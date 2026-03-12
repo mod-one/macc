@@ -1,0 +1,768 @@
+{
+    "lot": "WEB-UI",
+    "version": "1.3",
+    "generated_at": "2026-03-12",
+    "timezone": "Europe/Paris",
+    "priority_mapping": {
+        "0": "P0 / This task should not be done in parallel with another.",
+        "1": "P1 / Must-have for MVP",
+        "2": "P2 / Should-have for MVP",
+        "4": "P3 / Nice-to-have (MVP+) or preparatory",
+        "5": "P4 / Lowest priority / can defer"
+    },
+    "assumptions": [
+        "The existing `macc-core` logic is sufficiently modular to be called from a new web backend.",
+        "The development will use modern, widely-adopted frontend technologies (React, Vite, Tailwind CSS).",
+        "The web UI will initially replicate the core functionality of the TUI, not introduce a wide range of new features.",
+        "The Axum web framework is the preferred choice for the Rust backend.",
+        "The web server will call the Engine facade (macc-core) and avoid direct core file parsing.",
+        "The web UI is local-only (bind 127.0.0.1 by default) and can be exposed explicitly."
+    ],
+    "tasks": [
+        {
+            "id": "WEB-SETUP-001",
+            "title": "Create /web directory and initialize Vite project",
+            "category": "SETUP",
+            "description": "Problem/Goal: To establish the foundational structure for the frontend application. Key actions: Create a new `/web` directory at the project root. Inside `/web`, initialize a new React + TypeScript project using the Vite scaffolding tool (`npm create vite@latest`). Out of scope: Does not include adding any specific UI components, styling, or routing. Success criteria: A `/web` directory exists and contains a default, runnable Vite application. The command `npm install && npm run dev` inside `/web` should start the dev server successfully.",
+            "objective": "To have a clean, standard, and ready-to-use frontend project structure.",
+            "result": "A new `/web` directory containing a functional Vite project with React and TypeScript. `web/package.json`, `web/vite.config.ts`, and `web/src/main.tsx` will exist.",
+            "steps": [
+                "Create the `/web` directory.",
+                "Run `npm create vite@latest` within `/web`, selecting React and TypeScript.",
+                "Run `npm install` to verify dependency installation."
+            ],
+            "notes": "This is the first step and has no dependencies. It prepares the ground for all subsequent frontend work.",
+            "exclusive_resources": [
+                "web/"
+            ],
+            "dependencies": [],
+            "priority": "1"
+        },
+        {
+            "id": "WEB-BACKEND-001",
+            "title": "Add Axum and Tokio dependencies to cli/Cargo.toml",
+            "category": "BACKEND",
+            "description": "Problem/Goal: To integrate the necessary Rust libraries for building a web server into the main CLI crate. Key actions: Add `axum` and `tokio` (with the `full` feature flag) to the `[dependencies]` section of `cli/Cargo.toml`. Out of scope: Does not involve writing any web server code. Success criteria: `cli/Cargo.toml` is updated. The command `cargo build` should complete successfully, and `Cargo.lock` will be updated.",
+            "objective": "To provide the core building blocks for creating an HTTP server within the `macc` CLI.",
+            "result": "`cli/Cargo.toml` is updated with `axum` and `tokio` dependencies. `Cargo.lock` is updated.",
+            "steps": [
+                "Edit `cli/Cargo.toml` to add the new dependencies.",
+                "Run `cargo check` or `cargo build` to ensure dependencies resolve correctly."
+            ],
+            "notes": "This is a foundational step for the backend, enabling all subsequent server-side development.",
+            "exclusive_resources": [
+                "cli/Cargo.toml",
+                "Cargo.lock"
+            ],
+            "dependencies": [],
+            "priority": "1"
+        },
+        {
+            "id": "WEB-BACKEND-002",
+            "title": "Create a new `web` subcommand in `macc` CLI",
+            "category": "BACKEND",
+            "description": "Problem/Goal: To create a dedicated command-line entry point for launching the new web UI server. Key actions: Create a new module `cli/src/commands/web.rs`. Define a new `clap` subcommand named `web`. Integrate this new subcommand into the main command enum in `cli/src/main.rs`. The initial implementation should just print a confirmation message. Out of scope: Does not launch a web server yet. Success criteria: A new file `cli/src/commands/web.rs` is created and correctly wired into `cli/src/main.rs`. Running `macc web` from the command line executes the new subcommand without errors.",
+            "objective": "To create a dedicated entry point for launching the web server.",
+            "result": "A new `web` subcommand is available in the CLI. `macc web` prints a message like 'Web server starting...'",
+            "steps": [
+                "Create `cli/src/commands/web.rs` with a struct for the `web` command.",
+                "Add the `web` module and subcommand to `cli/src/main.rs`.",
+                "Implement the `run` method for the `web` command to print a message.",
+                "Compile and run `macc web` to verify."
+            ],
+            "notes": "This structures the CLI to accommodate the new server functionality.",
+            "exclusive_resources": [
+                "cli/src/main.rs",
+                "cli/src/commands/"
+            ],
+            "dependencies": [
+                "WEB-BACKEND-001"
+            ],
+            "priority": "1"
+        },
+        {
+            "id": "WEB-BACKEND-003",
+            "title": "Implement a basic Axum server in the `web` subcommand",
+            "category": "BACKEND",
+            "description": "Problem/Goal: To have a running HTTP server that can be started with the `macc web` command. Key actions: Modify `cli/src/commands/web.rs` to launch a minimal Axum server. The server should listen on a configurable port (e.g., 3000). It should have a single route `/` that returns a simple text or JSON response. Out of scope: Does not include API endpoints or serving static files yet. Success criteria: Running `macc web` starts an HTTP server. Sending a request with `curl http://localhost:3000/` receives a '200 OK' response with a body like `{\"status\": \"running\"}`.",
+            "objective": "To launch a live HTTP server from the `macc` binary.",
+            "result": "`cli/src/commands/web.rs` contains the logic to start an Axum server. `macc web` blocks and runs the server.",
+            "steps": [
+                "Add a `#[tokio::main]` async main function within the `web` command's handler.",
+                "Create an Axum router with a single `GET /` route.",
+                "Bind the server to an address like `127.0.0.1:3000`.",
+                "Start the server and have it log a startup message."
+            ],
+            "notes": "This task makes the web server 'real'.",
+            "exclusive_resources": [
+                "cli/src/commands/web.rs"
+            ],
+            "dependencies": [
+                "WEB-BACKEND-002"
+            ],
+            "priority": "1"
+        },
+        {
+            "id": "WEB-BACKEND-004",
+            "title": "Create a health-check API endpoint (/api/health)",
+            "category": "BACKEND",
+            "description": "Problem/Goal: To establish a basic, versioned API structure and provide a standardized way for clients to check server availability. Key actions: In the Axum server, create a new route `/api/v1/health`. The handler for this route should return a `200 OK` with a JSON body: `{\"status\": \"ok\"}`. Out of scope: Any other API functionality. Success criteria: The Axum server has a new route. `curl http://localhost:3000/api/v1/health` returns the correct JSON response and status code.",
+            "objective": "To establish the API's routing structure and provide a simple test endpoint.",
+            "result": "The server exposes a functional `/api/v1/health` endpoint.",
+            "steps": [
+                "Create a new handler function for the health check.",
+                "Add the `/api/v1/health` route to the Axum router, pointing to the new handler.",
+                "Use `axum::Json` to return the response.",
+                "Test the endpoint using `curl`."
+            ],
+            "notes": "This is a contract-first step for the API, establishing the `/api/v1` prefix.",
+            "exclusive_resources": [
+                "cli/src/commands/web.rs"
+            ],
+            "dependencies": [
+                "WEB-BACKEND-003"
+            ],
+            "priority": "1"
+        },
+        {
+            "id": "WEB-FRONTEND-001",
+            "title": "Set up basic layout, pages, and routing in React",
+            "category": "FRONTEND",
+            "description": "Problem/Goal: To establish the main navigation and page structure for the single-page application. Key actions: Add `react-router-dom` to the Vite project. Create a main `App.tsx` component that defines the routes. Build a basic layout component with a persistent sidebar/navbar. Create two placeholder page components: `pages/Dashboard.tsx` and `pages/Logs.tsx`. Out of scope: Does not include any styling or data fetching. Success criteria: The React application can switch between a `/` (Dashboard) and a `/logs` route without a full page reload. A simple navigation link allows moving between the pages.",
+            "objective": "To create a navigable multi-page structure within the SPA.",
+            "result": "The React app has routing capabilities. `web/src/App.tsx`, `web/src/pages/Dashboard.tsx`, `web/src/pages/Logs.tsx` exist and are functional.",
+            "steps": [
+                "Run `npm install react-router-dom` in `/web`.",
+                "Wrap the main application in `<BrowserRouter>`.",
+                "Define `<Routes>` and `<Route>` components for the Dashboard and Logs pages.",
+                "Create simple functional components for the two pages.",
+                "Add `<Link>` components to navigate between them."
+            ],
+            "notes": "This provides the skeleton of the frontend application.",
+            "exclusive_resources": [
+                "web/src/"
+            ],
+            "dependencies": [
+                "WEB-SETUP-001"
+            ],
+            "priority": "1"
+        },
+        {
+            "id": "WEB-FRONTEND-002",
+            "title": "Add and configure Tailwind CSS in the Vite project",
+            "category": "FRONTEND",
+            "description": "Problem/Goal: To integrate a utility-first CSS framework for consistent and rapid styling. Key actions: Follow the official Tailwind CSS guide to integrate it with a Vite project. This involves installing `tailwindcss`, `postcss`, and `autoprefixer`, and creating `tailwind.config.js` and `postcss.config.js`. Out of scope: Does not apply styling to any specific components yet, other than a simple test. Success criteria: `tailwind.config.js` and `postcss.config.js` are created and correctly configured. Tailwind's utility classes (e.g., `bg-blue-500`, `font-bold`) can be applied to JSX elements and the styles are reflected in the browser.",
+            "objective": "To have a powerful and flexible styling system in place for building UI components.",
+            "result": "The Vite project is fully configured to use Tailwind CSS.",
+            "steps": [
+                "Run `npm install -D tailwindcss postcss autoprefixer`.",
+                "Run `npx tailwindcss init -p` to generate config files.",
+                "Configure the `content` paths in `tailwind.config.js`.",
+                "Add the `@tailwind` directives to the main CSS file (e.g., `index.css`).",
+                "Test by adding a utility class to `App.tsx`."
+            ],
+            "notes": "A key step for ensuring a professional look and feel.",
+            "exclusive_resources": [
+                "web/"
+            ],
+            "dependencies": [
+                "WEB-SETUP-001"
+            ],
+            "priority": "1"
+        },
+        {
+            "id": "WEB-INTEGRATION-001",
+            "title": "Configure Vite dev server to proxy /api requests",
+            "category": "INTEGRATION",
+            "description": "Problem/Goal: To solve CORS issues during development and allow the frontend dev server to communicate with the backend API seamlessly. Key actions: In `web/vite.config.ts`, add a `server.proxy` configuration object. This object should proxy any request to a path starting with `/api` to the Rust backend server's address (e.g., `http://localhost:3000`). Out of scope: This only affects the development environment (`npm run dev`). Success criteria: `web/vite.config.ts` is updated. While the Vite dev server is running, a `fetch('/api/v1/health')` call from within the React app successfully receives the response from the Axum server.",
+            "objective": "To enable smooth frontend-backend communication during development.",
+            "result": "`web/vite.config.ts` contains a `server.proxy` configuration.",
+            "steps": [
+                "Modify `web/vite.config.ts` to include the `server` key.",
+                "Add the `proxy` object, targeting `/api` and rewriting to the backend address.",
+                "Create a simple test component that fetches from `/api/v1/health` on mount and displays the result."
+            ],
+            "notes": "This is crucial for developer experience (DX).",
+            "exclusive_resources": [
+                "web/vite.config.ts"
+            ],
+            "dependencies": [
+                "WEB-BACKEND-004",
+                "WEB-FRONTEND-001"
+            ],
+            "priority": "1"
+        },
+        {
+            "id": "WEB-INTEGRATION-002",
+            "title": "Serve compiled frontend from the Axum server",
+            "category": "INTEGRATION",
+            "description": "Problem/Goal: To enable the single `macc` binary to serve the entire web application, making it self-contained. Key actions: Add `tower-http` with `fs` feature. In the Axum server logic, configure a `ServeDir` service to serve static files from the `web/dist` directory. A fallback service should be configured to always serve `web/dist/index.html` for any non-API, non-file request, to support client-side routing. Out of scope: Does not yet embed the assets into the binary. Success criteria: After running `npm run build` in `/web`, starting the `macc web` server allows a user to navigate to `http://localhost:3000` and use the full React application, including its client-side routes.",
+            "objective": "To make the Rust binary capable of serving the production-built SPA.",
+            "result": "The Axum server serves the static content from `web/dist`.",
+            "steps": [
+                "Add `tower-http` to `cli/Cargo.toml`.",
+                "In `cli/src/commands/web.rs`, create a `ServeDir` service pointing to `web/dist`.",
+                "Combine the API router with the static file service, ensuring API routes have precedence.",
+                "Add the fallback to `index.html`.",
+                "Document the build-and-run process for testing."
+            ],
+            "notes": "This is the first step towards a production-ready setup.",
+            "exclusive_resources": [
+                "cli/src/commands/web.rs",
+                "cli/Cargo.toml"
+            ],
+            "dependencies": [
+                "WEB-BACKEND-003",
+                "WEB-FRONTEND-001"
+            ],
+            "priority": "2"
+        },
+        {
+            "id": "WEB-BUILD-001",
+            "title": "Embed frontend assets into the Rust binary",
+            "category": "BUILD",
+            "description": "Problem/Goal: To create a single, self-contained `macc` executable for easy distribution, with no dependency on external web assets. Key actions: Add the `rust-embed` crate to `cli/Cargo.toml`. Create a struct that derives `RustEmbed` and points to the `web/dist` directory. Modify the Axum server to serve files from this embedded struct instead of from the filesystem using `ServeDir`. Out of scope: A `build.rs` script is not strictly necessary if the path is relative, but may be considered. Success criteria: The `macc` binary can be copied to a new location and run with `macc web`, and it will serve the web UI correctly without the `web/dist` directory being present.",
+            "objective": "To create a single, portable executable for the entire application.",
+            "result": "The `macc` executable contains all web assets. The `web/dist` directory is not needed at runtime.",
+            "steps": [
+                "Add `rust-embed` to `cli/Cargo.toml`.",
+                "Define the `Asset` struct for embedding.",
+                "Replace the `ServeDir` filesystem logic with a custom handler that serves from the `Asset` struct.",
+                "Test by deleting the `web/dist` folder and running the server."
+            ],
+            "notes": "This is a key requirement for simple distribution and a polished final product.",
+            "exclusive_resources": [
+                "cli/Cargo.toml",
+                "cli/src/commands/web.rs"
+            ],
+            "dependencies": [
+                "WEB-INTEGRATION-002"
+            ],
+            "priority": "2"
+        },
+        {
+            "id": "WEB-BACKEND-005",
+            "title": "Define minimal REST + SSE contract for local web UI",
+            "category": "BACKEND",
+            "description": "Problem/Goal: Align backend and frontend on a stable, versioned API contract driven by Engine. Key actions: Create a short API contract in docs (or inline in task notes) covering required endpoints: GET /api/v1/health, GET /api/v1/status, POST /api/v1/coordinator/{action}, GET /api/v1/events (SSE). Out of scope: auth, multi-user. Success criteria: Endpoints, payloads, and error formats are clearly defined.",
+            "objective": "To avoid frontend/backend drift by specifying the API before implementation.",
+            "result": "A minimal API contract exists in the docs and references Engine data structures.",
+            "steps": [
+                "Draft the endpoints and payload shapes for success cases.",
+                "Define and document a standard JSON error response format (e.g., { \"error\": { \"code\": \"MACC-WEB-1001\", \"message\": \"...\" } }).",
+                "Define and document the SSE event envelope (e.g., {id, event, data}) and a heartbeat event."
+            ],
+            "notes": "Keep the contract small and aligned with existing core diagnostics and coordinator status structures.",
+            "exclusive_resources": [
+                "docs/"
+            ],
+            "dependencies": [
+                "WEB-BACKEND-002"
+            ],
+            "priority": "1"
+        },
+        {
+            "id": "WEB-BACKEND-006",
+            "title": "Implement /api/v1/status using Engine facade",
+            "category": "BACKEND",
+            "description": "Problem/Goal: Expose coordinator status and failure diagnostics without clients parsing files. Key actions: Add a handler that calls Engine::get_coordinator_status (or equivalent) and returns a JSON payload. Out of scope: coordinator run/stop. Success criteria: GET /api/v1/status returns consistent JSON, and endpoint is covered by a backend integration test.",
+            "objective": "To make the UI fully driven by Engine snapshots.",
+            "result": "/api/v1/status is available and validated with automated tests.",
+            "steps": [
+                "Add a status handler in the web server.",
+                "Serialize the status struct into JSON, conforming to the API contract.",
+                "Map potential Engine errors to the standard error format.",
+                "Add a backend integration test for both success and error cases of the /api/v1/status endpoint."
+            ],
+            "notes": "If Engine has not yet exposed status, add a minimal facade method as part of this task.",
+            "exclusive_resources": [
+                "cli/src/commands/web.rs",
+                "core/src/engine.rs"
+            ],
+            "dependencies": [
+                "WEB-BACKEND-005"
+            ],
+            "priority": "1"
+        },
+        {
+            "id": "WEB-BACKEND-008",
+            "title": "Add SSE endpoint for coordinator events/logs",
+            "category": "BACKEND",
+            "description": "Problem/Goal: Provide a live stream for status and logs. Key actions: Implement GET /api/v1/events using SSE (text/event-stream), streaming coordinator events from an Engine event source. Out of scope: authentication. Success criteria: `curl -N` receives events in real time; client reconnect works; stream includes heartbeats.",
+            "objective": "Enable real-time UI updates without polling.",
+            "result": "SSE endpoint streams coordinator events with a stable envelope and heartbeats.",
+            "steps": [
+                "Add SSE handler using axum::response::sse.",
+                "Wire to an Engine event source (e.g., a broadcast channel).",
+                "Implement the event envelope and heartbeat mechanism as defined in the contract."
+            ],
+            "notes": "Prefer Engine event sourcing (SQLite-first or brokered stream) over direct log file reads for performance.",
+            "exclusive_resources": [
+                "cli/src/commands/web.rs",
+                "core/src/engine.rs",
+                "core/src/service/logs.rs"
+            ],
+            "dependencies": [
+                "WEB-BACKEND-005"
+            ],
+            "priority": "2"
+        },
+        {
+            "id": "WEB-FRONTEND-003",
+            "title": "Create API client module and typed models",
+            "category": "FRONTEND",
+            "description": "Problem/Goal: Centralize API calls and define shared types based on the API contract. Key actions: Create `web/src/api/client.ts` with typed fetch wrappers. Create `web/src/api/models.ts` for all API request/response types (Health, Status, Error, Event). Out of scope: UI styling. Success criteria: API functions and types exist and are used by pages instead of ad-hoc fetch and inline types.",
+            "objective": "To keep frontend data access consistent, typed, and maintainable.",
+            "result": "`web/src/api/client.ts` and `web/src/api/models.ts` exist and align with the API contract.",
+            "steps": [
+                "Define TypeScript interfaces for all API payloads in `models.ts`.",
+                "Implement fetch wrappers in `client.ts` that handle standardized success and error responses.",
+                "Expose functions: getHealth, getStatus, postCoordinatorAction, etc."
+            ],
+            "notes": "Types must be kept in sync with the backend API contract.",
+            "exclusive_resources": [
+                "web/src/"
+            ],
+            "dependencies": [
+                "WEB-FRONTEND-001",
+                "WEB-BACKEND-005"
+            ],
+            "priority": "1"
+        },
+        {
+            "id": "WEB-FRONTEND-004",
+            "title": "Build Dashboard UI with status + coordinator controls",
+            "category": "FRONTEND",
+            "description": "Problem/Goal: Provide a primary screen with coordinator status and control actions. Key actions: Implement a dashboard that shows counts, status, and errors from the API. Add buttons to trigger coordinator actions. Out of scope: fine-grained task views. Success criteria: Buttons call the API client, and the UI updates based on the response (success or error).",
+            "objective": "Make the web UI usable for daily orchestration.",
+            "result": "Dashboard page is wired to the API and provides basic coordinator controls.",
+            "steps": [
+                "Use the API client to load status on mount.",
+                "Implement control buttons that call the API client.",
+                "Render error responses in a user-friendly way (e.g., a toast notification).",
+                "Display a loading state while requests are in flight."
+            ],
+            "notes": "Focus on a clear and responsive user experience.",
+            "exclusive_resources": [
+                "web/src/"
+            ],
+            "dependencies": [
+                "WEB-FRONTEND-003",
+                "WEB-BACKEND-006",
+                "WEB-BACKEND-007"
+            ],
+            "priority": "1"
+        },
+        {
+            "id": "WEB-FRONTEND-005",
+            "title": "Implement live logs page with SSE stream",
+            "category": "FRONTEND",
+            "description": "Problem/Goal: Display real-time coordinator events. Key actions: Use the `EventSource` API to subscribe to `/api/v1/events`. Render a scrollable feed of incoming events. Out of scope: persistence across sessions. Success criteria: Live events are visible and the UI correctly handles reconnects and heartbeats.",
+            "objective": "Provide real-time visibility similar to the TUI.",
+            "result": "Logs page shows a live, formatted stream of events.",
+            "steps": [
+                "Create a custom React hook (e.g., `useEventSource`) to manage the connection.",
+                "Render events, parsing the data according to the event envelope.",
+                "Handle connection state changes (connecting, open, closed).",
+                "Add basic filtering controls (e.g., by event type)."
+            ],
+            "notes": "Keep the UI rendering lightweight to handle high event volume.",
+            "exclusive_resources": [
+                "web/src/"
+            ],
+            "dependencies": [
+                "WEB-FRONTEND-003",
+                "WEB-BACKEND-008"
+            ],
+            "priority": "2"
+        },
+        {
+            "id": "WEB-DOCS-001",
+            "title": "Document local web UI runbook",
+            "category": "DOCS",
+            "description": "Problem/Goal: Provide a minimal runbook for developers. Key actions: Update README/MACC.md with a section on how to build the frontend, run the `macc web` server, and access the UI. Out of scope: user-facing documentation. Success criteria: Docs list the necessary commands for both development and production-like (embedded) modes.",
+            "objective": "Make the new client discoverable and usable by contributors.",
+            "result": "Project documentation includes clear instructions for the web UI.",
+            "steps": [
+                "Add a 'Web UI' section to the main README.md or a relevant doc.",
+                "List commands for the dev workflow (`npm run dev` + `macc web`).",
+                "List commands for the production workflow (`npm run build` + `macc web`)."
+            ],
+            "notes": "Keep it short, accurate, and easy to copy-paste.",
+            "exclusive_resources": [
+                "README.md",
+                "MACC.md"
+            ],
+            "dependencies": [
+                "WEB-BUILD-001",
+                "WEB-BACKEND-011"
+            ],
+            "priority": "4"
+        },
+        {
+            "id": "WEB-BACKEND-009",
+            "title": "Bind web server to localhost by default with explicit expose flag",
+            "category": "BACKEND",
+            "description": "Problem/Goal: Prevent accidental remote exposure of the local UI. Key actions: Default bind address to 127.0.0.1. Add a CLI flag (e.g., --host) to override the bind address to `0.0.0.0` or another IP. Out of scope: auth. Success criteria: Without flags, the server is only accessible locally. With `--host 0.0.0.0`, it is accessible over the network.",
+            "objective": "To ensure a safe-by-default configuration for the local UI.",
+            "result": "CLI exposes bind configuration and defaults to localhost.",
+            "steps": [
+                "Add `--host` and `--port` CLI options to the `web` subcommand.",
+                "Use `127.0.0.1` as the default value for `--host`.",
+                "Use the provided host and port when binding the Axum server.",
+                "Document the flags in the command's help text."
+            ],
+            "notes": "This is a critical security and usability feature.",
+            "exclusive_resources": [
+                "cli/src/commands/web.rs"
+            ],
+            "dependencies": [
+                "WEB-BACKEND-003"
+            ],
+            "priority": "1"
+        },
+        {
+            "id": "WEB-BACKEND-011",
+            "title": "Centralize Web Server Configuration",
+            "category": "BACKEND",
+            "description": "Problem/Goal: To manage all web server settings from a single, clear source, improving maintainability and separating concerns. Key actions: Create a `WebServerConfig` struct in the `web` command module. Populate this struct from the parsed CLI arguments (`--host`, `--port`, `--assets-mode`, etc.). Pass this config struct to the server setup logic. Out of scope: Reading from `macc.yaml`. Success criteria: Server startup logic reads all configuration from a single struct, not directly from `clap` matches.",
+            "objective": "To improve code structure by centralizing configuration.",
+            "result": "A `WebServerConfig` struct is used to configure and launch the server.",
+            "steps": [
+                "Define a `WebServerConfig` struct.",
+                "In the `web` command's `run` function, create an instance of the struct from CLI arguments.",
+                "Refactor the server setup logic to accept the config struct as an argument."
+            ],
+            "notes": "This refactoring makes the server logic more modular and easier to test.",
+            "exclusive_resources": [
+                "cli/src/commands/web.rs"
+            ],
+            "dependencies": [
+                "WEB-BACKEND-009",
+                "WEB-INTEGRATION-004"
+            ],
+            "priority": "2"
+        },
+        {
+            "id": "WEB-TEST-001",
+            "title": "Set up Frontend Unit & Integration Testing",
+            "category": "TEST",
+            "description": "Problem/Goal: To ensure frontend code quality, prevent regressions, and enable test-driven development. Key actions: Configure Vitest and React Testing Library within the Vite project. Create a `*.test.tsx` file. Out of scope: E2E tests, high test coverage. Success criteria: `npm test` runs successfully and executes at least one component test and one API client test.",
+            "objective": "To establish a robust testing framework for the frontend.",
+            "result": "The frontend project has a working and configured test suite.",
+            "steps": [
+                "Install `vitest`, `jsdom`, and `@testing-library/react`.",
+                "Configure `vite.config.ts` and `tsconfig.json` for testing.",
+                "Write a simple unit test for a UI component (e.g., a button).",
+                "Write a test for an API client function, using a mock handler (e.g., with `msw`)."
+            ],
+            "notes": "A solid testing foundation is crucial for long-term maintainability.",
+            "exclusive_resources": [
+                "web/"
+            ],
+            "dependencies": [
+                "WEB-FRONTEND-003"
+            ],
+            "priority": "2"
+        },
+        {
+            "id": "WEB-FRONTEND-006",
+            "title": "Integrate a Headless UI Component Library",
+            "category": "FRONTEND",
+            "description": "Problem/Goal: To accelerate the development of accessible and consistent UI components without being locked into a specific design system. Key actions: Install Radix UI. Refactor one existing component (e.g., a button or a modal) to use a Radix primitive. Out of scope: Refactoring the entire application. Success criteria: A component is successfully using a Radix primitive while being styled by Tailwind CSS.",
+            "objective": "To improve development velocity and UI quality with accessible, unstyled primitives.",
+            "result": "Radix UI is installed and used for at least one component.",
+            "steps": [
+                "Run `npm install @radix-ui/react-slot` (or another primitive).",
+                "Choose a simple component to refactor (e.g., a button).",
+                "Replace the basic HTML element with the Radix primitive and apply Tailwind classes.",
+                "Verify that functionality and accessibility are preserved or improved."
+            ],
+            "notes": "Radix UI + Tailwind CSS is a powerful combination for building custom design systems.",
+            "exclusive_resources": [
+                "web/src/",
+                "web/package.json"
+            ],
+            "dependencies": [
+                "WEB-FRONTEND-002"
+            ],
+            "priority": "4"
+        },
+        {
+            "id": "WEB-FRONTEND-007",
+            "title": "Integrate a Frontend State Management Library",
+            "category": "FRONTEND",
+            "description": "Problem/Goal: To handle shared, complex, and asynchronous UI state in a predictable and scalable way, avoiding prop-drilling. Key actions: Install Zustand. Create a simple store to hold the coordinator's status. Refactor the Dashboard page to use this store instead of local component state. Out of scope: Persisting state to localStorage. Success criteria: The Dashboard's state is managed by a Zustand store, and the UI still updates correctly based on API calls.",
+            "objective": "To establish a scalable pattern for managing global and async state.",
+            "result": "Zustand is installed and a central store manages the coordinator status.",
+            "steps": [
+                "Run `npm install zustand`.",
+                "Create a `store.ts` file and define a `useCoordinatorStore`.",
+                "The store should hold the status data and any loading/error states.",
+                "Refactor the Dashboard component to get its data and trigger API calls via the store's actions."
+            ],
+            "notes": "Zustand is lightweight and a good starting point before considering more complex solutions like Redux.",
+            "exclusive_resources": [
+                "web/src/",
+                "web/package.json"
+            ],
+            "dependencies": [
+                "WEB-FRONTEND-004"
+            ],
+            "priority": "2"
+        },
+        {
+            "id": "WEB-INTEGRATION-003",
+            "title": "Wire frontend to backend API during dev",
+            "category": "INTEGRATION",
+            "description": "Problem/Goal: Ensure frontend uses proxy or config for API base. Key actions: Add a simple config (env or constant) for API base and confirm /api/v1/status and SSE stream work through the Vite proxy. Out of scope: production deployment. Success criteria: Dashboard works while running `npm run dev` + `macc web`.",
+            "objective": "Smooth dev workflow for full stack iteration.",
+            "result": "Frontend uses proxy or API base configuration in dev.",
+            "steps": [
+                "Add API base config (env or constant).",
+                "Verify status and SSE in dev.",
+                "Document the dev run commands."
+            ],
+            "notes": "Keep config simple; avoid runtime coupling.",
+            "exclusive_resources": [
+                "web/vite.config.ts",
+                "web/src/"
+            ],
+            "dependencies": [
+                "WEB-INTEGRATION-001",
+                "WEB-FRONTEND-004",
+                "WEB-FRONTEND-005"
+            ],
+            "priority": "2"
+        },
+        {
+            "id": "WEB-INTEGRATION-004",
+            "title": "Add static serving mode selection (dist vs embedded)",
+            "category": "INTEGRATION",
+            "description": "Problem/Goal: Support both local dist serving and embedded assets. Key actions: Add a flag/env to choose between ServeDir (web/dist) and embedded assets (rust-embed). Out of scope: automatic build. Success criteria: Running `macc web --assets=dist` serves files from disk; `--assets=embedded` serves embedded assets.",
+            "objective": "Allow flexible deployment without changing code.",
+            "result": "Server can serve dist or embedded assets based on configuration.",
+            "steps": [
+                "Add CLI flag and config for assets mode.",
+                "Implement both paths in server setup.",
+                "Document usage."
+            ],
+            "notes": "Keep default to dist during dev; embedded for release.",
+            "exclusive_resources": [
+                "cli/src/commands/web.rs"
+            ],
+            "dependencies": [
+                "WEB-INTEGRATION-002",
+                "WEB-BUILD-001"
+            ],
+            "priority": "2"
+        },
+        {
+            "id": "WEB-BACKEND-007A",
+            "title": "Add POST /api/v1/coordinator/run endpoint",
+            "category": "BACKEND",
+            "description": "Problem/Goal: Start coordinator from the web client. Key actions: Implement POST /api/v1/coordinator/run that calls Engine::coordinator_run or workflow equivalent. Out of scope: extra args. Success criteria: returns 200 with standard response envelope on success and standard error on failure.",
+            "objective": "Expose coordinator run action via API.",
+            "result": "Run endpoint is implemented and tested.",
+            "steps": [
+                "Add handler that invokes Engine coordinator run.",
+                "Map errors to the standard error schema.",
+                "Add an integration test for success and failure."
+            ],
+            "notes": "Keep payload empty for now; extend later if needed.",
+            "exclusive_resources": [
+                "cli/src/commands/web.rs",
+                "core/src/engine.rs"
+            ],
+            "dependencies": [
+                "WEB-BACKEND-006"
+            ],
+            "priority": "1"
+        },
+        {
+            "id": "WEB-BACKEND-007B",
+            "title": "Add POST /api/v1/coordinator/stop endpoint",
+            "category": "BACKEND",
+            "description": "Problem/Goal: Stop coordinator from the web client. Key actions: Implement POST /api/v1/coordinator/stop that calls Engine::coordinator_stop. Out of scope: graceful shutdown options. Success criteria: returns 200 with standard response envelope on success and standard error on failure.",
+            "objective": "Expose coordinator stop action via API.",
+            "result": "Stop endpoint is implemented and tested.",
+            "steps": [
+                "Add handler that invokes Engine coordinator stop.",
+                "Map errors to the standard error schema.",
+                "Add an integration test for success and failure."
+            ],
+            "notes": "Align response with other coordinator endpoints.",
+            "exclusive_resources": [
+                "cli/src/commands/web.rs",
+                "core/src/engine.rs"
+            ],
+            "dependencies": [
+                "WEB-BACKEND-006"
+            ],
+            "priority": "1"
+        },
+        {
+            "id": "WEB-BACKEND-007C",
+            "title": "Add POST /api/v1/coordinator/resume endpoint",
+            "category": "BACKEND",
+            "description": "Problem/Goal: Resume paused coordinator. Key actions: Implement POST /api/v1/coordinator/resume that calls Engine::coordinator_resume. Out of scope: phase-specific resume. Success criteria: returns 200 with standard response envelope on success and standard error on failure.",
+            "objective": "Expose coordinator resume action via API.",
+            "result": "Resume endpoint is implemented and tested.",
+            "steps": [
+                "Add handler that invokes Engine coordinator resume.",
+                "Map errors to the standard error schema.",
+                "Add an integration test for success and failure."
+            ],
+            "notes": "If resume is a no-op when not paused, return success with a flag.",
+            "exclusive_resources": [
+                "cli/src/commands/web.rs",
+                "core/src/engine.rs"
+            ],
+            "dependencies": [
+                "WEB-BACKEND-006"
+            ],
+            "priority": "1"
+        },
+        {
+            "id": "WEB-BACKEND-007D",
+            "title": "Add POST /api/v1/coordinator/dispatch endpoint",
+            "category": "BACKEND",
+            "description": "Problem/Goal: Dispatch ready tasks. Key actions: Implement POST /api/v1/coordinator/dispatch that calls Engine::coordinator_dispatch or workflow action. Out of scope: custom args. Success criteria: returns 200 with standard response envelope on success and standard error on failure.",
+            "objective": "Expose coordinator dispatch action via API.",
+            "result": "Dispatch endpoint is implemented and tested.",
+            "steps": [
+                "Add handler that invokes Engine coordinator dispatch.",
+                "Map errors to the standard error schema.",
+                "Add an integration test for success and failure."
+            ],
+            "notes": "Keep input empty; extend later if needed.",
+            "exclusive_resources": [
+                "cli/src/commands/web.rs",
+                "core/src/engine.rs"
+            ],
+            "dependencies": [
+                "WEB-BACKEND-006"
+            ],
+            "priority": "1"
+        },
+        {
+            "id": "WEB-BACKEND-007E",
+            "title": "Add POST /api/v1/coordinator/advance endpoint",
+            "category": "BACKEND",
+            "description": "Problem/Goal: Advance coordinator state. Key actions: Implement POST /api/v1/coordinator/advance that calls Engine::coordinator_advance or workflow action. Out of scope: custom args. Success criteria: returns 200 with standard response envelope on success and standard error on failure.",
+            "objective": "Expose coordinator advance action via API.",
+            "result": "Advance endpoint is implemented and tested.",
+            "steps": [
+                "Add handler that invokes Engine coordinator advance.",
+                "Map errors to the standard error schema.",
+                "Add an integration test for success and failure."
+            ],
+            "notes": "Keep input empty; extend later if needed.",
+            "exclusive_resources": [
+                "cli/src/commands/web.rs",
+                "core/src/engine.rs"
+            ],
+            "dependencies": [
+                "WEB-BACKEND-006"
+            ],
+            "priority": "1"
+        },
+        {
+            "id": "WEB-BACKEND-007F",
+            "title": "Add POST /api/v1/coordinator/reconcile endpoint",
+            "category": "BACKEND",
+            "description": "Problem/Goal: Reconcile coordinator state. Key actions: Implement POST /api/v1/coordinator/reconcile that calls Engine::coordinator_reconcile or workflow action. Out of scope: custom args. Success criteria: returns 200 with standard response envelope on success and standard error on failure.",
+            "objective": "Expose coordinator reconcile action via API.",
+            "result": "Reconcile endpoint is implemented and tested.",
+            "steps": [
+                "Add handler that invokes Engine coordinator reconcile.",
+                "Map errors to the standard error schema.",
+                "Add an integration test for success and failure."
+            ],
+            "notes": "Align error mapping with other actions.",
+            "exclusive_resources": [
+                "cli/src/commands/web.rs",
+                "core/src/engine.rs"
+            ],
+            "dependencies": [
+                "WEB-BACKEND-006"
+            ],
+            "priority": "1"
+        },
+        {
+            "id": "WEB-BACKEND-007G",
+            "title": "Add POST /api/v1/coordinator/cleanup endpoint",
+            "category": "BACKEND",
+            "description": "Problem/Goal: Cleanup coordinator resources. Key actions: Implement POST /api/v1/coordinator/cleanup that calls Engine::coordinator_cleanup or workflow action. Out of scope: custom args. Success criteria: returns 200 with standard response envelope on success and standard error on failure.",
+            "objective": "Expose coordinator cleanup action via API.",
+            "result": "Cleanup endpoint is implemented and tested.",
+            "steps": [
+                "Add handler that invokes Engine coordinator cleanup.",
+                "Map errors to the standard error schema.",
+                "Add an integration test for success and failure."
+            ],
+            "notes": "Cleanup should be non-blocking on warnings; map warnings in response if needed.",
+            "exclusive_resources": [
+                "cli/src/commands/web.rs",
+                "core/src/engine.rs"
+            ],
+            "dependencies": [
+                "WEB-BACKEND-006"
+            ],
+            "priority": "1"
+        },
+        {
+            "id": "WEB-BACKEND-012",
+            "title": "Define API error schema and add tests",
+            "category": "BACKEND",
+            "description": "Problem/Goal: Standardize error responses across the API. Key actions: Define a single error response schema (code/message/details) and implement helper to map Engine errors. Add integration tests validating error responses for at least /api/v1/status and one coordinator action. Out of scope: full error catalog. Success criteria: All endpoints return the same error envelope on failure and tests cover the contract.",
+            "objective": "Make errors predictable for the web client.",
+            "result": "Standard error schema and tests are in place.",
+            "steps": [
+                "Define ErrorResponse struct and JSON serialization.",
+                "Add a mapper from Engine errors to ErrorResponse.",
+                "Add integration tests asserting error schema."
+            ],
+            "notes": "Keep the schema minimal: code, message, optional details.",
+            "exclusive_resources": [
+                "cli/src/commands/web.rs",
+                "core/src/engine.rs",
+                "docs/"
+            ],
+            "dependencies": [
+                "WEB-BACKEND-005"
+            ],
+            "priority": "1"
+        },
+        {
+            "id": "WEB-FRONTEND-008",
+            "title": "Add SSE reconnect/backoff with last_event_id support",
+            "category": "FRONTEND",
+            "description": "Problem/Goal: Make the logs stream resilient to disconnects. Key actions: Implement EventSource reconnect with exponential backoff; track last_event_id and send it as a query param or header on reconnect. Out of scope: offline persistence. Success criteria: After simulated disconnect, client reconnects and continues from last event when possible.",
+            "objective": "Reliable live logs under unstable connections.",
+            "result": "SSE client reconnects with backoff and uses last_event_id.",
+            "steps": [
+                "Implement reconnect logic with capped exponential backoff.",
+                "Store last_event_id from SSE events.",
+                "Reconnect with last_event_id and verify server behavior."
+            ],
+            "notes": "If server cannot replay, client should resume live and indicate gap.",
+            "exclusive_resources": [
+                "web/src/"
+            ],
+            "dependencies": [
+                "WEB-FRONTEND-005"
+            ],
+            "priority": "2"
+        }
+    ],
+    "recommendations": [
+        "Default bind to 127.0.0.1; require explicit flag to expose externally.",
+        "Use Engine facade only; no direct file parsing in web backend.",
+        "SSE must include event_id/type/data and a heartbeat to keep connections alive.",
+        "Use SQLite-first event sourcing; avoid JSON log reads in the web client.",
+        "A centralized `WebServerConfig` struct should be used to configure the server.",
+        "A standard JSON error response format should be used across the entire API.",
+        "A testing framework (Vitest) and state management (Zustand) should be adopted for frontend scalability."
+    ]
+}
