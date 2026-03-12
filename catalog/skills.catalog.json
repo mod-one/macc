@@ -1,0 +1,433 @@
+{
+  "schema_version": "1.0",
+  "type": "skills",
+  "updated_at": "2026-01-30",
+  "entries": [
+    {
+      "id": "macc-code-reviewer",
+      "name": "macc code reviewer",
+      "description": "AI code reviewer for MACC tasks, providing feedback and validation against project standards.",
+      "tags": [
+        "macc",
+        "review",
+        "quality"
+      ],
+      "selector": {
+        "subpath": "skills/macc-code-reviewer"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/mod-one/skills.git",
+        "ref": "main",
+        "checksum": null
+      }
+    },
+    {
+      "id": "macc-performer",
+      "name": "macc performer",
+      "description": "Core implementation agent for MACC tasks, following the implement-act-observe cycle.",
+      "tags": [
+        "macc",
+        "performer",
+        "implementation"
+      ],
+      "selector": {
+        "subpath": "skills/macc-performer"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/mod-one/skills.git",
+        "ref": "main",
+        "checksum": null
+      }
+    },
+    {
+      "id": "macc-prd-planner",
+      "name": "macc prd planner",
+      "description": "High-level project planner for MACC, generating PRDs and task registries.",
+      "tags": [
+        "macc",
+        "planning",
+        "prd"
+      ],
+      "selector": {
+        "subpath": "skills/macc-prd-planner"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/mod-one/skills.git",
+        "ref": "main",
+        "checksum": null
+      }
+    },
+    {
+      "id": "dfigma-implement-designc",
+      "name": "figma implement design",
+      "description": "This skill provides a structured workflow for translating Figma designs into production-ready code with pixel-perfect accuracy.",
+      "tags": [
+        "implement",
+        "figma"
+      ],
+      "selector": {
+        "subpath": "skills/.curated/dfigma-implement-designc"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/openai/skills.git",
+        "ref": "main",
+        "checksum": null
+      }
+    },
+    {
+      "id": "implement",
+      "name": "Implement",
+      "description": "Guides an agent through implementing a feature with tests and validation.",
+      "tags": [
+        "implementation",
+        "testing",
+        "workflow"
+      ],
+      "selector": {
+        "subpath": "skills/implement"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/Nirusan/claude-config.git",
+        "ref": "main",
+        "checksum": null
+      }
+    },
+    {
+      "id": "figma",
+      "name": "figma",
+      "description": "Use the Figma MCP server for Figma-driven implementation. For setup and debugging details (env vars, config, verification), see references/figma-mcp-config.md.",
+      "tags": [
+        "implement",
+        "figma"
+      ],
+      "selector": {
+        "subpath": "skills/.curated/figma"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/openai/skills.git",
+        "ref": "main",
+        "checksum": null
+      }
+    },
+    {
+      "id": "fdevelop-web-gamea",
+      "name": "develop web game",
+      "description": "Build games in small steps and validate every change. Treat each iteration as: implement → act → pause → observe → adjust.",
+      "tags": [
+        "develop",
+        "web",
+        "game"
+      ],
+      "selector": {
+        "subpath": "skills/.curated/fdevelop-web-gamea"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/openai/skills.git",
+        "ref": "main",
+        "checksum": null
+      }
+    },
+    {
+      "id": "rust-async-patterns",
+      "name": "rust async patterns",
+      "description": "Production patterns for async Rust programming with Tokio runtime, including tasks, channels, streams, and error handling.",
+      "tags": [
+        "develop",
+        "rust"
+      ],
+      "selector": {
+        "subpath": "plugins/systems-programming/skills/rust-async-patterns"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/wshobson/agents.git",
+        "ref": "main",
+        "checksum": null
+      }
+    },
+    {
+      "id": "rust-cli-builder",
+      "name": "rust cli builder",
+      "description": "Plan and build production-ready Rust CLI tools using clap for argument parsing, with subcommands, config file support, colored output, and proper error handling.",
+      "tags": [
+        "rust",
+        "cli",
+        "clap",
+        "terminal",
+        "command-line",
+        "devtools"
+      ],
+      "selector": {
+        "subpath": "cli-tool/components/skills/development/rust-cli-builder"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/davila7/claude-code-templates.git",
+        "ref": "main",
+        "checksum": null
+      }
+    },
+    {
+      "id": "python-expert",
+      "name": "python expert",
+      "description": "Senior Python developer expertise for writing clean, efficient, and well-documented code.",
+      "tags": [
+        "Python",
+        "expert"
+      ],
+      "selector": {
+        "subpath": "awesome_agent_skills/python-expert"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/Shubhamsaboo/awesome-llm-apps.git",
+        "ref": "main",
+        "checksum": null
+      }
+    },
+    {
+      "id": "python-testing",
+      "name": "python testing",
+      "description": "Python testing strategies using pytest, TDD methodology, fixtures, mocking, parametrization, and coverage requirements.",
+      "tags": [
+        "Python",
+        "test"
+      ],
+      "selector": {
+        "subpath": "skills/python-testing"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/affaan-m/everything-claude-code.git",
+        "ref": "main",
+        "checksum": null
+      }
+    },
+    {
+      "id": "k8s-manifest-generator",
+      "name": "k8s manifest generator",
+      "description": "Create production-ready Kubernetes manifests for Deployments, Services, ConfigMaps, and Secrets following best practices and security standards.",
+      "tags": [
+        "k8s",
+        "manifest",
+        "Kubernetes"
+      ],
+      "selector": {
+        "subpath": "plugins/kubernetes-operations/skills/k8s-manifest-generator"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/wshobson/agents.git",
+        "ref": "main",
+        "checksum": null
+      }
+    },
+    {
+      "id": "k8s-security-policies",
+      "name": "k8s security policies",
+      "description": "Implement Kubernetes security policies including NetworkPolicy, PodSecurityPolicy, and RBAC for production-grade security.",
+      "tags": [
+        "k8s",
+        "security",
+        "Kubernetes",
+        "policies"
+      ],
+      "selector": {
+        "subpath": "plugins/kubernetes-operations/skills/k8s-security-policies"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/wshobson/agents.git",
+        "ref": "main",
+        "checksum": null
+      }
+    },
+    {
+      "id": "kubernetes-architect",
+      "name": "kubernetes architect",
+      "description": "Expert Kubernetes architect specializing in cloud-native infrastructure, advanced GitOps workflows (ArgoCD/Flux), and enterprise container orchestration.",
+      "tags": [
+        "k8s",
+        "Kubernetes",
+        "parchitects"
+      ],
+      "selector": {
+        "subpath": "skills/kubernetes-architect"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/sickn33/antigravity-awesome-skills.git",
+        "ref": "main",
+        "checksum": null
+      }
+    },
+    {
+      "id": "devops-iac-engineer",
+      "name": "devops iac engineer",
+      "description": "Implements infrastructure as code using Terraform, Kubernetes, and cloud platforms. Designs scalable architectures, CI/CD pipelines, and observability solutions.",
+      "tags": [
+        "CI/CD",
+        "Kubernetes",
+        "architectures"
+      ],
+      "selector": {
+        "subpath": "cli-tool/components/skills/development/devops-iac-engineer"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/davila7/claude-code-templates.git",
+        "ref": "main",
+        "checksum": null
+      }
+    },
+    {
+      "id": "helm-chart-scaffolding",
+      "name": "helm chart scaffolding",
+      "description": "Design, organize, and manage Helm charts for templating and packaging Kubernetes applications with reusable configurations.",
+      "tags": [
+        "Helm",
+        "Kubernetes"
+      ],
+      "selector": {
+        "subpath": "plugins/kubernetes-operations/skills/helm-chart-scaffolding"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/wshobson/agents.git",
+        "ref": "main",
+        "checksum": null
+      }
+    },
+    {
+      "id": "react-vendoring",
+      "name": "react-vendoring",
+      "description": "Manages React vendoring, react-server layer boundaries, and Flight API integration within the Next.js App Router.",
+      "tags": [
+        "next.js",
+        "react",
+        "vendoring",
+        "app-router",
+        "rsc",
+        "turbopack",
+        "typescript"
+      ],
+      "selector": {
+        "subpath": ".agents/skills/react-vendoring"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/vercel/next.js.git",
+        "ref": "canary",
+        "checksum": null
+      }
+    },
+    {
+      "id": "react-verify",
+      "name": "react verify",
+      "description": "A comprehensive verification tool for React contributions that automates code formatting, linting, type checking, and testing to ensure all requirements are met before committing.",
+      "tags": [
+        "react",
+        "verification",
+        "testing",
+        "linting",
+        "formatting",
+        "type-checking",
+        "ci-cd",
+        "contribution-workflow"
+      ],
+      "selector": {
+        "subpath": ".claude/skills/verify"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/facebook/react.git",
+        "ref": "main",
+        "checksum": null
+      }
+    },
+    {
+      "id": "fullstack-developer",
+      "name": "Full-Stack Developer",
+      "description": "Provides comprehensive expertise in modern full-stack web development, covering frontend frameworks like React and Next.js, backend services with Node.js, and database management with PostgreSQL or MongoDB.",
+      "tags": [
+        "react",
+        "node.js",
+        "typescript",
+        "next.js",
+        "full-stack",
+        "web-development",
+        "api-design",
+        "postgresql",
+        "mongodb",
+        "prisma",
+        "tailwind-css"
+      ],
+      "selector": {
+        "subpath": "awesome_agent_skills/fullstack-developer"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/Shubhamsaboo/awesome-llm-apps.git",
+        "ref": "main",
+        "checksum": null
+      }
+    },
+    {
+      "id": "neo-app-mode",
+      "name": "Neo App Mode",
+      "description": "Scaffolds production-ready full-stack applications with a React/Vite/Tailwind frontend and Node/Express/MongoDB backend using a structured requirement intake and MVC architecture.",
+      "tags": [
+        "full-stack",
+        "scaffolding",
+        "react",
+        "nodejs",
+        "express",
+        "mongodb",
+        "mvc",
+        "tailwind",
+        "vite",
+        "boilerplate"
+      ],
+      "selector": {
+        "subpath": "skills/chinmayagit/webappbuilder"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/openclaw/skills.git",
+        "ref": "main",
+        "checksum": null
+      }
+    },
+    {
+      "id": "frontend-gram",
+      "name": "frontend gram",
+      "description": "Provides comprehensive rules and best practices for React frontend development, emphasizing component reuse, React Query for state management, and strict adherence to the Moonshine design system.",
+      "tags": [
+        "react",
+        "frontend",
+        "typescript",
+        "tailwind-css",
+        "react-query",
+        "pnpm",
+        "design-system",
+        "component-architecture"
+      ],
+      "selector": {
+        "subpath": ".agents/skills/frontend"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/speakeasy-api/gram.git",
+        "ref": "main",
+        "checksum": null
+      }
+    }
+  ]
+}
