@@ -19,10 +19,10 @@ performer:
     id_strategy: generated
     resume:
       command: claude
-      args: ["--session-id", "{session_id}", "--output-format", "text"]
+      args: ["--model", "{model}", "--session-id", "{session_id}", "--output-format", "text"]
   retry:
     command: claude
-    args: ["--model", "opus", "--output-format", "text"]
+    args: ["--model", "{model}", "--output-format", "text"]
 defaults:
   model: sonnet
 install:

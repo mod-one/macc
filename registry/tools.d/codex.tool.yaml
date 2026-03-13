@@ -18,10 +18,10 @@ performer:
     extract_regex: "session[[:space:]]+id:[[:space:]]*([[:alnum:]-]+)"
     resume:
       command: codex
-      args: ["exec", "resume", "{session_id}"]
+      args: ["--model", "{model}", "exec", "resume", "{session_id}"]
   retry:
     command: codex
-    args: ["--model", "gpt-5.1-codex-max", "exec", "--color", "never", "-"]
+    args: ["--model", "{model}", "exec", "--color", "never", "-"]
 defaults:
   approval_policy: never
   sandbox_mode: workspace-write

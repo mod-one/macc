@@ -20,6 +20,79 @@ pub struct SelectedTask {
     pub base_branch: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DispatchBlockReason {
+    ActivePriorityZero { task_id: String },
+    ReadyPriorityZeroBlocked { task_id: String },
+}
+
+pub fn dispatch_block_reason(
+    registry: &Value,
+    config: &TaskSelectorConfig,
+) -> Option<DispatchBlockReason> {
+    let tasks = registry.get("tasks")?.as_array()?;
+    let active_tasks: Vec<&Value> = tasks
+        .iter()
+        .filter(|t| is_active_state(task_state(t)))
+        .collect();
+
+    if let Some(task_id) = active_tasks
+        .iter()
+        .find(|task| parse_priority(task.get("priority")) == 0)
+        .and_then(|task| task.get("id").and_then(Value::as_str))
+    {
+        return Some(DispatchBlockReason::ActivePriorityZero {
+            task_id: task_id.to_string(),
+        });
+    }
+
+    if active_tasks.is_empty() {
+        return None;
+    }
+
+    let merged_ids: HashSet<String> = tasks
+        .iter()
+        .filter(|t| task_state(t) == "merged")
+        .filter_map(|t| t.get("id").and_then(Value::as_str).map(ToOwned::to_owned))
+        .collect();
+    let resource_locks = registry
+        .get("resource_locks")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+
+    for task in tasks {
+        if task_state(task) != "todo" {
+            continue;
+        }
+        if task.get("worktree").is_some() && !task.get("worktree").unwrap().is_null() {
+            continue;
+        }
+
+        let task_id = task.get("id").and_then(Value::as_str).unwrap_or_default();
+        if task_id.is_empty() || parse_priority(task.get("priority")) != 0 {
+            continue;
+        }
+
+        if !dependencies_ready(task, &merged_ids) {
+            continue;
+        }
+        if !resources_available(task, task_id, &resource_locks) {
+            continue;
+        }
+
+        if pick_tool(task, config, &HashMap::new()).is_none() {
+            continue;
+        }
+
+        return Some(DispatchBlockReason::ReadyPriorityZeroBlocked {
+            task_id: task_id.to_string(),
+        });
+    }
+
+    None
+}
+
 pub fn select_next_ready_task(
     registry: &Value,
     config: &TaskSelectorConfig,
@@ -30,6 +103,9 @@ pub fn select_next_ready_task(
         .iter()
         .filter(|t| is_active_state(task_state(t)))
         .collect();
+    if dispatch_block_reason(registry, config).is_some() {
+        return None;
+    }
     if config.max_parallel > 0 && active_tasks.len() >= config.max_parallel {
         return None;
     }
@@ -338,5 +414,74 @@ mod tests {
         };
         let selected = select_next_ready_task(&registry, &cfg).expect("selected task");
         assert_eq!(selected.id, "DEP");
+    }
+
+    #[test]
+    fn active_priority_zero_blocks_new_dispatch() {
+        let registry = json!({
+          "tasks": [
+            {"id":"P0","title":"p0","state":"claimed","priority":"0","dependencies":[],"exclusive_resources":[]},
+            {"id":"A","title":"a","state":"todo","priority":"1","dependencies":[],"exclusive_resources":[]}
+          ],
+          "resource_locks": {}
+        });
+        let cfg = TaskSelectorConfig {
+            default_tool: "codex".into(),
+            default_base_branch: "master".into(),
+            max_parallel: 3,
+            ..TaskSelectorConfig::default()
+        };
+        assert_eq!(
+            dispatch_block_reason(&registry, &cfg),
+            Some(DispatchBlockReason::ActivePriorityZero {
+                task_id: "P0".into()
+            })
+        );
+        assert_eq!(select_next_ready_task(&registry, &cfg), None);
+    }
+
+    #[test]
+    fn ready_priority_zero_waits_for_exclusive_slot() {
+        let registry = json!({
+          "tasks": [
+            {"id":"RUN","title":"run","state":"claimed","priority":"2","dependencies":[],"exclusive_resources":[]},
+            {"id":"P0","title":"p0","state":"todo","priority":"0","dependencies":[],"exclusive_resources":[]},
+            {"id":"LATER","title":"later","state":"todo","priority":"1","dependencies":[],"exclusive_resources":[]}
+          ],
+          "resource_locks": {}
+        });
+        let cfg = TaskSelectorConfig {
+            default_tool: "codex".into(),
+            default_base_branch: "master".into(),
+            max_parallel: 3,
+            ..TaskSelectorConfig::default()
+        };
+        assert_eq!(
+            dispatch_block_reason(&registry, &cfg),
+            Some(DispatchBlockReason::ReadyPriorityZeroBlocked {
+                task_id: "P0".into()
+            })
+        );
+        assert_eq!(select_next_ready_task(&registry, &cfg), None);
+    }
+
+    #[test]
+    fn non_priority_zero_tasks_can_still_dispatch_in_parallel() {
+        let registry = json!({
+          "tasks": [
+            {"id":"RUN","title":"run","state":"claimed","priority":"2","dependencies":[],"exclusive_resources":[]},
+            {"id":"NEXT","title":"next","state":"todo","priority":"1","dependencies":[],"exclusive_resources":[]}
+          ],
+          "resource_locks": {}
+        });
+        let cfg = TaskSelectorConfig {
+            default_tool: "codex".into(),
+            default_base_branch: "master".into(),
+            max_parallel: 3,
+            ..TaskSelectorConfig::default()
+        };
+        assert_eq!(dispatch_block_reason(&registry, &cfg), None);
+        let selected = select_next_ready_task(&registry, &cfg).expect("selected task");
+        assert_eq!(selected.id, "NEXT");
     }
 }

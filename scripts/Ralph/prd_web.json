@@ -7,8 +7,8 @@
         "0": "P0 / This task should not be done in parallel with another.",
         "1": "P1 / Must-have for MVP",
         "2": "P2 / Should-have for MVP",
-        "4": "P3 / Nice-to-have (MVP+) or preparatory",
-        "5": "P4 / Lowest priority / can defer"
+        "3": "P3 / Nice-to-have (MVP+) or preparatory",
+        "4": "P4 / Lowest priority / can defer"
     },
     "assumptions": [
         "The existing `macc-core` logic is sufficiently modular to be called from a new web backend.",
