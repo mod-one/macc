@@ -109,7 +109,7 @@ Resume behavior:
 - `Retry step` reruns the same failed phase only.
 - If failure persists, same gate is shown again.
 
-## 6) TUI live behavior target
+## 6) live behavior target
 
 Coordinator Live becomes event-first:
 

@@ -826,7 +826,7 @@ pub async fn monitor_active_jobs_native(
     Ok(())
 }
 
-fn consume_heartbeat_events(
+pub fn consume_heartbeat_events(
     repo_root: &Path,
     state: &mut CoordinatorRunState,
     logger: Option<&dyn CoordinatorLog>,
@@ -845,6 +845,19 @@ fn consume_heartbeat_events(
         action: "open coordinator events for heartbeat scan".into(),
         source: e,
     })?;
+
+    let project_paths = crate::ProjectPaths::from_root(repo_root);
+    let storage_paths =
+        crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&project_paths);
+    let storage = crate::coordinator_storage::SqliteStorage::new(storage_paths);
+
+    // Initial load of cursor from DB if state offset is 0 (start of run)
+    if state.events_cursor_offset == 0 {
+        if let Ok(Some((offset, _last_id))) = storage.get_cursor("events.jsonl") {
+            state.events_cursor_offset = offset;
+        }
+    }
+
     let len = file
         .metadata()
         .map_err(|e| MaccError::Io {
@@ -869,11 +882,13 @@ fn consume_heartbeat_events(
         source: e,
     })?;
     state.events_cursor_offset = len;
+
+    let mut last_event_id = String::new();
     if buf.is_empty() {
+        let _ = storage.set_cursor("events.jsonl", len, "");
         return Ok(0);
     }
 
-    let project_paths = crate::ProjectPaths::from_root(repo_root);
     let mut heartbeat_updates: HashMap<String, String> = HashMap::new();
     let mut terminal_success_sources: HashSet<(String, String)> = HashSet::new();
     for line in buf.lines() {
@@ -884,6 +899,10 @@ fn consume_heartbeat_events(
         let Ok(event) = serde_json::from_str::<serde_json::Value>(trimmed) else {
             continue;
         };
+
+        if let Some(id) = event.get("event_id").and_then(serde_json::Value::as_str) {
+            last_event_id = id.to_string();
+        }
         if let Some(expected_run_id) = current_run_id.as_deref() {
             let event_run_id = event
                 .get("run_id")
@@ -955,6 +974,9 @@ fn consume_heartbeat_events(
         }
         heartbeat_updates.insert(task_id.to_string(), ts.to_string());
     }
+
+    let _ = storage.set_cursor("events.jsonl", len, &last_event_id);
+
     if heartbeat_updates.is_empty() {
         return Ok(0);
     }
@@ -1012,7 +1034,7 @@ enum StaleHeartbeatAction {
     Requeue,
 }
 
-fn apply_stale_heartbeat_policy(
+pub fn apply_stale_heartbeat_policy(
     repo_root: &Path,
     env_cfg: &CoordinatorEnvConfig,
     logger: Option<&dyn CoordinatorLog>,
@@ -1171,7 +1193,10 @@ fn apply_stale_heartbeat_policy(
     Ok(stale_ids.len())
 }
 
-fn resolve_stale_heartbeat_seconds(_env_cfg: &CoordinatorEnvConfig) -> usize {
+fn resolve_stale_heartbeat_seconds(env_cfg: &CoordinatorEnvConfig) -> usize {
+    if let Some(val) = env_cfg.stale_in_progress_seconds {
+        return val;
+    }
     if let Ok(raw) = std::env::var("STALE_HEARTBEAT_SECONDS") {
         if let Ok(value) = raw.trim().parse::<usize>() {
             return value;
@@ -1181,11 +1206,14 @@ fn resolve_stale_heartbeat_seconds(_env_cfg: &CoordinatorEnvConfig) -> usize {
 }
 
 fn resolve_stale_heartbeat_action(
-    _env_cfg: &CoordinatorEnvConfig,
+    env_cfg: &CoordinatorEnvConfig,
     logger: Option<&dyn CoordinatorLog>,
 ) -> StaleHeartbeatAction {
-    let raw = std::env::var("STALE_HEARTBEAT_ACTION")
-        .unwrap_or_else(|_| "block".to_string())
+    let raw = env_cfg
+        .stale_action
+        .clone()
+        .or_else(|| std::env::var("STALE_HEARTBEAT_ACTION").ok())
+        .unwrap_or_else(|| "block".to_string())
         .trim()
         .to_ascii_lowercase();
     match raw.as_str() {
@@ -1195,7 +1223,7 @@ fn resolve_stale_heartbeat_action(
         other => {
             if let Some(log) = logger {
                 let _ = log.note(format!(
-                    "- Unknown STALE_HEARTBEAT_ACTION='{}', defaulting to block",
+                    "- Unknown stale heartbeat action '{}', defaulting to block",
                     other
                 ));
             }
