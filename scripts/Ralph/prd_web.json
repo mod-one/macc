@@ -36,7 +36,7 @@
                 "web/"
             ],
             "dependencies": [],
-            "priority": "1"
+            "priority": "0"
         },
         {
             "id": "WEB-BACKEND-001",

@@ -24,12 +24,7 @@ fn test_core_forbidden_io_patterns() {
     // Keep this list short and remove entries as migration to UI-agnostic core completes.
     let allowed_rel_paths = ["src/lib.rs", "src/coordinator/state.rs"];
 
-    let forbidden_patterns = [
-        "println!(",
-        "eprintln!(",
-        "std::io::stdin",
-        "io::stdin()",
-    ];
+    let forbidden_patterns = ["println!(", "eprintln!(", "std::io::stdin", "io::stdin()"];
 
     let mut files = Vec::new();
     collect_rs_files(&core_src, &mut files);
@@ -60,4 +55,3 @@ fn test_core_forbidden_io_patterns() {
         violations.join("\n")
     );
 }
-

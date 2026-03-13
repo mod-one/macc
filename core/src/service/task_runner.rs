@@ -14,6 +14,19 @@ fn now_nanos() -> u128 {
         .unwrap_or(0)
 }
 
+fn assert_worktree_branch(worktree_path: &std::path::Path, expected_branch: &str) -> Result<()> {
+    let current_branch = crate::git::current_branch(worktree_path)?;
+    if current_branch != expected_branch {
+        return Err(MaccError::Validation(format!(
+            "Worktree branch mismatch: expected '{}' but HEAD is '{}' in {}",
+            expected_branch,
+            current_branch,
+            worktree_path.display()
+        )));
+    }
+    Ok(())
+}
+
 pub fn worktree_run_task(paths: &ProjectPaths, id: &str) -> Result<()> {
     let worktree_path = resolve_worktree_path(&paths.root, id)?;
     if !worktree_path.exists() {
@@ -25,6 +38,7 @@ pub fn worktree_run_task(paths: &ProjectPaths, id: &str) -> Result<()> {
 
     let metadata = read_worktree_metadata(&worktree_path)?
         .ok_or_else(|| MaccError::Validation("Missing .macc/worktree.json".into()))?;
+    assert_worktree_branch(&worktree_path, &metadata.branch)?;
     ensure_tool_json(&paths.root, &worktree_path, &metadata.tool)?;
     let (task_id, prd_path) =
         resolve_worktree_task_context(&paths.root, &worktree_path, &metadata.id)?;
