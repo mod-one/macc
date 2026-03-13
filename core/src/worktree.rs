@@ -206,6 +206,9 @@ pub fn write_tool_json(repo_root: &Path, worktree_path: &Path, tool_id: &str) ->
     let mut runtime = spec.to_runtime_config().ok_or_else(|| {
         MaccError::Validation(format!("Tool spec missing performer section: {}", tool_id))
     })?;
+    let canonical = load_tool_runtime_config(repo_root, worktree_path)?;
+    let placeholders = resolve_runtime_placeholders(&spec, &canonical);
+    apply_runtime_placeholders(&mut runtime, &placeholders);
 
     let worktree_paths = ProjectPaths::from_root(worktree_path);
     let _ = crate::ensure_embedded_automation_scripts(&worktree_paths)?;
@@ -231,6 +234,122 @@ pub fn write_tool_json(repo_root: &Path, worktree_path: &Path, tool_id: &str) ->
         source: e,
     })?;
     Ok(tool_json_path)
+}
+
+fn load_tool_runtime_config(repo_root: &Path, worktree_path: &Path) -> Result<CanonicalConfig> {
+    let worktree_paths = ProjectPaths::from_root(worktree_path);
+    if worktree_paths.config_path.exists() {
+        return crate::load_canonical_config(&worktree_paths.config_path);
+    }
+
+    let repo_paths = ProjectPaths::from_root(repo_root);
+    crate::load_canonical_config(&repo_paths.config_path)
+}
+
+fn resolve_runtime_placeholders(
+    spec: &crate::tool::ToolSpec,
+    canonical: &CanonicalConfig,
+) -> BTreeMap<String, String> {
+    let mut placeholders = BTreeMap::new();
+    if let Some(model) = resolve_tool_model(spec, canonical) {
+        placeholders.insert("model".to_string(), model);
+    }
+    placeholders
+}
+
+fn resolve_tool_model(spec: &crate::tool::ToolSpec, canonical: &CanonicalConfig) -> Option<String> {
+    let field = spec.fields.iter().find(|field| field.id == "model");
+    if let Some(field) = field {
+        if let Some(pointer) = field.pointer.as_deref() {
+            if let Some(value) = resolve_tool_pointer_value(canonical, &spec.id, pointer)
+                .and_then(json_scalar_to_string)
+            {
+                return Some(value);
+            }
+        }
+
+        if let Some(default) = field.default.as_ref().and_then(json_scalar_to_string) {
+            return Some(default);
+        }
+    }
+
+    spec.defaults
+        .as_ref()
+        .and_then(|defaults| defaults.get("model"))
+        .and_then(json_scalar_to_string)
+}
+
+fn resolve_tool_pointer_value<'a>(
+    canonical: &'a CanonicalConfig,
+    tool_id: &str,
+    pointer: &str,
+) -> Option<&'a serde_json::Value> {
+    let relative = relative_tool_pointer(tool_id, pointer)?;
+    canonical
+        .tools
+        .config
+        .get(tool_id)
+        .and_then(|value| value.pointer(relative))
+        .or_else(|| {
+            canonical
+                .tools
+                .settings
+                .get(tool_id)
+                .and_then(|value| value.pointer(relative))
+        })
+}
+
+fn relative_tool_pointer<'a>(tool_id: &str, pointer: &'a str) -> Option<&'a str> {
+    let config_prefix = format!("/tools/config/{}", tool_id);
+    let legacy_prefix = format!("/tools/{}", tool_id);
+    if let Some(relative) = pointer.strip_prefix(&config_prefix) {
+        return Some(if relative.is_empty() { "/" } else { relative });
+    }
+    if let Some(relative) = pointer.strip_prefix(&legacy_prefix) {
+        return Some(if relative.is_empty() { "/" } else { relative });
+    }
+    None
+}
+
+fn json_scalar_to_string(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(text) => Some(text.clone()),
+        serde_json::Value::Number(number) => Some(number.to_string()),
+        serde_json::Value::Bool(flag) => Some(flag.to_string()),
+        _ => None,
+    }
+}
+
+fn apply_runtime_placeholders(
+    runtime: &mut crate::tool::ToolRuntimeConfig,
+    placeholders: &BTreeMap<String, String>,
+) {
+    replace_placeholders_in_args(&mut runtime.performer.args, placeholders);
+    if let Some(retry) = runtime.performer.retry.as_mut() {
+        replace_placeholders_in_args(&mut retry.args, placeholders);
+    }
+    if let Some(session) = runtime.performer.session.as_mut() {
+        if let Some(resume) = session.resume.as_mut() {
+            replace_placeholders_in_args(&mut resume.args, placeholders);
+        }
+        if let Some(discover) = session.discover.as_mut() {
+            replace_placeholders_in_args(&mut discover.args, placeholders);
+        }
+    }
+}
+
+fn replace_placeholders_in_args(args: &mut [String], placeholders: &BTreeMap<String, String>) {
+    for arg in args {
+        *arg = replace_placeholders(arg, placeholders);
+    }
+}
+
+fn replace_placeholders(value: &str, placeholders: &BTreeMap<String, String>) -> String {
+    let mut rendered = value.to_string();
+    for (key, replacement) in placeholders {
+        rendered = rendered.replace(&format!("{{{}}}", key), replacement);
+    }
+    rendered
 }
 
 pub fn ensure_performer(worktree_path: &Path) -> Result<PathBuf> {
@@ -461,6 +580,7 @@ fn generate_suffix() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn parse_porcelain_output() {
@@ -477,5 +597,124 @@ mod tests {
         assert_eq!(entries[1].branch.as_deref(), Some("refs/heads/feat"));
         assert!(entries[1].locked);
         assert!(entries[1].prunable);
+    }
+
+    #[test]
+    fn resolves_model_placeholder_from_tool_config() {
+        let spec = crate::tool::ToolSpec {
+            api_version: "v1".to_string(),
+            id: "gemini".to_string(),
+            display_name: "Gemini".to_string(),
+            description: None,
+            capabilities: Vec::new(),
+            fields: vec![crate::tool::FieldSpec {
+                id: "model".to_string(),
+                label: "Model".to_string(),
+                kind: crate::tool::FieldKindSpec::Text,
+                help: None,
+                pointer: Some("/tools/config/gemini/model/name".to_string()),
+                default: Some(json!("default-model")),
+            }],
+            doctor: None,
+            gitignore: Vec::new(),
+            performer: None,
+            install: None,
+            update: None,
+            version_check: None,
+            defaults: Some(json!({"model": "fallback-model"})),
+        };
+        let canonical = CanonicalConfig {
+            version: None,
+            tools: crate::config::ToolsConfig {
+                enabled: vec!["gemini".to_string()],
+                config: BTreeMap::from([(
+                    "gemini".to_string(),
+                    json!({"model": {"name": "user-selected-model"}}),
+                )]),
+                settings: BTreeMap::new(),
+            },
+            standards: crate::config::StandardsConfig::default(),
+            selections: None,
+            automation: crate::config::AutomationConfig::default(),
+            mcp_templates: CanonicalConfig::default().mcp_templates,
+        };
+
+        assert_eq!(
+            resolve_tool_model(&spec, &canonical).as_deref(),
+            Some("user-selected-model")
+        );
+    }
+
+    #[test]
+    fn applies_model_placeholder_to_retry_and_resume_args() {
+        let mut runtime = crate::tool::ToolRuntimeConfig {
+            api_version: "v1".to_string(),
+            id: "codex".to_string(),
+            display_name: "Codex".to_string(),
+            performer: crate::tool::ToolPerformerSpec {
+                runner: "runner.sh".to_string(),
+                command: "codex".to_string(),
+                args: vec!["exec".to_string(), "-".to_string()],
+                retry: Some(crate::tool::ToolPerformerCommand {
+                    command: "codex".to_string(),
+                    args: vec![
+                        "--model".to_string(),
+                        "{model}".to_string(),
+                        "exec".to_string(),
+                    ],
+                }),
+                prompt: None,
+                session: Some(crate::tool::ToolPerformerSessionSpec {
+                    enabled: true,
+                    scope: None,
+                    init_prompt: None,
+                    extract_regex: None,
+                    resume: Some(crate::tool::ToolPerformerCommand {
+                        command: "codex".to_string(),
+                        args: vec![
+                            "--model".to_string(),
+                            "{model}".to_string(),
+                            "exec".to_string(),
+                            "resume".to_string(),
+                            "{session_id}".to_string(),
+                        ],
+                    }),
+                    discover: None,
+                    id_strategy: None,
+                }),
+            },
+            defaults: None,
+        };
+        let placeholders = BTreeMap::from([("model".to_string(), "gpt-5.2-codex".to_string())]);
+
+        apply_runtime_placeholders(&mut runtime, &placeholders);
+
+        assert_eq!(
+            runtime
+                .performer
+                .retry
+                .as_ref()
+                .map(|retry| retry.args.clone()),
+            Some(vec![
+                "--model".to_string(),
+                "gpt-5.2-codex".to_string(),
+                "exec".to_string(),
+            ])
+        );
+        assert_eq!(
+            runtime
+                .performer
+                .session
+                .as_ref()
+                .and_then(|session| session.resume.as_ref())
+                .map(|resume| resume.args.clone()),
+            Some(vec![
+                "--model".to_string(),
+                "gpt-5.2-codex".to_string(),
+                "exec".to_string(),
+                "resume".to_string(),
+                "{session_id}".to_string(),
+            ])
+        );
     }
 }

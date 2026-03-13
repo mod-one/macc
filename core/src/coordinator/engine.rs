@@ -906,6 +906,7 @@ struct NativeControlPlaneBackend<'a> {
     coordinator_tool_override: Option<String>,
     phase_timeout_seconds: usize,
     last_logged_counts: Option<CoordinatorCounts>,
+    last_cycle_progressed: bool,
 }
 
 #[async_trait]
@@ -1030,9 +1031,10 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
     async fn on_cycle_end(
         &mut self,
         _cycle: usize,
-        _advance: &AdvanceResult,
-        _dispatched: usize,
+        advance: &AdvanceResult,
+        dispatched: usize,
     ) -> Result<CoordinatorCounts> {
+        self.last_cycle_progressed = advance.progressed || dispatched > 0;
         let snapshot = crate::coordinator::state::coordinator_state_snapshot(
             self.repo_root,
             &std::collections::BTreeMap::new(),
@@ -1071,7 +1073,12 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
     }
 
     async fn sleep_between_cycles(&mut self) -> Result<()> {
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        let ms = if self.last_cycle_progressed {
+            500
+        } else {
+            2000
+        };
+        tokio::time::sleep(Duration::from_millis(ms)).await;
         Ok(())
     }
 
@@ -1236,6 +1243,7 @@ pub async fn run_native_control_plane(
         coordinator_tool_override,
         phase_timeout_seconds,
         last_logged_counts: None,
+        last_cycle_progressed: false,
     };
 
     let timeout_seconds = env_cfg
@@ -1251,6 +1259,38 @@ pub async fn run_native_control_plane(
         max_no_progress_cycles: 2,
     };
     let run_result = run_control_plane(&mut backend, loop_cfg).await;
+
+    let result_label = if run_result.is_err() {
+        "failed"
+    } else {
+        let snapshot = crate::coordinator::state::coordinator_state_snapshot(
+            repo_root,
+            &std::collections::BTreeMap::new(),
+        );
+        if let Ok(snap) = snapshot {
+            if snap
+                .registry
+                .get("paused")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                "paused"
+            } else {
+                "success"
+            }
+        } else {
+            "success"
+        }
+    };
+
+    if let Some(log) = logger {
+        let _ = log.note(format!(
+            "\n# Run footer\n- ended_at: {}\n- result: {}\n",
+            crate::coordinator::helpers::now_iso_coordinator(),
+            result_label
+        ));
+    }
+
     if run_result.is_err() {
         if let Err(err) = &run_result {
             let _ = crate::coordinator::helpers::append_coordinator_event_with_severity(

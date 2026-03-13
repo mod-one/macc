@@ -17,6 +17,53 @@ pub trait CoordinatorLog: Sync {
     fn note(&self, line: String) -> Result<()>;
 }
 
+fn aggregate_performer_logs_after_completion(
+    repo_root: &Path,
+    task_id: &str,
+    logger: Option<&dyn CoordinatorLog>,
+) {
+    match crate::coordinator::logs::aggregate_performer_logs(repo_root) {
+        Ok(copied) => {
+            if copied > 0 {
+                let msg = format!(
+                    "performer log aggregation updated task={} copied={}",
+                    task_id, copied
+                );
+                let _ = append_coordinator_event_with_severity(
+                    repo_root,
+                    "performer_logs_aggregated",
+                    task_id,
+                    "dev",
+                    "success",
+                    &msg,
+                    "info",
+                );
+                if let Some(log) = logger {
+                    let _ = log.note(format!("- {}", msg));
+                }
+            }
+        }
+        Err(err) => {
+            let msg = format!(
+                "performer log aggregation failed task={} error={}",
+                task_id, err
+            );
+            let _ = append_coordinator_event_with_severity(
+                repo_root,
+                "performer_logs_aggregation_failed",
+                task_id,
+                "dev",
+                "failed",
+                &msg,
+                "warning",
+            );
+            if let Some(log) = logger {
+                let _ = log.note(format!("- {}", msg));
+            }
+        }
+    }
+}
+
 fn resolve_dispatch_cooldown_seconds() -> u64 {
     std::env::var("COORDINATOR_DISPATCH_COOLDOWN_SECONDS")
         .ok()
@@ -297,6 +344,13 @@ pub fn sync_registry_from_prd_native(
         merged.push(task);
     }
 
+    let tasks_changed =
+        if let Some(old_tasks) = registry.get("tasks").and_then(serde_json::Value::as_array) {
+            old_tasks.len() != merged.len() || old_tasks != &merged
+        } else {
+            true
+        };
+
     registry["tasks"] = serde_json::Value::Array(merged);
     recompute_resource_locks_from_tasks(&mut registry);
     set_registry_updated_at(&mut registry);
@@ -305,13 +359,25 @@ pub fn sync_registry_from_prd_native(
         &BTreeMap::new(),
         &registry,
     )?;
+
     if let Some(log) = logger {
-        let count = registry
-            .get("tasks")
-            .and_then(serde_json::Value::as_array)
-            .map(|v| v.len())
-            .unwrap_or(0);
-        let _ = log.note(format!("Registry synced from PRD (tasks={})", count));
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static LAST_LOG_TS: AtomicU64 = AtomicU64::new(0);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let last = LAST_LOG_TS.load(Ordering::Relaxed);
+
+        if tasks_changed || now.saturating_sub(last) >= 300 {
+            let count = registry
+                .get("tasks")
+                .and_then(serde_json::Value::as_array)
+                .map(|v| v.len())
+                .unwrap_or(0);
+            let _ = log.note(format!("Registry synced from PRD (tasks={})", count));
+            LAST_LOG_TS.store(now, Ordering::Relaxed);
+        }
     }
     Ok(())
 }
@@ -546,6 +612,11 @@ pub async fn advance_tasks_native(
         .cloned()
         .collect::<HashSet<_>>();
     let actions = coordinator_engine::build_advance_actions(&registry, &active_merge_ids)?;
+    if !actions.is_empty() {
+        if let Some(log) = logger {
+            let _ = log.note(format!("- Advance started (actions={})", actions.len()));
+        }
+    }
     for action in actions {
         match action {
             coordinator_engine::AdvanceTaskAction::RunPhase {
@@ -692,6 +763,11 @@ pub async fn advance_tasks_native(
             }
         }
     }
+    if progressed {
+        if let Some(log) = logger {
+            let _ = log.note("- Advance done".to_string());
+        }
+    }
     recompute_resource_locks_from_tasks(&mut registry);
     set_registry_updated_at(&mut registry);
     crate::coordinator::state::coordinator_state_registry_save(
@@ -720,6 +796,12 @@ pub async fn monitor_active_jobs_native(
     loop {
         match state.event_rx.try_recv() {
             Ok(evt) => {
+                if let Some(log) = logger {
+                    let _ = log.note(format!(
+                        "- Lifecycle task={} stage=monitor status=job_exit_received success={} detail={}",
+                        evt.task_id, evt.success, evt.status_text
+                    ));
+                }
                 let maybe_job = state.active_jobs.remove(&evt.task_id);
                 let Some(job) = maybe_job else {
                     continue;
@@ -747,6 +829,12 @@ pub async fn monitor_active_jobs_native(
                     },
                     &now_iso_coordinator(),
                 )?;
+                if let Some(log) = logger {
+                    let _ = log.note(format!(
+                        "- Lifecycle task={} stage=monitor status=completion_applied new_state={} should_retry={}",
+                        evt.task_id, completion.status_label, completion.should_retry
+                    ));
+                }
                 recompute_resource_locks_from_tasks(&mut registry);
                 set_registry_updated_at(&mut registry);
                 crate::coordinator::state::coordinator_state_registry_save(
@@ -754,6 +842,7 @@ pub async fn monitor_active_jobs_native(
                     &BTreeMap::new(),
                     &registry,
                 )?;
+                aggregate_performer_logs_after_completion(repo_root, &evt.task_id, logger);
                 if !completion.should_retry && completion.status_label == "phase_done" {
                     let sealed = crate::coordinator::session_manager::seal_worktree_scoped_session(
                         repo_root,
@@ -944,6 +1033,14 @@ pub fn consume_heartbeat_events(
             || (event_type == "phase_result" && event_status == "done" && !payload_attempt);
         if is_terminal_success && !event_task_id.is_empty() && !event_source.is_empty() {
             terminal_success_sources.insert((event_task_id.to_string(), event_source.to_string()));
+            if state.active_jobs.contains_key(event_task_id) {
+                if let Some(log) = logger {
+                    let _ = log.note(format!(
+                        "- Lifecycle task={} stage=monitor status=mismatch_detected reason=terminal_success_no_exit event_type={}",
+                        event_task_id, event_type
+                    ));
+                }
+            }
         }
         let is_failed =
             event_type == "failed" || (event_type == "phase_result" && event_status == "failed");
