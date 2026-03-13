@@ -58,6 +58,11 @@ async fn sanitize_worktree_to_base(worktree_path: &Path, base_branch: &str) -> R
     Ok(true)
 }
 
+fn ensure_expected_worktree_branch(worktree_path: &Path, expected_branch: &str) -> Result<bool> {
+    let current_branch = crate::git::current_branch(worktree_path)?;
+    Ok(current_branch == expected_branch)
+}
+
 fn emit_dispatch_skipped(
     repo_root: &Path,
     logger: Option<&dyn CoordinatorLog>,
@@ -1668,6 +1673,41 @@ pub async fn dispatch_ready_tasks_native(
                 dispatch_failed_this_cycle.insert(selected.id.clone());
                 break;
             }
+            if !crate::git::checkout_async(&created.path, &created.branch, false).await? {
+                let msg = format!(
+                    "dispatch failed for task {}: restore task branch failed path={} branch={}",
+                    selected.id,
+                    created.path.display(),
+                    created.branch
+                );
+                let _ = append_coordinator_event_with_severity(
+                    repo_root,
+                    "dispatch_failed",
+                    &selected.id,
+                    "dev",
+                    "failed",
+                    &msg,
+                    "warning",
+                );
+                if let Some(log) = logger {
+                    let _ = log.note(format!("- {}", msg));
+                }
+                emit_dispatch_skipped(
+                    repo_root,
+                    logger,
+                    &selected.id,
+                    "restore_task_branch_failed",
+                    &created.branch,
+                );
+                if cooldown_seconds > 0 {
+                    state.dispatch_retry_not_before.insert(
+                        selected.id.clone(),
+                        Instant::now() + Duration::from_secs(cooldown_seconds),
+                    );
+                }
+                dispatch_failed_this_cycle.insert(selected.id.clone());
+                break;
+            }
             let sanitize_elapsed_ms = sanitize_started.elapsed().as_millis();
             let sanitize_msg = format!(
                 "sanitize done task={} mode=new path={} duration_ms={} dirty_before=false skipped_reset=false",
@@ -1998,6 +2038,79 @@ pub async fn dispatch_ready_tasks_native(
         let current_exe = std::env::current_exe().map_err(|e| {
             MaccError::Validation(format!("Failed to resolve current executable path: {}", e))
         })?;
+        let branch_matches = match ensure_expected_worktree_branch(&worktree_path, &branch) {
+            Ok(matches) => matches,
+            Err(err) => {
+                let msg = format!(
+                    "dispatch failed for task {}: verify worktree branch failed ({})",
+                    selected.id, err
+                );
+                let _ = append_coordinator_event_with_severity(
+                    repo_root,
+                    "dispatch_failed",
+                    &selected.id,
+                    "dev",
+                    "failed",
+                    &msg,
+                    "warning",
+                );
+                let _ = rollback_claim(&msg);
+                if let Some(log) = logger {
+                    let _ = log.note(format!("- {}", msg));
+                }
+                emit_dispatch_skipped(
+                    repo_root,
+                    logger,
+                    &selected.id,
+                    "verify_worktree_branch_failed",
+                    &err.to_string(),
+                );
+                dispatch_failed_this_cycle.insert(selected.id.clone());
+                if cooldown_seconds > 0 {
+                    state.dispatch_retry_not_before.insert(
+                        selected.id.clone(),
+                        Instant::now() + Duration::from_secs(cooldown_seconds),
+                    );
+                }
+                break;
+            }
+        };
+        if !branch_matches {
+            let current_branch = crate::git::current_branch(&worktree_path)
+                .unwrap_or_else(|_| "unknown".to_string());
+            let msg = format!(
+                "dispatch failed for task {}: worktree HEAD mismatch expected={} actual={}",
+                selected.id, branch, current_branch
+            );
+            let _ = append_coordinator_event_with_severity(
+                repo_root,
+                "dispatch_failed",
+                &selected.id,
+                "dev",
+                "failed",
+                &msg,
+                "warning",
+            );
+            let _ = rollback_claim(&msg);
+            if let Some(log) = logger {
+                let _ = log.note(format!("- {}", msg));
+            }
+            emit_dispatch_skipped(
+                repo_root,
+                logger,
+                &selected.id,
+                "worktree_head_mismatch",
+                &format!("expected={} actual={}", branch, current_branch),
+            );
+            dispatch_failed_this_cycle.insert(selected.id.clone());
+            if cooldown_seconds > 0 {
+                state.dispatch_retry_not_before.insert(
+                    selected.id.clone(),
+                    Instant::now() + Duration::from_secs(cooldown_seconds),
+                );
+            }
+            break;
+        }
         let pid = match coordinator_runtime::spawn_performer_job(
             &current_exe,
             repo_root,

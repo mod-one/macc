@@ -95,12 +95,38 @@ fi
 cd "$worktree"
 
 tool_json="${worktree}/.macc/tool.json"
+worktree_meta="${worktree}/.macc/worktree.json"
 
 if [[ ! -f "$tool_json" ]]; then
   LAST_ERROR_CODE="E303"
   LAST_ERROR_ORIGIN="performer"
   LAST_ERROR_MESSAGE="tool.json not found"
   echo "Error: tool.json not found in worktree: $tool_json" >&2
+  exit 1
+fi
+
+if [[ ! -f "$worktree_meta" ]]; then
+  LAST_ERROR_CODE="E304"
+  LAST_ERROR_ORIGIN="performer"
+  LAST_ERROR_MESSAGE="worktree metadata not found"
+  echo "Error: worktree metadata not found in worktree: $worktree_meta" >&2
+  exit 1
+fi
+
+expected_branch="$(jq -r '.branch // ""' "$worktree_meta")"
+current_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+if [[ -z "$expected_branch" ]]; then
+  LAST_ERROR_CODE="E305"
+  LAST_ERROR_ORIGIN="performer"
+  LAST_ERROR_MESSAGE="expected branch missing from worktree metadata"
+  echo "Error: expected branch missing from worktree metadata: $worktree_meta" >&2
+  exit 1
+fi
+if [[ -z "$current_branch" || "$current_branch" != "$expected_branch" ]]; then
+  LAST_ERROR_CODE="E306"
+  LAST_ERROR_ORIGIN="git"
+  LAST_ERROR_MESSAGE="worktree branch mismatch expected=${expected_branch} actual=${current_branch:-unknown}"
+  echo "Error: worktree branch mismatch. expected=$expected_branch actual=${current_branch:-unknown}" >&2
   exit 1
 fi
 
