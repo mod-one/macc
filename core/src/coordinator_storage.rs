@@ -511,6 +511,35 @@ impl SqliteStorage {
         Ok(())
     }
 
+    pub fn get_cursor(&self, name: &str) -> Result<Option<(u64, String)>> {
+        let conn = self.open()?;
+        self.init_schema(&conn)?;
+        let mut stmt = conn
+            .prepare("SELECT offset, last_event_id FROM cursors WHERE name = ?1")
+            .map_err(sql_err)?;
+        let mut rows = stmt.query([name]).map_err(sql_err)?;
+        if let Some(row) = rows.next().map_err(sql_err)? {
+            let offset: i64 = row.get(0).map_err(sql_err)?;
+            let last_id: String = row.get(1).map_err(sql_err)?;
+            Ok(Some((offset as u64, last_id)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn set_cursor(&self, name: &str, offset: u64, last_id: &str) -> Result<()> {
+        let conn = self.open()?;
+        self.init_schema(&conn)?;
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO cursors (name, offset, last_event_id, updated_at, payload_json) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(name) DO UPDATE SET offset=?2, last_event_id=?3, updated_at=?4",
+            rusqlite::params![name, offset as i64, last_id, now, "{}"],
+        )
+        .map_err(sql_err)?;
+        Ok(())
+    }
+
     pub fn apply_transition(&self, change: &TransitionMutation) -> Result<()> {
         self.apply_transition_with_event(change, None)
     }
