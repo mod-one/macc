@@ -1499,6 +1499,35 @@ pub async fn dispatch_ready_tasks_native(
                 .unwrap_or_else(|| "master".to_string()),
         };
 
+        if let Some(reason) =
+            crate::coordinator::task_selector::dispatch_block_reason(&registry, &config)
+        {
+            match reason {
+                crate::coordinator::task_selector::DispatchBlockReason::ActivePriorityZero {
+                    task_id,
+                } => {
+                    emit_dispatch_skipped(
+                        repo_root,
+                        logger,
+                        &task_id,
+                        "priority_zero_exclusive",
+                        "an active priority=0 task blocks parallel dispatch",
+                    );
+                }
+                crate::coordinator::task_selector::DispatchBlockReason::ReadyPriorityZeroBlocked {
+                    task_id,
+                } => {
+                    emit_dispatch_skipped(
+                        repo_root,
+                        logger,
+                        &task_id,
+                        "priority_zero_exclusive",
+                        "a ready priority=0 task must run alone before lower-priority dispatch",
+                    );
+                }
+            }
+            break;
+        }
         let Some(selected) =
             crate::coordinator::task_selector::select_next_ready_task(&registry, &config)
         else {
