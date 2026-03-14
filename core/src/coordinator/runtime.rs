@@ -127,6 +127,12 @@ impl CoordinatorRunState {
     }
 }
 
+impl Default for CoordinatorRunState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub fn raw_event_identity(event: &CoordinatorEventRecord) -> Option<(String, String, String)> {
     let task_id = event.task_id.clone().unwrap_or_default();
     let ts = event.ts.clone();
@@ -354,6 +360,7 @@ pub fn build_phase_prompt(mode: &str, task_id: &str, tool: &str, task: &Task) ->
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_performer_job(
     executable_path: &Path,
     repo_root: &Path,
@@ -623,7 +630,7 @@ pub fn terminate_active_jobs(state: &CoordinatorRunState) -> Vec<(String, i64)> 
 }
 
 pub fn summarize_output(text: &str) -> String {
-    let normalized = text.replace('\n', " ").replace('\r', " ");
+    let normalized = text.replace(['\n', '\r'], " ");
     let collapsed = normalized.split_whitespace().collect::<Vec<_>>().join(" ");
     if collapsed.len() > 1000 {
         format!("{}...", &collapsed[..1000])
@@ -1168,6 +1175,7 @@ fn find_worktree_using_branch(repo_root: &Path, branch: &str) -> Result<Option<P
     Ok(None)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn report_branch_cleanup_outcome<FE, FW>(
     repo_root: &Path,
     task_id: Option<&str>,

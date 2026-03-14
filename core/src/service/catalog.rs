@@ -20,6 +20,7 @@ pub trait CatalogUrlParser {
     fn validate_http_url(&self, value: &str) -> bool;
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn run_remote_search(
     engine: &(impl Engine + ?Sized),
     paths: &ProjectPaths,
@@ -285,6 +286,7 @@ pub fn install_mcp(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn import_url(
     paths: &ProjectPaths,
     kind: &str,

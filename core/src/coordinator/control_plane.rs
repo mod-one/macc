@@ -1069,7 +1069,7 @@ pub fn apply_stale_heartbeat_policy(
                     .as_deref()
                     .filter(|v| !v.is_empty())
             })
-            .or_else(|| task.updated_at.as_deref());
+            .or(task.updated_at.as_deref());
         let Some(last_ts) = last_ts else {
             continue;
         };

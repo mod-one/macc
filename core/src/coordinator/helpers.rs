@@ -148,14 +148,17 @@ fn is_branch_merged_into_base(worktree_path: &Path, branch: &str, base_branch: &
     crate::git::merge_base_is_ancestor(worktree_path, branch, base_branch).unwrap_or(false)
 }
 
+type ReusableWorktree = (std::path::PathBuf, String, String, bool, bool);
+type ReusableWorktreePrepareError = (String, String);
+
 pub fn find_reusable_worktree_native(
     repo_root: &Path,
     registry: &serde_json::Value,
     tool: &str,
     base_branch: &str,
 ) -> Result<(
-    Option<(std::path::PathBuf, String, String, bool, bool)>,
-    Option<(String, String)>,
+    Option<ReusableWorktree>,
+    Option<ReusableWorktreePrepareError>,
 )> {
     let active_paths = active_task_worktree_paths(registry);
     let pool_root = repo_root.join(".macc").join("worktree");

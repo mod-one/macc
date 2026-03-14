@@ -106,6 +106,7 @@ pub fn plan(
     ui.render_plan_preview(&paths, &plan, &ops, json, explain)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn apply(
     cwd: &Path,
     engine: &dyn Engine,

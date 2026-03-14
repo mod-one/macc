@@ -54,6 +54,7 @@ pub trait Engine {
         crate::remove_worktree(root, path, force)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn catalog_search_remote(
         &self,
         paths: &ProjectPaths,
@@ -250,6 +251,7 @@ pub trait Engine {
         crate::service::clear::clear_project(paths, force, ui)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn catalog_run_remote_search(
         &self,
         paths: &ProjectPaths,
@@ -405,6 +407,7 @@ pub trait Engine {
         crate::service::catalog::install_mcp(paths, id, self, backend, ui)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn catalog_import_url(
         &self,
         paths: &ProjectPaths,
@@ -451,6 +454,7 @@ pub trait Engine {
         crate::service::backups::open(paths, id, latest, user, editor, ui)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn backups_restore(
         &self,
         paths: &ProjectPaths,
@@ -871,6 +875,7 @@ pub trait Engine {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn coordinator_dispatch_ready_tasks_native<'a>(
         &'a self,
         repo_root: &'a Path,

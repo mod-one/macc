@@ -1178,8 +1178,8 @@ pub fn coordinator_sync<E: crate::engine::Engine + ?Sized>(
         engine.coordinator_storage_import_json_to_sqlite(paths)?;
     }
     engine.coordinator_sync_registry_from_prd_with_logger(&paths.root, &prd_file, logger)?;
-    if storage_mode != CoordinatorStorageMode::Json {
-        if std::env::var("COORDINATOR_JSON_COMPAT")
+    if storage_mode != CoordinatorStorageMode::Json
+        && std::env::var("COORDINATOR_JSON_COMPAT")
             .ok()
             .map(|raw| {
                 !matches!(
@@ -1188,9 +1188,8 @@ pub fn coordinator_sync<E: crate::engine::Engine + ?Sized>(
                 )
             })
             .unwrap_or(false)
-        {
-            engine.coordinator_storage_export_sqlite_to_json(paths)?;
-        }
+    {
+        engine.coordinator_storage_export_sqlite_to_json(paths)?;
     }
     Ok(())
 }
