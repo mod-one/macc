@@ -137,6 +137,17 @@ fn emit_dispatch_skipped(
     }
 }
 
+fn should_emit_priority_zero_dispatch_skip(
+    state: &mut CoordinatorRunState,
+    task_id: &str,
+) -> bool {
+    if state.last_priority_zero_dispatch_block_task_id.as_deref() == Some(task_id) {
+        return false;
+    }
+    state.last_priority_zero_dispatch_block_task_id = Some(task_id.to_string());
+    true
+}
+
 async fn switch_worktree_to_base_after_merge(
     repo_root: &Path,
     task: &Task,
@@ -1452,28 +1463,33 @@ pub async fn dispatch_ready_tasks_native(
                 crate::coordinator::task_selector::DispatchBlockReason::ActivePriorityZero {
                     task_id,
                 } => {
-                    emit_dispatch_skipped(
-                        repo_root,
-                        logger,
-                        &task_id,
-                        "priority_zero_exclusive",
-                        "an active priority=0 task blocks parallel dispatch",
-                    );
+                    if should_emit_priority_zero_dispatch_skip(state, &task_id) {
+                        emit_dispatch_skipped(
+                            repo_root,
+                            logger,
+                            &task_id,
+                            "priority_zero_exclusive",
+                            "an active priority=0 task blocks parallel dispatch",
+                        );
+                    }
                 }
                 crate::coordinator::task_selector::DispatchBlockReason::ReadyPriorityZeroBlocked {
                     task_id,
                 } => {
-                    emit_dispatch_skipped(
-                        repo_root,
-                        logger,
-                        &task_id,
-                        "priority_zero_exclusive",
-                        "a ready priority=0 task must run alone before lower-priority dispatch",
-                    );
+                    if should_emit_priority_zero_dispatch_skip(state, &task_id) {
+                        emit_dispatch_skipped(
+                            repo_root,
+                            logger,
+                            &task_id,
+                            "priority_zero_exclusive",
+                            "a ready priority=0 task must run alone before lower-priority dispatch",
+                        );
+                    }
                 }
             }
             break;
         }
+        state.last_priority_zero_dispatch_block_task_id = None;
         let Some(selected) =
             crate::coordinator::task_selector::select_next_ready_task(&registry, &config)
         else {
@@ -2185,4 +2201,18 @@ pub async fn dispatch_ready_tasks_native(
         }
     }
     Ok(dispatched)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_emit_priority_zero_dispatch_skip;
+    use crate::coordinator::runtime::CoordinatorRunState;
+
+    #[test]
+    fn priority_zero_dispatch_skip_logs_only_once_for_same_task() {
+        let mut state = CoordinatorRunState::new();
+        assert!(should_emit_priority_zero_dispatch_skip(&mut state, "TASK-1"));
+        assert!(!should_emit_priority_zero_dispatch_skip(&mut state, "TASK-1"));
+        assert!(should_emit_priority_zero_dispatch_skip(&mut state, "TASK-2"));
+    }
 }
