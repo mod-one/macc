@@ -21,7 +21,7 @@ performer:
       args: ["--model", "{model}", "exec", "resume", "{session_id}"]
   retry:
     command: codex
-    args: ["--model", "{model}", "exec", "--color", "never", "-"]
+    args: ["--model", "{model}", "exec", "resume", "{session_id}", "-"]
 defaults:
   approval_policy: never
   sandbox_mode: workspace-write

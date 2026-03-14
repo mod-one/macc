@@ -9,7 +9,7 @@ gitignore:
 performer:
   runner: adapters/gemini/gemini.performer.sh
   command: gemini
-  args: ["--sandbox", "false", "--approval-mode", "auto_edit", "--yolo"]
+  args: ["--sandbox", "false", "--approval-mode", "yolo"]
   prompt:
     mode: arg
     arg: "--prompt"
@@ -23,10 +23,10 @@ performer:
       args: ["-lc", "gemini --list-sessions 2>/dev/null | grep '\\[.*\\]' | tail -n 1 | sed 's/.*\\[\\(.*\\)\\].*/\\1/'"]
     resume:
       command: gemini
-      args: ["--model", "{model}", "--resume", "{session_id}", "--sandbox", "false", "--approval-mode", "auto_edit", "--yolo"]
+      args: ["--model", "{model}", "--resume", "{session_id}", "--sandbox", "false", "--approval-mode", "yolo"]
   retry:
     command: gemini
-    args: ["--model", "{model}", "--sandbox", "false", "--approval-mode", "auto_edit", "--yolo"]
+    args: ["--model", "{model}", "--resume", "{session_id}", "--sandbox", "false", "--approval-mode", "yolo"]
 defaults:
   approval_mode: auto_edit
   sandbox: false
