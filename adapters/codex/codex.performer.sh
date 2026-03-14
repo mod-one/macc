@@ -294,21 +294,59 @@ run_and_capture() {
   return "$rc"
 }
 
+expand_config_args() {
+  local sid="$1"
+  local out_name="$2"
+  local -n out_ref="$out_name"
+  local token=""
+  local current_sid="${sid:-}"
+
+  out_ref=()
+
+  for token in "${args[@]}"; do
+    out_ref+=("${token//\{session_id\}/$current_sid}")
+  done
+}
+
 run_resume_and_capture() {
   local output_file="$1"
   local sid="$2"
   local prompt="$3"
-  local resume_args=()
+  local final_args=()
   local arg
+  local expanded_retry_args=()
+  local i=0
 
+  # 1. Base resume args from config
   while IFS= read -r arg; do
-    resume_args+=("${arg//\{session_id\}/$sid}")
+    final_args+=("${arg//\{session_id\}/$sid}")
   done < <(jq -r '.performer.session.resume.args[]?' "$tool_json")
 
+  # 2. Inject attempt-specific flags from retry overrides.
+  expand_config_args "$sid" expanded_retry_args
+  while [[ $i -lt ${#expanded_retry_args[@]} ]]; do
+    local a="${expanded_retry_args[$i]}"
+    local substituted_a="$a"
+    if [[ "$substituted_a" == -* ]]; then
+      local next_idx=$((i + 1))
+      if [[ " ${final_args[*]} " != *" ${substituted_a} "* ]]; then
+        final_args+=("$substituted_a")
+        if [[ $next_idx -lt ${#expanded_retry_args[@]} ]]; then
+          local next_a="${expanded_retry_args[$next_idx]}"
+          final_args+=("$next_a")
+          i=$next_idx
+        fi
+      elif [[ $next_idx -lt ${#expanded_retry_args[@]} ]]; then
+        i=$next_idx
+      fi
+    fi
+    i=$((i + 1))
+  done
+
   if [[ "$prompt_mode" == "arg" && -n "$prompt_arg" ]]; then
-    run_and_capture "$output_file" "$session_resume_command" "${resume_args[@]}" "$prompt_arg" "$prompt"
+    run_and_capture "$output_file" "$session_resume_command" "${final_args[@]}" "$prompt_arg" "$prompt"
   else
-    run_and_capture "$output_file" "$session_resume_command" "${resume_args[@]}" "$prompt"
+    run_and_capture "$output_file" "$session_resume_command" "${final_args[@]}" "$prompt"
   fi
 }
 
@@ -388,6 +426,7 @@ prompt_arg="$(jq -r '.performer.prompt.arg // empty' "$tool_json")"
 prompt_text="$(cat "$prompt_file")"
 output_capture="$(mktemp)"
 active_session_id=""
+sid=""
 
 cleanup_runner() {
   if [[ -n "$active_session_id" ]]; then
@@ -401,15 +440,20 @@ cleanup_runner() {
 trap cleanup_runner EXIT
 
 run_default_call() {
+  local final_call_args=()
+  local a
+
+  expand_config_args "$sid" final_call_args
+
   if [[ "$prompt_mode" == "arg" ]]; then
     if [[ -z "$prompt_arg" ]]; then
       echo "Error: performer.prompt.arg required for arg mode" >&2
       return 1
     fi
-    run_and_capture "$output_capture" "$command" "${args[@]}" "$prompt_arg" "$prompt_text"
+    run_and_capture "$output_capture" "$command" "${final_call_args[@]}" "$prompt_arg" "$prompt_text"
   else
     local rc=0
-    printf "%s" "$prompt_text" | "$command" "${args[@]}" 2>&1 | tee "$output_capture"
+    printf "%s" "$prompt_text" | "$command" "${final_call_args[@]}" 2>&1 | tee "$output_capture"
     rc=${PIPESTATUS[1]}
     return "$rc"
   fi
@@ -439,18 +483,24 @@ if [[ "$session_enabled" == "true" && -n "$session_resume_command" ]]; then
     fi
   fi
 
+  if [[ "$attempt" -gt 1 && -z "$sid" ]]; then
+    echo "Error: missing session id for retry attempt $attempt" >&2
+    exit 1
+  fi
+
   if [[ -n "$sid" ]]; then
     if ! run_resume_and_capture "$output_capture" "$sid" "$prompt_text"; then
       rc=$?
-      if [[ "$attempt" -eq 1 ]]; then
-        run_default_call || rc=$?
-      fi
+      run_default_call || rc=$?
     fi
   else
     run_default_call || rc=$?
   fi
 
   new_sid="$(extract_session_id_from_output "$output_capture" "$session_extract_regex")"
+  if [[ -n "$sid" && "$attempt" -gt 1 ]]; then
+    new_sid="$sid"
+  fi
   if [[ -z "$new_sid" && "$attempt" -eq 1 && "$session_id_strategy" == "discovered" ]]; then
     discovery_capture="$(mktemp)"
     new_sid="$(discover_session_id "$discovery_capture")"

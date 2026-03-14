@@ -22,7 +22,7 @@ performer:
       args: ["--model", "{model}", "--session-id", "{session_id}", "--output-format", "text"]
   retry:
     command: claude
-    args: ["--model", "{model}", "--output-format", "text"]
+    args: ["--model", "{model}", "--session-id", "{session_id}", "--output-format", "text"]
 defaults:
   model: sonnet
 install:
