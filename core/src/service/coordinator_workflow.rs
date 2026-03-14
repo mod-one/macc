@@ -1458,7 +1458,7 @@ fn retry_dev_phase<E: crate::engine::Engine + ?Sized>(
     state.active_jobs.insert(
         task_id.to_string(),
         coordinator_runtime::CoordinatorJob {
-            tool: task.task_tool().unwrap_or("codex").to_string(),
+            tool: task.task_tool().unwrap_or_default().to_string(),
             worktree_path: worktree.clone(),
             attempt: 1,
             started_at: std::time::Instant::now(),
@@ -1834,7 +1834,7 @@ fn parse_select_ready_task_command(args: &[String]) -> Result<CoordinatorCommand
         .get("default-tool")
         .cloned()
         .or_else(|| std::env::var("DEFAULT_TOOL").ok())
-        .unwrap_or_else(|| "codex".to_string());
+        .unwrap_or_default();
     let default_base_branch = map
         .get("default-base-branch")
         .cloned()

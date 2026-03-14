@@ -1445,7 +1445,7 @@ pub async fn dispatch_ready_tasks_native(
                 .enabled
                 .first()
                 .cloned()
-                .unwrap_or_else(|| "codex".to_string()),
+                .unwrap_or_default(),
             default_base_branch: env_cfg
                 .reference_branch
                 .clone()

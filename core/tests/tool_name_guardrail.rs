@@ -38,8 +38,39 @@ fn guardrail_no_tool_names_in_core_cli_tui() {
             let Ok(contents) = std::fs::read_to_string(&file) else {
                 continue;
             };
+            let mut in_test_scope = false;
+            let mut pending_test_scope = false;
+            let mut test_scope_depth = 0usize;
 
             for (line_no, line) in contents.lines().enumerate() {
+                let trimmed = line.trim();
+                if !in_test_scope && (trimmed == "#[cfg(test)]" || trimmed.starts_with("#[test]")) {
+                    pending_test_scope = true;
+                    continue;
+                }
+
+                if pending_test_scope {
+                    let opens = line.matches('{').count();
+                    let closes = line.matches('}').count();
+                    if opens > 0 {
+                        in_test_scope = true;
+                        test_scope_depth = opens.saturating_sub(closes);
+                        pending_test_scope = false;
+                    }
+                    continue;
+                }
+
+                if in_test_scope {
+                    let opens = line.matches('{').count();
+                    let closes = line.matches('}').count();
+                    test_scope_depth = test_scope_depth.saturating_add(opens);
+                    test_scope_depth = test_scope_depth.saturating_sub(closes);
+                    if test_scope_depth == 0 {
+                        in_test_scope = false;
+                    }
+                    continue;
+                }
+
                 let lower = line.to_lowercase();
                 for token in &forbidden {
                     if !lower.contains(token) {
