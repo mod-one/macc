@@ -3,6 +3,7 @@ use chrono::{DateTime, Utc};
 use macc_adapter_shared::fetch::materialize_fetch_units;
 use macc_core::catalog::{Agent, McpEntry, Skill};
 use macc_core::config::{CanonicalConfig, CoordinatorConfig};
+use macc_core::coordinator::types::CoordinatorEnvConfig;
 use macc_core::coordinator_storage::{
     CoordinatorSnapshot, CoordinatorStorage, CoordinatorStoragePaths, JsonStorage, SqliteStorage,
 };
@@ -10,7 +11,10 @@ use macc_core::doctor::ToolCheck;
 use macc_core::engine::CoordinatorEvent;
 use macc_core::plan::{render_diff, ActionPlan, DiffView, PlannedOp, Scope};
 use macc_core::resolve::{resolve, resolve_fetch_units, CliOverrides};
-use macc_core::service::coordinator::CoordinatorManagedActionState;
+use macc_core::service::coordinator::CoordinatorManagedCommandState;
+use macc_core::service::coordinator_workflow::{
+    coordinator_command_display_name, CoordinatorCommand, CoordinatorCommandRequest,
+};
 use macc_core::tool::{ActionKind, FieldDefault, FieldKind, ToolDescriptor, ToolField};
 use macc_core::{find_project_root, Engine, ProjectPaths};
 use serde_json::{Map, Value};
@@ -173,10 +177,10 @@ pub struct AppState {
     pub ui_status: Option<UiStatus>,
     pub coordinator_snapshot: Option<CoordinatorTaskSnapshot>,
     pub coordinator_last_refresh: Option<Instant>,
-    pub coordinator_running_action: Option<String>,
+    pub coordinator_running_command: Option<String>,
     pub coordinator_last_result: Option<String>,
     pub coordinator_pause_error: Option<String>,
-    pub coordinator_pause_action: Option<String>,
+    pub coordinator_pause_command: Option<String>,
     pub coordinator_pause_task_id: Option<String>,
     pub coordinator_pause_phase: Option<String>,
     pub coordinator_spinner_tick: u64,
@@ -261,10 +265,10 @@ impl AppState {
             ui_status: None,
             coordinator_snapshot: None,
             coordinator_last_refresh: None,
-            coordinator_running_action: None,
+            coordinator_running_command: None,
             coordinator_last_result: None,
             coordinator_pause_error: None,
-            coordinator_pause_action: None,
+            coordinator_pause_command: None,
             coordinator_pause_task_id: None,
             coordinator_pause_phase: None,
             coordinator_spinner_tick: 0,
@@ -519,73 +523,55 @@ impl AppState {
         }
     }
 
-    fn read_registry_snapshot_from_value(
+    fn read_registry_snapshot(
         &self,
-        root: &Value,
+        root: &macc_core::coordinator::model::TaskRegistry,
     ) -> Result<CoordinatorTaskSnapshot, String> {
-        let tasks = root
-            .get("tasks")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| "registry is missing tasks array".to_string())?;
         let mut snapshot = CoordinatorTaskSnapshot {
-            total: tasks.len(),
+            total: root.tasks.len(),
             todo: 0,
             active: 0,
             blocked: 0,
             merged: 0,
             active_tasks: Vec::new(),
         };
-        for task in tasks {
-            let id = task
-                .get("id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("-")
-                .to_string();
-            let state = task
-                .get("state")
-                .and_then(|v| v.as_str())
-                .unwrap_or("todo")
-                .to_ascii_lowercase();
-            let tool = task
-                .get("tool")
-                .and_then(|v| v.as_str())
-                .unwrap_or("-")
-                .to_string();
+        for task in &root.tasks {
+            let id = if task.id.is_empty() {
+                "-".to_string()
+            } else {
+                task.id.clone()
+            };
+            let state = if task.state.is_empty() {
+                "todo".to_string()
+            } else {
+                task.state.to_ascii_lowercase()
+            };
+            let tool = task.tool.clone().unwrap_or_else(|| "-".to_string());
             let worktree = task
-                .get("worktree")
-                .and_then(|v| v.get("worktree_path"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("-")
-                .to_string();
+                .worktree
+                .as_ref()
+                .and_then(|w| w.worktree_path.clone())
+                .unwrap_or_else(|| "-".to_string());
             let updated_at = task
-                .get("state_changed_at")
-                .and_then(|v| v.as_str())
-                .unwrap_or("-")
-                .to_string();
+                .state_changed_at
+                .clone()
+                .unwrap_or_else(|| "-".to_string());
             let runtime_status = task
-                .get("task_runtime")
-                .and_then(|v| v.get("status"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("-")
-                .to_string();
+                .task_runtime
+                .status
+                .clone()
+                .unwrap_or_else(|| "-".to_string());
             let current_phase = task
-                .get("task_runtime")
-                .and_then(|v| v.get("current_phase"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("-")
-                .to_string();
-            let last_error = task
-                .get("task_runtime")
-                .and_then(|v| v.get("last_error"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+                .task_runtime
+                .current_phase
+                .clone()
+                .unwrap_or_else(|| "-".to_string());
+            let last_error = task.task_runtime.last_error.clone().unwrap_or_default();
             let last_heartbeat = task
-                .get("task_runtime")
-                .and_then(|v| v.get("last_heartbeat"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("-")
-                .to_string();
+                .task_runtime
+                .last_heartbeat
+                .clone()
+                .unwrap_or_else(|| "-".to_string());
             let is_live_active = matches!(
                 state.as_str(),
                 "claimed" | "in_progress" | "pr_open" | "changes_requested" | "queued"
@@ -625,7 +611,7 @@ impl AppState {
         self.refresh_coordinator_pause_state();
         match self
             .load_coordinator_storage_snapshot()
-            .and_then(|snapshot| self.read_registry_snapshot_from_value(&snapshot.registry))
+            .and_then(|snapshot| self.read_registry_snapshot(&snapshot.registry))
         {
             Ok(snapshot) => {
                 self.coordinator_snapshot = Some(snapshot);
@@ -829,8 +815,13 @@ impl AppState {
         self.tool_checks = self.engine.doctor(&paths);
     }
 
-    fn start_coordinator_action_with_args(&mut self, action: &str, args: &[String]) {
-        if self.is_coordinator_running() && action != "resume" {
+    fn coordinator_env_cfg(&self) -> CoordinatorEnvConfig {
+        CoordinatorEnvConfig::default()
+    }
+
+    fn start_managed_coordinator_command(&mut self, command: CoordinatorCommand) {
+        let command_name = coordinator_command_display_name(&command).to_string();
+        if self.is_coordinator_running() {
             self.set_status(
                 UiStatusLevel::Warning,
                 "Coordinator already running.",
@@ -846,81 +837,138 @@ impl AppState {
             );
             return;
         };
-        let root = paths.root.clone();
-        if action == "resume" {
-            match self.engine.coordinator_resume(&root) {
-                Ok(_) => {
-                    self.refresh_coordinator_snapshot();
-                    self.refresh_coordinator_events();
-                    self.set_status(
-                        UiStatusLevel::Success,
-                        "Resume signal sent to coordinator.",
-                        Some(Duration::from_secs(4)),
-                    );
-                }
-                Err(err) => {
-                    self.set_status(
-                        UiStatusLevel::Error,
-                        format!(
-                            "Failed to send resume signal: {}",
-                            format_actionable_error(&err.to_string())
-                        ),
-                        Some(Duration::from_secs(6)),
-                    );
-                }
-            }
-            return;
-        }
         self.coordinator_pause_error = None;
-        self.coordinator_pause_action = None;
+        self.coordinator_pause_command = None;
         self.coordinator_pause_task_id = None;
         self.coordinator_pause_phase = None;
         let coordinator_cfg = self
             .working_copy
             .as_ref()
             .and_then(|c| c.automation.coordinator.as_ref());
-        match self.engine.coordinator_start_managed_action_process(
+        match self.engine.coordinator_start_managed_command_process(
             paths,
-            action,
-            args,
+            &command,
             coordinator_cfg,
         ) {
             Ok(()) => {
-                self.coordinator_running_action = Some(action.to_string());
+                self.coordinator_running_command = Some(command_name.clone());
                 self.coordinator_running_elapsed_secs = Some(0);
-                self.coordinator_last_result = Some(if action == "run" {
+                self.coordinator_last_result = Some(if command_name == "run" {
                     "Started 'run' loop.".to_string()
                 } else {
-                    format!("Started '{}'.", action)
+                    format!("Started '{}'.", command_name)
                 });
                 self.refresh_coordinator_snapshot();
                 self.refresh_coordinator_events();
                 self.set_status(
                     UiStatusLevel::Info,
-                    format!("Coordinator '{}' started.", action),
+                    format!("Coordinator '{}' started.", command_name),
                     Some(Duration::from_secs(3)),
                 );
             }
             Err(err) => {
                 self.coordinator_last_result = Some(format_actionable_error(&format!(
                     "Failed to start '{}': {}",
-                    action, err
+                    command_name, err
                 )));
                 self.set_status(
                     UiStatusLevel::Error,
-                    format!("Failed to start '{}'.", action),
+                    format!("Failed to start '{}'.", command_name),
                     Some(Duration::from_secs(8)),
                 );
             }
         }
     }
 
-    pub fn start_coordinator_action(&mut self, action: &str) {
-        self.coordinator_pause_next_action = None;
-        self.start_coordinator_action_with_args(action, &[]);
+    fn execute_coordinator_command(&mut self, command: CoordinatorCommand) {
+        let action = coordinator_command_display_name(&command).to_string();
+        let Some(paths) = self.project_paths.as_ref() else {
+            self.set_status(
+                UiStatusLevel::Error,
+                "No project loaded.",
+                Some(Duration::from_secs(4)),
+            );
+            return;
+        };
+        let env_cfg = self.coordinator_env_cfg();
+        let canonical = self.working_copy.as_ref();
+        let coordinator_cfg = canonical.and_then(|c| c.automation.coordinator.as_ref());
+        match self.engine.coordinator_execute_command(
+            paths,
+            command,
+            CoordinatorCommandRequest {
+                canonical,
+                coordinator_cfg,
+                env_cfg: &env_cfg,
+                logger: None,
+            },
+        ) {
+            Ok(response) => {
+                self.refresh_coordinator_snapshot();
+                self.refresh_coordinator_events();
+                if let Some(resumed) = response.resumed {
+                    let message = if resumed {
+                        "Resume signal sent to coordinator."
+                    } else {
+                        "Coordinator is not paused."
+                    };
+                    self.set_status(
+                        UiStatusLevel::Success,
+                        message,
+                        Some(Duration::from_secs(4)),
+                    );
+                } else {
+                    self.set_status(
+                        UiStatusLevel::Success,
+                        format!("Coordinator '{}' completed.", action),
+                        Some(Duration::from_secs(4)),
+                    );
+                }
+            }
+            Err(err) => {
+                self.set_status(
+                    UiStatusLevel::Error,
+                    format!(
+                        "Failed to run '{}': {}",
+                        action,
+                        format_actionable_error(&err.to_string())
+                    ),
+                    Some(Duration::from_secs(6)),
+                );
+            }
+        }
     }
 
-    pub fn stop_coordinator_action(&mut self) {
+    pub fn start_coordinator_command(&mut self, command: CoordinatorCommand) {
+        self.coordinator_pause_next_action = None;
+        match command {
+            CoordinatorCommand::ResumePausedRun => self.execute_coordinator_command(command),
+            _ => self.start_managed_coordinator_command(command),
+        }
+    }
+
+    pub fn start_named_coordinator_command(&mut self, command_name: &str) {
+        let command = match command_name {
+            "run" => CoordinatorCommand::Run,
+            "sync" => CoordinatorCommand::SyncRegistry,
+            "reconcile" => CoordinatorCommand::ReconcileRuntime,
+            "cleanup" => CoordinatorCommand::CleanupMaintenance,
+            "dispatch" => CoordinatorCommand::DispatchReadyTasks,
+            "advance" => CoordinatorCommand::AdvanceTasks,
+            "resume" => CoordinatorCommand::ResumePausedRun,
+            other => {
+                self.set_status(
+                    UiStatusLevel::Error,
+                    format!("Unsupported coordinator command '{}'.", other),
+                    Some(Duration::from_secs(5)),
+                );
+                return;
+            }
+        };
+        self.start_coordinator_command(command);
+    }
+
+    pub fn stop_coordinator_command(&mut self) {
         let Some(paths) = self.project_paths.as_ref() else {
             self.set_status(
                 UiStatusLevel::Warning,
@@ -932,10 +980,10 @@ impl AppState {
 
         let stop_result = self
             .engine
-            .coordinator_stop_managed_action_process(paths, false);
+            .coordinator_stop_managed_command_process(paths, false);
 
         self.coordinator_pause_next_action = None;
-        self.coordinator_running_action = None;
+        self.coordinator_running_command = None;
         self.coordinator_running_elapsed_secs = None;
         self.refresh_coordinator_snapshot();
         self.refresh_coordinator_events();
@@ -1064,7 +1112,7 @@ impl AppState {
         badges.push(format!("tool:{}", self.active_tool_label()));
         badges.push(format!("warnings:{}", self.errors.len()));
         if self.is_coordinator_running() {
-            let action = self.coordinator_running_action.as_deref().unwrap_or("run");
+            let action = self.coordinator_running_command.as_deref().unwrap_or("run");
             badges.push(format!("coord:{}", action));
         } else if self.coordinator_paused {
             badges.push("coord:paused".to_string());
@@ -1117,7 +1165,7 @@ impl AppState {
     }
 
     pub fn is_coordinator_running(&self) -> bool {
-        self.coordinator_running_action.is_some()
+        self.coordinator_running_command.is_some()
     }
 
     pub fn has_coordinator_pause_prompt(&self) -> bool {
@@ -1137,18 +1185,16 @@ impl AppState {
             .coordinator_pause_phase
             .clone()
             .unwrap_or_else(|| "dev".to_string());
-        let args = vec![
-            "--retry-task".to_string(),
-            task_id,
-            "--retry-phase".to_string(),
-            phase,
-        ];
         self.coordinator_pause_error = None;
-        self.coordinator_pause_action = None;
+        self.coordinator_pause_command = None;
         self.coordinator_pause_task_id = None;
         self.coordinator_pause_phase = None;
         self.coordinator_pause_next_action = Some(CoordinatorPauseNextAction::RetryPhaseAndRun);
-        self.start_coordinator_action_with_args("retry-phase", &args);
+        self.start_managed_coordinator_command(CoordinatorCommand::RetryTaskPhase {
+            task_id,
+            phase,
+            skip: false,
+        });
     }
 
     pub fn skip_after_coordinator_pause(&mut self) {
@@ -1160,24 +1206,21 @@ impl AppState {
             .coordinator_pause_phase
             .clone()
             .unwrap_or_else(|| "dev".to_string());
-        let args = vec![
-            "--retry-task".to_string(),
-            task_id,
-            "--retry-phase".to_string(),
-            phase,
-            "--skip".to_string(),
-        ];
         self.coordinator_pause_error = None;
-        self.coordinator_pause_action = None;
+        self.coordinator_pause_command = None;
         self.coordinator_pause_task_id = None;
         self.coordinator_pause_phase = None;
         self.coordinator_pause_next_action = Some(CoordinatorPauseNextAction::ResumeRun);
-        self.start_coordinator_action_with_args("retry-phase", &args);
+        self.start_managed_coordinator_command(CoordinatorCommand::RetryTaskPhase {
+            task_id,
+            phase,
+            skip: true,
+        });
     }
 
     pub fn open_logs_after_coordinator_pause(&mut self) {
         self.coordinator_pause_error = None;
-        self.coordinator_pause_action = None;
+        self.coordinator_pause_command = None;
         self.coordinator_pause_task_id = None;
         self.coordinator_pause_phase = None;
         self.coordinator_pause_next_action = None;
@@ -1192,28 +1235,28 @@ impl AppState {
 
     pub fn resume_signal_after_coordinator_pause(&mut self) {
         self.coordinator_pause_error = None;
-        self.coordinator_pause_action = None;
+        self.coordinator_pause_command = None;
         self.coordinator_pause_task_id = None;
         self.coordinator_pause_phase = None;
         self.coordinator_pause_next_action = None;
-        self.start_coordinator_action("resume");
+        self.start_coordinator_command(CoordinatorCommand::ResumePausedRun);
     }
 
     pub fn resume_after_coordinator_pause(&mut self) {
-        let action = self
-            .coordinator_pause_action
+        let command_name = self
+            .coordinator_pause_command
             .clone()
             .unwrap_or_else(|| "run".to_string());
         self.coordinator_pause_error = None;
-        self.coordinator_pause_action = None;
+        self.coordinator_pause_command = None;
         self.coordinator_pause_task_id = None;
         self.coordinator_pause_phase = None;
-        self.start_coordinator_action(&action);
+        self.start_named_coordinator_command(&command_name);
     }
 
     pub fn stop_after_coordinator_pause(&mut self) {
         self.coordinator_pause_error = None;
-        self.coordinator_pause_action = None;
+        self.coordinator_pause_command = None;
         self.coordinator_pause_task_id = None;
         self.coordinator_pause_phase = None;
         self.coordinator_pause_next_action = None;
@@ -1254,22 +1297,22 @@ impl AppState {
         let mut finished_message: Option<(UiStatusLevel, String)> = None;
         let mut post_success_action: Option<CoordinatorPauseNextAction> = None;
         if let Some(paths) = self.project_paths.as_ref() {
-            match self.engine.coordinator_poll_managed_action_state(paths) {
-                Ok(CoordinatorManagedActionState::Succeeded {
-                    action,
+            match self.engine.coordinator_poll_managed_command_state(paths) {
+                Ok(CoordinatorManagedCommandState::Succeeded {
+                    command,
                     elapsed_secs: elapsed,
                 }) => {
                     finished_message = Some((
                         UiStatusLevel::Success,
                         format!(
                             "Coordinator '{}' finished in {}.",
-                            action,
+                            command,
                             format_hms(elapsed)
                         ),
                     ));
                     post_success_action = self.coordinator_pause_next_action.take();
                     self.coordinator_pause_error = None;
-                    self.coordinator_pause_action = None;
+                    self.coordinator_pause_command = None;
                     self.coordinator_pause_task_id = None;
                     self.coordinator_pause_phase = None;
                     self.coordinator_last_result = Some(
@@ -1278,13 +1321,13 @@ impl AppState {
                             .map(|(_, msg)| msg.clone())
                             .unwrap_or_default(),
                     );
-                    self.coordinator_running_action = None;
+                    self.coordinator_running_command = None;
                     self.coordinator_running_elapsed_secs = None;
                     self.refresh_coordinator_snapshot();
                     self.refresh_coordinator_events();
                 }
-                Ok(CoordinatorManagedActionState::Failed {
-                    action,
+                Ok(CoordinatorManagedCommandState::Failed {
+                    command,
                     elapsed_secs: elapsed,
                     reason,
                     task_id,
@@ -1292,13 +1335,13 @@ impl AppState {
                 }) => {
                     let msg = format!(
                         "Coordinator '{}' failed in {}.\n\nCause: {}",
-                        action,
+                        command,
                         format_hms(elapsed),
                         reason.trim()
                     );
                     finished_message = Some((UiStatusLevel::Error, msg.clone()));
                     self.coordinator_pause_error = Some(msg);
-                    self.coordinator_pause_action = Some(action);
+                    self.coordinator_pause_command = Some(command);
                     self.coordinator_pause_next_action = None;
                     if let Some(task_id) = task_id {
                         self.coordinator_pause_task_id = Some(task_id);
@@ -1314,16 +1357,16 @@ impl AppState {
                             .map(|(_, msg)| msg.clone())
                             .unwrap_or_default(),
                     );
-                    self.coordinator_running_action = None;
+                    self.coordinator_running_command = None;
                     self.coordinator_running_elapsed_secs = None;
                     self.refresh_coordinator_snapshot();
                     self.refresh_coordinator_events();
                 }
-                Ok(CoordinatorManagedActionState::Running {
-                    action,
+                Ok(CoordinatorManagedCommandState::Running {
+                    command,
                     elapsed_secs,
                 }) => {
-                    self.coordinator_running_action = Some(action);
+                    self.coordinator_running_command = Some(command);
                     self.coordinator_running_elapsed_secs = Some(elapsed_secs);
                     let should_refresh = self
                         .coordinator_last_refresh
@@ -1334,24 +1377,26 @@ impl AppState {
                         self.refresh_coordinator_events();
                     }
                 }
-                Ok(CoordinatorManagedActionState::Idle) => {
-                    self.coordinator_running_action = None;
+                Ok(CoordinatorManagedCommandState::Idle) => {
+                    self.coordinator_running_command = None;
                     self.coordinator_running_elapsed_secs = None;
                 }
                 Err(err) => {
-                    let action = self
-                        .coordinator_running_action
+                    let command_name = self
+                        .coordinator_running_command
                         .clone()
                         .unwrap_or_else(|| "run".to_string());
                     self.coordinator_last_result = Some(format_actionable_error(&format!(
                         "Coordinator '{}' poll error: {}",
-                        action, err
+                        command_name, err
                     )));
-                    self.coordinator_running_action = None;
+                    self.coordinator_running_command = None;
                     self.coordinator_running_elapsed_secs = None;
-                    self.coordinator_pause_error =
-                        Some(format!("Coordinator '{}' polling error: {}", action, err));
-                    self.coordinator_pause_action = Some(action);
+                    self.coordinator_pause_error = Some(format!(
+                        "Coordinator '{}' polling error: {}",
+                        command_name, err
+                    ));
+                    self.coordinator_pause_command = Some(command_name);
                     self.coordinator_pause_task_id = None;
                     self.coordinator_pause_phase = None;
                     self.coordinator_pause_next_action = None;
@@ -1371,7 +1416,7 @@ impl AppState {
             match next_action {
                 CoordinatorPauseNextAction::RetryPhaseAndRun
                 | CoordinatorPauseNextAction::ResumeRun => {
-                    self.start_coordinator_action("run");
+                    self.start_coordinator_command(CoordinatorCommand::Run);
                 }
             }
         }
@@ -3198,7 +3243,7 @@ fn format_actionable_error(raw: &str) -> String {
         )
     } else {
         (
-            "Coordinator action failed.",
+            "Coordinator command failed.",
             "Open logs in .macc/log/coordinator/ and .macc/log/performer/, then rerun the action.",
         )
     };

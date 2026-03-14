@@ -1,6 +1,7 @@
 use super::{RuntimeStatus, WorkflowState};
 use crate::config::{CanonicalConfig, CoordinatorConfig};
 use crate::coordinator::control_plane::CoordinatorLog;
+use crate::coordinator::model::{Task, TaskRegistry};
 use crate::coordinator::runtime::{
     process_branch_cleanup_queue, terminate_active_jobs, CoordinatorRunState,
 };
@@ -223,39 +224,16 @@ fn transition_workflow_state(from: WorkflowState, event: WorkflowEvent) -> Resul
     Ok(to)
 }
 
-fn task_workflow_state(task: &Value) -> Result<WorkflowState> {
-    task.get("state")
-        .and_then(Value::as_str)
-        .unwrap_or("todo")
-        .parse::<WorkflowState>()
-        .map_err(MaccError::Validation)
-}
-
-fn tasks_array_mut(registry: &mut Value) -> Result<&mut Vec<Value>> {
-    registry
-        .get_mut("tasks")
-        .and_then(Value::as_array_mut)
-        .ok_or_else(|| MaccError::Validation("Registry missing .tasks array".into()))
-}
-
-fn find_task_mut<'a>(registry: &'a mut Value, task_id: &str) -> Result<&'a mut Value> {
-    tasks_array_mut(registry)?
-        .iter_mut()
-        .find(|task| {
-            task.get("id")
-                .and_then(Value::as_str)
-                .map(|id| id == task_id)
-                .unwrap_or(false)
-        })
-        .ok_or_else(|| MaccError::Validation(format!("Task '{}' not found in registry", task_id)))
-}
-
 pub fn apply_dispatch_claim_in_registry(
     registry: &mut Value,
     update: &DispatchClaimUpdate,
 ) -> Result<()> {
-    let task = find_task_mut(registry, &update.task_id)?;
-    apply_dispatch_claim(task, update);
+    let mut typed = TaskRegistry::from_value(registry)?;
+    let task = typed.find_task_mut(&update.task_id).ok_or_else(|| {
+        MaccError::Validation(format!("Task '{}' not found in registry", update.task_id))
+    })?;
+    apply_dispatch_claim_typed(task, update);
+    *registry = typed.to_value()?;
     Ok(())
 }
 
@@ -264,8 +242,12 @@ pub fn apply_dispatch_pid_in_registry(
     task_id: &str,
     pid: Option<i64>,
 ) -> Result<()> {
-    let task = find_task_mut(registry, task_id)?;
-    apply_dispatch_pid(task, pid);
+    let mut typed = TaskRegistry::from_value(registry)?;
+    let task = typed.find_task_mut(task_id).ok_or_else(|| {
+        MaccError::Validation(format!("Task '{}' not found in registry", task_id))
+    })?;
+    apply_dispatch_pid_typed(task, pid);
+    *registry = typed.to_value()?;
     Ok(())
 }
 
@@ -273,23 +255,11 @@ pub fn build_advance_actions(
     registry: &Value,
     active_merge_jobs: &HashSet<String>,
 ) -> Result<Vec<AdvanceTaskAction>> {
-    let tasks = registry
-        .get("tasks")
-        .and_then(Value::as_array)
-        .ok_or_else(|| MaccError::Validation("Registry missing .tasks array".into()))?;
+    let typed = TaskRegistry::from_value(registry)?;
     let mut actions = Vec::new();
-    for task in tasks {
-        let task_id = task
-            .get("id")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let workflow_raw = task
-            .get("state")
-            .and_then(Value::as_str)
-            .unwrap_or("todo")
-            .to_string();
-        let workflow_state = workflow_raw.parse::<WorkflowState>().ok();
+    for task in &typed.tasks {
+        let task_id = task.id.clone();
+        let workflow_state = task.workflow_state();
         match workflow_state
             .map(plan_advance)
             .unwrap_or(AdvancePlan::Noop)
@@ -305,21 +275,11 @@ pub fn build_advance_actions(
                 if active_merge_jobs.contains(&task_id) {
                     continue;
                 }
-                let branch = task
-                    .get("worktree")
-                    .and_then(|w| w.get("branch"))
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
+                let branch = task.branch().unwrap_or_default().to_string();
                 if branch.is_empty() {
                     continue;
                 }
-                let base = task
-                    .get("worktree")
-                    .and_then(|w| w.get("base_branch"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("master")
-                    .to_string();
+                let base = task.base_branch("master");
                 actions.push(AdvanceTaskAction::QueueMerge {
                     task_id,
                     branch,
@@ -341,9 +301,14 @@ pub fn apply_phase_outcome_in_registry(
     phase_error: Option<&str>,
     now: &str,
 ) -> Result<()> {
-    let task = find_task_mut(registry, task_id)?;
+    let mut typed = TaskRegistry::from_value(registry)?;
+    let task = typed.find_task_mut(task_id).ok_or_else(|| {
+        MaccError::Validation(format!("Task '{}' not found in registry", task_id))
+    })?;
     if let Some(reason) = phase_error {
-        return apply_phase_failure(task, mode, reason, now);
+        apply_phase_failure_typed(task, mode, reason, now)?;
+        *registry = typed.to_value()?;
+        return Ok(());
     }
     if mode == "review" {
         let verdict = review_verdict.ok_or_else(|| {
@@ -352,38 +317,22 @@ pub fn apply_phase_outcome_in_registry(
                 task_id
             ))
         })?;
-        let next = apply_review_phase_success(task, verdict, now)?;
-        if next == WorkflowState::PrOpen
-            && task
-                .get("pr_url")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .is_empty()
-        {
-            let branch = task
-                .get("worktree")
-                .and_then(|w| w.get("branch"))
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            task["pr_url"] = Value::String(format!("local://{}", branch));
+        let next = apply_review_phase_success_typed(task, verdict, now)?;
+        if next == WorkflowState::PrOpen && task.pr_url.as_deref().unwrap_or_default().is_empty() {
+            let branch = task.branch().unwrap_or("unknown");
+            task.pr_url = Some(format!("local://{}", branch));
         }
+        *registry = typed.to_value()?;
         return Ok(());
     }
-    apply_phase_success(task, transition, now)?;
+    apply_phase_success_typed(task, transition, now)?;
     if transition.next_state == WorkflowState::PrOpen
-        && task
-            .get("pr_url")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .is_empty()
+        && task.pr_url.as_deref().unwrap_or_default().is_empty()
     {
-        let branch = task
-            .get("worktree")
-            .and_then(|w| w.get("branch"))
-            .and_then(Value::as_str)
-            .unwrap_or("unknown");
-        task["pr_url"] = Value::String(format!("local://{}", branch));
+        let branch = task.branch().unwrap_or("unknown");
+        task.pr_url = Some(format!("local://{}", branch));
     }
+    *registry = typed.to_value()?;
     Ok(())
 }
 
@@ -393,8 +342,13 @@ pub fn apply_job_completion_in_registry(
     input: &JobCompletionInput,
     now: &str,
 ) -> Result<JobCompletionResult> {
-    let task = find_task_mut(registry, task_id)?;
-    Ok(apply_job_completion(task, input, now))
+    let mut typed = TaskRegistry::from_value(registry)?;
+    let task = typed.find_task_mut(task_id).ok_or_else(|| {
+        MaccError::Validation(format!("Task '{}' not found in registry", task_id))
+    })?;
+    let out = apply_job_completion_typed(task, input, now);
+    *registry = typed.to_value()?;
+    Ok(out)
 }
 
 pub fn apply_merge_result_in_registry(
@@ -404,12 +358,17 @@ pub fn apply_merge_result_in_registry(
     reason: &str,
     now: &str,
 ) -> Result<()> {
-    let task = find_task_mut(registry, task_id)?;
+    let mut typed = TaskRegistry::from_value(registry)?;
+    let task = typed.find_task_mut(task_id).ok_or_else(|| {
+        MaccError::Validation(format!("Task '{}' not found in registry", task_id))
+    })?;
     if success {
-        apply_merge_success(task, now)
+        apply_merge_success_typed(task, now)?
     } else {
-        apply_merge_failure(task, reason, now)
+        apply_merge_failure_typed(task, reason, now)?
     }
+    *registry = typed.to_value()?;
+    Ok(())
 }
 
 pub fn ensure_runtime_object(task: &mut Value) {
@@ -422,46 +381,53 @@ pub fn ensure_runtime_object(task: &mut Value) {
     }
 }
 
+fn parse_compat_task(task: &Value) -> Task {
+    serde_json::from_value::<Task>(task.clone()).unwrap_or_default()
+}
+
+fn write_compat_task(task: &mut Value, typed: &Task) {
+    if let Ok(serialized) = serde_json::to_value(typed) {
+        *task = serialized;
+    }
+}
+
 pub fn apply_dispatch_claim(task: &mut Value, update: &DispatchClaimUpdate) {
-    task["state"] = Value::String(WorkflowState::Claimed.as_str().to_string());
-    task["tool"] = Value::String(update.tool.clone());
-    task["worktree"] = json!({
-        "worktree_path": update.worktree_path,
-        "branch": update.branch,
-        "base_branch": update.base_branch,
-        "last_commit": update.last_commit,
-        "session_id": update.session_id,
-    });
-    ensure_runtime_object(task);
-    task["task_runtime"]["status"] = Value::String(RuntimeStatus::Running.as_str().to_string());
-    task["task_runtime"]["current_phase"] = Value::String(update.phase.clone());
-    task["task_runtime"]["started_at"] = Value::String(update.now.clone());
-    task["task_runtime"]["pid"] = update.pid.map(Value::from).unwrap_or(Value::Null);
-    task["state_changed_at"] = Value::String(update.now.clone());
+    let mut typed = parse_compat_task(task);
+    apply_dispatch_claim_typed(&mut typed, update);
+    write_compat_task(task, &typed);
 }
 
 pub fn apply_dispatch_pid(task: &mut Value, pid: Option<i64>) {
-    ensure_runtime_object(task);
-    task["task_runtime"]["pid"] = pid.map(Value::from).unwrap_or(Value::Null);
+    let mut typed = parse_compat_task(task);
+    apply_dispatch_pid_typed(&mut typed, pid);
+    write_compat_task(task, &typed);
+}
+
+fn apply_dispatch_claim_typed(task: &mut Task, update: &DispatchClaimUpdate) {
+    task.set_workflow_state(WorkflowState::Claimed);
+    task.tool = Some(update.tool.clone());
+    let worktree = task.ensure_worktree();
+    worktree.worktree_path = Some(update.worktree_path.clone());
+    worktree.branch = Some(update.branch.clone());
+    worktree.base_branch = Some(update.base_branch.clone());
+    worktree.last_commit = Some(update.last_commit.clone());
+    worktree.session_id = Some(update.session_id.clone());
+    let runtime = task.ensure_runtime();
+    runtime.set_status(RuntimeStatus::Running);
+    runtime.current_phase = Some(update.phase.clone());
+    runtime.started_at = Some(update.now.clone());
+    runtime.pid = update.pid;
+    task.touch_state_changed(&update.now);
+}
+
+fn apply_dispatch_pid_typed(task: &mut Task, pid: Option<i64>) {
+    task.ensure_runtime().pid = pid;
 }
 
 pub fn apply_phase_success(task: &mut Value, transition: PhaseTransition, now: &str) -> Result<()> {
-    let from = task_workflow_state(task)?;
-    let to = transition_workflow_state(from, WorkflowEvent::PhaseSucceeded(transition.mode))?;
-    if to != transition.next_state {
-        return Err(MaccError::Validation(format!(
-            "Coordinator FSM mismatch for mode='{}': expected next={} got {}",
-            transition.mode,
-            transition.next_state.as_str(),
-            to.as_str()
-        )));
-    }
-    task["state"] = Value::String(to.as_str().to_string());
-    ensure_runtime_object(task);
-    task["task_runtime"]["status"] = Value::String(RuntimeStatus::PhaseDone.as_str().to_string());
-    task["task_runtime"]["current_phase"] = Value::String(transition.runtime_phase.to_string());
-    task["task_runtime"]["pid"] = Value::Null;
-    task["state_changed_at"] = Value::String(now.to_string());
+    let mut typed = parse_compat_task(task);
+    apply_phase_success_typed(&mut typed, transition, now)?;
+    write_compat_task(task, &typed);
     Ok(())
 }
 
@@ -470,21 +436,9 @@ pub fn apply_review_phase_success(
     verdict: ReviewVerdict,
     now: &str,
 ) -> Result<WorkflowState> {
-    let from = task_workflow_state(task)?;
-    let to = match verdict {
-        ReviewVerdict::Ok => {
-            transition_workflow_state(from, WorkflowEvent::PhaseSucceeded("review"))?
-        }
-        ReviewVerdict::ChangesRequested => {
-            transition_workflow_state(from, WorkflowEvent::ReviewChangesRequested)?
-        }
-    };
-    task["state"] = Value::String(to.as_str().to_string());
-    ensure_runtime_object(task);
-    task["task_runtime"]["status"] = Value::String(RuntimeStatus::PhaseDone.as_str().to_string());
-    task["task_runtime"]["current_phase"] = Value::String("review".to_string());
-    task["task_runtime"]["pid"] = Value::Null;
-    task["state_changed_at"] = Value::String(now.to_string());
+    let mut typed = parse_compat_task(task);
+    let to = apply_review_phase_success_typed(&mut typed, verdict, now)?;
+    write_compat_task(task, &typed);
     Ok(to)
 }
 
@@ -494,39 +448,23 @@ pub fn apply_phase_failure(
     reason: &str,
     now: &str,
 ) -> Result<()> {
-    let from = task_workflow_state(task)?;
-    let to = transition_workflow_state(from, WorkflowEvent::PhaseFailed(phase_mode))?;
-    task["state"] = Value::String(to.as_str().to_string());
-    ensure_runtime_object(task);
-    task["task_runtime"]["status"] = Value::String(RuntimeStatus::Failed.as_str().to_string());
-    task["task_runtime"]["current_phase"] = Value::String(phase_mode.to_string());
-    task["task_runtime"]["last_error"] = Value::String(reason.to_string());
-    task["task_runtime"]["pid"] = Value::Null;
-    task["state_changed_at"] = Value::String(now.to_string());
+    let mut typed = parse_compat_task(task);
+    apply_phase_failure_typed(&mut typed, phase_mode, reason, now)?;
+    write_compat_task(task, &typed);
     Ok(())
 }
 
 pub fn apply_merge_success(task: &mut Value, now: &str) -> Result<()> {
-    let from = task_workflow_state(task)?;
-    let to = transition_workflow_state(from, WorkflowEvent::MergeSucceeded)?;
-    task["state"] = Value::String(to.as_str().to_string());
-    ensure_runtime_object(task);
-    task["task_runtime"]["status"] = Value::String(RuntimeStatus::Idle.as_str().to_string());
-    task["task_runtime"]["pid"] = Value::Null;
-    task["state_changed_at"] = Value::String(now.to_string());
+    let mut typed = parse_compat_task(task);
+    apply_merge_success_typed(&mut typed, now)?;
+    write_compat_task(task, &typed);
     Ok(())
 }
 
 pub fn apply_merge_failure(task: &mut Value, reason: &str, now: &str) -> Result<()> {
-    let from = task_workflow_state(task)?;
-    let to = transition_workflow_state(from, WorkflowEvent::MergeFailed)?;
-    task["state"] = Value::String(to.as_str().to_string());
-    ensure_runtime_object(task);
-    task["task_runtime"]["status"] = Value::String(RuntimeStatus::Paused.as_str().to_string());
-    task["task_runtime"]["current_phase"] = Value::String("integrate".to_string());
-    task["task_runtime"]["last_error"] = Value::String(reason.to_string());
-    task["task_runtime"]["pid"] = Value::Null;
-    task["state_changed_at"] = Value::String(now.to_string());
+    let mut typed = parse_compat_task(task);
+    apply_merge_failure_typed(&mut typed, reason, now)?;
+    write_compat_task(task, &typed);
     Ok(())
 }
 
@@ -535,7 +473,115 @@ pub fn apply_job_completion(
     input: &JobCompletionInput,
     now: &str,
 ) -> JobCompletionResult {
-    ensure_runtime_object(task);
+    let mut typed = parse_compat_task(task);
+    let result = apply_job_completion_typed(&mut typed, input, now);
+    write_compat_task(task, &typed);
+    result
+}
+
+fn task_workflow_state_typed(task: &Task) -> Result<WorkflowState> {
+    task.workflow_state().ok_or_else(|| {
+        MaccError::Validation(format!(
+            "Invalid coordinator workflow state '{}'",
+            task.state
+        ))
+    })
+}
+
+pub(crate) fn apply_phase_success_typed(
+    task: &mut Task,
+    transition: PhaseTransition,
+    now: &str,
+) -> Result<()> {
+    let from = task_workflow_state_typed(task)?;
+    let to = transition_workflow_state(from, WorkflowEvent::PhaseSucceeded(transition.mode))?;
+    if to != transition.next_state {
+        return Err(MaccError::Validation(format!(
+            "Coordinator FSM mismatch for mode='{}': expected next={} got {}",
+            transition.mode,
+            transition.next_state.as_str(),
+            to.as_str()
+        )));
+    }
+    task.set_workflow_state(to);
+    let runtime = task.ensure_runtime();
+    runtime.set_status(RuntimeStatus::PhaseDone);
+    runtime.current_phase = Some(transition.runtime_phase.to_string());
+    runtime.pid = None;
+    task.touch_state_changed(now);
+    Ok(())
+}
+
+pub(crate) fn apply_review_phase_success_typed(
+    task: &mut Task,
+    verdict: ReviewVerdict,
+    now: &str,
+) -> Result<WorkflowState> {
+    let from = task_workflow_state_typed(task)?;
+    let to = match verdict {
+        ReviewVerdict::Ok => {
+            transition_workflow_state(from, WorkflowEvent::PhaseSucceeded("review"))?
+        }
+        ReviewVerdict::ChangesRequested => {
+            transition_workflow_state(from, WorkflowEvent::ReviewChangesRequested)?
+        }
+    };
+    task.set_workflow_state(to);
+    let runtime = task.ensure_runtime();
+    runtime.set_status(RuntimeStatus::PhaseDone);
+    runtime.current_phase = Some("review".to_string());
+    runtime.pid = None;
+    task.touch_state_changed(now);
+    Ok(to)
+}
+
+pub(crate) fn apply_phase_failure_typed(
+    task: &mut Task,
+    phase_mode: &'static str,
+    reason: &str,
+    now: &str,
+) -> Result<()> {
+    let from = task_workflow_state_typed(task)?;
+    let to = transition_workflow_state(from, WorkflowEvent::PhaseFailed(phase_mode))?;
+    task.set_workflow_state(to);
+    let runtime = task.ensure_runtime();
+    runtime.set_status(RuntimeStatus::Failed);
+    runtime.current_phase = Some(phase_mode.to_string());
+    runtime.last_error = Some(reason.to_string());
+    runtime.pid = None;
+    task.touch_state_changed(now);
+    Ok(())
+}
+
+pub(crate) fn apply_merge_success_typed(task: &mut Task, now: &str) -> Result<()> {
+    let from = task_workflow_state_typed(task)?;
+    let to = transition_workflow_state(from, WorkflowEvent::MergeSucceeded)?;
+    task.set_workflow_state(to);
+    let runtime = task.ensure_runtime();
+    runtime.set_status(RuntimeStatus::Idle);
+    runtime.pid = None;
+    task.touch_state_changed(now);
+    Ok(())
+}
+
+pub(crate) fn apply_merge_failure_typed(task: &mut Task, reason: &str, now: &str) -> Result<()> {
+    let from = task_workflow_state_typed(task)?;
+    let to = transition_workflow_state(from, WorkflowEvent::MergeFailed)?;
+    task.set_workflow_state(to);
+    let runtime = task.ensure_runtime();
+    runtime.set_status(RuntimeStatus::Paused);
+    runtime.current_phase = Some("integrate".to_string());
+    runtime.last_error = Some(reason.to_string());
+    runtime.pid = None;
+    task.touch_state_changed(now);
+    Ok(())
+}
+
+fn apply_job_completion_typed(
+    task: &mut Task,
+    input: &JobCompletionInput,
+    now: &str,
+) -> JobCompletionResult {
     let error_code = input
         .error_code
         .clone()
@@ -549,58 +595,54 @@ pub fn apply_job_completion(
         .clone()
         .unwrap_or_else(|| input.status_text.clone());
     if input.attempt == 0 || input.max_attempts == 0 {
-        task["state"] = Value::String(WorkflowState::Blocked.as_str().to_string());
-        task["task_runtime"]["status"] = Value::String(RuntimeStatus::Failed.as_str().to_string());
-        task["task_runtime"]["pid"] = Value::Null;
+        task.set_workflow_state(WorkflowState::Blocked);
+        let runtime = task.ensure_runtime();
+        runtime.set_status(RuntimeStatus::Failed);
+        runtime.pid = None;
         let detail = "performer completion received with invalid attempt counters".to_string();
-        task["task_runtime"]["last_error_code"] = Value::String("E901".to_string());
-        task["task_runtime"]["last_error_origin"] = Value::String("coordinator".to_string());
-        task["task_runtime"]["last_error_message"] = Value::String(detail.clone());
-        task["task_runtime"]["last_error"] = Value::String(detail.clone());
-        task["state_changed_at"] = Value::String(now.to_string());
+        runtime.set_last_error_details("E901", "coordinator", detail.clone());
+        runtime.last_error = Some(detail.clone());
+        task.touch_state_changed(now);
         return JobCompletionResult {
             should_retry: false,
             status_label: "failed",
             detail,
         };
     }
-
     if input.status_text.is_empty() {
-        task["state"] = Value::String(WorkflowState::Blocked.as_str().to_string());
-        task["task_runtime"]["status"] = Value::String(RuntimeStatus::Failed.as_str().to_string());
-        task["task_runtime"]["pid"] = Value::Null;
+        task.set_workflow_state(WorkflowState::Blocked);
+        let runtime = task.ensure_runtime();
+        runtime.set_status(RuntimeStatus::Failed);
+        runtime.pid = None;
         let detail = "performer completion received without status detail".to_string();
-        task["task_runtime"]["last_error_code"] = Value::String("E901".to_string());
-        task["task_runtime"]["last_error_origin"] = Value::String("coordinator".to_string());
-        task["task_runtime"]["last_error_message"] = Value::String(detail.clone());
-        task["task_runtime"]["last_error"] = Value::String(detail.clone());
-        task["state_changed_at"] = Value::String(now.to_string());
+        runtime.set_last_error_details("E901", "coordinator", detail.clone());
+        runtime.last_error = Some(detail.clone());
+        task.touch_state_changed(now);
         return JobCompletionResult {
             should_retry: false,
             status_label: "failed",
             detail,
         };
     }
-
     if input.success {
-        task["state"] = Value::String(WorkflowState::InProgress.as_str().to_string());
-        task["task_runtime"]["status"] =
-            Value::String(RuntimeStatus::PhaseDone.as_str().to_string());
-        task["task_runtime"]["current_phase"] = Value::String("dev".to_string());
-        task["task_runtime"]["pid"] = Value::Null;
-        task["state_changed_at"] = Value::String(now.to_string());
+        task.set_workflow_state(WorkflowState::InProgress);
+        let runtime = task.ensure_runtime();
+        runtime.set_status(RuntimeStatus::PhaseDone);
+        runtime.current_phase = Some("dev".to_string());
+        runtime.pid = None;
+        task.touch_state_changed(now);
         return JobCompletionResult {
             should_retry: false,
             status_label: "phase_done",
             detail: input.status_text.clone(),
         };
     }
-
     if input.attempt < input.max_attempts {
-        task["state"] = Value::String(WorkflowState::Claimed.as_str().to_string());
-        task["task_runtime"]["status"] = Value::String(RuntimeStatus::Running.as_str().to_string());
-        task["task_runtime"]["current_phase"] = Value::String("dev".to_string());
-        task["task_runtime"]["pid"] = Value::Null;
+        task.set_workflow_state(WorkflowState::Claimed);
+        let runtime = task.ensure_runtime();
+        runtime.set_status(RuntimeStatus::Running);
+        runtime.current_phase = Some("dev".to_string());
+        runtime.pid = None;
         let reason = if input.timed_out {
             format!(
                 "performer timed out after {}s on attempt {} (elapsed={}s)",
@@ -612,18 +654,19 @@ pub fn apply_job_completion(
                 input.attempt, input.status_text
             )
         };
-        task["task_runtime"]["last_error_code"] = Value::String(error_code.clone());
-        task["task_runtime"]["last_error_origin"] = Value::String(error_origin.clone());
-        task["task_runtime"]["last_error_message"] = Value::String(error_message.clone());
-        task["task_runtime"]["last_error"] = Value::String(reason.clone());
-        task["state_changed_at"] = Value::String(now.to_string());
+        runtime.set_last_error_details(
+            error_code.clone(),
+            error_origin.clone(),
+            error_message.clone(),
+        );
+        runtime.last_error = Some(reason.clone());
+        task.touch_state_changed(now);
         return JobCompletionResult {
             should_retry: true,
             status_label: "retry",
             detail: reason,
         };
     }
-
     let reason = if input.timed_out {
         format!(
             "performer timed out after {}s (max attempts reached: {}, elapsed={}s)",
@@ -635,73 +678,44 @@ pub fn apply_job_completion(
             input.attempt, input.status_text
         )
     };
-    let retries_total = task_retry_count(task);
+    let retries_total = task.task_runtime.retries_count();
     if should_auto_retry_error_code(
         &error_code,
         &input.auto_retry_error_codes,
         input.auto_retry_max,
         retries_total,
     ) {
-        increment_task_retries(task);
-        task["state"] = Value::String(WorkflowState::Todo.as_str().to_string());
-        task["task_runtime"]["status"] = Value::String(RuntimeStatus::Idle.as_str().to_string());
-        task["task_runtime"]["pid"] = Value::Null;
-        task["task_runtime"]["current_phase"] = Value::String("dev".to_string());
-        task["task_runtime"]["last_error_code"] = Value::String(error_code.clone());
-        task["task_runtime"]["last_error_origin"] = Value::String(error_origin.clone());
-        task["task_runtime"]["last_error_message"] = Value::String(error_message.clone());
-        task["task_runtime"]["last_error"] = Value::String(reason.clone());
-        task["state_changed_at"] = Value::String(now.to_string());
+        task.set_workflow_state(WorkflowState::Todo);
+        let runtime = task.ensure_runtime();
+        runtime.increment_retries();
+        runtime.set_status(RuntimeStatus::Idle);
+        runtime.pid = None;
+        runtime.current_phase = Some("dev".to_string());
+        runtime.set_last_error_details(
+            error_code.clone(),
+            error_origin.clone(),
+            error_message.clone(),
+        );
+        runtime.last_error = Some(reason.clone());
+        task.touch_state_changed(now);
         return JobCompletionResult {
             should_retry: false,
             status_label: "auto_retry",
             detail: format!("auto-retry scheduled for error code {}", error_code),
         };
     }
-
-    task["state"] = Value::String(WorkflowState::Blocked.as_str().to_string());
-    task["task_runtime"]["status"] = Value::String(RuntimeStatus::Failed.as_str().to_string());
-    task["task_runtime"]["pid"] = Value::Null;
-    task["task_runtime"]["last_error_code"] = Value::String(error_code);
-    task["task_runtime"]["last_error_origin"] = Value::String(error_origin);
-    task["task_runtime"]["last_error_message"] = Value::String(error_message);
-    task["task_runtime"]["last_error"] = Value::String(reason.clone());
-    task["state_changed_at"] = Value::String(now.to_string());
+    task.set_workflow_state(WorkflowState::Blocked);
+    let runtime = task.ensure_runtime();
+    runtime.set_status(RuntimeStatus::Failed);
+    runtime.pid = None;
+    runtime.set_last_error_details(error_code, error_origin, error_message);
+    runtime.last_error = Some(reason.clone());
+    task.touch_state_changed(now);
     JobCompletionResult {
         should_retry: false,
         status_label: "failed",
         detail: reason,
     }
-}
-
-fn task_retry_count(task: &Value) -> usize {
-    task.get("task_runtime")
-        .and_then(|v| v.get("retries"))
-        .and_then(Value::as_u64)
-        .or_else(|| {
-            task.get("task_runtime")
-                .and_then(|v| v.get("metrics"))
-                .and_then(|v| v.get("retries"))
-                .and_then(Value::as_u64)
-        })
-        .unwrap_or(0) as usize
-}
-
-fn increment_task_retries(task: &mut Value) -> usize {
-    ensure_runtime_object(task);
-    if !task
-        .get("task_runtime")
-        .and_then(|v| v.get("metrics"))
-        .map(Value::is_object)
-        .unwrap_or(false)
-    {
-        task["task_runtime"]["metrics"] = json!({});
-    }
-    let current = task_retry_count(task);
-    let next = current.saturating_add(1);
-    task["task_runtime"]["metrics"]["retries"] = Value::from(next as i64);
-    task["task_runtime"]["retries"] = Value::from(next as i64);
-    next
 }
 
 fn should_auto_retry_error_code(
@@ -733,22 +747,20 @@ where
         .map(|dt| dt.timestamp())
         .unwrap_or_default();
     let mut cleaned = Vec::new();
-    let tasks = registry
-        .get_mut("tasks")
-        .and_then(Value::as_array_mut)
-        .ok_or_else(|| MaccError::Validation("Registry missing .tasks array".into()))?;
-    for task in tasks.iter_mut() {
-        ensure_runtime_object(task);
-        let Some(pid) = task["task_runtime"]["pid"].as_i64() else {
+    let mut typed = TaskRegistry::from_value(registry)?;
+    for task in typed.tasks.iter_mut() {
+        let Some(pid) = task.runtime_pid() else {
             continue;
         };
-        let runtime_status = task["task_runtime"]["status"].as_str().unwrap_or_default();
-        if runtime_status != RuntimeStatus::Running.as_str() || is_pid_running(pid) {
+        let runtime_status = task.runtime_status();
+        if runtime_status != RuntimeStatus::Running || is_pid_running(pid) {
             continue;
         }
         if heartbeat_grace_seconds > 0 {
-            let within_grace = task["task_runtime"]["last_heartbeat"]
-                .as_str()
+            let within_grace = task
+                .task_runtime
+                .last_heartbeat
+                .as_deref()
                 .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
                 .map(|dt| now_ts.saturating_sub(dt.timestamp()) <= heartbeat_grace_seconds)
                 .unwrap_or(false);
@@ -757,35 +769,23 @@ where
             }
         }
 
-        let task_id = task
-            .get("id")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let phase = task["task_runtime"]["current_phase"]
-            .as_str()
-            .unwrap_or("dev")
-            .to_string();
-        let old_state = task
-            .get("state")
-            .and_then(Value::as_str)
-            .unwrap_or(WorkflowState::Todo.as_str())
-            .to_string();
+        let task_id = task.id.clone();
+        let phase = task.current_phase().to_string();
+        let old_state = task.state.clone();
 
-        task["task_runtime"]["pid"] = Value::Null;
-        task["task_runtime"]["status"] = Value::String(RuntimeStatus::Stale.as_str().to_string());
-        task["task_runtime"]["last_error"] =
-            Value::String(format!("runtime pid {} is not running; auto-reset", pid));
-        task["updated_at"] = Value::String(now.to_string());
-        task["state_changed_at"] = Value::String(now.to_string());
+        let runtime = task.ensure_runtime();
+        runtime.pid = None;
+        runtime.set_status(RuntimeStatus::Stale);
+        runtime.last_error = Some(format!("runtime pid {} is not running; auto-reset", pid));
         let new_state = if old_state == WorkflowState::Claimed.as_str() && phase == "dev" {
-            task["state"] = Value::String(WorkflowState::Todo.as_str().to_string());
-            task["assignee"] = Value::Null;
+            task.set_workflow_state(WorkflowState::Todo);
+            task.assignee = None;
             WorkflowState::Todo.as_str().to_string()
         } else {
-            task["state"] = Value::String(WorkflowState::Blocked.as_str().to_string());
+            task.set_workflow_state(WorkflowState::Blocked);
             WorkflowState::Blocked.as_str().to_string()
         };
+        task.touch_state_changed(now);
 
         cleaned.push(DeadRuntimeCleanupEntry {
             task_id,
@@ -795,6 +795,7 @@ where
             new_state,
         });
     }
+    *registry = typed.to_value()?;
     Ok(cleaned)
 }
 
@@ -1039,35 +1040,14 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
             self.repo_root,
             &std::collections::BTreeMap::new(),
         )?;
-        let tasks = snapshot
-            .registry
-            .get("tasks")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-
-        let mut counts = CoordinatorCounts {
-            total: tasks.len(),
-            todo: 0,
-            active: 0,
-            blocked: 0,
-            merged: 0,
+        let (total, todo, active, blocked, merged) = snapshot.registry.counts();
+        let counts = CoordinatorCounts {
+            total,
+            todo,
+            active,
+            blocked,
+            merged,
         };
-        for task in tasks {
-            let state = task
-                .get("state")
-                .and_then(|s| s.as_str())
-                .unwrap_or_default();
-            match state {
-                "todo" => counts.todo += 1,
-                "blocked" => counts.blocked += 1,
-                "merged" => counts.merged += 1,
-                "claimed" | "in_progress" | "pr_open" | "changes_requested" | "queued" => {
-                    counts.active += 1
-                }
-                _ => {}
-            }
-        }
         self.last_logged_counts = Some(counts);
         Ok(counts)
     }
@@ -1263,21 +1243,12 @@ pub async fn run_native_control_plane(
     let result_label = if run_result.is_err() {
         "failed"
     } else {
-        let snapshot = crate::coordinator::state::coordinator_state_snapshot(
-            repo_root,
-            &std::collections::BTreeMap::new(),
-        );
-        if let Ok(snap) = snapshot {
-            if snap
-                .registry
-                .get("paused")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
-                "paused"
-            } else {
-                "success"
-            }
+        if crate::coordinator::state_runtime::read_coordinator_pause_file(repo_root)
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            "paused"
         } else {
             "success"
         }

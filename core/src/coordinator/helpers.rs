@@ -1,4 +1,4 @@
-use crate::coordinator::model::TaskRegistry;
+use crate::coordinator::model::{PrdInput, TaskRegistry};
 use crate::coordinator::runtime as coordinator_runtime;
 use crate::coordinator_storage::append_event_sqlite;
 use crate::{MaccError, Result};
@@ -10,72 +10,19 @@ pub fn now_iso_coordinator() -> String {
 }
 
 pub fn set_registry_updated_at(registry: &mut serde_json::Value) {
-    if let Ok(mut typed) = TaskRegistry::from_value(registry) {
-        typed.set_updated_at(now_iso_coordinator());
-        if let Ok(next) = typed.to_value() {
-            *registry = next;
-            return;
-        }
+    let mut typed = TaskRegistry::from_value(registry).unwrap_or_default();
+    typed.set_updated_at(now_iso_coordinator());
+    if let Ok(next) = typed.to_value() {
+        *registry = next;
     }
-    registry["updated_at"] = serde_json::Value::String(now_iso_coordinator());
 }
 
 pub fn recompute_resource_locks_from_tasks(registry: &mut serde_json::Value) {
-    if let Ok(mut typed) = TaskRegistry::from_value(registry) {
-        typed.recompute_resource_locks(&now_iso_coordinator());
-        if let Ok(next) = typed.to_value() {
-            *registry = next;
-            return;
-        }
+    let mut typed = TaskRegistry::from_value(registry).unwrap_or_default();
+    typed.recompute_resource_locks(&now_iso_coordinator());
+    if let Ok(next) = typed.to_value() {
+        *registry = next;
     }
-
-    let mut locks = serde_json::Map::new();
-    if let Some(tasks) = registry.get("tasks").and_then(serde_json::Value::as_array) {
-        for task in tasks {
-            let state = task
-                .get("state")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("todo");
-            if !matches!(
-                state,
-                "claimed" | "in_progress" | "pr_open" | "changes_requested" | "queued"
-            ) {
-                continue;
-            }
-            let task_id = task
-                .get("id")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default();
-            if task_id.is_empty() {
-                continue;
-            }
-            let worktree_path = task
-                .get("worktree")
-                .and_then(|w| w.get("worktree_path"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("");
-            for res in task
-                .get("exclusive_resources")
-                .and_then(serde_json::Value::as_array)
-                .cloned()
-                .unwrap_or_default()
-            {
-                let res_name = res.as_str().unwrap_or_default();
-                if res_name.is_empty() {
-                    continue;
-                }
-                locks.insert(
-                    res_name.to_string(),
-                    serde_json::json!({
-                        "task_id": task_id,
-                        "worktree_path": worktree_path,
-                        "locked_at": now_iso_coordinator(),
-                    }),
-                );
-            }
-        }
-    }
-    registry["resource_locks"] = serde_json::Value::Object(locks);
 }
 
 fn sanitize_slug(input: &str) -> String {
@@ -98,94 +45,23 @@ fn is_worktree_clean(worktree_path: &Path) -> Result<bool> {
 }
 
 fn active_task_worktree_paths(registry: &serde_json::Value) -> HashSet<String> {
-    if let Ok(typed) = TaskRegistry::from_value(registry) {
-        return typed.active_task_worktree_paths();
-    }
-    let mut out = HashSet::new();
-    if let Some(tasks) = registry.get("tasks").and_then(serde_json::Value::as_array) {
-        for task in tasks {
-            let state = task
-                .get("state")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("todo");
-            if !matches!(
-                state,
-                "claimed" | "in_progress" | "pr_open" | "changes_requested" | "queued"
-            ) {
-                continue;
-            }
-            if let Some(path) = task
-                .get("worktree")
-                .and_then(|w| w.get("worktree_path"))
-                .and_then(serde_json::Value::as_str)
-            {
-                if !path.is_empty() {
-                    out.insert(path.to_string());
-                }
-            }
-        }
-    }
-    out
+    TaskRegistry::from_value(registry)
+        .map(|typed| typed.active_task_worktree_paths())
+        .unwrap_or_default()
 }
 
 fn can_reuse_worktree_slot(registry: &serde_json::Value, worktree_path: &Path) -> bool {
-    if let Ok(typed) = TaskRegistry::from_value(registry) {
-        return typed.can_reuse_worktree_slot(&worktree_path.to_string_lossy());
-    }
-    let key = worktree_path.to_string_lossy().to_string();
-    let mut seen = false;
-    let mut all_merged = true;
-    if let Some(tasks) = registry.get("tasks").and_then(serde_json::Value::as_array) {
-        for task in tasks {
-            let path = task
-                .get("worktree")
-                .and_then(|w| w.get("worktree_path"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default();
-            if path != key {
-                continue;
-            }
-            seen = true;
-            let state = task
-                .get("state")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("todo");
-            if state != "merged" {
-                all_merged = false;
-            }
-        }
-    }
-    seen && all_merged
+    TaskRegistry::from_value(registry)
+        .map(|typed| typed.can_reuse_worktree_slot(&worktree_path.to_string_lossy()))
+        .unwrap_or(false)
 }
 
 fn has_in_progress_or_queued_on_worktree(
     registry: &serde_json::Value,
     worktree_path: &Path,
 ) -> bool {
-    if let Ok(typed) = TaskRegistry::from_value(registry) {
-        return typed.has_in_progress_or_queued_on_worktree(&worktree_path.to_string_lossy());
-    }
-    let key = worktree_path.to_string_lossy().to_string();
-    registry
-        .get("tasks")
-        .and_then(serde_json::Value::as_array)
-        .map(|tasks| {
-            tasks.iter().any(|task| {
-                let state = task
-                    .get("state")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("todo");
-                if !matches!(state, "in_progress" | "queued") {
-                    return false;
-                }
-                let path = task
-                    .get("worktree")
-                    .and_then(|w| w.get("worktree_path"))
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default();
-                path == key
-            })
-        })
+    TaskRegistry::from_value(registry)
+        .map(|typed| typed.has_in_progress_or_queued_on_worktree(&worktree_path.to_string_lossy()))
         .unwrap_or(false)
 }
 
@@ -535,18 +411,17 @@ pub fn write_worktree_prd_for_task(
             e
         ))
     })?;
-    let selected = prd
-        .get("tasks")
-        .and_then(serde_json::Value::as_array)
-        .cloned()
-        .unwrap_or_default()
+    let typed_prd = serde_json::from_value::<PrdInput>(prd.clone()).map_err(|e| {
+        MaccError::Validation(format!(
+            "Failed to parse typed PRD {} for worktree: {}",
+            prd_file.display(),
+            e
+        ))
+    })?;
+    let selected = typed_prd
+        .tasks
         .into_iter()
-        .find(|t| {
-            t.get("id")
-                .and_then(serde_json::Value::as_str)
-                .map(|id| id == task_id)
-                .unwrap_or(false)
-        })
+        .find(|task| task.id == task_id)
         .ok_or_else(|| {
             MaccError::Validation(format!(
                 "Task '{}' not found in PRD {}",
@@ -554,6 +429,12 @@ pub fn write_worktree_prd_for_task(
                 prd_file.display()
             ))
         })?;
+    let selected = serde_json::to_value(selected).map_err(|e| {
+        MaccError::Validation(format!(
+            "Failed to serialize typed PRD task '{}' for worktree: {}",
+            task_id, e
+        ))
+    })?;
     let payload = serde_json::json!({
         "lot": prd.get("lot").cloned().unwrap_or(serde_json::Value::Null),
         "version": prd.get("version").cloned().unwrap_or(serde_json::Value::Null),

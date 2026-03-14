@@ -116,7 +116,7 @@ pub struct HeaderContext<'a> {
     pub errors: usize,
     pub coordinator_active: bool,
     pub coordinator_paused: bool,
-    pub coordinator_action: Option<&'a str>,
+    pub coordinator_command: Option<&'a str>,
     pub status: Option<(UiStatusLevel, String)>,
     pub width: u16,
 }
@@ -140,10 +140,10 @@ pub fn header_lines(ctx: &HeaderContext<'_>, t: &Theme) -> Vec<Line<'static>> {
         Span::styled(ctx.mode.to_string(), Style::default().fg(t.accent)),
     ];
     if ctx.coordinator_active {
-        let action = ctx.coordinator_action.unwrap_or("run");
+        let command_name = ctx.coordinator_command.unwrap_or("run");
         top_line.push(Span::raw("  "));
         top_line.push(Span::styled(
-            format!("[coord:{}]", action),
+            format!("[coord:{}]", command_name),
             Style::default().fg(t.warn).add_modifier(Modifier::BOLD),
         ));
     }

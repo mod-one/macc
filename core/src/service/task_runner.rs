@@ -44,26 +44,15 @@ pub fn worktree_run_task(paths: &ProjectPaths, id: &str) -> Result<()> {
         resolve_worktree_task_context(&paths.root, &worktree_path, &metadata.id)?;
     let performer_path = ensure_performer(&worktree_path)?;
     let registry_path = coordinator_task_registry_path(&paths.root);
-    let events_file = paths
-        .root
-        .join(".macc")
-        .join("log")
-        .join("coordinator")
-        .join("events.jsonl");
-    if let Some(parent) = events_file.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| MaccError::Io {
-            path: parent.to_string_lossy().into(),
-            action: "create coordinator log dir for events".into(),
-            source: e,
-        })?;
+    let performer_ipc_addr = crate::coordinator::ipc::read_performer_ipc_addr(&paths.root);
+    if performer_ipc_addr.is_none() {
+        return Err(MaccError::Validation(
+            "Performer run refused: no coordinator IPC address".to_string(),
+        ));
     }
 
-    let status = Command::new(&performer_path)
-        .current_dir(&worktree_path)
-        .env(
-            "COORD_EVENTS_FILE",
-            events_file.to_string_lossy().to_string(),
-        )
+    let mut cmd = Command::new(&performer_path);
+    cmd.current_dir(&worktree_path)
         .env(
             "COORDINATOR_RUN_ID",
             crate::service::project::ensure_coordinator_run_id(),
@@ -84,13 +73,16 @@ pub fn worktree_run_task(paths: &ProjectPaths, id: &str) -> Result<()> {
         .arg("--registry")
         .arg(&registry_path)
         .arg("--prd")
-        .arg(&prd_path)
-        .status()
-        .map_err(|e| MaccError::Io {
-            path: performer_path.to_string_lossy().into(),
-            action: "run worktree performer".into(),
-            source: e,
-        })?;
+        .arg(&prd_path);
+    if let Some(ipc_addr) = performer_ipc_addr {
+        cmd.env("MACC_COORDINATOR_IPC_ADDR", ipc_addr);
+    }
+
+    let status = cmd.status().map_err(|e| MaccError::Io {
+        path: performer_path.to_string_lossy().into(),
+        action: "run worktree performer".into(),
+        source: e,
+    })?;
 
     if !status.success() {
         return Err(MaccError::Validation(format!(

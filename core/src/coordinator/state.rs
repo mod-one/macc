@@ -1,3 +1,5 @@
+use crate::coordinator::model::TaskRegistry;
+use crate::coordinator::{CoordinatorEventPayload, RuntimeStatus, WorkflowState};
 use crate::coordinator_storage::{
     apply_transition_sqlite_with_event, coordinator_storage_export_sqlite_to_json,
     increment_retries_sqlite, set_merge_pending_sqlite, set_merge_processed_sqlite,
@@ -42,59 +44,40 @@ pub fn coordinator_state_apply_transition(
     }
 
     let registry_path = coordinator_registry_path(repo_root);
-    let mut registry = load_registry(&registry_path)?;
-    let tasks = registry
-        .get_mut("tasks")
-        .and_then(Value::as_array_mut)
-        .ok_or_else(|| MaccError::Validation("Registry missing tasks array".into()))?;
-
-    let mut found = false;
-    for task in tasks.iter_mut() {
-        let id = task.get("id").and_then(Value::as_str).unwrap_or_default();
-        if id != task_id {
-            continue;
-        }
-        found = true;
-        task["state"] = Value::String(new_state.clone());
-        task["updated_at"] = Value::String(now.clone());
-        task["state_changed_at"] = Value::String(now.clone());
-
-        if new_state == "pr_open" && !pr_url.is_empty() {
-            task["pr_url"] = Value::String(pr_url.clone());
-        }
-        if new_state == "changes_requested" {
-            ensure_object(task, "review");
-            task["review"]["changed"] = Value::Bool(true);
-            task["review"]["last_reviewed_at"] = Value::String(now.clone());
-            if !reviewer.is_empty() {
-                task["review"]["reviewer"] = Value::String(reviewer.clone());
-            }
-            if !reason.is_empty() {
-                task["review"]["reason"] = Value::String(reason.clone());
-            }
-        }
-
-        if matches!(new_state.as_str(), "merged" | "abandoned" | "todo") {
-            task["assignee"] = Value::Null;
-            task["claimed_at"] = Value::Null;
-            task["worktree"] = Value::Null;
-            ensure_object(task, "task_runtime");
-            reset_runtime_to_idle(task);
-        }
-        break;
-    }
-
-    if !found {
+    let mut typed = TaskRegistry::from_value(&load_registry(&registry_path)?)?;
+    let Some(task) = typed.find_task_mut(&task_id) else {
         return Err(MaccError::Validation(format!(
             "Task not found in registry: {}",
             task_id
         )));
+    };
+    task.state = new_state.clone();
+    task.updated_at = Some(now.clone());
+    task.state_changed_at = Some(now.clone());
+
+    if new_state == WorkflowState::PrOpen.as_str() && !pr_url.is_empty() {
+        task.pr_url = Some(pr_url.clone());
+    }
+    if new_state == WorkflowState::ChangesRequested.as_str() {
+        let mut review = task.review.clone().unwrap_or_default();
+        review.changed = Some(true);
+        review.last_reviewed_at = Some(now.clone());
+        if !reviewer.is_empty() {
+            review.reviewer = Some(reviewer.clone());
+        }
+        if !reason.is_empty() {
+            review.reason = Some(reason.clone());
+        }
+        task.review = Some(review);
+    }
+    if matches!(new_state.as_str(), "merged" | "abandoned" | "todo") {
+        task.clear_assignment();
+        reset_runtime_to_idle_typed(task);
     }
 
-    let locks = recompute_resource_locks(&registry, &now);
-    registry["resource_locks"] = locks;
-    registry["updated_at"] = Value::String(now);
-    save_registry(&registry_path, &registry)?;
+    typed.recompute_resource_locks(&now);
+    typed.updated_at = Some(now);
+    save_registry(&registry_path, &typed.to_value()?)?;
     Ok(())
 }
 
@@ -138,100 +121,64 @@ pub fn coordinator_state_set_runtime(
     }
 
     let registry_path = coordinator_registry_path(repo_root);
-    let mut registry = load_registry(&registry_path)?;
-    let tasks = registry
-        .get_mut("tasks")
-        .and_then(Value::as_array_mut)
-        .ok_or_else(|| MaccError::Validation("Registry missing tasks array".into()))?;
-
-    let mut found = false;
-    for task in tasks.iter_mut() {
-        let id = task.get("id").and_then(Value::as_str).unwrap_or_default();
-        if id != task_id {
-            continue;
-        }
-        found = true;
-        ensure_object(task, "task_runtime");
-        ensure_object(&mut task["task_runtime"], "metrics");
-        ensure_object(&mut task["task_runtime"], "slo_warnings");
-
-        let old_status = task["task_runtime"]["status"]
-            .as_str()
-            .unwrap_or("idle")
-            .to_string();
-        let old_phase = task["task_runtime"]["current_phase"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
-
-        task["task_runtime"]["status"] = Value::String(runtime_status.clone());
-        if !phase.is_empty() {
-            task["task_runtime"]["current_phase"] = Value::String(phase.clone());
-        }
-        if !pid.is_empty() {
-            let parsed = pid
-                .parse::<i64>()
-                .ok()
-                .map(Value::from)
-                .unwrap_or(Value::Null);
-            task["task_runtime"]["pid"] = parsed;
-        } else if matches!(
-            runtime_status.as_str(),
-            "idle" | "phase_done" | "failed" | "stale"
-        ) {
-            task["task_runtime"]["pid"] = Value::Null;
-        }
-        if !last_error.is_empty() {
-            task["task_runtime"]["last_error"] = Value::String(last_error.clone());
-        }
-        if !heartbeat_ts.is_empty() {
-            task["task_runtime"]["last_heartbeat"] = Value::String(heartbeat_ts);
-        }
-        if !attempt.is_empty() {
-            if let Ok(parsed) = attempt.parse::<i64>() {
-                task["task_runtime"]["attempt"] = Value::from(parsed);
-            }
-        }
-
-        if runtime_status == "running"
-            && task["task_runtime"]["started_at"]
-                .as_str()
-                .unwrap_or_default()
-                .is_empty()
-        {
-            task["task_runtime"]["started_at"] = Value::String(now.clone());
-        }
-
-        let phase_changed = !phase.is_empty() && phase != old_phase;
-        let status_became_running = old_status != "running" && runtime_status == "running";
-        let missing_phase_started = task["task_runtime"]["phase_started_at"]
-            .as_str()
-            .unwrap_or_default()
-            .is_empty();
-        if runtime_status == "running"
-            && (phase_changed || status_became_running || missing_phase_started)
-        {
-            task["task_runtime"]["phase_started_at"] = Value::String(now.clone());
-        } else if matches!(
-            runtime_status.as_str(),
-            "idle" | "phase_done" | "failed" | "stale"
-        ) {
-            task["task_runtime"]["phase_started_at"] = Value::Null;
-        }
-
-        task["updated_at"] = Value::String(now.clone());
-        break;
-    }
-
-    if !found {
+    let mut typed = TaskRegistry::from_value(&load_registry(&registry_path)?)?;
+    let Some(task) = typed.find_task_mut(&task_id) else {
         return Err(MaccError::Validation(format!(
             "Task not found in registry: {}",
             task_id
         )));
-    }
+    };
+    let runtime = &mut task.task_runtime;
+    let old_status = runtime.status.clone().unwrap_or_else(|| "idle".to_string());
+    let old_phase = runtime.current_phase.clone().unwrap_or_default();
 
-    registry["updated_at"] = Value::String(now);
-    save_registry(&registry_path, &registry)?;
+    runtime.status = Some(runtime_status.clone());
+    if !phase.is_empty() {
+        runtime.current_phase = Some(phase.clone());
+    }
+    if !pid.is_empty() {
+        runtime.pid = pid.parse::<i64>().ok();
+    } else if matches!(
+        runtime_status.as_str(),
+        "idle" | "phase_done" | "failed" | "stale"
+    ) {
+        runtime.pid = None;
+    }
+    if !last_error.is_empty() {
+        runtime.last_error = Some(last_error.clone());
+    }
+    if !heartbeat_ts.is_empty() {
+        runtime.last_heartbeat = Some(heartbeat_ts);
+    }
+    if !attempt.is_empty() {
+        runtime.attempt = attempt.parse::<i64>().ok();
+    }
+    if runtime_status == RuntimeStatus::Running.as_str()
+        && runtime.started_at.as_deref().unwrap_or_default().is_empty()
+    {
+        runtime.started_at = Some(now.clone());
+    }
+    let phase_changed = !phase.is_empty() && phase != old_phase;
+    let status_became_running = old_status != RuntimeStatus::Running.as_str()
+        && runtime_status == RuntimeStatus::Running.as_str();
+    let missing_phase_started = runtime
+        .phase_started_at
+        .as_deref()
+        .unwrap_or_default()
+        .is_empty();
+    if runtime_status == RuntimeStatus::Running.as_str()
+        && (phase_changed || status_became_running || missing_phase_started)
+    {
+        runtime.phase_started_at = Some(now.clone());
+    } else if matches!(
+        runtime_status.as_str(),
+        "idle" | "phase_done" | "failed" | "stale"
+    ) {
+        runtime.phase_started_at = None;
+    }
+    task.updated_at = Some(now.clone());
+    typed.updated_at = Some(now);
+    save_registry(&registry_path, &typed.to_value()?)?;
     Ok(())
 }
 
@@ -242,18 +189,8 @@ pub fn coordinator_state_task_field(
     let task_id = required_arg(args, "task-id")?;
     let field_expr = required_arg(args, "field")?;
     let snapshot = load_snapshot_view(repo_root, args)?;
-    let task = snapshot
-        .registry
-        .get("tasks")
-        .and_then(Value::as_array)
-        .and_then(|tasks| {
-            tasks
-                .iter()
-                .find(|task| task.get("id").and_then(Value::as_str).unwrap_or_default() == task_id)
-                .cloned()
-        });
-    if let Some(task) = task {
-        if let Some(value) = extract_task_field_value(&task, &field_expr) {
+    if let Some(task) = snapshot.registry.find_task(&task_id) {
+        if let Some(value) = extract_task_field_value_typed(task, &field_expr) {
             println!("{}", value);
         }
     }
@@ -266,16 +203,7 @@ pub fn coordinator_state_task_exists(
 ) -> Result<()> {
     let task_id = required_arg(args, "task-id")?;
     let snapshot = load_snapshot_view(repo_root, args)?;
-    let exists = snapshot
-        .registry
-        .get("tasks")
-        .and_then(Value::as_array)
-        .map(|tasks| {
-            tasks
-                .iter()
-                .any(|task| task.get("id").and_then(Value::as_str).unwrap_or_default() == task_id)
-        })
-        .unwrap_or(false);
+    let exists = snapshot.registry.find_task(&task_id).is_some();
     if exists {
         Ok(())
     } else {
@@ -288,27 +216,7 @@ pub fn coordinator_state_task_exists(
 
 pub fn coordinator_state_counts(repo_root: &Path, args: &BTreeMap<String, String>) -> Result<()> {
     let snapshot = load_snapshot_view(repo_root, args)?;
-    let tasks = snapshot
-        .registry
-        .get("tasks")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let total = tasks.len();
-    let mut todo = 0usize;
-    let mut active = 0usize;
-    let mut blocked = 0usize;
-    let mut merged = 0usize;
-    for task in tasks {
-        let state = task.get("state").and_then(Value::as_str).unwrap_or("todo");
-        match state {
-            "todo" => todo += 1,
-            "blocked" => blocked += 1,
-            "merged" => merged += 1,
-            "claimed" | "in_progress" | "pr_open" | "changes_requested" | "queued" => active += 1,
-            _ => {}
-        }
-    }
+    let (total, todo, active, blocked, merged) = snapshot.registry.counts();
     println!("{}\t{}\t{}\t{}\t{}", total, todo, active, blocked, merged);
     Ok(())
 }
@@ -319,25 +227,13 @@ pub fn coordinator_state_locks(repo_root: &Path, args: &BTreeMap<String, String>
         .cloned()
         .unwrap_or_else(|| "count".to_string());
     let snapshot = load_snapshot_view(repo_root, args)?;
-    let locks = snapshot
-        .registry
-        .get("resource_locks")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
+    let locks = snapshot.registry.resource_locks;
     match format.as_str() {
         "count" => println!("{}", locks.len()),
         "lines" => {
             let mut rows: Vec<(String, String)> = locks
                 .iter()
-                .map(|(resource, value)| {
-                    let task_id = value
-                        .get("task_id")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    (resource.clone(), task_id)
-                })
+                .map(|(resource, value)| (resource.clone(), value.task_id.clone()))
                 .collect();
             rows.sort_by(|a, b| a.0.cmp(&b.0));
             for (resource, task_id) in rows {
@@ -386,17 +282,12 @@ pub fn coordinator_state_unlock_resource(
     clear_all: bool,
 ) -> Result<usize> {
     let mut snapshot = load_snapshot_view(repo_root, args)?;
-    let locks = snapshot
-        .registry
-        .get_mut("resource_locks")
-        .and_then(Value::as_object_mut)
-        .ok_or_else(|| MaccError::Validation("Registry missing resource_locks".into()))?;
     let removed = if clear_all {
-        let count = locks.len();
-        locks.clear();
+        let count = snapshot.registry.resource_locks.len();
+        snapshot.registry.resource_locks.clear();
         count
     } else if let Some(name) = resource {
-        if locks.remove(name).is_some() {
+        if snapshot.registry.resource_locks.remove(name).is_some() {
             1
         } else {
             0
@@ -498,41 +389,10 @@ pub fn coordinator_state_slo_metric(
     let task_id = required_arg(args, "task-id")?;
     let metric = required_arg(args, "metric")?;
     let snapshot = load_snapshot_view(repo_root, args)?;
-    let task = snapshot
-        .registry
-        .get("tasks")
-        .and_then(Value::as_array)
-        .and_then(|tasks| {
-            tasks
-                .iter()
-                .find(|task| task.get("id").and_then(Value::as_str).unwrap_or_default() == task_id)
-                .cloned()
-        });
+    let task = snapshot.registry.find_task(&task_id);
     if let Some(task) = task {
-        let value = if metric == "retries" {
-            task.get("task_runtime")
-                .and_then(|v| v.get("retries"))
-                .and_then(Value::as_i64)
-                .or_else(|| {
-                    task.get("task_runtime")
-                        .and_then(|v| v.get("metrics"))
-                        .and_then(|v| v.get("retries"))
-                        .and_then(Value::as_i64)
-                })
-                .unwrap_or(0)
-        } else {
-            task.get("task_runtime")
-                .and_then(|v| v.get("metrics"))
-                .and_then(|v| v.get(&metric))
-                .and_then(Value::as_i64)
-                .unwrap_or(0)
-        };
-        let warned = task
-            .get("task_runtime")
-            .and_then(|v| v.get("slo_warnings"))
-            .and_then(|v| v.get(&metric))
-            .map(|v| !v.is_null())
-            .unwrap_or(false);
+        let value = task.task_runtime.metric_i64(&metric).unwrap_or(0);
+        let warned = task.task_runtime.has_slo_warning(&metric);
         println!("{}\t{}", value, if warned { "true" } else { "false" });
     } else {
         println!("0\tfalse");
@@ -544,7 +404,7 @@ pub fn coordinator_state_registry_load(
     repo_root: &Path,
     args: &BTreeMap<String, String>,
 ) -> Result<Value> {
-    Ok(load_snapshot_view(repo_root, args)?.registry)
+    load_snapshot_view(repo_root, args)?.registry.to_value()
 }
 
 pub fn coordinator_state_registry_save(
@@ -567,7 +427,7 @@ pub fn coordinator_state_registry_save(
             }
         }
     };
-    snapshot.registry = registry.clone();
+    snapshot.registry = TaskRegistry::from_value(registry)?;
     match mode {
         CoordinatorStorageMode::Json => {
             JsonStorage::new(store_paths).save_snapshot(&snapshot)?;
@@ -640,79 +500,15 @@ fn save_registry(path: &Path, value: &Value) -> Result<()> {
     Ok(())
 }
 
-fn ensure_object(node: &mut Value, key: &str) {
-    if !node.get(key).map(Value::is_object).unwrap_or(false) {
-        node[key] = json!({});
-    }
-}
-
-pub fn reset_runtime_to_idle(task: &mut Value) {
-    task["task_runtime"]["status"] = Value::String("idle".to_string());
-    task["task_runtime"]["pid"] = Value::Null;
-    task["task_runtime"]["started_at"] = Value::Null;
-    task["task_runtime"]["current_phase"] = Value::Null;
-    task["task_runtime"]["merge_result_pending"] = Value::Bool(false);
-    task["task_runtime"]["merge_result_file"] = Value::Null;
-}
-
-fn is_active_state(state: &str) -> bool {
-    matches!(
-        state,
-        "claimed" | "in_progress" | "pr_open" | "changes_requested" | "queued"
-    )
-}
-
-fn recompute_resource_locks(registry: &Value, now: &str) -> Value {
-    let mut locks = serde_json::Map::new();
-    let Some(tasks) = registry.get("tasks").and_then(Value::as_array) else {
-        return Value::Object(locks);
-    };
-    for task in tasks {
-        let state = task
-            .get("state")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        if !is_active_state(state) {
-            continue;
-        }
-        if task.get("worktree").is_none() || task.get("worktree").unwrap().is_null() {
-            continue;
-        }
-        let task_id = task.get("id").and_then(Value::as_str).unwrap_or_default();
-        if task_id.is_empty() {
-            continue;
-        }
-        let locked_at = task
-            .get("claimed_at")
-            .and_then(Value::as_str)
-            .filter(|v| !v.is_empty())
-            .unwrap_or(now);
-        let worktree_path = task
-            .get("worktree")
-            .and_then(|v| v.get("worktree_path"))
-            .and_then(Value::as_str)
-            .map(Value::from)
-            .unwrap_or(Value::Null);
-        if let Some(resources) = task.get("exclusive_resources").and_then(Value::as_array) {
-            for resource in resources {
-                let Some(resource_name) = resource.as_str() else {
-                    continue;
-                };
-                if resource_name.is_empty() || locks.contains_key(resource_name) {
-                    continue;
-                }
-                locks.insert(
-                    resource_name.to_string(),
-                    json!({
-                        "task_id": task_id,
-                        "worktree_path": worktree_path,
-                        "locked_at": locked_at,
-                    }),
-                );
-            }
-        }
-    }
-    Value::Object(locks)
+fn reset_runtime_to_idle_typed(task: &mut crate::coordinator::model::Task) {
+    let runtime = &mut task.task_runtime;
+    runtime.status = Some(RuntimeStatus::Idle.as_str().to_string());
+    runtime.pid = None;
+    runtime.started_at = None;
+    runtime.current_phase = None;
+    runtime.clear_last_error_details();
+    runtime.merge_result_pending = Some(false);
+    runtime.merge_result_file = None;
 }
 
 fn now_iso() -> String {
@@ -815,65 +611,35 @@ fn allow_legacy_json_fallback(args: &BTreeMap<String, String>) -> bool {
     )
 }
 
-fn extract_task_field_value(task: &Value, field_expr: &str) -> Option<String> {
+fn extract_task_field_value_typed(
+    task: &crate::coordinator::model::Task,
+    field_expr: &str,
+) -> Option<String> {
     let expr = field_expr.trim();
     match expr {
-        ".state" => task
-            .get("state")
-            .and_then(Value::as_str)
-            .map(|v| v.to_string()),
-        ".scope // \"\"" => Some(
-            task.get("scope")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-        ),
+        ".state" => Some(task.state.clone()),
+        ".scope // \"\"" => Some(task.scope().unwrap_or_default().to_string()),
         ".task_runtime.status // \"idle\"" => Some(
-            task.get("task_runtime")
-                .and_then(|v| v.get("status"))
-                .and_then(Value::as_str)
-                .unwrap_or("idle")
-                .to_string(),
+            task.task_runtime
+                .status
+                .clone()
+                .unwrap_or_else(|| RuntimeStatus::Idle.as_str().to_string()),
         ),
-        ".task_runtime.current_phase // \"\"" => Some(
-            task.get("task_runtime")
-                .and_then(|v| v.get("current_phase"))
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-        ),
-        ".task_runtime.last_error // \"\"" => Some(
-            task.get("task_runtime")
-                .and_then(|v| v.get("last_error"))
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-        ),
+        ".task_runtime.current_phase // \"\"" => {
+            Some(task.task_runtime.current_phase.clone().unwrap_or_default())
+        }
+        ".task_runtime.last_error // \"\"" => {
+            Some(task.task_runtime.last_error.clone().unwrap_or_default())
+        }
         ".task_runtime.retries // .task_runtime.metrics.retries // 0" => {
-            let retries = task
-                .get("task_runtime")
-                .and_then(|v| v.get("retries"))
-                .and_then(Value::as_i64)
-                .or_else(|| {
-                    task.get("task_runtime")
-                        .and_then(|v| v.get("metrics"))
-                        .and_then(|v| v.get("retries"))
-                        .and_then(Value::as_i64)
-                })
-                .unwrap_or(0);
-            Some(retries.to_string())
+            Some(task.task_runtime.retries_count().to_string())
         }
         _ => {
             if let Some(metric_name) = expr
                 .strip_prefix(".task_runtime.metrics.")
                 .and_then(|v| v.strip_suffix(" // 0"))
             {
-                let value = task
-                    .get("task_runtime")
-                    .and_then(|v| v.get("metrics"))
-                    .and_then(|v| v.get(metric_name))
-                    .and_then(Value::as_i64)
-                    .unwrap_or(0);
+                let value = task.task_runtime.metric_i64(metric_name).unwrap_or(0);
                 return Some(value.to_string());
             }
             None
@@ -929,6 +695,6 @@ fn parse_optional_event_mutation(
         event_type,
         phase: event_phase,
         status: event_status,
-        payload,
+        payload: CoordinatorEventPayload::from(payload),
     }))
 }

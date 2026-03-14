@@ -540,63 +540,67 @@ pub trait Engine {
         runtime.block_on(coordinator::engine::run_control_plane(backend, cfg))
     }
 
-    fn coordinator_start_action_process(
+    fn coordinator_start_command_process(
         &self,
         paths: &ProjectPaths,
-        action: &str,
+        command: &str,
         args: &[String],
         cfg: Option<&crate::config::CoordinatorConfig>,
     ) -> Result<crate::service::coordinator::CoordinatorProcessHandle> {
-        crate::service::coordinator::coordinator_start_action_process(paths, action, args, cfg)
+        crate::service::coordinator::coordinator_start_command_process(paths, command, args, cfg)
     }
 
-    fn coordinator_poll_action_process(
+    fn coordinator_poll_command_process(
         &self,
         handle: crate::service::coordinator::CoordinatorProcessHandle,
     ) -> Result<crate::service::coordinator::CoordinatorProcessPoll> {
-        crate::service::coordinator::coordinator_poll_action_process(handle)
+        crate::service::coordinator::coordinator_poll_command_process(handle)
     }
 
-    fn coordinator_stop_action_process(
+    fn coordinator_stop_command_process(
         &self,
         handle: crate::service::coordinator::CoordinatorProcessHandle,
         graceful: bool,
     ) -> Result<crate::service::coordinator::CoordinatorStopResult> {
-        crate::service::coordinator::coordinator_stop_action_process(handle, graceful)
+        crate::service::coordinator::coordinator_stop_command_process(handle, graceful)
     }
 
-    fn coordinator_start_managed_action_process(
+    fn coordinator_start_managed_command_process(
         &self,
         paths: &ProjectPaths,
-        action: &str,
-        args: &[String],
+        command: &crate::service::coordinator_workflow::CoordinatorCommand,
         cfg: Option<&crate::config::CoordinatorConfig>,
     ) -> Result<()> {
-        crate::service::coordinator::coordinator_start_managed_action_process(
-            paths, action, args, cfg,
+        let invocation =
+            crate::service::coordinator_workflow::coordinator_command_invocation(command)?;
+        crate::service::coordinator::coordinator_start_managed_command_process(
+            paths,
+            invocation.action,
+            &invocation.args,
+            cfg,
         )
     }
 
-    fn coordinator_poll_managed_action_process(
+    fn coordinator_poll_managed_command_process(
         &self,
         paths: &ProjectPaths,
-    ) -> Result<crate::service::coordinator::CoordinatorManagedPoll> {
-        crate::service::coordinator::coordinator_poll_managed_action_process(paths)
+    ) -> Result<crate::service::coordinator::CoordinatorManagedCommandPoll> {
+        crate::service::coordinator::coordinator_poll_managed_command_process(paths)
     }
 
-    fn coordinator_poll_managed_action_state(
+    fn coordinator_poll_managed_command_state(
         &self,
         paths: &ProjectPaths,
-    ) -> Result<crate::service::coordinator::CoordinatorManagedActionState> {
-        crate::service::coordinator::coordinator_poll_managed_action_state(paths)
+    ) -> Result<crate::service::coordinator::CoordinatorManagedCommandState> {
+        crate::service::coordinator::coordinator_poll_managed_command_state(paths)
     }
 
-    fn coordinator_stop_managed_action_process(
+    fn coordinator_stop_managed_command_process(
         &self,
         paths: &ProjectPaths,
         graceful: bool,
     ) -> Result<crate::service::coordinator::CoordinatorStopResult> {
-        crate::service::coordinator::coordinator_stop_managed_action_process(paths, graceful)
+        crate::service::coordinator::coordinator_stop_managed_command_process(paths, graceful)
     }
 
     fn coordinator_run_workflow(
@@ -633,14 +637,14 @@ pub trait Engine {
         )
     }
 
-    fn coordinator_perform_action_workflow(
+    fn coordinator_execute_command(
         &self,
         paths: &ProjectPaths,
-        action: crate::service::coordinator_workflow::CoordinatorAction,
-        request: crate::service::coordinator_workflow::CoordinatorActionRequest<'_>,
-    ) -> Result<crate::service::coordinator_workflow::CoordinatorActionResult> {
-        crate::service::coordinator_workflow::coordinator_perform_action(
-            self, paths, action, request,
+        command: crate::service::coordinator_workflow::CoordinatorCommand,
+        request: crate::service::coordinator_workflow::CoordinatorCommandRequest<'_>,
+    ) -> Result<crate::service::coordinator_workflow::CoordinatorCommandResult> {
+        crate::service::coordinator_workflow::coordinator_execute_command(
+            self, paths, command, request,
         )
     }
 
@@ -775,14 +779,8 @@ pub trait Engine {
 
     fn coordinator_resume(&self, repo_root: &Path) -> Result<()> {
         if let Some(pause) = coordinator::state_runtime::read_coordinator_pause_file(repo_root)? {
-            let task_id = pause
-                .get("task_id")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default();
-            let phase = pause
-                .get("phase")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default();
+            let task_id = pause.task_id.as_str();
+            let phase = pause.phase.as_str();
             if !task_id.is_empty() && phase == "integrate" {
                 coordinator::state_runtime::resume_paused_task_integrate(repo_root, task_id)?;
             }
@@ -803,43 +801,21 @@ pub trait Engine {
             JsonStorage::new(paths).load_snapshot()?
         };
 
-        let tasks = snapshot
-            .registry
-            .get("tasks")
-            .and_then(serde_json::Value::as_array)
-            .cloned()
-            .unwrap_or_default();
         let mut counts = CoordinatorStatusSnapshot::default();
-        counts.total = tasks.len();
-        for task in tasks {
-            match task
-                .get("state")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("todo")
-            {
-                "todo" => counts.todo += 1,
-                "blocked" => counts.blocked += 1,
-                "merged" => counts.merged += 1,
-                _ => counts.active += 1,
-            }
-        }
+        let (total, todo, active, blocked, merged) = snapshot.registry.counts();
+        counts.total = total;
+        counts.todo = todo;
+        counts.active = active;
+        counts.blocked = blocked;
+        counts.merged = merged;
 
         if let Some(pause) =
             coordinator::state_runtime::read_coordinator_pause_file(&project_paths.root)?
         {
             counts.paused = true;
-            counts.pause_reason = pause
-                .get("reason")
-                .and_then(serde_json::Value::as_str)
-                .map(|s| s.to_string());
-            counts.pause_task_id = pause
-                .get("task_id")
-                .and_then(serde_json::Value::as_str)
-                .map(|s| s.to_string());
-            counts.pause_phase = pause
-                .get("phase")
-                .and_then(serde_json::Value::as_str)
-                .map(|s| s.to_string());
+            counts.pause_reason = Some(pause.reason);
+            counts.pause_task_id = Some(pause.task_id);
+            counts.pause_phase = Some(pause.phase);
         }
 
         Ok(counts)
@@ -858,8 +834,8 @@ pub trait Engine {
         };
 
         let mut out = Vec::with_capacity(snapshot.events.len());
-        for raw in snapshot.events {
-            out.push(CoordinatorEvent::from_raw(raw));
+        for record in snapshot.events {
+            out.push(CoordinatorEvent::from_record(record));
         }
         Ok(out)
     }
@@ -959,7 +935,7 @@ pub trait Engine {
     fn coordinator_run_phase_for_task_native(
         &self,
         repo_root: &Path,
-        task: &serde_json::Value,
+        task: &crate::coordinator::model::Task,
         phase: &str,
         coordinator_tool_override: Option<&str>,
         max_attempts: usize,
@@ -978,7 +954,7 @@ pub trait Engine {
     fn coordinator_run_review_phase_for_task_native(
         &self,
         repo_root: &Path,
-        task: &serde_json::Value,
+        task: &crate::coordinator::model::Task,
         coordinator_tool_override: Option<&str>,
         max_attempts: usize,
         logger: Option<&dyn crate::coordinator::control_plane::CoordinatorLog>,
@@ -1108,10 +1084,6 @@ pub trait Engine {
             repo_root, args, resource, clear_all,
         )
     }
-
-    fn coordinator_state_reset_runtime_to_idle(&self, task: &mut serde_json::Value) {
-        crate::coordinator::state::reset_runtime_to_idle(task)
-    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1141,41 +1113,18 @@ pub struct CoordinatorEvent {
 }
 
 impl CoordinatorEvent {
-    fn from_raw(raw: serde_json::Value) -> Self {
+    fn from_record(record: crate::coordinator::CoordinatorEventRecord) -> Self {
+        let raw = serde_json::to_value(&record)
+            .unwrap_or_else(|_| serde_json::json!({ "event_id": record.event_id }));
         Self {
-            event_id: raw
-                .get("event_id")
-                .and_then(serde_json::Value::as_str)
-                .map(|s| s.to_string()),
-            run_id: raw
-                .get("run_id")
-                .and_then(serde_json::Value::as_str)
-                .map(|s| s.to_string()),
-            event_type: raw
-                .get("type")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("")
-                .to_string(),
-            task_id: raw
-                .get("task_id")
-                .and_then(serde_json::Value::as_str)
-                .map(|s| s.to_string()),
-            phase: raw
-                .get("phase")
-                .and_then(serde_json::Value::as_str)
-                .map(|s| s.to_string()),
-            status: raw
-                .get("status")
-                .and_then(serde_json::Value::as_str)
-                .map(|s| s.to_string()),
-            ts: raw
-                .get("ts")
-                .and_then(serde_json::Value::as_str)
-                .map(|s| s.to_string()),
-            message: raw
-                .get("message")
-                .and_then(serde_json::Value::as_str)
-                .map(|s| s.to_string()),
+            event_id: (!record.event_id.is_empty()).then(|| record.event_id.clone()),
+            run_id: record.run_id.clone(),
+            event_type: record.event_type.clone(),
+            task_id: record.task_id.clone(),
+            phase: record.phase.clone(),
+            status: (!record.status.is_empty()).then(|| record.status.clone()),
+            ts: (!record.ts.is_empty()).then(|| record.ts.clone()),
+            message: record.message().map(|s| s.to_string()),
             raw,
         }
     }

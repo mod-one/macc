@@ -3,13 +3,15 @@ use crate::coordinator::helpers::{
     count_pool_worktrees, find_reusable_worktree_native, now_iso_coordinator,
     recompute_resource_locks_from_tasks, set_registry_updated_at, write_worktree_prd_for_task,
 };
-use crate::coordinator::runtime::{CoordinatorJob, CoordinatorMergeJob, CoordinatorRunState};
+use crate::coordinator::ipc::{ensure_performer_ipc_listener, read_performer_ipc_addr};
+use crate::coordinator::model::{PrdInput, Task, TaskRegistry};
+use crate::coordinator::runtime::{
+    CoordinatorJob, CoordinatorMergeJob, CoordinatorRunState, CoordinatorRuntimeEventKind,
+};
 use crate::coordinator::types::CoordinatorEnvConfig;
 use crate::coordinator::{engine as coordinator_engine, runtime as coordinator_runtime};
 use crate::{MaccError, Result};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -137,40 +139,23 @@ fn emit_dispatch_skipped(
 
 async fn switch_worktree_to_base_after_merge(
     repo_root: &Path,
-    task: &serde_json::Value,
+    task: &Task,
     logger: Option<&dyn CoordinatorLog>,
 ) -> Result<()> {
-    let task_id = task
-        .get("id")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-    let worktree_path = task
-        .get("worktree")
-        .and_then(|w| w.get("worktree_path"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
+    let task_id = task.id.as_str();
+    let worktree_path = task.worktree_path().unwrap_or_default();
     if task_id.is_empty() || worktree_path.is_empty() {
         return Ok(());
     }
-    let base_branch = task
-        .get("worktree")
-        .and_then(|w| w.get("base_branch"))
-        .and_then(serde_json::Value::as_str)
-        .filter(|v| !v.trim().is_empty())
-        .or_else(|| {
-            task.get("base_branch")
-                .and_then(serde_json::Value::as_str)
-                .filter(|v| !v.trim().is_empty())
-        })
-        .unwrap_or("master");
+    let base_branch = task.base_branch("master");
 
     let wt = Path::new(worktree_path);
 
     // First action after merge success: force checkout base to release task branch immediately.
-    let switched = if crate::git::checkout_async(wt, base_branch, true).await? {
+    let switched = if crate::git::checkout_async(wt, &base_branch, true).await? {
         true
     } else {
-        crate::git::checkout_reset_branch_async(wt, base_branch, true).await?
+        crate::git::checkout_reset_branch_async(wt, &base_branch, true).await?
     };
     if !switched {
         let msg = format!(
@@ -214,7 +199,7 @@ async fn switch_worktree_to_base_after_merge(
         }
         return Ok(());
     }
-    if !crate::git::reset_hard_async(wt, base_branch).await? {
+    if !crate::git::reset_hard_async(wt, &base_branch).await? {
         let msg = format!(
             "worktree switch warning task={} path={} base={} reason=reset_hard_failed",
             task_id, worktree_path, base_branch
@@ -257,107 +242,84 @@ pub fn sync_registry_from_prd_native(
     prd_file: &Path,
     logger: Option<&dyn CoordinatorLog>,
 ) -> Result<()> {
-    let mut registry =
+    let registry_value =
         crate::coordinator::state::coordinator_state_registry_load(repo_root, &BTreeMap::new())?;
+    let mut registry = TaskRegistry::from_value(&registry_value)?;
     let raw_prd = std::fs::read_to_string(prd_file).map_err(|e| MaccError::Io {
         path: prd_file.to_string_lossy().into(),
         action: "read coordinator prd".into(),
         source: e,
     })?;
-    let prd: serde_json::Value = serde_json::from_str(&raw_prd).map_err(|e| {
+    let prd: PrdInput = serde_json::from_str(&raw_prd).map_err(|e| {
         MaccError::Validation(format!("Failed to parse PRD {}: {}", prd_file.display(), e))
     })?;
-    let prd_tasks = prd
-        .get("tasks")
-        .and_then(serde_json::Value::as_array)
+    let mut by_id: HashMap<String, Task> = registry
+        .tasks
+        .iter()
         .cloned()
-        .unwrap_or_default();
-
-    if !registry
-        .get("tasks")
-        .map(serde_json::Value::is_array)
-        .unwrap_or(false)
-    {
-        registry["tasks"] = serde_json::Value::Array(Vec::new());
-    }
-
-    let existing_tasks = registry["tasks"].as_array().cloned().unwrap_or_default();
-    let mut by_id: HashMap<String, serde_json::Value> = HashMap::new();
-    for task in existing_tasks {
-        if let Some(id) = task
-            .get("id")
-            .and_then(serde_json::Value::as_str)
-            .map(|s| s.to_string())
-        {
-            by_id.insert(id, task);
-        }
-    }
+        .map(|task| (task.id.clone(), task))
+        .collect();
 
     let mut merged = Vec::new();
-    for prd_task in prd_tasks {
-        let id = if let Some(v) = prd_task.get("id").and_then(serde_json::Value::as_str) {
-            v.to_string()
-        } else if let Some(v) = prd_task.get("id").and_then(serde_json::Value::as_i64) {
-            v.to_string()
-        } else {
-            String::new()
-        };
+    for prd_task in prd.tasks {
+        let id = prd_task.id.clone();
         if id.is_empty() {
             continue;
         }
-        let mut task = by_id.remove(&id).unwrap_or_else(|| {
-            serde_json::json!({
-                "id": id,
-                "state": "todo",
-                "dependencies": [],
-                "exclusive_resources": [],
-                "task_runtime": {
-                    "status": "idle",
-                    "pid": null,
-                    "current_phase": null,
-                    "merge_result_pending": false,
-                    "merge_result_file": null
-                }
-            })
+        let mut task = by_id.remove(&id).unwrap_or_else(|| Task {
+            id: id.clone(),
+            state: "todo".to_string(),
+            ..Task::default()
         });
-
-        for key in [
-            "title",
-            "description",
-            "objective",
-            "result",
-            "steps",
-            "notes",
-            "category",
-            "priority",
-            "dependencies",
-            "exclusive_resources",
-            "base_branch",
-            "scope",
-        ] {
-            if let Some(v) = prd_task.get(key) {
-                task[key] = v.clone();
-            }
+        task.id = id;
+        task.title = prd_task.title.clone();
+        task.priority = prd_task.priority.clone();
+        task.category = prd_task.category.clone();
+        task.scope = prd_task.scope.clone();
+        task.base_branch = prd_task.base_branch.clone();
+        task.coordinator_tool = prd_task.coordinator_tool.clone();
+        task.dependencies = prd_task.dependencies.clone();
+        task.exclusive_resources = prd_task.exclusive_resources.clone();
+        task.extra.retain(|key, _| {
+            !matches!(
+                key.as_str(),
+                "description"
+                    | "objective"
+                    | "result"
+                    | "steps"
+                    | "notes"
+                    | "category"
+                    | "dependencies"
+                    | "base_branch"
+                    | "coordinator_tool"
+                    | "scope"
+            )
+        });
+        for (key, value) in prd_task.extra {
+            task.extra.insert(key, value);
         }
-        coordinator_engine::ensure_runtime_object(&mut task);
-        task["updated_at"] = serde_json::Value::String(now_iso_coordinator());
+        let runtime = task.ensure_runtime();
+        if runtime.status.is_none() {
+            runtime.status = Some("idle".to_string());
+        }
+        if runtime.merge_result_pending.is_none() {
+            runtime.merge_result_pending = Some(false);
+        }
+        if runtime.merge_result_file.is_none() {
+            runtime.merge_result_file = None;
+        }
+        task.updated_at = Some(now_iso_coordinator());
         merged.push(task);
     }
 
-    let tasks_changed =
-        if let Some(old_tasks) = registry.get("tasks").and_then(serde_json::Value::as_array) {
-            old_tasks.len() != merged.len() || old_tasks != &merged
-        } else {
-            true
-        };
-
-    registry["tasks"] = serde_json::Value::Array(merged);
-    recompute_resource_locks_from_tasks(&mut registry);
-    set_registry_updated_at(&mut registry);
+    let tasks_changed = registry.tasks != merged;
+    registry.tasks = merged;
+    registry.recompute_resource_locks(&now_iso_coordinator());
+    registry.set_updated_at(now_iso_coordinator());
     crate::coordinator::state::coordinator_state_registry_save(
         repo_root,
         &BTreeMap::new(),
-        &registry,
+        &registry.to_value()?,
     )?;
 
     if let Some(log) = logger {
@@ -370,12 +332,10 @@ pub fn sync_registry_from_prd_native(
         let last = LAST_LOG_TS.load(Ordering::Relaxed);
 
         if tasks_changed || now.saturating_sub(last) >= 300 {
-            let count = registry
-                .get("tasks")
-                .and_then(serde_json::Value::as_array)
-                .map(|v| v.len())
-                .unwrap_or(0);
-            let _ = log.note(format!("Registry synced from PRD (tasks={})", count));
+            let _ = log.note(format!(
+                "Registry synced from PRD (tasks={})",
+                registry.tasks.len()
+            ));
             LAST_LOG_TS.store(now, Ordering::Relaxed);
         }
     }
@@ -390,20 +350,13 @@ struct NativePhaseExecutor<'a> {
 impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
     fn run_phase(
         &self,
-        task: &serde_json::Value,
+        task: &crate::coordinator::model::Task,
         mode: &str,
         coordinator_tool_override: Option<&str>,
         max_attempts: usize,
     ) -> Result<std::result::Result<String, String>> {
-        let task_id = task
-            .get("id")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        let worktree_path = task
-            .get("worktree")
-            .and_then(|w| w.get("worktree_path"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
+        let task_id = task.id.as_str();
+        let worktree_path = task.worktree_path().unwrap_or_default();
         if task_id.is_empty() || worktree_path.is_empty() {
             return Ok(Err(format!(
                 "phase '{}' cannot run: missing task id or worktree path",
@@ -412,16 +365,9 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
         }
         let phase_tool = coordinator_tool_override
             .filter(|v| !v.trim().is_empty())
-            .or_else(|| {
-                task.get("coordinator_tool")
-                    .and_then(serde_json::Value::as_str)
-                    .filter(|v| !v.trim().is_empty())
-            })
-            .or_else(|| {
-                task.get("tool")
-                    .and_then(serde_json::Value::as_str)
-                    .filter(|v| !v.trim().is_empty())
-            })
+            .or_else(|| task.coordinator_tool())
+            .or_else(|| task.task_tool())
+            .filter(|v| !v.trim().is_empty())
             .unwrap_or_default()
             .to_string();
         if phase_tool.is_empty() {
@@ -473,12 +419,13 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
             action: "write coordinator phase prompt".into(),
             source: e,
         })?;
-        let events_file = self
-            .repo_root
-            .join(".macc")
-            .join("log")
-            .join("coordinator")
-            .join("events.jsonl");
+        let performer_ipc_addr = read_performer_ipc_addr(self.repo_root);
+        if performer_ipc_addr.is_none() {
+            return Ok(Err(format!(
+                "phase '{}' cannot run for task {}: coordinator IPC address is unavailable",
+                mode, task_id
+            )));
+        }
         let attempts = max_attempts.max(1);
         if let Some(log) = self.logger {
             let _ = log.note(format!(
@@ -488,12 +435,10 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
         }
         let mut last_reason = String::new();
         for attempt in 1..=attempts {
-            let output = std::process::Command::new(&runner_path)
+            let mut command = std::process::Command::new(&runner_path);
+            command
                 .current_dir(&worktree)
-                .env(
-                    "COORD_EVENTS_FILE",
-                    events_file.to_string_lossy().to_string(),
-                )
+                .env_remove(crate::coordinator::ipc::COORDINATOR_IPC_ADDR_ENV)
                 .env(
                     "MACC_EVENT_SOURCE",
                     format!(
@@ -518,8 +463,14 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                 .arg("--attempt")
                 .arg(attempt.to_string())
                 .arg("--max-attempts")
-                .arg(attempts.to_string())
-                .output();
+                .arg(attempts.to_string());
+            if let Some(ipc_addr) = performer_ipc_addr
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            {
+                command.env(crate::coordinator::ipc::COORDINATOR_IPC_ADDR_ENV, ipc_addr);
+            }
+            let output = command.output();
             let Ok(out) = output else {
                 last_reason = format!(
                     "phase '{}' failed to execute runner '{}'",
@@ -567,7 +518,7 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
 
 pub fn run_phase_for_task_native(
     repo_root: &Path,
-    task: &serde_json::Value,
+    task: &crate::coordinator::model::Task,
     mode: &str,
     coordinator_tool_override: Option<&str>,
     max_attempts: usize,
@@ -585,7 +536,7 @@ pub fn run_phase_for_task_native(
 
 pub fn run_review_phase_for_task_native(
     repo_root: &Path,
-    task: &serde_json::Value,
+    task: &crate::coordinator::model::Task,
     coordinator_tool_override: Option<&str>,
     max_attempts: usize,
     logger: Option<&dyn CoordinatorLog>,
@@ -603,6 +554,7 @@ pub async fn advance_tasks_native(
 ) -> Result<coordinator_engine::AdvanceResult> {
     let mut registry =
         crate::coordinator::state::coordinator_state_registry_load(repo_root, &BTreeMap::new())?;
+    let registry_snapshot = TaskRegistry::from_value(&registry)?;
     let mut progressed = false;
     let blocked_merge: Option<(String, String)> = None;
     let now = now_iso_coordinator();
@@ -624,24 +576,16 @@ pub async fn advance_tasks_native(
                 mode,
                 transition,
             } => {
-                let task_snapshot = registry
-                    .get("tasks")
-                    .and_then(serde_json::Value::as_array)
-                    .and_then(|tasks| {
-                        tasks.iter().find(|t| {
-                            t.get("id")
-                                .and_then(serde_json::Value::as_str)
-                                .map(|id| id == task_id)
-                                .unwrap_or(false)
-                        })
-                    })
-                    .cloned()
-                    .ok_or_else(|| {
-                        MaccError::Validation(format!(
-                            "Task '{}' not found while advancing phase",
-                            task_id
-                        ))
-                    })?;
+                let task_snapshot =
+                    registry_snapshot
+                        .find_task(&task_id)
+                        .cloned()
+                        .ok_or_else(|| {
+                            MaccError::Validation(format!(
+                                "Task '{}' not found while advancing phase",
+                                task_id
+                            ))
+                        })?;
                 let executor = NativePhaseExecutor { repo_root, logger };
                 if mode == "review" {
                     match coordinator_runtime::run_review_phase(
@@ -789,7 +733,9 @@ pub async fn monitor_active_jobs_native(
     phase_timeout_seconds: usize,
     logger: Option<&dyn CoordinatorLog>,
 ) -> Result<()> {
-    consume_heartbeat_events(repo_root, state, logger)?;
+    ensure_performer_ipc_listener(repo_root, state, logger).await?;
+    consume_runtime_events(repo_root, state, logger)?;
+    apply_runtime_event_bus_updates(repo_root, state, logger)?;
     apply_stale_heartbeat_policy(repo_root, env_cfg, logger)?;
     let retry_codes = resolve_error_code_retry_list(env_cfg);
     let retry_max = resolve_error_code_retry_max(env_cfg);
@@ -884,6 +830,7 @@ pub async fn monitor_active_jobs_native(
                         &state.event_tx,
                         &mut state.join_set,
                         phase_timeout_seconds,
+                        state.performer_ipc_addr.as_deref(),
                     )?;
                     state.active_jobs.insert(
                         task_id,
@@ -920,213 +867,156 @@ pub async fn monitor_active_jobs_native(
     Ok(())
 }
 
+fn apply_runtime_event_bus_updates(
+    repo_root: &Path,
+    state: &mut CoordinatorRunState,
+    logger: Option<&dyn CoordinatorLog>,
+) -> Result<usize> {
+    #[derive(Default)]
+    struct PendingRuntimeUpdate {
+        last_heartbeat: Option<String>,
+        status: Option<String>,
+        phase: Option<String>,
+        last_error: Option<String>,
+    }
+
+    let mut runtime_updates: HashMap<String, PendingRuntimeUpdate> = HashMap::new();
+    loop {
+        match state.runtime_event_bus_rx.try_recv() {
+            Ok(event) => {
+                let update = runtime_updates.entry(event.task_id.clone()).or_default();
+                update.last_heartbeat = Some(event.ts.clone());
+                match event.kind {
+                    CoordinatorRuntimeEventKind::Heartbeat => {}
+                    CoordinatorRuntimeEventKind::Progress {
+                        status,
+                        phase,
+                        message,
+                    } => {
+                        update.status = Some(status);
+                        if let Some(phase) = phase {
+                            update.phase = Some(phase);
+                        }
+                        if let Some(message) = message {
+                            update.last_error = Some(message);
+                        }
+                    }
+                    CoordinatorRuntimeEventKind::PhaseResult {
+                        status,
+                        phase,
+                        message,
+                    } => {
+                        update.status = Some(status);
+                        if let Some(phase) = phase {
+                            update.phase = Some(phase);
+                        }
+                        if let Some(message) = message {
+                            update.last_error = Some(message);
+                        }
+                    }
+                    CoordinatorRuntimeEventKind::Failed { phase, message } => {
+                        update.status = Some(
+                            crate::coordinator::RuntimeStatus::Failed
+                                .as_str()
+                                .to_string(),
+                        );
+                        if let Some(phase) = phase {
+                            update.phase = Some(phase);
+                        }
+                        if let Some(message) = message {
+                            update.last_error = Some(message);
+                        }
+                    }
+                }
+            }
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+            Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
+            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
+                if let Some(log) = logger {
+                    let _ = log.note(format!(
+                        "- Runtime event bus lagged skipped={} events; continuing with newest",
+                        skipped
+                    ));
+                }
+                continue;
+            }
+        }
+    }
+
+    if runtime_updates.is_empty() {
+        return Ok(0);
+    }
+
+    let registry_value =
+        crate::coordinator::state::coordinator_state_registry_load(repo_root, &BTreeMap::new())?;
+    let mut registry = TaskRegistry::from_value(&registry_value)?;
+    let mut updated = 0usize;
+    for task in &mut registry.tasks {
+        let Some(update) = runtime_updates.get(task.id.as_str()) else {
+            continue;
+        };
+        let runtime = task.ensure_runtime();
+        if let Some(ts) = &update.last_heartbeat {
+            runtime.last_heartbeat = Some(ts.clone());
+        }
+        if let Some(status) = &update.status {
+            runtime.status = Some(status.clone());
+            if matches!(status.as_str(), "phase_done" | "failed" | "stale" | "idle") {
+                runtime.pid = None;
+            }
+        }
+        if let Some(phase) = &update.phase {
+            runtime.current_phase = Some(phase.clone());
+        }
+        if let Some(last_error) = &update.last_error {
+            runtime.last_error = Some(last_error.clone());
+        }
+        updated += 1;
+    }
+    if updated == 0 {
+        return Ok(0);
+    }
+
+    registry.set_updated_at(now_iso_coordinator());
+    crate::coordinator::state::coordinator_state_registry_save(
+        repo_root,
+        &BTreeMap::new(),
+        &registry.to_value()?,
+    )?;
+
+    if let Some(log) = logger {
+        state.heartbeat_updates_since_log += updated;
+        let should_log = state
+            .last_heartbeat_log_at
+            .map(|last| last.elapsed() >= std::time::Duration::from_secs(30))
+            .unwrap_or(true);
+        if should_log {
+            let _ = log.note(format!(
+                "- Runtime event bus updates applied count={} (30s window)",
+                state.heartbeat_updates_since_log
+            ));
+            state.last_heartbeat_log_at = Some(std::time::Instant::now());
+            state.heartbeat_updates_since_log = 0;
+        }
+    }
+
+    Ok(updated)
+}
+
 pub fn consume_heartbeat_events(
     repo_root: &Path,
     state: &mut CoordinatorRunState,
     logger: Option<&dyn CoordinatorLog>,
 ) -> Result<usize> {
-    let current_run_id = std::env::var("COORDINATOR_RUN_ID").ok();
-    let events_file = repo_root
-        .join(".macc")
-        .join("log")
-        .join("coordinator")
-        .join("events.jsonl");
-    if !events_file.exists() {
-        return Ok(0);
-    }
-    let mut file = File::open(&events_file).map_err(|e| MaccError::Io {
-        path: events_file.to_string_lossy().into(),
-        action: "open coordinator events for heartbeat scan".into(),
-        source: e,
-    })?;
+    consume_runtime_events(repo_root, state, logger)
+}
 
-    let project_paths = crate::ProjectPaths::from_root(repo_root);
-    let storage_paths =
-        crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&project_paths);
-    let storage = crate::coordinator_storage::SqliteStorage::new(storage_paths);
-
-    // Initial load of cursor from DB if state offset is 0 (start of run)
-    if state.events_cursor_offset == 0 {
-        if let Ok(Some((offset, _last_id))) = storage.get_cursor("events.jsonl") {
-            state.events_cursor_offset = offset;
-        }
-    }
-
-    let len = file
-        .metadata()
-        .map_err(|e| MaccError::Io {
-            path: events_file.to_string_lossy().into(),
-            action: "read coordinator events metadata".into(),
-            source: e,
-        })?
-        .len();
-    if len < state.events_cursor_offset {
-        state.events_cursor_offset = 0;
-    }
-    file.seek(SeekFrom::Start(state.events_cursor_offset))
-        .map_err(|e| MaccError::Io {
-            path: events_file.to_string_lossy().into(),
-            action: "seek coordinator events file".into(),
-            source: e,
-        })?;
-    let mut buf = String::new();
-    file.read_to_string(&mut buf).map_err(|e| MaccError::Io {
-        path: events_file.to_string_lossy().into(),
-        action: "read coordinator events file".into(),
-        source: e,
-    })?;
-    state.events_cursor_offset = len;
-
-    let mut last_event_id = String::new();
-    if buf.is_empty() {
-        let _ = storage.set_cursor("events.jsonl", len, "");
-        return Ok(0);
-    }
-
-    let mut heartbeat_updates: HashMap<String, String> = HashMap::new();
-    let mut terminal_success_sources: HashSet<(String, String)> = HashSet::new();
-    for line in buf.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Ok(event) = serde_json::from_str::<serde_json::Value>(trimmed) else {
-            continue;
-        };
-
-        if let Some(id) = event.get("event_id").and_then(serde_json::Value::as_str) {
-            last_event_id = id.to_string();
-        }
-        if let Some(expected_run_id) = current_run_id.as_deref() {
-            let event_run_id = event
-                .get("run_id")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default();
-            if event_run_id != expected_run_id {
-                continue;
-            }
-        }
-        let event_type = event
-            .get("type")
-            .or_else(|| event.get("event"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        let event_status = event
-            .get("status")
-            .or_else(|| event.get("state"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        let event_task_id = event
-            .get("task_id")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        let event_source = event
-            .get("source")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        let payload = event.get("payload").unwrap_or(&serde_json::Value::Null);
-        let payload_attempt = payload
-            .get("attempt")
-            .and_then(serde_json::Value::as_i64)
-            .is_some();
-        let is_terminal_success = event_type == "commit_created"
-            || (event_type == "phase_result" && event_status == "done" && !payload_attempt);
-        if is_terminal_success && !event_task_id.is_empty() && !event_source.is_empty() {
-            terminal_success_sources.insert((event_task_id.to_string(), event_source.to_string()));
-            if state.active_jobs.contains_key(event_task_id) {
-                if let Some(log) = logger {
-                    let _ = log.note(format!(
-                        "- Lifecycle task={} stage=monitor status=mismatch_detected reason=terminal_success_no_exit event_type={}",
-                        event_task_id, event_type
-                    ));
-                }
-            }
-        }
-        let is_failed =
-            event_type == "failed" || (event_type == "phase_result" && event_status == "failed");
-        if is_failed
-            && !event_task_id.is_empty()
-            && !event_source.is_empty()
-            && terminal_success_sources
-                .contains(&(event_task_id.to_string(), event_source.to_string()))
-        {
-            if let Some(log) = logger {
-                let _ = log.note(format!(
-                    "- Ignored late inconsistent failed event task={} source={}",
-                    event_task_id, event_source
-                ));
-            }
-            continue;
-        }
-        // Ingest performer/runtime events into SQLite source-of-truth.
-        let _ = crate::coordinator_storage::append_event_sqlite(&project_paths, &event)?;
-        if event_type != "heartbeat" {
-            continue;
-        }
-        let task_id = event
-            .get("task_id")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        let ts = event
-            .get("ts")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        if task_id.is_empty() || ts.is_empty() {
-            continue;
-        }
-        heartbeat_updates.insert(task_id.to_string(), ts.to_string());
-    }
-
-    let _ = storage.set_cursor("events.jsonl", len, &last_event_id);
-
-    if heartbeat_updates.is_empty() {
-        return Ok(0);
-    }
-
-    let mut registry =
-        crate::coordinator::state::coordinator_state_registry_load(repo_root, &BTreeMap::new())?;
-    let mut updated = 0usize;
-    if let Some(tasks) = registry
-        .get_mut("tasks")
-        .and_then(serde_json::Value::as_array_mut)
-    {
-        for task in tasks {
-            let id = task
-                .get("id")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default();
-            let Some(ts) = heartbeat_updates.get(id) else {
-                continue;
-            };
-            coordinator_engine::ensure_runtime_object(task);
-            task["task_runtime"]["last_heartbeat"] = serde_json::Value::String(ts.clone());
-            updated += 1;
-        }
-    }
-    if updated > 0 {
-        set_registry_updated_at(&mut registry);
-        crate::coordinator::state::coordinator_state_registry_save(
-            repo_root,
-            &BTreeMap::new(),
-            &registry,
-        )?;
-        if let Some(log) = logger {
-            state.heartbeat_updates_since_log += updated;
-            let should_log = state
-                .last_heartbeat_log_at
-                .map(|last| last.elapsed() >= std::time::Duration::from_secs(30))
-                .unwrap_or(true);
-            if should_log {
-                let _ = log.note(format!(
-                    "- Heartbeat updates applied count={} (30s window)",
-                    state.heartbeat_updates_since_log
-                ));
-                state.last_heartbeat_log_at = Some(std::time::Instant::now());
-                state.heartbeat_updates_since_log = 0;
-            }
-        }
-    }
-    Ok(updated)
+pub fn consume_runtime_events(
+    _repo_root: &Path,
+    _state: &mut CoordinatorRunState,
+    _logger: Option<&dyn CoordinatorLog>,
+) -> Result<usize> {
+    Ok(0)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1150,35 +1040,28 @@ pub fn apply_stale_heartbeat_policy(
     let now_ts = now.timestamp();
     let now_iso = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
-    let mut registry =
+    let registry_value =
         crate::coordinator::state::coordinator_state_registry_load(repo_root, &BTreeMap::new())?;
-    let Some(tasks) = registry
-        .get_mut("tasks")
-        .and_then(serde_json::Value::as_array_mut)
-    else {
-        return Ok(0);
-    };
+    let mut registry = TaskRegistry::from_value(&registry_value)?;
 
     let mut stale_ids = Vec::new();
-    for task in tasks.iter_mut() {
-        coordinator_engine::ensure_runtime_object(task);
-        let status = task["task_runtime"]["status"].as_str().unwrap_or_default();
-        if status != "running" {
+    for task in &mut registry.tasks {
+        if task.runtime_status() != crate::coordinator::RuntimeStatus::Running {
             continue;
         }
-        let phase = task["task_runtime"]["current_phase"]
-            .as_str()
-            .unwrap_or("dev")
-            .to_string();
-        let last_ts = task["task_runtime"]["last_heartbeat"]
-            .as_str()
+        let phase = task.current_phase().to_string();
+        let last_ts = task
+            .task_runtime
+            .last_heartbeat
+            .as_deref()
             .filter(|v| !v.is_empty())
             .or_else(|| {
-                task["task_runtime"]["started_at"]
-                    .as_str()
+                task.task_runtime
+                    .started_at
+                    .as_deref()
                     .filter(|v| !v.is_empty())
             })
-            .or_else(|| task.get("updated_at").and_then(serde_json::Value::as_str));
+            .or_else(|| task.updated_at.as_deref());
         let Some(last_ts) = last_ts else {
             continue;
         };
@@ -1190,11 +1073,7 @@ pub fn apply_stale_heartbeat_policy(
             continue;
         }
 
-        let task_id = task
-            .get("id")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .to_string();
+        let task_id = task.id.clone();
         if task_id.is_empty() {
             continue;
         }
@@ -1213,32 +1092,39 @@ pub fn apply_stale_heartbeat_policy(
 
         match action {
             StaleHeartbeatAction::Block => {
-                task["task_runtime"]["status"] = serde_json::Value::String("stale".to_string());
-                task["task_runtime"]["pid"] = serde_json::Value::Null;
-                task["task_runtime"]["last_error"] = serde_json::Value::String(detail.clone());
-                task["state"] = serde_json::Value::String("blocked".to_string());
+                let runtime = task.ensure_runtime();
+                runtime.status = Some("stale".to_string());
+                runtime.pid = None;
+                runtime.last_error = Some(detail.clone());
+                task.state = "blocked".to_string();
             }
             StaleHeartbeatAction::Requeue => {
-                crate::coordinator::state::reset_runtime_to_idle(task);
-                task["task_runtime"]["last_error"] = serde_json::Value::String(detail.clone());
-                task["state"] = serde_json::Value::String("todo".to_string());
-                task["assignee"] = serde_json::Value::Null;
-                task["claimed_at"] = serde_json::Value::Null;
-                task["worktree"] = serde_json::Value::Null;
+                let runtime = task.ensure_runtime();
+                runtime.status = Some("idle".to_string());
+                runtime.pid = None;
+                runtime.current_phase = None;
+                runtime.last_error = Some(detail.clone());
+                task.state = "todo".to_string();
+                task.assignee = None;
+                task.claimed_at = None;
+                task.worktree = None;
             }
             StaleHeartbeatAction::Retry => {
-                increment_runtime_retries(task);
-                crate::coordinator::state::reset_runtime_to_idle(task);
-                task["task_runtime"]["last_error"] = serde_json::Value::String(detail.clone());
-                task["state"] = serde_json::Value::String("todo".to_string());
-                task["assignee"] = serde_json::Value::Null;
-                task["claimed_at"] = serde_json::Value::Null;
-                task["worktree"] = serde_json::Value::Null;
+                let runtime = task.ensure_runtime();
+                runtime.increment_retries();
+                runtime.status = Some("idle".to_string());
+                runtime.pid = None;
+                runtime.current_phase = None;
+                runtime.last_error = Some(detail.clone());
+                task.state = "todo".to_string();
+                task.assignee = None;
+                task.claimed_at = None;
+                task.worktree = None;
             }
         }
 
-        task["updated_at"] = serde_json::Value::String(now_iso.clone());
-        task["state_changed_at"] = serde_json::Value::String(now_iso.clone());
+        task.updated_at = Some(now_iso.clone());
+        task.state_changed_at = Some(now_iso.clone());
         stale_ids.push((task_id, phase));
     }
 
@@ -1246,12 +1132,12 @@ pub fn apply_stale_heartbeat_policy(
         return Ok(0);
     }
 
-    recompute_resource_locks_from_tasks(&mut registry);
-    set_registry_updated_at(&mut registry);
+    registry.recompute_resource_locks(&now_iso);
+    registry.set_updated_at(now_iso.clone());
     crate::coordinator::state::coordinator_state_registry_save(
         repo_root,
         &BTreeMap::new(),
-        &registry,
+        &registry.to_value()?,
     )?;
 
     for (task_id, phase) in &stale_ids {
@@ -1334,24 +1220,6 @@ fn resolve_stale_heartbeat_action(
     }
 }
 
-fn increment_runtime_retries(task: &mut serde_json::Value) {
-    coordinator_engine::ensure_runtime_object(task);
-    if !task
-        .get("task_runtime")
-        .and_then(|v| v.get("metrics"))
-        .map(serde_json::Value::is_object)
-        .unwrap_or(false)
-    {
-        task["task_runtime"]["metrics"] = serde_json::json!({});
-    }
-    let current = task["task_runtime"]["metrics"]["retries"]
-        .as_u64()
-        .unwrap_or(0);
-    let next = current.saturating_add(1);
-    task["task_runtime"]["metrics"]["retries"] = serde_json::Value::from(next);
-    task["task_runtime"]["retries"] = serde_json::Value::from(next);
-}
-
 fn resolve_error_code_retry_list(env_cfg: &CoordinatorEnvConfig) -> Vec<String> {
     let raw = env_cfg
         .error_code_retry_list
@@ -1394,59 +1262,39 @@ pub async fn monitor_merge_jobs_native(
                     &now,
                 )?;
                 if evt.success {
-                    if let Some(task_snapshot) = registry
-                        .get("tasks")
-                        .and_then(serde_json::Value::as_array)
-                        .and_then(|tasks| {
-                            tasks.iter().find(|task| {
-                                task.get("id")
-                                    .and_then(serde_json::Value::as_str)
-                                    .unwrap_or_default()
-                                    == evt.task_id
-                            })
-                        })
-                        .cloned()
-                    {
-                        // Post-merge order is strict:
-                        // 1) switch worktree to base (release task branch)
-                        // 2) cleanup merged task branch
-                        let _ =
-                            switch_worktree_to_base_after_merge(repo_root, &task_snapshot, logger)
-                                .await;
-                        let branch = task_snapshot
-                            .get("worktree")
-                            .and_then(|w| w.get("branch"))
-                            .and_then(serde_json::Value::as_str)
-                            .unwrap_or_default();
-                        let base = task_snapshot
-                            .get("worktree")
-                            .and_then(|w| w.get("base_branch"))
-                            .and_then(serde_json::Value::as_str)
-                            .or_else(|| {
-                                task_snapshot
-                                    .get("base_branch")
-                                    .and_then(serde_json::Value::as_str)
-                            })
-                            .unwrap_or("master");
-                        if !branch.is_empty() && branch != base {
-                            coordinator_runtime::report_branch_cleanup_outcome(
+                    if let Ok(registry_snapshot) = TaskRegistry::from_value(&registry) {
+                        if let Some(task_snapshot) = registry_snapshot.find_task(&evt.task_id) {
+                            // Post-merge order is strict:
+                            // 1) switch worktree to base (release task branch)
+                            // 2) cleanup merged task branch
+                            let _ = switch_worktree_to_base_after_merge(
                                 repo_root,
-                                Some(&evt.task_id),
-                                "integrate",
-                                branch,
-                                base,
-                                "merge_success_post_switch",
-                                coordinator_runtime::cleanup_merged_local_branch(
-                                    repo_root, branch, base,
-                                ),
-                                |event_type, task_id, phase, status, message, severity| {
-                                    let _ = append_coordinator_event_with_severity(
-                                        repo_root, event_type, task_id, phase, status, message,
-                                        severity,
-                                    );
-                                },
-                                |msg| tracing::warn!("{}", msg),
-                            );
+                                task_snapshot,
+                                logger,
+                            )
+                            .await;
+                            let branch = task_snapshot.branch().unwrap_or_default();
+                            let base = task_snapshot.base_branch("master");
+                            if !branch.is_empty() && branch != base {
+                                coordinator_runtime::report_branch_cleanup_outcome(
+                                    repo_root,
+                                    Some(&evt.task_id),
+                                    "integrate",
+                                    branch,
+                                    &base,
+                                    "merge_success_post_switch",
+                                    coordinator_runtime::cleanup_merged_local_branch(
+                                        repo_root, branch, &base,
+                                    ),
+                                    |event_type, task_id, phase, status, message, severity| {
+                                        let _ = append_coordinator_event_with_severity(
+                                            repo_root, event_type, task_id, phase, status, message,
+                                            severity,
+                                        );
+                                    },
+                                    |msg| tracing::warn!("{}", msg),
+                                );
+                            }
                         }
                     }
                     if let Some(log) = logger {
@@ -1491,6 +1339,7 @@ pub async fn dispatch_ready_tasks_native(
     state: &mut CoordinatorRunState,
     logger: Option<&dyn CoordinatorLog>,
 ) -> Result<usize> {
+    ensure_performer_ipc_listener(repo_root, state, logger).await?;
     let mut dispatched = 0usize;
     let mut dispatch_failed_this_cycle: HashSet<String> = HashSet::new();
     let cooldown_seconds = resolve_dispatch_cooldown_seconds();
@@ -1892,44 +1741,32 @@ pub async fn dispatch_ready_tasks_native(
         }
 
         let rollback_claim = |detail: &str| -> Result<()> {
-            let mut rollback_registry = crate::coordinator::state::coordinator_state_registry_load(
-                repo_root,
-                &BTreeMap::new(),
-            )?;
-            if let Some(tasks) = rollback_registry
-                .get_mut("tasks")
-                .and_then(serde_json::Value::as_array_mut)
-            {
-                for task in tasks.iter_mut() {
-                    if task
-                        .get("id")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or_default()
-                        == selected.id
-                    {
-                        task["state"] = serde_json::Value::String("todo".to_string());
-                        task["assignee"] = serde_json::Value::Null;
-                        task["claimed_at"] = serde_json::Value::Null;
-                        task["worktree"] = serde_json::Value::Null;
-                        coordinator_engine::ensure_runtime_object(task);
-                        task["task_runtime"]["status"] =
-                            serde_json::Value::String("idle".to_string());
-                        task["task_runtime"]["pid"] = serde_json::Value::Null;
-                        task["task_runtime"]["current_phase"] = serde_json::Value::Null;
-                        task["task_runtime"]["last_error"] =
-                            serde_json::Value::String(detail.to_string());
-                        task["updated_at"] = serde_json::Value::String(now_iso_coordinator());
-                        task["state_changed_at"] = serde_json::Value::String(now_iso_coordinator());
-                        break;
-                    }
-                }
+            let rollback_registry_value =
+                crate::coordinator::state::coordinator_state_registry_load(
+                    repo_root,
+                    &BTreeMap::new(),
+                )?;
+            let mut rollback_registry = TaskRegistry::from_value(&rollback_registry_value)?;
+            if let Some(task) = rollback_registry.find_task_mut(selected.id.as_str()) {
+                let now = now_iso_coordinator();
+                task.state = "todo".to_string();
+                task.assignee = None;
+                task.claimed_at = None;
+                task.worktree = None;
+                let runtime = task.ensure_runtime();
+                runtime.status = Some("idle".to_string());
+                runtime.pid = None;
+                runtime.current_phase = None;
+                runtime.last_error = Some(detail.to_string());
+                task.updated_at = Some(now.clone());
+                task.state_changed_at = Some(now);
             }
-            recompute_resource_locks_from_tasks(&mut rollback_registry);
-            set_registry_updated_at(&mut rollback_registry);
+            rollback_registry.recompute_resource_locks(&now_iso_coordinator());
+            rollback_registry.set_updated_at(now_iso_coordinator());
             crate::coordinator::state::coordinator_state_registry_save(
                 repo_root,
                 &BTreeMap::new(),
-                &rollback_registry,
+                &rollback_registry.to_value()?,
             )
         };
 
@@ -2245,6 +2082,7 @@ pub async fn dispatch_ready_tasks_native(
             &state.event_tx,
             &mut state.join_set,
             phase_timeout_seconds,
+            state.performer_ipc_addr.as_deref(),
         ) {
             Ok(pid) => pid,
             Err(err) => {

@@ -1,4 +1,3 @@
-use macc_core::coordinator::args::parse_coordinator_extra_kv_args;
 #[cfg(test)]
 use macc_core::coordinator::runtime::CoordinatorRunState;
 #[cfg(test)]
@@ -161,183 +160,6 @@ pub(crate) fn validate_coordinator_runtime_transition_action(args: &[String]) ->
         from.as_str(),
         to.as_str()
     )))
-}
-
-pub(crate) fn coordinator_select_ready_task_action(
-    repo_root: &std::path::Path,
-    extra_args: &[String],
-) -> Result<()> {
-    let args = parse_coordinator_extra_kv_args(extra_args)?;
-    let registry_path = args
-        .get("registry")
-        .map(std::path::PathBuf::from)
-        .map(|p| {
-            if p.is_absolute() {
-                p
-            } else {
-                repo_root.join(p)
-            }
-        })
-        .unwrap_or_else(|| {
-            repo_root
-                .join(".macc")
-                .join("automation")
-                .join("task")
-                .join("task_registry.json")
-        });
-    let registry_raw = std::fs::read_to_string(&registry_path).map_err(|e| MaccError::Io {
-        path: registry_path.to_string_lossy().into(),
-        action: "read task registry for select-ready-task".into(),
-        source: e,
-    })?;
-    let registry: serde_json::Value = serde_json::from_str(&registry_raw).map_err(|e| {
-        MaccError::Validation(format!(
-            "Failed to parse task registry JSON '{}': {}",
-            registry_path.display(),
-            e
-        ))
-    })?;
-
-    let max_parallel_raw = args
-        .get("max-parallel")
-        .cloned()
-        .or_else(|| std::env::var("MAX_PARALLEL").ok())
-        .unwrap_or_else(|| "0".to_string());
-    let default_tool = args
-        .get("default-tool")
-        .cloned()
-        .or_else(|| std::env::var("DEFAULT_TOOL").ok())
-        .unwrap_or_else(|| "codex".to_string());
-    let default_base_branch = args
-        .get("default-base-branch")
-        .cloned()
-        .or_else(|| std::env::var("DEFAULT_BASE_BRANCH").ok())
-        .unwrap_or_else(|| "master".to_string());
-
-    let config = macc_core::coordinator::task_selector::TaskSelectorConfig {
-        enabled_tools: parse_json_string_vec(
-            args.get("enabled-tools-json")
-                .map(String::as_str)
-                .unwrap_or("[]"),
-            "enabled-tools-json",
-        )?,
-        tool_priority: parse_json_string_vec(
-            args.get("tool-priority-json")
-                .map(String::as_str)
-                .unwrap_or("[]"),
-            "tool-priority-json",
-        )?,
-        max_parallel_per_tool: parse_json_string_usize_map(
-            args.get("max-parallel-per-tool-json")
-                .map(String::as_str)
-                .unwrap_or("{}"),
-            "max-parallel-per-tool-json",
-        )?,
-        tool_specializations: parse_json_string_vec_map(
-            args.get("tool-specializations-json")
-                .map(String::as_str)
-                .unwrap_or("{}"),
-            "tool-specializations-json",
-        )?,
-        max_parallel: max_parallel_raw
-            .parse::<usize>()
-            .map_err(|e| MaccError::Validation(format!("Invalid max-parallel value: {}", e)))?,
-        default_tool,
-        default_base_branch,
-    };
-
-    if let Some(selected) =
-        macc_core::coordinator::task_selector::select_next_ready_task(&registry, &config)
-    {
-        println!(
-            "{}\t{}\t{}\t{}",
-            selected.id, selected.title, selected.tool, selected.base_branch
-        );
-    }
-    Ok(())
-}
-
-fn parse_json_string_vec(raw: &str, field_name: &str) -> Result<Vec<String>> {
-    let value: serde_json::Value = serde_json::from_str(raw)
-        .map_err(|e| MaccError::Validation(format!("Invalid JSON for {}: {}", field_name, e)))?;
-    let arr = value
-        .as_array()
-        .ok_or_else(|| MaccError::Validation(format!("{} must be a JSON array", field_name)))?;
-    let mut out = Vec::new();
-    for item in arr {
-        let value = item.as_str().ok_or_else(|| {
-            MaccError::Validation(format!("{} must contain string values only", field_name))
-        })?;
-        if !value.is_empty() {
-            out.push(value.to_string());
-        }
-    }
-    Ok(out)
-}
-
-fn parse_json_string_usize_map(
-    raw: &str,
-    field_name: &str,
-) -> Result<std::collections::HashMap<String, usize>> {
-    let value: serde_json::Value = serde_json::from_str(raw)
-        .map_err(|e| MaccError::Validation(format!("Invalid JSON for {}: {}", field_name, e)))?;
-    let obj = value
-        .as_object()
-        .ok_or_else(|| MaccError::Validation(format!("{} must be a JSON object", field_name)))?;
-    let mut out = std::collections::HashMap::new();
-    for (k, v) in obj {
-        let cap = if let Some(n) = v.as_u64() {
-            n as usize
-        } else if let Some(s) = v.as_str() {
-            s.parse::<usize>().map_err(|e| {
-                MaccError::Validation(format!(
-                    "Invalid numeric value '{}' for key '{}' in {}: {}",
-                    s, k, field_name, e
-                ))
-            })?
-        } else {
-            return Err(MaccError::Validation(format!(
-                "Invalid value type for key '{}' in {}; expected number/string",
-                k, field_name
-            )));
-        };
-        out.insert(k.clone(), cap);
-    }
-    Ok(out)
-}
-
-fn parse_json_string_vec_map(
-    raw: &str,
-    field_name: &str,
-) -> Result<std::collections::HashMap<String, Vec<String>>> {
-    let value: serde_json::Value = serde_json::from_str(raw)
-        .map_err(|e| MaccError::Validation(format!("Invalid JSON for {}: {}", field_name, e)))?;
-    let obj = value
-        .as_object()
-        .ok_or_else(|| MaccError::Validation(format!("{} must be a JSON object", field_name)))?;
-    let mut out = std::collections::HashMap::new();
-    for (k, v) in obj {
-        let arr = v.as_array().ok_or_else(|| {
-            MaccError::Validation(format!(
-                "Value for key '{}' in {} must be an array of strings",
-                k, field_name
-            ))
-        })?;
-        let mut tools = Vec::new();
-        for tool in arr {
-            let value = tool.as_str().ok_or_else(|| {
-                MaccError::Validation(format!(
-                    "Value for key '{}' in {} must contain strings only",
-                    k, field_name
-                ))
-            })?;
-            if !value.is_empty() {
-                tools.push(value.to_string());
-            }
-        }
-        out.insert(k.clone(), tools);
-    }
-    Ok(out)
 }
 
 pub(crate) fn stop_coordinator_process_groups(
@@ -617,19 +439,19 @@ fn coordinator_env_pairs(
 }
 
 #[cfg(test)]
-pub(crate) fn run_coordinator_action(
+pub(crate) fn run_coordinator_command(
     repo_root: &std::path::Path,
     coordinator_path: &std::path::Path,
-    action: &str,
+    command_name: &str,
     extra_args: &[String],
     canonical: &macc_core::config::CanonicalConfig,
     coordinator: Option<&macc_core::config::CoordinatorConfig>,
     env_cfg: &CoordinatorEnvConfig,
 ) -> Result<()> {
-    run_coordinator_action_with_options(
+    run_coordinator_command_with_options(
         repo_root,
         coordinator_path,
-        action,
+        command_name,
         extra_args,
         canonical,
         coordinator,
@@ -639,10 +461,10 @@ pub(crate) fn run_coordinator_action(
 }
 
 #[cfg(test)]
-fn run_coordinator_action_with_options(
+fn run_coordinator_command_with_options(
     repo_root: &std::path::Path,
     coordinator_path: &std::path::Path,
-    action: &str,
+    command_name: &str,
     extra_args: &[String],
     canonical: &macc_core::config::CanonicalConfig,
     coordinator: Option<&macc_core::config::CoordinatorConfig>,
@@ -651,7 +473,7 @@ fn run_coordinator_action_with_options(
 ) -> Result<()> {
     let mut command = std::process::Command::new(coordinator_path);
     command.current_dir(repo_root);
-    command.arg(action);
+    command.arg(command_name);
     command.args(extra_args);
     apply_coordinator_env(&mut command, canonical, coordinator, env_cfg);
     if skip_storage_sync {
@@ -660,14 +482,14 @@ fn run_coordinator_action_with_options(
 
     let status = command.status().map_err(|e| MaccError::Io {
         path: coordinator_path.to_string_lossy().into(),
-        action: format!("run coordinator action '{}'", action),
+        action: format!("run coordinator command '{}'", command_name),
         source: e,
     })?;
     if !status.success() {
-        let hint = coordinator_action_hint(action);
+        let hint = coordinator_command_hint(command_name);
         return Err(MaccError::Validation(format!(
             "Coordinator '{}' failed with status: {}. {}",
-            action, status, hint
+            command_name, status, hint
         )));
     }
     if let Err(err) = macc_core::coordinator::logs::aggregate_performer_logs(repo_root) {
@@ -677,8 +499,8 @@ fn run_coordinator_action_with_options(
 }
 
 #[cfg(test)]
-fn coordinator_action_hint(action: &str) -> &'static str {
-    match action {
+fn coordinator_command_hint(command_name: &str) -> &'static str {
+    match command_name {
         "dispatch" => {
             "Run `macc coordinator status` and inspect logs with `macc logs tail --component coordinator`."
         }
