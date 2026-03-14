@@ -1238,12 +1238,54 @@ pub async fn run_native_control_plane(
         },
         max_no_progress_cycles: 2,
     };
-    let run_result = run_control_plane(&mut backend, loop_cfg).await;
+
+    // Set up graceful shutdown signal handling
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+    
+    #[cfg(unix)]
+    {
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .map_err(|e| MaccError::Io {
+                path: "signal".into(),
+                action: "setup sigterm handler".into(),
+                source: e,
+            })?;
+        let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+            .map_err(|e| MaccError::Io {
+                path: "signal".into(),
+                action: "setup sigint handler".into(),
+                source: e,
+            })?;
+        
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = sigterm.recv() => {
+                    let _ = shutdown_tx.send(true);
+                }
+                _ = sigint.recv() => {
+                    let _ = shutdown_tx.send(true);
+                }
+            }
+        });
+    }
+
+    let run_result = tokio::select! {
+        res = run_control_plane(&mut backend, loop_cfg) => res,
+        _ = shutdown_rx.changed() => {
+            if let Some(log) = logger {
+                let _ = log.note("- Graceful shutdown signal received".to_string());
+            }
+            Ok(())
+        }
+    };
 
     let result_label = if run_result.is_err() {
         "failed"
     } else {
-        if crate::coordinator::state_runtime::read_coordinator_pause_file(repo_root)
+        let is_shutdown = *shutdown_rx.borrow();
+        if is_shutdown {
+            "stopped"
+        } else if crate::coordinator::state_runtime::read_coordinator_pause_file(repo_root)
             .ok()
             .flatten()
             .is_some()
