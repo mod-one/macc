@@ -1,4 +1,5 @@
 use crate::coordinator::model::{ResourceLock, Task, TaskRegistry};
+use crate::coordinator::{CoordinatorCursor, CoordinatorEventPayload, CoordinatorEventRecord};
 use crate::{MaccError, ProjectPaths, Result};
 use chrono::Utc;
 use rusqlite::{params, Connection};
@@ -113,15 +114,15 @@ impl CoordinatorStoragePaths {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CoordinatorSnapshot {
-    pub registry: Value,
-    pub events: Vec<Value>,
-    pub cursor: Option<Value>,
+    pub registry: TaskRegistry,
+    pub events: Vec<CoordinatorEventRecord>,
+    pub cursor: Option<CoordinatorCursor>,
 }
 
 impl CoordinatorSnapshot {
     pub fn empty() -> Self {
         Self {
-            registry: default_registry_value(),
+            registry: default_registry(),
             events: Vec::new(),
             cursor: None,
         }
@@ -199,7 +200,7 @@ pub struct EventMutation {
     pub event_type: String,
     pub phase: String,
     pub status: String,
-    pub payload: Value,
+    pub payload: CoordinatorEventPayload,
 }
 
 #[derive(Debug, Clone)]
@@ -215,10 +216,9 @@ impl JsonStorage {
 
 impl CoordinatorStorage for JsonStorage {
     fn load_snapshot(&self) -> Result<CoordinatorSnapshot> {
-        let registry = read_json_or_default(
+        let registry = read_registry_or_default(
             &self.paths.registry_json_path,
             "read coordinator registry json",
-            default_registry_value(),
         )?;
 
         let mut events = Vec::new();
@@ -233,17 +233,17 @@ impl CoordinatorStorage for JsonStorage {
                 if line.trim().is_empty() {
                     continue;
                 }
-                if let Ok(v) = serde_json::from_str::<Value>(line) {
+                if let Ok(v) = serde_json::from_str::<CoordinatorEventRecord>(line) {
                     events.push(v);
                 }
             }
         }
 
         let cursor = if self.paths.cursor_json_path.exists() {
-            Some(read_json_or_default(
+            Some(read_json_typed_or_default(
                 &self.paths.cursor_json_path,
                 "read coordinator cursor json",
-                json!({}),
+                CoordinatorCursor::default(),
             )?)
         } else {
             None
@@ -316,55 +316,93 @@ impl SqliteStorage {
     }
 
     pub fn append_event(&self, event: &Value) -> Result<bool> {
+        let record =
+            CoordinatorEventRecord::from_value(event.clone()).map_err(MaccError::Validation)?;
+        self.append_event_record(&record)
+    }
+
+    pub fn append_event_record(&self, event: &CoordinatorEventRecord) -> Result<bool> {
         let mut conn = self.open()?;
         self.init_schema(&conn)?;
         let tx = conn.transaction().map_err(sql_err)?;
-        let mutation = EventMutation {
-            event_id: event
-                .get("event_id")
-                .and_then(|v| v.as_str())
-                .map(|v| v.to_string()),
-            run_id: event
-                .get("run_id")
-                .and_then(|v| v.as_str())
-                .map(|v| v.to_string()),
-            seq: event.get("seq").and_then(|v| v.as_i64()),
-            ts: event
-                .get("ts")
-                .and_then(|v| v.as_str())
-                .map(|v| v.to_string()),
-            source: event
-                .get("source")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            task_id: event
-                .get("task_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            event_type: event
-                .get("type")
-                .or_else(|| event.get("event"))
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            phase: event
-                .get("phase")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            status: event
-                .get("status")
-                .or_else(|| event.get("state"))
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-            payload: event.get("payload").cloned().unwrap_or_else(|| json!({})),
-        };
-        let inserted = self.append_event_in_tx(&tx, &mutation)?;
+        let inserted = self.append_event_record_in_tx(&tx, event)?;
         tx.commit().map_err(sql_err)?;
         Ok(inserted)
+    }
+
+    fn append_event_record_in_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        event: &CoordinatorEventRecord,
+    ) -> Result<bool> {
+        let now = now_iso_string();
+        let seq = if event.seq == 0 {
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        } else {
+            event.seq
+        };
+        let ts = if event.ts.trim().is_empty() {
+            now.as_str()
+        } else {
+            event.ts.as_str()
+        };
+        let run_id = event
+            .run_id
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.to_string())
+            .or_else(|| std::env::var("COORDINATOR_RUN_ID").ok())
+            .unwrap_or_else(|| {
+                format!(
+                    "run-{}-{}",
+                    Utc::now().timestamp_nanos_opt().unwrap_or_default(),
+                    std::process::id()
+                )
+            });
+        let event_id = if event.event_id.trim().is_empty() {
+            format!(
+                "evt-{}-{}-{}",
+                event.event_type,
+                event.task_id.as_deref().unwrap_or_default(),
+                seq
+            )
+        } else {
+            event.event_id.clone()
+        };
+        let mut raw_event = event.clone();
+        raw_event.schema_version = if raw_event.schema_version.trim().is_empty() {
+            crate::coordinator::COORDINATOR_EVENT_SCHEMA_VERSION.to_string()
+        } else {
+            raw_event.schema_version
+        };
+        raw_event.event_id = event_id.clone();
+        raw_event.run_id = Some(run_id.clone());
+        raw_event.seq = seq;
+        raw_event.ts = ts.to_string();
+        let payload_raw = serde_json::to_string(&raw_event.payload).map_err(|e| {
+            MaccError::Validation(format!("Failed to serialize event payload: {}", e))
+        })?;
+        let raw_json = serde_json::to_string(&raw_event)
+            .map_err(|e| MaccError::Validation(format!("Failed to serialize event json: {}", e)))?;
+        let inserted = tx
+            .execute(
+                "INSERT OR IGNORE INTO events (event_id, seq, ts, source, task_id, event_type, phase, status, payload_json, raw_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    event_id,
+                    seq,
+                    ts,
+                    raw_event.source,
+                    raw_event.task_id,
+                    raw_event.event_type,
+                    raw_event.phase,
+                    raw_event.status,
+                    payload_raw,
+                    raw_json
+                ],
+            )
+            .map_err(sql_err)?;
+        Ok(inserted > 0)
     }
 
     fn append_event_in_tx(
@@ -396,7 +434,7 @@ impl SqliteStorage {
             .filter(|s| !s.trim().is_empty())
             .map(|s| s.to_string())
             .unwrap_or_else(|| format!("evt-{}-{}-{}", event.event_type, event.task_id, seq));
-        let payload_raw = serde_json::to_string(&event.payload).map_err(|e| {
+        let payload_raw = serde_json::to_string(event.payload.as_value()).map_err(|e| {
             MaccError::Validation(format!("Failed to serialize event payload: {}", e))
         })?;
         let raw_json = serde_json::to_string(&json!({
@@ -410,7 +448,7 @@ impl SqliteStorage {
             "type": event.event_type,
             "phase": event.phase,
             "status": event.status,
-            "payload": event.payload
+            "payload": event.payload.as_value()
         }))
         .map_err(|e| MaccError::Validation(format!("Failed to serialize event json: {}", e)))?;
 
@@ -531,10 +569,17 @@ impl SqliteStorage {
         let conn = self.open()?;
         self.init_schema(&conn)?;
         let now = chrono::Utc::now().to_rfc3339();
+        let payload_json = serde_json::to_string(&CoordinatorCursor {
+            offset,
+            last_event_id: (!last_id.is_empty()).then(|| last_id.to_string()),
+            updated_at: Some(now.clone()),
+            ..CoordinatorCursor::default()
+        })
+        .map_err(|e| MaccError::Validation(format!("Failed to serialize cursor payload: {}", e)))?;
         conn.execute(
             "INSERT INTO cursors (name, offset, last_event_id, updated_at, payload_json) VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(name) DO UPDATE SET offset=?2, last_event_id=?3, updated_at=?4",
-            rusqlite::params![name, offset as i64, last_id, now, "{}"],
+            rusqlite::params![name, offset as i64, last_id, now, payload_json],
         )
         .map_err(sql_err)?;
         Ok(())
@@ -571,17 +616,14 @@ impl SqliteStorage {
         }
 
         if change.new_state == "changes_requested" {
-            let mut review = task.review.take().unwrap_or_else(|| json!({}));
-            if !review.is_object() {
-                review = json!({});
-            }
-            review["changed"] = Value::Bool(true);
-            review["last_reviewed_at"] = Value::String(change.now.clone());
+            let mut review = task.review.take().unwrap_or_default();
+            review.changed = Some(true);
+            review.last_reviewed_at = Some(change.now.clone());
             if !change.reviewer.is_empty() {
-                review["reviewer"] = Value::String(change.reviewer.clone());
+                review.reviewer = Some(change.reviewer.clone());
             }
             if !change.reason.is_empty() {
-                review["reason"] = Value::String(change.reason.clone());
+                review.reason = Some(change.reason.clone());
             }
             task.review = Some(review);
         }
@@ -649,13 +691,6 @@ impl SqliteStorage {
             )
             .map_err(sql_err)?;
         let mut task = parse_task_payload(&change.task_id, &task_raw)?;
-
-        if task.task_runtime.metrics.is_none() {
-            task.task_runtime.metrics = Some(json!({}));
-        }
-        if task.task_runtime.slo_warnings.is_none() {
-            task.task_runtime.slo_warnings = Some(json!({}));
-        }
 
         task.task_runtime.status = Some(change.runtime_status.clone());
         if !change.phase.is_empty() {
@@ -822,23 +857,7 @@ impl SqliteStorage {
             )
             .map_err(sql_err)?;
         let mut task = parse_task_payload(&change.task_id, &task_raw)?;
-        let mut metrics = task
-            .task_runtime
-            .metrics
-            .take()
-            .unwrap_or_else(|| json!({}));
-        if !metrics.is_object() {
-            metrics = json!({});
-        }
-        let current = metrics
-            .get("retries")
-            .and_then(Value::as_i64)
-            .or(task.task_runtime.retries)
-            .unwrap_or(0);
-        let next = current + 1;
-        metrics["retries"] = Value::from(next);
-        task.task_runtime.metrics = Some(metrics);
-        task.task_runtime.retries = Some(next);
+        task.task_runtime.increment_retries();
         task.updated_at = Some(change.now.clone());
 
         let state = task.state.clone();
@@ -872,22 +891,13 @@ impl SqliteStorage {
             )
             .map_err(sql_err)?;
         let mut task = parse_task_payload(&change.task_id, &task_raw)?;
-        let mut slo_warnings = task
-            .task_runtime
-            .slo_warnings
-            .take()
-            .unwrap_or_else(|| json!({}));
-        if !slo_warnings.is_object() {
-            slo_warnings = json!({});
-        }
-        slo_warnings[&change.metric] = json!({
-            "metric": change.metric,
-            "threshold": change.threshold,
-            "value": change.value,
-            "warned_at": change.now,
-            "suggestion": change.suggestion,
-        });
-        task.task_runtime.slo_warnings = Some(slo_warnings);
+        task.task_runtime.upsert_slo_warning(
+            &change.metric,
+            change.threshold,
+            change.value,
+            &change.suggestion,
+            &change.now,
+        );
         task.updated_at = Some(change.now.clone());
 
         let state = task.state.clone();
@@ -1040,7 +1050,7 @@ impl SqliteStorage {
         Ok(())
     }
 
-    fn load_registry_from_tables(&self, conn: &Connection) -> Result<Value> {
+    fn load_registry_from_tables(&self, conn: &Connection) -> Result<TaskRegistry> {
         let mut registry = TaskRegistry::default();
         let mut stmt = conn
             .prepare("SELECT payload_json FROM tasks ORDER BY task_id")
@@ -1083,7 +1093,7 @@ impl SqliteStorage {
             .extra
             .entry("state_mapping".into())
             .or_insert_with(|| json!({}));
-        registry.to_value()
+        Ok(registry)
     }
 }
 
@@ -1097,7 +1107,7 @@ impl CoordinatorStorage for SqliteStorage {
             [],
             |row| row.get::<_, String>(0),
         ) {
-            Ok(raw) => Some(serde_json::from_str::<Value>(&raw).map_err(|e| {
+            Ok(raw) => Some(serde_json::from_str::<TaskRegistry>(&raw).map_err(|e| {
                 MaccError::Validation(format!("Failed to parse registry_json metadata: {}", e))
             })?),
             Err(rusqlite::Error::QueryReturnedNoRows) => None,
@@ -1105,32 +1115,28 @@ impl CoordinatorStorage for SqliteStorage {
         };
         let mut registry = self.load_registry_from_tables(&conn)?;
         if let Some(meta) = metadata_registry {
-            let table_tasks_len = registry
-                .get("tasks")
-                .and_then(Value::as_array)
-                .map(|v| v.len())
-                .unwrap_or(0);
-            let meta_tasks_len = meta
-                .get("tasks")
-                .and_then(Value::as_array)
-                .map(|v| v.len())
-                .unwrap_or(0);
+            let TaskRegistry {
+                tasks: meta_tasks,
+                resource_locks: meta_resource_locks,
+                updated_at: meta_updated_at,
+                extra: meta_extra,
+            } = meta;
+            let table_tasks_len = registry.tasks.len();
+            let meta_tasks_len = meta_tasks.len();
             if table_tasks_len == 0 && meta_tasks_len > 0 {
-                registry = meta;
+                registry = TaskRegistry {
+                    tasks: meta_tasks,
+                    resource_locks: meta_resource_locks,
+                    updated_at: meta_updated_at,
+                    extra: meta_extra,
+                };
             } else {
-                for key in [
-                    "lot",
-                    "version",
-                    "generated_at",
-                    "timezone",
-                    "priority_mapping",
-                    "state_mapping",
-                    "processed_event_ids",
-                    "updated_at",
-                ] {
-                    if let Some(value) = meta.get(key) {
-                        registry[key] = value.clone();
-                    }
+                if registry.resource_locks.is_empty() && !meta_resource_locks.is_empty() {
+                    registry.resource_locks = meta_resource_locks;
+                }
+                registry.updated_at = meta_updated_at.or(registry.updated_at);
+                for (key, value) in meta_extra {
+                    registry.extra.insert(key, value);
                 }
             }
         }
@@ -1144,7 +1150,7 @@ impl CoordinatorStorage for SqliteStorage {
             .map_err(sql_err)?;
         for row in rows {
             let raw = row.map_err(sql_err)?;
-            if let Ok(v) = serde_json::from_str::<Value>(&raw) {
+            if let Ok(v) = serde_json::from_str::<CoordinatorEventRecord>(&raw) {
                 events.push(v);
             }
         }
@@ -1154,9 +1160,11 @@ impl CoordinatorStorage for SqliteStorage {
             [],
             |row| row.get::<_, String>(0),
         ) {
-            Ok(raw) => Some(serde_json::from_str::<Value>(&raw).map_err(|e| {
-                MaccError::Validation(format!("Failed to parse cursor payload_json: {}", e))
-            })?),
+            Ok(raw) => Some(
+                serde_json::from_str::<CoordinatorCursor>(&raw).map_err(|e| {
+                    MaccError::Validation(format!("Failed to parse cursor payload_json: {}", e))
+                })?,
+            ),
             Err(rusqlite::Error::QueryReturnedNoRows) => None,
             Err(e) => return Err(sql_err(e)),
         };
@@ -1192,8 +1200,7 @@ impl CoordinatorStorage for SqliteStorage {
         )
         .map_err(sql_err)?;
 
-        let registry = TaskRegistry::from_value(&snapshot.registry)?;
-        for task in &registry.tasks {
+        for task in &snapshot.registry.tasks {
             let task_id = task.id.clone();
             if task_id.is_empty() {
                 continue;
@@ -1295,7 +1302,7 @@ impl CoordinatorStorage for SqliteStorage {
             }
         }
 
-        for (resource, lock_value) in &registry.resource_locks {
+        for (resource, lock_value) in &snapshot.registry.resource_locks {
             let task_id = lock_value.task_id.as_str();
             let worktree_path = lock_value.worktree_path.as_str();
             let locked_at = lock_value.locked_at.as_str();
@@ -1311,31 +1318,23 @@ impl CoordinatorStorage for SqliteStorage {
         }
 
         for (idx, event) in snapshot.events.iter().enumerate() {
-            let event_id = event
-                .get("event_id")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| format!("event-{}", idx + 1));
-            let seq = event
-                .get("seq")
-                .and_then(|v| v.as_i64())
-                .unwrap_or((idx + 1) as i64);
-            let ts = event.get("ts").and_then(|v| v.as_str()).unwrap_or("");
-            let source = event.get("source").and_then(|v| v.as_str()).unwrap_or("");
-            let task_id = event.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
-            let event_type = event
-                .get("type")
-                .or_else(|| event.get("event"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let phase = event.get("phase").and_then(|v| v.as_str()).unwrap_or("");
-            let status = event
-                .get("status")
-                .or_else(|| event.get("state"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let payload = event.get("payload").cloned().unwrap_or_else(|| json!({}));
+            let event_id = if event.event_id.is_empty() {
+                format!("event-{}", idx + 1)
+            } else {
+                event.event_id.clone()
+            };
+            let seq = if event.seq == 0 {
+                (idx + 1) as i64
+            } else {
+                event.seq
+            };
+            let ts = event.ts.as_str();
+            let source = event.source.as_str();
+            let task_id = event.task_id.as_deref().unwrap_or("");
+            let event_type = event.event_type.as_str();
+            let phase = event.phase.as_deref().unwrap_or("");
+            let status = event.status.as_str();
+            let payload = event.payload.clone();
             let payload_raw = serde_json::to_string(&payload).map_err(|e| {
                 MaccError::Validation(format!("Failed to serialize event payload: {}", e))
             })?;
@@ -1365,17 +1364,11 @@ impl CoordinatorStorage for SqliteStorage {
             let cursor_raw = serde_json::to_string(cursor).map_err(|e| {
                 MaccError::Validation(format!("Failed to serialize cursor payload: {}", e))
             })?;
-            let path = cursor.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            let inode = cursor.get("inode").and_then(|v| v.as_i64()).unwrap_or(0);
-            let offset = cursor.get("offset").and_then(|v| v.as_i64()).unwrap_or(0);
-            let last_event_id = cursor
-                .get("last_event_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let updated_at = cursor
-                .get("updated_at")
-                .and_then(|v| v.as_str())
-                .unwrap_or(now.as_str());
+            let path = cursor.path.as_deref().unwrap_or("");
+            let inode = cursor.inode.unwrap_or(0);
+            let offset = i64::try_from(cursor.offset).unwrap_or(i64::MAX);
+            let last_event_id = cursor.last_event_id.as_deref().unwrap_or("");
+            let updated_at = cursor.updated_at.as_deref().unwrap_or(now.as_str());
             tx.execute(
                 "INSERT INTO cursors (name, path, inode, offset, last_event_id, updated_at, payload_json)
                  VALUES ('coordinator', ?1, ?2, ?3, ?4, ?5, ?6)",
@@ -1463,6 +1456,15 @@ pub fn append_event_sqlite(project_paths: &ProjectPaths, event: &Value) -> Resul
     sqlite.append_event(event)
 }
 
+pub fn append_event_record_sqlite(
+    project_paths: &ProjectPaths,
+    event: &CoordinatorEventRecord,
+) -> Result<bool> {
+    let paths = CoordinatorStoragePaths::from_project_paths(project_paths);
+    let sqlite = SqliteStorage::new(paths);
+    sqlite.append_event_record(event)
+}
+
 pub fn apply_transition_sqlite(
     project_paths: &ProjectPaths,
     change: &TransitionMutation,
@@ -1530,6 +1532,7 @@ pub fn upsert_slo_warning_sqlite(
     sqlite.upsert_slo_warning(change)
 }
 
+#[cfg(test)]
 fn read_json_or_default(path: &Path, action: &str, default: Value) -> Result<Value> {
     if !path.exists() {
         return Ok(default);
@@ -1540,6 +1543,35 @@ fn read_json_or_default(path: &Path, action: &str, default: Value) -> Result<Val
         source: e,
     })?;
     serde_json::from_str::<Value>(&raw)
+        .map_err(|e| MaccError::Validation(format!("Failed to parse {}: {}", path.display(), e)))
+}
+
+fn read_json_typed_or_default<T>(path: &Path, action: &str, default: T) -> Result<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    if !path.exists() {
+        return Ok(default);
+    }
+    let raw = fs::read_to_string(path).map_err(|e| MaccError::Io {
+        path: path.to_string_lossy().into(),
+        action: action.into(),
+        source: e,
+    })?;
+    serde_json::from_str::<T>(&raw)
+        .map_err(|e| MaccError::Validation(format!("Failed to parse {}: {}", path.display(), e)))
+}
+
+fn read_registry_or_default(path: &Path, action: &str) -> Result<TaskRegistry> {
+    if !path.exists() {
+        return Ok(default_registry());
+    }
+    let raw = fs::read_to_string(path).map_err(|e| MaccError::Io {
+        path: path.to_string_lossy().into(),
+        action: action.into(),
+        source: e,
+    })?;
+    serde_json::from_str::<TaskRegistry>(&raw)
         .map_err(|e| MaccError::Validation(format!("Failed to parse {}: {}", path.display(), e)))
 }
 
@@ -1570,7 +1602,7 @@ fn write_text_atomic(path: &Path, content: &str) -> Result<()> {
     Ok(())
 }
 
-fn write_json_atomic(path: &Path, value: &Value) -> Result<()> {
+fn write_json_atomic<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
     let content = serde_json::to_string_pretty(value)
         .map_err(|e| MaccError::Validation(format!("Failed to serialize json: {}", e)))?;
     write_text_atomic(path, &content)
@@ -1587,15 +1619,17 @@ fn is_active_state(state: &str) -> bool {
     )
 }
 
-fn default_registry_value() -> Value {
-    json!({
-        "schema_version": 1,
-        "tasks": [],
-        "processed_event_ids": {},
-        "resource_locks": {},
-        "state_mapping": {},
-        "updated_at": now_iso_string(),
-    })
+fn default_registry() -> TaskRegistry {
+    let mut registry = TaskRegistry::default();
+    registry.updated_at = Some(now_iso_string());
+    registry
+        .extra
+        .insert("schema_version".into(), Value::from(1));
+    registry
+        .extra
+        .insert("processed_event_ids".into(), json!({}));
+    registry.extra.insert("state_mapping".into(), json!({}));
+    registry
 }
 
 fn parse_task_payload(task_id: &str, raw: &str) -> Result<Task> {
@@ -1673,13 +1707,14 @@ mod tests {
         .unwrap();
         write_json_atomic(
             &paths.cursor_json_path,
-            &json!({
-                "path": paths.events_jsonl_path.to_string_lossy().to_string(),
-                "inode": 1,
-                "offset": 100,
-                "last_event_id": "evt-1",
-                "updated_at": "2026-02-20T00:00:01Z"
-            }),
+            &CoordinatorCursor {
+                path: Some(paths.events_jsonl_path.to_string_lossy().to_string()),
+                inode: Some(1),
+                offset: 100,
+                last_event_id: Some("evt-1".to_string()),
+                updated_at: Some("2026-02-20T00:00:01Z".to_string()),
+                extra: Default::default(),
+            },
         )
         .unwrap();
     }
@@ -1759,18 +1794,10 @@ mod tests {
             .load_snapshot()
             .unwrap();
         let cursor = sqlite_snapshot.cursor.expect("cursor from sqlite");
+        assert_eq!(cursor.offset, 100, "cursor offset must roundtrip",);
+        assert_eq!(cursor.inode, Some(1), "cursor inode must roundtrip",);
         assert_eq!(
-            cursor.get("offset").and_then(|v| v.as_i64()),
-            Some(100),
-            "cursor offset must roundtrip",
-        );
-        assert_eq!(
-            cursor.get("inode").and_then(|v| v.as_i64()),
-            Some(1),
-            "cursor inode must roundtrip",
-        );
-        assert_eq!(
-            cursor.get("last_event_id").and_then(|v| v.as_str()),
+            cursor.last_event_id.as_deref(),
             Some("evt-1"),
             "cursor last_event_id must roundtrip",
         );
@@ -1872,40 +1899,22 @@ mod tests {
         assert_eq!(baseline_snapshot.registry, migrated_snapshot.registry);
         assert_eq!(baseline_snapshot.events, migrated_snapshot.events);
         assert_eq!(
-            baseline_snapshot
-                .cursor
-                .as_ref()
-                .and_then(|c| c.get("offset"))
-                .cloned(),
-            migrated_snapshot
-                .cursor
-                .as_ref()
-                .and_then(|c| c.get("offset"))
-                .cloned()
+            baseline_snapshot.cursor.as_ref().map(|c| c.offset),
+            migrated_snapshot.cursor.as_ref().map(|c| c.offset)
+        );
+        assert_eq!(
+            baseline_snapshot.cursor.as_ref().and_then(|c| c.inode),
+            migrated_snapshot.cursor.as_ref().and_then(|c| c.inode)
         );
         assert_eq!(
             baseline_snapshot
                 .cursor
                 .as_ref()
-                .and_then(|c| c.get("inode"))
-                .cloned(),
+                .and_then(|c| c.last_event_id.clone()),
             migrated_snapshot
                 .cursor
                 .as_ref()
-                .and_then(|c| c.get("inode"))
-                .cloned()
-        );
-        assert_eq!(
-            baseline_snapshot
-                .cursor
-                .as_ref()
-                .and_then(|c| c.get("last_event_id"))
-                .cloned(),
-            migrated_snapshot
-                .cursor
-                .as_ref()
-                .and_then(|c| c.get("last_event_id"))
-                .cloned()
+                .and_then(|c| c.last_event_id.clone())
         );
 
         sync_coordinator_storage(
@@ -1992,41 +2001,18 @@ mod tests {
             event_type: "phase_result".to_string(),
             phase: "dev".to_string(),
             status: "done".to_string(),
-            payload: json!({"message":"phase done"}),
+            payload: json!({"message":"phase done"}).into(),
         };
         set_runtime_sqlite_with_event(&project_paths, &runtime, Some(&event)).unwrap();
         set_runtime_sqlite_with_event(&project_paths, &runtime, Some(&event)).unwrap();
 
         let snapshot = SqliteStorage::new(storage_paths).load_snapshot().unwrap();
-        let task = snapshot
-            .registry
-            .get("tasks")
-            .and_then(Value::as_array)
-            .and_then(|tasks| {
-                tasks.iter().find(|t| {
-                    t.get("id")
-                        .and_then(Value::as_str)
-                        .map(|id| id == "TASK-1")
-                        .unwrap_or(false)
-                })
-            })
-            .cloned()
-            .unwrap();
-        assert_eq!(
-            task.get("task_runtime")
-                .and_then(|v| v.get("status"))
-                .and_then(Value::as_str),
-            Some("phase_done")
-        );
+        let task = snapshot.registry.find_task("TASK-1").unwrap();
+        assert_eq!(task.task_runtime.status.as_deref(), Some("phase_done"));
         let matching_events = snapshot
             .events
             .iter()
-            .filter(|e| {
-                e.get("event_id")
-                    .and_then(Value::as_str)
-                    .map(|id| id == "evt-runtime-done-1")
-                    .unwrap_or(false)
-            })
+            .filter(|e| e.event_id == "evt-runtime-done-1")
             .count();
         assert_eq!(matching_events, 1, "event insert must stay idempotent");
 

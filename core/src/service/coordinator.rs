@@ -23,14 +23,14 @@ pub struct CoordinatorStopResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CoordinatorManagedPoll {
+pub enum CoordinatorManagedCommandPoll {
     Idle,
     Running {
-        action: String,
+        command: String,
         elapsed_secs: u64,
     },
     Exited {
-        action: String,
+        command: String,
         success: bool,
         code: Option<i32>,
         elapsed_secs: u64,
@@ -38,18 +38,18 @@ pub enum CoordinatorManagedPoll {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CoordinatorManagedActionState {
+pub enum CoordinatorManagedCommandState {
     Idle,
     Running {
-        action: String,
+        command: String,
         elapsed_secs: u64,
     },
     Succeeded {
-        action: String,
+        command: String,
         elapsed_secs: u64,
     },
     Failed {
-        action: String,
+        command: String,
         elapsed_secs: u64,
         reason: String,
         task_id: Option<String>,
@@ -61,9 +61,9 @@ struct ManagedCoordinatorProcess {
     child: Child,
 }
 
-struct ManagedCoordinatorAction {
+struct ManagedCoordinatorCommand {
     handle: CoordinatorProcessHandle,
-    action: String,
+    command: String,
     started_at: Instant,
 }
 
@@ -77,8 +77,8 @@ fn process_id_gen() -> &'static AtomicU64 {
     ID.get_or_init(|| AtomicU64::new(1))
 }
 
-fn managed_actions_by_root() -> &'static Mutex<HashMap<String, ManagedCoordinatorAction>> {
-    static TABLE: OnceLock<Mutex<HashMap<String, ManagedCoordinatorAction>>> = OnceLock::new();
+fn managed_commands_by_root() -> &'static Mutex<HashMap<String, ManagedCoordinatorCommand>> {
+    static TABLE: OnceLock<Mutex<HashMap<String, ManagedCoordinatorCommand>>> = OnceLock::new();
     TABLE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -86,23 +86,23 @@ fn root_key(paths: &ProjectPaths) -> String {
     paths.root.to_string_lossy().into_owned()
 }
 
-pub fn coordinator_start_managed_action_process(
+pub fn coordinator_start_managed_command_process(
     paths: &ProjectPaths,
-    action: &str,
+    command: &str,
     args: &[String],
     cfg: Option<&CoordinatorConfig>,
 ) -> Result<()> {
     let key = root_key(paths);
     {
-        let mut table = managed_actions_by_root().lock().map_err(|_| {
-            MaccError::Validation("coordinator managed actions table lock poisoned".into())
+        let mut table = managed_commands_by_root().lock().map_err(|_| {
+            MaccError::Validation("coordinator managed commands table lock poisoned".into())
         })?;
         if let Some(existing) = table.get(&key) {
-            match coordinator_poll_action_process(existing.handle)? {
+            match coordinator_poll_command_process(existing.handle)? {
                 CoordinatorProcessPoll::Running => {
                     return Err(MaccError::Validation(format!(
-                        "coordinator action '{}' is already running for this project",
-                        existing.action
+                        "coordinator command '{}' is already running for this project",
+                        existing.command
                     )));
                 }
                 CoordinatorProcessPoll::Exited { .. } => {
@@ -112,43 +112,43 @@ pub fn coordinator_start_managed_action_process(
         }
     }
 
-    let handle = coordinator_start_action_process(paths, action, args, cfg)?;
-    let mut table = managed_actions_by_root().lock().map_err(|_| {
-        MaccError::Validation("coordinator managed actions table lock poisoned".into())
+    let handle = coordinator_start_command_process(paths, command, args, cfg)?;
+    let mut table = managed_commands_by_root().lock().map_err(|_| {
+        MaccError::Validation("coordinator managed commands table lock poisoned".into())
     })?;
     table.insert(
         key,
-        ManagedCoordinatorAction {
+        ManagedCoordinatorCommand {
             handle,
-            action: action.to_string(),
+            command: command.to_string(),
             started_at: Instant::now(),
         },
     );
     Ok(())
 }
 
-pub fn coordinator_poll_managed_action_process(
+pub fn coordinator_poll_managed_command_process(
     paths: &ProjectPaths,
-) -> Result<CoordinatorManagedPoll> {
+) -> Result<CoordinatorManagedCommandPoll> {
     let key = root_key(paths);
-    let mut table = managed_actions_by_root().lock().map_err(|_| {
-        MaccError::Validation("coordinator managed actions table lock poisoned".into())
+    let mut table = managed_commands_by_root().lock().map_err(|_| {
+        MaccError::Validation("coordinator managed commands table lock poisoned".into())
     })?;
     let Some(entry) = table.get(&key) else {
-        return Ok(CoordinatorManagedPoll::Idle);
+        return Ok(CoordinatorManagedCommandPoll::Idle);
     };
     let handle = entry.handle;
-    let action = entry.action.clone();
+    let command = entry.command.clone();
     let elapsed_secs = entry.started_at.elapsed().as_secs();
-    match coordinator_poll_action_process(handle)? {
-        CoordinatorProcessPoll::Running => Ok(CoordinatorManagedPoll::Running {
-            action,
+    match coordinator_poll_command_process(handle)? {
+        CoordinatorProcessPoll::Running => Ok(CoordinatorManagedCommandPoll::Running {
+            command,
             elapsed_secs,
         }),
         CoordinatorProcessPoll::Exited { success, code } => {
             table.remove(&key);
-            Ok(CoordinatorManagedPoll::Exited {
-                action,
+            Ok(CoordinatorManagedCommandPoll::Exited {
+                command,
                 success,
                 code,
                 elapsed_secs,
@@ -157,27 +157,27 @@ pub fn coordinator_poll_managed_action_process(
     }
 }
 
-pub fn coordinator_poll_managed_action_state(
+pub fn coordinator_poll_managed_command_state(
     paths: &ProjectPaths,
-) -> Result<CoordinatorManagedActionState> {
-    match coordinator_poll_managed_action_process(paths)? {
-        CoordinatorManagedPoll::Idle => Ok(CoordinatorManagedActionState::Idle),
-        CoordinatorManagedPoll::Running {
-            action,
+) -> Result<CoordinatorManagedCommandState> {
+    match coordinator_poll_managed_command_process(paths)? {
+        CoordinatorManagedCommandPoll::Idle => Ok(CoordinatorManagedCommandState::Idle),
+        CoordinatorManagedCommandPoll::Running {
+            command,
             elapsed_secs,
-        } => Ok(CoordinatorManagedActionState::Running {
-            action,
+        } => Ok(CoordinatorManagedCommandState::Running {
+            command,
             elapsed_secs,
         }),
-        CoordinatorManagedPoll::Exited {
-            action,
+        CoordinatorManagedCommandPoll::Exited {
+            command,
             success,
             code,
             elapsed_secs,
         } => {
             if success {
-                return Ok(CoordinatorManagedActionState::Succeeded {
-                    action,
+                return Ok(CoordinatorManagedCommandState::Succeeded {
+                    command,
                     elapsed_secs,
                 });
             }
@@ -188,13 +188,13 @@ pub fn coordinator_poll_managed_action_state(
                 .unwrap_or_else(|| {
                     format!(
                         "Coordinator '{}' failed ({})",
-                        action,
+                        command,
                         code.map(|v| format!("exit status: {}", v))
                             .unwrap_or_else(|| "unknown exit status".to_string())
                     )
                 });
-            Ok(CoordinatorManagedActionState::Failed {
-                action,
+            Ok(CoordinatorManagedCommandState::Failed {
+                command,
                 elapsed_secs,
                 reason,
                 task_id: failure.as_ref().and_then(|f| f.task_id.clone()),
@@ -204,13 +204,13 @@ pub fn coordinator_poll_managed_action_state(
     }
 }
 
-pub fn coordinator_stop_managed_action_process(
+pub fn coordinator_stop_managed_command_process(
     paths: &ProjectPaths,
     graceful: bool,
 ) -> Result<CoordinatorStopResult> {
     let key = root_key(paths);
-    let mut table = managed_actions_by_root().lock().map_err(|_| {
-        MaccError::Validation("coordinator managed actions table lock poisoned".into())
+    let mut table = managed_commands_by_root().lock().map_err(|_| {
+        MaccError::Validation("coordinator managed commands table lock poisoned".into())
     })?;
     let Some(entry) = table.remove(&key) else {
         return Ok(CoordinatorStopResult {
@@ -218,20 +218,20 @@ pub fn coordinator_stop_managed_action_process(
             used_group: false,
         });
     };
-    coordinator_stop_action_process(entry.handle, graceful)
+    coordinator_stop_command_process(entry.handle, graceful)
 }
 
-pub fn coordinator_start_action_process(
+pub fn coordinator_start_command_process(
     paths: &ProjectPaths,
-    action: &str,
+    command: &str,
     args: &[String],
     cfg: Option<&CoordinatorConfig>,
 ) -> Result<CoordinatorProcessHandle> {
     let root = &paths.root;
-    let mut cmd = if action == "run" {
+    let mut cmd = if command == "run" {
         let current_exe = std::env::current_exe().map_err(|e| MaccError::Io {
             path: root.to_string_lossy().into(),
-            action: "resolve current executable for coordinator run".into(),
+            action: "resolve current executable for coordinator command".into(),
             source: e,
         })?;
         let mut cmd = Command::new(current_exe);
@@ -254,7 +254,7 @@ pub fn coordinator_start_action_process(
         }
         let mut cmd = Command::new(script);
         cmd.current_dir(root)
-            .arg(action)
+            .arg(command)
             .args(args)
             .env("REPO_DIR", root);
         apply_coordinator_env_overrides(&mut cmd, cfg);
@@ -264,7 +264,7 @@ pub fn coordinator_start_action_process(
     cmd.stdout(Stdio::null()).stderr(Stdio::null());
     let child = cmd.spawn().map_err(|e| MaccError::Io {
         path: root.to_string_lossy().into(),
-        action: format!("spawn coordinator '{}'", action),
+        action: format!("spawn coordinator command '{}'", command),
         source: e,
     })?;
 
@@ -277,7 +277,7 @@ pub fn coordinator_start_action_process(
     Ok(handle)
 }
 
-pub fn coordinator_poll_action_process(
+pub fn coordinator_poll_command_process(
     handle: CoordinatorProcessHandle,
 ) -> Result<CoordinatorProcessPoll> {
     let mut table = process_table()
@@ -306,7 +306,7 @@ pub fn coordinator_poll_action_process(
     }
 }
 
-pub fn coordinator_stop_action_process(
+pub fn coordinator_stop_command_process(
     handle: CoordinatorProcessHandle,
     _graceful: bool,
 ) -> Result<CoordinatorStopResult> {

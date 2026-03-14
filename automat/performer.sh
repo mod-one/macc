@@ -22,6 +22,7 @@ prd=""
 performer_log_dir=""
 task_log_file=""
 EVENT_FILE="${COORD_EVENTS_FILE:-}"
+EVENT_IPC_ADDR="${MACC_COORDINATOR_IPC_ADDR:-}"
 EVENT_SOURCE="${MACC_EVENT_SOURCE:-}"
 EVENT_TASK_ID="${MACC_EVENT_TASK_ID:-}"
 EVENT_RUN_ID="${COORDINATOR_RUN_ID:-$(date +%s%N)-$$}"
@@ -212,7 +213,7 @@ emit_performer_event() {
   local phase="${2:-}"
   local status="${3:-}"
   local payload_json="${4:-{}}"
-  [[ -n "$EVENT_FILE" ]] || return 0
+  [[ -n "$EVENT_FILE" || -n "$EVENT_IPC_ADDR" ]] || return 0
   [[ -n "$EVENT_SOURCE" ]] || EVENT_SOURCE="performer:${tool}:${EVENT_RUN_ID}"
   [[ -n "$EVENT_TASK_ID" ]] || EVENT_TASK_ID="$task_id"
   local seq
@@ -220,7 +221,8 @@ emit_performer_event() {
   if ! jq -e 'type == "object"' <<<"$payload_json" >/dev/null 2>&1; then
     payload_json="$(jq -nc --arg value "$payload_json" '{value:$value}')"
   fi
-  jq -nc \
+  local event_line=""
+  event_line="$(jq -nc \
     --arg schema_version "1" \
     --arg event_id "${EVENT_TASK_ID}-${seq}-$(date +%s%N)" \
     --arg run_id "$EVENT_RUN_ID" \
@@ -246,7 +248,25 @@ emit_performer_event() {
       payload:$payload,
       event:$type,
       state:$status
-    }' >>"$EVENT_FILE" 2>/dev/null || true
+    }')"
+  if [[ -n "$EVENT_IPC_ADDR" ]] && send_event_via_ipc "$event_line"; then
+    return 0
+  fi
+  if [[ -n "$EVENT_FILE" ]]; then
+    printf '%s\n' "$event_line" >>"$EVENT_FILE" 2>/dev/null || true
+  fi
+}
+
+send_event_via_ipc() {
+  local event_line="$1"
+  local host="${EVENT_IPC_ADDR%:*}"
+  local port="${EVENT_IPC_ADDR##*:}"
+  [[ -n "$host" && -n "$port" && "$host" != "$port" ]] || return 1
+  (
+    exec 9<>"/dev/tcp/${host}/${port}" || exit 1
+    printf '%s\n' "$event_line" >&9 || exit 1
+    exec 9>&- 9<&-
+  ) >/dev/null 2>&1
 }
 
 set_last_error() {

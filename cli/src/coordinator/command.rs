@@ -1,23 +1,26 @@
 use crate::coordinator::legacy_helpers::{
-    coordinator_select_ready_task_action, stop_coordinator_process_groups, NativeCoordinatorLogger,
+    stop_coordinator_process_groups, NativeCoordinatorLogger,
 };
 use crate::coordinator::render::print_status_summary;
 use macc_core::coordinator::engine as coordinator_engine;
 use macc_core::coordinator::types::CoordinatorEnvConfig;
 use macc_core::coordinator_storage::CoordinatorStorageMode;
-use macc_core::service::coordinator_workflow::{CoordinatorAction, CoordinatorActionRequest};
+use macc_core::service::coordinator_workflow::{
+    coordinator_command_emits_runtime_events, coordinator_command_from_name, CoordinatorCommand,
+    CoordinatorCommandRequest,
+};
 use macc_core::{load_canonical_config, MaccError, Result};
 use std::path::Path;
 
 fn build_native_logger(
     repo_root: &Path,
-    action: &str,
+    command_name: &str,
     env_cfg: &CoordinatorEnvConfig,
     coordinator_cfg: Option<&macc_core::config::CoordinatorConfig>,
 ) -> Result<NativeCoordinatorLogger> {
     NativeCoordinatorLogger::new_with_flush(
         repo_root,
-        action,
+        command_name,
         env_cfg
             .log_flush_lines
             .or_else(|| coordinator_cfg.and_then(|c| c.log_flush_lines)),
@@ -37,7 +40,7 @@ impl macc_core::coordinator::control_plane::CoordinatorLog for LoggerAdapter<'_>
 
 #[derive(Debug, Clone)]
 pub struct CoordinatorCommandInput {
-    pub action: String,
+    pub command_name: String,
     pub no_tui: bool,
     pub graceful: bool,
     pub remove_worktrees: bool,
@@ -73,18 +76,19 @@ pub fn handle(
     engine: &crate::services::engine_provider::SharedEngine,
     input: CoordinatorCommandInput,
 ) -> Result<()> {
-    let action: CoordinatorAction = input.action.parse()?;
-    if action == CoordinatorAction::SelectReadyTask {
-        coordinator_select_ready_task_action(absolute_cwd, &input.extra_args)?;
-        return Ok(());
-    }
-
     let context = ProjectContext::load(absolute_cwd, engine)?;
     let paths = &context.paths;
     let canonical = &context.canonical;
     let coordinator_cfg = context.coordinator_cfg.as_ref();
+    let command = coordinator_command_from_name(
+        &input.command_name,
+        &input.extra_args,
+        input.graceful,
+        input.remove_worktrees,
+        input.remove_branches,
+    )?;
 
-    if action == CoordinatorAction::Run && !input.no_tui {
+    if matches!(command, CoordinatorCommand::Run) && !input.no_tui {
         return macc_tui::run_tui_with_launch(macc_tui::LaunchMode::CoordinatorRun).map_err(|e| {
             MaccError::Io {
                 path: "tui".into(),
@@ -116,24 +120,24 @@ pub fn handle(
             debounce_ms.to_string(),
         );
     }
-    if action.emits_runtime_events() {
+    if coordinator_command_emits_runtime_events(&command) {
         let _ = engine.project_ensure_coordinator_run_id();
     }
 
-    if action == CoordinatorAction::Stop {
+    if matches!(command, CoordinatorCommand::Stop { .. }) {
         let coordinator_path = paths.automation_coordinator_path();
         let stopped =
             stop_coordinator_process_groups(&paths.root, &coordinator_path, input.graceful)?;
         println!("Coordinator process groups signaled: {}", stopped);
     }
 
-    let logger_action = match action {
-        CoordinatorAction::ControlPlaneRun => Some("run"),
-        CoordinatorAction::Dispatch => Some("dispatch"),
-        CoordinatorAction::Advance => Some("advance"),
-        CoordinatorAction::Sync => Some("sync"),
-        CoordinatorAction::Reconcile => Some("reconcile"),
-        CoordinatorAction::Cleanup => Some("cleanup"),
+    let logger_action = match command {
+        CoordinatorCommand::RunControlPlane => Some("run"),
+        CoordinatorCommand::DispatchReadyTasks => Some("dispatch"),
+        CoordinatorCommand::AdvanceTasks => Some("advance"),
+        CoordinatorCommand::SyncRegistry => Some("sync"),
+        CoordinatorCommand::ReconcileRuntime => Some("reconcile"),
+        CoordinatorCommand::CleanupMaintenance => Some("cleanup"),
         _ => None,
     };
     let native_logger = if let Some(action_name) = logger_action {
@@ -145,21 +149,18 @@ pub fn handle(
         None
     };
     let logger_adapter = native_logger.as_ref().map(LoggerAdapter);
+    let core_logger = logger_adapter
+        .as_ref()
+        .map(|adapter| adapter as &dyn macc_core::coordinator::control_plane::CoordinatorLog);
 
-    let response = engine.coordinator_perform_action_workflow(
+    let response = engine.coordinator_execute_command(
         paths,
-        action,
-        CoordinatorActionRequest {
+        command.clone(),
+        CoordinatorCommandRequest {
             canonical: Some(canonical),
             coordinator_cfg,
             env_cfg: &input.env_cfg,
-            extra_args: &input.extra_args,
-            logger: logger_adapter.as_ref().map(|adapter| {
-                adapter as &dyn macc_core::coordinator::control_plane::CoordinatorLog
-            }),
-            graceful: input.graceful,
-            remove_worktrees: input.remove_worktrees,
-            remove_branches: input.remove_branches,
+            logger: core_logger,
         },
     )?;
 
@@ -184,15 +185,20 @@ pub fn handle(
             "Coordinator storage export complete (sqlite -> json): {}",
             path.display()
         );
-    } else if action == CoordinatorAction::StorageImport {
+    } else if matches!(command, CoordinatorCommand::ImportStorageJsonToSqlite) {
         println!("Coordinator storage import complete (json -> sqlite).");
-    } else if action == CoordinatorAction::StorageVerify {
+    } else if matches!(command, CoordinatorCommand::VerifyStorageParity) {
         println!("Coordinator storage parity OK (json == sqlite).");
     }
     if let Some(removed) = response.removed_worktrees {
         println!("Removed {} worktree(s).", removed);
         println!("Pruned git worktrees.");
     }
-
+    if let Some(selected) = response.selected_task {
+        println!(
+            "{}\t{}\t{}\t{}",
+            selected.id, selected.title, selected.tool, selected.base_branch
+        );
+    }
     Ok(())
 }

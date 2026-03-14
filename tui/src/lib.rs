@@ -4,6 +4,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use macc_core::service::coordinator_workflow::CoordinatorCommand;
 use ratatui::{
     backend::{Backend, CrosstermBackend},
     layout::{Constraint, Direction, Layout},
@@ -65,7 +66,7 @@ pub fn run_tui_with_launch(mode: LaunchMode) -> Result<()> {
     let mut state = AppState::new(engine);
     if mode == LaunchMode::CoordinatorRun {
         state.goto_screen(Screen::CoordinatorLive);
-        state.start_coordinator_action("run");
+        state.start_coordinator_command(CoordinatorCommand::Run);
     }
 
     run_app(&mut guard.terminal, &mut state)?;
@@ -260,7 +261,7 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
         }
         KeyCode::Char('r') => {
             if current_screen == Screen::CoordinatorLive {
-                state.start_coordinator_action("run");
+                state.start_coordinator_command(CoordinatorCommand::Run);
             } else if current_screen == Screen::Logs {
                 state.refresh_logs();
             } else if current_screen == Screen::Preview {
@@ -269,22 +270,22 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
         }
         KeyCode::Char('y') => {
             if current_screen == Screen::CoordinatorLive {
-                state.start_coordinator_action("sync");
+                state.start_coordinator_command(CoordinatorCommand::SyncRegistry);
             }
         }
         KeyCode::Char('c') => {
             if current_screen == Screen::CoordinatorLive {
-                state.start_coordinator_action("reconcile");
+                state.start_coordinator_command(CoordinatorCommand::ReconcileRuntime);
             }
         }
         KeyCode::Char('u') => {
             if current_screen == Screen::CoordinatorLive {
-                state.start_coordinator_action("resume");
+                state.start_coordinator_command(CoordinatorCommand::ResumePausedRun);
             }
         }
         KeyCode::Char('k') => {
             if current_screen == Screen::CoordinatorLive {
-                state.stop_coordinator_action();
+                state.stop_coordinator_command();
             }
         }
         KeyCode::Char('l') => {
@@ -356,7 +357,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
         errors: state.errors.len(),
         coordinator_active: state.is_coordinator_running(),
         coordinator_paused: state.is_coordinator_paused(),
-        coordinator_action: state.coordinator_running_action.as_deref(),
+        coordinator_command: state.coordinator_running_command.as_deref(),
         status: state.status_line(),
         width: chunks[0].width,
     };
@@ -1162,7 +1163,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 format!(
                     "Running: {} ({}) {}",
                     state
-                        .coordinator_running_action
+                        .coordinator_running_command
                         .as_deref()
                         .unwrap_or("unknown"),
                     format_hms(state.coordinator_elapsed_seconds().unwrap_or(0)),
@@ -1585,7 +1586,7 @@ fn render_coordinator_pause_overlay(f: &mut Frame, state: &AppState) {
         .coordinator_pause_error
         .as_deref()
         .unwrap_or("Coordinator paused due to an error.");
-    let action = state.coordinator_pause_action.as_deref().unwrap_or("run");
+    let command_name = state.coordinator_pause_command.as_deref().unwrap_or("run");
     let retry_target = match (
         state.coordinator_pause_task_id.as_deref(),
         state.coordinator_pause_phase.as_deref(),
@@ -1595,8 +1596,8 @@ fn render_coordinator_pause_overlay(f: &mut Frame, state: &AppState) {
         _ => "global/blocking (no task context)".to_string(),
     };
     let text = format!(
-        "Coordinator Paused (blocking error)\n\n{}\n\nTarget:\n- {}\n\nFix the issue in your repo/worktree, then choose:\n\n- Press 'r' or Enter: retry failed phase, then resume run\n- Press 's': skip failed phase (move task to todo), then resume run\n- Press 'u': send manual resume signal (same as `macc coordinator resume`)\n- Press 'o': open Logs screen\n- Press 'k' or Esc: stop and keep paused state\n- Press 'c': resume run without retry\n\nAction: {}\n",
-        message, retry_target, action
+        "Coordinator Paused (blocking error)\n\n{}\n\nTarget:\n- {}\n\nFix the issue in your repo/worktree, then choose:\n\n- Press 'r' or Enter: retry failed phase, then resume run\n- Press 's': skip failed phase (move task to todo), then resume run\n- Press 'u': send manual resume signal (same as `macc coordinator resume`)\n- Press 'o': open Logs screen\n- Press 'k' or Esc: stop and keep paused state\n- Press 'c': resume run without retry\n\nCommand: {}\n",
+        message, retry_target, command_name
     );
     let popup = Paragraph::new(text)
         .block(

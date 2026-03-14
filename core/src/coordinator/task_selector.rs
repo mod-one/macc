@@ -1,7 +1,8 @@
+use crate::coordinator::model::{Task, TaskRegistry};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TaskSelectorConfig {
     pub enabled_tools: Vec<String>,
     pub tool_priority: Vec<String>,
@@ -30,63 +31,61 @@ pub fn dispatch_block_reason(
     registry: &Value,
     config: &TaskSelectorConfig,
 ) -> Option<DispatchBlockReason> {
-    let tasks = registry.get("tasks")?.as_array()?;
-    let active_tasks: Vec<&Value> = tasks
+    let typed = TaskRegistry::from_value(registry).ok()?;
+    dispatch_block_reason_typed(&typed, config)
+}
+
+pub fn dispatch_block_reason_typed(
+    registry: &TaskRegistry,
+    config: &TaskSelectorConfig,
+) -> Option<DispatchBlockReason> {
+    let active_tasks: Vec<&Task> = registry
+        .tasks
         .iter()
-        .filter(|t| is_active_state(task_state(t)))
+        .filter(|task| task.is_active())
         .collect();
 
     if let Some(task_id) = active_tasks
         .iter()
-        .find(|task| parse_priority(task.get("priority")) == 0)
-        .and_then(|task| task.get("id").and_then(Value::as_str))
+        .find(|task| task.priority_rank() == 0)
+        .map(|task| task.id.clone())
     {
-        return Some(DispatchBlockReason::ActivePriorityZero {
-            task_id: task_id.to_string(),
-        });
+        return Some(DispatchBlockReason::ActivePriorityZero { task_id });
     }
 
     if active_tasks.is_empty() {
         return None;
     }
 
-    let merged_ids: HashSet<String> = tasks
+    let merged_ids: HashSet<String> = registry
+        .tasks
         .iter()
-        .filter(|t| task_state(t) == "merged")
-        .filter_map(|t| t.get("id").and_then(Value::as_str).map(ToOwned::to_owned))
+        .filter(|task| task.is_merged())
+        .map(|task| task.id.clone())
         .collect();
-    let resource_locks = registry
-        .get("resource_locks")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
+    let resource_locks = &registry.resource_locks;
 
-    for task in tasks {
-        if task_state(task) != "todo" {
+    for task in &registry.tasks {
+        if task.workflow_state() != Some(crate::coordinator::WorkflowState::Todo) {
             continue;
         }
-        if task.get("worktree").is_some() && !task.get("worktree").unwrap().is_null() {
+        if task.has_worktree_attached() {
             continue;
         }
-
-        let task_id = task.get("id").and_then(Value::as_str).unwrap_or_default();
-        if task_id.is_empty() || parse_priority(task.get("priority")) != 0 {
+        if task.id.is_empty() || task.priority_rank() != 0 {
             continue;
         }
-
         if !dependencies_ready(task, &merged_ids) {
             continue;
         }
-        if !resources_available(task, task_id, &resource_locks) {
+        if !resources_available(task, resource_locks) {
             continue;
         }
-
         if pick_tool(task, config, &HashMap::new()).is_none() {
             continue;
         }
-
         return Some(DispatchBlockReason::ReadyPriorityZeroBlocked {
-            task_id: task_id.to_string(),
+            task_id: task.id.clone(),
         });
     }
 
@@ -97,57 +96,57 @@ pub fn select_next_ready_task(
     registry: &Value,
     config: &TaskSelectorConfig,
 ) -> Option<SelectedTask> {
-    let tasks = registry.get("tasks")?.as_array()?;
+    let typed = TaskRegistry::from_value(registry).ok()?;
+    select_next_ready_task_typed(&typed, config)
+}
 
-    let active_tasks: Vec<&Value> = tasks
+pub fn select_next_ready_task_typed(
+    registry: &TaskRegistry,
+    config: &TaskSelectorConfig,
+) -> Option<SelectedTask> {
+    let active_tasks: Vec<&Task> = registry
+        .tasks
         .iter()
-        .filter(|t| is_active_state(task_state(t)))
+        .filter(|task| task.is_active())
         .collect();
-    if dispatch_block_reason(registry, config).is_some() {
+    if dispatch_block_reason_typed(registry, config).is_some() {
         return None;
     }
     if config.max_parallel > 0 && active_tasks.len() >= config.max_parallel {
         return None;
     }
 
-    let merged_ids: HashSet<String> = tasks
+    let merged_ids: HashSet<String> = registry
+        .tasks
         .iter()
-        .filter(|t| task_state(t) == "merged")
-        .filter_map(|t| t.get("id").and_then(Value::as_str).map(ToOwned::to_owned))
+        .filter(|task| task.is_merged())
+        .map(|task| task.id.clone())
         .collect();
 
     let mut active_by_tool: HashMap<String, usize> = HashMap::new();
     for task in active_tasks {
-        if let Some(tool) = task.get("tool").and_then(Value::as_str) {
+        if let Some(tool) = task.task_tool() {
             *active_by_tool.entry(tool.to_string()).or_insert(0) += 1;
         }
     }
 
-    let resource_locks = registry
-        .get("resource_locks")
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default();
-
+    let resource_locks = &registry.resource_locks;
     let mut candidates: Vec<(i32, String, String, SelectedTask)> = Vec::new();
 
-    for task in tasks {
-        if task_state(task) != "todo" {
+    for task in &registry.tasks {
+        if task.workflow_state() != Some(crate::coordinator::WorkflowState::Todo) {
             continue;
         }
-        if task.get("worktree").is_some() && !task.get("worktree").unwrap().is_null() {
+        if task.has_worktree_attached() {
             continue;
         }
-
-        let task_id = task.get("id").and_then(Value::as_str).unwrap_or_default();
-        if task_id.is_empty() {
+        if task.id.is_empty() {
             continue;
         }
-
         if !dependencies_ready(task, &merged_ids) {
             continue;
         }
-        if !resources_available(task, task_id, &resource_locks) {
+        if !resources_available(task, resource_locks) {
             continue;
         }
 
@@ -155,111 +154,49 @@ pub fn select_next_ready_task(
             continue;
         };
 
-        let title = task
-            .get("title")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let base_branch = task
-            .get("base_branch")
-            .and_then(Value::as_str)
-            .filter(|v| !v.is_empty())
-            .unwrap_or_else(|| config.default_base_branch.as_str())
-            .to_string();
-        let category = task
-            .get("category")
-            .and_then(Value::as_str)
-            .unwrap_or("zzz")
-            .to_string();
-        let priority = parse_priority(task.get("priority"));
-
         candidates.push((
-            priority,
-            category,
-            task_id.to_string(),
+            task.priority_rank(),
+            task.category().unwrap_or("zzz").to_string(),
+            task.id.clone(),
             SelectedTask {
-                id: task_id.to_string(),
-                title,
+                id: task.id.clone(),
+                title: task.title.clone().unwrap_or_default(),
                 tool,
-                base_branch,
+                base_branch: task.base_branch(&config.default_base_branch),
             },
         ));
     }
 
     candidates.sort_by(|a, b| (&a.0, &a.1, &a.2).cmp(&(&b.0, &b.1, &b.2)));
-    candidates.into_iter().next().map(|(_, _, _, s)| s)
+    candidates
+        .into_iter()
+        .next()
+        .map(|(_, _, _, selected)| selected)
 }
 
-fn task_state(task: &Value) -> &str {
-    task.get("state").and_then(Value::as_str).unwrap_or("todo")
-}
-
-fn is_active_state(state: &str) -> bool {
-    matches!(
-        state,
-        "claimed" | "in_progress" | "pr_open" | "changes_requested" | "queued"
-    )
-}
-
-fn parse_priority(priority: Option<&Value>) -> i32 {
-    match priority {
-        Some(Value::Number(n)) => n.as_i64().unwrap_or(99) as i32,
-        Some(Value::String(s)) => {
-            let v = s.trim().to_ascii_lowercase();
-            match v.as_str() {
-                "p0" => 0,
-                "p1" => 1,
-                "p2" => 2,
-                "p3" => 3,
-                "p4" => 4,
-                _ => v.parse::<i32>().unwrap_or(99),
-            }
-        }
-        _ => 99,
-    }
-}
-
-fn dependencies_ready(task: &Value, merged_ids: &HashSet<String>) -> bool {
-    let deps = task
-        .get("dependencies")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    deps.iter().all(|dep| {
-        dep.as_str()
-            .map(ToOwned::to_owned)
-            .or_else(|| dep.as_i64().map(|n| n.to_string()))
-            .map(|id| merged_ids.contains(&id))
-            .unwrap_or(false)
-    })
+fn dependencies_ready(task: &Task, merged_ids: &HashSet<String>) -> bool {
+    task.dependency_ids()
+        .iter()
+        .all(|dependency| merged_ids.contains(dependency))
 }
 
 fn resources_available(
-    task: &Value,
-    task_id: &str,
-    locks: &serde_json::Map<String, Value>,
+    task: &Task,
+    locks: &BTreeMap<String, crate::coordinator::model::ResourceLock>,
 ) -> bool {
-    let resources = task
-        .get("exclusive_resources")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    resources.iter().all(|r| {
-        let res = r.as_str().unwrap_or_default();
-        if res.is_empty() {
+    task.exclusive_resources.iter().all(|resource| {
+        if resource.is_empty() {
             return true;
         }
-        let owner = locks
-            .get(res)
-            .and_then(|v| v.get("task_id"))
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        owner.is_empty() || owner == task_id
+        match locks.get(resource) {
+            Some(lock) => lock.task_id.is_empty() || lock.task_id == task.id,
+            None => true,
+        }
     })
 }
 
 fn pick_tool(
-    task: &Value,
+    task: &Task,
     config: &TaskSelectorConfig,
     active_by_tool: &HashMap<String, usize>,
 ) -> Option<String> {
@@ -272,9 +209,9 @@ fn pick_tool(
 
     let mut uniq = Vec::new();
     let mut seen = HashSet::new();
-    for t in combined {
-        if seen.insert(t.clone()) {
-            uniq.push(t);
+    for tool in combined {
+        if seen.insert(tool.clone()) {
+            uniq.push(tool);
         }
     }
 
@@ -287,7 +224,7 @@ fn pick_tool(
     let pref_rank: BTreeMap<String, usize> = preference
         .iter()
         .enumerate()
-        .map(|(i, t)| (t.clone(), i))
+        .map(|(index, tool)| (tool.clone(), index))
         .collect();
 
     let mut candidates: Vec<(usize, usize, String)> = Vec::new();
@@ -297,9 +234,9 @@ fn pick_tool(
                 continue;
             }
         }
-        if let Some(cap) = config.max_parallel_per_tool.get(&tool) {
+        if let Some(capacity) = config.max_parallel_per_tool.get(&tool) {
             let current = *active_by_tool.get(&tool).unwrap_or(&0);
-            if current >= *cap {
+            if current >= *capacity {
                 continue;
             }
         }
@@ -309,21 +246,19 @@ fn pick_tool(
     }
 
     candidates.sort_by(|a, b| (&a.0, &a.1, &a.2).cmp(&(&b.0, &b.1, &b.2)));
-    candidates.into_iter().next().map(|(_, _, t)| t)
+    candidates.into_iter().next().map(|(_, _, tool)| tool)
 }
 
-fn preference_list(task: &Value, config: &TaskSelectorConfig) -> Vec<String> {
+fn preference_list(task: &Task, config: &TaskSelectorConfig) -> Vec<String> {
     let mut out = Vec::new();
-    if let Some(category) = task.get("category").and_then(Value::as_str) {
+    if let Some(category) = task.category() {
         if let Some(tools) = config.tool_specializations.get(category) {
             out.extend(tools.iter().cloned());
         }
     }
     if out.is_empty() {
-        if let Some(task_tool) = task.get("tool").and_then(Value::as_str) {
-            if !task_tool.is_empty() {
-                out.push(task_tool.to_string());
-            }
+        if let Some(task_tool) = task.task_tool() {
+            out.push(task_tool.to_string());
         } else if !config.tool_priority.is_empty() {
             out.extend(config.tool_priority.iter().cloned());
         }
@@ -331,7 +266,7 @@ fn preference_list(task: &Value, config: &TaskSelectorConfig) -> Vec<String> {
     dedup_and_clean(out)
 }
 
-fn fallback_pool(task: &Value, config: &TaskSelectorConfig, preference: &[String]) -> Vec<String> {
+fn fallback_pool(task: &Task, config: &TaskSelectorConfig, preference: &[String]) -> Vec<String> {
     if !config.enabled_tools.is_empty() {
         return config.enabled_tools.clone();
     }
@@ -339,18 +274,18 @@ fn fallback_pool(task: &Value, config: &TaskSelectorConfig, preference: &[String
     let mut out = Vec::new();
     out.extend(preference.iter().cloned());
     out.extend(config.tool_priority.iter().cloned());
-    if let Some(task_tool) = task.get("tool").and_then(Value::as_str) {
+    if let Some(task_tool) = task.task_tool() {
         out.push(task_tool.to_string());
     }
     out.push(config.default_tool.clone());
 
-    let mut specs = BTreeSet::new();
-    for v in config.tool_specializations.values() {
-        for t in v {
-            specs.insert(t.clone());
+    let mut specialization_tools = BTreeSet::new();
+    for tools in config.tool_specializations.values() {
+        for tool in tools {
+            specialization_tools.insert(tool.clone());
         }
     }
-    out.extend(specs);
+    out.extend(specialization_tools);
 
     dedup_and_clean(out)
 }
@@ -358,13 +293,13 @@ fn fallback_pool(task: &Value, config: &TaskSelectorConfig, preference: &[String
 fn dedup_and_clean(values: Vec<String>) -> Vec<String> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
-    for v in values {
-        let t = v.trim().to_string();
-        if t.is_empty() {
+    for value in values {
+        let trimmed = value.trim().to_string();
+        if trimmed.is_empty() {
             continue;
         }
-        if seen.insert(t.clone()) {
-            out.push(t);
+        if seen.insert(trimmed.clone()) {
+            out.push(trimmed);
         }
     }
     out

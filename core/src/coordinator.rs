@@ -1,11 +1,13 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::str::FromStr;
 
 pub mod args;
 pub mod control_plane;
 pub mod engine;
 pub mod helpers;
+pub mod ipc;
 pub mod logs;
 pub mod model;
 pub mod runtime;
@@ -244,20 +246,269 @@ pub fn runtime_status_from_event(event_type: &str, status: &str) -> RuntimeStatu
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CoordinatorEvent {
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct CoordinatorEventRecord {
+    #[serde(default = "default_event_schema_version")]
     pub schema_version: String,
+    #[serde(default)]
     pub event_id: String,
-    pub seq: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default)]
+    pub seq: i64,
+    #[serde(default)]
     pub ts: String,
+    #[serde(default)]
     pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
-    #[serde(rename = "type")]
+    #[serde(rename = "type", alias = "event", default)]
     pub event_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
+    #[serde(default, alias = "state")]
     pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub msg: Option<String>,
     #[serde(default)]
     pub payload: Value,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct CoordinatorCursor {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inode: Option<i64>,
+    #[serde(default)]
+    pub offset: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_event_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(transparent)]
+pub struct CoordinatorEventPayload(pub Value);
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct CoordinatorProgressPayload {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<i64>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct CoordinatorPhaseResultPayload {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<i64>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct CoordinatorFailedPayload {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<i64>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+fn default_event_schema_version() -> String {
+    COORDINATOR_EVENT_SCHEMA_VERSION.to_string()
+}
+
+impl CoordinatorEventRecord {
+    pub fn from_value(raw: Value) -> Result<Self, String> {
+        serde_json::from_value(raw)
+            .map_err(|e| format!("failed to parse coordinator event record: {}", e))
+    }
+
+    pub fn to_value(&self) -> Result<Value, String> {
+        serde_json::to_value(self)
+            .map_err(|e| format!("failed to serialize coordinator event record: {}", e))
+    }
+
+    pub fn severity(&self) -> Option<&str> {
+        self.extra.get("severity").and_then(Value::as_str)
+    }
+
+    fn parse_payload<T>(&self) -> Option<T>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        let payload = self.normalized_payload();
+        serde_json::from_value(payload).ok()
+    }
+
+    pub fn progress_payload(&self) -> Option<CoordinatorProgressPayload> {
+        (self.event_type == "progress")
+            .then(|| self.parse_payload())
+            .flatten()
+    }
+
+    pub fn phase_result_payload(&self) -> Option<CoordinatorPhaseResultPayload> {
+        (self.event_type == "phase_result")
+            .then(|| self.parse_payload())
+            .flatten()
+    }
+
+    pub fn failed_payload(&self) -> Option<CoordinatorFailedPayload> {
+        (self.event_type == "failed")
+            .then(|| self.parse_payload())
+            .flatten()
+    }
+
+    pub fn payload_attempt(&self) -> Option<i64> {
+        self.phase_result_payload()
+            .and_then(|payload| payload.attempt)
+            .or_else(|| self.failed_payload().and_then(|payload| payload.attempt))
+            .or_else(|| self.progress_payload().and_then(|payload| payload.attempt))
+            .or_else(|| self.payload.get("attempt").and_then(Value::as_i64))
+    }
+
+    pub fn payload_error_code(&self) -> Option<String> {
+        self.failed_payload()
+            .and_then(|payload| payload.error_code.or(payload.code))
+            .or_else(|| {
+                self.phase_result_payload()
+                    .and_then(|payload| payload.error_code.or(payload.code))
+            })
+            .or_else(|| {
+                self.payload
+                    .get("error_code")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string)
+            })
+            .or_else(|| {
+                self.payload
+                    .get("code")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string)
+            })
+    }
+
+    pub fn payload_origin(&self) -> Option<String> {
+        self.failed_payload()
+            .and_then(|payload| payload.origin)
+            .or_else(|| {
+                self.phase_result_payload()
+                    .and_then(|payload| payload.origin)
+            })
+            .or_else(|| self.progress_payload().and_then(|payload| payload.origin))
+            .or_else(|| {
+                self.payload
+                    .get("origin")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string)
+            })
+    }
+
+    pub fn is_terminal_success(&self) -> bool {
+        self.event_type == "commit_created"
+            || (self.event_type == "phase_result"
+                && self.status == "done"
+                && self.payload_attempt().is_none())
+    }
+
+    pub fn message(&self) -> Option<&str> {
+        self.detail
+            .as_deref()
+            .or(self.msg.as_deref())
+            .or_else(|| self.payload.get("reason").and_then(Value::as_str))
+            .or_else(|| self.payload.get("message").and_then(Value::as_str))
+            .or_else(|| self.payload.get("error").and_then(Value::as_str))
+    }
+
+    pub fn normalized_payload(&self) -> Value {
+        if self.payload.is_object() {
+            return self.payload.clone();
+        }
+        if let Some(raw) = self.payload.as_str() {
+            if let Ok(parsed) = serde_json::from_str::<Value>(raw) {
+                if parsed.is_object() {
+                    return parsed;
+                }
+            }
+        }
+        serde_json::json!({})
+    }
+}
+
+impl CoordinatorEventPayload {
+    pub fn as_value(&self) -> &Value {
+        &self.0
+    }
+
+    pub fn into_value(self) -> Value {
+        self.0
+    }
+}
+
+impl From<Value> for CoordinatorEventPayload {
+    fn from(value: Value) -> Self {
+        Self(value)
+    }
+}
+
+impl From<CoordinatorProgressPayload> for CoordinatorEventPayload {
+    fn from(value: CoordinatorProgressPayload) -> Self {
+        Self(serde_json::to_value(value).unwrap_or_else(|_| serde_json::json!({})))
+    }
+}
+
+impl From<CoordinatorPhaseResultPayload> for CoordinatorEventPayload {
+    fn from(value: CoordinatorPhaseResultPayload) -> Self {
+        Self(serde_json::to_value(value).unwrap_or_else(|_| serde_json::json!({})))
+    }
+}
+
+impl From<CoordinatorFailedPayload> for CoordinatorEventPayload {
+    fn from(value: CoordinatorFailedPayload) -> Self {
+        Self(serde_json::to_value(value).unwrap_or_else(|_| serde_json::json!({})))
+    }
 }
 
 #[cfg(test)]

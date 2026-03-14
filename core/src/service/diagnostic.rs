@@ -1,4 +1,5 @@
 use crate::coordinator::state_runtime;
+use crate::coordinator::CoordinatorEventRecord;
 use crate::coordinator_storage::{
     CoordinatorSnapshot, CoordinatorStorage, CoordinatorStoragePaths, JsonStorage, SqliteStorage,
 };
@@ -26,21 +27,15 @@ pub struct FailureReport {
 
 pub fn analyze_last_failure(paths: &ProjectPaths) -> Result<Option<FailureReport>> {
     if let Some(pause) = state_runtime::read_coordinator_pause_file(&paths.root)? {
-        let message = pause
-            .get("reason")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("Coordinator paused due to a blocking error.")
-            .to_string();
+        let message = if pause.reason.is_empty() {
+            "Coordinator paused due to a blocking error.".to_string()
+        } else {
+            pause.reason.clone()
+        };
         return Ok(Some(build_failure_report(
             message,
-            pause
-                .get("task_id")
-                .and_then(serde_json::Value::as_str)
-                .map(|s| s.to_string()),
-            pause
-                .get("phase")
-                .and_then(serde_json::Value::as_str)
-                .map(|s| s.to_string()),
+            Some(pause.task_id),
+            Some(pause.phase),
             "pause_file",
             true,
             Some("pause".to_string()),
@@ -68,48 +63,19 @@ pub fn analyze_last_failure(paths: &ProjectPaths) -> Result<Option<FailureReport
     Ok(None)
 }
 
-fn report_from_events(events: &[serde_json::Value]) -> Option<FailureReport> {
+fn report_from_events(events: &[CoordinatorEventRecord]) -> Option<FailureReport> {
     for raw in events.iter().rev() {
-        let event_type = raw
-            .get("type")
-            .or_else(|| raw.get("event"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        let status = raw
-            .get("status")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        let severity = raw
-            .get("severity")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
+        let event_type = raw.event_type.as_str();
+        let status = raw.status.as_str();
+        let severity = raw.severity().unwrap_or_default();
         if !is_blocking_failure_event(event_type, status, severity) {
             continue;
         }
-        let message = raw
-            .get("detail")
-            .and_then(serde_json::Value::as_str)
-            .or_else(|| raw.get("msg").and_then(serde_json::Value::as_str))
-            .or_else(|| {
-                raw.get("payload")
-                    .and_then(|p| p.get("reason"))
-                    .and_then(serde_json::Value::as_str)
-            })
-            .or_else(|| {
-                raw.get("payload")
-                    .and_then(|p| p.get("message"))
-                    .and_then(serde_json::Value::as_str)
-            })
-            .unwrap_or(event_type)
-            .to_string();
-        let task_id = raw
-            .get("task_id")
-            .and_then(serde_json::Value::as_str)
-            .map(|s| s.to_string());
+        let message = raw.message().unwrap_or(event_type).to_string();
+        let task_id = raw.task_id.clone();
         let phase = raw
-            .get("phase")
-            .and_then(serde_json::Value::as_str)
-            .map(|s| s.to_string())
+            .phase
+            .clone()
             .or_else(|| infer_phase_from_status(status));
         return Some(build_failure_report(
             message,

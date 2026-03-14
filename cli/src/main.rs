@@ -176,9 +176,9 @@ enum Commands {
     },
     /// Run the project coordinator automation script
     Coordinator {
-        /// Coordinator action (run, control-plane-run, dispatch, advance, resume, sync, status, reconcile, unlock, cleanup, retry-phase, cutover-gate, stop, validate-transition, validate-runtime-transition, runtime-status-from-event, storage-import, storage-export, events-export, storage-verify, storage-sync, select-ready-task, state-apply-transition, state-set-runtime, state-task-field, state-task-exists, state-counts, state-locks, state-set-merge-pending, state-set-merge-processed, state-increment-retries, state-upsert-slo-warning, state-slo-metric)
+        /// Coordinator command (run, control-plane-run, dispatch, advance, resume, sync, status, reconcile, unlock, cleanup, retry-phase, cutover-gate, stop, validate-transition, validate-runtime-transition, runtime-status-from-event, storage-import, storage-export, events-export, storage-verify, storage-sync, select-ready-task, state-apply-transition, state-set-runtime, state-task-field, state-task-exists, state-counts, state-locks, state-set-merge-pending, state-set-merge-processed, state-increment-retries, state-upsert-slo-warning, state-slo-metric)
         #[arg(default_value = "run")]
-        action: String,
+        command_name: String,
         /// Disable TUI live view for `macc coordinator run`
         #[arg(long)]
         no_tui: bool,
@@ -725,7 +725,7 @@ fn run_with_engine_provider(
             commands::logs::LogsCommand::new(app.clone(), logs_command).run()
         }
         Some(Commands::Coordinator {
-            action,
+            command_name,
             no_tui,
             graceful,
             remove_worktrees,
@@ -752,7 +752,7 @@ fn run_with_engine_provider(
         }) => commands::coordinator::CoordinatorCommand::new(
             app.clone(),
             coordinator::command::CoordinatorCommandInput {
-                action: action.clone(),
+                command_name: command_name.clone(),
                 no_tui: *no_tui,
                 graceful: *graceful,
                 remove_worktrees: *remove_worktrees,
@@ -1114,7 +1114,7 @@ fn confirm_user_scope_apply(
 mod tests {
     use super::*;
     use crate::coordinator::legacy_helpers::{
-        read_registry_counts, run_coordinator_action, run_coordinator_full_cycle,
+        read_registry_counts, run_coordinator_command, run_coordinator_full_cycle,
         validate_coordinator_runtime_transition_action, validate_coordinator_transition_action,
         COORDINATOR_TASK_REGISTRY_REL_PATH,
     };
@@ -1878,7 +1878,7 @@ fi
             error_code_retry_max: None,
         };
 
-        run_coordinator_action(&root, &script, "dispatch", &[], &canonical, None, &env_cfg)?;
+        run_coordinator_command(&root, &script, "dispatch", &[], &canonical, None, &env_cfg)?;
 
         let value: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&registry).unwrap()).unwrap();
@@ -1970,7 +1970,7 @@ fi
             error_code_retry_max: None,
         };
 
-        run_coordinator_action(
+        run_coordinator_command(
             &root,
             &script,
             "retry-phase",
@@ -2066,7 +2066,7 @@ fi
                 cwd: root.to_string_lossy().into(),
                 verbose: false,
                 command: Some(Commands::Coordinator {
-                    action: "stop".to_string(),
+                    command_name: "stop".to_string(),
                     no_tui: true,
                     graceful: true,
                     remove_worktrees: true,

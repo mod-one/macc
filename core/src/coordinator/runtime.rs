@@ -1,4 +1,7 @@
 use crate::coordinator::engine::ReviewVerdict;
+use crate::coordinator::model::Task;
+use crate::coordinator::CoordinatorEventRecord;
+use crate::coordinator_storage::CoordinatorStorage;
 use crate::git;
 use crate::{MaccError, Result};
 use serde::{Deserialize, Serialize};
@@ -38,6 +41,33 @@ pub struct CoordinatorMergeEvent {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoordinatorRuntimeEventKind {
+    Heartbeat,
+    Progress {
+        status: String,
+        phase: Option<String>,
+        message: Option<String>,
+    },
+    PhaseResult {
+        status: String,
+        phase: Option<String>,
+        message: Option<String>,
+    },
+    Failed {
+        phase: Option<String>,
+        message: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoordinatorRuntimeEvent {
+    pub task_id: String,
+    pub ts: String,
+    pub source: String,
+    pub kind: CoordinatorRuntimeEventKind,
+}
+
 pub struct CoordinatorRunState {
     pub active_jobs: HashMap<String, CoordinatorJob>,
     pub join_set: tokio::task::JoinSet<()>,
@@ -47,18 +77,21 @@ pub struct CoordinatorRunState {
     pub merge_join_set: tokio::task::JoinSet<()>,
     pub merge_event_tx: tokio::sync::mpsc::UnboundedSender<CoordinatorMergeEvent>,
     pub merge_event_rx: tokio::sync::mpsc::UnboundedReceiver<CoordinatorMergeEvent>,
-    pub events_cursor_offset: u64,
+    pub runtime_event_bus_tx: tokio::sync::broadcast::Sender<CoordinatorRuntimeEvent>,
+    pub runtime_event_bus_rx: tokio::sync::broadcast::Receiver<CoordinatorRuntimeEvent>,
     pub last_heartbeat_log_at: Option<std::time::Instant>,
     pub heartbeat_updates_since_log: usize,
     pub dispatch_retry_not_before: HashMap<String, std::time::Instant>,
     pub dispatched_total_run: usize,
     pub dispatch_limit_event_emitted: bool,
+    pub performer_ipc_addr: Option<String>,
+    pub performer_ipc_listener_started: bool,
 }
 
 pub trait PhaseExecutor {
     fn run_phase(
         &self,
-        task: &serde_json::Value,
+        task: &Task,
         mode: &str,
         coordinator_tool_override: Option<&str>,
         max_attempts: usize,
@@ -69,6 +102,7 @@ impl CoordinatorRunState {
     pub fn new() -> Self {
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let (merge_event_tx, merge_event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (runtime_event_bus_tx, runtime_event_bus_rx) = tokio::sync::broadcast::channel(4096);
         Self {
             active_jobs: HashMap::new(),
             join_set: tokio::task::JoinSet::new(),
@@ -78,14 +112,67 @@ impl CoordinatorRunState {
             merge_join_set: tokio::task::JoinSet::new(),
             merge_event_tx,
             merge_event_rx,
-            events_cursor_offset: 0,
+            runtime_event_bus_tx,
+            runtime_event_bus_rx,
             last_heartbeat_log_at: None,
             heartbeat_updates_since_log: 0,
             dispatch_retry_not_before: HashMap::new(),
             dispatched_total_run: 0,
             dispatch_limit_event_emitted: false,
+            performer_ipc_addr: None,
+            performer_ipc_listener_started: false,
         }
     }
+}
+
+pub fn raw_event_identity(event: &CoordinatorEventRecord) -> Option<(String, String, String)> {
+    let task_id = event.task_id.clone().unwrap_or_default();
+    let ts = event.ts.clone();
+    let source = event.source.clone();
+    if task_id.is_empty() || ts.is_empty() {
+        None
+    } else {
+        Some((task_id, ts, source))
+    }
+}
+
+pub fn raw_event_to_runtime_event(
+    event: &CoordinatorEventRecord,
+) -> Option<CoordinatorRuntimeEvent> {
+    let (task_id, ts, source) = raw_event_identity(event)?;
+    let event_type = event.event_type.as_str();
+    let event_status = event.status.as_str();
+    let event_phase = event.phase.clone().filter(|value| !value.is_empty());
+    let event_message = event.message().map(|value| value.to_string());
+    let runtime_status = crate::coordinator::runtime_status_from_event(event_type, event_status)
+        .as_str()
+        .to_string();
+    let kind = match event_type {
+        "heartbeat" => CoordinatorRuntimeEventKind::Heartbeat,
+        "progress" => CoordinatorRuntimeEventKind::Progress {
+            status: runtime_status,
+            phase: event_phase,
+            message: event_message,
+        },
+        "phase_result" => CoordinatorRuntimeEventKind::PhaseResult {
+            status: crate::coordinator::runtime_status_from_event(event_type, event_status)
+                .as_str()
+                .to_string(),
+            phase: event_phase,
+            message: event_message,
+        },
+        "failed" => CoordinatorRuntimeEventKind::Failed {
+            phase: event_phase,
+            message: event_message,
+        },
+        _ => return None,
+    };
+    Some(CoordinatorRuntimeEvent {
+        task_id,
+        ts,
+        source,
+        kind,
+    })
 }
 
 pub fn parse_review_verdict(output: &str) -> Option<ReviewVerdict> {
@@ -129,7 +216,7 @@ fn git_ahead_count(worktree: &Path, base: &str) -> Result<usize> {
 
 pub fn run_phase<E: PhaseExecutor>(
     executor: &E,
-    task: &serde_json::Value,
+    task: &Task,
     mode: &str,
     coordinator_tool_override: Option<&str>,
     max_attempts: usize,
@@ -139,24 +226,13 @@ pub fn run_phase<E: PhaseExecutor>(
 
 pub fn run_review_phase<E: PhaseExecutor>(
     executor: &E,
-    task: &serde_json::Value,
+    task: &Task,
     coordinator_tool_override: Option<&str>,
     max_attempts: usize,
 ) -> Result<std::result::Result<ReviewVerdict, String>> {
-    let task_id = task
-        .get("id")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-    let worktree_path = task
-        .get("worktree")
-        .and_then(|w| w.get("worktree_path"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-    let base_branch = task
-        .get("worktree")
-        .and_then(|w| w.get("base_branch"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("master");
+    let task_id = task.id.as_str();
+    let worktree_path = task.worktree_path().unwrap_or_default();
+    let base_branch = task.base_branch("master");
     if task_id.is_empty() || worktree_path.is_empty() {
         return Ok(Err(
             "review cannot run: missing task id or worktree path".to_string()
@@ -170,7 +246,7 @@ pub fn run_review_phase<E: PhaseExecutor>(
             task_id
         )));
     }
-    let ahead = git_ahead_count(&worktree, base_branch)?;
+    let ahead = git_ahead_count(&worktree, &base_branch)?;
     if ahead == 0 {
         return Ok(Err(format!(
             "review precheck failed for task {}: no committed diff to review against base '{}'",
@@ -257,13 +333,8 @@ pub fn resolve_phase_runner(
     Ok(Some(path))
 }
 
-pub fn build_phase_prompt(
-    mode: &str,
-    task_id: &str,
-    tool: &str,
-    task_json: &serde_json::Value,
-) -> Result<String> {
-    let task_payload = serde_json::to_string(task_json).map_err(|e| {
+pub fn build_phase_prompt(mode: &str, task_id: &str, tool: &str, task: &Task) -> Result<String> {
+    let task_payload = serde_json::to_string(task).map_err(|e| {
         MaccError::Validation(format!(
             "Failed to serialize task payload for '{}' phase prompt (task={}): {}",
             mode, task_id, e
@@ -289,24 +360,24 @@ pub fn spawn_performer_job(
     event_tx: &tokio::sync::mpsc::UnboundedSender<CoordinatorJobEvent>,
     join_set: &mut tokio::task::JoinSet<()>,
     phase_timeout_seconds: usize,
+    performer_ipc_addr: Option<&str>,
 ) -> Result<Option<i64>> {
+    let effective_ipc_addr = performer_ipc_addr
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.to_string());
+    if effective_ipc_addr.is_none() {
+        return Err(MaccError::Validation(
+            "performer spawn refused: no coordinator IPC address".to_string(),
+        ));
+    }
     let mut run_cmd = tokio::process::Command::new(executable_path);
     let event_source = format!(
         "coordinator-worktree:{}:{}",
         task_id,
         chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
     );
-    let events_file = repo_root
-        .join(".macc")
-        .join("log")
-        .join("coordinator")
-        .join("events.jsonl");
     run_cmd
         .current_dir(repo_root)
-        .env(
-            "COORD_EVENTS_FILE",
-            events_file.to_string_lossy().to_string(),
-        )
         .env(
             "COORDINATOR_RUN_ID",
             std::env::var("COORDINATOR_RUN_ID").unwrap_or_else(|_| {
@@ -319,17 +390,22 @@ pub fn spawn_performer_job(
         )
         .env("MACC_EVENT_SOURCE", event_source.clone())
         .env("MACC_EVENT_TASK_ID", task_id)
+        .env_remove(crate::coordinator::ipc::COORDINATOR_IPC_ADDR_ENV)
         .arg("--cwd")
         .arg(repo_root)
         .arg("worktree")
         .arg("run")
         .arg(worktree_path.to_string_lossy().to_string());
+    if let Some(ipc_addr) = effective_ipc_addr.as_deref() {
+        run_cmd.env(crate::coordinator::ipc::COORDINATOR_IPC_ADDR_ENV, ipc_addr);
+    }
     let mut child = run_cmd.spawn().map_err(|e| MaccError::Io {
         path: worktree_path.to_string_lossy().into(),
         action: "spawn performer process".into(),
         source: e,
     })?;
     let pid = child.id().map(|v| v as i64);
+    let repo_root_owned = repo_root.to_path_buf();
     let task_id_owned = task_id.to_string();
     let event_source_owned = event_source.clone();
     let tx = event_tx.clone();
@@ -359,7 +435,7 @@ pub fn spawn_performer_job(
         let mut error_message = None;
         if !success {
             if let Some(details) =
-                read_last_error_details(&events_file, &task_id_owned, &event_source_owned)
+                read_last_error_details(&repo_root_owned, &task_id_owned, &event_source_owned)
             {
                 error_code = details.error_code;
                 error_origin = details.error_origin;
@@ -387,53 +463,39 @@ struct ErrorDetails {
 }
 
 fn read_last_error_details(
-    events_file: &Path,
+    repo_root: &Path,
     task_id: &str,
     event_source: &str,
 ) -> Option<ErrorDetails> {
-    let content = std::fs::read_to_string(events_file).ok()?;
+    read_last_error_details_from_sqlite(repo_root, task_id, event_source)
+}
+
+fn read_last_error_details_from_sqlite(
+    repo_root: &Path,
+    task_id: &str,
+    event_source: &str,
+) -> Option<ErrorDetails> {
+    let project_paths = crate::ProjectPaths::from_root(repo_root);
+    let storage_paths =
+        crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&project_paths);
+    let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
+    let snapshot = sqlite.load_snapshot().ok()?;
     let mut failed_candidate: Option<ErrorDetails> = None;
     let mut saw_terminal_success_before_failed = false;
-    for line in content.lines().rev() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Ok(event) = serde_json::from_str::<serde_json::Value>(trimmed) else {
-            continue;
-        };
-        let Some(event_task_id) = event.get("task_id").and_then(serde_json::Value::as_str) else {
+    for event in snapshot.events.iter().rev() {
+        let Some(event_task_id) = event.task_id.as_deref() else {
             continue;
         };
         if event_task_id != task_id {
             continue;
         }
-        let source = event
-            .get("source")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
+        let source = event.source.as_str();
         if !event_source.is_empty() && source != event_source {
             continue;
         }
-        let event_type = event
-            .get("type")
-            .or_else(|| event.get("event"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        let status = event
-            .get("status")
-            .or_else(|| event.get("state"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        let payload = event.get("payload").unwrap_or(&serde_json::Value::Null);
-        let payload = normalize_payload_object(payload);
-        let is_terminal_success = event_type == "commit_created"
-            || (event_type == "phase_result"
-                && status == "done"
-                && payload
-                    .get("attempt")
-                    .and_then(serde_json::Value::as_i64)
-                    .is_none());
+        let event_type = event.event_type.as_str();
+        let status = event.status.as_str();
+        let is_terminal_success = event.is_terminal_success();
         if is_terminal_success && failed_candidate.is_some() {
             saw_terminal_success_before_failed = true;
             continue;
@@ -441,21 +503,9 @@ fn read_last_error_details(
         if event_type != "failed" && !(event_type == "phase_result" && status == "failed") {
             continue;
         }
-        let error_code = payload
-            .get("error_code")
-            .or_else(|| payload.get("code"))
-            .and_then(serde_json::Value::as_str)
-            .map(|v| v.to_string());
-        let error_origin = payload
-            .get("origin")
-            .and_then(serde_json::Value::as_str)
-            .map(|v| v.to_string());
-        let error_message = payload
-            .get("message")
-            .or_else(|| payload.get("reason"))
-            .or_else(|| payload.get("error"))
-            .and_then(serde_json::Value::as_str)
-            .map(|v| v.to_string());
+        let error_code = event.payload_error_code();
+        let error_origin = event.payload_origin();
+        let error_message = event.message().map(|v| v.to_string());
         if failed_candidate.is_none() {
             failed_candidate = Some(ErrorDetails {
                 error_code,
@@ -477,20 +527,6 @@ fn read_last_error_details(
             None
         }
     })
-}
-
-fn normalize_payload_object(payload: &serde_json::Value) -> serde_json::Value {
-    if payload.is_object() {
-        return payload.clone();
-    }
-    if let Some(raw) = payload.as_str() {
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw) {
-            if parsed.is_object() {
-                return parsed;
-            }
-        }
-    }
-    serde_json::json!({})
 }
 
 pub async fn spawn_merge_job<F>(
