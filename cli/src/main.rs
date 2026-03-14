@@ -1862,13 +1862,7 @@ exit 0
                 error_code_retry_max: None,
             };
 
-            run_scripted_full_cycle(
-                root,
-                script,
-                &canonical,
-                Some(&coordinator_cfg),
-                &env_cfg,
-            )?;
+            run_scripted_full_cycle(root, script, &canonical, Some(&coordinator_cfg), &env_cfg)?;
 
             let final_state: serde_json::Value =
                 serde_json::from_str(&fs::read_to_string(&registry).unwrap()).unwrap();

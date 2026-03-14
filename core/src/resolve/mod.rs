@@ -555,14 +555,26 @@ mod tests {
         assert_eq!(fetch_units.len(), 1);
         let unit = &fetch_units[0];
         assert_eq!(unit.source.url, "https://github.com/repo1.git");
-        assert_eq!(unit.source.subpaths.len(), 2 + crate::required_skills().len());
+        assert_eq!(
+            unit.source.subpaths.len(),
+            2 + crate::required_skills().len()
+        );
         assert!(unit.source.subpaths.contains(&"skills/s1".into()));
         assert!(unit.source.subpaths.contains(&"skills/s2".into()));
         assert_eq!(unit.selections.len(), 2 + crate::required_skills().len());
-        assert!(unit.selections.iter().any(|selection| selection.id == "skill1"));
-        assert!(unit.selections.iter().any(|selection| selection.id == "skill2"));
+        assert!(unit
+            .selections
+            .iter()
+            .any(|selection| selection.id == "skill1"));
+        assert!(unit
+            .selections
+            .iter()
+            .any(|selection| selection.id == "skill2"));
         for required_id in crate::required_skills() {
-            assert!(unit.selections.iter().any(|selection| selection.id == *required_id));
+            assert!(unit
+                .selections
+                .iter()
+                .any(|selection| selection.id == *required_id));
         }
 
         fs::remove_dir_all(&temp_dir).ok();
