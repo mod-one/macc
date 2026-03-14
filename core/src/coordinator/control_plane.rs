@@ -137,10 +137,7 @@ fn emit_dispatch_skipped(
     }
 }
 
-fn should_emit_priority_zero_dispatch_skip(
-    state: &mut CoordinatorRunState,
-    task_id: &str,
-) -> bool {
+fn should_emit_priority_zero_dispatch_skip(state: &mut CoordinatorRunState, task_id: &str) -> bool {
     if state.last_priority_zero_dispatch_block_task_id.as_deref() == Some(task_id) {
         return false;
     }
@@ -2211,8 +2208,14 @@ mod tests {
     #[test]
     fn priority_zero_dispatch_skip_logs_only_once_for_same_task() {
         let mut state = CoordinatorRunState::new();
-        assert!(should_emit_priority_zero_dispatch_skip(&mut state, "TASK-1"));
-        assert!(!should_emit_priority_zero_dispatch_skip(&mut state, "TASK-1"));
-        assert!(should_emit_priority_zero_dispatch_skip(&mut state, "TASK-2"));
+        assert!(should_emit_priority_zero_dispatch_skip(
+            &mut state, "TASK-1"
+        ));
+        assert!(!should_emit_priority_zero_dispatch_skip(
+            &mut state, "TASK-1"
+        ));
+        assert!(should_emit_priority_zero_dispatch_skip(
+            &mut state, "TASK-2"
+        ));
     }
 }

@@ -1241,7 +1241,7 @@ pub async fn run_native_control_plane(
 
     // Set up graceful shutdown signal handling
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
-    
+
     #[cfg(unix)]
     {
         let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
@@ -1256,7 +1256,7 @@ pub async fn run_native_control_plane(
                 action: "setup sigint handler".into(),
                 source: e,
             })?;
-        
+
         tokio::spawn(async move {
             tokio::select! {
                 _ = sigterm.recv() => {
