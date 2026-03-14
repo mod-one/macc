@@ -137,10 +137,7 @@ fn emit_dispatch_skipped(
     }
 }
 
-fn should_emit_priority_zero_dispatch_skip(
-    state: &mut CoordinatorRunState,
-    task_id: &str,
-) -> bool {
+fn should_emit_priority_zero_dispatch_skip(state: &mut CoordinatorRunState, task_id: &str) -> bool {
     if state.last_priority_zero_dispatch_block_task_id.as_deref() == Some(task_id) {
         return false;
     }
@@ -1072,7 +1069,7 @@ pub fn apply_stale_heartbeat_policy(
                     .as_deref()
                     .filter(|v| !v.is_empty())
             })
-            .or_else(|| task.updated_at.as_deref());
+            .or(task.updated_at.as_deref());
         let Some(last_ts) = last_ts else {
             continue;
         };
@@ -1443,12 +1440,7 @@ pub async fn dispatch_ready_tasks_native(
                 })
                 .unwrap_or_default(),
             max_parallel,
-            default_tool: canonical
-                .tools
-                .enabled
-                .first()
-                .cloned()
-                .unwrap_or_else(|| "codex".to_string()),
+            default_tool: canonical.tools.enabled.first().cloned().unwrap_or_default(),
             default_base_branch: env_cfg
                 .reference_branch
                 .clone()
@@ -2211,8 +2203,14 @@ mod tests {
     #[test]
     fn priority_zero_dispatch_skip_logs_only_once_for_same_task() {
         let mut state = CoordinatorRunState::new();
-        assert!(should_emit_priority_zero_dispatch_skip(&mut state, "TASK-1"));
-        assert!(!should_emit_priority_zero_dispatch_skip(&mut state, "TASK-1"));
-        assert!(should_emit_priority_zero_dispatch_skip(&mut state, "TASK-2"));
+        assert!(should_emit_priority_zero_dispatch_skip(
+            &mut state, "TASK-1"
+        ));
+        assert!(!should_emit_priority_zero_dispatch_skip(
+            &mut state, "TASK-1"
+        ));
+        assert!(should_emit_priority_zero_dispatch_skip(
+            &mut state, "TASK-2"
+        ));
     }
 }

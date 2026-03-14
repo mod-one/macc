@@ -5,8 +5,11 @@ on:
     tags:
       - "v*"
 
+permissions:
+  contents: write
+
 jobs:
-  release:
+  verify:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -18,11 +21,113 @@ jobs:
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
 
+      - name: Verify release tag matches cli and tui versions
+        shell: bash
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          read_manifest_version() {
+            local manifest_path=$1
+            python3 - "$manifest_path" <<'PY2'
+from pathlib import Path
+import sys
+import tomllib
+with Path(sys.argv[1]).open('rb') as fh:
+    data = tomllib.load(fh)
+print(data['package']['version'])
+PY2
+          }
+
+          cli_version=$(read_manifest_version cli/Cargo.toml)
+          tui_version=$(read_manifest_version tui/Cargo.toml)
+
+          if [[ "$tag_version" != "$cli_version" ]]; then
+            echo "release tag version ($tag_version) does not match cli/Cargo.toml version ($cli_version)" >&2
+            exit 1
+          fi
+
+          if [[ "$tag_version" != "$tui_version" ]]; then
+            echo "release tag version ($tag_version) does not match tui/Cargo.toml version ($tui_version)" >&2
+            exit 1
+          fi
+
+          if [[ "$cli_version" != "$tui_version" ]]; then
+            echo "cli/Cargo.toml version ($cli_version) does not match tui/Cargo.toml version ($tui_version)" >&2
+            exit 1
+          fi
+
       - name: Verify build
         run: cargo build --workspace --locked
 
       - name: Verify tests
         run: cargo test --workspace --locked
+
+  build-artifacts:
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: macc-linux-x86_64
+            archive_name: macc-linux-x86_64.tar.gz
+            binary_suffix: ""
+            archive_type: tar
+          - os: macos-latest
+            artifact_name: macc-macos-x86_64
+            archive_name: macc-macos-x86_64.tar.gz
+            binary_suffix: ""
+            archive_type: tar
+          - os: windows-latest
+            artifact_name: macc-windows-x86_64
+            archive_name: macc-windows-x86_64.zip
+            binary_suffix: ".exe"
+            archive_type: zip
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binaries
+        run: cargo build --release --locked -p macc-cli -p macc-tui
+
+      - name: Package release artifacts (tar)
+        if: matrix.archive_type == 'tar'
+        run: |
+          mkdir -p dist
+          cp target/release/macc${{ matrix.binary_suffix }} dist/
+          cp target/release/macc-tui${{ matrix.binary_suffix }} dist/
+          tar -C dist -czf ${{ matrix.archive_name }} macc${{ matrix.binary_suffix }} macc-tui${{ matrix.binary_suffix }}
+
+      - name: Package release artifacts (zip)
+        if: matrix.archive_type == 'zip'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          Copy-Item "target/release/macc${{ matrix.binary_suffix }}" dist/
+          Copy-Item "target/release/macc-tui${{ matrix.binary_suffix }}" dist/
+          Compress-Archive -Path "dist/*" -DestinationPath "${{ matrix.archive_name }}" -Force
+
+      - name: Upload packaged binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.archive_name }}
+          if-no-files-found: error
+
+  release:
+    needs: build-artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download packaged binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
@@ -31,3 +136,6 @@ jobs:
           append_body: true
           body: |
             Refer to `CHANGELOG.md` for curated release notes and migration details.
+          files: |
+            release-artifacts/**/*.tar.gz
+            release-artifacts/**/*.zip

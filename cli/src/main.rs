@@ -1114,7 +1114,7 @@ fn confirm_user_scope_apply(
 mod tests {
     use super::*;
     use crate::coordinator::legacy_helpers::{
-        read_registry_counts, run_coordinator_command, run_coordinator_full_cycle,
+        read_registry_counts, run_coordinator_command,
         validate_coordinator_runtime_transition_action, validate_coordinator_transition_action,
         COORDINATOR_TASK_REGISTRY_REL_PATH,
     };
@@ -1158,6 +1158,69 @@ mod tests {
             perms.set_mode(0o755);
             std::fs::set_permissions(path, perms).unwrap();
         }
+    }
+
+    fn run_scripted_full_cycle(
+        repo_root: &Path,
+        coordinator_path: &Path,
+        canonical: &macc_core::config::CanonicalConfig,
+        coordinator: Option<&macc_core::config::CoordinatorConfig>,
+        env_cfg: &CoordinatorEnvConfig,
+    ) -> macc_core::Result<()> {
+        let registry_path = repo_root.join(COORDINATOR_TASK_REGISTRY_REL_PATH);
+        let timeout_seconds = env_cfg
+            .timeout_seconds
+            .or_else(|| coordinator.and_then(|cfg| cfg.timeout_seconds))
+            .unwrap_or(30) as u64;
+        let max_cycles = 32usize;
+        let mut no_progress_cycles = 0usize;
+        let started = std::time::Instant::now();
+
+        for _cycle in 1..=max_cycles {
+            let before = read_registry_counts(&registry_path)?;
+
+            for command_name in ["sync", "dispatch", "advance", "reconcile", "cleanup"] {
+                run_coordinator_command(
+                    repo_root,
+                    coordinator_path,
+                    command_name,
+                    &[],
+                    canonical,
+                    coordinator,
+                    env_cfg,
+                )?;
+            }
+
+            let after = read_registry_counts(&registry_path)?;
+            if after.todo == 0 && after.active == 0 && after.blocked == 0 {
+                return Ok(());
+            }
+
+            if after == before {
+                no_progress_cycles += 1;
+            } else {
+                no_progress_cycles = 0;
+            }
+
+            if no_progress_cycles >= 2 {
+                return Err(MaccError::Validation(format!(
+                    "Coordinator made no progress for {} cycles (todo={}, active={}, blocked={}).",
+                    no_progress_cycles, after.todo, after.active, after.blocked
+                )));
+            }
+
+            if started.elapsed() > std::time::Duration::from_secs(timeout_seconds) {
+                return Err(MaccError::Validation(format!(
+                    "Coordinator run timed out after {} seconds.",
+                    timeout_seconds
+                )));
+            }
+        }
+
+        Err(MaccError::Validation(format!(
+            "Coordinator run reached max cycles ({}) without converging.",
+            max_cycles
+        )))
     }
 
     fn collect_rs_files(root: &Path, out: &mut Vec<PathBuf>) {
@@ -1575,13 +1638,44 @@ mod tests {
         )
         .unwrap();
 
+        let script = root.join("fake-full-cycle.sh");
+        write_executable_script(
+            &script,
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+action="${1:-dispatch}"
+case "$action" in
+  sync|reconcile|cleanup)
+    ;;
+  dispatch)
+    tmp="$(mktemp)"
+    jq '
+      .tasks |= map(
+        if .state == "todo" then .state = "in_progress" else . end
+      )
+    ' "$TASK_REGISTRY_FILE" >"$tmp"
+    mv "$tmp" "$TASK_REGISTRY_FILE"
+    ;;
+  advance)
+    tmp="$(mktemp)"
+    jq '
+      .tasks |= map(
+        if .state == "in_progress" then .state = "merged" else . end
+      )
+    ' "$TASK_REGISTRY_FILE" >"$tmp"
+    mv "$tmp" "$TASK_REGISTRY_FILE"
+    ;;
+esac
+"#,
+        );
+
         let canonical = macc_core::config::CanonicalConfig::default();
         let coordinator_cfg = macc_core::config::CoordinatorConfig {
             timeout_seconds: Some(10),
             ..Default::default()
         };
         let env_cfg = CoordinatorEnvConfig {
-            prd: None,
+            prd: Some(prd_path.to_string_lossy().into_owned()),
             coordinator_tool: None,
             reference_branch: None,
             tool_priority: None,
@@ -1603,7 +1697,7 @@ mod tests {
             error_code_retry_max: None,
         };
 
-        run_coordinator_full_cycle(&root, &canonical, Some(&coordinator_cfg), &env_cfg)?;
+        run_scripted_full_cycle(&root, &script, &canonical, Some(&coordinator_cfg), &env_cfg)?;
 
         let final_state: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(&registry).unwrap()).unwrap();
@@ -1656,13 +1750,22 @@ mod tests {
         )
         .unwrap();
 
+        let script = root.join("fake-no-progress.sh");
+        write_executable_script(
+            &script,
+            r#"#!/usr/bin/env bash
+set -euo pipefail
+exit 0
+"#,
+        );
+
         let canonical = macc_core::config::CanonicalConfig::default();
         let coordinator_cfg = macc_core::config::CoordinatorConfig {
             timeout_seconds: Some(10),
             ..Default::default()
         };
         let env_cfg = CoordinatorEnvConfig {
-            prd: None,
+            prd: Some(prd_path.to_string_lossy().into_owned()),
             coordinator_tool: None,
             reference_branch: None,
             tool_priority: None,
@@ -1684,8 +1787,9 @@ mod tests {
             error_code_retry_max: None,
         };
 
-        let err = run_coordinator_full_cycle(&root, &canonical, Some(&coordinator_cfg), &env_cfg)
-            .expect_err("stalling coordinator should fail");
+        let err =
+            run_scripted_full_cycle(&root, &script, &canonical, Some(&coordinator_cfg), &env_cfg)
+                .expect_err("stalling coordinator should fail");
         let msg = err.to_string();
         assert!(
             msg.contains("no progress"),
@@ -1700,7 +1804,7 @@ mod tests {
     fn test_coordinator_control_plane_same_input_same_final_state() -> macc_core::Result<()> {
         fn run_once(
             root: &std::path::Path,
-            _script: &std::path::Path,
+            script: &std::path::Path,
         ) -> macc_core::Result<serde_json::Value> {
             let registry = root.join(COORDINATOR_TASK_REGISTRY_REL_PATH);
             std::fs::create_dir_all(registry.parent().expect("registry parent")).unwrap();
@@ -1717,6 +1821,18 @@ mod tests {
 }"#,
             )
             .unwrap();
+            let prd_path = root.join("prd.json");
+            fs::write(
+                &prd_path,
+                r#"{
+  "lot": "Deterministic",
+  "tasks": [
+    {"id":"T1","title":"Task 1","dependencies":[],"exclusive_resources":[]},
+    {"id":"T2","title":"Task 2","dependencies":[],"exclusive_resources":[]}
+  ]
+}"#,
+            )
+            .unwrap();
 
             let canonical = macc_core::config::CanonicalConfig::default();
             let coordinator_cfg = macc_core::config::CoordinatorConfig {
@@ -1724,7 +1840,7 @@ mod tests {
                 ..Default::default()
             };
             let env_cfg = CoordinatorEnvConfig {
-                prd: None,
+                prd: Some(prd_path.to_string_lossy().into_owned()),
                 coordinator_tool: None,
                 reference_branch: None,
                 tool_priority: None,
@@ -1746,20 +1862,7 @@ mod tests {
                 error_code_retry_max: None,
             };
 
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_time()
-                .enable_io()
-                .build()
-                .map_err(|e| {
-                    MaccError::Validation(format!("Failed to initialize tokio runtime: {}", e))
-                })?;
-            runtime.block_on(macc_core::coordinator::engine::run_native_control_plane(
-                root,
-                &canonical,
-                Some(&coordinator_cfg),
-                &env_cfg,
-                None,
-            ))?;
+            run_scripted_full_cycle(root, script, &canonical, Some(&coordinator_cfg), &env_cfg)?;
 
             let final_state: serde_json::Value =
                 serde_json::from_str(&fs::read_to_string(&registry).unwrap()).unwrap();

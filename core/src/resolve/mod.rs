@@ -508,6 +508,24 @@ mod tests {
             },
             source: source1, // Same source
         });
+        for required_id in crate::required_skills() {
+            skills_catalog.entries.push(SkillEntry {
+                id: (*required_id).into(),
+                name: format!("Required {required_id}"),
+                description: "".into(),
+                tags: vec![],
+                selector: Selector {
+                    subpath: format!("skills/{required_id}"),
+                },
+                source: Source {
+                    kind: SourceKind::Git,
+                    url: "https://github.com/repo1.git".into(),
+                    reference: "main".into(),
+                    checksum: None,
+                    subpaths: vec![],
+                },
+            });
+        }
 
         skills_catalog
             .save_atomically(&paths, &paths.skills_catalog_path())
@@ -537,12 +555,27 @@ mod tests {
         assert_eq!(fetch_units.len(), 1);
         let unit = &fetch_units[0];
         assert_eq!(unit.source.url, "https://github.com/repo1.git");
-        assert_eq!(unit.source.subpaths.len(), 2);
+        assert_eq!(
+            unit.source.subpaths.len(),
+            2 + crate::required_skills().len()
+        );
         assert!(unit.source.subpaths.contains(&"skills/s1".into()));
         assert!(unit.source.subpaths.contains(&"skills/s2".into()));
-        assert_eq!(unit.selections.len(), 2);
-        assert_eq!(unit.selections[0].id, "skill1");
-        assert_eq!(unit.selections[1].id, "skill2");
+        assert_eq!(unit.selections.len(), 2 + crate::required_skills().len());
+        assert!(unit
+            .selections
+            .iter()
+            .any(|selection| selection.id == "skill1"));
+        assert!(unit
+            .selections
+            .iter()
+            .any(|selection| selection.id == "skill2"));
+        for required_id in crate::required_skills() {
+            assert!(unit
+                .selections
+                .iter()
+                .any(|selection| selection.id == *required_id));
+        }
 
         fs::remove_dir_all(&temp_dir).ok();
         Ok(())
@@ -576,6 +609,24 @@ mod tests {
                 subpaths: vec![],
             },
         });
+        for required_id in crate::required_skills() {
+            skills_catalog.entries.push(SkillEntry {
+                id: (*required_id).into(),
+                name: format!("Required {required_id}"),
+                description: "".into(),
+                tags: vec![],
+                selector: Selector {
+                    subpath: format!("required/{required_id}"),
+                },
+                source: Source {
+                    kind: SourceKind::Git,
+                    url: "repo1".into(),
+                    reference: "main".into(),
+                    checksum: None,
+                    subpaths: vec![],
+                },
+            });
+        }
 
         let mut mcp_catalog = McpCatalog::default();
         mcp_catalog.entries.push(McpEntry {
@@ -635,8 +686,14 @@ mod tests {
             .unwrap();
 
         assert_eq!(git_unit.source.url, "repo1");
-        assert_eq!(git_unit.selections[0].id, "skill1");
-        assert_eq!(git_unit.selections[0].kind, SelectionKind::Skill);
+        assert!(git_unit.selections.iter().any(|selection| {
+            selection.id == "skill1" && selection.kind == SelectionKind::Skill
+        }));
+        for required_id in crate::required_skills() {
+            assert!(git_unit.selections.iter().any(|selection| {
+                selection.id == *required_id && selection.kind == SelectionKind::Skill
+            }));
+        }
 
         assert_eq!(http_unit.source.url, "url1");
         assert_eq!(http_unit.selections[0].id, "mcp1");

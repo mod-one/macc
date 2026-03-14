@@ -1620,8 +1620,10 @@ fn is_active_state(state: &str) -> bool {
 }
 
 fn default_registry() -> TaskRegistry {
-    let mut registry = TaskRegistry::default();
-    registry.updated_at = Some(now_iso_string());
+    let mut registry = TaskRegistry {
+        updated_at: Some(now_iso_string()),
+        ..TaskRegistry::default()
+    };
     registry
         .extra
         .insert("schema_version".into(), Value::from(1));

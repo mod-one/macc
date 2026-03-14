@@ -72,7 +72,7 @@ impl OperationAccumulator {
         match (self.kind, kind) {
             (Some(existing), candidate) if existing == candidate => {}
             (Some(PlannedOpKind::Write), _) => {}
-            (Some(existing), candidate) if candidate == PlannedOpKind::Write => {
+            (Some(_existing), candidate) if candidate == PlannedOpKind::Write => {
                 self.kind = Some(candidate)
             }
             _ => {
