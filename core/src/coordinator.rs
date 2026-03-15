@@ -297,11 +297,11 @@ pub struct CoordinatorEventRecord {
     pub source: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
-    #[serde(rename = "type", alias = "event", default)]
+    #[serde(rename = "type", default)]
     pub event_type: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
-    #[serde(default, alias = "state")]
+    #[serde(default)]
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
