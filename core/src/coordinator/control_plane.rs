@@ -66,19 +66,26 @@ fn aggregate_performer_logs_after_completion(
     }
 }
 
-fn resolve_dispatch_cooldown_seconds() -> u64 {
-    std::env::var("COORDINATOR_DISPATCH_COOLDOWN_SECONDS")
-        .ok()
-        .and_then(|raw| raw.trim().parse::<u64>().ok())
-        .unwrap_or(10)
+fn resolve_dispatch_cooldown_seconds(
+    env_cfg: &CoordinatorEnvConfig,
+    coordinator: Option<&crate::config::CoordinatorConfig>,
+) -> u64 {
+    env_cfg
+        .dispatch_cooldown_seconds
+        .or_else(|| coordinator.and_then(|c| c.dispatch_cooldown_seconds))
+        .unwrap_or(2)
 }
 
-fn resolve_merge_timeout_seconds() -> usize {
-    std::env::var("COORDINATOR_MERGE_JOB_TIMEOUT_SECONDS")
-        .ok()
-        .and_then(|raw| raw.trim().parse::<usize>().ok())
+fn resolve_merge_timeout_seconds(
+    env_cfg: &CoordinatorEnvConfig,
+    coordinator: Option<&crate::config::CoordinatorConfig>,
+) -> usize {
+    env_cfg
+        .merge_job_timeout_seconds
+        .or_else(|| coordinator.and_then(|c| c.merge_job_timeout_seconds))
         .unwrap_or(0)
 }
+
 
 async fn sanitize_worktree_to_base(worktree_path: &Path, base_branch: &str) -> Result<bool> {
     if !crate::git::reset_hard_async(worktree_path, "HEAD").await? {
@@ -555,6 +562,8 @@ pub fn run_review_phase_for_task_native(
 
 pub async fn advance_tasks_native(
     repo_root: &Path,
+    env_cfg: &CoordinatorEnvConfig,
+    coordinator: Option<&crate::config::CoordinatorConfig>,
     coordinator_tool_override: Option<&str>,
     phase_runner_max_attempts: usize,
     state: &mut CoordinatorRunState,
@@ -566,6 +575,7 @@ pub async fn advance_tasks_native(
     let mut progressed = false;
     let blocked_merge: Option<(String, String)> = None;
     let now = now_iso_coordinator();
+    let merge_timeout = resolve_merge_timeout_seconds(env_cfg, coordinator);
     let active_merge_ids = state
         .active_merge_jobs
         .keys()
@@ -682,17 +692,33 @@ pub async fn advance_tasks_native(
                 let task_for_worker = task_id.clone();
                 let branch_for_worker = branch.clone();
                 let base_for_worker = base.clone();
+
+                let merge_ai_fix = env_cfg
+                    .merge_ai_fix
+                    .or_else(|| coordinator.and_then(|c| c.merge_ai_fix))
+                    .unwrap_or(false);
+                let merge_fix_hook = env_cfg
+                    .merge_fix_hook
+                    .clone()
+                    .or_else(|| coordinator.and_then(|c| c.merge_fix_hook.clone()));
+                let merge_hook_timeout = env_cfg
+                    .merge_hook_timeout_seconds
+                    .or_else(|| coordinator.and_then(|c| c.merge_hook_timeout_seconds));
+
                 coordinator_runtime::spawn_merge_job(
                     &task_id,
                     &state.merge_event_tx,
                     &mut state.merge_join_set,
-                    resolve_merge_timeout_seconds(),
+                    merge_timeout,
                     move || {
                         coordinator_runtime::merge_task_with_policy_native(
                             &repo,
                             &task_for_worker,
                             &branch_for_worker,
                             &base_for_worker,
+                            merge_ai_fix,
+                            merge_fix_hook.as_deref(),
+                            merge_hook_timeout,
                             |event_type, task_id, phase, status, message, severity| {
                                 let _ = append_coordinator_event_with_severity(
                                     &repo, event_type, task_id, phase, status, message, severity,
@@ -736,6 +762,7 @@ pub async fn advance_tasks_native(
 pub async fn monitor_active_jobs_native(
     repo_root: &Path,
     env_cfg: &CoordinatorEnvConfig,
+    coordinator: Option<&crate::config::CoordinatorConfig>,
     state: &mut CoordinatorRunState,
     max_attempts: usize,
     phase_timeout_seconds: usize,
@@ -744,9 +771,9 @@ pub async fn monitor_active_jobs_native(
     ensure_performer_ipc_listener(repo_root, state, logger).await?;
     consume_runtime_events(repo_root, state, logger)?;
     apply_runtime_event_bus_updates(repo_root, state, logger)?;
-    apply_stale_heartbeat_policy(repo_root, env_cfg, logger)?;
-    let retry_codes = resolve_error_code_retry_list(env_cfg);
-    let retry_max = resolve_error_code_retry_max(env_cfg);
+    apply_stale_heartbeat_policy(repo_root, env_cfg, coordinator, logger)?;
+    let retry_codes = resolve_error_code_retry_list(env_cfg, coordinator);
+    let retry_max = resolve_error_code_retry_max(env_cfg, coordinator);
     loop {
         match state.event_rx.try_recv() {
             Ok(evt) => {
@@ -1037,13 +1064,14 @@ enum StaleHeartbeatAction {
 pub fn apply_stale_heartbeat_policy(
     repo_root: &Path,
     env_cfg: &CoordinatorEnvConfig,
+    coordinator: Option<&crate::config::CoordinatorConfig>,
     logger: Option<&dyn CoordinatorLog>,
 ) -> Result<usize> {
-    let stale_seconds = resolve_stale_heartbeat_seconds(env_cfg);
+    let stale_seconds = resolve_stale_heartbeat_seconds(env_cfg, coordinator);
     if stale_seconds == 0 {
         return Ok(0);
     }
-    let action = resolve_stale_heartbeat_action(env_cfg, logger);
+    let action = resolve_stale_heartbeat_action(env_cfg, coordinator, logger);
     let now = chrono::Utc::now();
     let now_ts = now.timestamp();
     let now_iso = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
@@ -1189,26 +1217,25 @@ pub fn apply_stale_heartbeat_policy(
     Ok(stale_ids.len())
 }
 
-fn resolve_stale_heartbeat_seconds(env_cfg: &CoordinatorEnvConfig) -> usize {
-    if let Some(val) = env_cfg.stale_in_progress_seconds {
-        return val;
-    }
-    if let Ok(raw) = std::env::var("STALE_HEARTBEAT_SECONDS") {
-        if let Ok(value) = raw.trim().parse::<usize>() {
-            return value;
-        }
-    }
-    0
+fn resolve_stale_heartbeat_seconds(
+    env_cfg: &CoordinatorEnvConfig,
+    coordinator: Option<&crate::config::CoordinatorConfig>,
+) -> usize {
+    env_cfg
+        .stale_in_progress_seconds
+        .or_else(|| coordinator.and_then(|c| c.stale_in_progress_seconds))
+        .unwrap_or(0)
 }
 
 fn resolve_stale_heartbeat_action(
     env_cfg: &CoordinatorEnvConfig,
+    coordinator: Option<&crate::config::CoordinatorConfig>,
     logger: Option<&dyn CoordinatorLog>,
 ) -> StaleHeartbeatAction {
     let raw = env_cfg
         .stale_action
         .clone()
-        .or_else(|| std::env::var("STALE_HEARTBEAT_ACTION").ok())
+        .or_else(|| coordinator.and_then(|c| c.stale_action.clone()))
         .unwrap_or_else(|| "block".to_string())
         .trim()
         .to_ascii_lowercase();
@@ -1228,10 +1255,14 @@ fn resolve_stale_heartbeat_action(
     }
 }
 
-fn resolve_error_code_retry_list(env_cfg: &CoordinatorEnvConfig) -> Vec<String> {
+fn resolve_error_code_retry_list(
+    env_cfg: &CoordinatorEnvConfig,
+    coordinator: Option<&crate::config::CoordinatorConfig>,
+) -> Vec<String> {
     let raw = env_cfg
         .error_code_retry_list
         .clone()
+        .or_else(|| coordinator.and_then(|c| c.error_code_retry_list.clone()))
         .unwrap_or_else(|| "E101,E102,E103,E301,E302,E303".to_string());
     raw.split(',')
         .map(|v| v.trim().to_string())
@@ -1239,12 +1270,20 @@ fn resolve_error_code_retry_list(env_cfg: &CoordinatorEnvConfig) -> Vec<String> 
         .collect()
 }
 
-fn resolve_error_code_retry_max(env_cfg: &CoordinatorEnvConfig) -> usize {
-    env_cfg.error_code_retry_max.unwrap_or(2)
+fn resolve_error_code_retry_max(
+    env_cfg: &CoordinatorEnvConfig,
+    coordinator: Option<&crate::config::CoordinatorConfig>,
+) -> usize {
+    env_cfg
+        .error_code_retry_max
+        .or_else(|| coordinator.and_then(|c| c.error_code_retry_max))
+        .unwrap_or(2)
 }
 
 pub async fn monitor_merge_jobs_native(
     repo_root: &Path,
+    _env_cfg: &CoordinatorEnvConfig,
+    _coordinator: Option<&crate::config::CoordinatorConfig>,
     state: &mut CoordinatorRunState,
     logger: Option<&dyn CoordinatorLog>,
 ) -> Result<Option<(String, String)>> {
@@ -1350,7 +1389,7 @@ pub async fn dispatch_ready_tasks_native(
     ensure_performer_ipc_listener(repo_root, state, logger).await?;
     let mut dispatched = 0usize;
     let mut dispatch_failed_this_cycle: HashSet<String> = HashSet::new();
-    let cooldown_seconds = resolve_dispatch_cooldown_seconds();
+    let cooldown_seconds = resolve_dispatch_cooldown_seconds(env_cfg, coordinator);
     state
         .dispatch_retry_not_before
         .retain(|_, until| *until > Instant::now());

@@ -519,7 +519,6 @@ fn resolve_storage_mode(args: &BTreeMap<String, String>) -> Result<CoordinatorSt
     let raw = args
         .get("storage-mode")
         .cloned()
-        .or_else(|| std::env::var("COORDINATOR_STORAGE_MODE").ok())
         .unwrap_or_else(|| "sqlite".to_string());
     raw.parse::<CoordinatorStorageMode>()
         .map_err(MaccError::Validation)
@@ -529,7 +528,6 @@ fn should_mirror_json(args: &BTreeMap<String, String>) -> bool {
     let raw = args
         .get("mirror-json")
         .cloned()
-        .or_else(|| std::env::var("COORDINATOR_JSON_COMPAT").ok())
         .unwrap_or_else(|| "0".to_string());
     !matches!(
         raw.trim().to_ascii_lowercase().as_str(),
@@ -540,7 +538,6 @@ fn should_mirror_json(args: &BTreeMap<String, String>) -> bool {
 fn mirror_json_debounce_ms(args: &BTreeMap<String, String>) -> u64 {
     args.get("mirror-json-debounce-ms")
         .cloned()
-        .or_else(|| std::env::var("COORDINATOR_JSON_EXPORT_DEBOUNCE_MS").ok())
         .and_then(|raw| raw.trim().parse::<u64>().ok())
         .unwrap_or(0)
 }
@@ -603,7 +600,6 @@ fn allow_legacy_json_fallback(args: &BTreeMap<String, String>) -> bool {
     let raw = args
         .get("legacy-json-fallback")
         .cloned()
-        .or_else(|| std::env::var("COORDINATOR_LEGACY_JSON_FALLBACK").ok())
         .unwrap_or_else(|| "0".to_string());
     !matches!(
         raw.trim().to_ascii_lowercase().as_str(),

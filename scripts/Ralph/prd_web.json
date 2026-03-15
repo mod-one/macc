@@ -55,7 +55,7 @@
                 "Cargo.lock"
             ],
             "dependencies": [],
-            "priority": "1"
+            "priority": "0"
         },
         {
             "id": "WEB-BACKEND-002",

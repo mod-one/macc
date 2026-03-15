@@ -19,7 +19,6 @@ use macc_core::tool::{ActionKind, FieldDefault, FieldKind, ToolDescriptor, ToolF
 use macc_core::{find_project_root, Engine, ProjectPaths};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap};
-use std::env;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -68,29 +67,6 @@ pub struct WorktreeStatus {
 pub struct LogEntry {
     pub path: PathBuf,
     pub relative: String,
-}
-
-struct QuietEnvGuard {
-    key: &'static str,
-    previous: Option<String>,
-}
-
-impl QuietEnvGuard {
-    fn new(key: &'static str, value: &str) -> Self {
-        let previous = env::var(key).ok();
-        env::set_var(key, value);
-        Self { key, previous }
-    }
-}
-
-impl Drop for QuietEnvGuard {
-    fn drop(&mut self) {
-        if let Some(prev) = self.previous.take() {
-            env::set_var(self.key, prev);
-        } else {
-            env::remove_var(self.key);
-        }
-    }
 }
 
 fn format_hms(total_secs: u64) -> String {
@@ -147,6 +123,9 @@ pub struct AppState {
     pub automation_field_index: usize,
     pub automation_field_editing: bool,
     pub automation_field_input: String,
+    pub settings_field_index: usize,
+    pub settings_field_editing: bool,
+    pub settings_field_input: String,
     pub skills: Vec<Skill>,
     pub agents: Vec<Agent>,
     pub skill_selection_index: usize,
@@ -200,7 +179,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    const AUTOMATION_FIELD_COUNT: usize = 17;
+    const AUTOMATION_FIELD_COUNT: usize = 27;
     const COORDINATOR_EVENTS_EWMA_ALPHA: f64 = 0.30;
     const COORDINATOR_PAUSE_REL_PATH: &'static str = ".macc/automation/task/coordinator.pause.json";
 
@@ -235,6 +214,9 @@ impl AppState {
             automation_field_index: 0,
             automation_field_editing: false,
             automation_field_input: String::new(),
+            settings_field_index: 0,
+            settings_field_editing: false,
+            settings_field_input: String::new(),
             skills: Vec::new(),
             agents: Vec::new(),
             skill_selection_index: 0,
@@ -1120,9 +1102,9 @@ impl AppState {
             badges.push("coord:off".to_string());
         }
         let offline = self
-            .engine
-            .env_var("MACC_OFFLINE")
-            .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+            .working_copy
+            .as_ref()
+            .map(|c| c.settings.offline)
             .unwrap_or(false);
         badges.push(if offline {
             "offline:on".to_string()
@@ -1794,8 +1776,20 @@ impl AppState {
             prev_index(self.automation_field_index, Self::AUTOMATION_FIELD_COUNT);
     }
 
+    pub fn next_settings_field(&mut self) {
+        self.settings_field_index = next_index(self.settings_field_index, 3);
+    }
+
+    pub fn prev_settings_field(&mut self) {
+        self.settings_field_index = prev_index(self.settings_field_index, 3);
+    }
+
     pub fn is_automation_field_editing(&self) -> bool {
         self.automation_field_editing
+    }
+
+    pub fn is_settings_field_editing(&self) -> bool {
+        self.settings_field_editing
     }
 
     pub fn automation_field_label(&self, index: usize) -> &'static str {
@@ -1817,6 +1811,16 @@ impl AppState {
             14 => "Log Flush Lines",
             15 => "Log Flush Interval (ms)",
             16 => "JSON Export Debounce (ms)",
+            17 => "Merge AI Fix",
+            18 => "Merge Fix Hook",
+            19 => "Merge Job Timeout (s)",
+            20 => "Merge Hook Timeout (s)",
+            21 => "Ghost Heartbeat Grace (s)",
+            22 => "Dispatch Cooldown (s)",
+            23 => "JSON Compatibility",
+            24 => "Retry Error Codes (CSV)",
+            25 => "Max Auto Retries",
+            26 => "Legacy JSON Fallback",
             _ => "",
         }
     }
@@ -1840,6 +1844,16 @@ impl AppState {
             14 => "Flush coordinator logs every N lines (0 uses runtime default).",
             15 => "Flush coordinator logs every N milliseconds (0 uses runtime default).",
             16 => "Debounce SQLite -> JSON compatibility export in ms (0 disables debounce).",
+            17 => "Enable AI-driven resolution for merge conflicts.",
+            18 => "Custom script path to handle merge conflict resolution.",
+            19 => "Timeout for git merge operations in seconds.",
+            20 => "Timeout for AI merge-fix hook execution in seconds.",
+            21 => "Grace period before considering a dead process a 'ghost' in seconds.",
+            22 => "Wait time between task dispatch cycles in seconds.",
+            23 => "Enable JSON snapshot export for external tool compatibility.",
+            24 => "Comma-separated list of error codes that trigger an automatic task retry.",
+            25 => "Maximum number of automatic retries for a failed task.",
+            26 => "Allow falling back to JSON task registry if SQLite is corrupted or missing.",
             _ => "",
         }
     }
@@ -1917,7 +1931,168 @@ impl AppState {
                 .and_then(|c| c.mirror_json_debounce_ms)
                 .unwrap_or(0)
                 .to_string(),
+            17 => coordinator
+                .and_then(|c| c.merge_ai_fix)
+                .unwrap_or(false)
+                .to_string(),
+            18 => coordinator
+                .and_then(|c| c.merge_fix_hook.clone())
+                .unwrap_or_else(|| "automat/hooks/ai-merge-fix.sh".to_string()),
+            19 => coordinator
+                .and_then(|c| c.merge_job_timeout_seconds)
+                .unwrap_or(0)
+                .to_string(),
+            20 => coordinator
+                .and_then(|c| c.merge_hook_timeout_seconds)
+                .unwrap_or(90)
+                .to_string(),
+            21 => coordinator
+                .and_then(|c| c.ghost_heartbeat_grace_seconds)
+                .unwrap_or(30)
+                .to_string(),
+            22 => coordinator
+                .and_then(|c| c.dispatch_cooldown_seconds)
+                .unwrap_or(2)
+                .to_string(),
+            23 => coordinator
+                .and_then(|c| c.json_compat)
+                .unwrap_or(false)
+                .to_string(),
+            24 => self
+                .coordinator_env_cfg()
+                .error_code_retry_list
+                .unwrap_or_else(|| "E101,E102,E103,E301,E302,E303".to_string()),
+            25 => self.coordinator_env_cfg().error_code_retry_max.unwrap_or(2).to_string(),
+            26 => coordinator
+                .and_then(|c| c.legacy_json_fallback)
+                .unwrap_or(false)
+                .to_string(),
             _ => String::new(),
+        }
+    }
+
+    pub fn settings_field_count(&self) -> usize {
+        3
+    }
+
+    pub fn settings_field_label(&self, index: usize) -> &'static str {
+        match index {
+            0 => "Silent Mode",
+            1 => "Offline Mode",
+            2 => "Web Interface Port",
+            _ => "",
+        }
+    }
+
+    pub fn settings_field_help(&self, index: usize) -> &'static str {
+        match index {
+            0 => "Suppress all non-essential output from AI tools.",
+            1 => "Disable all remote fetching and updates.",
+            2 => "The port number for the MACC web interface.",
+            _ => "",
+        }
+    }
+
+    pub fn settings_field_display_value(&self, index: usize) -> String {
+        let Some(config) = &self.working_copy else {
+            return String::new();
+        };
+        match index {
+            0 => config.settings.quiet.to_string(),
+            1 => config.settings.offline.to_string(),
+            2 => config
+                .settings
+                .web_port
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "default (3450)".to_string()),
+            _ => String::new(),
+        }
+    }
+
+    pub fn begin_settings_field_edit(&mut self) {
+        self.settings_field_input = self.settings_field_display_value(self.settings_field_index);
+        self.settings_field_editing = true;
+    }
+
+    pub fn append_settings_field_char(&mut self, ch: char) {
+        if self.settings_field_editing {
+            self.settings_field_input.push(ch);
+        }
+    }
+
+    pub fn pop_settings_field_char(&mut self) {
+        if self.settings_field_editing {
+            self.settings_field_input.pop();
+        }
+    }
+
+    pub fn cancel_settings_field_edit(&mut self) {
+        self.settings_field_editing = false;
+    }
+
+    pub fn toggle_settings_field(&mut self) {
+        if matches!(self.settings_field_index, 0 | 1) {
+            let current = self.settings_field_display_value(self.settings_field_index) == "true";
+            self.set_settings_field_bool(self.settings_field_index, !current);
+            return;
+        }
+        self.begin_settings_field_edit();
+    }
+
+    pub fn commit_settings_field_edit(&mut self) {
+        if !self.settings_field_editing {
+            return;
+        }
+        let idx = self.settings_field_index;
+        let input = self.settings_field_input.trim().to_string();
+        self.settings_field_editing = false;
+
+        let result = match idx {
+            0 | 1 => {
+                let value = input.to_lowercase();
+                if value == "true" {
+                    self.set_settings_field_bool(idx, true);
+                    Ok(())
+                } else if value == "false" {
+                    self.set_settings_field_bool(idx, false);
+                    Ok(())
+                } else {
+                    Err("Value must be 'true' or 'false'.".to_string())
+                }
+            }
+            2 => match input.parse::<u16>() {
+                Ok(value) => {
+                    self.set_settings_field_u16(idx, value);
+                    Ok(())
+                }
+                Err(_) => Err("Invalid port number.".to_string()),
+            },
+            _ => Ok(()),
+        };
+
+        if let Err(err) = result {
+            self.errors.push(err);
+        }
+    }
+
+    fn set_settings_field_bool(&mut self, idx: usize, value: bool) {
+        self.snapshot_before_config_change();
+        if let Some(config) = &mut self.working_copy {
+            match idx {
+                0 => config.settings.quiet = value,
+                1 => config.settings.offline = value,
+                _ => {}
+            }
+        }
+    }
+
+    fn set_settings_field_u16(&mut self, idx: usize, value: u16) {
+        self.snapshot_before_config_change();
+        if let Some(config) = &mut self.working_copy {
+            match idx {
+                2 => config.settings.web_port = Some(value),
+                _ => {}
+            }
         }
     }
 
@@ -1954,6 +2129,11 @@ impl AppState {
             self.set_automation_field_string(13, next.to_string());
             return;
         }
+        if matches!(self.automation_field_index, 17 | 23 | 26) {
+            let current = self.automation_field_display_value(self.automation_field_index) == "true";
+            self.set_automation_field_bool(self.automation_field_index, !current);
+            return;
+        }
         self.begin_automation_field_edit();
     }
 
@@ -1964,8 +2144,8 @@ impl AppState {
         let idx = self.automation_field_index;
         let input = self.automation_field_input.trim().to_string();
         let result = match idx {
-            0..=2 => {
-                if input.is_empty() {
+            0..=2 | 18 | 24 => {
+                if input.is_empty() && idx != 18 {
                     Err("Value cannot be empty.".to_string())
                 } else {
                     self.set_automation_field_string(idx, input);
@@ -1978,16 +2158,23 @@ impl AppState {
             }
             4 => self.set_automation_field_tool_caps(input),
             5 => self.set_automation_field_tool_specializations(input),
-            6..=12 | 14 => match input.parse::<usize>() {
+            6..=12 | 14 | 19 | 25 => match input.parse::<usize>() {
                 Ok(value) => {
                     self.set_automation_field_usize(idx, value);
                     Ok(())
                 }
                 Err(_) => Err("Invalid integer value.".to_string()),
             },
-            15 | 16 => match input.parse::<u64>() {
+            15 | 16 | 20 | 22 => match input.parse::<u64>() {
                 Ok(value) => {
                     self.set_automation_field_u64(idx, value);
+                    Ok(())
+                }
+                Err(_) => Err("Invalid integer value.".to_string()),
+            },
+            21 => match input.parse::<i64>() {
+                Ok(value) => {
+                    self.set_automation_field_i64(idx, value);
                     Ok(())
                 }
                 Err(_) => Err("Invalid integer value.".to_string()),
@@ -1999,6 +2186,18 @@ impl AppState {
                 } else {
                     self.set_automation_field_string(13, value);
                     Ok(())
+                }
+            }
+            17 | 23 | 26 => {
+                let value = input.to_lowercase();
+                if value == "true" {
+                    self.set_automation_field_bool(idx, true);
+                    Ok(())
+                } else if value == "false" {
+                    self.set_automation_field_bool(idx, false);
+                    Ok(())
+                } else {
+                    Err("Value must be 'true' or 'false'.".to_string())
                 }
             }
             _ => Ok(()),
@@ -2038,6 +2237,8 @@ impl AppState {
                 1 => coordinator.reference_branch = Some(value),
                 2 => coordinator.prd_file = Some(value),
                 13 => coordinator.stale_action = Some(value),
+                18 => coordinator.merge_fix_hook = Some(value),
+                24 => coordinator.error_code_retry_list = Some(value),
                 _ => {}
             }
         }
@@ -2055,6 +2256,8 @@ impl AppState {
                 11 => coordinator.stale_in_progress_seconds = Some(value),
                 12 => coordinator.stale_changes_requested_seconds = Some(value),
                 14 => coordinator.log_flush_lines = Some(value),
+                19 => coordinator.merge_job_timeout_seconds = Some(value),
+                25 => coordinator.error_code_retry_max = Some(value),
                 _ => {}
             }
         }
@@ -2066,6 +2269,30 @@ impl AppState {
             match idx {
                 15 => coordinator.log_flush_ms = Some(value),
                 16 => coordinator.mirror_json_debounce_ms = Some(value),
+                20 => coordinator.merge_hook_timeout_seconds = Some(value),
+                22 => coordinator.dispatch_cooldown_seconds = Some(value),
+                _ => {}
+            }
+        }
+    }
+
+    fn set_automation_field_i64(&mut self, idx: usize, value: i64) {
+        self.snapshot_before_config_change();
+        if let Some(coordinator) = self.coordinator_config_mut() {
+            match idx {
+                21 => coordinator.ghost_heartbeat_grace_seconds = Some(value),
+                _ => {}
+            }
+        }
+    }
+
+    fn set_automation_field_bool(&mut self, idx: usize, value: bool) {
+        self.snapshot_before_config_change();
+        if let Some(coordinator) = self.coordinator_config_mut() {
+            match idx {
+                17 => coordinator.merge_ai_fix = Some(value),
+                23 => coordinator.json_compat = Some(value),
+                26 => coordinator.legacy_json_fallback = Some(value),
                 _ => {}
             }
         }
@@ -2622,6 +2849,7 @@ impl AppState {
         match self.current_screen() {
             Screen::Tools => self.next_tool(),
             Screen::Automation => self.next_automation_field(),
+            Screen::Settings => self.next_settings_field(),
             Screen::Logs => self.next_log(),
             Screen::Skills => self.next_skill(),
             Screen::Agents => self.next_agent(),
@@ -2636,6 +2864,7 @@ impl AppState {
         match self.current_screen() {
             Screen::Tools => self.prev_tool(),
             Screen::Automation => self.prev_automation_field(),
+            Screen::Settings => self.prev_settings_field(),
             Screen::Logs => self.prev_log(),
             Screen::Skills => self.prev_skill(),
             Screen::Agents => self.prev_agent(),
@@ -2650,6 +2879,7 @@ impl AppState {
         match self.current_screen() {
             Screen::Tools => self.toggle_selected_tool(),
             Screen::Automation => self.toggle_automation_field(),
+            Screen::Settings => self.toggle_settings_field(),
             Screen::Skills => self.toggle_skill(),
             Screen::Agents => self.toggle_agent(),
             Screen::ToolSettings => self.toggle_tool_field(),
@@ -2684,6 +2914,7 @@ impl AppState {
                 }
             }
             Screen::Automation => self.toggle_automation_field(),
+            Screen::Settings => self.toggle_settings_field(),
             Screen::Skills => self.toggle_skill(),
             Screen::Agents => self.toggle_agent(),
             Screen::ToolSettings => self.toggle_tool_field(),
@@ -2859,7 +3090,6 @@ impl AppState {
     }
 
     pub fn refresh_preview_plan(&mut self) {
-        let _quiet = QuietEnvGuard::new("MACC_QUIET", "1");
         self.preview_ops.clear();
         self.preview_diff_cache.clear();
         self.preview_diff_scroll.clear();
@@ -2895,7 +3125,13 @@ impl AppState {
             }
         };
 
-        let materialized_units = match materialize_fetch_units(paths, fetch_units) {
+        let (quiet, offline) = self
+            .working_copy
+            .as_ref()
+            .map(|c| (c.settings.quiet, c.settings.offline))
+            .unwrap_or((false, false));
+
+        let materialized_units = match materialize_fetch_units(paths, fetch_units, quiet, offline) {
             Ok(units) => units,
             Err(e) => {
                 self.preview_error = Some(format!("Failed to materialize catalog sources: {}", e));
@@ -2920,7 +3156,6 @@ impl AppState {
     }
 
     fn build_apply_context(&self) -> Result<ApplyContext, String> {
-        let _quiet = QuietEnvGuard::new("MACC_QUIET", "1");
         let paths = self
             .project_paths
             .as_ref()
@@ -2933,8 +3168,9 @@ impl AppState {
         let resolved = resolve(canonical, &CliOverrides::default());
         let fetch_units = resolve_fetch_units(paths, &resolved)
             .map_err(|e| format!("Failed to resolve catalog selections: {}", e))?;
-        let materialized_units = materialize_fetch_units(paths, fetch_units)
-            .map_err(|e| format!("Failed to materialize catalog sources: {}", e))?;
+        let materialized_units =
+            materialize_fetch_units(paths, fetch_units, canonical.settings.quiet, canonical.settings.offline)
+                .map_err(|e| format!("Failed to materialize catalog sources: {}", e))?;
 
         let plan = self
             .engine
@@ -3033,8 +3269,7 @@ impl AppState {
         });
 
         let result = {
-            let _quiet = QuietEnvGuard::new("MACC_QUIET", "1");
-            // For now, engine.apply doesn't support progress callback yet,
+                // For now, engine.apply doesn't support progress callback yet,
             // but we could add it to Engine trait if needed.
             self.engine.apply(paths, &mut plan, allow_user_scope)
         };

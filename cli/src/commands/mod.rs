@@ -30,6 +30,7 @@ pub trait Command {
 pub struct AppContext {
     pub cwd: PathBuf,
     pub engine: crate::services::engine_provider::SharedEngine,
+    pub overrides: macc_core::resolve::CliOverrides,
     cache: Arc<AppContextCache>,
 }
 
@@ -40,10 +41,15 @@ struct AppContextCache {
 }
 
 impl AppContext {
-    pub fn new(cwd: PathBuf, engine: crate::services::engine_provider::SharedEngine) -> Self {
+    pub fn new(
+        cwd: PathBuf,
+        engine: crate::services::engine_provider::SharedEngine,
+        overrides: macc_core::resolve::CliOverrides,
+    ) -> Self {
         Self {
             cwd,
             engine,
+            overrides,
             cache: Arc::new(AppContextCache::default()),
         }
     }

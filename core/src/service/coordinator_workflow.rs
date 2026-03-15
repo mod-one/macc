@@ -597,7 +597,7 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
             result.status = Some(get_coordinator_status(paths)?);
         }
         CoordinatorCommand::ReconcileRuntime => {
-            coordinator_reconcile(paths, request.logger)?;
+            coordinator_reconcile(paths, request.env_cfg, request.coordinator_cfg, request.logger)?;
         }
         CoordinatorCommand::CleanupMaintenance => {
             coordinator_cleanup(paths, request.logger)?;
@@ -612,7 +612,7 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
                 Some(engine.coordinator_aggregate_performer_logs(&paths.root)?);
         }
         CoordinatorCommand::EvaluateCutoverGate => {
-            coordinator_cutover_gate(paths)?;
+            coordinator_cutover_gate(paths, request.env_cfg, request.coordinator_cfg)?;
         }
         CoordinatorCommand::Unlock {
             task_id,
@@ -897,7 +897,7 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
             reason,
         } => {
             coordinator_stop(paths, &reason)?;
-            coordinator_reconcile(paths, request.logger)?;
+            coordinator_reconcile(paths, request.env_cfg, request.coordinator_cfg, request.logger)?;
             coordinator_cleanup(paths, request.logger)?;
             coordinator_unlock(
                 engine,
@@ -1071,6 +1071,7 @@ pub fn coordinator_dispatch<E: crate::engine::Engine + ?Sized>(
                 .coordinator_monitor_active_jobs_native(
                     &paths.root,
                     env_cfg,
+                    coordinator_cfg,
                     &mut state,
                     max_attempts,
                     phase_timeout,
@@ -1110,6 +1111,8 @@ pub fn coordinator_advance<E: crate::engine::Engine + ?Sized>(
         engine
             .coordinator_advance_tasks_native(
                 &paths.root,
+                env_cfg,
+                coordinator_cfg,
                 coordinator_tool_override.as_deref(),
                 phase_runner_max_attempts,
                 &mut state,
@@ -1130,12 +1133,18 @@ pub fn coordinator_advance<E: crate::engine::Engine + ?Sized>(
 
 pub fn coordinator_reconcile(
     paths: &ProjectPaths,
+    env_cfg: &CoordinatorEnvConfig,
+    coordinator: Option<&CoordinatorConfig>,
     logger: Option<&dyn CoordinatorLog>,
 ) -> Result<()> {
     if let Some(logger) = logger {
         let _ = logger.note("- Reconcile start".to_string());
     }
-    state_runtime::reconcile_registry_native(&paths.root)?;
+    let heartbeat_grace_seconds = env_cfg
+        .ghost_heartbeat_grace_seconds
+        .or_else(|| coordinator.and_then(|c| c.ghost_heartbeat_grace_seconds))
+        .unwrap_or(30);
+    state_runtime::reconcile_registry_native(&paths.root, heartbeat_grace_seconds)?;
     if let Some(logger) = logger {
         let _ = logger.note("- Reconcile complete".to_string());
     }
@@ -1178,17 +1187,11 @@ pub fn coordinator_sync<E: crate::engine::Engine + ?Sized>(
         engine.coordinator_storage_import_json_to_sqlite(paths)?;
     }
     engine.coordinator_sync_registry_from_prd_with_logger(&paths.root, &prd_file, logger)?;
-    if storage_mode != CoordinatorStorageMode::Json
-        && std::env::var("COORDINATOR_JSON_COMPAT")
-            .ok()
-            .map(|raw| {
-                !matches!(
-                    raw.trim().to_ascii_lowercase().as_str(),
-                    "0" | "false" | "no" | "off"
-                )
-            })
-            .unwrap_or(false)
-    {
+    let json_compat = env_cfg
+        .json_compat
+        .or_else(|| coordinator_cfg.and_then(|c| c.json_compat))
+        .unwrap_or(false);
+    if storage_mode != CoordinatorStorageMode::Json && json_compat {
         engine.coordinator_storage_export_sqlite_to_json(paths)?;
     }
     Ok(())
@@ -1230,18 +1233,22 @@ pub fn coordinator_unlock<E: crate::engine::Engine + ?Sized>(
     )))
 }
 
-pub fn coordinator_cutover_gate(paths: &ProjectPaths) -> Result<()> {
-    let window_events: usize = std::env::var("CUTOVER_GATE_WINDOW_EVENTS")
-        .ok()
-        .and_then(|v| v.parse().ok())
+pub fn coordinator_cutover_gate(
+    paths: &ProjectPaths,
+    env_cfg: &CoordinatorEnvConfig,
+    coordinator: Option<&CoordinatorConfig>,
+) -> Result<()> {
+    let window_events: usize = env_cfg
+        .cutover_gate_window_events
+        .or_else(|| coordinator.and_then(|c| c.cutover_gate_window_events))
         .unwrap_or(2000);
-    let max_blocked_ratio: f64 = std::env::var("CUTOVER_GATE_MAX_BLOCKED_RATIO")
-        .ok()
-        .and_then(|v| v.parse().ok())
+    let max_blocked_ratio: f64 = env_cfg
+        .cutover_gate_max_blocked_ratio
+        .or_else(|| coordinator.and_then(|c| c.cutover_gate_max_blocked_ratio))
         .unwrap_or(0.25);
-    let max_stale_ratio: f64 = std::env::var("CUTOVER_GATE_MAX_STALE_RATIO")
-        .ok()
-        .and_then(|v| v.parse().ok())
+    let max_stale_ratio: f64 = env_cfg
+        .cutover_gate_max_stale_ratio
+        .or_else(|| coordinator.and_then(|c| c.cutover_gate_max_stale_ratio))
         .unwrap_or(0.25);
     let storage_paths = CoordinatorStoragePaths::from_project_paths(paths);
     let sqlite = SqliteStorage::new(storage_paths.clone());
@@ -1329,7 +1336,15 @@ pub fn coordinator_retry_phase<E: crate::engine::Engine + ?Sized>(
     engine.coordinator_state_increment_retries(&paths.root, &retry_args)?;
 
     match phase.as_str() {
-        "dev" => retry_dev_phase(engine, paths, canonical, env_cfg, task_id.as_str(), logger)?,
+        "dev" => retry_dev_phase(
+            engine,
+            paths,
+            canonical,
+            coordinator_cfg,
+            env_cfg,
+            task_id.as_str(),
+            logger,
+        )?,
         "review" | "fix" | "integrate" => retry_tool_phase(
             engine,
             paths,
@@ -1401,6 +1416,7 @@ fn retry_dev_phase<E: crate::engine::Engine + ?Sized>(
     engine: &E,
     paths: &ProjectPaths,
     canonical: &crate::config::CanonicalConfig,
+    coordinator_cfg: Option<&CoordinatorConfig>,
     env_cfg: &CoordinatorEnvConfig,
     task_id: &str,
     logger: Option<&dyn CoordinatorLog>,
@@ -1471,6 +1487,7 @@ fn retry_dev_phase<E: crate::engine::Engine + ?Sized>(
                 .coordinator_monitor_active_jobs_native(
                     &paths.root,
                     env_cfg,
+                    coordinator_cfg,
                     &mut state,
                     1,
                     env_cfg.stale_in_progress_seconds.unwrap_or(0),
@@ -1619,6 +1636,18 @@ fn apply_storage_mode_args(
         .or_else(|| coordinator_cfg.and_then(|c| c.mirror_json_debounce_ms))
     {
         args.insert("mirror-json-debounce-ms".to_string(), value.to_string());
+    }
+    if let Some(value) = env_cfg
+        .json_compat
+        .or_else(|| coordinator_cfg.and_then(|c| c.json_compat))
+    {
+        args.insert("mirror-json".to_string(), value.to_string());
+    }
+    if let Some(value) = env_cfg
+        .legacy_json_fallback
+        .or_else(|| coordinator_cfg.and_then(|c| c.legacy_json_fallback))
+    {
+        args.insert("legacy-json-fallback".to_string(), value.to_string());
     }
 }
 
@@ -1828,17 +1857,14 @@ fn parse_select_ready_task_command(args: &[String]) -> Result<CoordinatorCommand
     let max_parallel_raw = map
         .get("max-parallel")
         .cloned()
-        .or_else(|| std::env::var("MAX_PARALLEL").ok())
         .unwrap_or_else(|| "0".to_string());
     let default_tool = map
         .get("default-tool")
         .cloned()
-        .or_else(|| std::env::var("DEFAULT_TOOL").ok())
         .unwrap_or_default();
     let default_base_branch = map
         .get("default-base-branch")
         .cloned()
-        .or_else(|| std::env::var("DEFAULT_BASE_BRANCH").ok())
         .unwrap_or_else(|| "master".to_string());
 
     Ok(CoordinatorCommand::SelectReadyTask {

@@ -155,13 +155,14 @@ pub fn execute_remote_search(
         }
     }
 }
-
 pub trait CatalogInstallBackend {
     fn list_tools(&self, paths: &ProjectPaths) -> (Vec<ToolDescriptor>, Vec<ToolDiagnostic>);
     fn materialize_fetch_unit(
         &self,
         paths: &ProjectPaths,
         fetch_unit: FetchUnit,
+        quiet: bool,
+        offline: bool,
     ) -> Result<MaterializedFetchUnit>;
     fn apply(
         &self,
@@ -187,6 +188,7 @@ pub fn install_skill(
     paths: &ProjectPaths,
     tool: &str,
     id: &str,
+    canonical: &crate::config::CanonicalConfig,
     backend: &dyn CatalogInstallBackend,
 ) -> Result<InstallSkillOutcome> {
     let catalog = load_effective_skills_catalog(paths)?;
@@ -215,7 +217,12 @@ pub fn install_skill(
             kind: SelectionKind::Skill,
         }],
     };
-    let materialized = backend.materialize_fetch_unit(paths, fetch_unit)?;
+    let materialized = backend.materialize_fetch_unit(
+        paths,
+        fetch_unit,
+        canonical.settings.quiet,
+        canonical.settings.offline,
+    )?;
     let mut plan = ActionPlan::new();
     plan_skill_install(
         &mut plan,
@@ -237,6 +244,7 @@ pub fn install_skill(
 pub fn install_mcp(
     paths: &ProjectPaths,
     id: &str,
+    canonical: &crate::config::CanonicalConfig,
     backend: &dyn CatalogInstallBackend,
 ) -> Result<InstallMcpOutcome> {
     let catalog = load_effective_mcp_catalog(paths)?;
@@ -256,7 +264,12 @@ pub fn install_mcp(
             kind: SelectionKind::Mcp,
         }],
     };
-    let materialized = backend.materialize_fetch_unit(paths, fetch_unit)?;
+    let materialized = backend.materialize_fetch_unit(
+        paths,
+        fetch_unit,
+        canonical.settings.quiet,
+        canonical.settings.offline,
+    )?;
     let mut plan = ActionPlan::new();
     plan_mcp_install(
         &mut plan,

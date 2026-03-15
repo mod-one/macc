@@ -54,7 +54,12 @@ fn cache_root_from_archive_path(archive_path: &Path) -> MaccResult<PathBuf> {
     Ok(cache_root.to_path_buf())
 }
 
-pub fn download_source_raw(paths: &ProjectPaths, source: &Source) -> MaccResult<PathBuf> {
+pub fn download_source_raw(
+    paths: &ProjectPaths,
+    source: &Source,
+    quiet: bool,
+    offline: bool,
+) -> MaccResult<PathBuf> {
     if source.kind != SourceKind::Http {
         return Err(MaccError::Validation(format!(
             "download_source_raw only supports HTTP sources, got {:?}",
@@ -76,15 +81,24 @@ pub fn download_source_raw(paths: &ProjectPaths, source: &Source) -> MaccResult<
                 if actual_checksum.to_lowercase() == expected_checksum.to_lowercase() {
                     return Ok(target);
                 }
-                log_info(&format!(
-                    "Cached archive checksum mismatch for {}. Re-downloading...",
-                    source.url
-                ));
+                if !quiet {
+                    println!(
+                        "Cached archive checksum mismatch for {}. Re-downloading...",
+                        source.url
+                    );
+                }
                 let _ = std::fs::remove_file(&target);
             } else {
                 return Ok(target);
             }
         }
+    }
+
+    if offline {
+        return Err(MaccError::Validation(format!(
+            "Offline mode enabled: cannot download remote source {}",
+            source.url
+        )));
     }
 
     let cache_root = choose_writable_cache_root(paths, &key)?;
@@ -99,7 +113,9 @@ pub fn download_source_raw(paths: &ProjectPaths, source: &Source) -> MaccResult<
         })?;
     }
 
-    log_info(&format!("Fetching {}...", source.url));
+    if !quiet {
+        println!("Fetching {}...", source.url);
+    }
 
     let client = Client::builder()
         .timeout(Duration::from_secs(30))
@@ -149,10 +165,15 @@ pub fn download_source_raw(paths: &ProjectPaths, source: &Source) -> MaccResult<
 }
 
 /// Materializes a source (Git or Http) into the cache.
-pub fn materialize_source(paths: &ProjectPaths, source: &Source) -> MaccResult<PathBuf> {
+pub fn materialize_source(
+    paths: &ProjectPaths,
+    source: &Source,
+    quiet: bool,
+    offline: bool,
+) -> MaccResult<PathBuf> {
     match source.kind {
-        SourceKind::Git => git_fetch(paths, source),
-        SourceKind::Http => download_and_unpack(paths, source),
+        SourceKind::Git => git_fetch(paths, source, quiet, offline),
+        SourceKind::Http => download_and_unpack(paths, source, quiet, offline),
         SourceKind::Local => resolve_local_source(paths, source),
     }
 }
@@ -179,8 +200,10 @@ fn resolve_local_source(paths: &ProjectPaths, source: &Source) -> MaccResult<Pat
 pub fn materialize_fetch_unit(
     paths: &ProjectPaths,
     unit: FetchUnit,
+    quiet: bool,
+    offline: bool,
 ) -> MaccResult<MaterializedFetchUnit> {
-    let root = materialize_source(paths, &unit.source)?;
+    let root = materialize_source(paths, &unit.source, quiet, offline)?;
 
     // Validate that each selection's subpath exists under returned root
     for selection in &unit.selections {
@@ -221,16 +244,23 @@ pub fn materialize_fetch_unit(
 pub fn materialize_fetch_units(
     paths: &ProjectPaths,
     units: Vec<FetchUnit>,
+    quiet: bool,
+    offline: bool,
 ) -> MaccResult<Vec<MaterializedFetchUnit>> {
     let mut materialized = Vec::new();
     for unit in units {
-        materialized.push(materialize_fetch_unit(paths, unit)?);
+        materialized.push(materialize_fetch_unit(paths, unit, quiet, offline)?);
     }
     Ok(materialized)
 }
 
 /// Fetches a Git source into the cache.
-pub fn git_fetch(paths: &ProjectPaths, source: &Source) -> MaccResult<PathBuf> {
+pub fn git_fetch(
+    paths: &ProjectPaths,
+    source: &Source,
+    quiet: bool,
+    offline: bool,
+) -> MaccResult<PathBuf> {
     if source.kind != SourceKind::Git {
         return Err(MaccError::Validation(format!(
             "git_fetch only supports Git sources, got {:?}",
@@ -247,11 +277,15 @@ pub fn git_fetch(paths: &ProjectPaths, source: &Source) -> MaccResult<PathBuf> {
     let repo_dir = cache_root.join("repo");
 
     if !repo_dir.exists() {
-        log_info(&format!(
-            "Cloning {} into {}...",
-            source.url,
-            repo_dir.display()
-        ));
+        if offline {
+            return Err(MaccError::Validation(format!(
+                "Offline mode enabled: repository not found in cache for {}",
+                source.url
+            )));
+        }
+        if !quiet {
+            println!("Cloning {}...", source.url);
+        }
         let mut args = vec!["clone", "--no-checkout"];
         // If we have subpaths, we can optimize the clone
         if !source.subpaths.is_empty() {
@@ -277,12 +311,10 @@ pub fn git_fetch(paths: &ProjectPaths, source: &Source) -> MaccResult<PathBuf> {
                 String::from_utf8_lossy(&output.stderr)
             )));
         }
-    } else {
-        log_info(&format!(
-            "Fetching {} in {}...",
-            source.url,
-            repo_dir.display()
-        ));
+    } else if !offline {
+        if !quiet {
+            println!("Updating {}...", source.url);
+        }
         let output = Command::new("git")
             .args(["fetch", "--all", "--tags"])
             .current_dir(&repo_dir)
@@ -309,13 +341,19 @@ pub fn git_fetch(paths: &ProjectPaths, source: &Source) -> MaccResult<PathBuf> {
     }
 
     if !source.reference.is_empty() {
-        log_info(&format!("Resolving ref {}...", source.reference));
+        if !quiet {
+            println!("Resolving ref {}...", source.reference);
+        }
         let sha = resolve_ref_to_sha(&repo_dir, &source.reference)?;
-        log_info(&format!("Checking out {}...", sha));
+        if !quiet {
+            println!("Checking out {}...", sha);
+        }
         checkout_ref(&repo_dir, &sha)?;
     } else if !source.subpaths.is_empty() {
         // If we have subpaths but no specific ref, we still need to checkout the default branch
-        log_info("Checking out default branch...");
+        if !quiet {
+            println!("Checking out default branch...");
+        }
         checkout_ref(&repo_dir, "HEAD")?;
     }
 
@@ -333,13 +371,6 @@ pub fn git_fetch(paths: &ProjectPaths, source: &Source) -> MaccResult<PathBuf> {
     }
 
     Ok(repo_dir)
-}
-
-fn log_info(message: &str) {
-    if std::env::var("MACC_QUIET").is_ok() {
-        return;
-    }
-    println!("{}", message);
 }
 
 fn enable_sparse_checkout(repo_dir: &Path) -> MaccResult<()> {
@@ -462,8 +493,13 @@ fn disable_sparse_checkout(repo_dir: &Path) -> MaccResult<()> {
 }
 
 /// Downloads and unpacks a source into the cache.
-pub fn download_and_unpack(paths: &ProjectPaths, source: &Source) -> MaccResult<PathBuf> {
-    let archive_path = download_source_raw(paths, source)?;
+pub fn download_and_unpack(
+    paths: &ProjectPaths,
+    source: &Source,
+    quiet: bool,
+    offline: bool,
+) -> MaccResult<PathBuf> {
+    let archive_path = download_source_raw(paths, source, quiet, offline)?;
     let cache_root = cache_root_from_archive_path(&archive_path)?;
     let unpack_dir = cache_root.join("unpacked");
 

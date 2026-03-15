@@ -225,7 +225,7 @@ pub fn coordinator_start_command_process(
     paths: &ProjectPaths,
     command: &str,
     args: &[String],
-    cfg: Option<&CoordinatorConfig>,
+    _cfg: Option<&CoordinatorConfig>,
 ) -> Result<CoordinatorProcessHandle> {
     let root = &paths.root;
     let mut cmd = if command == "run" {
@@ -257,7 +257,6 @@ pub fn coordinator_start_command_process(
             .arg(command)
             .args(args)
             .env("REPO_DIR", root);
-        apply_coordinator_env_overrides(&mut cmd, cfg);
         cmd
     };
 
@@ -327,75 +326,6 @@ pub fn coordinator_stop_command_process(
         targets: count,
         used_group,
     })
-}
-
-fn apply_coordinator_env_overrides(cmd: &mut Command, cfg: Option<&CoordinatorConfig>) {
-    let Some(cfg) = cfg else {
-        return;
-    };
-    if let Some(v) = &cfg.prd_file {
-        if !v.is_empty() {
-            cmd.env("PRD_FILE", v);
-        }
-    }
-    if let Some(v) = &cfg.coordinator_tool {
-        if !v.is_empty() {
-            cmd.env("COORDINATOR_TOOL", v);
-        }
-    }
-    if let Some(v) = &cfg.reference_branch {
-        if !v.is_empty() {
-            cmd.env("DEFAULT_BASE_BRANCH", v);
-        }
-    }
-    if !cfg.tool_priority.is_empty() {
-        cmd.env("TOOL_PRIORITY_CSV", cfg.tool_priority.join(","));
-    }
-    if !cfg.max_parallel_per_tool.is_empty() {
-        if let Ok(json) = serde_json::to_string(&cfg.max_parallel_per_tool) {
-            cmd.env("MAX_PARALLEL_PER_TOOL_JSON", json);
-        }
-    }
-    if !cfg.tool_specializations.is_empty() {
-        if let Ok(json) = serde_json::to_string(&cfg.tool_specializations) {
-            cmd.env("TOOL_SPECIALIZATIONS_JSON", json);
-        }
-    }
-    if let Some(v) = cfg.max_dispatch {
-        cmd.env("MAX_DISPATCH", v.to_string());
-    }
-    if let Some(v) = cfg.max_parallel {
-        cmd.env("MAX_PARALLEL", v.to_string());
-    }
-    if let Some(v) = cfg.timeout_seconds {
-        cmd.env("TIMEOUT_SECONDS", v.to_string());
-    }
-    if let Some(v) = cfg.phase_runner_max_attempts {
-        cmd.env("PHASE_RUNNER_MAX_ATTEMPTS", v.to_string());
-    }
-    if let Some(v) = cfg.log_flush_lines {
-        cmd.env("COORDINATOR_LOG_FLUSH_LINES", v.to_string());
-    }
-    if let Some(v) = cfg.log_flush_ms {
-        cmd.env("COORDINATOR_LOG_FLUSH_MS", v.to_string());
-    }
-    if let Some(v) = cfg.mirror_json_debounce_ms {
-        cmd.env("COORDINATOR_JSON_EXPORT_DEBOUNCE_MS", v.to_string());
-    }
-    if let Some(v) = cfg.stale_claimed_seconds {
-        cmd.env("STALE_CLAIMED_SECONDS", v.to_string());
-    }
-    if let Some(v) = cfg.stale_in_progress_seconds {
-        cmd.env("STALE_IN_PROGRESS_SECONDS", v.to_string());
-    }
-    if let Some(v) = cfg.stale_changes_requested_seconds {
-        cmd.env("STALE_CHANGES_REQUESTED_SECONDS", v.to_string());
-    }
-    if let Some(v) = &cfg.stale_action {
-        if !v.is_empty() {
-            cmd.env("STALE_ACTION", v);
-        }
-    }
 }
 
 fn stop_coordinator_process_group_or_tree(pid: i32) -> Result<(usize, bool)> {
