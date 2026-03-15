@@ -452,7 +452,8 @@ impl CoordinatorEventRecord {
         {
             return Err("invalid performer event: missing task_id".to_string());
         }
-        if !self.payload.is_object() {
+        let normalized_payload = self.normalized_payload();
+        if !normalized_payload.is_object() {
             return Err(format!(
                 "invalid performer event '{}': payload must be an object",
                 self.event_type
@@ -466,8 +467,8 @@ impl CoordinatorEventRecord {
                         self.status
                     ));
                 }
-                if !payload_has_non_empty_string(&self.payload, "tool")
-                    || !payload_has_non_empty_string(&self.payload, "worktree")
+                if !payload_has_non_empty_string(&normalized_payload, "tool")
+                    || !payload_has_non_empty_string(&normalized_payload, "worktree")
                 {
                     return Err(
                         "invalid performer event 'started': payload.tool and payload.worktree are required"
@@ -499,12 +500,6 @@ impl CoordinatorEventRecord {
                         self.status
                     ));
                 }
-                if self.payload_attempt().is_none() {
-                    return Err(
-                        "invalid performer event 'phase_result': payload.attempt is required"
-                            .to_string(),
-                    );
-                }
                 if self.status == "done" && self.payload_result_kind().is_none() {
                     return Err(
                         "invalid performer event 'phase_result': payload.result_kind is required for successful terminal events"
@@ -513,7 +508,7 @@ impl CoordinatorEventRecord {
                 }
             }
             "commit_created" => {
-                if self.status != "done" || !payload_has_non_empty_string(&self.payload, "sha") {
+                if self.status != "done" || !payload_has_non_empty_string(&normalized_payload, "sha") {
                     return Err(
                         "invalid performer event 'commit_created': status=done and payload.sha are required"
                             .to_string(),
@@ -615,7 +610,7 @@ impl CoordinatorEventRecord {
                     self.status.as_str(),
                     "done" | "phase_done" | "already_satisfied"
                 )
-                && self.payload_attempt().is_none())
+                && self.payload_result_kind().is_some())
     }
 
     pub fn message(&self) -> Option<&str> {
@@ -861,10 +856,53 @@ mod tests {
     }
 
     #[test]
-    fn performer_started_event_schema_is_accepted() {
+    fn performer_phase_result_event_schema_accepts_success_without_attempt() {
         let event = CoordinatorEventRecord {
             schema_version: COORDINATOR_EVENT_SCHEMA_VERSION.to_string(),
             event_id: "evt-2".to_string(),
+            ts: "2026-03-15T00:00:00Z".to_string(),
+            source: "coordinator-worktree:T1:1".to_string(),
+            task_id: Some("T1".to_string()),
+            event_type: "phase_result".to_string(),
+            phase: Some("dev".to_string()),
+            status: "done".to_string(),
+            payload: serde_json::json!({
+                "result_kind": "already_satisfied",
+                "message": "Task already satisfied"
+            }),
+            ..CoordinatorEventRecord::default()
+        };
+        event
+            .validate_performer_runtime_event()
+            .expect("successful phase_result without attempt should be accepted");
+    }
+
+    #[test]
+    fn performer_phase_result_with_attempt_is_terminal_success() {
+        let event = CoordinatorEventRecord {
+            schema_version: COORDINATOR_EVENT_SCHEMA_VERSION.to_string(),
+            event_id: "evt-3".to_string(),
+            ts: "2026-03-15T00:00:00Z".to_string(),
+            source: "coordinator-worktree:T1:1".to_string(),
+            task_id: Some("T1".to_string()),
+            event_type: "phase_result".to_string(),
+            phase: Some("dev".to_string()),
+            status: "done".to_string(),
+            payload: serde_json::json!({
+                "attempt": 1,
+                "result_kind": "already_satisfied",
+                "message": "Task already satisfied"
+            }),
+            ..CoordinatorEventRecord::default()
+        };
+        assert!(event.is_terminal_success());
+    }
+
+    #[test]
+    fn performer_started_event_schema_is_accepted() {
+        let event = CoordinatorEventRecord {
+            schema_version: COORDINATOR_EVENT_SCHEMA_VERSION.to_string(),
+            event_id: "evt-4".to_string(),
             ts: "2026-03-15T00:00:00Z".to_string(),
             source: "coordinator-worktree:T1:1".to_string(),
             task_id: Some("T1".to_string()),
