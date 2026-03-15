@@ -16,6 +16,9 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 
+type MonitorMergeJobsFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Option<(String, String)>>> + 'a>>;
+
 /// The interface for UI (CLI/TUI) to interact with MACC core logic.
 pub trait Engine {
     fn list_tools(&self, paths: &ProjectPaths) -> (Vec<ToolDescriptor>, Vec<ToolDiagnostic>);
@@ -913,6 +916,7 @@ pub trait Engine {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn coordinator_monitor_active_jobs_native<'a>(
         &'a self,
         repo_root: &'a Path,
@@ -943,7 +947,7 @@ pub trait Engine {
         coordinator: Option<&'a crate::config::CoordinatorConfig>,
         state: &'a mut crate::coordinator::runtime::CoordinatorRunState,
         logger: Option<&'a dyn crate::coordinator::control_plane::CoordinatorLog>,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<(String, String)>>> + 'a>> {
+    ) -> MonitorMergeJobsFuture<'a> {
         Box::pin(
             crate::coordinator::control_plane::monitor_merge_jobs_native(
                 repo_root,
@@ -955,6 +959,7 @@ pub trait Engine {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn coordinator_advance_tasks_native<'a>(
         &'a self,
         repo_root: &'a Path,

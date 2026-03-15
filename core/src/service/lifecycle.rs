@@ -179,6 +179,7 @@ pub fn apply(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn quickstart(
     cwd: &Path,
     engine: &dyn Engine,

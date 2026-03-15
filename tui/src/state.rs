@@ -2093,9 +2093,8 @@ impl AppState {
     fn set_settings_field_u16(&mut self, idx: usize, value: u16) {
         self.snapshot_before_config_change();
         if let Some(config) = &mut self.working_copy {
-            match idx {
-                2 => config.settings.web_port = Some(value),
-                _ => {}
+            if idx == 2 {
+                config.settings.web_port = Some(value);
             }
         }
     }
@@ -2284,9 +2283,8 @@ impl AppState {
     fn set_automation_field_i64(&mut self, idx: usize, value: i64) {
         self.snapshot_before_config_change();
         if let Some(coordinator) = self.coordinator_config_mut() {
-            match idx {
-                21 => coordinator.ghost_heartbeat_grace_seconds = Some(value),
-                _ => {}
+            if idx == 21 {
+                coordinator.ghost_heartbeat_grace_seconds = Some(value);
             }
         }
     }

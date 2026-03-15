@@ -711,6 +711,7 @@ fn run_merge_hook_with_timeout(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn merge_task_with_policy_native<FE>(
     repo_root: &Path,
     task_id: &str,
