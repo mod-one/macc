@@ -3,6 +3,6 @@ members = [
     "core",
     "cli",
     "tui",
-    "registry", "test_serde",
+    "registry",
 ]
 resolver = "2"
