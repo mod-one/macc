@@ -467,8 +467,8 @@ impl CoordinatorEventRecord {
                         self.status
                     ));
                 }
-                if !payload_has_non_empty_string(&normalized_payload, "tool")
-                    || !payload_has_non_empty_string(&normalized_payload, "worktree")
+                if !payload_has_non_empty_string_in_sources(self, &normalized_payload, "tool")
+                    || !payload_has_non_empty_string_in_sources(self, &normalized_payload, "worktree")
                 {
                     return Err(
                         "invalid performer event 'started': payload.tool and payload.worktree are required"
@@ -508,7 +508,9 @@ impl CoordinatorEventRecord {
                 }
             }
             "commit_created" => {
-                if self.status != "done" || !payload_has_non_empty_string(&normalized_payload, "sha") {
+                if self.status != "done"
+                    || !payload_has_non_empty_string_in_sources(self, &normalized_payload, "sha")
+                {
                     return Err(
                         "invalid performer event 'commit_created': status=done and payload.sha are required"
                             .to_string(),
@@ -553,6 +555,7 @@ impl CoordinatorEventRecord {
             .or_else(|| self.failed_payload().and_then(|payload| payload.attempt))
             .or_else(|| self.progress_payload().and_then(|payload| payload.attempt))
             .or_else(|| self.payload.get("attempt").and_then(Value::as_i64))
+            .or_else(|| self.extra.get("attempt").and_then(Value::as_i64))
     }
 
     pub fn payload_error_code(&self) -> Option<String> {
@@ -569,7 +572,19 @@ impl CoordinatorEventRecord {
                     .map(ToString::to_string)
             })
             .or_else(|| {
+                self.extra
+                    .get("error_code")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string)
+            })
+            .or_else(|| {
                 self.payload
+                    .get("code")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string)
+            })
+            .or_else(|| {
+                self.extra
                     .get("code")
                     .and_then(Value::as_str)
                     .map(ToString::to_string)
@@ -590,6 +605,12 @@ impl CoordinatorEventRecord {
                     .and_then(Value::as_str)
                     .map(ToString::to_string)
             })
+            .or_else(|| {
+                self.extra
+                    .get("origin")
+                    .and_then(Value::as_str)
+                    .map(ToString::to_string)
+            })
     }
 
     pub fn payload_result_kind(&self) -> Option<PerformerCompletionKind> {
@@ -597,6 +618,12 @@ impl CoordinatorEventRecord {
             .and_then(|payload| payload.result_kind)
             .or_else(|| {
                 self.payload
+                    .get("result_kind")
+                    .and_then(Value::as_str)
+                    .and_then(|value| PerformerCompletionKind::from_str(value).ok())
+            })
+            .or_else(|| {
+                self.extra
                     .get("result_kind")
                     .and_then(Value::as_str)
                     .and_then(|value| PerformerCompletionKind::from_str(value).ok())
@@ -620,6 +647,9 @@ impl CoordinatorEventRecord {
             .or_else(|| self.payload.get("reason").and_then(Value::as_str))
             .or_else(|| self.payload.get("message").and_then(Value::as_str))
             .or_else(|| self.payload.get("error").and_then(Value::as_str))
+            .or_else(|| self.extra.get("reason").and_then(Value::as_str))
+            .or_else(|| self.extra.get("message").and_then(Value::as_str))
+            .or_else(|| self.extra.get("error").and_then(Value::as_str))
     }
 
     pub fn normalized_payload(&self) -> Value {
@@ -644,6 +674,21 @@ fn payload_has_non_empty_string(payload: &Value, key: &str) -> bool {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .is_some()
+}
+
+fn payload_has_non_empty_string_in_sources(
+    event: &CoordinatorEventRecord,
+    payload: &Value,
+    key: &str,
+) -> bool {
+    payload_has_non_empty_string(payload, key)
+        || event
+            .extra
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_some()
 }
 
 impl CoordinatorEventPayload {

@@ -243,7 +243,7 @@ emit_performer_event() {
     --arg phase "$phase" \
     --arg status "$status" \
     --argjson payload "$payload_json" \
-    '{
+    '({
       schema_version:$schema_version,
       event_id:$event_id,
       run_id:$run_id,
@@ -254,8 +254,8 @@ emit_performer_event() {
       type:$type,
       phase:($phase|select(length>0)),
       status:$status,
-      payload:$payload,
-    }')"
+      payload:$payload
+    } + ($payload | if type == "object" then . else {} end))')"
   if [[ -n "$EVENT_IPC_ADDR" ]] && send_event_via_ipc "$event_line"; then
     return 0
   fi
