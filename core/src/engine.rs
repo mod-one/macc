@@ -16,6 +16,9 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 
+type MonitorMergeJobsFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Option<(String, String)>>> + 'a>>;
+
 /// The interface for UI (CLI/TUI) to interact with MACC core logic.
 pub trait Engine {
     fn list_tools(&self, paths: &ProjectPaths) -> (Vec<ToolDescriptor>, Vec<ToolDiagnostic>);
@@ -77,7 +80,8 @@ pub trait Engine {
         id: &str,
         backend: &dyn crate::catalog::service::CatalogInstallBackend,
     ) -> Result<crate::catalog::service::InstallSkillOutcome> {
-        crate::catalog::service::install_skill(paths, tool, id, backend)
+        let config = crate::load_canonical_config(&paths.config_path)?;
+        crate::catalog::service::install_skill(paths, tool, id, &config, backend)
     }
 
     fn install_mcp(
@@ -86,7 +90,8 @@ pub trait Engine {
         id: &str,
         backend: &dyn crate::catalog::service::CatalogInstallBackend,
     ) -> Result<crate::catalog::service::InstallMcpOutcome> {
-        crate::catalog::service::install_mcp(paths, id, backend)
+        let config = crate::load_canonical_config(&paths.config_path)?;
+        crate::catalog::service::install_mcp(paths, id, &config, backend)
     }
 
     fn tooling_install_tool(
@@ -702,9 +707,16 @@ pub trait Engine {
     fn coordinator_reconcile_workflow(
         &self,
         paths: &ProjectPaths,
+        env_cfg: &crate::coordinator::types::CoordinatorEnvConfig,
+        coordinator: Option<&crate::config::CoordinatorConfig>,
         logger: Option<&dyn crate::coordinator::control_plane::CoordinatorLog>,
     ) -> Result<()> {
-        crate::service::coordinator_workflow::coordinator_reconcile(paths, logger)
+        crate::service::coordinator_workflow::coordinator_reconcile(
+            paths,
+            env_cfg,
+            coordinator,
+            logger,
+        )
     }
 
     fn coordinator_cleanup_workflow(
@@ -747,8 +759,13 @@ pub trait Engine {
         )
     }
 
-    fn coordinator_cutover_gate_workflow(&self, paths: &ProjectPaths) -> Result<()> {
-        crate::service::coordinator_workflow::coordinator_cutover_gate(paths)
+    fn coordinator_cutover_gate_workflow(
+        &self,
+        paths: &ProjectPaths,
+        env_cfg: &crate::coordinator::types::CoordinatorEnvConfig,
+        coordinator: Option<&crate::config::CoordinatorConfig>,
+    ) -> Result<()> {
+        crate::service::coordinator_workflow::coordinator_cutover_gate(paths, env_cfg, coordinator)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -899,10 +916,12 @@ pub trait Engine {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn coordinator_monitor_active_jobs_native<'a>(
         &'a self,
         repo_root: &'a Path,
         env_cfg: &'a crate::coordinator::types::CoordinatorEnvConfig,
+        coordinator: Option<&'a crate::config::CoordinatorConfig>,
         state: &'a mut crate::coordinator::runtime::CoordinatorRunState,
         max_attempts: usize,
         phase_timeout_seconds: usize,
@@ -912,6 +931,7 @@ pub trait Engine {
             crate::coordinator::control_plane::monitor_active_jobs_native(
                 repo_root,
                 env_cfg,
+                coordinator,
                 state,
                 max_attempts,
                 phase_timeout_seconds,
@@ -920,9 +940,31 @@ pub trait Engine {
         )
     }
 
+    fn coordinator_monitor_merge_jobs_native<'a>(
+        &'a self,
+        repo_root: &'a Path,
+        env_cfg: &'a crate::coordinator::types::CoordinatorEnvConfig,
+        coordinator: Option<&'a crate::config::CoordinatorConfig>,
+        state: &'a mut crate::coordinator::runtime::CoordinatorRunState,
+        logger: Option<&'a dyn crate::coordinator::control_plane::CoordinatorLog>,
+    ) -> MonitorMergeJobsFuture<'a> {
+        Box::pin(
+            crate::coordinator::control_plane::monitor_merge_jobs_native(
+                repo_root,
+                env_cfg,
+                coordinator,
+                state,
+                logger,
+            ),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn coordinator_advance_tasks_native<'a>(
         &'a self,
         repo_root: &'a Path,
+        env_cfg: &'a crate::coordinator::types::CoordinatorEnvConfig,
+        coordinator: Option<&'a crate::config::CoordinatorConfig>,
         coordinator_tool_override: Option<&'a str>,
         phase_runner_max_attempts: usize,
         state: &'a mut crate::coordinator::runtime::CoordinatorRunState,
@@ -930,6 +972,8 @@ pub trait Engine {
     ) -> Pin<Box<dyn Future<Output = Result<crate::coordinator::engine::AdvanceResult>> + 'a>> {
         Box::pin(crate::coordinator::control_plane::advance_tasks_native(
             repo_root,
+            env_cfg,
+            coordinator,
             coordinator_tool_override,
             phase_runner_max_attempts,
             state,

@@ -10,8 +10,10 @@ impl macc_core::service::worktree::WorktreeFetchMaterializer for CliFetchMateria
         &self,
         paths: &macc_core::ProjectPaths,
         units: Vec<macc_core::resolve::FetchUnit>,
+        quiet: bool,
+        offline: bool,
     ) -> Result<Vec<macc_core::resolve::MaterializedFetchUnit>> {
-        macc_adapter_shared::fetch::materialize_fetch_units(paths, units)
+        macc_adapter_shared::fetch::materialize_fetch_units(paths, units, quiet, offline)
     }
 }
 

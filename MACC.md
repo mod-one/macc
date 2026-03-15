@@ -92,8 +92,10 @@ Minimum screens:
    - **MCP servers** selection (catalog + selection + remote sources)
 2) **Standards** (global conventions / presets)
 3) **Automation / Coordinator** (dispatch policy, parallelism, stale handling)
-4) **Worktrees** (create, scopes, launch)
-5) **Preview & Apply** (summary of files to be written, backups, consent prompts)
+4) Worktrees (create, scopes, launch)
+5) Global Settings (quiet mode, offline mode, web port)
+6) Preview & Apply (summary of files to be written, backups, consent prompts)
+
 
 ### 3.4 Operational runbook (reference)
 For production-like usage, the recommended sequence is:
@@ -235,13 +237,13 @@ Error code schema (v1):
 - `E900` Unknown/Unexpected
   - `E901` Unknown fatal error
 
-Auto-retry controls (coordinator):
-- `ERROR_CODE_RETRY_LIST`: comma-separated list of error codes eligible for auto-retry.
-- `ERROR_CODE_RETRY_MAX`: max retries per task for eligible codes.
+Auto-retry controls (coordinator settings):
+- `error_code_retry_list`: comma-separated list of error codes eligible for auto-retry.
+- `error_code_retry_max`: max retries per task for eligible codes.
 
 Default policy:
-- `ERROR_CODE_RETRY_LIST=E101,E102,E103,E301,E302,E303`
-- `ERROR_CODE_RETRY_MAX=2`
+- `error_code_retry_list=E101,E102,E103,E301,E302,E303`
+- `error_code_retry_max=2`
 
 ---
 
@@ -576,21 +578,21 @@ Important behavior:
 - `run`, `dispatch`, `advance`, `reconcile`, and `cleanup` are handled natively in Rust.
 - Worktrees are reused as worker slots (not task-coupled names): once a task is merged, the slot is reset to reference, moved to a fresh branch, refreshed for the new task, then relaunched.
 - New worker worktrees are created only when no reusable slot is available; pool size is bounded by `max_parallel`.
-- CLI options can override YAML settings (`--max-dispatch`, `--max-parallel`, `--timeout-seconds`, etc.).
-- Coordinator log buffering/flush can be configured without env vars:
-  - CLI: `--log-flush-lines <N>` and `--log-flush-ms <N>`
-  - YAML (`automation.coordinator`): `log_flush_lines`, `log_flush_ms`
-  - TUI (Coordinator Settings): `Log Flush Lines`, `Log Flush Interval (ms)`
-  - Precedence: CLI override -> YAML value -> env (`COORDINATOR_LOG_FLUSH_LINES` / `COORDINATOR_LOG_FLUSH_MS`) -> built-in defaults.
-- SQLite -> JSON compatibility export debounce is configurable as an official coordinator setting:
-  - CLI: `--mirror-json-debounce-ms <ms>`
-  - YAML (`automation.coordinator`): `mirror_json_debounce_ms`
-  - TUI (Coordinator Settings): `JSON Export Debounce (ms)`
-  - Env fallback remains supported: `COORDINATOR_JSON_EXPORT_DEBOUNCE_MS=<ms>`
-  - `0` keeps immediate export (legacy behavior).
-- Stale heartbeat policy is enforced during control-plane runs via env:
-  - `STALE_HEARTBEAT_SECONDS` (0 disables)
-  - `STALE_HEARTBEAT_ACTION=retry|block|requeue`
+- Coordinator options can override config at runtime:
+  - `--prd`, `--coordinator-tool`
+  - `--tool-priority`, `--max-parallel-per-tool-json`, `--tool-specializations-json`
+  - `--max-dispatch`, `--max-parallel`, `--timeout-seconds`
+  - `--phase-runner-max-attempts`
+  - `--stale-claimed-seconds`, `--stale-in-progress-seconds`, `--stale-changes-requested-seconds`, `--stale-action`
+  - `--merge-ai-fix`, `--merge-fix-hook`, `--merge-job-timeout-seconds`, `--merge-hook-timeout-seconds`
+  - `--ghost-heartbeat-grace-seconds`, `--dispatch-cooldown-seconds`
+  - `--json-compat`, `--legacy-json-fallback`
+  - `--error-code-retry-list`, `--error-code-retry-max`
+  - `--cutover-gate-window-events`, `--cutover-gate-max-blocked-ratio`, `--cutover-gate-max-stale-ratio`
+- Coordinator settings are persisted in `.macc/macc.yaml` under `automation.coordinator`.
+- TUI (Automation Settings screen) allows visual editing of all 27 coordinator parameters.
+- Heartbeat events update `task_runtime.last_heartbeat` from `events.jsonl`.
+- Stale heartbeat policy is enforced during control-plane runs; can be reset, blocked, or requeued based on `stale_action`.
 - Extra raw args with `--` are for coordinator subcommands that require raw passthrough args.
 - Optional VCS automation hook:
   - `COORDINATOR_VCS_HOOK=/path/to/hook.sh`
@@ -618,6 +620,20 @@ Reference short design doc:
 - `docs/COORDINATOR_REALTIME.md`
 
 ---
+
+### 12.5 Global settings
+
+MACC maintains global preferences at the project level in `.macc/macc.yaml` under the `settings` key. These settings control the behavior of the MACC binary itself.
+
+Available settings:
+- `quiet`: Suppress all non-essential output from AI tools and MACC internal operations (e.g., fetch logs).
+- `offline`: Disable all remote fetching and updates.
+- `web_port`: The port number for the MACC web interface (default: 3450).
+
+Control hierarchy:
+1. CLI global flags (`--quiet`, `--offline`, `--web-port`)
+2. Project configuration (`.macc/macc.yaml`)
+3. Built-in defaults
 
 ## 13. Worktrees & parallelism
 

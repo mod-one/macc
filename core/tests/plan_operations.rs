@@ -32,6 +32,7 @@ fn plan_operations_returns_expected_write_ops() -> Result<()> {
         },
         mcp_templates: Vec::new(),
         automation: macc_core::config::AutomationConfig::default(),
+        settings: macc_core::config::SettingsConfig::default(),
     };
     let ops = plan_operations(&paths, &resolved, &[], &ToolRegistry::default_registry())?;
 

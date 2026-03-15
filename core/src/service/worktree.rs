@@ -9,6 +9,8 @@ pub trait WorktreeFetchMaterializer {
         &self,
         paths: &crate::ProjectPaths,
         units: Vec<crate::resolve::FetchUnit>,
+        quiet: bool,
+        offline: bool,
     ) -> Result<Vec<crate::resolve::MaterializedFetchUnit>>;
 }
 
@@ -94,7 +96,12 @@ pub fn apply_worktree(
 
     let resolved = resolve(&canonical, &overrides);
     let fetch_units = resolve_fetch_units(&paths, &resolved)?;
-    let materialized_units = fetch_materializer.materialize_fetch_units(&paths, fetch_units)?;
+    let materialized_units = fetch_materializer.materialize_fetch_units(
+        &paths,
+        fetch_units,
+        resolved.settings.quiet,
+        resolved.settings.offline,
+    )?;
 
     let mut plan = engine.plan(&paths, &canonical, &materialized_units, &overrides)?;
     let _ = engine.apply(&paths, &mut plan, allow_user_scope)?;

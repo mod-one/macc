@@ -9,8 +9,10 @@ impl macc_core::service::lifecycle::LifecycleFetchMaterializer for CliFetchMater
         &self,
         paths: &ProjectPaths,
         units: Vec<macc_core::resolve::FetchUnit>,
+        quiet: bool,
+        offline: bool,
     ) -> Result<Vec<macc_core::resolve::MaterializedFetchUnit>> {
-        macc_adapter_shared::fetch::materialize_fetch_units(paths, units)
+        macc_adapter_shared::fetch::materialize_fetch_units(paths, units, quiet, offline)
     }
 }
 
@@ -131,10 +133,18 @@ pub(crate) fn init(app: &AppContext, force: bool, wizard: bool) -> Result<()> {
 }
 
 pub(crate) fn plan(app: &AppContext, tools: Option<&str>, json: bool, explain: bool) -> Result<()> {
+    let mut overrides = app.overrides.clone();
+    if let Some(tools_csv) = tools {
+        let (_descriptors, _diagnostics) = app.engine.list_tools(&app.project_paths()?);
+        let allowed_tools: Vec<String> = _descriptors.iter().map(|d| d.id.clone()).collect();
+        overrides.tools =
+            macc_core::resolve::CliOverrides::from_tools_csv(tools_csv, &allowed_tools)?.tools;
+    }
+
     macc_core::service::lifecycle::plan(
         &app.cwd,
         app.engine.as_ref(),
-        tools,
+        overrides,
         json,
         explain,
         &CliLifecycleUi,
@@ -150,10 +160,18 @@ pub(crate) fn apply(
     json: bool,
     explain: bool,
 ) -> Result<()> {
+    let mut overrides = app.overrides.clone();
+    if let Some(tools_csv) = tools {
+        let (_descriptors, _diagnostics) = app.engine.list_tools(&app.project_paths()?);
+        let allowed_tools: Vec<String> = _descriptors.iter().map(|d| d.id.clone()).collect();
+        overrides.tools =
+            macc_core::resolve::CliOverrides::from_tools_csv(tools_csv, &allowed_tools)?.tools;
+    }
+
     macc_core::service::lifecycle::apply(
         &app.cwd,
         app.engine.as_ref(),
-        tools,
+        overrides,
         dry_run,
         allow_user_scope,
         json,
@@ -172,6 +190,7 @@ pub(crate) fn quickstart(
     macc_core::service::lifecycle::quickstart(
         &app.cwd,
         app.engine.as_ref(),
+        app.overrides.clone(),
         assume_yes,
         apply,
         no_tui,

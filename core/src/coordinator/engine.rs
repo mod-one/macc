@@ -906,6 +906,7 @@ struct NativeControlPlaneBackend<'a> {
     phase_runner_max_attempts: usize,
     coordinator_tool_override: Option<String>,
     phase_timeout_seconds: usize,
+    ghost_heartbeat_grace_seconds: i64,
     last_logged_counts: Option<CoordinatorCounts>,
     last_cycle_progressed: bool,
 }
@@ -942,9 +943,19 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
             let note = |line: String| {
                 let _ = log.note(line);
             };
-            cleanup_dead_runtime_tasks(self.repo_root, "run-cycle", Some(&note))?
+            cleanup_dead_runtime_tasks(
+                self.repo_root,
+                "run-cycle",
+                self.ghost_heartbeat_grace_seconds,
+                Some(&note),
+            )?
         } else {
-            cleanup_dead_runtime_tasks(self.repo_root, "run-cycle", None)?
+            cleanup_dead_runtime_tasks(
+                self.repo_root,
+                "run-cycle",
+                self.ghost_heartbeat_grace_seconds,
+                None,
+            )?
         };
         if cleaned > 0 {
             if let Some(log) = self.logger {
@@ -958,6 +969,7 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
         crate::coordinator::control_plane::monitor_active_jobs_native(
             self.repo_root,
             self.env_cfg,
+            self.coordinator,
             &mut self.run_state,
             self.phase_runner_max_attempts,
             self.phase_timeout_seconds,
@@ -969,6 +981,8 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
     async fn monitor_merge_jobs(&mut self) -> Result<Option<(String, String)>> {
         crate::coordinator::control_plane::monitor_merge_jobs_native(
             self.repo_root,
+            self.env_cfg,
+            self.coordinator,
             &mut self.run_state,
             self.logger,
         )
@@ -1008,6 +1022,8 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
     async fn advance_tasks(&mut self) -> Result<AdvanceResult> {
         crate::coordinator::control_plane::advance_tasks_native(
             self.repo_root,
+            self.env_cfg,
+            self.coordinator,
             self.coordinator_tool_override.as_deref(),
             self.phase_runner_max_attempts,
             &mut self.run_state,
@@ -1094,6 +1110,7 @@ pub fn resolve_storage_mode(
 pub fn sync_storage_with_startup_reconcile(
     project_paths: &crate::ProjectPaths,
     storage_mode: CoordinatorStorageMode,
+    json_compat: bool,
     logger: Option<&dyn CoordinatorLog>,
 ) -> Result<()> {
     if storage_mode == CoordinatorStorageMode::Json {
@@ -1105,16 +1122,7 @@ pub fn sync_storage_with_startup_reconcile(
             let _ = log.note("- Storage bootstrap: imported JSON snapshot into SQLite".to_string());
         }
     }
-    if std::env::var("COORDINATOR_JSON_COMPAT")
-        .ok()
-        .map(|raw| {
-            !matches!(
-                raw.trim().to_ascii_lowercase().as_str(),
-                "0" | "false" | "no" | "off"
-            )
-        })
-        .unwrap_or(false)
-    {
+    if json_compat {
         coordinator_storage_export_sqlite_to_json(project_paths)?;
     }
     Ok(())
@@ -1190,17 +1198,36 @@ pub async fn run_native_control_plane(
         .stale_in_progress_seconds
         .or_else(|| coordinator.and_then(|c| c.stale_in_progress_seconds))
         .unwrap_or(0);
+    let ghost_heartbeat_grace_seconds = env_cfg
+        .ghost_heartbeat_grace_seconds
+        .or_else(|| coordinator.and_then(|c| c.ghost_heartbeat_grace_seconds))
+        .unwrap_or(30);
+
+    let json_compat = env_cfg
+        .json_compat
+        .or_else(|| coordinator.and_then(|c| c.json_compat))
+        .unwrap_or(false);
 
     let storage_mode = resolve_storage_mode(env_cfg, coordinator)?;
     let storage_paths = crate::ProjectPaths::from_root(repo_root);
-    sync_storage_with_startup_reconcile(&storage_paths, storage_mode, logger)?;
+    sync_storage_with_startup_reconcile(&storage_paths, storage_mode, json_compat, logger)?;
     let startup_cleaned = if let Some(log) = logger {
         let note = |line: String| {
             let _ = log.note(line);
         };
-        cleanup_dead_runtime_tasks(repo_root, "run-startup", Some(&note))?
+        cleanup_dead_runtime_tasks(
+            repo_root,
+            "run-startup",
+            ghost_heartbeat_grace_seconds,
+            Some(&note),
+        )?
     } else {
-        cleanup_dead_runtime_tasks(repo_root, "run-startup", None)?
+        cleanup_dead_runtime_tasks(
+            repo_root,
+            "run-startup",
+            ghost_heartbeat_grace_seconds,
+            None,
+        )?
     };
     if startup_cleaned > 0 {
         if let Some(log) = logger {
@@ -1222,6 +1249,7 @@ pub async fn run_native_control_plane(
         phase_runner_max_attempts,
         coordinator_tool_override,
         phase_timeout_seconds,
+        ghost_heartbeat_grace_seconds,
         last_logged_counts: None,
         last_cycle_progressed: false,
     };

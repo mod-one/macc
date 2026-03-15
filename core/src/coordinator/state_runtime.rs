@@ -142,8 +142,10 @@ pub fn cleanup_dead_runtime_tasks_in_registry(
     repo_root: Option<&Path>,
 ) -> Result<usize> {
     let mut typed = TaskRegistry::from_value(registry)?;
-    let fixed =
-        cleanup_dead_runtime_tasks_in_typed_registry(&mut typed, reason, logger, repo_root)?;
+    let fixed = cleanup_dead_runtime_tasks_in_typed_registry(
+        &mut typed, reason, 60, // Default for untyped registry cleanup
+        logger, repo_root,
+    )?;
     *registry = typed.to_value()?;
     Ok(fixed)
 }
@@ -151,14 +153,11 @@ pub fn cleanup_dead_runtime_tasks_in_registry(
 pub fn cleanup_dead_runtime_tasks_in_typed_registry(
     registry: &mut TaskRegistry,
     reason: &str,
+    heartbeat_grace_seconds: i64,
     logger: Option<&dyn Fn(String)>,
     repo_root: Option<&Path>,
 ) -> Result<usize> {
     let now = now_iso_coordinator();
-    let heartbeat_grace_seconds = std::env::var("COORDINATOR_GHOST_HEARTBEAT_GRACE_SECONDS")
-        .ok()
-        .and_then(|raw| raw.trim().parse::<i64>().ok())
-        .unwrap_or(60);
     if let Some(root) = repo_root {
         let refreshed = refresh_candidate_heartbeats_from_events_typed(
             registry,
@@ -298,6 +297,7 @@ fn refresh_candidate_heartbeats_from_events_typed(
 pub fn cleanup_dead_runtime_tasks(
     repo_root: &Path,
     reason: &str,
+    heartbeat_grace_seconds: i64,
     logger: Option<&dyn Fn(String)>,
 ) -> Result<usize> {
     let registry_value =
@@ -306,6 +306,7 @@ pub fn cleanup_dead_runtime_tasks(
     let fixed = cleanup_dead_runtime_tasks_in_typed_registry(
         &mut registry,
         reason,
+        heartbeat_grace_seconds,
         logger,
         Some(repo_root),
     )?;
@@ -319,13 +320,14 @@ pub fn cleanup_dead_runtime_tasks(
     Ok(fixed)
 }
 
-pub fn reconcile_registry_native(repo_root: &Path) -> Result<()> {
+pub fn reconcile_registry_native(repo_root: &Path, heartbeat_grace_seconds: i64) -> Result<()> {
     let registry_value =
         crate::coordinator::state::coordinator_state_registry_load(repo_root, &BTreeMap::new())?;
     let mut registry = TaskRegistry::from_value(&registry_value)?;
     let _ = cleanup_dead_runtime_tasks_in_typed_registry(
         &mut registry,
         "reconcile",
+        heartbeat_grace_seconds,
         None,
         Some(repo_root),
     )?;

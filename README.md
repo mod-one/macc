@@ -9,7 +9,7 @@ They can run on the same project in parallel (using worktrees) repeatedly until 
 ## What MACC provides
 
 - Canonical config and deterministic generation (`plan` then `apply`).
-- Tool-agnostic TUI for tool selection, tool settings, skills, MCP, and automation coordinator settings.
+- Tool-agnostic TUI for tool selection, tool settings, skills, MCP, automation coordinator settings, and global preferences.
 - Embedded defaults for ToolSpecs and catalogs so clean machines are usable immediately.
 - Project automation with embedded `coordinator.sh` + `performer.sh` + per-tool runners.
 - Worktree orchestration for parallel task execution.
@@ -227,10 +227,10 @@ MACC emits structured error codes when a performer or coordinator step fails. Th
 
 ### Auto-retry policy (coordinator)
 
-Coordinator can auto-retry failed tasks based on error code:
+Coordinator can auto-retry failed tasks based on error code. This is configured in `.macc/macc.yaml` under `automation.coordinator`:
 
-- `ERROR_CODE_RETRY_LIST` default: `E101,E102,E103,E301,E302,E303`
-- `ERROR_CODE_RETRY_MAX` default: `2`
+- `error_code_retry_list` default: `E101,E102,E103,E301,E302,E303`
+- `error_code_retry_max` default: `2`
 
 When a failed task has an error code in the allow-list and retries are below the max, the task is requeued to `todo` with an `auto_retry:<code>` reason.
 
@@ -285,6 +285,11 @@ macc clear
 `macc clear` asks confirmation, runs forced worktree cleanup first, then removes MACC-managed paths only.
 
 ## Core commands
+
+All commands support these global flags:
+- `-q, --quiet`: suppress non-essential output.
+- `--offline`: disable all network operations.
+- `--web-port <PORT>`: set the port for the web interface.
 
 ### Project lifecycle
 
@@ -380,13 +385,14 @@ Main screens:
 - Coordinator Live (runtime monitoring)
 - Skills
 - MCP
+- Global Settings
 - Logs
 - Preview
 - Apply
 
 Common keys:
 
-- Navigation: `h` Home, `t` Tools, `o` Automation, `v` Coordinator Live, `m` MCP, `g` Logs, `p` Preview
+- Navigation: `h` Home, `t` Tools, `o` Automation, `e` Settings, `v` Coordinator Live, `m` MCP, `g` Logs, `p` Preview
 - Save/apply: `s` Save config, `x` Apply
 - Help: `?`
 - Back: `Backspace`
@@ -441,11 +447,11 @@ MACC installs embedded automation assets into `.macc/automation/`:
 - `runners/<tool>.performer.sh`: tool-specific execution scripts.
 - All automation logs are written under `.macc/log/` (coordinator + performer).
 
-Coordinator defaults live in:
+Coordinator defaults and advanced settings live in:
 
 - `.macc/macc.yaml` under `automation.coordinator`
 
-You can edit these defaults in the TUI Automation screen or override with `macc coordinator` flags.
+You can edit these settings visually in the TUI Automation screen or override them with `macc coordinator` flags. Legacy environment variables are no longer used for coordinator configuration.
 
 ## Session strategy
 

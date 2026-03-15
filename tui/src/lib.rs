@@ -156,6 +156,16 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
         }
         return;
     }
+    if current_screen == Screen::Settings && state.is_settings_field_editing() {
+        match key {
+            KeyCode::Enter => state.commit_settings_field_edit(),
+            KeyCode::Esc => state.cancel_settings_field_edit(),
+            KeyCode::Backspace => state.pop_settings_field_char(),
+            KeyCode::Char(c) => state.append_settings_field_char(c),
+            _ => {}
+        }
+        return;
+    }
     if current_screen == Screen::Tools && state.is_tool_install_confirmation_open() {
         match key {
             KeyCode::Char('y') | KeyCode::Enter => state.confirm_tool_install(),
@@ -196,6 +206,7 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
         KeyCode::Char('v') => state.push_screen(Screen::CoordinatorLive),
         KeyCode::Char('m') => state.push_screen(Screen::Mcp),
         KeyCode::Char('g') => state.push_screen(Screen::Logs),
+        KeyCode::Char('e') => state.push_screen(Screen::Settings),
         KeyCode::Char('p') => state.open_preview(),
         KeyCode::Char('x') if current_screen != Screen::Apply => {
             state.open_apply_screen();
@@ -1090,9 +1101,51 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             let overview_para = wrapped_paragraph(overview, "Overview");
             f.render_widget(overview_para, body_chunks[0]);
 
-            let next_steps = "Quick actions:\n\n- Press 't' to configure tools\n- Press 'o' to configure automation settings\n- Press 'v' for Coordinator Live monitor\n- Press 'm' to select MCP servers\n- Press 'p' to preview changes\n- Press 'x' to apply changes\n- Press 's' to save\n\nTip: Use '?' anywhere for full keybindings.";
+            let next_steps = "Quick actions:\n\n- Press 't' to configure tools\n- Press 'o' to configure automation settings\n- Press 'e' for global settings\n- Press 'v' for Coordinator Live monitor\n- Press 'm' to select MCP servers\n- Press 'p' to preview changes\n- Press 'x' to apply changes\n- Press 's' to save\n\nTip: Use '?' anywhere for full keybindings.";
             let steps_para = wrapped_paragraph(next_steps, "Next Steps");
             f.render_widget(steps_para, body_chunks[1]);
+        }
+        Screen::Settings => {
+            let body_chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+                .split(chunks[1]);
+
+            let mut list_state = ListState::default();
+            let settings_count = state.settings_field_count();
+            list_state.select(Some(
+                state
+                    .settings_field_index
+                    .min(settings_count.saturating_sub(1)),
+            ));
+            let items: Vec<ListItem> = (0..settings_count)
+                .map(|i| {
+                    let label = state.settings_field_label(i);
+                    let value =
+                        if i == state.settings_field_index && state.is_settings_field_editing() {
+                            format!("{}_", state.settings_field_input)
+                        } else {
+                            state.settings_field_display_value(i)
+                        };
+                    ListItem::new(Line::from(vec![
+                        Span::styled(format!("{:<30}", label), Style::default().fg(theme.muted)),
+                        Span::raw(" "),
+                        Span::raw(value),
+                    ]))
+                })
+                .collect();
+
+            let list = List::new(items)
+                .block(panel("Global Settings"))
+                .highlight_symbol("› ")
+                .highlight_style(Style::default().bg(theme.highlight_bg));
+            f.render_stateful_widget(list, body_chunks[0], &mut list_state);
+
+            let help = state.settings_field_help(state.settings_field_index);
+            let help_para = Paragraph::new(help)
+                .block(panel("Setting Description"))
+                .wrap(Wrap { trim: true });
+            f.render_widget(help_para, body_chunks[1]);
         }
         Screen::Automation => {
             let body_chunks = Layout::default()

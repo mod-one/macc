@@ -12,6 +12,7 @@ pub struct ResolvedConfig {
     pub selections: ResolvedSelectionsConfig,
     pub mcp_templates: Vec<crate::config::McpTemplateDefinition>,
     pub automation: crate::config::AutomationConfig,
+    pub settings: crate::config::SettingsConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
@@ -70,6 +71,8 @@ pub enum SelectionKind {
 #[derive(Debug, Default, Clone)]
 pub struct CliOverrides {
     pub tools: Option<Vec<String>>,
+    pub quiet: Option<bool>,
+    pub offline: Option<bool>,
 }
 
 impl CliOverrides {
@@ -81,7 +84,10 @@ impl CliOverrides {
             .collect();
 
         if tools.is_empty() {
-            return Ok(CliOverrides { tools: None });
+            return Ok(CliOverrides {
+                tools: None,
+                ..Default::default()
+            });
         }
 
         let allowed_set: HashSet<&str> = allowed.iter().map(|s| s.as_str()).collect();
@@ -95,11 +101,15 @@ impl CliOverrides {
         }
 
         if filtered_tools.is_empty() {
-            return Ok(CliOverrides { tools: None });
+            return Ok(CliOverrides {
+                tools: None,
+                ..Default::default()
+            });
         }
 
         Ok(CliOverrides {
             tools: Some(filtered_tools),
+            ..Default::default()
         })
     }
 }
@@ -161,6 +171,15 @@ pub fn resolve(canonical: &CanonicalConfig, overrides: &CliOverrides) -> Resolve
     mcp.sort();
     mcp.dedup();
 
+    // 5. Settings
+    let mut settings = canonical.settings.clone();
+    if let Some(q) = overrides.quiet {
+        settings.quiet = q;
+    }
+    if let Some(o) = overrides.offline {
+        settings.offline = o;
+    }
+
     ResolvedConfig {
         version,
         tools: ResolvedToolsConfig {
@@ -179,6 +198,7 @@ pub fn resolve(canonical: &CanonicalConfig, overrides: &CliOverrides) -> Resolve
         },
         mcp_templates: canonical.mcp_templates.clone(),
         automation: canonical.automation.clone(),
+        settings,
     }
 }
 
@@ -295,7 +315,7 @@ fn read_string_list(value: &serde_json::Value, key: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{SelectionsConfig, StandardsConfig, ToolsConfig};
+    use crate::config::{SelectionsConfig, SettingsConfig, StandardsConfig, ToolsConfig};
 
     fn ordered_tool_ids() -> (String, String, String) {
         let suffix = uuid_v4_like();
@@ -326,6 +346,7 @@ mod tests {
                 mcp: vec![],
             }),
             automation: crate::config::AutomationConfig::default(),
+            settings: SettingsConfig::default(),
             mcp_templates: Vec::new(),
         };
 
@@ -361,6 +382,7 @@ mod tests {
                 mcp: vec![],
             }),
             automation: crate::config::AutomationConfig::default(),
+            settings: SettingsConfig::default(),
             mcp_templates: Vec::new(),
         };
 
@@ -382,11 +404,13 @@ mod tests {
             standards: StandardsConfig::default(),
             selections: None,
             automation: crate::config::AutomationConfig::default(),
+            settings: SettingsConfig::default(),
             mcp_templates: Vec::new(),
         };
 
         let overrides = CliOverrides {
             tools: Some(vec![tool_two.clone(), tool_three.clone()]),
+            ..Default::default()
         };
 
         let resolved = resolve(&canonical, &overrides);
@@ -445,6 +469,7 @@ mod tests {
             },
             selections: None,
             automation: crate::config::AutomationConfig::default(),
+            settings: SettingsConfig::default(),
             mcp_templates: Vec::new(),
         };
 
@@ -457,6 +482,7 @@ mod tests {
             standards: StandardsConfig { path: None, inline },
             selections: None,
             automation: crate::config::AutomationConfig::default(),
+            settings: SettingsConfig::default(),
             mcp_templates: Vec::new(),
         };
 
@@ -548,6 +574,7 @@ mod tests {
             },
             mcp_templates: Vec::new(),
             automation: crate::config::AutomationConfig::default(),
+            settings: SettingsConfig::default(),
         };
 
         let fetch_units = resolve_fetch_units(&paths, &resolved)?;
@@ -670,6 +697,7 @@ mod tests {
             },
             mcp_templates: Vec::new(),
             automation: crate::config::AutomationConfig::default(),
+            settings: SettingsConfig::default(),
         };
 
         let fetch_units = resolve_fetch_units(&paths, &resolved)?;
@@ -727,6 +755,7 @@ mod tests {
             },
             mcp_templates: Vec::new(),
             automation: crate::config::AutomationConfig::default(),
+            settings: SettingsConfig::default(),
         };
 
         let result = resolve_fetch_units(&paths, &resolved);

@@ -11,6 +11,7 @@ pub enum Screen {
     ToolSettings,
     Preview,
     Apply,
+    Settings,
     About,
 }
 
@@ -28,6 +29,7 @@ impl Screen {
             Screen::ToolSettings => "Tool Settings",
             Screen::Preview => "Preview",
             Screen::Apply => "Apply Changes",
+            Screen::Settings => "Global Settings",
             Screen::About => "About",
         }
     }
@@ -42,6 +44,7 @@ impl Screen {
             ("v", "Go to Coordinator Live"),
             ("m", "Go to MCP"),
             ("g", "Go to Logs"),
+            ("e", "Go to Settings"),
             ("p", "Go to Preview"),
             ("x", "Go to Apply"),
             ("s", "Save Config"),
@@ -110,6 +113,10 @@ impl Screen {
                 ("Enter", "Apply Changes"),
                 ("Backspace", "Delete last char of 'YES'"),
                 ("YES", "Type to consent to user-scope ops"),
+            ],
+            Screen::Settings => vec![
+                ("Up/Down", "Navigate Settings"),
+                ("Space/Enter", "Edit / Cycle"),
             ],
             _ => vec![],
         };

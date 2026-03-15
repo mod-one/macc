@@ -12,6 +12,8 @@ pub trait LifecycleFetchMaterializer {
         &self,
         paths: &ProjectPaths,
         units: Vec<FetchUnit>,
+        quiet: bool,
+        offline: bool,
     ) -> Result<Vec<MaterializedFetchUnit>>;
 }
 
@@ -64,7 +66,7 @@ pub fn init(
 pub fn plan(
     cwd: &Path,
     engine: &dyn Engine,
-    tools: Option<&str>,
+    overrides: CliOverrides,
     json: bool,
     explain: bool,
     ui: &dyn LifecycleUi,
@@ -84,11 +86,6 @@ pub fn plan(
         );
     }
 
-    let overrides = if let Some(tools_csv) = tools {
-        CliOverrides::from_tools_csv(tools_csv, &allowed_tools)?
-    } else {
-        CliOverrides::default()
-    };
     let resolved = resolve(&canonical, &overrides);
     let enabled_titles = enabled_titles(&descriptors, &resolved.tools.enabled);
     if !json {
@@ -100,7 +97,12 @@ pub fn plan(
     }
 
     let fetch_units = resolve_fetch_units(&paths, &resolved)?;
-    let materialized_units = fetch_materializer.materialize_fetch_units(&paths, fetch_units)?;
+    let materialized_units = fetch_materializer.materialize_fetch_units(
+        &paths,
+        fetch_units,
+        resolved.settings.quiet,
+        resolved.settings.offline,
+    )?;
     let plan = engine.plan(&paths, &canonical, &materialized_units, &overrides)?;
     let ops = engine.plan_operations(&paths, &plan);
     ui.render_plan_preview(&paths, &plan, &ops, json, explain)
@@ -110,7 +112,7 @@ pub fn plan(
 pub fn apply(
     cwd: &Path,
     engine: &dyn Engine,
-    tools: Option<&str>,
+    overrides: CliOverrides,
     dry_run: bool,
     allow_user_scope: bool,
     json: bool,
@@ -132,15 +134,15 @@ pub fn apply(
         );
     }
 
-    let overrides = if let Some(tools_csv) = tools {
-        CliOverrides::from_tools_csv(tools_csv, &allowed_tools)?
-    } else {
-        CliOverrides::default()
-    };
     let resolved = resolve(&canonical, &overrides);
     let enabled_titles = enabled_titles(&descriptors, &resolved.tools.enabled);
     let fetch_units = resolve_fetch_units(&paths, &resolved)?;
-    let materialized_units = fetch_materializer.materialize_fetch_units(&paths, fetch_units)?;
+    let materialized_units = fetch_materializer.materialize_fetch_units(
+        &paths,
+        fetch_units,
+        resolved.settings.quiet,
+        resolved.settings.offline,
+    )?;
 
     if dry_run {
         if !json {
@@ -177,9 +179,11 @@ pub fn apply(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn quickstart(
     cwd: &Path,
     engine: &dyn Engine,
+    overrides: CliOverrides,
     assume_yes: bool,
     apply: bool,
     no_tui: bool,
@@ -227,7 +231,14 @@ pub fn quickstart(
     ));
 
     if apply {
-        run_plan_then_optional_apply(engine, &paths, assume_yes, ui, fetch_materializer)?;
+        run_plan_then_optional_apply(
+            engine,
+            &paths,
+            overrides,
+            assume_yes,
+            ui,
+            fetch_materializer,
+        )?;
         return Ok(());
     }
 
@@ -245,6 +256,7 @@ pub fn quickstart(
 fn run_plan_then_optional_apply(
     engine: &dyn Engine,
     paths: &ProjectPaths,
+    overrides: CliOverrides,
     assume_yes: bool,
     ui: &dyn LifecycleUi,
     fetch_materializer: &dyn LifecycleFetchMaterializer,
@@ -252,10 +264,14 @@ fn run_plan_then_optional_apply(
     let canonical = load_canonical_config(&paths.config_path)?;
     let (_descriptors, diagnostics) = engine.list_tools(paths);
     crate::service::project::report_diagnostics(&diagnostics, ui);
-    let overrides = CliOverrides::default();
     let resolved = resolve(&canonical, &overrides);
     let fetch_units = resolve_fetch_units(paths, &resolved)?;
-    let materialized_units = fetch_materializer.materialize_fetch_units(paths, fetch_units)?;
+    let materialized_units = fetch_materializer.materialize_fetch_units(
+        paths,
+        fetch_units,
+        resolved.settings.quiet,
+        resolved.settings.offline,
+    )?;
     let plan = engine.plan(paths, &canonical, &materialized_units, &overrides)?;
     crate::preview_plan(&plan, paths)?;
     ui.info(&format!(
@@ -268,10 +284,14 @@ fn run_plan_then_optional_apply(
         return Ok(());
     }
 
-    let overrides = CliOverrides::default();
     let resolved = resolve(&canonical, &overrides);
     let fetch_units = resolve_fetch_units(paths, &resolved)?;
-    let materialized_units = fetch_materializer.materialize_fetch_units(paths, fetch_units)?;
+    let materialized_units = fetch_materializer.materialize_fetch_units(
+        paths,
+        fetch_units,
+        resolved.settings.quiet,
+        resolved.settings.offline,
+    )?;
     let mut apply_plan = engine.plan(paths, &canonical, &materialized_units, &overrides)?;
     let report = engine.apply(paths, &mut apply_plan, false)?;
     ui.info(&report.render_cli());

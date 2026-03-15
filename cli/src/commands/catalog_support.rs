@@ -49,8 +49,10 @@ impl macc_core::catalog::service::CatalogInstallBackend for CliCatalogInstallBac
         &self,
         paths: &macc_core::ProjectPaths,
         fetch_unit: macc_core::resolve::FetchUnit,
+        quiet: bool,
+        offline: bool,
     ) -> Result<macc_core::resolve::MaterializedFetchUnit> {
-        macc_adapter_shared::fetch::materialize_fetch_unit(paths, fetch_unit)
+        macc_adapter_shared::fetch::materialize_fetch_unit(paths, fetch_unit, quiet, offline)
     }
 
     fn apply(

@@ -548,14 +548,7 @@ pub async fn spawn_merge_job<F>(
 where
     F: FnOnce() -> Result<std::result::Result<(), String>> + Send + 'static,
 {
-    let merge_timeout_seconds = if merge_timeout_seconds > 0 {
-        merge_timeout_seconds as u64
-    } else {
-        std::env::var("COORDINATOR_MERGE_JOB_TIMEOUT_SECONDS")
-            .ok()
-            .and_then(|v| v.trim().parse::<u64>().ok())
-            .unwrap_or(0)
-    };
+    let merge_timeout_seconds = merge_timeout_seconds as u64;
     let task_id_owned = task_id.to_string();
     let tx = event_tx.clone();
     join_set.spawn(async move {
@@ -643,36 +636,6 @@ fn coordinator_log_dir(repo_root: &Path) -> PathBuf {
     repo_root.join(".macc").join("log").join("coordinator")
 }
 
-fn coordinator_merge_fix_hook(repo_root: &Path) -> Option<PathBuf> {
-    if let Ok(v) = std::env::var("COORDINATOR_MERGE_FIX_HOOK") {
-        if !v.trim().is_empty() {
-            let p = PathBuf::from(v);
-            if p.exists() {
-                return Some(p);
-            }
-        }
-    }
-    let default = repo_root
-        .join("automat")
-        .join("hooks")
-        .join("ai-merge-fix.sh");
-    if default.exists() {
-        Some(default)
-    } else {
-        None
-    }
-}
-
-fn is_truthy_env(name: &str, default: bool) -> bool {
-    match std::env::var(name) {
-        Ok(v) => matches!(
-            v.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        ),
-        Err(_) => default,
-    }
-}
-
 enum HookRunResult {
     Completed { output: String, timed_out: bool },
 }
@@ -748,11 +711,15 @@ fn run_merge_hook_with_timeout(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn merge_task_with_policy_native<FE>(
     repo_root: &Path,
     task_id: &str,
     branch: &str,
     base: &str,
+    merge_ai_fix: bool,
+    merge_fix_hook: Option<&str>,
+    merge_hook_timeout: Option<u64>,
     mut emit_event: FE,
 ) -> Result<std::result::Result<(), String>>
 where
@@ -812,13 +779,10 @@ where
     .unwrap_or_default();
 
     let mut hook_output = String::new();
-    let allow_ai_fix = is_truthy_env("COORDINATOR_MERGE_AI_FIX", false);
-    if allow_ai_fix {
-        if let Some(hook) = coordinator_merge_fix_hook(repo_root) {
-            let hook_timeout_seconds = std::env::var("COORDINATOR_MERGE_HOOK_TIMEOUT_SECONDS")
-                .ok()
-                .and_then(|raw| raw.trim().parse::<u64>().ok())
-                .unwrap_or(90);
+    if merge_ai_fix {
+        if let Some(hook_path_str) = merge_fix_hook {
+            let hook = PathBuf::from(hook_path_str);
+            let hook_timeout_seconds = merge_hook_timeout.unwrap_or(90);
             let hook_started = std::time::Instant::now();
             emit_event(
                 "merge_hook",

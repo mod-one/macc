@@ -16,8 +16,21 @@ pub struct CanonicalConfig {
     pub selections: Option<SelectionsConfig>,
     #[serde(default)]
     pub automation: AutomationConfig,
+    #[serde(default)]
+    pub settings: SettingsConfig,
     #[serde(default = "default_mcp_templates")]
     pub mcp_templates: Vec<McpTemplateDefinition>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
+#[serde(deny_unknown_fields)]
+pub struct SettingsConfig {
+    #[serde(default)]
+    pub quiet: bool,
+    #[serde(default)]
+    pub offline: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub web_port: Option<u16>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
@@ -111,6 +124,32 @@ pub struct CoordinatorConfig {
     pub stale_action: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub storage_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merge_ai_fix: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merge_fix_hook: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merge_job_timeout_seconds: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merge_hook_timeout_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ghost_heartbeat_grace_seconds: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dispatch_cooldown_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub json_compat: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub legacy_json_fallback: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code_retry_list: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code_retry_max: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cutover_gate_window_events: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cutover_gate_max_blocked_ratio: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cutover_gate_max_stale_ratio: Option<f64>,
 }
 
 fn default_true() -> bool {
@@ -229,6 +268,7 @@ impl Default for CanonicalConfig {
             standards: StandardsConfig::default(),
             selections: None,
             automation: AutomationConfig::default(),
+            settings: SettingsConfig::default(),
             mcp_templates: default_mcp_templates(),
         }
     }
@@ -562,6 +602,7 @@ standards:
             standards: StandardsConfig { path: None, inline },
             selections: None,
             automation: AutomationConfig::default(),
+            settings: SettingsConfig::default(),
             mcp_templates: Vec::new(),
         };
 
