@@ -179,7 +179,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    const AUTOMATION_FIELD_COUNT: usize = 27;
+    const AUTOMATION_FIELD_COUNT: usize = 26;
     const COORDINATOR_EVENTS_EWMA_ALPHA: f64 = 0.30;
     const COORDINATOR_PAUSE_REL_PATH: &'static str = ".macc/automation/task/coordinator.pause.json";
 
@@ -1812,15 +1812,14 @@ impl AppState {
             15 => "Log Flush Interval (ms)",
             16 => "JSON Export Debounce (ms)",
             17 => "Merge AI Fix",
-            18 => "Merge Fix Hook",
-            19 => "Merge Job Timeout (s)",
-            20 => "Merge Hook Timeout (s)",
-            21 => "Ghost Heartbeat Grace (s)",
-            22 => "Dispatch Cooldown (s)",
-            23 => "JSON Compatibility",
-            24 => "Retry Error Codes (CSV)",
-            25 => "Max Auto Retries",
-            26 => "Legacy JSON Fallback",
+            18 => "Merge Job Timeout (s)",
+            19 => "Merge Hook Timeout (s)",
+            20 => "Ghost Heartbeat Grace (s)",
+            21 => "Dispatch Cooldown (s)",
+            22 => "JSON Compatibility",
+            23 => "Retry Error Codes (CSV)",
+            24 => "Max Auto Retries",
+            25 => "Legacy JSON Fallback",
             _ => "",
         }
     }
@@ -1845,15 +1844,14 @@ impl AppState {
             15 => "Flush coordinator logs every N milliseconds (0 uses runtime default).",
             16 => "Debounce SQLite -> JSON compatibility export in ms (0 disables debounce).",
             17 => "Enable AI-driven resolution for merge conflicts.",
-            18 => "Custom script path to handle merge conflict resolution.",
-            19 => "Timeout for git merge operations in seconds.",
-            20 => "Timeout for AI merge-fix hook execution in seconds.",
-            21 => "Grace period before considering a dead process a 'ghost' in seconds.",
-            22 => "Wait time between task dispatch cycles in seconds.",
-            23 => "Enable JSON snapshot export for external tool compatibility.",
-            24 => "Comma-separated list of error codes that trigger an automatic task retry.",
-            25 => "Maximum number of automatic retries for a failed task.",
-            26 => "Allow falling back to JSON task registry if SQLite is corrupted or missing.",
+            18 => "Timeout for git merge operations in seconds.",
+            19 => "Timeout for AI merge-fix hook execution in seconds.",
+            20 => "Grace period before considering a dead process a 'ghost' in seconds.",
+            21 => "Wait time between task dispatch cycles in seconds.",
+            22 => "Enable JSON snapshot export for external tool compatibility.",
+            23 => "Comma-separated list of error codes that trigger an automatic task retry.",
+            24 => "Maximum number of automatic retries for a failed task.",
+            25 => "Allow falling back to JSON task registry if SQLite is corrupted or missing.",
             _ => "",
         }
     }
@@ -1936,38 +1934,35 @@ impl AppState {
                 .unwrap_or(false)
                 .to_string(),
             18 => coordinator
-                .and_then(|c| c.merge_fix_hook.clone())
-                .unwrap_or_else(|| "automat/hooks/ai-merge-fix.sh".to_string()),
-            19 => coordinator
                 .and_then(|c| c.merge_job_timeout_seconds)
                 .unwrap_or(0)
                 .to_string(),
-            20 => coordinator
+            19 => coordinator
                 .and_then(|c| c.merge_hook_timeout_seconds)
                 .unwrap_or(90)
                 .to_string(),
-            21 => coordinator
+            20 => coordinator
                 .and_then(|c| c.ghost_heartbeat_grace_seconds)
                 .unwrap_or(30)
                 .to_string(),
-            22 => coordinator
+            21 => coordinator
                 .and_then(|c| c.dispatch_cooldown_seconds)
                 .unwrap_or(2)
                 .to_string(),
-            23 => coordinator
+            22 => coordinator
                 .and_then(|c| c.json_compat)
                 .unwrap_or(false)
                 .to_string(),
-            24 => self
+            23 => self
                 .coordinator_env_cfg()
                 .error_code_retry_list
                 .unwrap_or_else(|| "E101,E102,E103,E301,E302,E303".to_string()),
-            25 => self
+            24 => self
                 .coordinator_env_cfg()
                 .error_code_retry_max
                 .unwrap_or(2)
                 .to_string(),
-            26 => coordinator
+            25 => coordinator
                 .and_then(|c| c.legacy_json_fallback)
                 .unwrap_or(false)
                 .to_string(),
@@ -2132,7 +2127,7 @@ impl AppState {
             self.set_automation_field_string(13, next.to_string());
             return;
         }
-        if matches!(self.automation_field_index, 17 | 23 | 26) {
+        if matches!(self.automation_field_index, 17 | 22 | 25) {
             let current =
                 self.automation_field_display_value(self.automation_field_index) == "true";
             self.set_automation_field_bool(self.automation_field_index, !current);
@@ -2148,8 +2143,8 @@ impl AppState {
         let idx = self.automation_field_index;
         let input = self.automation_field_input.trim().to_string();
         let result = match idx {
-            0..=2 | 18 | 24 => {
-                if input.is_empty() && idx != 18 {
+            0..=2 | 23 => {
+                if input.is_empty() && idx != 23 {
                     Err("Value cannot be empty.".to_string())
                 } else {
                     self.set_automation_field_string(idx, input);
@@ -2162,21 +2157,21 @@ impl AppState {
             }
             4 => self.set_automation_field_tool_caps(input),
             5 => self.set_automation_field_tool_specializations(input),
-            6..=12 | 14 | 19 | 25 => match input.parse::<usize>() {
+            6..=12 | 14 | 18 | 24 => match input.parse::<usize>() {
                 Ok(value) => {
                     self.set_automation_field_usize(idx, value);
                     Ok(())
                 }
                 Err(_) => Err("Invalid integer value.".to_string()),
             },
-            15 | 16 | 20 | 22 => match input.parse::<u64>() {
+            15 | 16 | 19 | 21 => match input.parse::<u64>() {
                 Ok(value) => {
                     self.set_automation_field_u64(idx, value);
                     Ok(())
                 }
                 Err(_) => Err("Invalid integer value.".to_string()),
             },
-            21 => match input.parse::<i64>() {
+            20 => match input.parse::<i64>() {
                 Ok(value) => {
                     self.set_automation_field_i64(idx, value);
                     Ok(())
@@ -2192,7 +2187,7 @@ impl AppState {
                     Ok(())
                 }
             }
-            17 | 23 | 26 => {
+            17 | 22 | 25 => {
                 let value = input.to_lowercase();
                 if value == "true" {
                     self.set_automation_field_bool(idx, true);
@@ -2241,8 +2236,7 @@ impl AppState {
                 1 => coordinator.reference_branch = Some(value),
                 2 => coordinator.prd_file = Some(value),
                 13 => coordinator.stale_action = Some(value),
-                18 => coordinator.merge_fix_hook = Some(value),
-                24 => coordinator.error_code_retry_list = Some(value),
+                23 => coordinator.error_code_retry_list = Some(value),
                 _ => {}
             }
         }
@@ -2260,8 +2254,8 @@ impl AppState {
                 11 => coordinator.stale_in_progress_seconds = Some(value),
                 12 => coordinator.stale_changes_requested_seconds = Some(value),
                 14 => coordinator.log_flush_lines = Some(value),
-                19 => coordinator.merge_job_timeout_seconds = Some(value),
-                25 => coordinator.error_code_retry_max = Some(value),
+                18 => coordinator.merge_job_timeout_seconds = Some(value),
+                24 => coordinator.error_code_retry_max = Some(value),
                 _ => {}
             }
         }
@@ -2273,8 +2267,8 @@ impl AppState {
             match idx {
                 15 => coordinator.log_flush_ms = Some(value),
                 16 => coordinator.mirror_json_debounce_ms = Some(value),
-                20 => coordinator.merge_hook_timeout_seconds = Some(value),
-                22 => coordinator.dispatch_cooldown_seconds = Some(value),
+                19 => coordinator.merge_hook_timeout_seconds = Some(value),
+                21 => coordinator.dispatch_cooldown_seconds = Some(value),
                 _ => {}
             }
         }
@@ -2283,7 +2277,7 @@ impl AppState {
     fn set_automation_field_i64(&mut self, idx: usize, value: i64) {
         self.snapshot_before_config_change();
         if let Some(coordinator) = self.coordinator_config_mut() {
-            if idx == 21 {
+            if idx == 20 {
                 coordinator.ghost_heartbeat_grace_seconds = Some(value);
             }
         }
@@ -2294,8 +2288,8 @@ impl AppState {
         if let Some(coordinator) = self.coordinator_config_mut() {
             match idx {
                 17 => coordinator.merge_ai_fix = Some(value),
-                23 => coordinator.json_compat = Some(value),
-                26 => coordinator.legacy_json_fallback = Some(value),
+                22 => coordinator.json_compat = Some(value),
+                25 => coordinator.legacy_json_fallback = Some(value),
                 _ => {}
             }
         }
@@ -3430,15 +3424,22 @@ impl AppState {
             5 => serde_json::from_str::<BTreeMap<String, Vec<String>>>(input)
                 .err()
                 .map(|e| format!("Invalid JSON: {}", e)),
-            6..=12 | 14 => {
+            6..=12 | 14 | 18 | 24 => {
                 if input.parse::<usize>().is_err() {
                     Some("Invalid integer value.".to_string())
                 } else {
                     None
                 }
             }
-            15 | 16 => {
+            15 | 16 | 19 | 21 => {
                 if input.parse::<u64>().is_err() {
+                    Some("Invalid integer value.".to_string())
+                } else {
+                    None
+                }
+            }
+            20 => {
+                if input.parse::<i64>().is_err() {
                     Some("Invalid integer value.".to_string())
                 } else {
                     None

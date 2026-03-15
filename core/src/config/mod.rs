@@ -127,8 +127,6 @@ pub struct CoordinatorConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub merge_ai_fix: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub merge_fix_hook: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub merge_job_timeout_seconds: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub merge_hook_timeout_seconds: Option<u64>,

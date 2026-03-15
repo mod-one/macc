@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  merge_worker.sh --repo <path> --task-id <id> --branch <branch> --base-branch <branch> --log-dir <path> --result-file <path> [--allow-ai-fix true|false] [--merge-fix-hook <path>]
+  merge_worker.sh --repo <path> --task-id <id> --branch <branch> --base-branch <branch> --log-dir <path> --result-file <path> [--allow-ai-fix true|false]
 EOF
 }
 
@@ -26,7 +26,6 @@ while [[ $# -gt 0 ]]; do
     --log-dir) LOG_DIR="$2"; shift 2 ;;
     --result-file) RESULT_FILE="$2"; shift 2 ;;
     --allow-ai-fix) ALLOW_AI_FIX="$2"; shift 2 ;;
-    --merge-fix-hook) MERGE_FIX_HOOK="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; usage; exit 1 ;;
   esac
@@ -42,6 +41,7 @@ command -v git >/dev/null 2>&1 || { echo "Error: git is required" >&2; exit 1; }
 command -v jq >/dev/null 2>&1 || { echo "Error: jq is required" >&2; exit 1; }
 
 REPO_DIR="$(cd "$REPO_DIR" && pwd -P)"
+MERGE_FIX_HOOK="${REPO_DIR}/.macc/automation/hooks/ai-merge-fix.sh"
 mkdir -p "$LOG_DIR"
 mkdir -p "$(dirname "$RESULT_FILE")"
 

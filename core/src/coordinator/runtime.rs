@@ -718,7 +718,6 @@ pub fn merge_task_with_policy_native<FE>(
     branch: &str,
     base: &str,
     merge_ai_fix: bool,
-    merge_fix_hook: Option<&str>,
     merge_hook_timeout: Option<u64>,
     mut emit_event: FE,
 ) -> Result<std::result::Result<(), String>>
@@ -780,73 +779,71 @@ where
 
     let mut hook_output = String::new();
     if merge_ai_fix {
-        if let Some(hook_path_str) = merge_fix_hook {
-            let hook = PathBuf::from(hook_path_str);
-            let hook_timeout_seconds = merge_hook_timeout.unwrap_or(90);
-            let hook_started = std::time::Instant::now();
-            emit_event(
-                "merge_hook",
-                task_id,
-                "integrate",
-                "started",
-                &format!(
-                    "merge-fix hook started task={} timeout_s={}",
-                    task_id, hook_timeout_seconds
-                ),
-                "info",
-            );
-            let hook_result = run_merge_hook_with_timeout(
-                repo_root,
-                &hook,
-                task_id,
-                branch,
-                base,
-                &conflicts,
-                hook_timeout_seconds,
-            );
-            let hook_elapsed = hook_started.elapsed().as_secs();
-            match hook_result {
-                Ok(HookRunResult::Completed { output, timed_out }) => {
-                    hook_output = output;
-                    emit_event(
-                        "merge_hook",
-                        task_id,
-                        "integrate",
-                        if timed_out { "timeout" } else { "done" },
-                        &format!(
-                            "merge-fix hook completed task={} elapsed={}s timeout={}",
-                            task_id, hook_elapsed, timed_out
-                        ),
-                        if timed_out { "warning" } else { "info" },
-                    );
-                }
-                Err(err) => {
-                    hook_output = format!("merge-fix hook execution error: {}", err);
-                    emit_event(
-                        "merge_hook",
-                        task_id,
-                        "integrate",
-                        "failed",
-                        &format!(
-                            "merge-fix hook failed task={} elapsed={}s error={}",
-                            task_id, hook_elapsed, err
-                        ),
-                        "warning",
-                    );
-                }
+        let hook = crate::ProjectPaths::from_root(repo_root).automation_merge_fix_hook_path();
+        let hook_timeout_seconds = merge_hook_timeout.unwrap_or(90);
+        let hook_started = std::time::Instant::now();
+        emit_event(
+            "merge_hook",
+            task_id,
+            "integrate",
+            "started",
+            &format!(
+                "merge-fix hook started task={} timeout_s={}",
+                task_id, hook_timeout_seconds
+            ),
+            "info",
+        );
+        let hook_result = run_merge_hook_with_timeout(
+            repo_root,
+            &hook,
+            task_id,
+            branch,
+            base,
+            &conflicts,
+            hook_timeout_seconds,
+        );
+        let hook_elapsed = hook_started.elapsed().as_secs();
+        match hook_result {
+            Ok(HookRunResult::Completed { output, timed_out }) => {
+                hook_output = output;
+                emit_event(
+                    "merge_hook",
+                    task_id,
+                    "integrate",
+                    if timed_out { "timeout" } else { "done" },
+                    &format!(
+                        "merge-fix hook completed task={} elapsed={}s timeout={}",
+                        task_id, hook_elapsed, timed_out
+                    ),
+                    if timed_out { "warning" } else { "info" },
+                );
             }
-            let unresolved = git::run_git_output_mapped(
-                repo_root,
-                &["diff", "--name-only", "--diff-filter=U"],
-                "list unresolved merge conflict files",
-            )
-            .ok()
-            .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
-            .unwrap_or(true);
-            let in_merge = git::rev_parse_verify(repo_root, "MERGE_HEAD").unwrap_or(false);
-            if !unresolved && !in_merge {
-                return Ok(Ok(()));
+            Err(err) => {
+                hook_output = format!("merge-fix hook execution error: {}", err);
+                emit_event(
+                    "merge_hook",
+                    task_id,
+                    "integrate",
+                    "failed",
+                    &format!(
+                        "merge-fix hook failed task={} elapsed={}s error={}",
+                        task_id, hook_elapsed, err
+                    ),
+                    "warning",
+                );
             }
+        }
+        let unresolved = git::run_git_output_mapped(
+            repo_root,
+            &["diff", "--name-only", "--diff-filter=U"],
+            "list unresolved merge conflict files",
+        )
+        .ok()
+        .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+        .unwrap_or(true);
+        let in_merge = git::rev_parse_verify(repo_root, "MERGE_HEAD").unwrap_or(false);
+        if !unresolved && !in_merge {
+            return Ok(Ok(()));
         }
     }
 

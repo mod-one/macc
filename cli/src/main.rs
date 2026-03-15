@@ -263,9 +263,6 @@ enum Commands {
         /// Enable AI-driven merge conflict resolution
         #[arg(long)]
         merge_ai_fix: Option<bool>,
-        /// Override merge-fix hook path
-        #[arg(long)]
-        merge_fix_hook: Option<String>,
         /// Timeout for merge operations in seconds
         #[arg(long)]
         merge_job_timeout_seconds: Option<usize>,
@@ -812,7 +809,6 @@ fn run_with_engine_provider(
             stale_action,
             storage_mode,
             merge_ai_fix,
-            merge_fix_hook,
             merge_job_timeout_seconds,
             merge_hook_timeout_seconds,
             ghost_heartbeat_grace_seconds,
@@ -853,7 +849,6 @@ fn run_with_engine_provider(
                     stale_action: stale_action.clone(),
                     storage_mode: storage_mode.clone(),
                     merge_ai_fix: *merge_ai_fix,
-                    merge_fix_hook: merge_fix_hook.clone(),
                     merge_job_timeout_seconds: *merge_job_timeout_seconds,
                     merge_hook_timeout_seconds: *merge_hook_timeout_seconds,
                     ghost_heartbeat_grace_seconds: *ghost_heartbeat_grace_seconds,
@@ -2225,7 +2220,6 @@ fi
                     stale_action: None,
                     storage_mode: None,
                     merge_ai_fix: None,
-                    merge_fix_hook: None,
                     merge_job_timeout_seconds: None,
                     merge_hook_timeout_seconds: None,
                     ghost_heartbeat_grace_seconds: None,

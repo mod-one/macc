@@ -19,7 +19,6 @@ pub struct CoordinatorEnvConfig {
     pub stale_action: Option<String>,
     pub storage_mode: Option<String>,
     pub merge_ai_fix: Option<bool>,
-    pub merge_fix_hook: Option<String>,
     pub merge_job_timeout_seconds: Option<usize>,
     pub merge_hook_timeout_seconds: Option<u64>,
     pub ghost_heartbeat_grace_seconds: Option<i64>,

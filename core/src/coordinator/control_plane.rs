@@ -696,10 +696,6 @@ pub async fn advance_tasks_native(
                     .merge_ai_fix
                     .or_else(|| coordinator.and_then(|c| c.merge_ai_fix))
                     .unwrap_or(false);
-                let merge_fix_hook = env_cfg
-                    .merge_fix_hook
-                    .clone()
-                    .or_else(|| coordinator.and_then(|c| c.merge_fix_hook.clone()));
                 let merge_hook_timeout = env_cfg
                     .merge_hook_timeout_seconds
                     .or_else(|| coordinator.and_then(|c| c.merge_hook_timeout_seconds));
@@ -716,7 +712,6 @@ pub async fn advance_tasks_native(
                             &branch_for_worker,
                             &base_for_worker,
                             merge_ai_fix,
-                            merge_fix_hook.as_deref(),
                             merge_hook_timeout,
                             |event_type, task_id, phase, status, message, severity| {
                                 let _ = append_coordinator_event_with_severity(
