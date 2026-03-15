@@ -653,7 +653,25 @@ impl CoordinatorEventRecord {
     }
 
     pub fn normalized_payload(&self) -> Value {
+        if let Some(val) = self.extra.get("payload") {
+            if val.is_object() {
+                return val.clone();
+            } else if let Some(s) = val.as_str() {
+                if let Ok(parsed) = serde_json::from_str::<Value>(s) {
+                    if parsed.is_object() {
+                        return parsed;
+                    }
+                }
+            }
+        }
         if self.payload.is_object() {
+            if let Some(val_str) = self.payload.get("value").and_then(Value::as_str) {
+                if let Ok(parsed) = serde_json::from_str::<Value>(val_str) {
+                    if parsed.is_object() {
+                        return parsed;
+                    }
+                }
+            }
             return self.payload.clone();
         }
         if let Some(raw) = self.payload.as_str() {
