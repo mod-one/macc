@@ -685,7 +685,7 @@ mod tests {
 
         // 1. Test "already exists and matches"
         std::fs::write(&target_path, bytes).unwrap();
-        let result = download_source_raw(&paths, &source).unwrap();
+        let result = download_source_raw(&paths, &source, false, false).unwrap();
         assert_eq!(result, target_path);
 
         std::fs::remove_dir_all(&temp_base).ok();
@@ -737,7 +737,8 @@ mod tests {
         std::fs::write(&target_path, &archive_bytes).unwrap();
 
         // 2. Call download_and_unpack (it should use the cached file)
-        let unpack_dir = download_and_unpack(&paths, &source).expect("Should download and unpack");
+        let unpack_dir =
+            download_and_unpack(&paths, &source, false, false).expect("Should download and unpack");
 
         // 3. Verify
         assert!(unpack_dir.exists());
@@ -796,7 +797,7 @@ mod tests {
         };
 
         // 2. Fetch it
-        let repo_dir = git_fetch(&paths, &source).expect("Should fetch git repo");
+        let repo_dir = git_fetch(&paths, &source, false, false).expect("Should fetch git repo");
 
         // 3. Verify
         assert!(repo_dir.exists());
@@ -819,7 +820,8 @@ mod tests {
             .status()
             .unwrap();
 
-        let repo_dir_v2 = git_fetch(&paths, &source).expect("Should fetch git repo update");
+        let repo_dir_v2 =
+            git_fetch(&paths, &source, false, false).expect("Should fetch git repo update");
         assert_eq!(repo_dir, repo_dir_v2);
 
         // Since we are on master, and git fetch doesn't automatically merge,
@@ -846,7 +848,8 @@ mod tests {
             subpaths: vec![],
         };
 
-        let repo_dir_sha = git_fetch(&paths, &source_sha).expect("Should fetch git SHA");
+        let repo_dir_sha =
+            git_fetch(&paths, &source_sha, false, false).expect("Should fetch git SHA");
         assert_eq!(
             std::fs::read_to_string(repo_dir_sha.join("README.md")).unwrap(),
             "updated"
@@ -907,7 +910,8 @@ mod tests {
         };
 
         // 2. Fetch it
-        let repo_dir = git_fetch(&paths, &source).expect("Should fetch git repo sparsely");
+        let repo_dir =
+            git_fetch(&paths, &source, false, false).expect("Should fetch git repo sparsely");
 
         // 3. Verify
         assert!(repo_dir.join("folder1").exists());
@@ -925,7 +929,8 @@ mod tests {
             subpaths: vec!["folder1".into(), "folder2".into()],
         };
         let repo_dir_multi =
-            git_fetch(&paths, &source_multi).expect("Should fetch git repo with multi subpaths");
+            git_fetch(&paths, &source_multi, false, false)
+                .expect("Should fetch git repo with multi subpaths");
         assert!(repo_dir_multi.join("folder1").exists());
         assert!(repo_dir_multi.join("folder2").exists());
         assert!(repo_dir_multi.join("root.txt").exists());
@@ -990,7 +995,8 @@ mod tests {
             }],
         };
 
-        let result = materialize_fetch_unit(&paths, unit).expect("Should materialize unit");
+        let result =
+            materialize_fetch_unit(&paths, unit, false, false).expect("Should materialize unit");
         assert!(result.source_root_path.ends_with("unpacked"));
         assert_eq!(result.selections.len(), 1);
         assert_eq!(result.selections[0].id, "s1");
@@ -1004,7 +1010,7 @@ mod tests {
                 kind: SelectionKind::Skill,
             }],
         };
-        let result_fail = materialize_fetch_unit(&paths, unit_fail);
+        let result_fail = materialize_fetch_unit(&paths, unit_fail, false, false);
         assert!(result_fail.is_err());
         assert!(result_fail
             .unwrap_err()
@@ -1056,7 +1062,7 @@ mod tests {
             }],
         };
 
-        let result = materialize_fetch_unit(&paths, unit);
+        let result = materialize_fetch_unit(&paths, unit, false, false);
         assert!(result.is_err());
         assert!(result
             .unwrap_err()

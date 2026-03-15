@@ -602,6 +602,7 @@ standards:
             standards: StandardsConfig { path: None, inline },
             selections: None,
             automation: AutomationConfig::default(),
+            settings: SettingsConfig::default(),
             mcp_templates: Vec::new(),
         };
 

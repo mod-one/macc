@@ -636,6 +636,7 @@ mod tests {
             standards: crate::config::StandardsConfig::default(),
             selections: None,
             automation: crate::config::AutomationConfig::default(),
+            settings: crate::config::SettingsConfig::default(),
             mcp_templates: CanonicalConfig::default().mcp_templates,
         };
 

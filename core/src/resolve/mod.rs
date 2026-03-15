@@ -315,7 +315,7 @@ fn read_string_list(value: &serde_json::Value, key: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{SelectionsConfig, StandardsConfig, ToolsConfig};
+    use crate::config::{SelectionsConfig, SettingsConfig, StandardsConfig, ToolsConfig};
 
     fn ordered_tool_ids() -> (String, String, String) {
         let suffix = uuid_v4_like();
@@ -346,6 +346,7 @@ mod tests {
                 mcp: vec![],
             }),
             automation: crate::config::AutomationConfig::default(),
+            settings: SettingsConfig::default(),
             mcp_templates: Vec::new(),
         };
 
@@ -381,6 +382,7 @@ mod tests {
                 mcp: vec![],
             }),
             automation: crate::config::AutomationConfig::default(),
+            settings: SettingsConfig::default(),
             mcp_templates: Vec::new(),
         };
 
@@ -402,11 +404,13 @@ mod tests {
             standards: StandardsConfig::default(),
             selections: None,
             automation: crate::config::AutomationConfig::default(),
+            settings: SettingsConfig::default(),
             mcp_templates: Vec::new(),
         };
 
         let overrides = CliOverrides {
             tools: Some(vec![tool_two.clone(), tool_three.clone()]),
+            ..Default::default()
         };
 
         let resolved = resolve(&canonical, &overrides);
@@ -465,6 +469,7 @@ mod tests {
             },
             selections: None,
             automation: crate::config::AutomationConfig::default(),
+            settings: SettingsConfig::default(),
             mcp_templates: Vec::new(),
         };
 
@@ -477,6 +482,7 @@ mod tests {
             standards: StandardsConfig { path: None, inline },
             selections: None,
             automation: crate::config::AutomationConfig::default(),
+            settings: SettingsConfig::default(),
             mcp_templates: Vec::new(),
         };
 
@@ -568,6 +574,7 @@ mod tests {
             },
             mcp_templates: Vec::new(),
             automation: crate::config::AutomationConfig::default(),
+            settings: SettingsConfig::default(),
         };
 
         let fetch_units = resolve_fetch_units(&paths, &resolved)?;
@@ -690,6 +697,7 @@ mod tests {
             },
             mcp_templates: Vec::new(),
             automation: crate::config::AutomationConfig::default(),
+            settings: SettingsConfig::default(),
         };
 
         let fetch_units = resolve_fetch_units(&paths, &resolved)?;
@@ -747,6 +755,7 @@ mod tests {
             },
             mcp_templates: Vec::new(),
             automation: crate::config::AutomationConfig::default(),
+            settings: SettingsConfig::default(),
         };
 
         let result = resolve_fetch_units(&paths, &resolved);

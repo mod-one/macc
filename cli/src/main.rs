@@ -1539,6 +1539,9 @@ mod tests {
         let cli = Cli {
             cwd: project_dir.to_string_lossy().into(),
             verbose: true,
+            quiet: false,
+            offline: false,
+            web_port: None,
             command: Some(Commands::Init {
                 force: false,
                 wizard: false,
@@ -1566,6 +1569,9 @@ mod tests {
         let cli = Cli {
             cwd: temp_base.to_string_lossy().into(),
             verbose: false,
+            quiet: false,
+            offline: false,
+            web_port: None,
             command: Some(Commands::Init {
                 force: false,
                 wizard: false,
@@ -1586,6 +1592,9 @@ mod tests {
         let cli_idempotent = Cli {
             cwd: temp_base.to_string_lossy().into(),
             verbose: false,
+            quiet: false,
+            offline: false,
+            web_port: None,
             command: Some(Commands::Init {
                 force: false,
                 wizard: false,
@@ -1603,6 +1612,9 @@ mod tests {
         let cli_force = Cli {
             cwd: temp_base.to_string_lossy().into(),
             verbose: false,
+            quiet: false,
+            offline: false,
+            web_port: None,
             command: Some(Commands::Init {
                 force: true,
                 wizard: false,
@@ -1639,6 +1651,9 @@ mod tests {
             Cli {
                 cwd: temp_base.to_string_lossy().into(),
                 verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
                 command: Some(Commands::Init {
                     force: false,
                     wizard: false,
@@ -1652,6 +1667,9 @@ mod tests {
             Cli {
                 cwd: temp_base.to_string_lossy().into(),
                 verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
                 command: Some(Commands::Plan {
                     tools: Some(format!("{},{}", tool_one, tool_two)),
                     json: false,
@@ -1666,6 +1684,9 @@ mod tests {
             Cli {
                 cwd: temp_base.to_string_lossy().into(),
                 verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
                 command: Some(Commands::Plan {
                     tools: Some(format!("{},unknown", tool_one)),
                     json: false,
@@ -2109,6 +2130,9 @@ fi
             Cli {
                 cwd: root.to_string_lossy().into(),
                 verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
                 command: Some(Commands::Init {
                     force: false,
                     wizard: false,
@@ -2161,6 +2185,9 @@ fi
             Cli {
                 cwd: root.to_string_lossy().into(),
                 verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
                 command: Some(Commands::Coordinator {
                     command_name: "stop".to_string(),
                     no_tui: true,
@@ -2230,6 +2257,9 @@ fi
             Cli {
                 cwd: temp_base.to_string_lossy().into(),
                 verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
                 command: Some(Commands::Init {
                     force: false,
                     wizard: false,
@@ -2243,6 +2273,9 @@ fi
             Cli {
                 cwd: temp_base.to_string_lossy().into(),
                 verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
                 command: Some(Commands::Apply {
                     tools: Some(tool_one.clone()),
                     dry_run: false,
@@ -2277,6 +2310,9 @@ fi
             Cli {
                 cwd: temp_base.to_string_lossy().into(),
                 verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
                 command: Some(Commands::Init {
                     force: false,
                     wizard: false,
@@ -2289,6 +2325,9 @@ fi
             Cli {
                 cwd: temp_base.to_string_lossy().into(),
                 verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
                 command: Some(Commands::Context {
                     tool: None,
                     from_files: Vec::new(),
@@ -2322,6 +2361,9 @@ fi
             Cli {
                 cwd: temp_base.to_string_lossy().into(),
                 verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
                 command: Some(Commands::Init {
                     force: false,
                     wizard: false,
@@ -2335,6 +2377,9 @@ fi
             Cli {
                 cwd: temp_base.to_string_lossy().into(),
                 verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
                 command: Some(Commands::Catalog {
                     catalog_command: CatalogCommands::Skills {
                         skills_command: CatalogSubCommands::Add {
@@ -2362,6 +2407,9 @@ fi
             Cli {
                 cwd: temp_base.to_string_lossy().into(),
                 verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
                 command: Some(Commands::Catalog {
                     catalog_command: CatalogCommands::Skills {
                         skills_command: CatalogSubCommands::List,
@@ -2376,6 +2424,9 @@ fi
             Cli {
                 cwd: temp_base.to_string_lossy().into(),
                 verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
                 command: Some(Commands::Catalog {
                     catalog_command: CatalogCommands::Skills {
                         skills_command: CatalogSubCommands::Search {
@@ -2392,6 +2443,9 @@ fi
             Cli {
                 cwd: temp_base.to_string_lossy().into(),
                 verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
                 command: Some(Commands::Catalog {
                     catalog_command: CatalogCommands::Skills {
                         skills_command: CatalogSubCommands::Remove {
@@ -2421,6 +2475,9 @@ fi
             Cli {
                 cwd: temp_base.to_string_lossy().into(),
                 verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
                 command: Some(Commands::Init {
                     force: false,
                     wizard: false,
@@ -2434,6 +2491,9 @@ fi
             Cli {
                 cwd: temp_base.to_string_lossy().into(),
                 verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
                 command: Some(Commands::Catalog {
                     catalog_command: CatalogCommands::Mcp {
                         mcp_command: CatalogSubCommands::Add {
@@ -2461,6 +2521,9 @@ fi
             Cli {
                 cwd: temp_base.to_string_lossy().into(),
                 verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
                 command: Some(Commands::Catalog {
                     catalog_command: CatalogCommands::Mcp {
                         mcp_command: CatalogSubCommands::List,
@@ -2475,6 +2538,9 @@ fi
             Cli {
                 cwd: temp_base.to_string_lossy().into(),
                 verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
                 command: Some(Commands::Catalog {
                     catalog_command: CatalogCommands::Mcp {
                         mcp_command: CatalogSubCommands::Search {
@@ -2491,6 +2557,9 @@ fi
             Cli {
                 cwd: temp_base.to_string_lossy().into(),
                 verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
                 command: Some(Commands::Catalog {
                     catalog_command: CatalogCommands::Mcp {
                         mcp_command: CatalogSubCommands::Remove {
@@ -2523,6 +2592,9 @@ fi
             Cli {
                 cwd: temp_base.to_string_lossy().into(),
                 verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
                 command: Some(Commands::Init {
                     force: false,
                     wizard: false,
@@ -2563,6 +2635,9 @@ fi
             Cli {
                 cwd: temp_base.to_string_lossy().into(),
                 verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
                 command: Some(Commands::Catalog {
                     catalog_command: CatalogCommands::Skills {
                         skills_command: CatalogSubCommands::Add {
@@ -2587,6 +2662,9 @@ fi
             Cli {
                 cwd: temp_base.to_string_lossy().into(),
                 verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
                 command: Some(Commands::Install {
                     install_command: InstallCommands::Skill {
                         tool: tool_one.clone(),
@@ -2621,6 +2699,9 @@ fi
             Cli {
                 cwd: temp_base.to_string_lossy().into(),
                 verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
                 command: Some(Commands::Init {
                     force: false,
                     wizard: false,
@@ -2664,6 +2745,9 @@ fi
             Cli {
                 cwd: temp_base.to_string_lossy().into(),
                 verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
                 command: Some(Commands::Catalog {
                     catalog_command: CatalogCommands::Mcp {
                         mcp_command: CatalogSubCommands::Add {
@@ -2688,6 +2772,9 @@ fi
             Cli {
                 cwd: temp_base.to_string_lossy().into(),
                 verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
                 command: Some(Commands::Install {
                     install_command: InstallCommands::Mcp {
                         id: "remote-mcp".into(),
@@ -2723,6 +2810,9 @@ fi
             Cli {
                 cwd: temp_base.to_string_lossy().into(),
                 verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
                 command: Some(Commands::Init {
                     force: false,
                     wizard: false,
@@ -2736,6 +2826,9 @@ fi
             Cli {
                 cwd: temp_base.to_string_lossy().into(),
                 verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
                 command: Some(Commands::Catalog {
                     catalog_command: CatalogCommands::ImportUrl {
                         kind: "skill".into(),
@@ -2767,6 +2860,9 @@ fi
             Cli {
                 cwd: temp_base.to_string_lossy().into(),
                 verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
                 command: Some(Commands::Catalog {
                     catalog_command: CatalogCommands::ImportUrl {
                         kind: "mcp".into(),
@@ -2855,6 +2951,9 @@ fi
             Cli {
                 cwd: temp_base.to_string_lossy().into(),
                 verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
                 command: Some(Commands::Init {
                     force: false,
                     wizard: false,
@@ -2868,6 +2967,9 @@ fi
             Cli {
                 cwd: temp_base.to_string_lossy().into(),
                 verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
                 command: Some(Commands::Catalog {
                     catalog_command: CatalogCommands::SearchRemote {
                         api: server_url,
@@ -2984,6 +3086,9 @@ fi
             Cli {
                 cwd: temp_base.to_string_lossy().into(),
                 verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
                 command: Some(Commands::Init {
                     force: false,
                     wizard: false,
@@ -2997,6 +3102,9 @@ fi
             Cli {
                 cwd: temp_base.to_string_lossy().into(),
                 verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
                 command: Some(Commands::Catalog {
                     catalog_command: CatalogCommands::Skills {
                         skills_command: CatalogSubCommands::Add {
@@ -3021,6 +3129,9 @@ fi
             Cli {
                 cwd: temp_base.to_string_lossy().into(),
                 verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
                 command: Some(Commands::Install {
                     install_command: InstallCommands::Skill {
                         tool: tool_one.clone(),
@@ -3118,6 +3229,9 @@ fi
             Cli {
                 cwd: project_path.to_string_lossy().into(),
                 verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
                 command: Some(Commands::Init {
                     force: false,
                     wizard: false,
@@ -3131,6 +3245,9 @@ fi
             Cli {
                 cwd: project_path.to_string_lossy().into(),
                 verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
                 command: Some(Commands::Catalog {
                     catalog_command: CatalogCommands::Skills {
                         skills_command: CatalogSubCommands::Add {
@@ -3154,6 +3271,9 @@ fi
             Cli {
                 cwd: project_path.to_string_lossy().into(),
                 verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
                 command: Some(Commands::Catalog {
                     catalog_command: CatalogCommands::Skills {
                         skills_command: CatalogSubCommands::Add {
@@ -3178,6 +3298,9 @@ fi
             Cli {
                 cwd: project_path.to_string_lossy().into(),
                 verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
                 command: Some(Commands::Install {
                     install_command: InstallCommands::Skill {
                         tool: tool_one.clone(),
@@ -3306,6 +3429,9 @@ fi
             Cli {
                 cwd: temp_base.to_string_lossy().into(),
                 verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
                 command: Some(Commands::Init {
                     force: false,
                     wizard: false,
@@ -3319,6 +3445,9 @@ fi
             Cli {
                 cwd: temp_base.to_string_lossy().into(),
                 verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
                 command: Some(Commands::Catalog {
                     catalog_command: CatalogCommands::Skills {
                         skills_command: CatalogSubCommands::Add {
@@ -3343,6 +3472,9 @@ fi
             Cli {
                 cwd: temp_base.to_string_lossy().into(),
                 verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
                 command: Some(Commands::Install {
                     install_command: InstallCommands::Skill {
                         tool: tool_one,

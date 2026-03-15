@@ -46,6 +46,7 @@ mod tests {
             },
             mcp_templates: Vec::new(),
             automation: crate::config::AutomationConfig::default(),
+            settings: crate::config::SettingsConfig::default(),
         };
 
         let ctx = PlanningContext {
