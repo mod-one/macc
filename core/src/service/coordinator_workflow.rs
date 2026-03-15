@@ -597,7 +597,12 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
             result.status = Some(get_coordinator_status(paths)?);
         }
         CoordinatorCommand::ReconcileRuntime => {
-            coordinator_reconcile(paths, request.env_cfg, request.coordinator_cfg, request.logger)?;
+            coordinator_reconcile(
+                paths,
+                request.env_cfg,
+                request.coordinator_cfg,
+                request.logger,
+            )?;
         }
         CoordinatorCommand::CleanupMaintenance => {
             coordinator_cleanup(paths, request.logger)?;
@@ -897,7 +902,12 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
             reason,
         } => {
             coordinator_stop(paths, &reason)?;
-            coordinator_reconcile(paths, request.env_cfg, request.coordinator_cfg, request.logger)?;
+            coordinator_reconcile(
+                paths,
+                request.env_cfg,
+                request.coordinator_cfg,
+                request.logger,
+            )?;
             coordinator_cleanup(paths, request.logger)?;
             coordinator_unlock(
                 engine,
@@ -1858,10 +1868,7 @@ fn parse_select_ready_task_command(args: &[String]) -> Result<CoordinatorCommand
         .get("max-parallel")
         .cloned()
         .unwrap_or_else(|| "0".to_string());
-    let default_tool = map
-        .get("default-tool")
-        .cloned()
-        .unwrap_or_default();
+    let default_tool = map.get("default-tool").cloned().unwrap_or_default();
     let default_base_branch = map
         .get("default-base-branch")
         .cloned()

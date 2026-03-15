@@ -86,7 +86,6 @@ fn resolve_merge_timeout_seconds(
         .unwrap_or(0)
 }
 
-
 async fn sanitize_worktree_to_base(worktree_path: &Path, base_branch: &str) -> Result<bool> {
     if !crate::git::reset_hard_async(worktree_path, "HEAD").await? {
         return Ok(false);

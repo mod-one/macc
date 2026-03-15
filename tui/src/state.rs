@@ -1962,7 +1962,11 @@ impl AppState {
                 .coordinator_env_cfg()
                 .error_code_retry_list
                 .unwrap_or_else(|| "E101,E102,E103,E301,E302,E303".to_string()),
-            25 => self.coordinator_env_cfg().error_code_retry_max.unwrap_or(2).to_string(),
+            25 => self
+                .coordinator_env_cfg()
+                .error_code_retry_max
+                .unwrap_or(2)
+                .to_string(),
             26 => coordinator
                 .and_then(|c| c.legacy_json_fallback)
                 .unwrap_or(false)
@@ -2130,7 +2134,8 @@ impl AppState {
             return;
         }
         if matches!(self.automation_field_index, 17 | 23 | 26) {
-            let current = self.automation_field_display_value(self.automation_field_index) == "true";
+            let current =
+                self.automation_field_display_value(self.automation_field_index) == "true";
             self.set_automation_field_bool(self.automation_field_index, !current);
             return;
         }
@@ -3168,9 +3173,13 @@ impl AppState {
         let resolved = resolve(canonical, &CliOverrides::default());
         let fetch_units = resolve_fetch_units(paths, &resolved)
             .map_err(|e| format!("Failed to resolve catalog selections: {}", e))?;
-        let materialized_units =
-            materialize_fetch_units(paths, fetch_units, canonical.settings.quiet, canonical.settings.offline)
-                .map_err(|e| format!("Failed to materialize catalog sources: {}", e))?;
+        let materialized_units = materialize_fetch_units(
+            paths,
+            fetch_units,
+            canonical.settings.quiet,
+            canonical.settings.offline,
+        )
+        .map_err(|e| format!("Failed to materialize catalog sources: {}", e))?;
 
         let plan = self
             .engine
@@ -3269,7 +3278,7 @@ impl AppState {
         });
 
         let result = {
-                // For now, engine.apply doesn't support progress callback yet,
+            // For now, engine.apply doesn't support progress callback yet,
             // but we could add it to Engine trait if needed.
             self.engine.apply(paths, &mut plan, allow_user_scope)
         };

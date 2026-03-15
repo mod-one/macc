@@ -1222,7 +1222,12 @@ pub async fn run_native_control_plane(
             Some(&note),
         )?
     } else {
-        cleanup_dead_runtime_tasks(repo_root, "run-startup", ghost_heartbeat_grace_seconds, None)?
+        cleanup_dead_runtime_tasks(
+            repo_root,
+            "run-startup",
+            ghost_heartbeat_grace_seconds,
+            None,
+        )?
     };
     if startup_cleaned > 0 {
         if let Some(log) = logger {

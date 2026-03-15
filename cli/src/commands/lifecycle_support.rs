@@ -137,8 +137,8 @@ pub(crate) fn plan(app: &AppContext, tools: Option<&str>, json: bool, explain: b
     if let Some(tools_csv) = tools {
         let (_descriptors, _diagnostics) = app.engine.list_tools(&app.project_paths()?);
         let allowed_tools: Vec<String> = _descriptors.iter().map(|d| d.id.clone()).collect();
-        overrides.tools = macc_core::resolve::CliOverrides::from_tools_csv(tools_csv, &allowed_tools)?
-            .tools;
+        overrides.tools =
+            macc_core::resolve::CliOverrides::from_tools_csv(tools_csv, &allowed_tools)?.tools;
     }
 
     macc_core::service::lifecycle::plan(
@@ -164,8 +164,8 @@ pub(crate) fn apply(
     if let Some(tools_csv) = tools {
         let (_descriptors, _diagnostics) = app.engine.list_tools(&app.project_paths()?);
         let allowed_tools: Vec<String> = _descriptors.iter().map(|d| d.id.clone()).collect();
-        overrides.tools = macc_core::resolve::CliOverrides::from_tools_csv(tools_csv, &allowed_tools)?
-            .tools;
+        overrides.tools =
+            macc_core::resolve::CliOverrides::from_tools_csv(tools_csv, &allowed_tools)?.tools;
     }
 
     macc_core::service::lifecycle::apply(

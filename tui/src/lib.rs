@@ -1121,12 +1121,12 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             let items: Vec<ListItem> = (0..settings_count)
                 .map(|i| {
                     let label = state.settings_field_label(i);
-                    let value = if i == state.settings_field_index && state.is_settings_field_editing()
-                    {
-                        format!("{}_", state.settings_field_input)
-                    } else {
-                        state.settings_field_display_value(i)
-                    };
+                    let value =
+                        if i == state.settings_field_index && state.is_settings_field_editing() {
+                            format!("{}_", state.settings_field_input)
+                        } else {
+                            state.settings_field_display_value(i)
+                        };
                     ListItem::new(Line::from(vec![
                         Span::styled(format!("{:<30}", label), Style::default().fg(theme.muted)),
                         Span::raw(" "),

@@ -58,13 +58,9 @@ impl NativeCoordinatorLogger {
                 action: "open coordinator log writer".into(),
                 source: e,
             })?;
-        let flush_every_lines = flush_lines_override
-            .filter(|v| *v > 0)
-            .unwrap_or(500);
+        let flush_every_lines = flush_lines_override.filter(|v| *v > 0).unwrap_or(500);
         let flush_every_interval = std::time::Duration::from_millis(
-            flush_ms_override
-                .filter(|v| *v > 0)
-                .unwrap_or(60_000),
+            flush_ms_override.filter(|v| *v > 0).unwrap_or(60_000),
         );
 
         Ok(Self {

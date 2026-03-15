@@ -84,7 +84,10 @@ impl CliOverrides {
             .collect();
 
         if tools.is_empty() {
-            return Ok(CliOverrides { tools: None, ..Default::default() });
+            return Ok(CliOverrides {
+                tools: None,
+                ..Default::default()
+            });
         }
 
         let allowed_set: HashSet<&str> = allowed.iter().map(|s| s.as_str()).collect();
@@ -98,7 +101,10 @@ impl CliOverrides {
         }
 
         if filtered_tools.is_empty() {
-            return Ok(CliOverrides { tools: None, ..Default::default() });
+            return Ok(CliOverrides {
+                tools: None,
+                ..Default::default()
+            });
         }
 
         Ok(CliOverrides {

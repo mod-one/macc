@@ -143,11 +143,8 @@ pub fn cleanup_dead_runtime_tasks_in_registry(
 ) -> Result<usize> {
     let mut typed = TaskRegistry::from_value(registry)?;
     let fixed = cleanup_dead_runtime_tasks_in_typed_registry(
-        &mut typed,
-        reason,
-        60, // Default for untyped registry cleanup
-        logger,
-        repo_root,
+        &mut typed, reason, 60, // Default for untyped registry cleanup
+        logger, repo_root,
     )?;
     *registry = typed.to_value()?;
     Ok(fixed)
