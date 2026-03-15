@@ -14,6 +14,20 @@ fn now_nanos() -> u128 {
         .unwrap_or(0)
 }
 
+fn resolve_worktree_event_source(task_id: &str) -> String {
+    std::env::var("MACC_EVENT_SOURCE")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| format!("worktree-run:{}:{}", task_id, now_nanos()))
+}
+
+fn resolve_worktree_event_task_id(task_id: &str) -> String {
+    std::env::var("MACC_EVENT_TASK_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| task_id.to_string())
+}
+
 fn assert_worktree_branch(worktree_path: &std::path::Path, expected_branch: &str) -> Result<()> {
     let current_branch = crate::git::current_branch(worktree_path)?;
     if current_branch != expected_branch {
@@ -57,11 +71,11 @@ pub fn worktree_run_task(paths: &ProjectPaths, id: &str) -> Result<()> {
             "COORDINATOR_RUN_ID",
             crate::service::project::ensure_coordinator_run_id(),
         )
+        .env("MACC_EVENT_SOURCE", resolve_worktree_event_source(&task_id))
         .env(
-            "MACC_EVENT_SOURCE",
-            format!("worktree-run:{}:{}", task_id, now_nanos()),
+            "MACC_EVENT_TASK_ID",
+            resolve_worktree_event_task_id(&task_id),
         )
-        .env("MACC_EVENT_TASK_ID", &task_id)
         .arg("--repo")
         .arg(&paths.root)
         .arg("--worktree")
@@ -210,4 +224,37 @@ fn launch_terminal_with_prefix(bin: &str, prefix: &[&str], path: &std::path::Pat
         source: e,
     })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{resolve_worktree_event_source, resolve_worktree_event_task_id};
+
+    #[test]
+    fn preserves_existing_worktree_event_env() {
+        unsafe {
+            std::env::set_var("MACC_EVENT_SOURCE", "coordinator-worktree:T1:123");
+            std::env::set_var("MACC_EVENT_TASK_ID", "T1");
+        }
+        assert_eq!(
+            resolve_worktree_event_source("IGNORED"),
+            "coordinator-worktree:T1:123"
+        );
+        assert_eq!(resolve_worktree_event_task_id("IGNORED"), "T1");
+        unsafe {
+            std::env::remove_var("MACC_EVENT_SOURCE");
+            std::env::remove_var("MACC_EVENT_TASK_ID");
+        }
+    }
+
+    #[test]
+    fn generates_defaults_when_worktree_event_env_missing() {
+        unsafe {
+            std::env::remove_var("MACC_EVENT_SOURCE");
+            std::env::remove_var("MACC_EVENT_TASK_ID");
+        }
+        assert_eq!(resolve_worktree_event_task_id("T2"), "T2");
+        let source = resolve_worktree_event_source("T2");
+        assert!(source.starts_with("worktree-run:T2:"));
+    }
 }
