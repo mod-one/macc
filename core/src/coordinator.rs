@@ -412,6 +412,120 @@ impl CoordinatorEventRecord {
         self.extra.get("severity").and_then(Value::as_str)
     }
 
+    pub fn is_performer_runtime_event(&self) -> bool {
+        matches!(
+            self.event_type.as_str(),
+            "started" | "heartbeat" | "progress" | "phase_result" | "failed" | "commit_created"
+        ) && matches!(
+            self.source.as_str(),
+            source if source.starts_with("coordinator-worktree:")
+                || source.starts_with("worktree-run:")
+                || source.starts_with("performer:")
+        )
+    }
+
+    pub fn validate_performer_runtime_event(&self) -> Result<(), String> {
+        if !self.is_performer_runtime_event() {
+            return Ok(());
+        }
+        if self.schema_version != COORDINATOR_EVENT_SCHEMA_VERSION {
+            return Err(format!(
+                "invalid performer event schema_version '{}'",
+                self.schema_version
+            ));
+        }
+        if self.event_id.trim().is_empty() {
+            return Err("invalid performer event: missing event_id".to_string());
+        }
+        if self.ts.trim().is_empty() {
+            return Err("invalid performer event: missing ts".to_string());
+        }
+        if self.source.trim().is_empty() {
+            return Err("invalid performer event: missing source".to_string());
+        }
+        if self
+            .task_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_none()
+        {
+            return Err("invalid performer event: missing task_id".to_string());
+        }
+        if !self.payload.is_object() {
+            return Err(format!(
+                "invalid performer event '{}': payload must be an object",
+                self.event_type
+            ));
+        }
+        match self.event_type.as_str() {
+            "started" => {
+                if !matches!(self.status.as_str(), "started" | "running") {
+                    return Err(format!(
+                        "invalid performer event 'started': unexpected status '{}'",
+                        self.status
+                    ));
+                }
+                if !payload_has_non_empty_string(&self.payload, "tool")
+                    || !payload_has_non_empty_string(&self.payload, "worktree")
+                {
+                    return Err(
+                        "invalid performer event 'started': payload.tool and payload.worktree are required"
+                            .to_string(),
+                    );
+                }
+            }
+            "heartbeat" | "progress" => {
+                if self.status != "running" {
+                    return Err(format!(
+                        "invalid performer event '{}': unexpected status '{}'",
+                        self.event_type, self.status
+                    ));
+                }
+            }
+            "phase_result" => {
+                if self
+                    .phase
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .is_none()
+                {
+                    return Err("invalid performer event 'phase_result': missing phase".to_string());
+                }
+                if !matches!(self.status.as_str(), "done" | "failed") {
+                    return Err(format!(
+                        "invalid performer event 'phase_result': unexpected status '{}'",
+                        self.status
+                    ));
+                }
+                if self.payload_attempt().is_none() {
+                    return Err(
+                        "invalid performer event 'phase_result': payload.attempt is required"
+                            .to_string(),
+                    );
+                }
+                if self.status == "done" && self.payload_result_kind().is_none() {
+                    return Err(
+                        "invalid performer event 'phase_result': payload.result_kind is required for successful terminal events"
+                            .to_string(),
+                    );
+                }
+            }
+            "commit_created" => {
+                if self.status != "done" || !payload_has_non_empty_string(&self.payload, "sha") {
+                    return Err(
+                        "invalid performer event 'commit_created': status=done and payload.sha are required"
+                            .to_string(),
+                    );
+                }
+            }
+            "failed" => {}
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn parse_payload<T>(&self) -> Option<T>
     where
         T: for<'de> Deserialize<'de>,
@@ -526,6 +640,15 @@ impl CoordinatorEventRecord {
         }
         serde_json::json!({})
     }
+}
+
+fn payload_has_non_empty_string(payload: &Value, key: &str) -> bool {
+    payload
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some()
 }
 
 impl CoordinatorEventPayload {
@@ -715,5 +838,47 @@ mod tests {
             event.payload_result_kind(),
             Some(PerformerCompletionKind::AlreadySatisfied)
         );
+    }
+
+    #[test]
+    fn performer_phase_result_event_schema_requires_result_kind() {
+        let event = CoordinatorEventRecord {
+            schema_version: COORDINATOR_EVENT_SCHEMA_VERSION.to_string(),
+            event_id: "evt-1".to_string(),
+            ts: "2026-03-15T00:00:00Z".to_string(),
+            source: "coordinator-worktree:T1:1".to_string(),
+            task_id: Some("T1".to_string()),
+            event_type: "phase_result".to_string(),
+            phase: Some("dev".to_string()),
+            status: "done".to_string(),
+            payload: serde_json::json!({"attempt": 1}),
+            ..CoordinatorEventRecord::default()
+        };
+        assert!(event
+            .validate_performer_runtime_event()
+            .expect_err("missing result_kind should fail")
+            .contains("payload.result_kind"));
+    }
+
+    #[test]
+    fn performer_started_event_schema_is_accepted() {
+        let event = CoordinatorEventRecord {
+            schema_version: COORDINATOR_EVENT_SCHEMA_VERSION.to_string(),
+            event_id: "evt-2".to_string(),
+            ts: "2026-03-15T00:00:00Z".to_string(),
+            source: "coordinator-worktree:T1:1".to_string(),
+            task_id: Some("T1".to_string()),
+            event_type: "started".to_string(),
+            phase: Some("dev".to_string()),
+            status: "started".to_string(),
+            payload: serde_json::json!({
+                "tool": "codex",
+                "worktree": "/tmp/worktree"
+            }),
+            ..CoordinatorEventRecord::default()
+        };
+        event
+            .validate_performer_runtime_event()
+            .expect("valid started event");
     }
 }

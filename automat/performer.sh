@@ -53,6 +53,14 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ -n "$EVENT_TASK_ID" && -n "$task_id" && "$EVENT_TASK_ID" != "$task_id" ]]; then
+  LAST_ERROR_CODE="E901"
+  LAST_ERROR_ORIGIN="performer"
+  LAST_ERROR_MESSAGE="event task id mismatch"
+  echo "Error: MACC_EVENT_TASK_ID mismatch. env=$EVENT_TASK_ID arg=$task_id" >&2
+  exit 1
+fi
+
 if [[ -z "$EVENT_SOURCE" ]]; then
   EVENT_SOURCE="performer:${tool:-unknown}:${EVENT_RUN_ID}"
 fi
@@ -254,19 +262,74 @@ emit_performer_event() {
   fi
   if [[ -n "$EVENT_FILE" ]]; then
     printf '%s\n' "$event_line" >>"$EVENT_FILE" 2>/dev/null || true
+    return 0
   fi
+  return 1
 }
 
 send_event_via_ipc() {
   local event_line="$1"
   local host="${EVENT_IPC_ADDR%:*}"
   local port="${EVENT_IPC_ADDR##*:}"
+  local event_id=""
+  local ack_line=""
+  local ack_ok=""
+  local ack_event_id=""
   [[ -n "$host" && -n "$port" && "$host" != "$port" ]] || return 1
+  event_id="$(jq -r '.event_id // empty' <<<"$event_line" 2>/dev/null)"
+  [[ -n "$event_id" ]] || return 1
   (
     exec 9<>"/dev/tcp/${host}/${port}" || exit 1
     printf '%s\n' "$event_line" >&9 || exit 1
+    IFS= read -r -t 2 ack_line <&9 || exit 1
+    ack_ok="$(jq -r '.ok // false' <<<"$ack_line" 2>/dev/null)" || exit 1
+    ack_event_id="$(jq -r '.event_id // empty' <<<"$ack_line" 2>/dev/null)" || exit 1
+    [[ "$ack_ok" == "true" && "$ack_event_id" == "$event_id" ]] || exit 1
     exec 9>&- 9<&-
   ) >/dev/null 2>&1
+  local rc=$?
+  if [[ $rc -eq 0 ]]; then
+    return 0
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$host" "$port" "$event_line" >/dev/null 2>&1 <<'PY'
+import json, socket, sys
+host, port, payload = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+event_id = json.loads(payload).get("event_id", "")
+if not event_id:
+    raise SystemExit(1)
+with socket.create_connection((host, port), timeout=2) as sock:
+    sock.sendall(payload.encode("utf-8") + b"\n")
+    sock.settimeout(2)
+    ack = b""
+    while not ack.endswith(b"\n"):
+        chunk = sock.recv(4096)
+        if not chunk:
+            raise SystemExit(1)
+        ack += chunk
+ack_payload = json.loads(ack.decode("utf-8").strip())
+if not ack_payload.get("ok") or ack_payload.get("event_id") != event_id:
+    raise SystemExit(1)
+PY
+    return $?
+  fi
+  return $rc
+}
+
+must_emit_performer_event() {
+  local event_type="$1"
+  local phase="${2:-}"
+  local status="${3:-}"
+  local payload_json="${4:-{}}"
+  if emit_performer_event "$event_type" "$phase" "$status" "$payload_json"; then
+    return 0
+  fi
+  if [[ -n "$EVENT_IPC_ADDR" ]]; then
+    local source="${EVENT_SOURCE:-performer:${tool:-unknown}:${EVENT_RUN_ID}}"
+    echo "Error: failed to persist performer event via coordinator IPC: type=${event_type} task=${EVENT_TASK_ID:-$task_id} source=${source}" >&2
+    return 1
+  fi
+  return 0
 }
 
 set_last_error() {
@@ -536,7 +599,7 @@ run_tool() {
     if [[ "$result_kind" == "success_with_changes" ]]; then
       changed="true"
     fi
-    emit_performer_event "phase_result" "$CURRENT_PHASE" "done" "$(jq -nc --arg attempt "$attempt" --arg result_kind "$result_kind" --argjson changed "$changed" '{
+    must_emit_performer_event "phase_result" "$CURRENT_PHASE" "done" "$(jq -nc --arg attempt "$attempt" --arg result_kind "$result_kind" --argjson changed "$changed" '{
       attempt:($attempt|tonumber?),
       result_kind:($result_kind|select(length>0)),
       changed:$changed,
@@ -548,7 +611,7 @@ run_tool() {
     log_task_line "- Result kind: ${result_kind}"
   else
     set_last_error "E101" "runner" "runner exited non-zero"
-    emit_performer_event "phase_result" "$CURRENT_PHASE" "failed" "$(jq -nc --arg attempt "$attempt" --arg status "$status" --arg code "$LAST_ERROR_CODE" --arg origin "$LAST_ERROR_ORIGIN" --arg message "$LAST_ERROR_MESSAGE" '{attempt:($attempt|tonumber?), exit_status:($status|tonumber?), error_code:($code|select(length>0)), origin:($origin|select(length>0)), message:($message|select(length>0))}')"
+    must_emit_performer_event "phase_result" "$CURRENT_PHASE" "failed" "$(jq -nc --arg attempt "$attempt" --arg status "$status" --arg code "$LAST_ERROR_CODE" --arg origin "$LAST_ERROR_ORIGIN" --arg message "$LAST_ERROR_MESSAGE" '{attempt:($attempt|tonumber?), exit_status:($status|tonumber?), error_code:($code|select(length>0)), origin:($origin|select(length>0)), message:($message|select(length>0))}')"
   fi
   log_task_line '```'
   log_task_line ""

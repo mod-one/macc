@@ -806,6 +806,16 @@ pub async fn monitor_active_jobs_native(
                     &now_iso_coordinator(),
                 )?;
                 if let Some(log) = logger {
+                    if let Some(source) = evt.completion_details_source.as_deref() {
+                        let _ = log.note(format!(
+                            "- completion details source={} task={} kind={}",
+                            source,
+                            evt.task_id,
+                            evt.completion_kind
+                                .map(|kind| kind.as_str())
+                                .unwrap_or("unknown")
+                        ));
+                    }
                     let _ = log.note(format!(
                         "- Lifecycle task={} stage=monitor status=completion_applied new_state={} should_retry={}",
                         evt.task_id, completion.status_label, completion.should_retry
@@ -923,6 +933,18 @@ fn apply_runtime_event_bus_updates(
     loop {
         match state.runtime_event_bus_rx.try_recv() {
             Ok(event) => {
+                if let Some(log) = logger {
+                    let event_type = match &event.kind {
+                        CoordinatorRuntimeEventKind::Heartbeat => "heartbeat",
+                        CoordinatorRuntimeEventKind::Progress { .. } => "progress",
+                        CoordinatorRuntimeEventKind::PhaseResult { .. } => "phase_result",
+                        CoordinatorRuntimeEventKind::Failed { .. } => "failed",
+                    };
+                    let _ = log.note(format!(
+                        "- performer event received task={} type={} source={}",
+                        event.task_id, event_type, event.source
+                    ));
+                }
                 let update = runtime_updates.entry(event.task_id.clone()).or_default();
                 update.last_heartbeat = Some(event.ts.clone());
                 match event.kind {
@@ -945,6 +967,12 @@ fn apply_runtime_event_bus_updates(
                         phase,
                         message,
                     } => {
+                        if let Some(log) = logger {
+                            let _ = log.note(format!(
+                                "- performer phase_result persisted task={} source={} status={}",
+                                event.task_id, event.source, status
+                            ));
+                        }
                         update.status = Some(status);
                         if let Some(phase) = phase {
                             update.phase = Some(phase);

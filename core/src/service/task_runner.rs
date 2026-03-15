@@ -21,11 +21,26 @@ fn resolve_worktree_event_source(task_id: &str) -> String {
         .unwrap_or_else(|| format!("worktree-run:{}:{}", task_id, now_nanos()))
 }
 
-fn resolve_worktree_event_task_id(task_id: &str) -> String {
-    std::env::var("MACC_EVENT_TASK_ID")
+fn resolve_worktree_event_task_id(task_id: &str) -> Result<String> {
+    match std::env::var("MACC_EVENT_TASK_ID")
         .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| task_id.to_string())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        Some(value) if value != task_id => Err(MaccError::Validation(format!(
+            "worktree event task id mismatch: env MACC_EVENT_TASK_ID='{}' but resolved task id is '{}'",
+            value, task_id
+        ))),
+        Some(value) => Ok(value),
+        None => Ok(task_id.to_string()),
+    }
+}
+
+fn resolve_worktree_event_context(task_id: &str) -> Result<(String, String)> {
+    Ok((
+        resolve_worktree_event_source(task_id),
+        resolve_worktree_event_task_id(task_id)?,
+    ))
 }
 
 fn assert_worktree_branch(worktree_path: &std::path::Path, expected_branch: &str) -> Result<()> {
@@ -59,6 +74,7 @@ pub fn worktree_run_task(paths: &ProjectPaths, id: &str) -> Result<()> {
     let performer_path = ensure_performer(&worktree_path)?;
     let registry_path = coordinator_task_registry_path(&paths.root);
     let performer_ipc_addr = crate::coordinator::ipc::read_performer_ipc_addr(&paths.root);
+    let (event_source, event_task_id) = resolve_worktree_event_context(&task_id)?;
     if performer_ipc_addr.is_none() {
         return Err(MaccError::Validation(
             "Performer run refused: no coordinator IPC address".to_string(),
@@ -71,11 +87,8 @@ pub fn worktree_run_task(paths: &ProjectPaths, id: &str) -> Result<()> {
             "COORDINATOR_RUN_ID",
             crate::service::project::ensure_coordinator_run_id(),
         )
-        .env("MACC_EVENT_SOURCE", resolve_worktree_event_source(&task_id))
-        .env(
-            "MACC_EVENT_TASK_ID",
-            resolve_worktree_event_task_id(&task_id),
-        )
+        .env("MACC_EVENT_SOURCE", event_source)
+        .env("MACC_EVENT_TASK_ID", event_task_id)
         .arg("--repo")
         .arg(&paths.root)
         .arg("--worktree")
@@ -240,7 +253,7 @@ mod tests {
             resolve_worktree_event_source("IGNORED"),
             "coordinator-worktree:T1:123"
         );
-        assert_eq!(resolve_worktree_event_task_id("IGNORED"), "T1");
+        assert_eq!(resolve_worktree_event_task_id("T1").unwrap(), "T1");
         unsafe {
             std::env::remove_var("MACC_EVENT_SOURCE");
             std::env::remove_var("MACC_EVENT_TASK_ID");
@@ -253,8 +266,20 @@ mod tests {
             std::env::remove_var("MACC_EVENT_SOURCE");
             std::env::remove_var("MACC_EVENT_TASK_ID");
         }
-        assert_eq!(resolve_worktree_event_task_id("T2"), "T2");
+        assert_eq!(resolve_worktree_event_task_id("T2").unwrap(), "T2");
         let source = resolve_worktree_event_source("T2");
         assert!(source.starts_with("worktree-run:T2:"));
+    }
+
+    #[test]
+    fn rejects_mismatched_worktree_event_task_id() {
+        unsafe {
+            std::env::set_var("MACC_EVENT_TASK_ID", "OTHER");
+        }
+        let err = resolve_worktree_event_task_id("T3").expect_err("mismatch should fail");
+        assert!(err.to_string().contains("worktree event task id mismatch"));
+        unsafe {
+            std::env::remove_var("MACC_EVENT_TASK_ID");
+        }
     }
 }

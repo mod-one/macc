@@ -4,13 +4,22 @@ use crate::coordinator::runtime::{
 };
 use crate::coordinator_storage;
 use crate::{MaccError, ProjectPaths, Result};
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
 pub const COORDINATOR_IPC_ADDR_ENV: &str = "MACC_COORDINATOR_IPC_ADDR";
 pub const COORDINATOR_IPC_ADDR_REL_PATH: &str = ".macc/state/coordinator.ipc.addr";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct PerformerIpcAck {
+    ok: bool,
+    event_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
 
 fn performer_ipc_addr_path(repo_root: &Path) -> std::path::PathBuf {
     repo_root.join(COORDINATOR_IPC_ADDR_REL_PATH)
@@ -101,7 +110,8 @@ async fn handle_ipc_connection(
         crate::coordinator::runtime::CoordinatorRuntimeEvent,
     >,
 ) -> Result<()> {
-    let reader = BufReader::new(stream);
+    let (read_half, mut write_half) = stream.into_split();
+    let reader = BufReader::new(read_half);
     let mut lines = reader.lines();
     while let Some(line) = lines
         .next_line()
@@ -112,17 +122,202 @@ async fn handle_ipc_connection(
         if trimmed.is_empty() {
             continue;
         }
-        let event = serde_json::from_str::<crate::coordinator::CoordinatorEventRecord>(trimmed)
-            .map_err(|e| {
-                MaccError::Validation(format!("Failed to parse IPC event payload as JSON: {}", e))
-            })?;
-        if raw_event_identity(&event).is_none() {
-            continue;
-        }
-        let _ = coordinator_storage::append_event_record_sqlite(project_paths, &event);
-        if let Some(runtime_event) = raw_event_to_runtime_event(&event) {
-            let _ = runtime_event_bus_tx.send(runtime_event);
+        let ack = process_ipc_event(trimmed, project_paths, runtime_event_bus_tx);
+        write_ipc_ack(&mut write_half, &ack)
+            .await
+            .map_err(|e| MaccError::Validation(format!("Failed to write IPC ack: {}", e)))?;
+        if !ack.ok {
+            return Err(MaccError::Validation(
+                ack.error
+                    .unwrap_or_else(|| "Rejected performer IPC event".to_string()),
+            ));
         }
     }
     Ok(())
+}
+
+fn process_ipc_event(
+    raw_line: &str,
+    project_paths: &ProjectPaths,
+    runtime_event_bus_tx: &tokio::sync::broadcast::Sender<
+        crate::coordinator::runtime::CoordinatorRuntimeEvent,
+    >,
+) -> PerformerIpcAck {
+    let event = match serde_json::from_str::<crate::coordinator::CoordinatorEventRecord>(raw_line) {
+        Ok(event) => event,
+        Err(err) => {
+            return PerformerIpcAck {
+                ok: false,
+                event_id: String::new(),
+                error: Some(format!(
+                    "Failed to parse IPC event payload as JSON: {}",
+                    err
+                )),
+            };
+        }
+    };
+    let event_id = event.event_id.clone();
+    if let Err(err) = event.validate_performer_runtime_event() {
+        return PerformerIpcAck {
+            ok: false,
+            event_id,
+            error: Some(format!("Rejected performer IPC event: {}", err)),
+        };
+    }
+    if raw_event_identity(&event).is_none() {
+        return PerformerIpcAck {
+            ok: false,
+            event_id,
+            error: Some("Rejected performer IPC event: missing identity".to_string()),
+        };
+    }
+    if let Err(err) = coordinator_storage::append_event_record_sqlite(project_paths, &event) {
+        return PerformerIpcAck {
+            ok: false,
+            event_id,
+            error: Some(format!(
+                "Failed to persist performer IPC event to SQLite: {}",
+                err
+            )),
+        };
+    }
+    if let Some(runtime_event) = raw_event_to_runtime_event(&event) {
+        let _ = runtime_event_bus_tx.send(runtime_event);
+    }
+    PerformerIpcAck {
+        ok: true,
+        event_id,
+        error: None,
+    }
+}
+
+async fn write_ipc_ack<W>(writer: &mut W, ack: &PerformerIpcAck) -> std::io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    let line = serde_json::to_string(ack)
+        .map_err(|err| std::io::Error::other(format!("serialize IPC ack: {}", err)))?;
+    writer.write_all(line.as_bytes()).await?;
+    writer.write_all(b"\n").await?;
+    writer.flush().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::process_ipc_event;
+    use crate::coordinator_storage::CoordinatorStorage;
+    use crate::ProjectPaths;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_root(label: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "macc-ipc-{}-{}",
+            label,
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn process_ipc_event_accepts_valid_started_event() {
+        let root = temp_root("started");
+        fs::create_dir_all(&root).expect("create root");
+        let paths = ProjectPaths::from_root(&root);
+        let (tx, _) = tokio::sync::broadcast::channel(16);
+        let ack = process_ipc_event(
+            &serde_json::json!({
+                "schema_version": "1",
+                "event_id": "evt-1",
+                "ts": "2026-03-15T00:00:00Z",
+                "source": "coordinator-worktree:T1:1",
+                "task_id": "T1",
+                "type": "started",
+                "phase": "dev",
+                "status": "started",
+                "payload": { "tool": "codex", "worktree": "/tmp/wt" }
+            })
+            .to_string(),
+            &paths,
+            &tx,
+        );
+        assert!(ack.ok);
+        assert_eq!(ack.event_id, "evt-1");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn process_ipc_event_rejects_success_phase_result_without_result_kind() {
+        let root = temp_root("phase-result");
+        fs::create_dir_all(&root).expect("create root");
+        let paths = ProjectPaths::from_root(&root);
+        let (tx, _) = tokio::sync::broadcast::channel(16);
+        let ack = process_ipc_event(
+            &serde_json::json!({
+                "schema_version": "1",
+                "event_id": "evt-2",
+                "ts": "2026-03-15T00:00:00Z",
+                "source": "coordinator-worktree:T1:1",
+                "task_id": "T1",
+                "type": "phase_result",
+                "phase": "dev",
+                "status": "done",
+                "payload": { "attempt": 1 }
+            })
+            .to_string(),
+            &paths,
+            &tx,
+        );
+        assert!(!ack.ok);
+        assert_eq!(ack.event_id, "evt-2");
+        assert!(ack
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("payload.result_kind"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn process_ipc_phase_result_persists_to_sqlite() {
+        let root = temp_root("phase-result-sqlite");
+        fs::create_dir_all(&root).expect("create root");
+        let paths = ProjectPaths::from_root(&root);
+        let (tx, _) = tokio::sync::broadcast::channel(16);
+        let ack = process_ipc_event(
+            &serde_json::json!({
+                "schema_version": "1",
+                "event_id": "evt-3",
+                "ts": "2026-03-15T00:00:00Z",
+                "source": "coordinator-worktree:T9:1",
+                "task_id": "T9",
+                "type": "phase_result",
+                "phase": "dev",
+                "status": "done",
+                "payload": { "attempt": 1, "result_kind": "already_satisfied", "message": "ok" }
+            })
+            .to_string(),
+            &paths,
+            &tx,
+        );
+        assert!(ack.ok);
+        let storage_paths =
+            crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&paths);
+        let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
+        let snapshot = sqlite.load_snapshot().expect("load snapshot");
+        let event = snapshot
+            .events
+            .iter()
+            .find(|event| event.event_id == "evt-3")
+            .expect("persisted event");
+        assert_eq!(event.event_type, "phase_result");
+        assert_eq!(event.task_id.as_deref(), Some("T9"));
+        assert_eq!(
+            event.payload_result_kind(),
+            Some(crate::coordinator::PerformerCompletionKind::AlreadySatisfied)
+        );
+        let _ = fs::remove_dir_all(root);
+    }
 }

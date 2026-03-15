@@ -30,6 +30,7 @@ pub struct CoordinatorJobEvent {
     pub status_text: String,
     pub timed_out: bool,
     pub completion_kind: Option<PerformerCompletionKind>,
+    pub completion_details_source: Option<String>,
     pub error_code: Option<String>,
     pub error_origin: Option<String>,
     pub error_message: Option<String>,
@@ -417,6 +418,7 @@ pub fn spawn_performer_job(
     let pid = child.id().map(|v| v as i64);
     let repo_root_owned = repo_root.to_path_buf();
     let task_id_owned = task_id.to_string();
+    let worktree_path_owned = worktree_path.to_path_buf();
     let event_source_owned = event_source.clone();
     let tx = event_tx.clone();
     join_set.spawn(async move {
@@ -440,10 +442,33 @@ pub fn spawn_performer_job(
                 Err(err) => (false, err.to_string(), false),
             }
         };
-        let completion_details = if success {
-            read_last_completion_details(&repo_root_owned, &task_id_owned, &event_source_owned)
+        let reported_success = success;
+        let (completion_details, completion_details_source) = if reported_success {
+            if let Some(details) =
+                read_last_completion_details(&repo_root_owned, &task_id_owned, &event_source_owned)
+            {
+                (Some(details), Some("sqlite".to_string()))
+            } else if compat_phase_result_log_fallback_enabled() {
+                (
+                    read_completion_details_from_worktree_log(&worktree_path_owned, &task_id_owned),
+                    Some("log-fallback".to_string()),
+                )
+            } else {
+                (None, None)
+            }
         } else {
-            None
+            (None, None)
+        };
+        let success = if reported_success {
+            completion_details.is_some()
+        } else {
+            false
+        };
+        let status_text = if reported_success && completion_details.is_none() {
+            "performer exited successfully but no phase_result event was persisted via coordinator IPC"
+                .to_string()
+        } else {
+            status_text
         };
         let mut error_code = None;
         let mut error_origin = None;
@@ -455,6 +480,12 @@ pub fn spawn_performer_job(
                 error_code = details.error_code;
                 error_origin = details.error_origin;
                 error_message = details.error_message;
+            } else if reported_success {
+                error_code = Some("E901".to_string());
+                error_origin = Some("coordinator".to_string());
+                error_message = Some(
+                    "performer exited without persisting terminal phase_result event".to_string(),
+                );
             }
         }
         let _ = tx.send(CoordinatorJobEvent {
@@ -467,6 +498,7 @@ pub fn spawn_performer_job(
                 .unwrap_or(status_text),
             timed_out,
             completion_kind: completion_details.and_then(|details| details.result_kind),
+            completion_details_source,
             error_code,
             error_origin,
             error_message,
@@ -486,6 +518,21 @@ struct ErrorDetails {
 struct CompletionDetails {
     result_kind: Option<PerformerCompletionKind>,
     message: Option<String>,
+}
+
+const COORDINATOR_COMPAT_PHASE_RESULT_LOG_FALLBACK: &str =
+    "COORDINATOR_COMPAT_PHASE_RESULT_LOG_FALLBACK";
+
+fn compat_phase_result_log_fallback_enabled() -> bool {
+    std::env::var(COORDINATOR_COMPAT_PHASE_RESULT_LOG_FALLBACK)
+        .ok()
+        .map(|raw| {
+            matches!(
+                raw.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
 }
 
 fn read_last_error_details(
@@ -525,6 +572,54 @@ fn read_last_completion_details(
         });
     }
     None
+}
+
+fn read_completion_details_from_worktree_log(
+    worktree_path: &Path,
+    task_id: &str,
+) -> Option<CompletionDetails> {
+    let log_path = performer_task_log_path(worktree_path, task_id);
+    let raw = std::fs::read_to_string(log_path).ok()?;
+    let mut result_kind = None;
+    let mut message = None;
+    for line in raw.lines().rev() {
+        let trimmed = line.trim();
+        if result_kind.is_none() {
+            if let Some(raw_kind) = trimmed.strip_prefix("- Result kind:") {
+                result_kind = raw_kind.trim().parse::<PerformerCompletionKind>().ok();
+                continue;
+            }
+            if let Some(raw_kind) = trimmed.strip_prefix("MACC_TASK_RESULT:") {
+                result_kind = raw_kind.trim().parse::<PerformerCompletionKind>().ok();
+                continue;
+            }
+        }
+        if message.is_none() && !trimmed.is_empty() && !trimmed.starts_with('-') {
+            message = Some(trimmed.to_string());
+        }
+        if result_kind.is_some() && message.is_some() {
+            break;
+        }
+    }
+    result_kind.map(|kind| CompletionDetails {
+        result_kind: Some(kind),
+        message,
+    })
+}
+
+fn performer_task_log_path(worktree_path: &Path, task_id: &str) -> PathBuf {
+    let safe: String = task_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+        .collect();
+    let file = if safe.is_empty() {
+        "task".to_string()
+    } else {
+        safe
+    };
+    worktree_path
+        .join(".macc/log/performer")
+        .join(format!("{}.md", file))
 }
 
 fn read_last_error_details_from_sqlite(
