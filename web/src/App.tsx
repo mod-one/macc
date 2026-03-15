@@ -22,11 +22,14 @@ function App() {
           </p>
         </div>
         <button
-          className="counter bg-blue-500 text-white font-bold px-4 py-2 rounded"
+          className="counter"
           onClick={() => setCount((count) => count + 1)}
         >
           Count is {count}
         </button>
+        <div className="inline-flex items-center gap-2 rounded bg-blue-500 px-3 py-2 text-sm font-bold text-white">
+          Tailwind utilities are working
+        </div>
       </section>
 
       <div className="ticks"></div>
