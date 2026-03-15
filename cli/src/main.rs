@@ -120,6 +120,8 @@ enum Commands {
     },
     /// Open the interactive TUI
     Tui,
+    /// Launch the web UI server
+    Web,
     /// Tool management
     Tool {
         #[command(subcommand)]
@@ -737,6 +739,7 @@ fn run_with_engine_provider(
                 source: std::io::Error::other(e.to_string()),
             })
         }
+        Some(Commands::Web) => commands::web::WebCommand::new(app.clone()).run(),
         Some(Commands::Tool { tool_command }) => {
             commands::tool::ToolCommand::new(app.clone(), tool_command).run()
         }
