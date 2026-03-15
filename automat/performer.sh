@@ -28,6 +28,7 @@ EVENT_TASK_ID="${MACC_EVENT_TASK_ID:-}"
 EVENT_RUN_ID="${COORDINATOR_RUN_ID:-$(date +%s%N)-$$}"
 EVENT_SEQ=0
 EVENT_SEQ_FILE=""
+LAST_IPC_ERROR=""
 HEARTBEAT_PID=""
 CURRENT_PHASE="dev"
 LAST_ERROR_CODE=""
@@ -275,6 +276,7 @@ send_event_via_ipc() {
   local ack_line=""
   local ack_ok=""
   local ack_event_id=""
+  LAST_IPC_ERROR=""
   [[ -n "$host" && -n "$port" && "$host" != "$port" ]] || return 1
   event_id="$(jq -r '.event_id // empty' <<<"$event_line" 2>/dev/null)"
   [[ -n "$event_id" ]] || return 1
@@ -292,11 +294,13 @@ send_event_via_ipc() {
     return 0
   fi
   if command -v python3 >/dev/null 2>&1; then
-    python3 - "$host" "$port" "$event_line" >/dev/null 2>&1 <<'PY'
+    local py_err=""
+    py_err="$(python3 - "$host" "$port" "$event_line" 2>&1 <<'PY'
 import json, socket, sys
 host, port, payload = sys.argv[1], int(sys.argv[2]), sys.argv[3]
 event_id = json.loads(payload).get("event_id", "")
 if not event_id:
+    print("missing event_id")
     raise SystemExit(1)
 with socket.create_connection((host, port), timeout=2) as sock:
     sock.sendall(payload.encode("utf-8") + b"\n")
@@ -305,14 +309,29 @@ with socket.create_connection((host, port), timeout=2) as sock:
     while not ack.endswith(b"\n"):
         chunk = sock.recv(4096)
         if not chunk:
+            print("no ack received")
             raise SystemExit(1)
         ack += chunk
-ack_payload = json.loads(ack.decode("utf-8").strip())
-if not ack_payload.get("ok") or ack_payload.get("event_id") != event_id:
+try:
+    ack_payload = json.loads(ack.decode("utf-8").strip())
+except Exception as exc:
+    print(f"ack parse error: {exc}")
+    raise SystemExit(1)
+if not ack_payload.get("ok"):
+    print(f"ack negative: {ack_payload}")
+    raise SystemExit(1)
+if ack_payload.get("event_id") != event_id:
+    print(f"ack event_id mismatch: {ack_payload.get('event_id')} != {event_id}")
     raise SystemExit(1)
 PY
-    return $?
+)"
+    local py_rc=$?
+    if [[ $py_rc -ne 0 ]]; then
+      LAST_IPC_ERROR="python ipc failed: ${py_err//$'\n'/ }"
+    fi
+    return $py_rc
   fi
+  LAST_IPC_ERROR="tcp ipc failed"
   return $rc
 }
 
@@ -326,7 +345,12 @@ must_emit_performer_event() {
   fi
   if [[ -n "$EVENT_IPC_ADDR" ]]; then
     local source="${EVENT_SOURCE:-performer:${tool:-unknown}:${EVENT_RUN_ID}}"
-    echo "Error: failed to persist performer event via coordinator IPC: type=${event_type} task=${EVENT_TASK_ID:-$task_id} source=${source}" >&2
+    local detail="Error: failed to persist performer event via coordinator IPC: type=${event_type} task=${EVENT_TASK_ID:-$task_id} source=${source}"
+    if [[ -n "$LAST_IPC_ERROR" ]]; then
+      detail="${detail} error=${LAST_IPC_ERROR}"
+    fi
+    echo "$detail" >&2
+    log_task_line "- ${detail}"
     return 1
   fi
   return 0
@@ -342,6 +366,9 @@ soft_emit_performer_event() {
   fi
   local source="${EVENT_SOURCE:-performer:${tool:-unknown}:${EVENT_RUN_ID}}"
   local detail="failed to persist non-terminal performer event: type=${event_type} task=${EVENT_TASK_ID:-$task_id} source=${source}"
+  if [[ -n "$LAST_IPC_ERROR" ]]; then
+    detail="${detail} error=${LAST_IPC_ERROR}"
+  fi
   echo "Warning: ${detail}" >&2
   log_task_line "- Warning: ${detail}"
   return 0
