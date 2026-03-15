@@ -332,6 +332,21 @@ must_emit_performer_event() {
   return 0
 }
 
+soft_emit_performer_event() {
+  local event_type="$1"
+  local phase="${2:-}"
+  local status="${3:-}"
+  local payload_json="${4:-{}}"
+  if emit_performer_event "$event_type" "$phase" "$status" "$payload_json"; then
+    return 0
+  fi
+  local source="${EVENT_SOURCE:-performer:${tool:-unknown}:${EVENT_RUN_ID}}"
+  local detail="failed to persist non-terminal performer event: type=${event_type} task=${EVENT_TASK_ID:-$task_id} source=${source}"
+  echo "Warning: ${detail}" >&2
+  log_task_line "- Warning: ${detail}"
+  return 0
+}
+
 set_last_error() {
   local code="$1"
   local origin="$2"
@@ -361,11 +376,11 @@ build_error_payload() {
 }
 
 heartbeat_start() {
-  [[ -n "$EVENT_FILE" ]] || return 0
+  [[ -n "$EVENT_FILE" || -n "$EVENT_IPC_ADDR" ]] || return 0
   heartbeat_stop
   (
     while true; do
-      emit_performer_event "heartbeat" "$CURRENT_PHASE" "running" '{}'
+      soft_emit_performer_event "heartbeat" "$CURRENT_PHASE" "running" '{}'
       sleep 2
     done
   ) &
@@ -655,7 +670,7 @@ commit_changes() {
     printf '%s\n' "$git_commit_output"
     local sha
     sha="$(git rev-parse HEAD 2>/dev/null || true)"
-    emit_performer_event "commit_created" "$CURRENT_PHASE" "done" "$(jq -nc --arg sha "$sha" --arg message "$msg" '{sha:$sha, message:$message}')"
+    soft_emit_performer_event "commit_created" "$CURRENT_PHASE" "done" "$(jq -nc --arg sha "$sha" --arg message "$msg" '{sha:$sha, message:$message}')"
     echo "Committed changes: $msg"
   else
     echo "No changes to commit."
@@ -664,14 +679,26 @@ commit_changes() {
 
 last_id=""
 last_title=""
-emit_performer_event "started" "$CURRENT_PHASE" "started" "$(jq -nc --arg tool "$tool" --arg worktree "$worktree" '{tool:$tool, worktree:$worktree}')"
+task_log_file="$(task_log_path "$task_id")"
+log_task_header_if_needed "$task_log_file" "$task_id" "$task_id"
+log_task_line "## Performer session"
+log_task_line ""
+log_task_line "- Task ID: ${task_id}"
+log_task_line "- Started: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+log_task_line ""
+soft_emit_performer_event "started" "$CURRENT_PHASE" "started" "$(jq -nc --arg tool "$tool" --arg worktree "$worktree" '{tool:$tool, worktree:$worktree}')"
 heartbeat_start
 
 for ((i=1; i<=PERFORMER_MAX_ITERATIONS; i++)); do
   next_task_json="$(get_next_task_json)"
   if [[ -z "$next_task_json" ]]; then
     commit_changes "$last_id" "$last_title"
-    emit_performer_event "phase_result" "$CURRENT_PHASE" "done" '{}'
+    must_emit_performer_event "phase_result" "$CURRENT_PHASE" "done" "$(jq -nc '{
+      attempt: 0,
+      result_kind: "already_satisfied",
+      changed: false,
+      message: "Task already satisfied; no pending work remained in the worktree PRD."
+    }')"
     TERMINAL_EVENT_EMITTED="true"
     exit 0
   fi
@@ -686,7 +713,7 @@ for ((i=1; i<=PERFORMER_MAX_ITERATIONS; i++)); do
   log_task_line "- Started: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   log_task_line ""
   echo "Performer: task ${next_id} (${tool})"
-  emit_performer_event "progress" "$CURRENT_PHASE" "running" "$(jq -nc --arg task "$next_id" --arg title "$next_title" '{task_id:$task, title:$title}')"
+  soft_emit_performer_event "progress" "$CURRENT_PHASE" "running" "$(jq -nc --arg task "$next_id" --arg title "$next_title" '{task_id:$task, title:$title}')"
 
   prompt_file="$(mktemp)"
   build_prompt "$next_task_json" "$next_id" "$next_title" >"$prompt_file"
@@ -712,7 +739,7 @@ for ((i=1; i<=PERFORMER_MAX_ITERATIONS; i++)); do
     if [[ -z "$LAST_ERROR_CODE" ]]; then
       set_last_error "E101" "runner" "tool execution failed"
     fi
-    emit_performer_event "failed" "$CURRENT_PHASE" "failed" "$(jq -nc --arg task "$next_id" --arg code "$LAST_ERROR_CODE" --arg origin "$LAST_ERROR_ORIGIN" --arg message "$LAST_ERROR_MESSAGE" '{task_id:$task, reason:"tool execution failed", error_code:($code|select(length>0)), origin:($origin|select(length>0)), message:($message|select(length>0))}')"
+    must_emit_performer_event "failed" "$CURRENT_PHASE" "failed" "$(jq -nc --arg task "$next_id" --arg code "$LAST_ERROR_CODE" --arg origin "$LAST_ERROR_ORIGIN" --arg message "$LAST_ERROR_MESSAGE" '{task_id:$task, reason:"tool execution failed", error_code:($code|select(length>0)), origin:($origin|select(length>0)), message:($message|select(length>0))}')"
     TERMINAL_EVENT_EMITTED="true"
     echo "Error: tool execution failed for task ${next_id}" >&2
     exit 1
@@ -729,7 +756,6 @@ for ((i=1; i<=PERFORMER_MAX_ITERATIONS; i++)); do
 
   if [[ "$(pending_task_count)" -eq 0 ]]; then
     commit_changes "$last_id" "$last_title"
-    emit_performer_event "phase_result" "$CURRENT_PHASE" "done" "$(jq -nc --arg task "$next_id" '{task_id:$task, final:true}')"
     TERMINAL_EVENT_EMITTED="true"
     exit 0
   fi
