@@ -614,11 +614,11 @@ impl CoordinatorEventRecord {
     }
 
     pub fn payload_result_kind(&self) -> Option<PerformerCompletionKind> {
+        let norm = self.normalized_payload();
         self.phase_result_payload()
             .and_then(|payload| payload.result_kind)
             .or_else(|| {
-                self.payload
-                    .get("result_kind")
+                norm.get("result_kind")
                     .and_then(Value::as_str)
                     .and_then(|value| PerformerCompletionKind::from_str(value).ok())
             })
