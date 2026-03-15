@@ -1,6 +1,6 @@
 use crate::coordinator::engine::ReviewVerdict;
 use crate::coordinator::model::Task;
-use crate::coordinator::CoordinatorEventRecord;
+use crate::coordinator::{CoordinatorEventRecord, PerformerCompletionKind};
 use crate::coordinator_storage::CoordinatorStorage;
 use crate::git;
 use crate::{MaccError, Result};
@@ -29,6 +29,7 @@ pub struct CoordinatorJobEvent {
     pub success: bool,
     pub status_text: String,
     pub timed_out: bool,
+    pub completion_kind: Option<PerformerCompletionKind>,
     pub error_code: Option<String>,
     pub error_origin: Option<String>,
     pub error_message: Option<String>,
@@ -439,6 +440,11 @@ pub fn spawn_performer_job(
                 Err(err) => (false, err.to_string(), false),
             }
         };
+        let completion_details = if success {
+            read_last_completion_details(&repo_root_owned, &task_id_owned, &event_source_owned)
+        } else {
+            None
+        };
         let mut error_code = None;
         let mut error_origin = None;
         let mut error_message = None;
@@ -454,8 +460,13 @@ pub fn spawn_performer_job(
         let _ = tx.send(CoordinatorJobEvent {
             task_id: task_id_owned,
             success,
-            status_text,
+            status_text: completion_details
+                .as_ref()
+                .and_then(|details| details.message.clone())
+                .filter(|message| !message.trim().is_empty())
+                .unwrap_or(status_text),
             timed_out,
+            completion_kind: completion_details.and_then(|details| details.result_kind),
             error_code,
             error_origin,
             error_message,
@@ -471,12 +482,49 @@ struct ErrorDetails {
     error_message: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct CompletionDetails {
+    result_kind: Option<PerformerCompletionKind>,
+    message: Option<String>,
+}
+
 fn read_last_error_details(
     repo_root: &Path,
     task_id: &str,
     event_source: &str,
 ) -> Option<ErrorDetails> {
     read_last_error_details_from_sqlite(repo_root, task_id, event_source)
+}
+
+fn read_last_completion_details(
+    repo_root: &Path,
+    task_id: &str,
+    event_source: &str,
+) -> Option<CompletionDetails> {
+    let project_paths = crate::ProjectPaths::from_root(repo_root);
+    let storage_paths =
+        crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&project_paths);
+    let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
+    let snapshot = sqlite.load_snapshot().ok()?;
+    for event in snapshot.events.iter().rev() {
+        let Some(event_task_id) = event.task_id.as_deref() else {
+            continue;
+        };
+        if event_task_id != task_id {
+            continue;
+        }
+        if !event_source.is_empty() && event.source != event_source {
+            continue;
+        }
+        if event.event_type != "phase_result" {
+            continue;
+        }
+        return Some(CompletionDetails {
+            result_kind: event.payload_result_kind(),
+            message: event.message().map(|value| value.to_string()),
+        });
+    }
+    None
 }
 
 fn read_last_error_details_from_sqlite(

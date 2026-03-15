@@ -796,6 +796,7 @@ pub async fn monitor_active_jobs_native(
                         phase_timeout_seconds,
                         elapsed_seconds: job.started_at.elapsed().as_secs(),
                         status_text: evt.status_text.clone(),
+                        completion_kind: evt.completion_kind,
                         error_code: evt.error_code.clone(),
                         error_origin: evt.error_origin.clone(),
                         error_message: evt.error_message.clone(),
@@ -818,7 +819,17 @@ pub async fn monitor_active_jobs_native(
                     &registry,
                 )?;
                 aggregate_performer_logs_after_completion(repo_root, &evt.task_id, logger);
-                if !completion.should_retry && completion.status_label == "phase_done" {
+                if !completion.should_retry
+                    && (evt.success
+                        || matches!(
+                            completion.completion_kind,
+                            Some(
+                                crate::coordinator::PerformerCompletionKind::SuccessWithChanges
+                                    | crate::coordinator::PerformerCompletionKind::SuccessWithoutChanges
+                                    | crate::coordinator::PerformerCompletionKind::AlreadySatisfied
+                            )
+                        ))
+                {
                     let sealed = crate::coordinator::session_manager::seal_worktree_scoped_session(
                         repo_root,
                         &job.tool,
@@ -879,10 +890,9 @@ pub async fn monitor_active_jobs_native(
                         ));
                     }
                 } else if let Some(log) = logger {
-                    let status = if evt.success { "phase_done" } else { "failed" };
                     let _ = log.note(format!(
                         "- Task {} completion status={} attempt={} detail={}",
-                        evt.task_id, status, job.attempt, evt.status_text
+                        evt.task_id, completion.status_label, job.attempt, evt.status_text
                     ));
                 }
             }

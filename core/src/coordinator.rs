@@ -158,6 +158,39 @@ impl FromStr for RuntimeStatus {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PerformerCompletionKind {
+    SuccessWithChanges,
+    SuccessWithoutChanges,
+    AlreadySatisfied,
+}
+
+impl PerformerCompletionKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PerformerCompletionKind::SuccessWithChanges => "success_with_changes",
+            PerformerCompletionKind::SuccessWithoutChanges => "success_without_changes",
+            PerformerCompletionKind::AlreadySatisfied => "already_satisfied",
+        }
+    }
+}
+
+impl FromStr for PerformerCompletionKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "success_with_changes" => Ok(PerformerCompletionKind::SuccessWithChanges),
+            "success_without_changes" => Ok(PerformerCompletionKind::SuccessWithoutChanges),
+            "already_satisfied" | "already_done" | "noop_success" => {
+                Ok(PerformerCompletionKind::AlreadySatisfied)
+            }
+            other => Err(format!("unknown performer completion kind: {}", other)),
+        }
+    }
+}
+
 pub fn is_valid_workflow_transition(from: WorkflowState, to: WorkflowState) -> bool {
     matches!(
         (from, to),
@@ -231,7 +264,9 @@ pub fn runtime_status_from_event(event_type: &str, status: &str) -> RuntimeStatu
         "started" | "dispatched" => RuntimeStatus::Dispatched,
         "running" | "progress" | "heartbeat" => RuntimeStatus::Running,
         "waiting_for_user" | "input_required" => RuntimeStatus::WaitingForUser,
-        "done" | "phase_done" => RuntimeStatus::PhaseDone,
+        "done" | "phase_done" | "already_satisfied" | "success_without_changes" => {
+            RuntimeStatus::PhaseDone
+        }
         "failed" | "error" => RuntimeStatus::Failed,
         "stale" => RuntimeStatus::Stale,
         "paused" => RuntimeStatus::Paused,
@@ -332,6 +367,8 @@ pub struct CoordinatorPhaseResultPayload {
     pub origin: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempt: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_kind: Option<PerformerCompletionKind>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -446,10 +483,24 @@ impl CoordinatorEventRecord {
             })
     }
 
+    pub fn payload_result_kind(&self) -> Option<PerformerCompletionKind> {
+        self.phase_result_payload()
+            .and_then(|payload| payload.result_kind)
+            .or_else(|| {
+                self.payload
+                    .get("result_kind")
+                    .and_then(Value::as_str)
+                    .and_then(|value| PerformerCompletionKind::from_str(value).ok())
+            })
+    }
+
     pub fn is_terminal_success(&self) -> bool {
         self.event_type == "commit_created"
             || (self.event_type == "phase_result"
-                && self.status == "done"
+                && matches!(
+                    self.status.as_str(),
+                    "done" | "phase_done" | "already_satisfied"
+                )
                 && self.payload_attempt().is_none())
     }
 
@@ -560,6 +611,19 @@ mod tests {
     }
 
     #[test]
+    fn performer_completion_kind_parsing_roundtrips() {
+        let kind = "already_satisfied"
+            .parse::<PerformerCompletionKind>()
+            .unwrap();
+        assert_eq!(kind, PerformerCompletionKind::AlreadySatisfied);
+        assert_eq!(kind.as_str(), "already_satisfied");
+        assert_eq!(
+            "noop_success".parse::<PerformerCompletionKind>().unwrap(),
+            PerformerCompletionKind::AlreadySatisfied
+        );
+    }
+
+    #[test]
     fn runtime_status_from_event_maps_stable_values() {
         assert_eq!(
             runtime_status_from_event("heartbeat", "running"),
@@ -568,6 +632,10 @@ mod tests {
         assert_eq!(
             runtime_status_from_event("input_required", "waiting_for_user"),
             RuntimeStatus::WaitingForUser
+        );
+        assert_eq!(
+            runtime_status_from_event("phase_result", "already_satisfied"),
+            RuntimeStatus::PhaseDone
         );
         assert_eq!(
             runtime_status_from_event("phase_result", "phase_done"),
@@ -620,5 +688,32 @@ mod tests {
             .map(|s| s.to_string())
             .collect();
         assert_eq!(schema_types, core_types);
+    }
+
+    #[test]
+    fn phase_result_payload_exposes_completion_kind() {
+        let event = CoordinatorEventRecord {
+            schema_version: COORDINATOR_EVENT_SCHEMA_VERSION.to_string(),
+            event_id: "evt-1".to_string(),
+            run_id: Some("run-1".to_string()),
+            seq: 1,
+            ts: "2026-03-15T00:00:00Z".to_string(),
+            source: "performer:test".to_string(),
+            task_id: Some("TASK-1".to_string()),
+            event_type: "phase_result".to_string(),
+            phase: Some("dev".to_string()),
+            status: "done".to_string(),
+            payload: serde_json::json!({
+                "message": "Task already satisfied",
+                "result_kind": "already_satisfied"
+            }),
+            detail: None,
+            msg: None,
+            extra: BTreeMap::new(),
+        };
+        assert_eq!(
+            event.payload_result_kind(),
+            Some(PerformerCompletionKind::AlreadySatisfied)
+        );
     }
 }

@@ -1,4 +1,4 @@
-use super::{RuntimeStatus, WorkflowState};
+use super::{PerformerCompletionKind, RuntimeStatus, WorkflowState};
 use crate::config::{CanonicalConfig, CoordinatorConfig};
 use crate::coordinator::control_plane::CoordinatorLog;
 use crate::coordinator::model::{Task, TaskRegistry};
@@ -87,6 +87,7 @@ pub struct JobCompletionInput {
     pub phase_timeout_seconds: usize,
     pub elapsed_seconds: u64,
     pub status_text: String,
+    pub completion_kind: Option<PerformerCompletionKind>,
     pub error_code: Option<String>,
     pub error_origin: Option<String>,
     pub error_message: Option<String>,
@@ -99,6 +100,7 @@ pub struct JobCompletionResult {
     pub should_retry: bool,
     pub status_label: &'static str,
     pub detail: String,
+    pub completion_kind: Option<PerformerCompletionKind>,
 }
 
 #[derive(Debug, Clone)]
@@ -607,6 +609,7 @@ fn apply_job_completion_typed(
             should_retry: false,
             status_label: "failed",
             detail,
+            completion_kind: None,
         };
     }
     if input.status_text.is_empty() {
@@ -622,6 +625,7 @@ fn apply_job_completion_typed(
             should_retry: false,
             status_label: "failed",
             detail,
+            completion_kind: None,
         };
     }
     if input.success {
@@ -631,10 +635,18 @@ fn apply_job_completion_typed(
         runtime.current_phase = Some("dev".to_string());
         runtime.pid = None;
         task.touch_state_changed(now);
+        let completion_kind = input
+            .completion_kind
+            .unwrap_or(PerformerCompletionKind::SuccessWithChanges);
         return JobCompletionResult {
             should_retry: false,
-            status_label: "phase_done",
+            status_label: match completion_kind {
+                PerformerCompletionKind::SuccessWithChanges => "phase_done",
+                PerformerCompletionKind::SuccessWithoutChanges => "success_without_changes",
+                PerformerCompletionKind::AlreadySatisfied => "already_satisfied",
+            },
             detail: input.status_text.clone(),
+            completion_kind: Some(completion_kind),
         };
     }
     if input.attempt < input.max_attempts {
@@ -665,6 +677,7 @@ fn apply_job_completion_typed(
             should_retry: true,
             status_label: "retry",
             detail: reason,
+            completion_kind: None,
         };
     }
     let reason = if input.timed_out {
@@ -702,6 +715,7 @@ fn apply_job_completion_typed(
             should_retry: false,
             status_label: "auto_retry",
             detail: format!("auto-retry scheduled for error code {}", error_code),
+            completion_kind: None,
         };
     }
     task.set_workflow_state(WorkflowState::Blocked);
@@ -715,6 +729,7 @@ fn apply_job_completion_typed(
         should_retry: false,
         status_label: "failed",
         detail: reason,
+        completion_kind: None,
     }
 }
 
@@ -1439,6 +1454,7 @@ mod tests {
                 phase_timeout_seconds: 0,
                 elapsed_seconds: 2,
                 status_text: "exit status: 0".to_string(),
+                completion_kind: None,
                 error_code: None,
                 error_origin: None,
                 error_message: None,
@@ -1451,6 +1467,39 @@ mod tests {
         assert_eq!(task["state"], "in_progress");
         assert_eq!(task["task_runtime"]["status"], "phase_done");
         assert!(task["task_runtime"]["pid"].is_null());
+    }
+
+    #[test]
+    fn apply_job_completion_already_satisfied_is_explicit_success() {
+        let mut task =
+            json!({"id":"T3b","state":"claimed","task_runtime":{"status":"running","pid":123}});
+        let out = apply_job_completion(
+            &mut task,
+            &JobCompletionInput {
+                success: true,
+                attempt: 1,
+                max_attempts: 1,
+                timed_out: false,
+                phase_timeout_seconds: 0,
+                elapsed_seconds: 1,
+                status_text: "task already satisfied; verified axum/tokio config".to_string(),
+                completion_kind: Some(PerformerCompletionKind::AlreadySatisfied),
+                error_code: None,
+                error_origin: None,
+                error_message: None,
+                auto_retry_error_codes: Vec::new(),
+                auto_retry_max: 0,
+            },
+            "2026-02-21T00:00:00Z",
+        );
+        assert!(!out.should_retry);
+        assert_eq!(out.status_label, "already_satisfied");
+        assert_eq!(
+            out.completion_kind,
+            Some(PerformerCompletionKind::AlreadySatisfied)
+        );
+        assert_eq!(task["state"], "in_progress");
+        assert_eq!(task["task_runtime"]["status"], "phase_done");
     }
 
     #[test]

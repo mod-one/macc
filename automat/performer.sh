@@ -445,9 +445,53 @@ Instructions:
 2) Do NOT edit ${prd}; the runner will update it.
 3) Do NOT commit; the runner will commit if all tasks are done.
 4) Keep output concise; avoid dumping large files.
+5) If the task acceptance criteria are already satisfied before any code change, this is a valid success. Verify it explicitly and do not make unnecessary edits.
+6) At the end, print exactly one terminal result marker on its own line:
+   - MACC_TASK_RESULT: success_with_changes
+   - MACC_TASK_RESULT: success_without_changes
+   - MACC_TASK_RESULT: already_satisfied
+7) Use `already_satisfied` only when you verified the task is already done and can cite the evidence briefly.
+8) If you finish successfully but forget the marker, the runner will infer the result from repository state; still print the marker explicitly.
 
 Now implement the task.
 PROMPT
+}
+
+extract_task_result_marker() {
+  local output_file="$1"
+  local raw=""
+  raw="$(grep -E 'MACC_TASK_RESULT:' "$output_file" | tail -n 1 | sed -E 's/^.*MACC_TASK_RESULT:[[:space:]]*//')"
+  raw="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | tr '-' '_' | tr -d '\r' | xargs)"
+  case "$raw" in
+    success_with_changes) printf '%s' "success_with_changes" ;;
+    success_without_changes) printf '%s' "success_without_changes" ;;
+    already_satisfied|already_done|noop_success) printf '%s' "already_satisfied" ;;
+    *) printf '%s' "" ;;
+  esac
+}
+
+has_committable_changes() {
+  if git status --porcelain | awk 'NF' | grep -q .; then
+    if git status --porcelain | grep -vE '^[ MARCUD?!]{1,2} (performer\\.sh|worktree\\.prd\\.json)$' | awk 'NF' | grep -q .; then
+      return 0
+    fi
+  fi
+  return 1
+}
+
+detect_success_result_kind() {
+  local output_file="$1"
+  local explicit=""
+  explicit="$(extract_task_result_marker "$output_file")"
+  if [[ -n "$explicit" ]]; then
+    printf '%s' "$explicit"
+    return 0
+  fi
+  if has_committable_changes; then
+    printf '%s' "success_with_changes"
+  else
+    printf '%s' "success_without_changes"
+  fi
 }
 
 run_tool() {
@@ -486,7 +530,22 @@ run_tool() {
   set -e
 
   if [[ "$status" -eq 0 ]]; then
-    emit_performer_event "phase_result" "$CURRENT_PHASE" "done" "$(jq -nc --arg attempt "$attempt" '{attempt:($attempt|tonumber?)}')"
+    local result_kind=""
+    local changed="false"
+    result_kind="$(detect_success_result_kind "$output_capture")"
+    if [[ "$result_kind" == "success_with_changes" ]]; then
+      changed="true"
+    fi
+    emit_performer_event "phase_result" "$CURRENT_PHASE" "done" "$(jq -nc --arg attempt "$attempt" --arg result_kind "$result_kind" --argjson changed "$changed" '{
+      attempt:($attempt|tonumber?),
+      result_kind:($result_kind|select(length>0)),
+      changed:$changed,
+      message:(if $result_kind == "already_satisfied" then "Task already satisfied; verified with no code changes required."
+               elif $result_kind == "success_without_changes" then "Task completed successfully with no repository changes."
+               else "Task completed successfully with repository changes."
+               end)
+    }')"
+    log_task_line "- Result kind: ${result_kind}"
   else
     set_last_error "E101" "runner" "runner exited non-zero"
     emit_performer_event "phase_result" "$CURRENT_PHASE" "failed" "$(jq -nc --arg attempt "$attempt" --arg status "$status" --arg code "$LAST_ERROR_CODE" --arg origin "$LAST_ERROR_ORIGIN" --arg message "$LAST_ERROR_MESSAGE" '{attempt:($attempt|tonumber?), exit_status:($status|tonumber?), error_code:($code|select(length>0)), origin:($origin|select(length>0)), message:($message|select(length>0))}')"
