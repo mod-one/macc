@@ -629,15 +629,29 @@ fn apply_job_completion_typed(
         };
     }
     if input.success {
-        task.set_workflow_state(WorkflowState::InProgress);
-        let runtime = task.ensure_runtime();
-        runtime.set_status(RuntimeStatus::PhaseDone);
-        runtime.current_phase = Some("dev".to_string());
-        runtime.pid = None;
-        task.touch_state_changed(now);
         let completion_kind = input
             .completion_kind
             .unwrap_or(PerformerCompletionKind::SuccessWithChanges);
+        let terminal_noop = completion_kind == PerformerCompletionKind::AlreadySatisfied;
+        task.set_workflow_state(if terminal_noop {
+            WorkflowState::Merged
+        } else {
+            WorkflowState::InProgress
+        });
+        let runtime = task.ensure_runtime();
+        runtime.completion_kind = Some(completion_kind.as_str().to_string());
+        runtime.set_status(if terminal_noop {
+            RuntimeStatus::Idle
+        } else {
+            RuntimeStatus::PhaseDone
+        });
+        runtime.current_phase = if terminal_noop {
+            None
+        } else {
+            Some("dev".to_string())
+        };
+        runtime.pid = None;
+        task.touch_state_changed(now);
         return JobCompletionResult {
             should_retry: false,
             status_label: match completion_kind {
@@ -654,6 +668,7 @@ fn apply_job_completion_typed(
         let runtime = task.ensure_runtime();
         runtime.set_status(RuntimeStatus::Running);
         runtime.current_phase = Some("dev".to_string());
+        runtime.completion_kind = None;
         runtime.pid = None;
         let reason = if input.timed_out {
             format!(
@@ -704,6 +719,7 @@ fn apply_job_completion_typed(
         runtime.set_status(RuntimeStatus::Idle);
         runtime.pid = None;
         runtime.current_phase = Some("dev".to_string());
+        runtime.completion_kind = None;
         runtime.set_last_error_details(
             error_code.clone(),
             error_origin.clone(),
@@ -721,6 +737,7 @@ fn apply_job_completion_typed(
     task.set_workflow_state(WorkflowState::Blocked);
     let runtime = task.ensure_runtime();
     runtime.set_status(RuntimeStatus::Failed);
+    runtime.completion_kind = None;
     runtime.pid = None;
     runtime.set_last_error_details(error_code, error_origin, error_message);
     runtime.last_error = Some(reason.clone());
@@ -1498,8 +1515,10 @@ mod tests {
             out.completion_kind,
             Some(PerformerCompletionKind::AlreadySatisfied)
         );
-        assert_eq!(task["state"], "in_progress");
-        assert_eq!(task["task_runtime"]["status"], "phase_done");
+        assert_eq!(task["state"], "merged");
+        assert_eq!(task["task_runtime"]["status"], "idle");
+        assert_eq!(task["task_runtime"]["completion_kind"], "already_satisfied");
+        assert!(task["task_runtime"]["current_phase"].is_null());
     }
 
     #[test]

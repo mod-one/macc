@@ -450,7 +450,7 @@ Instructions:
    - MACC_TASK_RESULT: success_with_changes
    - MACC_TASK_RESULT: success_without_changes
    - MACC_TASK_RESULT: already_satisfied
-7) Use `already_satisfied` only when you verified the task is already done and can cite the evidence briefly.
+7) Use already_satisfied only when you verified the task is already done and can cite the evidence briefly.
 8) If you finish successfully but forget the marker, the runner will infer the result from repository state; still print the marker explicitly.
 
 Now implement the task.

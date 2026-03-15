@@ -118,6 +118,8 @@ pub struct TaskRuntime {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retries: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metrics: Option<TaskRuntimeMetrics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slo_warnings: Option<BTreeMap<String, SloWarningRecord>>,
