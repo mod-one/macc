@@ -20,6 +20,7 @@ pub mod plan;
 pub mod quickstart;
 pub mod restore;
 pub mod tool;
+pub mod web;
 pub mod worktree;
 
 pub trait Command {
