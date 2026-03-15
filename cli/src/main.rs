@@ -1642,6 +1642,10 @@ mod tests {
     fn test_plan_with_tools_override() -> macc_core::Result<()> {
         let temp_base = std::env::temp_dir().join(format!("macc_tools_test_{}", uuid_v4_like()));
         std::fs::create_dir_all(&temp_base).unwrap();
+        let temp_home = temp_base.join("home");
+        std::fs::create_dir_all(&temp_home).unwrap();
+        let old_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &temp_home);
         let ids = fixture_ids();
         let tool_one = ids[0].clone();
         let tool_two = ids[1].clone();
@@ -1697,6 +1701,11 @@ mod tests {
         )?;
 
         // Cleanup
+        if let Some(old) = old_home {
+            std::env::set_var("HOME", old);
+        } else {
+            std::env::remove_var("HOME");
+        }
         std::fs::remove_dir_all(&temp_base).ok();
         Ok(())
     }
@@ -3164,6 +3173,10 @@ fi
         let temp_base =
             std::env::temp_dir().join(format!("macc_install_multi_git_test_{}", uuid_v4_like()));
         std::fs::create_dir_all(&temp_base).unwrap();
+        let temp_home = temp_base.join("home");
+        std::fs::create_dir_all(&temp_home).unwrap();
+        let old_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &temp_home);
         let ids = fixture_ids();
         let tool_one = ids[0].clone();
 
@@ -3350,6 +3363,11 @@ fi
             "Expected at least one sparse cache entry with skills/a"
         );
 
+        if let Some(old) = old_home {
+            std::env::set_var("HOME", old);
+        } else {
+            std::env::remove_var("HOME");
+        }
         std::fs::remove_dir_all(&temp_base).ok();
         Ok(())
     }
