@@ -928,9 +928,8 @@ mod tests {
             checksum: None,
             subpaths: vec!["folder1".into(), "folder2".into()],
         };
-        let repo_dir_multi =
-            git_fetch(&paths, &source_multi, false, false)
-                .expect("Should fetch git repo with multi subpaths");
+        let repo_dir_multi = git_fetch(&paths, &source_multi, false, false)
+            .expect("Should fetch git repo with multi subpaths");
         assert!(repo_dir_multi.join("folder1").exists());
         assert!(repo_dir_multi.join("folder2").exists());
         assert!(repo_dir_multi.join("root.txt").exists());
