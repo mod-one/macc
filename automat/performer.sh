@@ -255,7 +255,6 @@ emit_performer_event() {
       phase:($phase|select(length>0)),
       status:$status,
       payload:$payload,
-      event:$type,
       state:$status
     }')"
   if [[ -n "$EVENT_IPC_ADDR" ]] && send_event_via_ipc "$event_line"; then
