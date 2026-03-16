@@ -637,7 +637,7 @@ impl CoordinatorEventRecord {
             || (self.event_type == "phase_result"
                 && matches!(
                     self.status.as_str(),
-                    "done" | "phase_done" | "already_satisfied"
+                    "done" | "phase_done" | "already_satisfied" | "success_without_changes"
                 )
                 && self.payload_result_kind().is_some())
     }

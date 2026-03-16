@@ -632,7 +632,8 @@ fn apply_job_completion_typed(
         let completion_kind = input
             .completion_kind
             .unwrap_or(PerformerCompletionKind::SuccessWithChanges);
-        let terminal_noop = completion_kind == PerformerCompletionKind::AlreadySatisfied;
+        let terminal_noop = completion_kind == PerformerCompletionKind::AlreadySatisfied
+            || completion_kind == PerformerCompletionKind::SuccessWithoutChanges;
         task.set_workflow_state(if terminal_noop {
             WorkflowState::Merged
         } else {
@@ -1518,6 +1519,40 @@ mod tests {
         assert_eq!(task["state"], "merged");
         assert_eq!(task["task_runtime"]["status"], "idle");
         assert_eq!(task["task_runtime"]["completion_kind"], "already_satisfied");
+        assert!(task["task_runtime"]["current_phase"].is_null());
+    }
+
+    #[test]
+    fn apply_job_completion_success_without_changes_bypasses_review() {
+        let mut task =
+            json!({"id":"T3c","state":"claimed","task_runtime":{"status":"running","pid":123}});
+        let out = apply_job_completion(
+            &mut task,
+            &JobCompletionInput {
+                success: true,
+                attempt: 1,
+                max_attempts: 1,
+                timed_out: false,
+                phase_timeout_seconds: 0,
+                elapsed_seconds: 1,
+                status_text: "performer finished but no changes made".to_string(),
+                completion_kind: Some(PerformerCompletionKind::SuccessWithoutChanges),
+                error_code: None,
+                error_origin: None,
+                error_message: None,
+                auto_retry_error_codes: Vec::new(),
+                auto_retry_max: 0,
+            },
+            "2026-02-21T00:00:00Z",
+        );
+        assert!(!out.should_retry);
+        assert_eq!(out.status_label, "success_without_changes");
+        assert_eq!(task["state"], "merged");
+        assert_eq!(task["task_runtime"]["status"], "idle");
+        assert_eq!(
+            task["task_runtime"]["completion_kind"],
+            "success_without_changes"
+        );
         assert!(task["task_runtime"]["current_phase"].is_null());
     }
 
