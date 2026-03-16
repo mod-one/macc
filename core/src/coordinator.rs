@@ -467,8 +467,10 @@ impl CoordinatorEventRecord {
                         self.status
                     ));
                 }
-                let has_tool = payload_has_non_empty_string_in_sources(self, &normalized_payload, "tool");
-                let has_worktree = payload_has_non_empty_string_in_sources(self, &normalized_payload, "worktree");
+                let has_tool =
+                    payload_has_non_empty_string_in_sources(self, &normalized_payload, "tool");
+                let has_worktree =
+                    payload_has_non_empty_string_in_sources(self, &normalized_payload, "worktree");
                 if !has_tool || !has_worktree {
                     return Err(format!(
                         "invalid performer event 'started': payload.tool and payload.worktree are required. has_tool={} has_worktree={} payload={:?}",

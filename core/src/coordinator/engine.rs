@@ -1557,6 +1557,128 @@ mod tests {
     }
 
     #[test]
+    fn already_satisfied_task_does_not_schedule_review_or_merge() {
+        let mut registry = json!({
+            "tasks": [
+                {
+                    "id": "DONE",
+                    "title": "done",
+                    "state": "claimed",
+                    "priority": "0",
+                    "dependencies": [],
+                    "exclusive_resources": [],
+                    "task_runtime": {
+                        "status": "running",
+                        "pid": 123
+                    }
+                },
+                {
+                    "id": "NEXT",
+                    "title": "next",
+                    "state": "todo",
+                    "priority": "1",
+                    "dependencies": [],
+                    "exclusive_resources": []
+                }
+            ],
+            "resource_locks": {}
+        });
+        let completion = apply_job_completion_in_registry(
+            &mut registry,
+            "DONE",
+            &JobCompletionInput {
+                success: true,
+                attempt: 1,
+                max_attempts: 1,
+                timed_out: false,
+                phase_timeout_seconds: 0,
+                elapsed_seconds: 1,
+                status_text: "task already satisfied".to_string(),
+                completion_kind: Some(PerformerCompletionKind::AlreadySatisfied),
+                error_code: None,
+                error_origin: None,
+                error_message: None,
+                auto_retry_error_codes: Vec::new(),
+                auto_retry_max: 0,
+            },
+            "2026-02-21T00:00:00Z",
+        )
+        .expect("apply completion");
+        assert_eq!(completion.status_label, "already_satisfied");
+        assert_eq!(registry["tasks"][0]["state"], "merged");
+        let actions = build_advance_actions(&registry, &HashSet::new()).expect("advance actions");
+        assert!(!actions.iter().any(|action| {
+            matches!(
+                action,
+                AdvanceTaskAction::RunPhase { task_id, .. }
+                    | AdvanceTaskAction::QueueMerge { task_id, .. }
+                    if task_id == "DONE"
+            )
+        }));
+    }
+
+    #[test]
+    fn success_without_changes_task_does_not_schedule_review_or_merge() {
+        let mut registry = json!({
+            "tasks": [
+                {
+                    "id": "DONE",
+                    "title": "done",
+                    "state": "claimed",
+                    "priority": "0",
+                    "dependencies": [],
+                    "exclusive_resources": [],
+                    "task_runtime": {
+                        "status": "running",
+                        "pid": 123
+                    }
+                },
+                {
+                    "id": "NEXT",
+                    "title": "next",
+                    "state": "todo",
+                    "priority": "1",
+                    "dependencies": [],
+                    "exclusive_resources": []
+                }
+            ],
+            "resource_locks": {}
+        });
+        let completion = apply_job_completion_in_registry(
+            &mut registry,
+            "DONE",
+            &JobCompletionInput {
+                success: true,
+                attempt: 1,
+                max_attempts: 1,
+                timed_out: false,
+                phase_timeout_seconds: 0,
+                elapsed_seconds: 1,
+                status_text: "task completed without code changes".to_string(),
+                completion_kind: Some(PerformerCompletionKind::SuccessWithoutChanges),
+                error_code: None,
+                error_origin: None,
+                error_message: None,
+                auto_retry_error_codes: Vec::new(),
+                auto_retry_max: 0,
+            },
+            "2026-02-21T00:00:00Z",
+        )
+        .expect("apply completion");
+        assert_eq!(completion.status_label, "success_without_changes");
+        assert_eq!(registry["tasks"][0]["state"], "merged");
+        let actions = build_advance_actions(&registry, &HashSet::new()).expect("advance actions");
+        assert!(!actions.iter().any(|action| {
+            matches!(
+                action,
+                AdvanceTaskAction::RunPhase { task_id, .. }
+                    | AdvanceTaskAction::QueueMerge { task_id, .. }
+                    if task_id == "DONE"
+            )
+        }));
+    }
+
+    #[test]
     fn cleanup_dead_runtime_tasks_resets_claimed_dev_to_todo() {
         let mut registry = json!({
             "tasks": [{
