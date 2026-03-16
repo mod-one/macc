@@ -306,10 +306,20 @@ pub fn resolve_phase_runner(
     let explicit = worktree_path
         .join(".macc")
         .join("automation")
-        .join("runners")
+        .join("embedded")
+        .join("adapters")
+        .join(tool)
         .join(format!("{}.performer.sh", tool));
     if explicit.exists() {
         return Ok(Some(explicit));
+    }
+    let legacy = worktree_path
+        .join(".macc")
+        .join("automation")
+        .join("runners")
+        .join(format!("{}.performer.sh", tool));
+    if legacy.exists() {
+        return Ok(Some(legacy));
     }
     let tool_json_path = worktree_path.join(".macc").join("tool.json");
     if !tool_json_path.exists() {

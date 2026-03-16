@@ -455,8 +455,8 @@ impl CoordinatorEventRecord {
         let normalized_payload = self.normalized_payload();
         if !normalized_payload.is_object() {
             return Err(format!(
-                "invalid performer event '{}': payload must be an object",
-                self.event_type
+                "invalid performer event '{}': payload must be an object (got {:?})",
+                self.event_type, normalized_payload
             ));
         }
         match self.event_type.as_str() {
@@ -467,13 +467,13 @@ impl CoordinatorEventRecord {
                         self.status
                     ));
                 }
-                if !payload_has_non_empty_string_in_sources(self, &normalized_payload, "tool")
-                    || !payload_has_non_empty_string_in_sources(self, &normalized_payload, "worktree")
-                {
-                    return Err(
-                        "invalid performer event 'started': payload.tool and payload.worktree are required"
-                            .to_string(),
-                    );
+                let has_tool = payload_has_non_empty_string_in_sources(self, &normalized_payload, "tool");
+                let has_worktree = payload_has_non_empty_string_in_sources(self, &normalized_payload, "worktree");
+                if !has_tool || !has_worktree {
+                    return Err(format!(
+                        "invalid performer event 'started': payload.tool and payload.worktree are required. has_tool={} has_worktree={} payload={:?}",
+                        has_tool, has_worktree, normalized_payload
+                    ));
                 }
             }
             "heartbeat" | "progress" => {
@@ -500,11 +500,13 @@ impl CoordinatorEventRecord {
                         self.status
                     ));
                 }
-                if self.status == "done" && self.payload_result_kind().is_none() {
-                    return Err(
-                        "invalid performer event 'phase_result': payload.result_kind is required for successful terminal events"
-                            .to_string(),
-                    );
+                let kind = self.payload_result_kind();
+                if self.status == "done" && kind.is_none() {
+                    let norm = self.normalized_payload();
+                    return Err(format!(
+                        "invalid performer event 'phase_result': payload.result_kind is required for successful terminal events. status={} payload={:?} normalized={:?}",
+                        self.status, self.payload, norm
+                    ));
                 }
             }
             "commit_created" => {

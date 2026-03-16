@@ -221,13 +221,13 @@ emit_performer_event() {
   local event_type="$1"
   local phase="${2:-}"
   local status="${3:-}"
-  local payload_json="${4:-{}}"
+  local payload_json="${4:-}"
   [[ -n "$EVENT_FILE" || -n "$EVENT_IPC_ADDR" ]] || return 0
   [[ -n "$EVENT_SOURCE" ]] || EVENT_SOURCE="performer:${tool}:${EVENT_RUN_ID}"
   [[ -n "$EVENT_TASK_ID" ]] || EVENT_TASK_ID="$task_id"
   local seq
   seq="$(next_event_seq)"
-  if ! jq -e 'type == "object"' <<<"$payload_json" >/dev/null 2>&1; then
+  if [[ -z "$payload_json" ]]; then payload_json="{}"; elif ! jq -e 'type == "object"' <<<"$payload_json" >/dev/null 2>&1; then
     payload_json="$(jq -nc --arg value "$payload_json" '{value:$value}')"
   fi
   local event_line=""
@@ -255,7 +255,7 @@ emit_performer_event() {
       phase:($phase|select(length>0)),
       status:$status,
       payload:$payload
-    } + ($payload | if type == "object" then . else {} end))')"
+    }')"
   if [[ -n "$EVENT_IPC_ADDR" ]] && send_event_via_ipc "$event_line"; then
     return 0
   fi
@@ -337,7 +337,7 @@ must_emit_performer_event() {
   local event_type="$1"
   local phase="${2:-}"
   local status="${3:-}"
-  local payload_json="${4:-{}}"
+  local payload_json="${4:-}"
   if emit_performer_event "$event_type" "$phase" "$status" "$payload_json"; then
     return 0
   fi
@@ -358,7 +358,7 @@ soft_emit_performer_event() {
   local event_type="$1"
   local phase="${2:-}"
   local status="${3:-}"
-  local payload_json="${4:-{}}"
+  local payload_json="${4:-}"
   if emit_performer_event "$event_type" "$phase" "$status" "$payload_json"; then
     return 0
   fi
