@@ -270,7 +270,7 @@ emit_performer_event() {
     --arg phase "$phase" \
     --arg status "$status" \
     --argjson payload "$payload_json" \
-    '({
+    '{
       schema_version:$schema_version,
       event_id:$event_id,
       run_id:$run_id,
