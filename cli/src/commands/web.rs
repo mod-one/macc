@@ -4,10 +4,14 @@ use crate::services::engine_provider::SharedEngine;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Json;
 use axum::Router;
-use macc_core::service::coordinator_workflow::CoordinatorStatus;
+use macc_core::coordinator::task_selector::SelectedTask;
+use macc_core::coordinator::types::CoordinatorEnvConfig;
+use macc_core::service::coordinator_workflow::{
+    CoordinatorCommand, CoordinatorCommandRequest, CoordinatorCommandResult, CoordinatorStatus,
+};
 use macc_core::service::diagnostic::{FailureKind, FailureReport};
 use macc_core::{MaccError, ProjectPaths, Result};
 use serde::Serialize;
@@ -41,13 +45,14 @@ impl Command for WebCommand {
             .map_err(|e| MaccError::Validation(format!("build web runtime: {}", e)))?;
 
         runtime.block_on(async move {
-            let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
-                MaccError::Io {
-                    path: addr.to_string(),
-                    action: "bind web server".into(),
-                    source: e,
-                }
-            })?;
+            let listener =
+                tokio::net::TcpListener::bind(addr)
+                    .await
+                    .map_err(|e| MaccError::Io {
+                        path: addr.to_string(),
+                        action: "bind web server".into(),
+                        source: e,
+                    })?;
             axum::serve(listener, app)
                 .await
                 .map_err(|e| MaccError::Validation(format!("web server failed: {}", e)))
@@ -73,6 +78,7 @@ struct WebState {
 fn build_web_router(state: WebState) -> Router {
     Router::new()
         .route("/api/v1/status", get(status_handler))
+        .route("/api/v1/coordinator/run", post(coordinator_run_handler))
         .with_state(state)
 }
 
@@ -84,6 +90,27 @@ async fn status_handler(
         .get_coordinator_status(&state.paths)
         .map_err(ApiError::from)?;
     Ok(Json(ApiCoordinatorStatus::from(status)))
+}
+
+async fn coordinator_run_handler(
+    State(state): State<WebState>,
+) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
+    let env_cfg = CoordinatorEnvConfig::default();
+    let _ = state.engine.project_ensure_coordinator_run_id();
+    let result = state
+        .engine
+        .coordinator_execute_command(
+            &state.paths,
+            CoordinatorCommand::Run,
+            CoordinatorCommandRequest {
+                canonical: None,
+                coordinator_cfg: None,
+                env_cfg: &env_cfg,
+                logger: None,
+            },
+        )
+        .map_err(ApiError::from)?;
+    Ok(Json(ApiCoordinatorCommandResult::from(result)))
 }
 
 #[derive(Debug, Serialize)]
@@ -115,6 +142,52 @@ impl From<CoordinatorStatus> for ApiCoordinatorStatus {
             pause_phase: status.pause_phase,
             latest_error: status.latest_error,
             failure_report: status.failure_report.map(ApiFailureReport::from),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ApiCoordinatorCommandResult {
+    pub status: Option<ApiCoordinatorStatus>,
+    pub resumed: Option<bool>,
+    pub aggregated_performer_logs: Option<usize>,
+    pub runtime_status: Option<String>,
+    pub exported_events_path: Option<String>,
+    pub removed_worktrees: Option<usize>,
+    pub selected_task: Option<ApiSelectedTask>,
+}
+
+impl From<CoordinatorCommandResult> for ApiCoordinatorCommandResult {
+    fn from(result: CoordinatorCommandResult) -> Self {
+        Self {
+            status: result.status.map(ApiCoordinatorStatus::from),
+            resumed: result.resumed,
+            aggregated_performer_logs: result.aggregated_performer_logs,
+            runtime_status: result.runtime_status,
+            exported_events_path: result
+                .exported_events_path
+                .map(|path| path.to_string_lossy().into_owned()),
+            removed_worktrees: result.removed_worktrees,
+            selected_task: result.selected_task.map(ApiSelectedTask::from),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct ApiSelectedTask {
+    pub id: String,
+    pub title: String,
+    pub tool: String,
+    pub base_branch: String,
+}
+
+impl From<SelectedTask> for ApiSelectedTask {
+    fn from(task: SelectedTask) -> Self {
+        Self {
+            id: task.id,
+            title: task.title,
+            tool: task.tool,
+            base_branch: task.base_branch,
         }
     }
 }
@@ -292,6 +365,86 @@ mod tests {
         std::env::temp_dir().join(format!("macc-web-{}-{}", label, nanos))
     }
 
+    struct WebTestEngine {
+        inner: TestEngine,
+        run_result:
+            std::sync::Mutex<Option<std::result::Result<CoordinatorCommandResult, MaccError>>>,
+    }
+
+    impl WebTestEngine {
+        fn new(result: std::result::Result<CoordinatorCommandResult, MaccError>) -> Self {
+            Self {
+                inner: TestEngine::with_fixtures(),
+                run_result: std::sync::Mutex::new(Some(result)),
+            }
+        }
+    }
+
+    impl macc_core::engine::Engine for WebTestEngine {
+        fn list_tools(
+            &self,
+            paths: &ProjectPaths,
+        ) -> (
+            Vec<macc_core::ToolDescriptor>,
+            Vec<macc_core::tool::ToolDiagnostic>,
+        ) {
+            self.inner.list_tools(paths)
+        }
+
+        fn doctor(&self, paths: &ProjectPaths) -> Vec<macc_core::doctor::ToolCheck> {
+            self.inner.doctor(paths)
+        }
+
+        fn plan(
+            &self,
+            paths: &ProjectPaths,
+            config: &macc_core::config::CanonicalConfig,
+            materialized_units: &[macc_core::resolve::MaterializedFetchUnit],
+            overrides: &macc_core::resolve::CliOverrides,
+        ) -> Result<macc_core::plan::ActionPlan> {
+            self.inner
+                .plan(paths, config, materialized_units, overrides)
+        }
+
+        fn plan_operations(
+            &self,
+            paths: &ProjectPaths,
+            plan: &macc_core::plan::ActionPlan,
+        ) -> Vec<macc_core::plan::PlannedOp> {
+            self.inner.plan_operations(paths, plan)
+        }
+
+        fn apply(
+            &self,
+            paths: &ProjectPaths,
+            plan: &mut macc_core::plan::ActionPlan,
+            allow_user_scope: bool,
+        ) -> Result<macc_core::ApplyReport> {
+            self.inner.apply(paths, plan, allow_user_scope)
+        }
+
+        fn builtin_skills(&self) -> Vec<macc_core::catalog::Skill> {
+            self.inner.builtin_skills()
+        }
+
+        fn builtin_agents(&self) -> Vec<macc_core::catalog::Agent> {
+            self.inner.builtin_agents()
+        }
+
+        fn coordinator_execute_command(
+            &self,
+            _paths: &ProjectPaths,
+            _command: CoordinatorCommand,
+            _request: CoordinatorCommandRequest<'_>,
+        ) -> Result<CoordinatorCommandResult> {
+            self.run_result
+                .lock()
+                .expect("lock")
+                .take()
+                .unwrap_or_else(|| Ok(CoordinatorCommandResult::default()))
+        }
+    }
+
     #[tokio::test]
     async fn status_endpoint_returns_status_payload() {
         let root = temp_root("ok");
@@ -357,6 +510,109 @@ mod tests {
                 Request::builder()
                     .uri("/api/v1/status")
                     .method("GET")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect")
+            .to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(payload["error"]["code"], "MACC-WEB-0000");
+        assert_eq!(payload["error"]["category"], "Validation");
+    }
+
+    #[tokio::test]
+    async fn coordinator_run_endpoint_returns_envelope() {
+        let root = temp_root("run-ok");
+        fs::create_dir_all(&root).expect("create root");
+        let result = CoordinatorCommandResult {
+            status: Some(CoordinatorStatus {
+                total: 5,
+                todo: 2,
+                active: 1,
+                blocked: 1,
+                merged: 1,
+                paused: false,
+                pause_reason: None,
+                pause_task_id: None,
+                pause_phase: None,
+                latest_error: None,
+                failure_report: None,
+            }),
+            resumed: Some(false),
+            aggregated_performer_logs: Some(2),
+            runtime_status: Some("running".to_string()),
+            exported_events_path: Some(std::path::PathBuf::from(
+                ".macc/log/coordinator/events.jsonl",
+            )),
+            removed_worktrees: Some(0),
+            selected_task: Some(SelectedTask {
+                id: "TASK-1".to_string(),
+                title: "Example".to_string(),
+                tool: "mock".to_string(),
+                base_branch: "main".to_string(),
+            }),
+        };
+        let state = WebState {
+            engine: Arc::new(WebTestEngine::new(Ok(result))),
+            paths: ProjectPaths::from_root(&root),
+        };
+        let app = build_web_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/coordinator/run")
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect")
+            .to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        for key in [
+            "status",
+            "resumed",
+            "aggregated_performer_logs",
+            "runtime_status",
+            "exported_events_path",
+            "removed_worktrees",
+            "selected_task",
+        ] {
+            assert!(payload.get(key).is_some(), "missing {}", key);
+        }
+    }
+
+    #[tokio::test]
+    async fn coordinator_run_endpoint_maps_errors() {
+        let root = temp_root("run-error");
+        fs::create_dir_all(&root).expect("create root");
+        let state = WebState {
+            engine: Arc::new(WebTestEngine::new(Err(MaccError::Validation(
+                "coordinator failed".to_string(),
+            )))),
+            paths: ProjectPaths::from_root(&root),
+        };
+        let app = build_web_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/coordinator/run")
+                    .method("POST")
                     .body(Body::empty())
                     .expect("request"),
             )
