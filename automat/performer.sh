@@ -255,6 +255,9 @@ emit_performer_event() {
     payload_json="$(jq -nc --arg value "$payload_json" '{value:$value}')"
   fi
   local event_line=""
+  local jq_err_file=""
+  local jq_err=""
+  jq_err_file="$(mktemp)"
   if ! event_line="$(jq -nc \
     --arg schema_version "1" \
     --arg event_id "${EVENT_TASK_ID}-${seq}-$(date +%s%N)" \
@@ -279,10 +282,13 @@ emit_performer_event() {
       phase:($phase|select(length>0)),
       status:$status,
       payload:$payload
-    }')"; then
-    LAST_IPC_ERROR="event json build failed: addr=$(ipc_addr_display) type=${event_type} status=${status} phase=${phase:-<empty>}"
+    }' 2>"$jq_err_file")"; then
+    jq_err="$(tr '\n' ' ' <"$jq_err_file" | sed 's/[[:space:]]\\+/ /g')"
+    rm -f "$jq_err_file"
+    LAST_IPC_ERROR="event json build failed: addr=$(ipc_addr_display) type=${event_type} status=${status} phase=${phase:-<empty>} jq_stderr=${jq_err:-<empty>}"
     return 1
   fi
+  rm -f "$jq_err_file"
   if [[ -z "$event_line" ]]; then
     LAST_IPC_ERROR="empty event json: addr=$(ipc_addr_display) type=${event_type} status=${status} phase=${phase:-<empty>}"
     return 1
