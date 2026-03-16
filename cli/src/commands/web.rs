@@ -79,6 +79,7 @@ fn build_web_router(state: WebState) -> Router {
     Router::new()
         .route("/api/v1/status", get(status_handler))
         .route("/api/v1/coordinator/run", post(coordinator_run_handler))
+        .route("/api/v1/coordinator/stop", post(coordinator_stop_handler))
         .with_state(state)
 }
 
@@ -111,6 +112,18 @@ async fn coordinator_run_handler(
         )
         .map_err(ApiError::from)?;
     Ok(Json(ApiCoordinatorCommandResult::from(result)))
+}
+
+async fn coordinator_stop_handler(
+    State(state): State<WebState>,
+) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
+    state
+        .engine
+        .coordinator_stop(&state.paths.root, "web api stop")
+        .map_err(ApiError::from)?;
+    Ok(Json(ApiCoordinatorCommandResult::from(
+        CoordinatorCommandResult::default(),
+    )))
 }
 
 #[derive(Debug, Serialize)]
@@ -369,6 +382,7 @@ mod tests {
         inner: TestEngine,
         run_result:
             std::sync::Mutex<Option<std::result::Result<CoordinatorCommandResult, MaccError>>>,
+        stop_result: std::sync::Mutex<Option<std::result::Result<(), MaccError>>>,
     }
 
     impl WebTestEngine {
@@ -376,6 +390,15 @@ mod tests {
             Self {
                 inner: TestEngine::with_fixtures(),
                 run_result: std::sync::Mutex::new(Some(result)),
+                stop_result: std::sync::Mutex::new(Some(Ok(()))),
+            }
+        }
+
+        fn with_stop_result(result: std::result::Result<(), MaccError>) -> Self {
+            Self {
+                inner: TestEngine::with_fixtures(),
+                run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
+                stop_result: std::sync::Mutex::new(Some(result)),
             }
         }
     }
@@ -442,6 +465,14 @@ mod tests {
                 .expect("lock")
                 .take()
                 .unwrap_or_else(|| Ok(CoordinatorCommandResult::default()))
+        }
+
+        fn coordinator_stop(&self, _repo_root: &std::path::Path, _reason: &str) -> Result<()> {
+            self.stop_result
+                .lock()
+                .expect("lock")
+                .take()
+                .unwrap_or_else(|| Ok(()))
         }
     }
 
@@ -612,6 +643,81 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/coordinator/run")
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect")
+            .to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(payload["error"]["code"], "MACC-WEB-0000");
+        assert_eq!(payload["error"]["category"], "Validation");
+    }
+
+    #[tokio::test]
+    async fn coordinator_stop_endpoint_returns_envelope() {
+        let root = temp_root("stop-ok");
+        fs::create_dir_all(&root).expect("create root");
+        let state = WebState {
+            engine: Arc::new(WebTestEngine::with_stop_result(Ok(()))),
+            paths: ProjectPaths::from_root(&root),
+        };
+        let app = build_web_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/coordinator/stop")
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect")
+            .to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        for key in [
+            "status",
+            "resumed",
+            "aggregated_performer_logs",
+            "runtime_status",
+            "exported_events_path",
+            "removed_worktrees",
+            "selected_task",
+        ] {
+            assert!(payload.get(key).is_some(), "missing {}", key);
+        }
+    }
+
+    #[tokio::test]
+    async fn coordinator_stop_endpoint_maps_errors() {
+        let root = temp_root("stop-error");
+        fs::create_dir_all(&root).expect("create root");
+        let state = WebState {
+            engine: Arc::new(WebTestEngine::with_stop_result(Err(MaccError::Validation(
+                "stop failed".to_string(),
+            )))),
+            paths: ProjectPaths::from_root(&root),
+        };
+        let app = build_web_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/coordinator/stop")
                     .method("POST")
                     .body(Body::empty())
                     .expect("request"),
