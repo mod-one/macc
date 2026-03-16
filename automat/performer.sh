@@ -217,6 +217,30 @@ next_event_seq() {
   echo "$current"
 }
 
+ipc_addr_display() {
+  local addr="${EVENT_IPC_ADDR:-}"
+  if [[ -n "$addr" ]]; then
+    printf '%s' "$addr"
+  else
+    printf '%s' "<unset>"
+  fi
+}
+
+ipc_event_preview() {
+  local event_line="$1"
+  local preview=""
+  preview="$(
+    jq -r '
+      "type=\(.type // "<missing>") event_id=\(.event_id // "<missing>") status=\(.status // "<missing>") phase=\(.phase // "<missing>") has_result_kind=\((((.payload.result_kind? // "") | tostring | length) > 0))"
+    ' <<<"$event_line" 2>/dev/null
+  )"
+  if [[ -n "$preview" ]]; then
+    printf '%s' "$preview"
+  else
+    printf '%s' 'type=<parse_failed> event_id=<unknown> status=<unknown> phase=<unknown> has_result_kind=<unknown>'
+  fi
+}
+
 emit_performer_event() {
   local event_type="$1"
   local phase="${2:-}"
@@ -231,7 +255,7 @@ emit_performer_event() {
     payload_json="$(jq -nc --arg value "$payload_json" '{value:$value}')"
   fi
   local event_line=""
-  event_line="$(jq -nc \
+  if ! event_line="$(jq -nc \
     --arg schema_version "1" \
     --arg event_id "${EVENT_TASK_ID}-${seq}-$(date +%s%N)" \
     --arg run_id "$EVENT_RUN_ID" \
@@ -255,7 +279,14 @@ emit_performer_event() {
       phase:($phase|select(length>0)),
       status:$status,
       payload:$payload
-    }')"
+    }')"; then
+    LAST_IPC_ERROR="event json build failed: addr=$(ipc_addr_display) type=${event_type} status=${status} phase=${phase:-<empty>}"
+    return 1
+  fi
+  if [[ -z "$event_line" ]]; then
+    LAST_IPC_ERROR="empty event json: addr=$(ipc_addr_display) type=${event_type} status=${status} phase=${phase:-<empty>}"
+    return 1
+  fi
   if [[ -n "$EVENT_IPC_ADDR" ]] && send_event_via_ipc "$event_line"; then
     return 0
   fi
@@ -268,6 +299,8 @@ emit_performer_event() {
 
 send_event_via_ipc() {
   local event_line="$1"
+  local addr_display=""
+  local preview=""
   local host="${EVENT_IPC_ADDR%:*}"
   local port="${EVENT_IPC_ADDR##*:}"
   local event_id=""
@@ -275,9 +308,17 @@ send_event_via_ipc() {
   local ack_ok=""
   local ack_event_id=""
   LAST_IPC_ERROR=""
-  [[ -n "$host" && -n "$port" && "$host" != "$port" ]] || return 1
+  addr_display="$(ipc_addr_display)"
+  preview="$(ipc_event_preview "$event_line")"
+  if [[ -z "$host" || -z "$port" || "$host" == "$port" ]]; then
+    LAST_IPC_ERROR="invalid ipc addr: addr=${addr_display} event_id_extracted=false preview=\"${preview}\""
+    return 1
+  fi
   event_id="$(jq -r '.event_id // empty' <<<"$event_line" 2>/dev/null)"
-  [[ -n "$event_id" ]] || return 1
+  if [[ -z "$event_id" ]]; then
+    LAST_IPC_ERROR="missing event_id: addr=${addr_display} event_id_extracted=false preview=\"${preview}\""
+    return 1
+  fi
   (
     exec 9<>"/dev/tcp/${host}/${port}" || exit 1
     printf '%s\n' "$event_line" >&9 || exit 1
@@ -325,11 +366,11 @@ PY
 )"
     local py_rc=$?
     if [[ $py_rc -ne 0 ]]; then
-      LAST_IPC_ERROR="python ipc failed: ${py_err//$'\n'/ }"
+      LAST_IPC_ERROR="python ipc failed: addr=${addr_display} event_id_extracted=true preview=\"${preview}\" detail=${py_err//$'\n'/ }"
     fi
     return $py_rc
   fi
-  LAST_IPC_ERROR="tcp ipc failed"
+  LAST_IPC_ERROR="tcp ipc failed: addr=${addr_display} event_id_extracted=true preview=\"${preview}\""
   return $rc
 }
 
@@ -709,6 +750,7 @@ log_task_header_if_needed "$task_log_file" "$task_id" "$task_id"
 log_task_line "## Performer session"
 log_task_line ""
 log_task_line "- Task ID: ${task_id}"
+log_task_line "- Coordinator IPC address: $(ipc_addr_display)"
 log_task_line "- Started: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 log_task_line ""
 soft_emit_performer_event "started" "$CURRENT_PHASE" "started" "$(jq -nc --arg tool "$tool" --arg worktree "$worktree" '{tool:$tool, worktree:$worktree}')"

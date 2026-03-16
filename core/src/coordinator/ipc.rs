@@ -208,6 +208,7 @@ mod tests {
     use crate::coordinator_storage::CoordinatorStorage;
     use crate::ProjectPaths;
     use std::fs;
+    use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_root(label: &str) -> std::path::PathBuf {
@@ -219,6 +220,66 @@ mod tests {
                 .expect("time")
                 .as_nanos()
         ))
+    }
+
+    fn build_shell_event_line(
+        event_id: &str,
+        source: &str,
+        task_id: &str,
+        event_type: &str,
+        phase: &str,
+        status: &str,
+        payload_json: &str,
+    ) -> String {
+        let output = Command::new("bash")
+            .arg("-lc")
+            .arg(
+                r#"
+jq -nc \
+  --arg schema_version "1" \
+  --arg event_id "$EVENT_ID" \
+  --arg run_id "run-test" \
+  --argjson seq 1 \
+  --arg ts "2026-03-16T00:00:00Z" \
+  --arg source "$SOURCE" \
+  --arg task_id "$TASK_ID" \
+  --arg type "$EVENT_TYPE" \
+  --arg phase "$PHASE" \
+  --arg status "$STATUS" \
+  --argjson payload "$PAYLOAD_JSON" \
+  '({
+    schema_version:$schema_version,
+    event_id:$event_id,
+    run_id:$run_id,
+    seq:$seq,
+    ts:$ts,
+    source:$source,
+    task_id:$task_id,
+    type:$type,
+    phase:($phase|select(length>0)),
+    status:$status,
+    payload:$payload
+  })'
+"#,
+            )
+            .env("EVENT_ID", event_id)
+            .env("SOURCE", source)
+            .env("TASK_ID", task_id)
+            .env("EVENT_TYPE", event_type)
+            .env("PHASE", phase)
+            .env("STATUS", status)
+            .env("PAYLOAD_JSON", payload_json)
+            .output()
+            .expect("build shell event line");
+        assert!(
+            output.status.success(),
+            "shell event build failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("utf8 event line")
+            .trim()
+            .to_string()
     }
 
     #[test]
@@ -314,6 +375,59 @@ mod tests {
             .expect("persisted event");
         assert_eq!(event.event_type, "phase_result");
         assert_eq!(event.task_id.as_deref(), Some("T9"));
+        assert_eq!(
+            event.payload_result_kind(),
+            Some(crate::coordinator::PerformerCompletionKind::AlreadySatisfied)
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn process_ipc_event_accepts_shell_built_started_event() {
+        let root = temp_root("shell-started");
+        fs::create_dir_all(&root).expect("create root");
+        let paths = ProjectPaths::from_root(&root);
+        let (tx, _) = tokio::sync::broadcast::channel(16);
+        let event_line = build_shell_event_line(
+            "evt-shell-started",
+            "coordinator-worktree:T1:1",
+            "T1",
+            "started",
+            "dev",
+            "started",
+            r#"{"tool":"codex","worktree":"/tmp/wt"}"#,
+        );
+        let ack = process_ipc_event(&event_line, &paths, &tx);
+        assert!(ack.ok, "shell started event rejected: {:?}", ack.error);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn process_ipc_event_accepts_shell_built_phase_result_event() {
+        let root = temp_root("shell-phase-result");
+        fs::create_dir_all(&root).expect("create root");
+        let paths = ProjectPaths::from_root(&root);
+        let (tx, _) = tokio::sync::broadcast::channel(16);
+        let event_line = build_shell_event_line(
+            "evt-shell-phase-result",
+            "coordinator-worktree:T2:1",
+            "T2",
+            "phase_result",
+            "dev",
+            "done",
+            r#"{"attempt":1,"result_kind":"already_satisfied","message":"ok"}"#,
+        );
+        let ack = process_ipc_event(&event_line, &paths, &tx);
+        assert!(ack.ok, "shell phase_result event rejected: {:?}", ack.error);
+        let storage_paths =
+            crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&paths);
+        let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
+        let snapshot = sqlite.load_snapshot().expect("load snapshot");
+        let event = snapshot
+            .events
+            .iter()
+            .find(|event| event.event_id == "evt-shell-phase-result")
+            .expect("persisted event");
         assert_eq!(
             event.payload_result_kind(),
             Some(crate::coordinator::PerformerCompletionKind::AlreadySatisfied)
