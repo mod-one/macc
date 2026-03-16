@@ -107,8 +107,16 @@ fields:
     kind:
       type: enum
       options: ["default", "auto_edit", "plan", "yolo"]
-    help: "The default approval mode for tool execution. ‘default’ prompts for approval, ‘auto_edit’ auto-approves edit tools, and ‘plan’ is read-only mode."
+    help: "The approval mode for tool execution. ‘default’ prompts for approval, ‘auto_edit’ auto-approves edit tools, and ‘plan’ is read-only mode."
     pointer: /tools/config/gemini/tools/approvalMode
+    default: "default"
+  - id: general_defaultApprovalMode
+    label: general defaultApprovalMode
+    kind:
+      type: enum
+      options: ["default", "auto_edit", "plan"]
+    help: "The default approval mode for general tool execution. ‘default’ prompts for approval, ‘auto_edit’ auto-approves edit tools, and ‘plan’ is read-only mode."
+    pointer: /tools/config/gemini/general/defaultApprovalMode
     default: "default"
   #- id: tools_sandbox
   #  label: Tools Sandbox
