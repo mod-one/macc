@@ -196,7 +196,15 @@ Useful commands during execution:
 ```bash
 macc coordinator status
 macc coordinator sync
+macc coordinator sync-prd       # reconcile tasks from commit history
 macc coordinator reconcile
+```
+
+After a run completes, optionally enrich the PRD with AI-generated notes:
+
+```bash
+macc coordinator audit-prd -- --tool claude --dry-run  # preview the prompt
+macc coordinator audit-prd -- --tool claude             # invoke the tool
 ```
 
 ## Error codes and auto-retry
@@ -253,6 +261,7 @@ ls -la .macc/log/performer
 2. Attempt deterministic recovery:
 
 ```bash
+macc coordinator sync-prd
 macc coordinator reconcile
 macc coordinator unlock
 macc coordinator cleanup
@@ -354,7 +363,7 @@ Coordinator orchestrates the end-to-end automation cycle: it reads the task regi
 
 - `macc coordinator` (default full cycle: sync -> dispatch -> advance -> reconcile -> cleanup in loop until convergence)
 - `macc coordinator` opens the TUI `Coordinator Live` screen and starts coordinator run.
-- `macc coordinator [run|dispatch|advance|sync|status|reconcile|unlock|cleanup|stop]`
+- `macc coordinator [run|dispatch|advance|sync|sync-prd|audit-prd|status|reconcile|unlock|cleanup|stop]`
 - `macc coordinator run --no-tui` keeps the previous headless CLI behavior.
 - `macc coordinator stop [--graceful] [--remove-worktrees] [--remove-branches]`
 - Coordinator options can override config at runtime:
@@ -452,6 +461,33 @@ Coordinator defaults and advanced settings live in:
 - `.macc/macc.yaml` under `automation.coordinator`
 
 You can edit these settings visually in the TUI Automation screen or override them with `macc coordinator` flags. Legacy environment variables are no longer used for coordinator configuration.
+
+## Commit convention and PRD reconciliation
+
+MACC enforces a unified commit message format across all performers and merge workers:
+
+```
+<type>: <TASK-ID> - <title>
+
+[macc:task <TASK-ID>]
+[macc:phase <phase>]
+[macc:tool <tool>]
+```
+
+This convention enables two post-run features:
+
+### `sync-prd` — deterministic reconciliation
+
+`macc coordinator sync-prd` scans the reference branch for committed task IDs and transitions matching tasks to `merged`. No AI involved — pure pattern matching. Also runs automatically as part of `macc coordinator sync`.
+
+### `audit-prd` — AI-powered PRD enrichment
+
+`macc coordinator audit-prd -- --tool <tool_id>` gathers commit context for completed tasks and builds a structured prompt for an LLM to:
+- Update `notes` of completed tasks with what was actually delivered.
+- Rewrite `description`/`steps` of todo tasks if integrated code changed the architecture.
+- Task IDs are never deleted or renamed.
+
+Use `--dry-run` to preview the prompt without invoking any tool.
 
 ## Session strategy
 
