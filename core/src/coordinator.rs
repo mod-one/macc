@@ -4,12 +4,14 @@ use std::collections::BTreeMap;
 use std::str::FromStr;
 
 pub mod args;
+pub mod commit_reconciler;
 pub mod control_plane;
 pub mod engine;
 pub mod helpers;
 pub mod ipc;
 pub mod logs;
 pub mod model;
+pub mod prd_auditor;
 pub mod runtime;
 pub mod session_manager;
 pub mod state;

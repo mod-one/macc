@@ -254,9 +254,12 @@ checkout_out="$(git -C "$REPO_DIR" checkout "$BASE_BRANCH" 2>&1)" || {
   exit 1
 }
 
-merge_msg="macc: merge task ${TASK_ID}"
+# --- MACC commit message convention (see core/src/commit_message.rs) ---
+merge_subject="macc: ${TASK_ID} - merge task ${TASK_ID}"
+merge_trailer="[macc:task ${TASK_ID}]
+[macc:merge true]"
 set +e
-merge_out="$(git -C "$REPO_DIR" merge --no-ff -m "$merge_msg" "$BRANCH" 2>&1)"
+merge_out="$(git -C "$REPO_DIR" merge --no-ff -m "$merge_subject" -m "" -m "$merge_trailer" "$BRANCH" 2>&1)"
 merge_rc=$?
 set -e
 

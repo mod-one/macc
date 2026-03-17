@@ -201,10 +201,14 @@ sequenceDiagram
 #### 3.4.5 Failure recovery
 Standard recovery sequence:
 1) `macc coordinator status`
-2) `macc coordinator reconcile`
-3) `macc coordinator unlock`
-4) `macc coordinator cleanup`
-5) `macc coordinator` (resume loop)
+2) `macc coordinator sync-prd` (reconcile tasks from commit history)
+3) `macc coordinator reconcile`
+4) `macc coordinator unlock`
+5) `macc coordinator cleanup`
+6) `macc coordinator` (resume loop)
+
+Post-run PRD enrichment (optional):
+- `macc coordinator audit-prd -- --tool <tool_id>` (AI-powered update of prd.json notes)
 
 Stop flow:
 - graceful stop: `macc coordinator stop --graceful`
@@ -574,7 +578,7 @@ Important behavior:
 
 - `macc coordinator` runs full-cycle mode by default (`run`).
 - Full-cycle loop: `sync -> dispatch -> advance -> reconcile -> cleanup` until convergence.
-- `macc coordinator [run|dispatch|advance|resume|sync|status|reconcile|unlock|cleanup]`
+- `macc coordinator [run|dispatch|advance|resume|sync|sync-prd|audit-prd|status|reconcile|unlock|cleanup]`
 - `run`, `dispatch`, `advance`, `reconcile`, and `cleanup` are handled natively in Rust.
 - Worktrees are reused as worker slots (not task-coupled names): once a task is merged, the slot is reset to reference, moved to a fresh branch, refreshed for the new task, then relaunched.
 - New worker worktrees are created only when no reusable slot is available; pool size is bounded by `max_parallel`.
@@ -601,7 +605,79 @@ Important behavior:
   - Hook returns JSON object on stdout (mode-specific fields such as `pr_url`, `decision`, `status`, `reason`).
   - Without hook, coordinator can use local fallback merge when `COORDINATOR_AUTOMERGE=true`.
 
-### 12.3.1 Realtime orchestrator target (next evolution)
+### 12.3.1 Commit message convention
+
+MACC enforces a unified commit message format used by performers, merge workers, and the reconciliation engine. The format is defined in `core/src/commit_message.rs` (single source of truth).
+
+**Subject format**: `<type>: <TASK-ID> - <title>`
+
+Supported types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`, `macc`.
+
+**Trailers** (in commit body, one per line):
+- `[macc:task <TASK-ID>]` — required, links the commit to a task
+- `[macc:phase <phase>]` — optional, records the coordinator phase (dev/review/fix/integrate)
+- `[macc:tool <tool>]` — optional, records which AI tool produced the commit
+- `[macc:merge true]` — marks a merge commit
+
+**Parsing (3-tier extraction)**:
+1. Structured `[macc:task ID]` tags (highest priority)
+2. Conventional subject regex (`<type>: <ID> - ...`)
+3. Legacy heuristic regex (fallback for older commits)
+
+The `commit_message` module provides: `task_commit()`, `merge_commit()`, `parse()`, `shell_commit_args()`, and type-safe `CommitType` / `CommitMessage` / `ParsedCommit` structs.
+
+### 12.3.2 PRD reconciliation from commit history (`sync-prd`)
+
+**Command**: `macc coordinator sync-prd`
+
+Deterministic reconciliation that scans the reference branch for committed task IDs and transitions matching tasks to `merged`. No AI involved — pure pattern matching.
+
+**How it works**:
+1. Reads all commits on `reference_branch` (default: `main`) via `git log` with NUL-delimited format.
+2. Extracts task IDs from each commit using the 3-tier parser (§12.3.1).
+3. Compares extracted IDs against the task registry.
+4. Tasks in reconcilable states (`todo`, `claimed`, `in_progress`, `pr_open`, `changes_requested`, `queued`) are transitioned to `merged`.
+5. Tasks already in terminal states (`merged`, `abandoned`) are skipped.
+6. Saves updated registry back (respects storage mode: JSON or SQLite).
+
+**Integration**: `sync-prd` is also called automatically as part of `coordinator sync`, running after the PRD registry sync and before dispatch. This prevents re-dispatching tasks that were already merged on the reference branch.
+
+**Configuration**:
+- `reference_branch`: resolved from env → `automation.coordinator.reference_branch` → `"main"` (default).
+
+**Module**: `core/src/coordinator/commit_reconciler.rs` (pure business logic, no CLI/UI).
+
+### 12.3.3 AI-powered PRD audit (`audit-prd`)
+
+**Command**: `macc coordinator audit-prd [-- --tool <tool_id>] [-- --dry-run]`
+
+Uses an LLM to enrich `prd.json` based on what was actually delivered, updating completed task notes and rewriting todo task descriptions when the integrated code has changed the intended architecture.
+
+**How it works**:
+1. Loads the PRD file (`--prd` or `automation.coordinator.prd_file` or `prd.json`).
+2. Loads the task registry (respects storage mode).
+3. Reads all commits on `reference_branch` and maps them to completed tasks.
+4. Gathers `git diff --stat` for each commit to provide file-level change summaries.
+5. Builds a structured LLM prompt containing:
+   - The current `prd.json` content (truncated at 80k chars if needed).
+   - Per-completed-task commit context (SHA, subject, diff stats).
+   - List of todo task IDs for architectural impact review.
+6. If `--tool <tool_id>` is provided (and not `--dry-run`), sends the prompt to the tool via its performer spec.
+
+**LLM instructions in the prompt**:
+- Update `notes` of completed tasks to reflect what was actually delivered.
+- Rewrite `description`/`steps` of todo tasks if integrated code changed the architecture.
+- Never delete or rename task IDs.
+- Output the complete updated `prd.json`.
+
+**Modes**:
+- `--dry-run`: generate and display the prompt without invoking any tool.
+- No `--tool`: generate and display the prompt (same as dry-run).
+- `--tool <id>`: invoke the specified AI tool with the prompt.
+
+**Module**: `core/src/coordinator/prd_auditor.rs` (pure business logic — prompt building, context gathering, no tool invocation).
+
+### 12.3.4 Realtime orchestrator target (next evolution)
 
 To remove ambiguity between "task dispatched" and "task actually running", MACC targets a split model:
 
@@ -795,7 +871,16 @@ macc/
 - ✅ `macc worktree list` shows worktrees.
 - ✅ `macc worktree prune` removes merged ones (or those removed in git).
 
-### 18.5 Security
+### 18.5 PRD reconciliation and audit
+- ✅ Unified commit message format with `[macc:task ID]` trailers enforced by performers and merge workers.
+- ✅ `macc coordinator sync-prd` deterministically transitions tasks to `merged` based on commit history (no AI).
+- ✅ `sync-prd` runs automatically as part of `coordinator sync` to prevent re-dispatching completed tasks.
+- ✅ 3-tier task ID extraction (structured tags → conventional subject → legacy heuristic) for backward compatibility.
+- ✅ `macc coordinator audit-prd` builds a structured LLM prompt from commit context for completed tasks.
+- ✅ `audit-prd --dry-run` previews the prompt without invoking any tool.
+- ✅ `audit-prd --tool <id>` sends the prompt to a selected AI tool via its performer spec.
+
+### 18.6 Security
 - ✅ No API key is written into the repo.
 - ✅ Remote packages are data-only; no scripts executed.
 - ✅ User-level modifications = backup + consent.

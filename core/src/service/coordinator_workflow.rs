@@ -36,6 +36,13 @@ pub enum CoordinatorCommand {
     DispatchReadyTasks,
     AdvanceTasks,
     SyncRegistry,
+    /// Reconcile task states from commit history on the reference branch.
+    SyncPrd,
+    /// AI-powered audit: enrich prd.json notes from commit history.
+    AuditPrd {
+        tool: Option<String>,
+        dry_run: bool,
+    },
     GetStatus,
     ReconcileRuntime,
     CleanupMaintenance,
@@ -158,6 +165,7 @@ pub struct CoordinatorCommandResult {
     pub exported_events_path: Option<PathBuf>,
     pub removed_worktrees: Option<usize>,
     pub selected_task: Option<SelectedTask>,
+    pub audit_prd_report: Option<crate::coordinator::prd_auditor::AuditPrdReport>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -189,6 +197,8 @@ pub fn coordinator_command_display_name(command: &CoordinatorCommand) -> &'stati
         CoordinatorCommand::DispatchReadyTasks => "dispatch",
         CoordinatorCommand::AdvanceTasks => "advance",
         CoordinatorCommand::SyncRegistry => "sync",
+        CoordinatorCommand::SyncPrd => "sync-prd",
+        CoordinatorCommand::AuditPrd { .. } => "audit-prd",
         CoordinatorCommand::GetStatus => "status",
         CoordinatorCommand::ReconcileRuntime => "reconcile",
         CoordinatorCommand::CleanupMaintenance => "cleanup",
@@ -241,6 +251,10 @@ pub fn coordinator_command_invocation(
         },
         CoordinatorCommand::SyncRegistry => CoordinatorCommandInvocation {
             action: "sync",
+            args: Vec::new(),
+        },
+        CoordinatorCommand::SyncPrd => CoordinatorCommandInvocation {
+            action: "sync-prd",
             args: Vec::new(),
         },
         CoordinatorCommand::ReconcileRuntime => CoordinatorCommandInvocation {
@@ -392,6 +406,7 @@ pub fn coordinator_command_invocation(
         | CoordinatorCommand::RunCycle
         | CoordinatorCommand::GetStatus
         | CoordinatorCommand::ResumePausedRun
+        | CoordinatorCommand::AuditPrd { .. }
         | CoordinatorCommand::Stop { .. } => {
             return Err(MaccError::Validation(format!(
                 "Coordinator command '{}' is not available as a managed process invocation",
@@ -416,6 +431,8 @@ pub fn coordinator_command_from_name(
         "advance" => Ok(CoordinatorCommand::AdvanceTasks),
         "resume" => Ok(CoordinatorCommand::ResumePausedRun),
         "sync" => Ok(CoordinatorCommand::SyncRegistry),
+        "sync-prd" => Ok(CoordinatorCommand::SyncPrd),
+        "audit-prd" => Ok(parse_audit_prd_command(extra_args)?),
         "status" => Ok(CoordinatorCommand::GetStatus),
         "reconcile" => Ok(CoordinatorCommand::ReconcileRuntime),
         "cleanup" => Ok(CoordinatorCommand::CleanupMaintenance),
@@ -492,6 +509,7 @@ pub fn coordinator_command_emits_runtime_events(command: &CoordinatorCommand) ->
             | CoordinatorCommand::DispatchReadyTasks
             | CoordinatorCommand::AdvanceTasks
             | CoordinatorCommand::SyncRegistry
+            | CoordinatorCommand::SyncPrd
             | CoordinatorCommand::ReconcileRuntime
             | CoordinatorCommand::CleanupMaintenance
             | CoordinatorCommand::RetryTaskPhase { .. }
@@ -592,6 +610,24 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
                 request.env_cfg,
                 request.logger,
             )?;
+        }
+        CoordinatorCommand::SyncPrd => {
+            coordinator_sync_prd(
+                paths,
+                request.coordinator_cfg,
+                request.env_cfg,
+                request.logger,
+            )?;
+        }
+        CoordinatorCommand::AuditPrd { tool, dry_run } => {
+            result.audit_prd_report = Some(coordinator_audit_prd(
+                paths,
+                request.coordinator_cfg,
+                request.env_cfg,
+                request.logger,
+                tool.as_deref(),
+                dry_run,
+            )?);
         }
         CoordinatorCommand::GetStatus => {
             result.status = Some(get_coordinator_status(paths)?);
@@ -1197,6 +1233,8 @@ pub fn coordinator_sync<E: crate::engine::Engine + ?Sized>(
         engine.coordinator_storage_import_json_to_sqlite(paths)?;
     }
     engine.coordinator_sync_registry_from_prd_with_logger(&paths.root, &prd_file, logger)?;
+    // Reconcile task states from commit history on the reference branch.
+    coordinator_sync_prd(paths, coordinator_cfg, env_cfg, logger)?;
     let json_compat = env_cfg
         .json_compat
         .or_else(|| coordinator_cfg.and_then(|c| c.json_compat))
@@ -1205,6 +1243,257 @@ pub fn coordinator_sync<E: crate::engine::Engine + ?Sized>(
         engine.coordinator_storage_export_sqlite_to_json(paths)?;
     }
     Ok(())
+}
+
+/// Reconcile task registry from commit history on the reference branch.
+///
+/// Scans commits on `reference_branch` for MACC task ID tags and transitions
+/// matching tasks that are still in-flight to `merged`.
+///
+/// Called automatically as part of `coordinator_sync` and also available as
+/// a standalone command via `macc coordinator sync-prd`.
+pub fn coordinator_sync_prd(
+    paths: &ProjectPaths,
+    coordinator_cfg: Option<&CoordinatorConfig>,
+    env_cfg: &CoordinatorEnvConfig,
+    logger: Option<&dyn CoordinatorLog>,
+) -> Result<()> {
+    use crate::coordinator::commit_reconciler;
+    use crate::coordinator::helpers::now_iso_coordinator;
+    use crate::coordinator_storage::CoordinatorStoragePaths;
+
+    if let Some(log) = logger {
+        let _ = log.note("- Sync PRD: reconciling tasks from commit history".to_string());
+    }
+
+    let reference_branch = env_cfg
+        .reference_branch
+        .as_deref()
+        .or_else(|| coordinator_cfg.and_then(|c| c.reference_branch.as_deref()))
+        .unwrap_or("main");
+
+    // Read commits on the reference branch
+    let commits = commit_reconciler::read_commit_range(&paths.root, None, reference_branch)?;
+    if commits.is_empty() {
+        if let Some(log) = logger {
+            let _ = log.note(format!(
+                "- Sync PRD: no commits found on '{}', skipping",
+                reference_branch
+            ));
+        }
+        return Ok(());
+    }
+
+    // Load the task registry
+    let storage_mode =
+        coordinator_engine::resolve_storage_mode(env_cfg, coordinator_cfg)?;
+    let store_paths = CoordinatorStoragePaths::from_project_paths(paths);
+    let mut snapshot = match storage_mode {
+        CoordinatorStorageMode::Json => {
+            crate::coordinator_storage::JsonStorage::new(store_paths.clone()).load_snapshot()?
+        }
+        _ => {
+            crate::coordinator_storage::SqliteStorage::new(store_paths.clone()).load_snapshot()?
+        }
+    };
+
+    // Reconcile
+    let report = commit_reconciler::reconcile(&snapshot.registry, &commits);
+
+    if report.reconciled.is_empty() {
+        if let Some(log) = logger {
+            let _ = log.note(format!(
+                "- Sync PRD: {} commits scanned, no tasks to reconcile",
+                report.commits_scanned
+            ));
+        }
+        return Ok(());
+    }
+
+    // Apply transitions
+    let now = now_iso_coordinator();
+    if let Some(log) = logger {
+        for entry in &report.reconciled {
+            let _ = log.note(format!(
+                "- Sync PRD: {} ({} -> merged) matched commit {}",
+                entry.task_id,
+                entry.previous_state,
+                &entry.matched_commit_sha[..7.min(entry.matched_commit_sha.len())]
+            ));
+        }
+    }
+    commit_reconciler::apply_reconcile_report(&mut snapshot.registry, &report, &now);
+
+    // Save back
+    match storage_mode {
+        CoordinatorStorageMode::Json => {
+            crate::coordinator_storage::JsonStorage::new(store_paths).save_snapshot(&snapshot)?;
+        }
+        _ => {
+            crate::coordinator_storage::SqliteStorage::new(store_paths).save_snapshot(&snapshot)?;
+        }
+    }
+
+    if let Some(log) = logger {
+        let _ = log.note(format!(
+            "- Sync PRD: reconciled {} task(s) from {} commit(s)",
+            report.reconciled.len(),
+            report.commits_scanned
+        ));
+    }
+    Ok(())
+}
+
+/// AI-powered PRD audit: gathers commit context for completed tasks and
+/// builds a prompt for an LLM to update `prd.json`.
+///
+/// When `tool` is provided, the prompt is sent to the tool via its performer
+/// spec. When `dry_run` is true (or no tool given), only the prompt is
+/// returned without invoking any tool.
+pub fn coordinator_audit_prd(
+    paths: &ProjectPaths,
+    coordinator_cfg: Option<&CoordinatorConfig>,
+    env_cfg: &CoordinatorEnvConfig,
+    logger: Option<&dyn CoordinatorLog>,
+    tool: Option<&str>,
+    dry_run: bool,
+) -> Result<crate::coordinator::prd_auditor::AuditPrdReport> {
+    use crate::coordinator::prd_auditor;
+
+    if let Some(log) = logger {
+        let _ = log.note("- Audit PRD: gathering commit context for completed tasks".to_string());
+    }
+
+    let reference_branch = env_cfg
+        .reference_branch
+        .as_deref()
+        .or_else(|| coordinator_cfg.and_then(|c| c.reference_branch.as_deref()))
+        .unwrap_or("main");
+
+    // Load the PRD file
+    let prd_path = env_cfg
+        .prd
+        .as_ref()
+        .map(std::path::PathBuf::from)
+        .or_else(|| coordinator_cfg.and_then(|c| c.prd_file.as_ref().map(std::path::PathBuf::from)))
+        .unwrap_or_else(|| paths.root.join("prd.json"));
+
+    if !prd_path.exists() {
+        return Err(MaccError::Validation(format!(
+            "PRD file not found: {}. Specify via --prd or automation.coordinator.prd in config.",
+            prd_path.display()
+        )));
+    }
+    let prd_json = std::fs::read_to_string(&prd_path).map_err(|e| MaccError::Io {
+        path: prd_path.display().to_string(),
+        action: "read PRD file for audit".into(),
+        source: e,
+    })?;
+
+    // Load task registry
+    let storage_mode =
+        coordinator_engine::resolve_storage_mode(env_cfg, coordinator_cfg)?;
+    let store_paths = CoordinatorStoragePaths::from_project_paths(paths);
+    let snapshot = match storage_mode {
+        CoordinatorStorageMode::Json => {
+            JsonStorage::new(store_paths.clone()).load_snapshot()?
+        }
+        _ => {
+            SqliteStorage::new(store_paths.clone()).load_snapshot()?
+        }
+    };
+
+    // Build the audit report with prompt
+    let report = prd_auditor::prepare_audit(
+        &paths.root,
+        &prd_json,
+        &snapshot.registry,
+        reference_branch,
+        true, // include diff stats
+    )?;
+
+    if !report.prompt_generated {
+        if let Some(log) = logger {
+            let _ = log.note(
+                "- Audit PRD: no completed tasks with commits or todo tasks found, nothing to audit"
+                    .to_string(),
+            );
+        }
+        return Ok(report);
+    }
+
+    if let Some(log) = logger {
+        let _ = log.note(format!(
+            "- Audit PRD: {} completed task(s) with context, {} todo task(s)",
+            report.completed_with_context, report.todo_tasks
+        ));
+    }
+
+    // If dry_run or no tool, just return the prompt
+    if dry_run || tool.is_none() {
+        if let Some(log) = logger {
+            let mode = if dry_run { "dry-run" } else { "no tool specified" };
+            let _ = log.note(format!(
+                "- Audit PRD: prompt generated ({}) — use --tool <id> to invoke an AI tool",
+                mode
+            ));
+        }
+        return Ok(report);
+    }
+
+    // Invoke the tool
+    let tool_id = tool.unwrap();
+    invoke_audit_tool(paths, tool_id, report.prompt.as_deref().unwrap_or(""), logger)?;
+
+    if let Some(log) = logger {
+        let _ = log.note(format!(
+            "- Audit PRD: tool '{}' invoked successfully",
+            tool_id
+        ));
+    }
+
+    Ok(report)
+}
+
+/// Invoke an AI tool with the audit prompt via its performer spec.
+fn invoke_audit_tool(
+    paths: &ProjectPaths,
+    tool_id: &str,
+    prompt: &str,
+    logger: Option<&dyn CoordinatorLog>,
+) -> Result<()> {
+    use crate::tool::ToolSpecLoader;
+
+    let loader = ToolSpecLoader::new(ToolSpecLoader::default_search_paths(&paths.root));
+    let (specs, _) = loader.load_all_with_embedded();
+
+    let spec = specs
+        .iter()
+        .find(|s| s.id == tool_id)
+        .ok_or_else(|| {
+            MaccError::Validation(format!(
+                "Tool '{}' not found. Available tools: {}",
+                tool_id,
+                specs.iter().map(|s| s.id.as_str()).collect::<Vec<_>>().join(", ")
+            ))
+        })?;
+
+    let performer = spec.performer.as_ref().ok_or_else(|| {
+        MaccError::Validation(format!(
+            "Tool '{}' has no performer configuration; cannot invoke for audit.",
+            tool_id
+        ))
+    })?;
+
+    if let Some(log) = logger {
+        let _ = log.note(format!(
+            "- Audit PRD: invoking tool '{}' (command: {})",
+            tool_id, performer.command
+        ));
+    }
+
+    // Delegate to the shared context tool invocation
+    crate::service::context::invoke_tool_with_prompt(paths, performer, prompt)
 }
 
 pub fn coordinator_unlock<E: crate::engine::Engine + ?Sized>(
@@ -1376,6 +1665,26 @@ pub fn coordinator_retry_phase<E: crate::engine::Engine + ?Sized>(
 
     engine.coordinator_state_save_snapshot(&paths.root, &state_args, &snapshot)?;
     Ok(())
+}
+
+fn parse_audit_prd_command(args: &[String]) -> Result<CoordinatorCommand> {
+    let mut tool: Option<String> = None;
+    let mut dry_run = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--tool" => {
+                i += 1;
+                tool = args.get(i).cloned();
+            }
+            "--dry-run" => {
+                dry_run = true;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    Ok(CoordinatorCommand::AuditPrd { tool, dry_run })
 }
 
 fn parse_retry_phase_args(args: &[String]) -> Result<(String, String, bool)> {

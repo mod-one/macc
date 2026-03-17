@@ -906,7 +906,7 @@ where
     }
 
     let _ = git::checkout(repo_root, base, false);
-    let merge_msg = format!("macc: merge task {}", task_id);
+    let merge_msg = crate::commit_message::merge_commit(task_id).format();
     let merge = git::run_git_output_mapped(
         repo_root,
         &["merge", "--no-ff", "-m", &merge_msg, branch],
