@@ -1,0 +1,262 @@
+{
+	"lot": "Lot RL — Coordinator Rate-Limit Awareness",
+	"version": "1.0",
+	"generated_at": "2026-03-17",
+	"timezone": "Europe/Paris",
+	"priority_mapping": {
+		"0": "P0 / This task should not be done in parallel with another.",
+		"1": "P1 / Must-have for MVP",
+		"2": "P2 / Should-have for MVP",
+		"4": "P3 / Nice-to-have (MVP+) or preparatory",
+		"5": "P4 / Lowest priority / can defer"
+	},
+	"assumptions": [
+		"The MACC coordinator already has a working error-code taxonomy (E100-E900) and auto-retry framework in engine.rs.",
+		"The task_selector already supports tool_priority, max_parallel_per_tool, and tool_specializations for routing.",
+		"The TUI CoordinatorLive screen, AppState, and pause overlay exist and display active tasks, events, and errors.",
+		"The Web API exposes ApiCoordinatorStatus with pause context via /api/v1/status.",
+		"TaskRuntime already has slo_warnings (BTreeMap<String, SloWarningRecord>) and upsert_slo_warning() method.",
+		"Performer.sh and tool runners emit structured events via IPC (heartbeat, phase_result, failed).",
+		"The coordinator pause mechanism (pause file + blocking loop + TUI overlay) is fully operational.",
+		"All tasks aim to be small enough to complete in < 1 day by a single AI agent."
+	],
+	"tasks": [
+		{
+			"id": "RL-TYPES-001",
+			"title": "Define rate-limit error codes, types, and config fields",
+			"category": "contracts",
+			"description": "Problem/Goal: MACC has no dedicated error category for rate-limit / quota exhaustion. The existing error taxonomy (E100-E900) does not distinguish transient throttling from permanent failures, and the coordinator has no types to represent tool-level rate-limit state.\nKey actions:\n  1. Add E600 error code series: E601 (rate-limited / 429), E602 (quota exhausted / hard limit).\n  2. Define RateLimitInfo struct (tool_id, error_code, retry_after_seconds, detected_at, source_header).\n  3. Define ToolThrottleState struct (tool_id, throttled_until, consecutive_429_count, backoff_seconds, last_rate_limit_info).\n  4. Add coordinator config fields: rate_limit_backoff_base_seconds, rate_limit_backoff_max_seconds, rate_limit_fallback_enabled, rate_limit_throttle_parallel.\n  5. Add corresponding fields to CoordinatorEnvConfig for CLI/env override.\nOut of scope: Actual detection logic, backoff engine, routing changes, TUI display.\nSuccess criteria: cargo check -p macc-core passes. All new types are Serialize+Deserialize+Clone+Debug+Default. Config fields are documented with serde defaults. Unit tests validate serialization roundtrip for all new types.",
+			"objective": "Establish the contracts and vocabulary for rate-limit handling before any implementation begins.",
+			"result": "New file core/src/coordinator/rate_limit.rs with RateLimitInfo, ToolThrottleState, and helper functions. E601/E602 documented alongside existing codes. CoordinatorConfig and CoordinatorEnvConfig extended with 4 new fields each. Unit tests pass.",
+			"steps": [
+				"Create core/src/coordinator/rate_limit.rs with RateLimitInfo and ToolThrottleState structs.",
+				"Add E600 series constants (E601, E602) to the module with doc comments explaining the distinction (transient vs hard quota).",
+				"Add pub mod rate_limit to core/src/coordinator.rs.",
+				"Add rate_limit_backoff_base_seconds (default 30), rate_limit_backoff_max_seconds (default 300), rate_limit_fallback_enabled (default true), rate_limit_throttle_parallel (default true) to CoordinatorConfig in core/src/config/mod.rs with #[serde(default)].",
+				"Mirror the same 4 fields as Option<T> in CoordinatorEnvConfig in core/src/coordinator/types.rs.",
+				"Add resolve helper functions: resolve_rate_limit_backoff_base(), resolve_rate_limit_backoff_max(), etc. following the existing resolve_* pattern in control_plane.rs.",
+				"Write unit tests: serialization roundtrip for RateLimitInfo and ToolThrottleState, config default values.",
+				"Verify cargo check -p macc-core and cargo test -p macc-core pass."
+			],
+			"notes": "This is the contracts-first task. All subsequent tasks depend on these types. Follow the existing resolve pattern: env_cfg -> coordinator_cfg -> default.",
+			"exclusive_resources": ["core/src/coordinator.rs", "core/src/coordinator/types.rs", "core/src/config/mod.rs"],
+			"dependencies": [],
+			"priority": "0"
+		},
+		{
+			"id": "RL-DETECT-002",
+			"title": "Detect rate-limit errors in performer output and emit E601/E602",
+			"category": "performer",
+			"description": "Problem/Goal: Currently, rate-limit errors (HTTP 429, RESOURCE_EXHAUSTED, quota exhaustion messages) from AI tools are treated as generic task failures (E101). The performer and coordinator cannot distinguish throttling from real errors.\nKey actions:\n  1. In core/src/coordinator/engine.rs, extend the job-completion error classification to detect rate-limit patterns.\n  2. Parse performer stderr/event payload for known rate-limit signatures: '429', 'RESOURCE_EXHAUSTED', 'rate limit', 'quota exceeded', 'Too Many Requests', 'token limit', 'usage limit reached'.\n  3. Parse Retry-After and x-ratelimit-reset headers if present in the error output.\n  4. Classify as E601 (transient rate-limit) or E602 (hard quota exhaustion, e.g. monthly cap reached).\n  5. Populate RateLimitInfo with retry_after_seconds when header is available.\n  6. Emit a rate_limit_detected event via the event bus.\nOut of scope: Backoff delay logic, tool routing changes, TUI display.\nSuccess criteria: When a performer exits with output containing '429' or 'RESOURCE_EXHAUSTED', the task gets error_code E601 (not E101). When output contains 'quota exceeded' or 'usage limit reached', error_code is E602. RateLimitInfo is populated. Event is emitted. Unit tests cover all detection patterns.",
+			"objective": "Correctly categorize rate-limit failures so the coordinator can apply specialized handling instead of generic retry.",
+			"result": "core/src/coordinator/rate_limit.rs gains detect_rate_limit_from_output() and parse_retry_after() functions. engine.rs calls detection before generic error classification. New event type rate_limit_detected added to COORDINATOR_EVENT_TYPES_V1. Tests cover 8+ detection patterns.",
+			"steps": [
+				"Add detect_rate_limit_from_output(stderr: &str, stdout: &str) -> Option<RateLimitInfo> to core/src/coordinator/rate_limit.rs using regex patterns for all known signatures.",
+				"Add parse_retry_after(output: &str) -> Option<u64> to extract seconds from Retry-After or x-ratelimit-reset headers in raw output.",
+				"Add rate_limit_detected to COORDINATOR_EVENT_TYPES_V1 in core/src/coordinator.rs.",
+				"In engine.rs apply_job_completion_in_registry(), call detect_rate_limit_from_output() BEFORE the generic error-code assignment. If matched, set last_error_code to E601 or E602.",
+				"Store RateLimitInfo in the task's runtime extra field (serde_json::Value) for downstream consumers.",
+				"Emit a rate_limit_detected event with tool_id and retry_after in the event payload.",
+				"Write unit tests: detect 429, RESOURCE_EXHAUSTED, 'rate limit exceeded', 'quota exceeded', 'usage limit reached', 'Too Many Requests'. Test Retry-After parsing (integer seconds and HTTP-date). Test E601 vs E602 distinction.",
+				"Verify cargo test -p macc-core passes."
+			],
+			"notes": "Detection must be case-insensitive. The regex patterns should be compiled once (lazy_static or OnceLock). E602 is for hard quotas (monthly/weekly caps), E601 for transient 429s.",
+			"exclusive_resources": ["core/src/coordinator/rate_limit.rs", "core/src/coordinator/engine.rs"],
+			"dependencies": ["RL-TYPES-001"],
+			"priority": "1"
+		},
+		{
+			"id": "RL-BACKOFF-003",
+			"title": "Implement exponential backoff engine for rate-limited tasks",
+			"category": "coordinator",
+			"description": "Problem/Goal: When a task fails with E601/E602, immediately retrying will worsen the rate-limit situation. The coordinator needs a backoff engine that computes an appropriate delay before re-queuing.\nKey actions:\n  1. Implement compute_backoff_delay() that returns the delay in seconds using: min(base * 2^attempt, max) with jitter.\n  2. If RateLimitInfo contains retry_after_seconds (from Retry-After header), use that value instead of computed backoff.\n  3. Store ToolThrottleState per tool in the coordinator runtime state.\n  4. When a task fails with E601, update the tool's ToolThrottleState (increment consecutive count, set throttled_until).\n  5. When a task fails with E602, set throttled_until to a longer period (or indefinite until manual resume).\n  6. The existing auto-retry loop in engine.rs should respect throttled_until: if the tool is throttled, do not requeue immediately — set a delayed_until timestamp on the task.\n  7. Add delayed_until field to TaskRuntime.\nOut of scope: Dynamic routing (fallback to other tools), max_parallel adjustment, TUI.\nSuccess criteria: After an E601 failure, the task is requeued with a computed delay. Consecutive 429s produce exponentially increasing delays (30s, 60s, 120s, 240s, capped at max). Retry-After header value overrides computed delay. E602 pauses the tool indefinitely. Tests validate delay computation and state tracking.",
+			"objective": "Prevent retry storms by introducing intelligent delay between rate-limited retries.",
+			"result": "core/src/coordinator/rate_limit.rs gains compute_backoff_delay(), update_throttle_state(). TaskRuntime gains delayed_until field. engine.rs respects delays. 6+ unit tests.",
+			"steps": [
+				"Add compute_backoff_delay(attempt: usize, base_seconds: u64, max_seconds: u64, retry_after: Option<u64>) -> u64 to rate_limit.rs. Use min(base * 2^attempt, max) with 10% random jitter. If retry_after is Some, return max(retry_after, computed).",
+				"Add update_throttle_state(state: &mut ToolThrottleState, info: &RateLimitInfo, backoff: u64, now: &str) to rate_limit.rs. Increment consecutive_429_count, set throttled_until = now + backoff, store last info.",
+				"Add clear_throttle_state(state: &mut ToolThrottleState) to reset when a tool succeeds (consecutive count = 0).",
+				"Add delayed_until: Option<String> (ISO 8601) to TaskRuntime in core/src/coordinator/model.rs.",
+				"In engine.rs apply_job_completion_in_registry(), when error code is E601: compute backoff, set task.task_runtime.delayed_until, requeue to todo with reason 'rate_limit_backoff'.",
+				"In engine.rs, when error code is E602: do NOT auto-retry. Instead, transition to Blocked state with reason 'quota_exhausted'. Emit a quota_exhausted event.",
+				"Add quota_exhausted to COORDINATOR_EVENT_TYPES_V1.",
+				"Write unit tests: backoff computation (1st=30s, 2nd=60s, 3rd=120s, 4th=240s, 5th=300s cap), Retry-After override, throttle state update/clear, E602 blocks task.",
+				"Verify cargo test -p macc-core passes."
+			],
+			"notes": "Jitter should use rand or a simple deterministic hash to avoid all tasks retrying at the exact same time. If rand is not available, use a hash of task_id + attempt as pseudo-jitter.",
+			"exclusive_resources": ["core/src/coordinator/rate_limit.rs", "core/src/coordinator/model.rs"],
+			"dependencies": ["RL-TYPES-001", "RL-DETECT-002"],
+			"priority": "1"
+		},
+		{
+			"id": "RL-DISPATCH-004",
+			"title": "Respect delayed_until during task dispatch selection",
+			"category": "coordinator",
+			"description": "Problem/Goal: After RL-BACKOFF-003 sets delayed_until on rate-limited tasks, the task selector still sees them as 'todo' and tries to dispatch them immediately.\nKey actions:\n  1. In task_selector.rs select_next_ready_task_typed(), filter out tasks where delayed_until > now.\n  2. Add is_task_delayed(task, now) helper to rate_limit.rs.\nOut of scope: Tool-level throttle state checks (covered in RL-ROUTE-005).\nSuccess criteria: A task with delayed_until in the future is not selected for dispatch. Once delayed_until passes, the task becomes eligible again. Unit tests validate both scenarios.",
+			"objective": "Ensure the dispatch loop respects backoff delays and does not re-dispatch throttled tasks prematurely.",
+			"result": "task_selector.rs calls is_task_delayed() during candidate filtering. 3+ unit tests.",
+			"steps": [
+				"Add is_task_delayed(task: &Task, now: &str) -> bool to core/src/coordinator/rate_limit.rs. Compares delayed_until against now using ISO 8601 string comparison.",
+				"In task_selector.rs select_next_ready_task_typed(), add a filter after the state == 'todo' check: skip tasks where is_task_delayed(task, now) returns true.",
+				"Pass current timestamp (now parameter) through the selection function. Extend TaskSelectorConfig or add a now field.",
+				"Write unit tests: task with future delayed_until is skipped, task with past delayed_until is eligible, task without delayed_until is eligible.",
+				"Verify cargo test -p macc-core passes."
+			],
+			"notes": "ISO 8601 string comparison works for chronological ordering (YYYY-MM-DDTHH:MM:SSZ). No chrono dependency needed for the comparison itself.",
+			"exclusive_resources": ["core/src/coordinator/task_selector.rs"],
+			"dependencies": ["RL-BACKOFF-003"],
+			"priority": "1"
+		},
+		{
+			"id": "RL-ROUTE-005",
+			"title": "Implement dynamic tool fallback routing on rate-limit",
+			"category": "coordinator",
+			"description": "Problem/Goal: When the primary tool (e.g. Codex) is rate-limited, the coordinator blocks rather than trying the next tool in tool_priority. The existing pick_tool() in task_selector.rs checks per-tool capacity but not rate-limit state.\nKey actions:\n  1. Maintain a ToolThrottleRegistry (BTreeMap<String, ToolThrottleState>) in the coordinator runtime.\n  2. Extend pick_tool() to skip tools that are currently throttled (throttled_until > now).\n  3. When the primary tool is throttled and rate_limit_fallback_enabled is true, select the next available tool from tool_priority.\n  4. When ALL tools are throttled, return None (no dispatch possible until earliest throttle expires).\n  5. On successful task completion, clear the throttle state for that tool.\n  6. Emit a tool_fallback event when a task is assigned to a non-primary tool due to rate-limiting.\nOut of scope: Concurrency throttle (RL-THROTTLE-006), TUI display.\nSuccess criteria: When tool A is throttled, tasks are dispatched to tool B (next in priority). When all tools are throttled, dispatch pauses. When tool A recovers, it resumes as primary. Unit tests cover fallback chain, all-throttled, and recovery scenarios.",
+			"objective": "Keep the project moving forward by routing tasks to non-throttled tools instead of blocking on a single provider's quota.",
+			"result": "ToolThrottleRegistry type added to rate_limit.rs. pick_tool() checks throttle state. tool_fallback event emitted. 5+ unit tests.",
+			"steps": [
+				"Add ToolThrottleRegistry type alias (BTreeMap<String, ToolThrottleState>) to rate_limit.rs.",
+				"Add is_tool_throttled(registry: &ToolThrottleRegistry, tool_id: &str, now: &str) -> bool helper.",
+				"Add next_throttle_expiry(registry: &ToolThrottleRegistry) -> Option<String> helper (returns earliest throttled_until across all tools).",
+				"Extend TaskSelectorConfig with throttle_registry: Option<ToolThrottleRegistry> field.",
+				"In task_selector.rs pick_tool(), after building the candidate list, filter out tools where is_tool_throttled() returns true (only when rate_limit_fallback_enabled is true in config).",
+				"In control_plane.rs dispatch_ready_tasks_native(), pass the current ToolThrottleRegistry into TaskSelectorConfig.",
+				"On successful job completion in engine.rs, call clear_throttle_state() for the task's tool.",
+				"Add tool_fallback to COORDINATOR_EVENT_TYPES_V1. Emit when a task is assigned to a non-primary tool.",
+				"Write unit tests: primary throttled -> fallback to secondary, all throttled -> None returned, throttle cleared on success, fallback disabled -> no routing change.",
+				"Verify cargo test -p macc-core passes."
+			],
+			"notes": "The ToolThrottleRegistry should be stored in CoordinatorRunState (runtime.rs) for the async control plane, and passed as a parameter for the sync task_selector. Do not store it in the persistent registry (it's volatile runtime state).",
+			"exclusive_resources": ["core/src/coordinator/task_selector.rs", "core/src/coordinator/runtime.rs"],
+			"dependencies": ["RL-BACKOFF-003"],
+			"priority": "1"
+		},
+		{
+			"id": "RL-THROTTLE-006",
+			"title": "Dynamically reduce max_parallel on rate-limit detection",
+			"category": "coordinator",
+			"description": "Problem/Goal: A high max_parallel value saturates TPM (tokens-per-minute) limits quickly. When the first rate-limit is detected, the coordinator should proactively reduce concurrency to smooth out resource consumption.\nKey actions:\n  1. Track effective_max_parallel (mutable at runtime) in CoordinatorRunState, initialized from config max_parallel.\n  2. When a rate-limit E601 is detected and rate_limit_throttle_parallel is true: reduce effective_max_parallel by 1 (min 1).\n  3. When a tool recovers (successful completion after throttle): increase effective_max_parallel by 1 (up to original max_parallel).\n  4. Log concurrency changes via the coordinator logger.\n  5. Emit concurrency_adjusted event.\nOut of scope: TUI display of dynamic concurrency (covered in RL-TUI-007).\nSuccess criteria: First E601 reduces parallel from N to N-1. Recovery restores parallel from N-1 to N. Never drops below 1. Never exceeds original config value. Unit tests validate the ramp-down and ramp-up logic.",
+			"objective": "Prevent rate-limit cascades by reducing concurrency pressure when throttling is detected.",
+			"result": "CoordinatorRunState gains effective_max_parallel and original_max_parallel fields. Dispatch loop uses effective_max_parallel. concurrency_adjusted event added. 4+ unit tests.",
+			"steps": [
+				"Add effective_max_parallel: usize and original_max_parallel: usize to CoordinatorRunState in runtime.rs. Initialize both from config max_parallel.",
+				"Add reduce_parallel(state: &mut CoordinatorRunState) -> usize and restore_parallel(state: &mut CoordinatorRunState) -> usize helpers in rate_limit.rs.",
+				"In control_plane.rs dispatch_ready_tasks_native(), use state.effective_max_parallel instead of the config value for the dispatch limit check.",
+				"In engine.rs, when E601 is detected and rate_limit_throttle_parallel config is true, call reduce_parallel().",
+				"In engine.rs, when a job completes successfully AND the tool was previously throttled, call restore_parallel().",
+				"Add concurrency_adjusted to COORDINATOR_EVENT_TYPES_V1. Emit with old_value and new_value in payload.",
+				"Log via coordinator logger: 'Rate-limit detected: reducing max_parallel from N to N-1' and 'Tool recovered: restoring max_parallel from N-1 to N'.",
+				"Write unit tests: reduce from 4 to 3 on first 429, reduce from 3 to 2 on second 429, never below 1, restore from 2 to 3 on success, never above original.",
+				"Verify cargo test -p macc-core passes."
+			],
+			"notes": "This is deliberately conservative — reduce by 1, not halve. The combination with backoff delays means the system self-heals gradually rather than oscillating.",
+			"exclusive_resources": ["core/src/coordinator/control_plane.rs"],
+			"dependencies": ["RL-DETECT-002", "RL-TYPES-001"],
+			"priority": "2"
+		},
+		{
+			"id": "RL-TUI-007",
+			"title": "Display rate-limit status and quota warnings in TUI CoordinatorLive",
+			"category": "tui",
+			"description": "Problem/Goal: When tools are rate-limited, the TUI shows 'Failed' status which is misleading. Users must dig into logs to understand the situation. The CoordinatorLive screen should show rate-limit state, throttled tools, and dynamic concurrency.\nKey actions:\n  1. Extend CoordinatorTaskSnapshot with throttled_tools (list of tool IDs + throttled_until).\n  2. Extend AppState with coordinator_throttled_tools and coordinator_effective_max_parallel.\n  3. In CoordinatorLive rendering, display a 'Throttled Tools' section below the active tasks.\n  4. When a tool is throttled, show: 'tool_id: throttled until HH:MM:SS (backoff: Ns, consecutive: N)'.\n  5. Show effective_max_parallel vs original: 'Concurrency: 2/4 (throttled)'.\n  6. When E602 (quota exhausted) triggers a pause, display a specific banner: 'PAUSED: Quota exhausted for <tool_id>. Resume after quota resets or switch tool.' instead of generic pause message.\n  7. In active tasks display, show 'rate-limited' runtime status instead of 'failed' for E601 tasks.\nOut of scope: Web API changes (RL-WEB-008).\nSuccess criteria: TUI CoordinatorLive shows throttled tools section. Rate-limited tasks show 'rate-limited' not 'failed'. Quota exhaustion pause banner is specific. Concurrency display shows effective/original.",
+			"objective": "Give operators immediate visibility into rate-limit state without needing to read logs.",
+			"result": "tui/src/state.rs AppState extended. tui/src/lib.rs CoordinatorLive rendering updated. Pause overlay shows quota-specific message for E602.",
+			"steps": [
+				"Add ThrottledToolInfo struct (tool_id, throttled_until, consecutive_count, backoff_seconds) to tui/src/state.rs.",
+				"Add coordinator_throttled_tools: Vec<ThrottledToolInfo> and coordinator_effective_max_parallel: Option<(usize, usize)> (effective, original) to AppState.",
+				"In the CoordinatorLive refresh logic, populate throttled_tools from the coordinator status or events.",
+				"In tui/src/lib.rs CoordinatorLive render, add a 'Throttled Tools' block between the task snapshot and active tasks. Show each throttled tool with countdown.",
+				"Modify the active tasks display: when task.last_error_code starts with 'E601', show runtime_status as 'rate-limited' (amber color) instead of 'failed' (red).",
+				"Modify the concurrency display line to show 'Concurrency: N/M (throttled)' when effective < original.",
+				"In render_coordinator_pause_overlay(), check if pause_reason contains 'quota_exhausted' or error code E602. If so, show specific message: 'Quota exhausted for <tool>. Options: wait for quota reset, switch to another tool, or resume manually.'",
+				"Verify cargo check -p macc-tui passes."
+			],
+			"notes": "Colors: rate-limited = amber/yellow, quota-exhausted = red with bold. Use the existing theme system (t.warn for amber, t.bad for red).",
+			"exclusive_resources": ["tui/src/state.rs", "tui/src/lib.rs"],
+			"dependencies": ["RL-TYPES-001", "RL-BACKOFF-003"],
+			"priority": "2"
+		},
+		{
+			"id": "RL-WEB-008",
+			"title": "Expose rate-limit status in Web API",
+			"category": "web",
+			"description": "Problem/Goal: The Web API (/api/v1/status) does not expose rate-limit state. External dashboards and monitoring tools cannot observe throttling.\nKey actions:\n  1. Extend ApiCoordinatorStatus with throttled_tools array and effective_max_parallel.\n  2. Extend CoordinatorStatus in core with the same fields.\n  3. Populate the fields from the runtime throttle registry when building status.\nOut of scope: TUI changes (RL-TUI-007), detection logic.\nSuccess criteria: GET /api/v1/status returns throttled_tools array (may be empty) and effective_max_parallel. When a tool is throttled, the API response includes it. Existing tests still pass.",
+			"objective": "Enable external observability of rate-limit state via the REST API.",
+			"result": "core/src/service/coordinator_workflow.rs CoordinatorStatus extended. cli/src/commands/web.rs ApiCoordinatorStatus extended. Tests updated.",
+			"steps": [
+				"Add throttled_tools: Vec<ThrottledToolStatus> and effective_max_parallel: Option<usize> to CoordinatorStatus in coordinator_workflow.rs. ThrottledToolStatus has tool_id: String, throttled_until: String, consecutive_count: usize.",
+				"Add matching fields to ApiCoordinatorStatus in web.rs with #[serde(skip_serializing_if = ...)] for empty/None.",
+				"In get_coordinator_status(), populate throttled_tools from the ToolThrottleRegistry if available (read from runtime state or a persisted snapshot).",
+				"Update the test fixture in web.rs to include throttled_tools: vec![] and effective_max_parallel: None.",
+				"Verify cargo check -p macc-cli --tests passes."
+			],
+			"notes": "The Web API is JSON-only. Use skip_serializing_if to keep responses clean when no throttling is active.",
+			"exclusive_resources": ["cli/src/commands/web.rs", "core/src/service/coordinator_workflow.rs"],
+			"dependencies": ["RL-TYPES-001"],
+			"priority": "2"
+		},
+		{
+			"id": "RL-PERFORMER-009",
+			"title": "Update performer.sh and tool runners to emit structured rate-limit errors",
+			"category": "performer",
+			"description": "Problem/Goal: Currently, performer.sh and tool runners (ralph_gemini.sh etc.) use ad-hoc grep patterns to detect rate limits (grep -qE 'RESOURCE_EXHAUSTED|429'). This detection is not standardized and does not emit structured error codes that the Rust coordinator can consume.\nKey actions:\n  1. In performer.sh, after tool execution, run a rate-limit detection pass on stderr/stdout.\n  2. If a rate-limit pattern is detected, emit a structured event with error_code E601 or E602 via the IPC channel.\n  3. Include Retry-After value if found in the output.\n  4. Standardize detection patterns across all tool runners.\nOut of scope: Rust-side detection (RL-DETECT-002 handles that independently). This task ensures shell-side also emits clean signals.\nSuccess criteria: When a tool runner encounters a 429, performer.sh emits a JSON event with error_code=E601 via IPC. When 'quota exceeded' is detected, error_code=E602. The existing IPC protocol is used without changes.",
+			"objective": "Ensure the shell-based performer pipeline emits clean, structured rate-limit signals that complement the Rust-side detection.",
+			"result": "performer.sh gains detect_rate_limit() function. Event emission uses existing emit_event() with error_code field. Works for all tool runners.",
+			"steps": [
+				"Add detect_rate_limit() function to performer.sh that checks combined stderr+stdout for known patterns: 429, RESOURCE_EXHAUSTED, 'rate limit', 'quota exceeded', 'Too Many Requests', 'usage limit reached'.",
+				"Parse Retry-After header value if present in the output.",
+				"Classify as E601 (transient) or E602 (hard quota) using the same heuristics as the Rust side.",
+				"After tool execution failure, call detect_rate_limit(). If matched, emit a 'failed' event with error_code in the payload JSON, plus retry_after_seconds if available.",
+				"Ensure the exit code from performer.sh is non-zero (so the Rust coordinator also processes the failure), but the error_code in the event allows smart handling.",
+				"Remove ad-hoc rate-limit grep patterns from individual runner scripts (ralph_gemini.sh etc.) and consolidate into the shared detect_rate_limit() function.",
+				"Test manually with simulated rate-limit output."
+			],
+			"notes": "The Rust-side detection (RL-DETECT-002) is a safety net — it will also parse the raw output. Both sides detecting the same thing is intentional redundancy, not duplication.",
+			"exclusive_resources": ["automat/performer.sh"],
+			"dependencies": ["RL-TYPES-001"],
+			"priority": "2"
+		},
+		{
+			"id": "RL-CONFIG-010",
+			"title": "Add E601/E602 to default retry list and document all settings",
+			"category": "config",
+			"description": "Problem/Goal: E601 must be in the default error_code_retry_list so rate-limited tasks are auto-retried (with backoff). E602 must NOT be in the retry list (hard quota should block, not retry). All new settings need documentation.\nKey actions:\n  1. Update the default error_code_retry_list from 'E101,E102,E103,E301,E302,E303' to 'E101,E102,E103,E301,E302,E303,E601'.\n  2. Document all new coordinator settings in MACC.md and README.md.\n  3. Update the TUI Automation Settings screen to include the 4 new rate-limit fields.\nOut of scope: Implementation of backoff or routing (already covered).\nSuccess criteria: E601 is auto-retried by default. E602 is NOT auto-retried. MACC.md documents E600 series, all new config fields, and the backoff/fallback behavior. TUI shows 4 new fields in Automation Settings.",
+			"objective": "Ensure rate-limit handling works out of the box with safe defaults and is fully documented.",
+			"result": "Default retry list updated in control_plane.rs. MACC.md §3.4.5.1 extended with E600 series. MACC.md §12.3 extended with rate-limit settings. README.md coordinator section updated. TUI Automation screen renders 4 new fields.",
+			"steps": [
+				"In core/src/coordinator/control_plane.rs, update the default error_code_retry_list string to include E601.",
+				"In MACC.md §3.4.5.1 (Error codes), add E600 series: E601 (rate-limited / transient 429), E602 (quota exhausted / hard limit).",
+				"In MACC.md §12.3 (Coordinator command), document the 4 new config fields: rate_limit_backoff_base_seconds, rate_limit_backoff_max_seconds, rate_limit_fallback_enabled, rate_limit_throttle_parallel.",
+				"Add a new subsection §12.3.5 'Rate-limit handling' in MACC.md describing the full flow: detection -> classification -> backoff -> fallback -> throttle -> visibility.",
+				"Update README.md coordinator section with brief rate-limit handling description.",
+				"In tui/src/lib.rs Automation Settings screen, add input fields for the 4 new coordinator settings following the existing pattern.",
+				"Verify cargo check -p macc-tui passes."
+			],
+			"notes": "The TUI Automation screen already renders 27 coordinator parameters. Adding 4 more follows the same pattern (scroll list with label + input).",
+			"exclusive_resources": ["MACC.md", "CLAUDE.md", "README.md"],
+			"dependencies": ["RL-TYPES-001"],
+			"priority": "2"
+		},
+		{
+			"id": "RL-INTEG-011",
+			"title": "Integration test: full rate-limit lifecycle (detect -> backoff -> fallback -> recover)",
+			"category": "test",
+			"description": "Problem/Goal: Individual unit tests validate each component, but the full lifecycle (detection -> backoff delay -> tool fallback -> concurrency reduction -> recovery) needs end-to-end validation.\nKey actions:\n  1. Write an integration test in core/tests/ that simulates a rate-limit scenario.\n  2. Use a mock task registry with 3 tasks and 2 tools.\n  3. Simulate E601 on tool A, verify: task requeued with delay, tool A throttled, next dispatch uses tool B, effective_max_parallel reduced.\n  4. Simulate E602 on tool B, verify: task blocked (not retried), pause event emitted.\n  5. Simulate successful completion on tool A, verify: throttle cleared, max_parallel restored.\nOut of scope: TUI/Web display testing (visual, not automatable here).\nSuccess criteria: Integration test passes end-to-end. All state transitions are verified. Test runs in < 10 seconds.",
+			"objective": "Validate the complete rate-limit handling pipeline works correctly when all components are wired together.",
+			"result": "New file core/tests/rate_limit_integration.rs with 3 test scenarios covering the full lifecycle.",
+			"steps": [
+				"Create core/tests/rate_limit_integration.rs.",
+				"Build a mock TaskRegistry with 3 tasks (todo state) and a TaskSelectorConfig with tool_priority: [tool-a, tool-b], max_parallel: 4.",
+				"Scenario 1 (E601 backoff + fallback): Simulate tool-a failure with E601. Verify task gets delayed_until set. Verify ToolThrottleRegistry marks tool-a as throttled. Verify next dispatch selects tool-b. Verify effective_max_parallel decreased.",
+				"Scenario 2 (E602 hard block): Simulate tool-b failure with E602. Verify task transitions to Blocked state. Verify it is NOT retried.",
+				"Scenario 3 (recovery): Simulate successful completion on tool-a. Verify throttle cleared. Verify effective_max_parallel restored.",
+				"Ensure all assertions use the public API from rate_limit, task_selector, and engine modules.",
+				"Verify cargo test -p macc-core -- rate_limit_integration passes."
+			],
+			"notes": "This test does not require git or filesystem — it operates on in-memory TaskRegistry and ToolThrottleRegistry. Keep it fast.",
+			"exclusive_resources": [],
+			"dependencies": ["RL-DETECT-002", "RL-BACKOFF-003", "RL-DISPATCH-004", "RL-ROUTE-005", "RL-THROTTLE-006"],
+			"priority": "2"
+		}
+	]
+}
