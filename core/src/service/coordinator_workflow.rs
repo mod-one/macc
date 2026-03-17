@@ -36,6 +36,8 @@ pub enum CoordinatorCommand {
     DispatchReadyTasks,
     AdvanceTasks,
     SyncRegistry,
+    /// Reconcile task states from commit history on the reference branch.
+    SyncPrd,
     GetStatus,
     ReconcileRuntime,
     CleanupMaintenance,
@@ -189,6 +191,7 @@ pub fn coordinator_command_display_name(command: &CoordinatorCommand) -> &'stati
         CoordinatorCommand::DispatchReadyTasks => "dispatch",
         CoordinatorCommand::AdvanceTasks => "advance",
         CoordinatorCommand::SyncRegistry => "sync",
+        CoordinatorCommand::SyncPrd => "sync-prd",
         CoordinatorCommand::GetStatus => "status",
         CoordinatorCommand::ReconcileRuntime => "reconcile",
         CoordinatorCommand::CleanupMaintenance => "cleanup",
@@ -241,6 +244,10 @@ pub fn coordinator_command_invocation(
         },
         CoordinatorCommand::SyncRegistry => CoordinatorCommandInvocation {
             action: "sync",
+            args: Vec::new(),
+        },
+        CoordinatorCommand::SyncPrd => CoordinatorCommandInvocation {
+            action: "sync-prd",
             args: Vec::new(),
         },
         CoordinatorCommand::ReconcileRuntime => CoordinatorCommandInvocation {
@@ -416,6 +423,7 @@ pub fn coordinator_command_from_name(
         "advance" => Ok(CoordinatorCommand::AdvanceTasks),
         "resume" => Ok(CoordinatorCommand::ResumePausedRun),
         "sync" => Ok(CoordinatorCommand::SyncRegistry),
+        "sync-prd" => Ok(CoordinatorCommand::SyncPrd),
         "status" => Ok(CoordinatorCommand::GetStatus),
         "reconcile" => Ok(CoordinatorCommand::ReconcileRuntime),
         "cleanup" => Ok(CoordinatorCommand::CleanupMaintenance),
@@ -492,6 +500,7 @@ pub fn coordinator_command_emits_runtime_events(command: &CoordinatorCommand) ->
             | CoordinatorCommand::DispatchReadyTasks
             | CoordinatorCommand::AdvanceTasks
             | CoordinatorCommand::SyncRegistry
+            | CoordinatorCommand::SyncPrd
             | CoordinatorCommand::ReconcileRuntime
             | CoordinatorCommand::CleanupMaintenance
             | CoordinatorCommand::RetryTaskPhase { .. }
@@ -587,6 +596,14 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
         CoordinatorCommand::SyncRegistry => {
             coordinator_sync(
                 engine,
+                paths,
+                request.coordinator_cfg,
+                request.env_cfg,
+                request.logger,
+            )?;
+        }
+        CoordinatorCommand::SyncPrd => {
+            coordinator_sync_prd(
                 paths,
                 request.coordinator_cfg,
                 request.env_cfg,
@@ -1197,12 +1214,113 @@ pub fn coordinator_sync<E: crate::engine::Engine + ?Sized>(
         engine.coordinator_storage_import_json_to_sqlite(paths)?;
     }
     engine.coordinator_sync_registry_from_prd_with_logger(&paths.root, &prd_file, logger)?;
+    // Reconcile task states from commit history on the reference branch.
+    coordinator_sync_prd(paths, coordinator_cfg, env_cfg, logger)?;
     let json_compat = env_cfg
         .json_compat
         .or_else(|| coordinator_cfg.and_then(|c| c.json_compat))
         .unwrap_or(false);
     if storage_mode != CoordinatorStorageMode::Json && json_compat {
         engine.coordinator_storage_export_sqlite_to_json(paths)?;
+    }
+    Ok(())
+}
+
+/// Reconcile task registry from commit history on the reference branch.
+///
+/// Scans commits on `reference_branch` for MACC task ID tags and transitions
+/// matching tasks that are still in-flight to `merged`.
+///
+/// Called automatically as part of `coordinator_sync` and also available as
+/// a standalone command via `macc coordinator sync-prd`.
+pub fn coordinator_sync_prd(
+    paths: &ProjectPaths,
+    coordinator_cfg: Option<&CoordinatorConfig>,
+    env_cfg: &CoordinatorEnvConfig,
+    logger: Option<&dyn CoordinatorLog>,
+) -> Result<()> {
+    use crate::coordinator::commit_reconciler;
+    use crate::coordinator::helpers::now_iso_coordinator;
+    use crate::coordinator_storage::CoordinatorStoragePaths;
+
+    if let Some(log) = logger {
+        let _ = log.note("- Sync PRD: reconciling tasks from commit history".to_string());
+    }
+
+    let reference_branch = env_cfg
+        .reference_branch
+        .as_deref()
+        .or_else(|| coordinator_cfg.and_then(|c| c.reference_branch.as_deref()))
+        .unwrap_or("main");
+
+    // Read commits on the reference branch
+    let commits = commit_reconciler::read_commit_range(&paths.root, None, reference_branch)?;
+    if commits.is_empty() {
+        if let Some(log) = logger {
+            let _ = log.note(format!(
+                "- Sync PRD: no commits found on '{}', skipping",
+                reference_branch
+            ));
+        }
+        return Ok(());
+    }
+
+    // Load the task registry
+    let storage_mode =
+        coordinator_engine::resolve_storage_mode(env_cfg, coordinator_cfg)?;
+    let store_paths = CoordinatorStoragePaths::from_project_paths(paths);
+    let mut snapshot = match storage_mode {
+        CoordinatorStorageMode::Json => {
+            crate::coordinator_storage::JsonStorage::new(store_paths.clone()).load_snapshot()?
+        }
+        _ => {
+            crate::coordinator_storage::SqliteStorage::new(store_paths.clone()).load_snapshot()?
+        }
+    };
+
+    // Reconcile
+    let report = commit_reconciler::reconcile(&snapshot.registry, &commits);
+
+    if report.reconciled.is_empty() {
+        if let Some(log) = logger {
+            let _ = log.note(format!(
+                "- Sync PRD: {} commits scanned, no tasks to reconcile",
+                report.commits_scanned
+            ));
+        }
+        return Ok(());
+    }
+
+    // Apply transitions
+    let now = now_iso_coordinator();
+    if let Some(log) = logger {
+        for entry in &report.reconciled {
+            let _ = log.note(format!(
+                "- Sync PRD: {} ({} -> merged) matched commit {}",
+                entry.task_id,
+                entry.previous_state,
+                &entry.matched_commit_sha[..7.min(entry.matched_commit_sha.len())]
+            ));
+        }
+    }
+    commit_reconciler::apply_reconcile_report(&mut snapshot.registry, &report, &now);
+
+    // Save back
+    match storage_mode {
+        CoordinatorStorageMode::Json => {
+            crate::coordinator_storage::JsonStorage::new(store_paths).save_snapshot(&snapshot)?;
+        }
+        _ => {
+            crate::coordinator_storage::SqliteStorage::new(store_paths).save_snapshot(&snapshot)?;
+        }
+    }
+
+    if let Some(log) = logger {
+        let _ = log.note(format!(
+            "- Sync PRD: reconciled {} task(s) from {} commit(s)",
+            report.reconciled.len(),
+            report.commits_scanned
+        ));
     }
     Ok(())
 }

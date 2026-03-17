@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::str::FromStr;
 
 pub mod args;
+pub mod commit_reconciler;
 pub mod control_plane;
 pub mod engine;
 pub mod helpers;

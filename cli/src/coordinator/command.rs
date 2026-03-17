@@ -136,6 +136,7 @@ pub fn handle(
         CoordinatorCommand::DispatchReadyTasks => Some("dispatch"),
         CoordinatorCommand::AdvanceTasks => Some("advance"),
         CoordinatorCommand::SyncRegistry => Some("sync"),
+        CoordinatorCommand::SyncPrd => Some("sync-prd"),
         CoordinatorCommand::ReconcileRuntime => Some("reconcile"),
         CoordinatorCommand::CleanupMaintenance => Some("cleanup"),
         _ => None,

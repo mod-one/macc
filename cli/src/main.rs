@@ -191,7 +191,7 @@ enum Commands {
     },
     /// Run the project coordinator automation script
     Coordinator {
-        /// Coordinator command (run, control-plane-run, dispatch, advance, resume, sync, status, reconcile, unlock, cleanup, retry-phase, cutover-gate, stop, validate-transition, validate-runtime-transition, runtime-status-from-event, storage-import, storage-export, events-export, storage-verify, storage-sync, select-ready-task, state-apply-transition, state-set-runtime, state-task-field, state-task-exists, state-counts, state-locks, state-set-merge-pending, state-set-merge-processed, state-increment-retries, state-upsert-slo-warning, state-slo-metric)
+        /// Coordinator command (run, control-plane-run, dispatch, advance, resume, sync, sync-prd, status, reconcile, unlock, cleanup, retry-phase, cutover-gate, stop, validate-transition, validate-runtime-transition, runtime-status-from-event, storage-import, storage-export, events-export, storage-verify, storage-sync, select-ready-task, state-apply-transition, state-set-runtime, state-task-field, state-task-exists, state-counts, state-locks, state-set-merge-pending, state-set-merge-processed, state-increment-retries, state-upsert-slo-warning, state-slo-metric)
         #[arg(default_value = "run")]
         command_name: String,
         /// Disable TUI live view for `macc coordinator run`
