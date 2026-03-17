@@ -30,4 +30,8 @@ pub struct CoordinatorEnvConfig {
     pub cutover_gate_window_events: Option<usize>,
     pub cutover_gate_max_blocked_ratio: Option<f64>,
     pub cutover_gate_max_stale_ratio: Option<f64>,
+    pub rate_limit_backoff_base_seconds: Option<u64>,
+    pub rate_limit_backoff_max_seconds: Option<u64>,
+    pub rate_limit_fallback_enabled: Option<bool>,
+    pub rate_limit_throttle_parallel: Option<bool>,
 }

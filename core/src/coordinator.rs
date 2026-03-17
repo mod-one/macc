@@ -12,6 +12,7 @@ pub mod ipc;
 pub mod logs;
 pub mod model;
 pub mod prd_auditor;
+pub mod rate_limit;
 pub mod runtime;
 pub mod session_manager;
 pub mod state;

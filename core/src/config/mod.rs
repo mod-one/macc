@@ -148,6 +148,14 @@ pub struct CoordinatorConfig {
     pub cutover_gate_max_blocked_ratio: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cutover_gate_max_stale_ratio: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limit_backoff_base_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limit_backoff_max_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limit_fallback_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limit_throttle_parallel: Option<bool>,
 }
 
 fn default_true() -> bool {

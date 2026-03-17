@@ -1312,6 +1312,46 @@ fn resolve_error_code_retry_max(
         .unwrap_or(2)
 }
 
+fn resolve_rate_limit_backoff_base_seconds(
+    env_cfg: &CoordinatorEnvConfig,
+    coordinator: Option<&crate::config::CoordinatorConfig>,
+) -> u64 {
+    env_cfg
+        .rate_limit_backoff_base_seconds
+        .or_else(|| coordinator.and_then(|c| c.rate_limit_backoff_base_seconds))
+        .unwrap_or(30)
+}
+
+fn resolve_rate_limit_backoff_max_seconds(
+    env_cfg: &CoordinatorEnvConfig,
+    coordinator: Option<&crate::config::CoordinatorConfig>,
+) -> u64 {
+    env_cfg
+        .rate_limit_backoff_max_seconds
+        .or_else(|| coordinator.and_then(|c| c.rate_limit_backoff_max_seconds))
+        .unwrap_or(300)
+}
+
+fn resolve_rate_limit_fallback_enabled(
+    env_cfg: &CoordinatorEnvConfig,
+    coordinator: Option<&crate::config::CoordinatorConfig>,
+) -> bool {
+    env_cfg
+        .rate_limit_fallback_enabled
+        .or_else(|| coordinator.and_then(|c| c.rate_limit_fallback_enabled))
+        .unwrap_or(true)
+}
+
+fn resolve_rate_limit_throttle_parallel(
+    env_cfg: &CoordinatorEnvConfig,
+    coordinator: Option<&crate::config::CoordinatorConfig>,
+) -> bool {
+    env_cfg
+        .rate_limit_throttle_parallel
+        .or_else(|| coordinator.and_then(|c| c.rate_limit_throttle_parallel))
+        .unwrap_or(true)
+}
+
 pub async fn monitor_merge_jobs_native(
     repo_root: &Path,
     _env_cfg: &CoordinatorEnvConfig,
