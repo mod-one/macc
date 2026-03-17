@@ -590,6 +590,7 @@ mod tests {
                 tool: "mock".to_string(),
                 base_branch: "main".to_string(),
             }),
+            audit_prd_report: None,
         };
         let state = WebState {
             engine: Arc::new(WebTestEngine::new(Ok(result))),
