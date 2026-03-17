@@ -650,6 +650,11 @@ fn get_exit_code(err: &MaccError) -> i32 {
         MaccError::SecretDetected { .. } => 6,
         MaccError::HomeDirNotFound => 7,
         MaccError::ToolSpec { .. } => 8,
+        MaccError::Coordinator { .. } => 9,
+        MaccError::Storage { .. } => 10,
+        MaccError::Git { .. } => 11,
+        MaccError::Fetch { .. } => 12,
+        MaccError::Catalog { .. } => 13,
     }
 }
 

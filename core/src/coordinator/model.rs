@@ -263,7 +263,10 @@ fn is_default_task_runtime(runtime: &TaskRuntime) -> bool {
 impl TaskRegistry {
     pub fn from_value(value: &Value) -> Result<Self> {
         serde_json::from_value::<Self>(value.clone()).map_err(|e| {
-            MaccError::Validation(format!("Failed to parse typed coordinator registry: {}", e))
+            MaccError::Coordinator {
+                code: "registry_parse",
+                message: format!("Failed to parse typed coordinator registry: {}", e),
+            }
         })
     }
 

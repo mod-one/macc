@@ -348,6 +348,41 @@ impl From<MaccError> for ApiError {
                 Some(serde_json::json!({ "path": path, "action": action })),
                 Some(source.to_string()),
             ),
+            MaccError::Coordinator { code, message } => ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Coordinator",
+                message,
+                Some(serde_json::json!({ "code": code })),
+                None,
+            ),
+            MaccError::Storage { backend, message } => ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Storage",
+                message,
+                Some(serde_json::json!({ "backend": backend })),
+                None,
+            ),
+            MaccError::Git { operation, message } => ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Git",
+                message,
+                Some(serde_json::json!({ "operation": operation })),
+                None,
+            ),
+            MaccError::Fetch { url, message } => ApiError::new(
+                StatusCode::BAD_GATEWAY,
+                "Fetch",
+                message,
+                Some(serde_json::json!({ "url": url })),
+                None,
+            ),
+            MaccError::Catalog { operation, message } => ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "Catalog",
+                message,
+                Some(serde_json::json!({ "operation": operation })),
+                None,
+            ),
         }
     }
 }

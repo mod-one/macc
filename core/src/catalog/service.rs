@@ -29,10 +29,10 @@ pub fn parse_search_kind(kind: &str) -> Result<CatalogSearchKind> {
     match kind {
         "skill" => Ok(CatalogSearchKind::Skill),
         "mcp" => Ok(CatalogSearchKind::Mcp),
-        _ => Err(MaccError::Validation(format!(
-            "Invalid kind: {}. Must be 'skill' or 'mcp'.",
-            kind
-        ))),
+        _ => Err(MaccError::Catalog {
+            operation: "parse_kind".to_string(),
+            message: format!("Invalid kind: {}. Must be 'skill' or 'mcp'.", kind),
+        }),
     }
 }
 
@@ -193,8 +193,9 @@ pub fn install_skill(
 ) -> Result<InstallSkillOutcome> {
     let catalog = load_effective_skills_catalog(paths)?;
     let entry =
-        catalog.entries.iter().find(|e| e.id == id).ok_or_else(|| {
-            MaccError::Validation(format!("Skill '{}' not found in catalog.", id))
+        catalog.entries.iter().find(|e| e.id == id).ok_or_else(|| MaccError::Catalog {
+            operation: "lookup_skill".to_string(),
+            message: format!("Skill '{}' not found in catalog.", id),
         })?;
 
     let (descriptors, diagnostics) = backend.list_tools(paths);
@@ -231,7 +232,10 @@ pub fn install_skill(
         &materialized.source_root_path,
         &entry.selector.subpath,
     )
-    .map_err(MaccError::Validation)?;
+    .map_err(|e| MaccError::Catalog {
+        operation: "install_skill".to_string(),
+        message: e,
+    })?;
     let report = backend.apply(paths, &mut plan, false)?;
 
     Ok(InstallSkillOutcome {
@@ -248,8 +252,9 @@ pub fn install_mcp(
     backend: &dyn CatalogInstallBackend,
 ) -> Result<InstallMcpOutcome> {
     let catalog = load_effective_mcp_catalog(paths)?;
-    let entry = catalog.entries.iter().find(|e| e.id == id).ok_or_else(|| {
-        MaccError::Validation(format!("MCP server '{}' not found in catalog.", id))
+    let entry = catalog.entries.iter().find(|e| e.id == id).ok_or_else(|| MaccError::Catalog {
+        operation: "lookup_mcp".to_string(),
+        message: format!("MCP server '{}' not found in catalog.", id),
     })?;
 
     let mut source = entry.source.clone();
@@ -277,7 +282,10 @@ pub fn install_mcp(
         &materialized.source_root_path,
         &entry.selector.subpath,
     )
-    .map_err(MaccError::Validation)?;
+    .map_err(|e| MaccError::Catalog {
+        operation: "install_mcp".to_string(),
+        message: e,
+    })?;
     let report = backend.apply(paths, &mut plan, false)?;
     Ok(InstallMcpOutcome { report })
 }

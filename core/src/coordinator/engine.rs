@@ -207,20 +207,26 @@ fn transition_workflow_state(from: WorkflowState, event: WorkflowEvent) -> Resul
         | (WorkflowState::Queued, WorkflowEvent::MergeFailed) => WorkflowState::Blocked,
         (WorkflowState::Queued, WorkflowEvent::MergeSucceeded) => WorkflowState::Merged,
         _ => {
-            return Err(MaccError::Validation(format!(
-                "Invalid coordinator FSM transition: from={} event={:?}",
-                from.as_str(),
-                event
-            )));
+            return Err(MaccError::Coordinator {
+                code: "invalid_transition",
+                message: format!(
+                    "Invalid coordinator FSM transition: from={} event={:?}",
+                    from.as_str(),
+                    event
+                ),
+            });
         }
     };
 
     if !super::is_valid_workflow_transition(from, to) {
-        return Err(MaccError::Validation(format!(
-            "Coordinator FSM produced invalid workflow transition {} -> {}",
-            from.as_str(),
-            to.as_str()
-        )));
+        return Err(MaccError::Coordinator {
+            code: "invalid_transition",
+            message: format!(
+                "Coordinator FSM produced invalid workflow transition {} -> {}",
+                from.as_str(),
+                to.as_str()
+            ),
+        });
     }
 
     Ok(to)
@@ -232,7 +238,10 @@ pub fn apply_dispatch_claim_in_registry(
 ) -> Result<()> {
     let mut typed = TaskRegistry::from_value(registry)?;
     let task = typed.find_task_mut(&update.task_id).ok_or_else(|| {
-        MaccError::Validation(format!("Task '{}' not found in registry", update.task_id))
+        MaccError::Coordinator {
+            code: "task_not_found",
+            message: format!("Task '{}' not found in registry", update.task_id),
+        }
     })?;
     apply_dispatch_claim_typed(task, update);
     *registry = typed.to_value()?;
@@ -246,7 +255,10 @@ pub fn apply_dispatch_pid_in_registry(
 ) -> Result<()> {
     let mut typed = TaskRegistry::from_value(registry)?;
     let task = typed.find_task_mut(task_id).ok_or_else(|| {
-        MaccError::Validation(format!("Task '{}' not found in registry", task_id))
+        MaccError::Coordinator {
+            code: "task_not_found",
+            message: format!("Task '{}' not found in registry", task_id),
+        }
     })?;
     apply_dispatch_pid_typed(task, pid);
     *registry = typed.to_value()?;
@@ -305,7 +317,10 @@ pub fn apply_phase_outcome_in_registry(
 ) -> Result<()> {
     let mut typed = TaskRegistry::from_value(registry)?;
     let task = typed.find_task_mut(task_id).ok_or_else(|| {
-        MaccError::Validation(format!("Task '{}' not found in registry", task_id))
+        MaccError::Coordinator {
+            code: "task_not_found",
+            message: format!("Task '{}' not found in registry", task_id),
+        }
     })?;
     if let Some(reason) = phase_error {
         apply_phase_failure_typed(task, mode, reason, now)?;
@@ -346,7 +361,10 @@ pub fn apply_job_completion_in_registry(
 ) -> Result<JobCompletionResult> {
     let mut typed = TaskRegistry::from_value(registry)?;
     let task = typed.find_task_mut(task_id).ok_or_else(|| {
-        MaccError::Validation(format!("Task '{}' not found in registry", task_id))
+        MaccError::Coordinator {
+            code: "task_not_found",
+            message: format!("Task '{}' not found in registry", task_id),
+        }
     })?;
     let out = apply_job_completion_typed(task, input, now);
     *registry = typed.to_value()?;
@@ -362,7 +380,10 @@ pub fn apply_merge_result_in_registry(
 ) -> Result<()> {
     let mut typed = TaskRegistry::from_value(registry)?;
     let task = typed.find_task_mut(task_id).ok_or_else(|| {
-        MaccError::Validation(format!("Task '{}' not found in registry", task_id))
+        MaccError::Coordinator {
+            code: "task_not_found",
+            message: format!("Task '{}' not found in registry", task_id),
+        }
     })?;
     if success {
         apply_merge_success_typed(task, now)?
