@@ -730,11 +730,23 @@ commit_changes() {
       fi
       return 0
     fi
-    local msg="feat: ${last_id}"
+    # --- MACC commit message convention (see core/src/commit_message.rs) ---
+    # Subject: <type>: <task_id>[ - <title>]
+    # Trailers: [macc:task <id>] [macc:phase <phase>]
+    local subject="feat: ${last_id}"
     if [[ -n "$last_title" ]]; then
-      msg="feat: ${last_id} - ${last_title}"
+      subject="feat: ${last_id} - ${last_title}"
     fi
-    if ! git_commit_output="$(git commit -m "$msg" 2>&1)"; then
+    local trailer="[macc:task ${last_id}]"
+    if [[ -n "$CURRENT_PHASE" ]]; then
+      trailer="${trailer}
+[macc:phase ${CURRENT_PHASE}]"
+    fi
+    if [[ -n "$TOOL" ]]; then
+      trailer="${trailer}
+[macc:tool ${TOOL}]"
+    fi
+    if ! git_commit_output="$(git commit -m "$subject" -m "" -m "$trailer" 2>&1)"; then
       git_commit_output="${git_commit_output//$'\n'/ }"
       set_last_error "E201" "git" "git commit failed: ${git_commit_output:0:240}"
       return 1
@@ -742,8 +754,9 @@ commit_changes() {
     printf '%s\n' "$git_commit_output"
     local sha
     sha="$(git rev-parse HEAD 2>/dev/null || true)"
+    local msg="${subject}"
     soft_emit_performer_event "commit_created" "$CURRENT_PHASE" "done" "$(jq -nc --arg sha "$sha" --arg message "$msg" '{sha:$sha, message:$message}')"
-    echo "Committed changes: $msg"
+    echo "Committed changes: $subject"
   else
     echo "No changes to commit."
   fi
