@@ -644,6 +644,36 @@ detect_success_result_kind() {
   fi
 }
 
+# RL-PERFORMER-009: classify E601/E602 from combined runner output.
+# Sets LAST_ERROR_CODE, LAST_ERROR_ORIGIN, LAST_ERROR_MESSAGE.
+# E602 is checked first (higher specificity — quota patterns are more specific).
+detect_rate_limit() {
+  local output_file="$1"
+  [[ -f "$output_file" ]] || return 0
+  local combined
+  combined="$(cat "$output_file" 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+  # E602: hard quota exhaustion — do NOT retry
+  if echo "$combined" | grep -qE \
+      'quota[[:space:]]+exceeded|insufficient[_[:space:]]quota|usage[[:space:]]+limit[[:space:]]+reached|hit[[:space:]]+your[[:space:]]+limit|billing[[:space:]]+quota'; then
+    LAST_ERROR_CODE="E602"
+    LAST_ERROR_ORIGIN="runner"
+    LAST_ERROR_MESSAGE="quota exhausted"
+    return 0
+  fi
+  # E601: transient rate-limit / 429
+  if echo "$combined" | grep -qE \
+      '429|resource_exhausted|rate[[:space:]]+limit(ed)?|too[[:space:]]+many[[:space:]]+requests|529|overloaded'; then
+    LAST_ERROR_CODE="E601"
+    LAST_ERROR_ORIGIN="runner"
+    LAST_ERROR_MESSAGE="rate limited"
+    local retry_after
+    retry_after="$(grep -iE 'retry.after:[[:space:]]*[0-9]+' "$output_file" 2>/dev/null \
+        | grep -oE '[0-9]+' | tail -n1)"
+    [[ -n "$retry_after" ]] && LAST_ERROR_MESSAGE="rate limited; retry-after=${retry_after}s"
+    return 0
+  fi
+}
+
 run_tool() {
   local prompt_file="$1"
   local attempt="$2"
@@ -697,7 +727,11 @@ run_tool() {
     }')"
     log_task_line "- Result kind: ${result_kind}"
   else
-    set_last_error "E101" "runner" "runner exited non-zero"
+    # RL-PERFORMER-009: classify rate-limit signals before falling back to E101.
+    detect_rate_limit "$output_capture"
+    if [[ -z "$LAST_ERROR_CODE" || "$LAST_ERROR_CODE" == "E101" ]]; then
+      set_last_error "E101" "runner" "runner exited non-zero"
+    fi
     must_emit_performer_event "phase_result" "$CURRENT_PHASE" "failed" "$(jq -nc --arg attempt "$attempt" --arg status "$status" --arg code "$LAST_ERROR_CODE" --arg origin "$LAST_ERROR_ORIGIN" --arg message "$LAST_ERROR_MESSAGE" '{attempt:($attempt|tonumber?), exit_status:($status|tonumber?), error_code:($code|select(length>0)), origin:($origin|select(length>0)), message:($message|select(length>0))}')"
   fi
   log_task_line '```'

@@ -2221,6 +2221,8 @@ fn parse_select_ready_task_command(args: &[String]) -> Result<CoordinatorCommand
                 .unwrap_or_else(|| {
                     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
                 }),
+            throttle_registry: Default::default(),
+            rate_limit_fallback_enabled: false,
         },
     })
 }

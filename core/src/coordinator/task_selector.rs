@@ -1,5 +1,5 @@
 use crate::coordinator::model::{Task, TaskRegistry};
-use crate::coordinator::rate_limit::is_task_delayed;
+use crate::coordinator::rate_limit::{is_task_delayed, is_tool_throttled, ToolThrottleRegistry};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -17,6 +17,12 @@ pub struct TaskSelectorConfig {
     /// still in the future are excluded from dispatch.  An empty string
     /// disables the delay filter (all tasks are eligible).
     pub now: String,
+    /// Per-tool throttle state used to filter out currently rate-limited tools.
+    /// Empty map disables throttle filtering.
+    pub throttle_registry: ToolThrottleRegistry,
+    /// When `true`, `pick_tool()` will skip throttled tools and select the
+    /// next available tool in priority order (fallback routing).
+    pub rate_limit_fallback_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,6 +31,9 @@ pub struct SelectedTask {
     pub title: String,
     pub tool: String,
     pub base_branch: String,
+    /// `true` when the selected tool differs from the primary (highest-priority)
+    /// tool due to throttle filtering (RL-ROUTE-005 fallback routing).
+    pub is_fallback: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,6 +99,9 @@ pub fn dispatch_block_reason_typed(
         if pick_tool(task, config, &HashMap::new()).is_none() {
             continue;
         }
+        // (throttle filtering is intentionally skipped in the block-reason
+        // check — we need to know whether the task *could* dispatch, not
+        // whether it can right now.)
         return Some(DispatchBlockReason::ReadyPriorityZeroBlocked {
             task_id: task.id.clone(),
         });
@@ -159,7 +171,7 @@ pub fn select_next_ready_task_typed(
             continue;
         }
 
-        let Some(tool) = pick_tool(task, config, &active_by_tool) else {
+        let Some((tool, is_fallback)) = pick_tool(task, config, &active_by_tool) else {
             continue;
         };
 
@@ -172,6 +184,7 @@ pub fn select_next_ready_task_typed(
                 title: task.title.clone().unwrap_or_default(),
                 tool,
                 base_branch: task.base_branch(&config.default_base_branch),
+                is_fallback,
             },
         ));
     }
@@ -204,11 +217,14 @@ fn resources_available(
     })
 }
 
+/// Returns `(tool_id, is_fallback)`. `is_fallback` is `true` when the
+/// selected tool differs from the highest-priority candidate due to
+/// throttle filtering (RL-ROUTE-005).
 fn pick_tool(
     task: &Task,
     config: &TaskSelectorConfig,
     active_by_tool: &HashMap<String, usize>,
-) -> Option<String> {
+) -> Option<(String, bool)> {
     let preference = preference_list(task, config);
     let fallback = fallback_pool(task, config, &preference);
 
@@ -255,7 +271,31 @@ fn pick_tool(
     }
 
     candidates.sort_by(|a, b| (&a.0, &a.1, &a.2).cmp(&(&b.0, &b.1, &b.2)));
-    candidates.into_iter().next().map(|(_, _, tool)| tool)
+
+    // Identify the primary (highest-priority) tool before throttle filtering.
+    let primary_tool = candidates.first().map(|(_, _, tool)| tool.clone());
+
+    // RL-ROUTE-005: throttle filtering — skip throttled tools and fall back
+    // to the next available one.  Disabled for review/fix phases (idempotency
+    // guard: the task is mid-flight and must not switch tools).
+    let apply_throttle_filter = config.rate_limit_fallback_enabled
+        && !config.throttle_registry.is_empty()
+        && !matches!(
+            task.task_runtime.current_phase.as_deref(),
+            Some("review") | Some("fix")
+        );
+
+    let selected = if apply_throttle_filter {
+        candidates
+            .into_iter()
+            .find(|(_, _, tool)| !is_tool_throttled(&config.throttle_registry, tool, &config.now))
+            .map(|(_, _, tool)| tool)
+    } else {
+        candidates.into_iter().next().map(|(_, _, tool)| tool)
+    };
+
+    let is_fallback = selected.is_some() && selected != primary_tool;
+    selected.map(|tool| (tool, is_fallback))
 }
 
 fn preference_list(task: &Task, config: &TaskSelectorConfig) -> Vec<String> {
@@ -555,5 +595,188 @@ mod tests {
         assert_eq!(dispatch_block_reason(&registry, &cfg), None);
         let selected = select_next_ready_task(&registry, &cfg).expect("selected task");
         assert_eq!(selected.id, "NEXT");
+    }
+
+    // ── RL-ROUTE-005: tool throttle fallback routing ──────────────────
+
+    fn throttle_registry_for(tool: &str, throttled_until_epoch: u64) -> ToolThrottleRegistry {
+        let mut reg = ToolThrottleRegistry::default();
+        reg.insert(
+            tool.to_string(),
+            crate::coordinator::rate_limit::ToolThrottleState {
+                tool_id: tool.to_string(),
+                throttled_until: throttled_until_epoch,
+                consecutive_429_count: 1,
+                backoff_seconds: 30,
+                last_rate_limit_info: None,
+            },
+        );
+        reg
+    }
+
+    fn epoch_far_future() -> u64 {
+        // 2099-01-01T00:00:00Z
+        4_070_908_800
+    }
+
+    #[test]
+    fn throttled_primary_tool_falls_back_to_next_priority() {
+        let registry = json!({
+          "tasks": [
+            {"id":"T1","title":"t1","state":"todo","priority":"1","dependencies":[],"exclusive_resources":[]}
+          ],
+          "resource_locks": {}
+        });
+        let cfg = TaskSelectorConfig {
+            default_tool: "fallback".into(),
+            default_base_branch: "main".into(),
+            max_parallel: 3,
+            tool_priority: vec!["primary".into(), "fallback".into()],
+            enabled_tools: vec!["primary".into(), "fallback".into()],
+            throttle_registry: throttle_registry_for("primary", epoch_far_future()),
+            rate_limit_fallback_enabled: true,
+            now: "2026-03-18T12:00:00Z".into(),
+            ..TaskSelectorConfig::default()
+        };
+        let selected = select_next_ready_task(&registry, &cfg).expect("fallback tool selected");
+        assert_eq!(selected.tool, "fallback");
+        assert!(selected.is_fallback, "is_fallback must be true");
+    }
+
+    #[test]
+    fn expired_throttle_does_not_trigger_fallback() {
+        let registry = json!({
+          "tasks": [
+            {"id":"T1","title":"t1","state":"todo","priority":"1","dependencies":[],"exclusive_resources":[]}
+          ],
+          "resource_locks": {}
+        });
+        // throttled_until is in the past (epoch 1)
+        let cfg = TaskSelectorConfig {
+            default_tool: "primary".into(),
+            default_base_branch: "main".into(),
+            max_parallel: 3,
+            tool_priority: vec!["primary".into(), "fallback".into()],
+            enabled_tools: vec!["primary".into(), "fallback".into()],
+            throttle_registry: throttle_registry_for("primary", 1),
+            rate_limit_fallback_enabled: true,
+            now: "2026-03-18T12:00:00Z".into(),
+            ..TaskSelectorConfig::default()
+        };
+        let selected = select_next_ready_task(&registry, &cfg).expect("primary selected after expiry");
+        assert_eq!(selected.tool, "primary");
+        assert!(!selected.is_fallback, "is_fallback must be false when throttle expired");
+    }
+
+    #[test]
+    fn fallback_disabled_by_config_uses_primary_even_when_throttled() {
+        let registry = json!({
+          "tasks": [
+            {"id":"T1","title":"t1","state":"todo","priority":"1","dependencies":[],"exclusive_resources":[]}
+          ],
+          "resource_locks": {}
+        });
+        let cfg = TaskSelectorConfig {
+            default_tool: "fallback".into(),
+            default_base_branch: "main".into(),
+            max_parallel: 3,
+            tool_priority: vec!["primary".into(), "fallback".into()],
+            enabled_tools: vec!["primary".into(), "fallback".into()],
+            throttle_registry: throttle_registry_for("primary", epoch_far_future()),
+            rate_limit_fallback_enabled: false, // disabled
+            now: "2026-03-18T12:00:00Z".into(),
+            ..TaskSelectorConfig::default()
+        };
+        let selected = select_next_ready_task(&registry, &cfg).expect("primary selected (fallback disabled)");
+        assert_eq!(selected.tool, "primary");
+        assert!(!selected.is_fallback);
+    }
+
+    #[test]
+    fn review_phase_task_does_not_fall_back() {
+        let registry = json!({
+          "tasks": [
+            {
+              "id": "T1",
+              "title": "t1",
+              "state": "todo",
+              "priority": "1",
+              "dependencies": [],
+              "exclusive_resources": [],
+              "task_runtime": { "current_phase": "review" }
+            }
+          ],
+          "resource_locks": {}
+        });
+        let cfg = TaskSelectorConfig {
+            default_tool: "fallback".into(),
+            default_base_branch: "main".into(),
+            max_parallel: 3,
+            tool_priority: vec!["primary".into(), "fallback".into()],
+            enabled_tools: vec!["primary".into(), "fallback".into()],
+            throttle_registry: throttle_registry_for("primary", epoch_far_future()),
+            rate_limit_fallback_enabled: true,
+            now: "2026-03-18T12:00:00Z".into(),
+            ..TaskSelectorConfig::default()
+        };
+        let selected = select_next_ready_task(&registry, &cfg).expect("primary selected (review phase)");
+        assert_eq!(selected.tool, "primary");
+        assert!(!selected.is_fallback, "review phase must not fall back");
+    }
+
+    #[test]
+    fn fix_phase_task_does_not_fall_back() {
+        let registry = json!({
+          "tasks": [
+            {
+              "id": "T1",
+              "title": "t1",
+              "state": "todo",
+              "priority": "1",
+              "dependencies": [],
+              "exclusive_resources": [],
+              "task_runtime": { "current_phase": "fix" }
+            }
+          ],
+          "resource_locks": {}
+        });
+        let cfg = TaskSelectorConfig {
+            default_tool: "fallback".into(),
+            default_base_branch: "main".into(),
+            max_parallel: 3,
+            tool_priority: vec!["primary".into(), "fallback".into()],
+            enabled_tools: vec!["primary".into(), "fallback".into()],
+            throttle_registry: throttle_registry_for("primary", epoch_far_future()),
+            rate_limit_fallback_enabled: true,
+            now: "2026-03-18T12:00:00Z".into(),
+            ..TaskSelectorConfig::default()
+        };
+        let selected = select_next_ready_task(&registry, &cfg).expect("primary selected (fix phase)");
+        assert_eq!(selected.tool, "primary");
+        assert!(!selected.is_fallback, "fix phase must not fall back");
+    }
+
+    #[test]
+    fn unthrottled_task_has_is_fallback_false() {
+        let registry = json!({
+          "tasks": [
+            {"id":"T1","title":"t1","state":"todo","priority":"1","dependencies":[],"exclusive_resources":[]}
+          ],
+          "resource_locks": {}
+        });
+        let cfg = TaskSelectorConfig {
+            default_tool: "primary".into(),
+            default_base_branch: "main".into(),
+            max_parallel: 3,
+            tool_priority: vec!["primary".into()],
+            enabled_tools: vec!["primary".into()],
+            throttle_registry: ToolThrottleRegistry::default(),
+            rate_limit_fallback_enabled: true,
+            now: "2026-03-18T12:00:00Z".into(),
+            ..TaskSelectorConfig::default()
+        };
+        let selected = select_next_ready_task(&registry, &cfg).expect("primary selected");
+        assert_eq!(selected.tool, "primary");
+        assert!(!selected.is_fallback);
     }
 }

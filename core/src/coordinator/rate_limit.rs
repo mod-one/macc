@@ -8,6 +8,7 @@
 //! | **E602** | Quota exhausted (hard limit) — the account/key has no remaining quota | No (blocks task) |
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 // ── Error code constants ────────────────────────────────────────────
 
@@ -23,7 +24,7 @@ pub const E602_QUOTA_EXHAUSTED: &str = "E602";
 // ── Data structs ────────────────────────────────────────────────────
 
 /// Snapshot of a single rate-limit signal received from a tool.
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct RateLimitInfo {
     /// Which tool emitted the signal (e.g. `"claude"`, `"codex"`).
     pub tool_id: String,
@@ -48,7 +49,7 @@ pub struct RateLimitInfo {
 
 /// Accumulated throttle state for a single tool, maintained by the
 /// coordinator across the lifetime of a run.
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct ToolThrottleState {
     /// Which tool this state belongs to.
     pub tool_id: String,
@@ -70,6 +71,50 @@ pub struct ToolThrottleState {
     /// The most recent rate-limit info that fed into this state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_rate_limit_info: Option<RateLimitInfo>,
+}
+
+// ── Tool throttle registry ──────────────────────────────────────────
+
+/// Runtime registry of per-tool throttle states, keyed by tool identifier.
+/// Stored in `CoordinatorRunState` (volatile — not persisted to disk).
+pub type ToolThrottleRegistry = BTreeMap<String, ToolThrottleState>;
+
+/// Return `true` when the named tool's `throttled_until` epoch is still in the
+/// future relative to `now` (an ISO 8601 / RFC 3339 string).
+///
+/// Returns `false` for unknown tools, an unset `throttled_until`, or an empty
+/// `now` string (disables filtering).
+pub fn is_tool_throttled(registry: &ToolThrottleRegistry, tool_id: &str, now: &str) -> bool {
+    if now.is_empty() || tool_id.is_empty() {
+        return false;
+    }
+    let Some(state) = registry.get(tool_id) else {
+        return false;
+    };
+    if state.throttled_until == 0 {
+        return false;
+    }
+    let now_epoch = chrono::DateTime::parse_from_rfc3339(now)
+        .map(|dt| dt.timestamp() as u64)
+        .unwrap_or(0);
+    now_epoch < state.throttled_until
+}
+
+/// Return the earliest `throttled_until` across all throttled tools as an ISO
+/// 8601 string, or `None` if no tools are currently throttled.
+pub fn next_throttle_expiry(registry: &ToolThrottleRegistry) -> Option<String> {
+    use chrono::TimeZone as _;
+    registry
+        .values()
+        .filter(|s| s.throttled_until > 0)
+        .map(|s| s.throttled_until)
+        .min()
+        .and_then(|epoch| {
+            chrono::Utc
+                .timestamp_opt(epoch as i64, 0)
+                .single()
+                .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        })
 }
 
 // ── Backoff engine ──────────────────────────────────────────────────
@@ -222,6 +267,75 @@ mod tests {
     fn error_code_constants() {
         assert_eq!(E601_RATE_LIMITED, "E601");
         assert_eq!(E602_QUOTA_EXHAUSTED, "E602");
+    }
+
+    // ── is_tool_throttled / next_throttle_expiry ────────────────────
+
+    fn registry_with(tool_id: &str, throttled_until: u64) -> ToolThrottleRegistry {
+        let mut reg = ToolThrottleRegistry::new();
+        reg.insert(
+            tool_id.to_string(),
+            ToolThrottleState {
+                tool_id: tool_id.to_string(),
+                throttled_until,
+                ..Default::default()
+            },
+        );
+        reg
+    }
+
+    #[test]
+    fn is_tool_throttled_returns_true_when_future() {
+        // 2_000_000_000 epoch ≈ 2033-05-18, clearly after 2027-01-16
+        let reg = registry_with("claude", 2_000_000_000);
+        assert!(is_tool_throttled(&reg, "claude", "2027-01-16T00:00:00Z"));
+    }
+
+    #[test]
+    fn is_tool_throttled_returns_false_when_past() {
+        let reg = registry_with("claude", 1_000_000_000);
+        assert!(!is_tool_throttled(&reg, "claude", "2027-01-16T00:00:00Z"));
+    }
+
+    #[test]
+    fn is_tool_throttled_returns_false_for_unknown_tool() {
+        let reg = registry_with("claude", 9_999_999_999);
+        assert!(!is_tool_throttled(&reg, "codex", "2020-01-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn is_tool_throttled_returns_false_for_empty_now() {
+        let reg = registry_with("claude", 9_999_999_999);
+        assert!(!is_tool_throttled(&reg, "claude", ""));
+    }
+
+    #[test]
+    fn next_throttle_expiry_returns_earliest() {
+        let mut reg = ToolThrottleRegistry::new();
+        reg.insert(
+            "a".into(),
+            ToolThrottleState {
+                tool_id: "a".into(),
+                throttled_until: 2_000_000_000,
+                ..Default::default()
+            },
+        );
+        reg.insert(
+            "b".into(),
+            ToolThrottleState {
+                tool_id: "b".into(),
+                throttled_until: 1_500_000_000,
+                ..Default::default()
+            },
+        );
+        let expiry = next_throttle_expiry(&reg).unwrap();
+        // 1_500_000_000 seconds epoch = 2017-07-14T02:40:00Z
+        assert!(expiry.starts_with("2017-"), "expected 2017 epoch, got {}", expiry);
+    }
+
+    #[test]
+    fn next_throttle_expiry_empty_registry() {
+        assert!(next_throttle_expiry(&ToolThrottleRegistry::new()).is_none());
     }
 
     // ── compute_backoff_delay ────────────────────────────────────────

@@ -1,5 +1,6 @@
 use crate::coordinator::engine::ReviewVerdict;
 use crate::coordinator::model::Task;
+use crate::coordinator::rate_limit::ToolThrottleRegistry;
 use crate::coordinator::{CoordinatorEventRecord, PerformerCompletionKind};
 use crate::coordinator_storage::CoordinatorStorage;
 use crate::git;
@@ -89,6 +90,11 @@ pub struct CoordinatorRunState {
     pub dispatch_limit_event_emitted: bool,
     pub performer_ipc_addr: Option<String>,
     pub performer_ipc_listener_started: bool,
+    // RL-ROUTE-005: per-tool throttle state
+    pub throttle_registry: ToolThrottleRegistry,
+    // RL-THROTTLE-006: dynamic concurrency control
+    pub effective_max_parallel: usize,
+    pub original_max_parallel: usize,
 }
 
 pub trait PhaseExecutor {
@@ -125,13 +131,85 @@ impl CoordinatorRunState {
             dispatch_limit_event_emitted: false,
             performer_ipc_addr: None,
             performer_ipc_listener_started: false,
+            throttle_registry: ToolThrottleRegistry::default(),
+            effective_max_parallel: 0,
+            original_max_parallel: 0,
         }
+    }
+
+    /// Reduce effective concurrency by 1 (minimum 1).
+    /// Returns the new value.
+    pub fn reduce_parallel(&mut self) -> usize {
+        if self.effective_max_parallel > 1 {
+            self.effective_max_parallel -= 1;
+        }
+        self.effective_max_parallel
+    }
+
+    /// Restore effective concurrency by 1 (capped at `original_max_parallel`).
+    /// Returns the new value.
+    pub fn restore_parallel(&mut self) -> usize {
+        if self.original_max_parallel > 0 {
+            self.effective_max_parallel =
+                (self.effective_max_parallel + 1).min(self.original_max_parallel);
+        }
+        self.effective_max_parallel
     }
 }
 
 impl Default for CoordinatorRunState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state_with_parallel(original: usize) -> CoordinatorRunState {
+        let mut s = CoordinatorRunState::new();
+        s.original_max_parallel = original;
+        s.effective_max_parallel = original;
+        s
+    }
+
+    #[test]
+    fn reduce_parallel_decrements_by_one() {
+        let mut s = state_with_parallel(3);
+        assert_eq!(s.reduce_parallel(), 2);
+        assert_eq!(s.effective_max_parallel, 2);
+    }
+
+    #[test]
+    fn reduce_parallel_does_not_go_below_one() {
+        let mut s = state_with_parallel(1);
+        assert_eq!(s.reduce_parallel(), 1);
+        assert_eq!(s.effective_max_parallel, 1);
+    }
+
+    #[test]
+    fn restore_parallel_increments_by_one() {
+        let mut s = state_with_parallel(3);
+        s.effective_max_parallel = 2;
+        assert_eq!(s.restore_parallel(), 3);
+        assert_eq!(s.effective_max_parallel, 3);
+    }
+
+    #[test]
+    fn restore_parallel_does_not_exceed_original() {
+        let mut s = state_with_parallel(3);
+        // already at original
+        assert_eq!(s.restore_parallel(), 3);
+        assert_eq!(s.effective_max_parallel, 3);
+    }
+
+    #[test]
+    fn restore_parallel_no_op_when_original_is_zero() {
+        let mut s = CoordinatorRunState::new();
+        // original_max_parallel == 0 → restore is a no-op
+        s.effective_max_parallel = 0;
+        assert_eq!(s.restore_parallel(), 0);
     }
 }
 
