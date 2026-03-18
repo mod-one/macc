@@ -83,6 +83,10 @@ fn build_web_router(state: WebState) -> Router {
         .route("/api/v1/status", get(status_handler))
         .route("/api/v1/coordinator/run", post(coordinator_run_handler))
         .route("/api/v1/coordinator/stop", post(coordinator_stop_handler))
+        .route(
+            "/api/v1/coordinator/resume",
+            post(coordinator_resume_handler),
+        )
         .with_state(state)
 }
 
@@ -134,6 +138,25 @@ async fn coordinator_stop_handler(
         .map_err(ApiError::from)?;
     Ok(Json(ApiCoordinatorCommandResult::from(
         CoordinatorCommandResult::default(),
+    )))
+}
+
+async fn coordinator_resume_handler(
+    State(state): State<WebState>,
+) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
+    let was_paused =
+        macc_core::coordinator::state_runtime::read_coordinator_pause_file(&state.paths.root)
+            .map_err(ApiError::from)?
+            .is_some();
+    state
+        .engine
+        .coordinator_resume(&state.paths.root)
+        .map_err(ApiError::from)?;
+    Ok(Json(ApiCoordinatorCommandResult::from(
+        CoordinatorCommandResult {
+            resumed: Some(was_paused),
+            ..CoordinatorCommandResult::default()
+        },
     )))
 }
 
@@ -495,6 +518,7 @@ mod tests {
         run_result:
             std::sync::Mutex<Option<std::result::Result<CoordinatorCommandResult, MaccError>>>,
         stop_result: std::sync::Mutex<Option<std::result::Result<(), MaccError>>>,
+        resume_result: std::sync::Mutex<Option<std::result::Result<(), MaccError>>>,
     }
 
     impl WebTestEngine {
@@ -503,6 +527,7 @@ mod tests {
                 inner: TestEngine::with_fixtures(),
                 run_result: std::sync::Mutex::new(Some(result)),
                 stop_result: std::sync::Mutex::new(Some(Ok(()))),
+                resume_result: std::sync::Mutex::new(Some(Ok(()))),
             }
         }
 
@@ -511,6 +536,16 @@ mod tests {
                 inner: TestEngine::with_fixtures(),
                 run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
                 stop_result: std::sync::Mutex::new(Some(result)),
+                resume_result: std::sync::Mutex::new(Some(Ok(()))),
+            }
+        }
+
+        fn with_resume_result(result: std::result::Result<(), MaccError>) -> Self {
+            Self {
+                inner: TestEngine::with_fixtures(),
+                run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
+                stop_result: std::sync::Mutex::new(Some(Ok(()))),
+                resume_result: std::sync::Mutex::new(Some(result)),
             }
         }
     }
@@ -581,6 +616,14 @@ mod tests {
 
         fn coordinator_stop(&self, _repo_root: &std::path::Path, _reason: &str) -> Result<()> {
             self.stop_result
+                .lock()
+                .expect("lock")
+                .take()
+                .unwrap_or_else(|| Ok(()))
+        }
+
+        fn coordinator_resume(&self, _repo_root: &std::path::Path) -> Result<()> {
+            self.resume_result
                 .lock()
                 .expect("lock")
                 .take()
@@ -953,5 +996,120 @@ mod tests {
         let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
         assert_eq!(payload["error"]["code"], WEB_ERR_VALIDATION);
         assert_eq!(payload["error"]["category"], "Validation");
+    }
+
+    #[tokio::test]
+    async fn coordinator_resume_endpoint_returns_envelope_with_resumed_true() {
+        let root = temp_root("resume-ok");
+        fs::create_dir_all(&root).expect("create root");
+        macc_core::coordinator::state_runtime::write_coordinator_pause_file(
+            &root,
+            "global",
+            "dev",
+            "paused for test",
+        )
+        .expect("write pause file");
+        let state = WebState {
+            engine: Arc::new(WebTestEngine::with_resume_result(Ok(()))),
+            paths: ProjectPaths::from_root(&root),
+        };
+        let app = build_web_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/coordinator/resume")
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect")
+            .to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        for key in [
+            "status",
+            "resumed",
+            "aggregated_performer_logs",
+            "runtime_status",
+            "exported_events_path",
+            "removed_worktrees",
+            "selected_task",
+        ] {
+            assert!(payload.get(key).is_some(), "missing {}", key);
+        }
+        assert_eq!(payload["resumed"], true);
+    }
+
+    #[tokio::test]
+    async fn coordinator_resume_endpoint_returns_envelope_with_resumed_false_when_not_paused() {
+        let root = temp_root("resume-noop");
+        fs::create_dir_all(&root).expect("create root");
+        let state = WebState {
+            engine: Arc::new(WebTestEngine::with_resume_result(Ok(()))),
+            paths: ProjectPaths::from_root(&root),
+        };
+        let app = build_web_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/coordinator/resume")
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect")
+            .to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(payload["resumed"], false);
+    }
+
+    #[tokio::test]
+    async fn coordinator_resume_endpoint_maps_errors() {
+        let root = temp_root("resume-error");
+        fs::create_dir_all(&root).expect("create root");
+        let state = WebState {
+            engine: Arc::new(WebTestEngine::with_resume_result(Err(
+                MaccError::Validation("resume failed".to_string()),
+            ))),
+            paths: ProjectPaths::from_root(&root),
+        };
+        let app = build_web_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/coordinator/resume")
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect")
+            .to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(payload["error"]["code"], WEB_ERR_VALIDATION);
+        assert_eq!(payload["error"]["category"], "Validation");
+        assert_eq!(payload["error"]["message"], "resume failed");
     }
 }
