@@ -1,4 +1,5 @@
 use crate::coordinator::model::{Task, TaskRegistry};
+use crate::coordinator::rate_limit::is_task_delayed;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -11,6 +12,11 @@ pub struct TaskSelectorConfig {
     pub max_parallel: usize,
     pub default_tool: String,
     pub default_base_branch: String,
+    /// Current wall-clock timestamp in ISO 8601 / RFC 3339 format (e.g.
+    /// `"2026-03-18T12:00:00Z"`).  When set, tasks whose `delayed_until` is
+    /// still in the future are excluded from dispatch.  An empty string
+    /// disables the delay filter (all tasks are eligible).
+    pub now: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,6 +153,9 @@ pub fn select_next_ready_task_typed(
             continue;
         }
         if !resources_available(task, resource_locks) {
+            continue;
+        }
+        if is_task_delayed(task, &config.now) {
             continue;
         }
 
@@ -398,6 +407,134 @@ mod tests {
             })
         );
         assert_eq!(select_next_ready_task(&registry, &cfg), None);
+    }
+
+    // ── RL-DISPATCH-004: delayed_until filtering ──────────────────────
+
+    fn cfg_with_now(now: &str) -> TaskSelectorConfig {
+        TaskSelectorConfig {
+            default_tool: "worker".into(),
+            default_base_branch: "main".into(),
+            max_parallel: 3,
+            now: now.to_string(),
+            ..TaskSelectorConfig::default()
+        }
+    }
+
+    #[test]
+    fn task_with_future_delayed_until_is_skipped() {
+        let registry = json!({
+          "tasks": [
+            {
+              "id": "DELAYED",
+              "title": "rate-limited task",
+              "state": "todo",
+              "priority": "1",
+              "dependencies": [],
+              "exclusive_resources": [],
+              "task_runtime": { "delayed_until": "2026-03-18T12:05:00Z" }
+            }
+          ],
+          "resource_locks": {}
+        });
+        let cfg = cfg_with_now("2026-03-18T12:00:00Z");
+        assert_eq!(
+            select_next_ready_task(&registry, &cfg),
+            None,
+            "delayed task must not be selected before delayed_until"
+        );
+    }
+
+    #[test]
+    fn task_with_past_delayed_until_is_eligible() {
+        let registry = json!({
+          "tasks": [
+            {
+              "id": "READY",
+              "title": "previously rate-limited",
+              "state": "todo",
+              "priority": "1",
+              "dependencies": [],
+              "exclusive_resources": [],
+              "task_runtime": { "delayed_until": "2026-03-18T11:55:00Z" }
+            }
+          ],
+          "resource_locks": {}
+        });
+        let cfg = cfg_with_now("2026-03-18T12:00:00Z");
+        let selected = select_next_ready_task(&registry, &cfg).expect("should select eligible task");
+        assert_eq!(selected.id, "READY");
+    }
+
+    #[test]
+    fn task_without_delayed_until_is_always_eligible() {
+        let registry = json!({
+          "tasks": [
+            {
+              "id": "NODLY",
+              "title": "no delay",
+              "state": "todo",
+              "priority": "1",
+              "dependencies": [],
+              "exclusive_resources": []
+            }
+          ],
+          "resource_locks": {}
+        });
+        let cfg = cfg_with_now("2026-03-18T12:00:00Z");
+        let selected = select_next_ready_task(&registry, &cfg).expect("should select undelayed task");
+        assert_eq!(selected.id, "NODLY");
+    }
+
+    #[test]
+    fn delayed_task_skipped_but_undelayed_sibling_selected() {
+        let registry = json!({
+          "tasks": [
+            {
+              "id": "DELAYED",
+              "title": "delayed",
+              "state": "todo",
+              "priority": "1",
+              "dependencies": [],
+              "exclusive_resources": [],
+              "task_runtime": { "delayed_until": "2026-03-18T12:30:00Z" }
+            },
+            {
+              "id": "FREE",
+              "title": "free",
+              "state": "todo",
+              "priority": "1",
+              "dependencies": [],
+              "exclusive_resources": []
+            }
+          ],
+          "resource_locks": {}
+        });
+        let cfg = cfg_with_now("2026-03-18T12:00:00Z");
+        let selected = select_next_ready_task(&registry, &cfg).expect("should select non-delayed task");
+        assert_eq!(selected.id, "FREE");
+    }
+
+    #[test]
+    fn empty_now_disables_delay_filter() {
+        // When config.now is empty, is_task_delayed always returns false.
+        let registry = json!({
+          "tasks": [
+            {
+              "id": "T1",
+              "title": "t1",
+              "state": "todo",
+              "priority": "1",
+              "dependencies": [],
+              "exclusive_resources": [],
+              "task_runtime": { "delayed_until": "9999-12-31T23:59:59Z" }
+            }
+          ],
+          "resource_locks": {}
+        });
+        let cfg = cfg_with_now(""); // empty disables filter
+        let selected = select_next_ready_task(&registry, &cfg).expect("filter disabled → task selected");
+        assert_eq!(selected.id, "T1");
     }
 
     #[test]

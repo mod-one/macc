@@ -1558,6 +1558,8 @@ pub async fn dispatch_ready_tasks_native(
                 .clone()
                 .or_else(|| coordinator.and_then(|c| c.reference_branch.clone()))
                 .unwrap_or_else(|| "master".to_string()),
+            now: chrono::Utc::now()
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         };
 
         if let Some(reason) =

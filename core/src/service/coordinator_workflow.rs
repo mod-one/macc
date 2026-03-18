@@ -2215,6 +2215,12 @@ fn parse_select_ready_task_command(args: &[String]) -> Result<CoordinatorCommand
                 .map_err(|e| MaccError::Validation(format!("Invalid max-parallel value: {}", e)))?,
             default_tool,
             default_base_branch,
+            now: map
+                .get("now")
+                .cloned()
+                .unwrap_or_else(|| {
+                    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                }),
         },
     })
 }

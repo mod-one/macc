@@ -846,7 +846,7 @@ fn apply_job_completion_typed(
             .and_then(|dt| {
                 dt.checked_add_signed(chrono::Duration::seconds(backoff as i64))
             })
-            .map(|dt| dt.to_rfc3339())
+            .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
             .unwrap_or_default();
         // Update per-tool throttle state stored in extra.
         let tool_id_str = task.tool.as_deref().unwrap_or("").to_string();

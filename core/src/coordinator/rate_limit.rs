@@ -116,6 +116,21 @@ pub fn update_throttle_state(
     state.last_rate_limit_info = Some(info.clone());
 }
 
+/// Return `true` when a task's `delayed_until` timestamp is still in the future.
+///
+/// Uses lexicographic ISO 8601 comparison — valid as long as both `now` and
+/// `delayed_until` use the same UTC suffix (`Z` or `+00:00`).  Returns `false`
+/// when either timestamp is absent or empty (task is immediately eligible).
+pub fn is_task_delayed(task: &crate::coordinator::model::Task, now: &str) -> bool {
+    if now.is_empty() {
+        return false;
+    }
+    match task.task_runtime.delayed_until.as_deref() {
+        Some(delayed_until) if !delayed_until.is_empty() => delayed_until > now,
+        _ => false,
+    }
+}
+
 /// Reset throttle state after a successful dispatch to the tool.
 pub fn clear_throttle_state(state: &mut ToolThrottleState) {
     state.consecutive_429_count = 0;
@@ -297,6 +312,49 @@ mod tests {
         assert_eq!(state.consecutive_429_count, 2);
         assert_eq!(state.backoff_seconds, 66);
         assert_eq!(state.throttled_until, 99);
+    }
+
+    // ── is_task_delayed ──────────────────────────────────────────────
+
+    fn task_with_delayed_until(delayed_until: Option<&str>) -> crate::coordinator::model::Task {
+        use crate::coordinator::model::TaskRuntime;
+        let mut task = crate::coordinator::model::Task::default();
+        task.task_runtime = TaskRuntime {
+            delayed_until: delayed_until.map(|s| s.to_string()),
+            ..Default::default()
+        };
+        task
+    }
+
+    #[test]
+    fn is_task_delayed_future_timestamp_returns_true() {
+        let task = task_with_delayed_until(Some("2026-03-18T12:05:00Z"));
+        assert!(is_task_delayed(&task, "2026-03-18T12:00:00Z"));
+    }
+
+    #[test]
+    fn is_task_delayed_past_timestamp_returns_false() {
+        let task = task_with_delayed_until(Some("2026-03-18T11:55:00Z"));
+        assert!(!is_task_delayed(&task, "2026-03-18T12:00:00Z"));
+    }
+
+    #[test]
+    fn is_task_delayed_no_delayed_until_returns_false() {
+        let task = task_with_delayed_until(None);
+        assert!(!is_task_delayed(&task, "2026-03-18T12:00:00Z"));
+    }
+
+    #[test]
+    fn is_task_delayed_empty_now_returns_false() {
+        let task = task_with_delayed_until(Some("9999-12-31T23:59:59Z"));
+        assert!(!is_task_delayed(&task, ""));
+    }
+
+    #[test]
+    fn is_task_delayed_exact_match_not_delayed() {
+        // When delayed_until == now, the window has expired → eligible.
+        let task = task_with_delayed_until(Some("2026-03-18T12:00:00Z"));
+        assert!(!is_task_delayed(&task, "2026-03-18T12:00:00Z"));
     }
 
     #[test]
