@@ -802,6 +802,7 @@ pub async fn monitor_active_jobs_native(
                         error_message: evt.error_message.clone(),
                         auto_retry_error_codes: retry_codes.clone(),
                         auto_retry_max: retry_max,
+                        normalizer_input: None,
                     },
                     &now_iso_coordinator(),
                 )?;

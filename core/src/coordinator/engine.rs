@@ -1,7 +1,12 @@
 use super::{PerformerCompletionKind, RuntimeStatus, WorkflowState};
 use crate::config::{CanonicalConfig, CoordinatorConfig};
 use crate::coordinator::control_plane::CoordinatorLog;
+use crate::coordinator::error_normalizer::{CanonicalClass, ErrorNormalizer, ToolError};
 use crate::coordinator::model::{Task, TaskRegistry};
+use crate::coordinator::normalizers::{
+    ClaudeErrorNormalizer, CodexErrorNormalizer, GeminiErrorNormalizer,
+};
+use crate::coordinator::rate_limit::RateLimitInfo;
 use crate::coordinator::runtime::{
     process_branch_cleanup_queue, terminate_active_jobs, CoordinatorRunState,
 };
@@ -78,6 +83,19 @@ pub struct DispatchClaimUpdate {
     pub now: String,
 }
 
+/// Raw output captured from a performer process for error normalization.
+/// Passed as part of [`JobCompletionInput`] when the caller has access to
+/// the process's exit code and stdio streams.
+#[derive(Debug, Clone, Default)]
+pub struct NormalizerInput {
+    /// Process exit code (non-zero indicates failure).
+    pub exit_code: i32,
+    /// Full stderr text from the performer process.
+    pub stderr: String,
+    /// Full stdout text from the performer process.
+    pub stdout: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct JobCompletionInput {
     pub success: bool,
@@ -93,6 +111,10 @@ pub struct JobCompletionInput {
     pub error_message: Option<String>,
     pub auto_retry_error_codes: Vec<String>,
     pub auto_retry_max: usize,
+    /// Raw performer output for per-adapter error normalization.
+    /// `None` when the caller does not have access to the raw process output
+    /// (e.g. in legacy paths or unit tests that pre-classify errors).
+    pub normalizer_input: Option<NormalizerInput>,
 }
 
 #[derive(Debug, Clone)]
@@ -101,6 +123,9 @@ pub struct JobCompletionResult {
     pub status_label: &'static str,
     pub detail: String,
     pub completion_kind: Option<PerformerCompletionKind>,
+    /// Canonical error classification produced by the per-adapter normalizer.
+    /// `None` when the job succeeded or the normalizer was not invoked.
+    pub tool_error: Option<ToolError>,
 }
 
 #[derive(Debug, Clone)]
@@ -600,12 +625,52 @@ pub(crate) fn apply_merge_failure_typed(task: &mut Task, reason: &str, now: &str
     Ok(())
 }
 
+/// Return the per-adapter error normalizer for the given tool identifier.
+/// Returns `None` for unknown tools (caller falls back to generic E101).
+pub(crate) fn get_normalizer_for_tool(tool_id: &str) -> Option<Box<dyn ErrorNormalizer>> {
+    match tool_id {
+        "claude" => Some(Box::new(ClaudeErrorNormalizer)),
+        "codex" => Some(Box::new(CodexErrorNormalizer)),
+        "gemini" => Some(Box::new(GeminiErrorNormalizer)),
+        _ => None,
+    }
+}
+
+/// Store a classified [`ToolError`] (and, when applicable, [`RateLimitInfo`])
+/// into `task_runtime.extra` for diagnostics and downstream consumers.
+fn store_classified_error_in_extra(
+    runtime: &mut crate::coordinator::model::TaskRuntime,
+    tool_error: &Option<ToolError>,
+    now_ts: u64,
+) {
+    let Some(te) = tool_error else { return };
+    if let Ok(v) = serde_json::to_value(te) {
+        runtime.extra.insert("tool_error".to_string(), v);
+    }
+    if matches!(
+        te.canonical_class,
+        CanonicalClass::RateLimit | CanonicalClass::QuotaExhausted
+    ) {
+        let rli = RateLimitInfo {
+            tool_id: te.provider.clone(),
+            error_code: te.error_code.clone(),
+            retry_after_seconds: te.retry_after_seconds,
+            detected_at: now_ts,
+            source_header: None,
+        };
+        if let Ok(v) = serde_json::to_value(&rli) {
+            runtime.extra.insert("rate_limit_info".to_string(), v);
+        }
+    }
+}
+
 fn apply_job_completion_typed(
     task: &mut Task,
     input: &JobCompletionInput,
     now: &str,
 ) -> JobCompletionResult {
-    let error_code = input
+    // ── Baseline error classification from caller ────────────────────
+    let raw_error_code = input
         .error_code
         .clone()
         .unwrap_or_else(|| "E101".to_string());
@@ -613,10 +678,12 @@ fn apply_job_completion_typed(
         .error_origin
         .clone()
         .unwrap_or_else(|| "runner".to_string());
-    let error_message = input
+    let raw_error_message = input
         .error_message
         .clone()
         .unwrap_or_else(|| input.status_text.clone());
+
+    // ── Guard: invalid attempt counters ─────────────────────────────
     if input.attempt == 0 || input.max_attempts == 0 {
         task.set_workflow_state(WorkflowState::Blocked);
         let runtime = task.ensure_runtime();
@@ -631,6 +698,7 @@ fn apply_job_completion_typed(
             status_label: "failed",
             detail,
             completion_kind: None,
+            tool_error: None,
         };
     }
     if input.status_text.is_empty() {
@@ -647,8 +715,39 @@ fn apply_job_completion_typed(
             status_label: "failed",
             detail,
             completion_kind: None,
+            tool_error: None,
         };
     }
+
+    // ── Per-adapter error normalization ──────────────────────────────
+    // Run when the caller provides raw process output AND the job failed.
+    // The normalizer output takes priority over the caller-supplied error code.
+    let classified_tool_error: Option<ToolError> = if !input.success {
+        input.normalizer_input.as_ref().and_then(|ni| {
+            let tool_id = task.tool.as_deref().unwrap_or("");
+            get_normalizer_for_tool(tool_id).and_then(|n| {
+                n.normalize(ni.exit_code, &ni.stderr, &ni.stdout).map(|mut te| {
+                    te.attempt = input.attempt as u32;
+                    te.operation = "performer_run".to_string();
+                    te
+                })
+            })
+        })
+    } else {
+        None
+    };
+
+    // Override caller-supplied error code/message with normalizer output.
+    let error_code = classified_tool_error
+        .as_ref()
+        .map(|te| te.error_code.clone())
+        .unwrap_or(raw_error_code);
+    let error_message = classified_tool_error
+        .as_ref()
+        .map(|te| te.raw_message.clone())
+        .unwrap_or(raw_error_message);
+
+    // ── Success ──────────────────────────────────────────────────────
     if input.success {
         let completion_kind = input
             .completion_kind
@@ -683,8 +782,55 @@ fn apply_job_completion_typed(
             },
             detail: input.status_text.clone(),
             completion_kind: Some(completion_kind),
+            tool_error: None,
         };
     }
+
+    // ── Exit-code override ───────────────────────────────────────────
+    // When a performer exits non-zero but its stdout contains a success
+    // marker AND the only detected error was transient (Overloaded /
+    // RateLimit), the task likely completed before the transient error
+    // fired. Treat as AlreadySatisfied to avoid losing completed work.
+    // This addresses the "Run 2 bug" where Claude returned already_satisfied
+    // but exit code was 1 due to an earlier 529 overload hit on teardown.
+    if let Some(ref ni) = input.normalizer_input {
+        let stdout_says_done = ni.stdout.contains("MACC_TASK_RESULT: success")
+            || ni.stdout.contains("already_satisfied");
+        let transient_error = classified_tool_error
+            .as_ref()
+            .map(|te| {
+                matches!(
+                    te.canonical_class,
+                    CanonicalClass::Overloaded | CanonicalClass::RateLimit
+                )
+            })
+            .unwrap_or(false);
+        if stdout_says_done && transient_error {
+            task.set_workflow_state(WorkflowState::Merged);
+            let runtime = task.ensure_runtime();
+            runtime.completion_kind =
+                Some(PerformerCompletionKind::AlreadySatisfied.as_str().to_string());
+            runtime.set_status(RuntimeStatus::Idle);
+            runtime.current_phase = None;
+            runtime.pid = None;
+            task.touch_state_changed(now);
+            return JobCompletionResult {
+                should_retry: false,
+                status_label: "already_satisfied",
+                detail:
+                    "exit-code override: stdout indicates completion despite transient error"
+                        .to_string(),
+                completion_kind: Some(PerformerCompletionKind::AlreadySatisfied),
+                tool_error: classified_tool_error,
+            };
+        }
+    }
+
+    let now_ts = chrono::DateTime::parse_from_rfc3339(now)
+        .map(|dt| dt.timestamp() as u64)
+        .unwrap_or(0);
+
+    // ── Retry (attempt < max_attempts) ───────────────────────────────
     if input.attempt < input.max_attempts {
         task.set_workflow_state(WorkflowState::Claimed);
         let runtime = task.ensure_runtime();
@@ -709,14 +855,17 @@ fn apply_job_completion_typed(
             error_message.clone(),
         );
         runtime.last_error = Some(reason.clone());
+        store_classified_error_in_extra(runtime, &classified_tool_error, now_ts);
         task.touch_state_changed(now);
         return JobCompletionResult {
             should_retry: true,
             status_label: "retry",
             detail: reason,
             completion_kind: None,
+            tool_error: classified_tool_error,
         };
     }
+
     let reason = if input.timed_out {
         format!(
             "performer timed out after {}s (max attempts reached: {}, elapsed={}s)",
@@ -728,6 +877,7 @@ fn apply_job_completion_typed(
             input.attempt, input.status_text
         )
     };
+
     let retries_total = task.task_runtime.retries_count();
     if should_auto_retry_error_code(
         &error_code,
@@ -748,14 +898,18 @@ fn apply_job_completion_typed(
             error_message.clone(),
         );
         runtime.last_error = Some(reason.clone());
+        store_classified_error_in_extra(runtime, &classified_tool_error, now_ts);
         task.touch_state_changed(now);
         return JobCompletionResult {
             should_retry: false,
             status_label: "auto_retry",
             detail: format!("auto-retry scheduled for error code {}", error_code),
             completion_kind: None,
+            tool_error: classified_tool_error,
         };
     }
+
+    // ── Terminal failure ─────────────────────────────────────────────
     task.set_workflow_state(WorkflowState::Blocked);
     let runtime = task.ensure_runtime();
     runtime.set_status(RuntimeStatus::Failed);
@@ -763,12 +917,14 @@ fn apply_job_completion_typed(
     runtime.pid = None;
     runtime.set_last_error_details(error_code, error_origin, error_message);
     runtime.last_error = Some(reason.clone());
+    store_classified_error_in_extra(runtime, &classified_tool_error, now_ts);
     task.touch_state_changed(now);
     JobCompletionResult {
         should_retry: false,
         status_label: "failed",
         detail: reason,
         completion_kind: None,
+        tool_error: classified_tool_error,
     }
 }
 
@@ -1499,6 +1655,7 @@ mod tests {
                 error_message: None,
                 auto_retry_error_codes: Vec::new(),
                 auto_retry_max: 0,
+                normalizer_input: None,
             },
             "2026-02-21T00:00:00Z",
         );
@@ -1528,6 +1685,7 @@ mod tests {
                 error_message: None,
                 auto_retry_error_codes: Vec::new(),
                 auto_retry_max: 0,
+                normalizer_input: None,
             },
             "2026-02-21T00:00:00Z",
         );
@@ -1563,6 +1721,7 @@ mod tests {
                 error_message: None,
                 auto_retry_error_codes: Vec::new(),
                 auto_retry_max: 0,
+                normalizer_input: None,
             },
             "2026-02-21T00:00:00Z",
         );
@@ -1621,6 +1780,7 @@ mod tests {
                 error_message: None,
                 auto_retry_error_codes: Vec::new(),
                 auto_retry_max: 0,
+                normalizer_input: None,
             },
             "2026-02-21T00:00:00Z",
         )
@@ -1682,6 +1842,7 @@ mod tests {
                 error_message: None,
                 auto_retry_error_codes: Vec::new(),
                 auto_retry_max: 0,
+                normalizer_input: None,
             },
             "2026-02-21T00:00:00Z",
         )
@@ -1774,5 +1935,237 @@ mod tests {
             "unexpected error: {}",
             err
         );
+    }
+
+    // ── Normalizer routing & integration tests ───────────────────────
+
+    fn make_failure_input(
+        tool_id: &str,
+        stderr: &str,
+        stdout: &str,
+    ) -> (serde_json::Value, JobCompletionInput) {
+        let task = json!({
+            "id": "TN1",
+            "state": "claimed",
+            "tool": tool_id,
+            "task_runtime": { "status": "running", "pid": 1 }
+        });
+        let input = JobCompletionInput {
+            success: false,
+            attempt: 1,
+            max_attempts: 1,
+            timed_out: false,
+            phase_timeout_seconds: 300,
+            elapsed_seconds: 10,
+            status_text: "performer exited with error".to_string(),
+            completion_kind: None,
+            error_code: None,
+            error_origin: None,
+            error_message: None,
+            auto_retry_error_codes: Vec::new(),
+            auto_retry_max: 0,
+            normalizer_input: Some(NormalizerInput {
+                exit_code: 1,
+                stderr: stderr.to_string(),
+                stdout: stdout.to_string(),
+            }),
+        };
+        (task, input)
+    }
+
+    #[test]
+    fn normalizer_routes_claude_529_to_overloaded() {
+        let (mut task_val, input) =
+            make_failure_input("claude", "Error: 529 API overloaded", "");
+        let out = apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
+        // Should be blocked (attempt == max_attempts) with E601
+        assert_eq!(out.status_label, "failed");
+        assert_eq!(task_val["task_runtime"]["last_error_code"], "E601");
+        let te = out.tool_error.unwrap();
+        assert_eq!(te.canonical_class, CanonicalClass::Overloaded);
+        assert_eq!(te.error_code, "E601");
+        assert_eq!(te.provider, "claude");
+        assert!(te.retryable);
+    }
+
+    #[test]
+    fn normalizer_routes_codex_insufficient_quota_to_e602() {
+        let (mut task_val, input) = make_failure_input(
+            "codex",
+            "429 insufficient_quota: You exceeded your current quota",
+            "",
+        );
+        let out = apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
+        assert_eq!(task_val["task_runtime"]["last_error_code"], "E602");
+        let te = out.tool_error.unwrap();
+        assert_eq!(te.canonical_class, CanonicalClass::QuotaExhausted);
+        assert_eq!(te.error_code, "E602");
+        assert_eq!(te.provider, "codex");
+        assert!(!te.retryable);
+    }
+
+    #[test]
+    fn normalizer_routes_gemini_resource_exhausted_quota_to_e602() {
+        let (mut task_val, input) = make_failure_input(
+            "gemini",
+            "429 RESOURCE_EXHAUSTED: Quota exceeded for requests per minute",
+            "",
+        );
+        let out = apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
+        assert_eq!(task_val["task_runtime"]["last_error_code"], "E602");
+        let te = out.tool_error.unwrap();
+        assert_eq!(te.canonical_class, CanonicalClass::QuotaExhausted);
+        assert_eq!(te.provider, "gemini");
+    }
+
+    #[test]
+    fn normalizer_routes_gemini_resource_exhausted_rate_limit_to_e601() {
+        let (mut task_val, input) = make_failure_input(
+            "gemini",
+            "429 RESOURCE_EXHAUSTED: Rate limit for model",
+            "",
+        );
+        let out = apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
+        assert_eq!(task_val["task_runtime"]["last_error_code"], "E601");
+        let te = out.tool_error.unwrap();
+        assert_eq!(te.canonical_class, CanonicalClass::RateLimit);
+    }
+
+    #[test]
+    fn tool_error_stored_in_extra() {
+        let (mut task_val, input) =
+            make_failure_input("claude", "Error: 529 API overloaded", "");
+        apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
+        let stored = &task_val["task_runtime"]["tool_error"];
+        assert!(!stored.is_null(), "tool_error should be stored in extra");
+        assert_eq!(stored["canonical_class"], "Overloaded");
+        assert_eq!(stored["error_code"], "E601");
+        assert_eq!(stored["provider"], "claude");
+    }
+
+    #[test]
+    fn rate_limit_info_stored_in_extra_for_e601() {
+        let (mut task_val, input) =
+            make_failure_input("claude", "Error: 429 Rate limit exceeded", "");
+        apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
+        let rli = &task_val["task_runtime"]["rate_limit_info"];
+        assert!(!rli.is_null(), "rate_limit_info should be stored for E601");
+        assert_eq!(rli["tool_id"], "claude");
+        assert_eq!(rli["error_code"], "E601");
+    }
+
+    #[test]
+    fn rate_limit_info_stored_in_extra_for_e602() {
+        let (mut task_val, input) = make_failure_input(
+            "codex",
+            "429 insufficient_quota: quota exceeded",
+            "",
+        );
+        apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
+        let rli = &task_val["task_runtime"]["rate_limit_info"];
+        assert!(!rli.is_null(), "rate_limit_info should be stored for E602");
+        assert_eq!(rli["tool_id"], "codex");
+        assert_eq!(rli["error_code"], "E602");
+    }
+
+    #[test]
+    fn exit_code_override_already_satisfied_with_transient_error() {
+        // Performer signals already_satisfied in stdout but exits non-zero
+        // due to a 529 overload on teardown. Should be treated as success.
+        let (mut task_val, input) = make_failure_input(
+            "claude",
+            "Error: 529 API overloaded",
+            "already_satisfied",
+        );
+        let out = apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
+        assert_eq!(out.status_label, "already_satisfied");
+        assert_eq!(task_val["state"], "merged");
+        assert_eq!(task_val["task_runtime"]["status"], "idle");
+        assert_eq!(
+            task_val["task_runtime"]["completion_kind"],
+            "already_satisfied"
+        );
+    }
+
+    #[test]
+    fn exit_code_override_macc_task_result_success_marker() {
+        let (mut task_val, input) = make_failure_input(
+            "claude",
+            "Error: 529 overloaded",
+            "MACC_TASK_RESULT: success",
+        );
+        let out = apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
+        assert_eq!(out.status_label, "already_satisfied");
+        assert_eq!(task_val["state"], "merged");
+    }
+
+    #[test]
+    fn exit_code_override_does_not_fire_for_hard_quota_error() {
+        // QuotaExhausted is not transient, so override must NOT fire even if
+        // stdout says "already_satisfied".
+        let (mut task_val, input) = make_failure_input(
+            "codex",
+            "429 insufficient_quota",
+            "already_satisfied",
+        );
+        let out = apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
+        // Should remain a terminal failure, not override to success.
+        assert_eq!(out.status_label, "failed");
+        assert_eq!(task_val["state"], "blocked");
+    }
+
+    #[test]
+    fn unknown_tool_falls_back_to_e101() {
+        // No normalizer for tool "agentic-x" → falls through to caller's E101.
+        let (mut task_val, mut input) =
+            make_failure_input("agentic-x", "some unexpected error text", "");
+        // Caller provides no pre-classified error code either.
+        input.error_code = None;
+        apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
+        assert_eq!(task_val["task_runtime"]["last_error_code"], "E101");
+        assert!(task_val["task_runtime"]["tool_error"].is_null());
+    }
+
+    #[test]
+    fn normalizer_not_invoked_when_normalizer_input_is_none() {
+        // Legacy path: no normalizer_input → caller's error_code wins.
+        let mut task_val = json!({
+            "id": "TN2",
+            "state": "claimed",
+            "tool": "claude",
+            "task_runtime": { "status": "running" }
+        });
+        let out = apply_job_completion(
+            &mut task_val,
+            &JobCompletionInput {
+                success: false,
+                attempt: 1,
+                max_attempts: 1,
+                timed_out: false,
+                phase_timeout_seconds: 300,
+                elapsed_seconds: 5,
+                status_text: "performer failed".to_string(),
+                completion_kind: None,
+                error_code: Some("E201".to_string()),
+                error_origin: Some("runner".to_string()),
+                error_message: Some("auth error".to_string()),
+                auto_retry_error_codes: Vec::new(),
+                auto_retry_max: 0,
+                normalizer_input: None,
+            },
+            "2026-02-21T00:00:00Z",
+        );
+        assert_eq!(out.status_label, "failed");
+        assert_eq!(task_val["task_runtime"]["last_error_code"], "E201");
+        assert!(out.tool_error.is_none());
+    }
+
+    #[test]
+    fn get_normalizer_for_tool_routing() {
+        assert!(get_normalizer_for_tool("claude").is_some());
+        assert!(get_normalizer_for_tool("codex").is_some());
+        assert!(get_normalizer_for_tool("gemini").is_some());
+        assert!(get_normalizer_for_tool("unknown-tool").is_none());
+        assert!(get_normalizer_for_tool("").is_none());
     }
 }

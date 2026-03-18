@@ -9,6 +9,7 @@ pub mod control_plane;
 pub mod engine;
 pub mod error_normalizer;
 pub mod helpers;
+pub mod normalizers;
 pub mod ipc;
 pub mod logs;
 pub mod model;
@@ -65,6 +66,7 @@ pub const COORDINATOR_EVENT_TYPES_V1: &[&str] = &[
     "local_merge_failed",
     "merge_worker_started",
     "merge_worker_complete",
+    "tool_error_classified",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
