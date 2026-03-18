@@ -75,7 +75,7 @@ pub fn run_generation(
             })?;
         }
 
-        invoke_context_tool(paths, performer, &prompt)?;
+        invoke_context_tool(paths, performer, &prompt, None)?;
 
         if !target_abs.is_file() {
             return Err(MaccError::Validation(format!(
@@ -316,18 +316,21 @@ fn truncate_text_for_prompt(input: &str, max_chars: usize) -> String {
 /// Public entry point for invoking a tool with a prompt string.
 ///
 /// Used by context generation and PRD audit.
+/// Pass `logger` to capture the tool's stdout into the coordinator log.
 pub fn invoke_tool_with_prompt(
     paths: &ProjectPaths,
     performer: &ToolPerformerSpec,
     prompt: &str,
+    logger: Option<&dyn crate::coordinator::control_plane::CoordinatorLog>,
 ) -> crate::Result<()> {
-    invoke_context_tool(paths, performer, prompt)
+    invoke_context_tool(paths, performer, prompt, logger)
 }
 
 fn invoke_context_tool(
     paths: &ProjectPaths,
     performer: &ToolPerformerSpec,
     prompt: &str,
+    logger: Option<&dyn crate::coordinator::control_plane::CoordinatorLog>,
 ) -> Result<()> {
     if !command_exists(&performer.command) {
         return Err(MaccError::Validation(format!(
@@ -365,7 +368,7 @@ fn invoke_context_tool(
                 action: "run tool context generation command".into(),
                 source: e,
             })?;
-            validate_context_tool_exit(&performer.command, output)
+            validate_context_tool_exit(&performer.command, output, logger)
         }
         "stdin" => {
             use std::io::Write;
@@ -393,7 +396,7 @@ fn invoke_context_tool(
                 action: "wait for tool context generation command".into(),
                 source: e,
             })?;
-            validate_context_tool_exit(&performer.command, output)
+            validate_context_tool_exit(&performer.command, output, logger)
         }
         other => Err(MaccError::Validation(format!(
             "Unsupported prompt mode '{}' for tool '{}'.",
@@ -402,9 +405,20 @@ fn invoke_context_tool(
     }
 }
 
-fn validate_context_tool_exit(command: &str, output: std::process::Output) -> Result<()> {
+fn validate_context_tool_exit(
+    command: &str,
+    output: std::process::Output,
+    logger: Option<&dyn crate::coordinator::control_plane::CoordinatorLog>,
+) -> Result<()> {
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if let Some(log) = logger {
+        for line in stdout.lines() {
+            let _ = log.note(format!("- [tool stdout] {}", line));
+        }
+    }
+
     if !output.status.success() {
         let reason = if !stderr.trim().is_empty() {
             stderr.trim().to_string()

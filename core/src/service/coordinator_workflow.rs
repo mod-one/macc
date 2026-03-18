@@ -1552,7 +1552,7 @@ fn invoke_audit_tool(
     }
 
     // Delegate to the shared context tool invocation
-    crate::service::context::invoke_tool_with_prompt(paths, performer, prompt)
+    crate::service::context::invoke_tool_with_prompt(paths, performer, prompt, logger)
 }
 
 pub fn coordinator_unlock<E: crate::engine::Engine + ?Sized>(

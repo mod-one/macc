@@ -211,7 +211,9 @@ pub fn build_audit_prompt(context: &AuditContext) -> String {
     }
 
     prompt.push_str("## Output\n\n");
-    prompt.push_str("Output the complete updated `prd.json` as a single JSON code block.\n");
+    prompt.push_str("Edit `prd.json` directly in the repository using your file-editing tools.\n");
+    prompt.push_str("Do not print the full file content in your response.\n");
+    prompt.push_str("At the end, print a short status line confirming the file was updated (e.g. `prd.json updated`).\n");
 
     prompt
 }
