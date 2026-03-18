@@ -153,12 +153,19 @@ fi
 
 cd "$PROJECT_ROOT"
 
+BUILD_SHA="$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")"
+BUILD_DIRTY=""
+if ! git diff --quiet HEAD -- 2>/dev/null; then
+  BUILD_DIRTY="-dirty"
+fi
+export MACC_BUILD_SHA="${BUILD_SHA}${BUILD_DIRTY}"
+
 if [[ "$BUILD_PROFILE" == "release" ]]; then
-  echo "Building macc (release)..."
+  echo "Building macc (release) [${MACC_BUILD_SHA}]..."
   cargo build --release
   BIN_PATH="$PROJECT_ROOT/target/release/macc"
 else
-  echo "Building macc (debug)..."
+  echo "Building macc (debug) [${MACC_BUILD_SHA}]..."
   cargo build
   BIN_PATH="$PROJECT_ROOT/target/debug/macc"
 fi
@@ -193,6 +200,13 @@ fi
 echo "Installed:"
 echo "  - $INSTALL_DIR/macc"
 echo "  - $INSTALL_DIR/macc-uninstall"
-echo "Verify with: macc --version"
+
+INSTALLED_VERSION=""
+if INSTALLED_VERSION="$("$INSTALL_DIR/macc" --version 2>/dev/null)"; then
+  echo "  - version: $INSTALLED_VERSION (build ${MACC_BUILD_SHA})"
+else
+  echo "Warning: post-install verification failed — '$INSTALL_DIR/macc --version' returned non-zero" >&2
+fi
+
 echo "Uninstall with: macc-uninstall"
 echo "Then in a new project: macc init && macc tui"

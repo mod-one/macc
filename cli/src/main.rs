@@ -26,7 +26,7 @@ use macc_core::coordinator::types::CoordinatorEnvConfig;
 #[derive(Parser)]
 #[command(name = "macc")]
 #[command(about = "MACC (Multi-Agentic Coding Config)", long_about = None)]
-#[command(version)]
+#[command(version = concat!(env!("CARGO_PKG_VERSION"), " (build ", env!("MACC_BUILD_SHA"), ")"))]
 struct Cli {
     /// Working directory
     #[arg(short, long, global = true, default_value = ".")]
