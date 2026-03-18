@@ -1316,7 +1316,7 @@ pub fn coordinator_sync_prd(
     coordinator_cfg: Option<&CoordinatorConfig>,
     env_cfg: &CoordinatorEnvConfig,
     logger: Option<&dyn CoordinatorLog>,
-) -> Result<()> {
+) -> Result<crate::coordinator::commit_reconciler::ReconcileReport> {
     use crate::coordinator::commit_reconciler;
     use crate::coordinator::helpers::now_iso_coordinator;
     use crate::coordinator_storage::CoordinatorStoragePaths;
@@ -1340,7 +1340,7 @@ pub fn coordinator_sync_prd(
                 reference_branch
             ));
         }
-        return Ok(());
+        return Ok(commit_reconciler::ReconcileReport::default());
     }
 
     // Load the task registry
@@ -1366,7 +1366,7 @@ pub fn coordinator_sync_prd(
                 report.commits_scanned
             ));
         }
-        return Ok(());
+        return Ok(report);
     }
 
     // Apply transitions
@@ -1400,7 +1400,33 @@ pub fn coordinator_sync_prd(
             report.commits_scanned
         ));
     }
-    Ok(())
+    Ok(report)
+}
+
+/// Build a human-readable sync-prd summary for inclusion in the audit prompt.
+fn build_sync_summary_for_prompt(
+    report: &crate::coordinator::commit_reconciler::ReconcileReport,
+) -> String {
+    if report.reconciled.is_empty() {
+        return format!(
+            "{} commit(s) scanned — no task states changed.",
+            report.commits_scanned
+        );
+    }
+    let mut s = format!(
+        "{} commit(s) scanned — {} task(s) transitioned to `merged`:\n",
+        report.commits_scanned,
+        report.reconciled.len()
+    );
+    for entry in &report.reconciled {
+        s.push_str(&format!(
+            "- `{}` ({} → merged) via commit `{}`\n",
+            entry.task_id,
+            entry.previous_state,
+            &entry.matched_commit_sha[..7.min(entry.matched_commit_sha.len())]
+        ));
+    }
+    s
 }
 
 /// AI-powered PRD audit: gathers commit context for completed tasks and
@@ -1420,7 +1446,7 @@ pub fn coordinator_audit_prd(
     use crate::coordinator::prd_auditor;
 
     if let Some(log) = logger {
-        let _ = log.note("- Audit PRD: gathering commit context for completed tasks".to_string());
+        let _ = log.note("- Audit PRD: running sync-prd before audit".to_string());
     }
 
     let reference_branch = env_cfg
@@ -1429,27 +1455,43 @@ pub fn coordinator_audit_prd(
         .or_else(|| coordinator_cfg.and_then(|c| c.reference_branch.as_deref()))
         .unwrap_or("main");
 
+    // Run sync-prd first and capture the reconcile result for the prompt
+    let sync_report =
+        coordinator_sync_prd(paths, coordinator_cfg, env_cfg, logger)?;
+    let sync_summary = build_sync_summary_for_prompt(&sync_report);
+
+    if let Some(log) = logger {
+        let _ = log.note("- Audit PRD: gathering commit context for completed tasks".to_string());
+    }
+
     // Load the PRD file
-    let prd_path = env_cfg
+    let prd_path_buf = env_cfg
         .prd
         .as_ref()
         .map(std::path::PathBuf::from)
         .or_else(|| coordinator_cfg.and_then(|c| c.prd_file.as_ref().map(std::path::PathBuf::from)))
         .unwrap_or_else(|| paths.root.join("prd.json"));
 
-    if !prd_path.exists() {
+    if !prd_path_buf.exists() {
         return Err(MaccError::Validation(format!(
             "PRD file not found: {}. Specify via --prd or automation.coordinator.prd in config.",
-            prd_path.display()
+            prd_path_buf.display()
         )));
     }
-    let prd_json = std::fs::read_to_string(&prd_path).map_err(|e| MaccError::Io {
-        path: prd_path.display().to_string(),
+
+    // Compute a repo-relative path string for the agent prompt
+    let prd_path_rel = prd_path_buf
+        .strip_prefix(&paths.root)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| prd_path_buf.to_string_lossy().into_owned());
+
+    let prd_json = std::fs::read_to_string(&prd_path_buf).map_err(|e| MaccError::Io {
+        path: prd_path_buf.display().to_string(),
         action: "read PRD file for audit".into(),
         source: e,
     })?;
 
-    // Load task registry
+    // Load task registry (after sync so states are up to date)
     let storage_mode =
         coordinator_engine::resolve_storage_mode(env_cfg, coordinator_cfg)?;
     let store_paths = CoordinatorStoragePaths::from_project_paths(paths);
@@ -1466,9 +1508,11 @@ pub fn coordinator_audit_prd(
     let report = prd_auditor::prepare_audit(
         &paths.root,
         &prd_json,
+        &prd_path_rel,
         &snapshot.registry,
         reference_branch,
         true, // include diff stats
+        Some(sync_summary),
     )?;
 
     if !report.prompt_generated {
