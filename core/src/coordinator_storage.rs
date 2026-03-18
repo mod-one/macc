@@ -475,7 +475,11 @@ impl SqliteStorage {
 
     fn open(&self) -> Result<Connection> {
         ensure_parent_dir(&self.paths.sqlite_path)?;
-        Connection::open(&self.paths.sqlite_path).map_err(sql_err)
+        let conn = Connection::open(&self.paths.sqlite_path).map_err(sql_err)?;
+        // Prevent SQLITE_BUSY errors when multiple performers write concurrently.
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(sql_err)?;
+        Ok(conn)
     }
 
     fn init_schema(&self, conn: &Connection) -> Result<()> {

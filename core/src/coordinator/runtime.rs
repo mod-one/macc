@@ -640,7 +640,17 @@ fn read_last_completion_details(
     let storage_paths =
         crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&project_paths);
     let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
-    let snapshot = sqlite.load_snapshot().ok()?;
+    let snapshot = match sqlite.load_snapshot() {
+        Ok(snap) => snap,
+        Err(err) => {
+            tracing::warn!(
+                task_id,
+                "read_last_completion_details: load_snapshot failed: {}",
+                err
+            );
+            return None;
+        }
+    };
     for event in snapshot.events.iter().rev() {
         let Some(event_task_id) = event.task_id.as_deref() else {
             continue;
@@ -719,7 +729,17 @@ fn read_last_error_details_from_sqlite(
     let storage_paths =
         crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&project_paths);
     let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
-    let snapshot = sqlite.load_snapshot().ok()?;
+    let snapshot = match sqlite.load_snapshot() {
+        Ok(snap) => snap,
+        Err(err) => {
+            tracing::warn!(
+                task_id,
+                "read_last_error_details_from_sqlite: load_snapshot failed: {}",
+                err
+            );
+            return None;
+        }
+    };
     let mut failed_candidate: Option<ErrorDetails> = None;
     let mut saw_terminal_success_before_failed = false;
     for event in snapshot.events.iter().rev() {
