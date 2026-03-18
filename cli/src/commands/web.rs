@@ -11,6 +11,7 @@ use macc_core::coordinator::task_selector::SelectedTask;
 use macc_core::coordinator::types::CoordinatorEnvConfig;
 use macc_core::service::coordinator_workflow::{
     CoordinatorCommand, CoordinatorCommandRequest, CoordinatorCommandResult, CoordinatorStatus,
+    ThrottledToolStatus,
 };
 use macc_core::service::diagnostic::{FailureKind, FailureReport};
 use macc_core::{MaccError, ProjectPaths, Result};
@@ -139,6 +140,30 @@ struct ApiCoordinatorStatus {
     pub pause_phase: Option<String>,
     pub latest_error: Option<String>,
     pub failure_report: Option<ApiFailureReport>,
+    /// RL-WEB-008: tools currently throttled due to rate-limiting (empty when none).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub throttled_tools: Vec<ApiThrottledToolStatus>,
+    /// RL-WEB-008: effective max_parallel after rate-limit concurrency reductions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_max_parallel: Option<usize>,
+}
+
+/// RL-WEB-008: per-tool throttle status for API responses.
+#[derive(Debug, Serialize)]
+struct ApiThrottledToolStatus {
+    pub tool_id: String,
+    pub throttled_until: String,
+    pub consecutive_count: usize,
+}
+
+impl From<ThrottledToolStatus> for ApiThrottledToolStatus {
+    fn from(s: ThrottledToolStatus) -> Self {
+        Self {
+            tool_id: s.tool_id,
+            throttled_until: s.throttled_until,
+            consecutive_count: s.consecutive_count,
+        }
+    }
 }
 
 impl From<CoordinatorStatus> for ApiCoordinatorStatus {
@@ -155,6 +180,12 @@ impl From<CoordinatorStatus> for ApiCoordinatorStatus {
             pause_phase: status.pause_phase,
             latest_error: status.latest_error,
             failure_report: status.failure_report.map(ApiFailureReport::from),
+            throttled_tools: status
+                .throttled_tools
+                .into_iter()
+                .map(ApiThrottledToolStatus::from)
+                .collect(),
+            effective_max_parallel: status.effective_max_parallel,
         }
     }
 }
@@ -611,6 +642,8 @@ mod tests {
                 pause_phase: None,
                 latest_error: None,
                 failure_report: None,
+                throttled_tools: vec![],
+                effective_max_parallel: None,
             }),
             resumed: Some(false),
             aggregated_performer_logs: Some(2),
@@ -624,6 +657,7 @@ mod tests {
                 title: "Example".to_string(),
                 tool: "mock".to_string(),
                 base_branch: "main".to_string(),
+                is_fallback: false,
             }),
             audit_prd_report: None,
         };

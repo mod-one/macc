@@ -181,6 +181,19 @@ pub struct CoordinatorStatus {
     pub pause_phase: Option<String>,
     pub latest_error: Option<String>,
     pub failure_report: Option<crate::service::diagnostic::FailureReport>,
+    /// RL-WEB-008: tools currently throttled due to rate-limiting.
+    pub throttled_tools: Vec<ThrottledToolStatus>,
+    /// RL-WEB-008: effective max_parallel after concurrency reductions from rate-limiting.
+    pub effective_max_parallel: Option<usize>,
+}
+
+/// RL-WEB-008: per-tool throttle status for API exposure.
+#[derive(Debug, Clone, Default)]
+pub struct ThrottledToolStatus {
+    pub tool_id: String,
+    /// ISO 8601 timestamp when the throttle expires.
+    pub throttled_until: String,
+    pub consecutive_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1062,6 +1075,52 @@ pub fn get_coordinator_status(paths: &ProjectPaths) -> Result<CoordinatorStatus>
             .find(|line| line.contains("ERROR") || line.contains("failed"))
             .map(|line| line.trim().to_string());
     }
+
+    // RL-WEB-008: populate throttled_tools from tasks with a future delayed_until.
+    let now_iso = chrono::Utc::now().to_rfc3339();
+    let mut throttle_map: BTreeMap<String, ThrottledToolStatus> = BTreeMap::new();
+    for task in &snapshot.registry.tasks {
+        if let (Some(delayed_until), Some(tool_id)) = (
+            task.task_runtime.delayed_until.as_deref(),
+            task.tool.as_deref(),
+        ) {
+            if !tool_id.is_empty() && delayed_until > now_iso.as_str() {
+                let consecutive_count = task
+                    .task_runtime
+                    .extra
+                    .get("throttle_state")
+                    .and_then(|v| v.get("consecutive_429_count"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as usize;
+                let entry = throttle_map
+                    .entry(tool_id.to_string())
+                    .or_insert_with(|| ThrottledToolStatus {
+                        tool_id: tool_id.to_string(),
+                        throttled_until: delayed_until.to_string(),
+                        consecutive_count,
+                    });
+                if delayed_until > entry.throttled_until.as_str() {
+                    entry.throttled_until = delayed_until.to_string();
+                    entry.consecutive_count = consecutive_count;
+                }
+            }
+        }
+    }
+    status.throttled_tools = throttle_map.into_values().collect();
+
+    // RL-WEB-008: parse effective_max_parallel from the most recent concurrency_adjusted event.
+    status.effective_max_parallel = snapshot
+        .events
+        .iter()
+        .rev()
+        .find(|e| e.event_type == "concurrency_adjusted")
+        .and_then(|e| e.message())
+        .and_then(|msg| {
+            msg.split_whitespace()
+                .find(|s| s.starts_with("effective_max_parallel="))
+                .and_then(|s| s.split('=').nth(1))
+                .and_then(|v| v.parse::<usize>().ok())
+        });
 
     Ok(status)
 }
