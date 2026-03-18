@@ -76,6 +76,14 @@ fn format_hms(total_secs: u64) -> String {
     format!("{}:{:02}:{:02}", hours, minutes, seconds)
 }
 
+/// Format an ISO 8601 timestamp as "HH:MM:SS UTC" for throttle-until display.
+fn throttle_until_hms(iso: &str) -> String {
+    DateTime::parse_from_rfc3339(iso)
+        .ok()
+        .map(|dt| dt.with_timezone(&Utc).format("%H:%M:%S UTC").to_string())
+        .unwrap_or_else(|| iso.to_string())
+}
+
 pub struct CoordinatorTaskSnapshot {
     pub total: usize,
     pub todo: usize,
@@ -83,6 +91,8 @@ pub struct CoordinatorTaskSnapshot {
     pub blocked: usize,
     pub merged: usize,
     pub active_tasks: Vec<CoordinatorActiveTask>,
+    /// RL-TUI-007: tools currently throttled due to rate-limiting.
+    pub throttled_tools: Vec<ThrottledToolInfo>,
 }
 
 #[derive(Clone)]
@@ -96,6 +106,20 @@ pub struct CoordinatorActiveTask {
     pub current_phase: String,
     pub last_error: String,
     pub last_heartbeat: String,
+    /// Most recent error code (e.g. "E601", "E602") for this task.
+    pub last_error_code: String,
+}
+
+/// RL-TUI-007: per-tool throttle state for TUI display.
+#[derive(Clone)]
+pub struct ThrottledToolInfo {
+    pub tool_id: String,
+    /// ISO 8601 timestamp when the throttle expires (raw, for sorting).
+    pub throttled_until: String,
+    /// Human-readable "HH:MM:SS UTC" form of `throttled_until`.
+    pub display_until: String,
+    pub backoff_seconds: u64,
+    pub consecutive_count: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -176,6 +200,10 @@ pub struct AppState {
     pub redo_stack: Vec<CanonicalConfig>,
     coordinator_running_elapsed_secs: Option<u64>,
     coordinator_pause_next_action: Option<CoordinatorPauseNextAction>,
+    /// RL-TUI-007: tools currently throttled due to rate-limiting.
+    pub coordinator_throttled_tools: Vec<ThrottledToolInfo>,
+    /// RL-TUI-007: (effective, original) max_parallel from concurrency_adjusted events.
+    pub coordinator_effective_max_parallel: Option<(usize, usize)>,
 }
 
 impl AppState {
@@ -267,6 +295,8 @@ impl AppState {
             redo_stack: Vec::new(),
             coordinator_running_elapsed_secs: None,
             coordinator_pause_next_action: None,
+            coordinator_throttled_tools: Vec::new(),
+            coordinator_effective_max_parallel: None,
         };
 
         state.refresh_tools();
@@ -516,7 +546,57 @@ impl AppState {
             blocked: 0,
             merged: 0,
             active_tasks: Vec::new(),
+            throttled_tools: Vec::new(),
         };
+        // RL-TUI-007: collect throttled tool info from tasks whose delayed_until is in the future.
+        let now_iso = Utc::now().to_rfc3339();
+        let mut throttle_map: BTreeMap<String, ThrottledToolInfo> = BTreeMap::new();
+        for task in &root.tasks {
+            if let (Some(delayed_until), Some(tool_id)) = (
+                task.task_runtime.delayed_until.as_deref(),
+                task.tool.as_deref(),
+            ) {
+                if !tool_id.is_empty() && delayed_until > now_iso.as_str() {
+                    let (backoff_seconds, consecutive_count) = task
+                        .task_runtime
+                        .extra
+                        .get("throttle_state")
+                        .and_then(|v| {
+                            let bs = v
+                                .get("backoff_seconds")
+                                .and_then(|x| x.as_u64())
+                                .unwrap_or(0);
+                            let cc = v
+                                .get("consecutive_429_count")
+                                .and_then(|x| x.as_u64())
+                                .unwrap_or(0) as u32;
+                            Some((bs, cc))
+                        })
+                        .unwrap_or((0, 0));
+                    let entry =
+                        throttle_map
+                            .entry(tool_id.to_string())
+                            .or_insert_with(|| ThrottledToolInfo {
+                                tool_id: tool_id.to_string(),
+                                throttled_until: delayed_until.to_string(),
+                                display_until: throttle_until_hms(delayed_until),
+                                backoff_seconds,
+                                consecutive_count,
+                            });
+                    // Keep the latest expiry for this tool.
+                    if delayed_until > entry.throttled_until.as_str() {
+                        *entry = ThrottledToolInfo {
+                            tool_id: tool_id.to_string(),
+                            throttled_until: delayed_until.to_string(),
+                            display_until: throttle_until_hms(delayed_until),
+                            backoff_seconds,
+                            consecutive_count,
+                        };
+                    }
+                }
+            }
+        }
+        snapshot.throttled_tools = throttle_map.into_values().collect();
         for task in &root.tasks {
             let id = if task.id.is_empty() {
                 "-".to_string()
@@ -549,6 +629,11 @@ impl AppState {
                 .clone()
                 .unwrap_or_else(|| "-".to_string());
             let last_error = task.task_runtime.last_error.clone().unwrap_or_default();
+            let last_error_code = task
+                .task_runtime
+                .last_error_code
+                .clone()
+                .unwrap_or_default();
             let last_heartbeat = task
                 .task_runtime
                 .last_heartbeat
@@ -575,6 +660,7 @@ impl AppState {
                         current_phase,
                         last_error,
                         last_heartbeat,
+                        last_error_code,
                     });
                 }
                 "claimed" => {
@@ -596,6 +682,7 @@ impl AppState {
             .and_then(|snapshot| self.read_registry_snapshot(&snapshot.registry))
         {
             Ok(snapshot) => {
+                self.coordinator_throttled_tools = snapshot.throttled_tools.clone();
                 self.coordinator_snapshot = Some(snapshot);
                 self.coordinator_last_refresh = Some(Instant::now());
             }
@@ -646,6 +733,10 @@ impl AppState {
                 | "phase_skipped"
                 | "events_rotated"
                 | "events_compacted"
+                // RL-TUI-007: rate-limit visibility events
+                | "concurrency_adjusted"
+                | "tool_fallback"
+                | "quota_exhausted"
         )
     }
 
@@ -787,6 +878,28 @@ impl AppState {
         self.coordinator_events = lines;
         self.coordinator_events_last_refresh = Some(now);
         self.coordinator_events_last_seen_count = total_count;
+        // RL-TUI-007: parse effective_max_parallel from the most recent concurrency_adjusted event.
+        if let Some(msg) = filtered
+            .iter()
+            .rev()
+            .find(|e| e.event_type == "concurrency_adjusted")
+            .and_then(|e| e.message.as_deref())
+        {
+            if let Some(effective) = msg
+                .split_whitespace()
+                .find(|s| s.starts_with("effective_max_parallel="))
+                .and_then(|s| s.split('=').nth(1))
+                .and_then(|v| v.parse::<usize>().ok())
+            {
+                let original = self
+                    .config
+                    .as_ref()
+                    .and_then(|c| c.automation.coordinator.as_ref())
+                    .and_then(|c| c.max_parallel)
+                    .unwrap_or(effective);
+                self.coordinator_effective_max_parallel = Some((effective, original));
+            }
+        }
     }
 
     pub fn refresh_tool_checks(&mut self) {
