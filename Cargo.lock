@@ -1163,6 +1163,7 @@ dependencies = [
  "inventory",
  "macc-adapter-shared",
  "macc-core",
+ "regex",
  "serde_json",
  "toml",
 ]
