@@ -160,3 +160,16 @@ fn write_executable_if_changed(path: &Path, content: &str) -> Result<bool> {
 
     Ok(!existed)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::EMBEDDED_PERFORMER_SH;
+
+    #[test]
+    fn embedded_performer_script_does_not_use_malformed_event_jq_filter() {
+        assert!(
+            !EMBEDDED_PERFORMER_SH.contains("'({"),
+            "embedded performer event jq filter starts with an unmatched parenthesis"
+        );
+    }
+}

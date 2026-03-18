@@ -136,6 +136,8 @@ pub fn handle(
         CoordinatorCommand::DispatchReadyTasks => Some("dispatch"),
         CoordinatorCommand::AdvanceTasks => Some("advance"),
         CoordinatorCommand::SyncRegistry => Some("sync"),
+        CoordinatorCommand::SyncPrd => Some("sync-prd"),
+        CoordinatorCommand::AuditPrd { .. } => Some("audit-prd"),
         CoordinatorCommand::ReconcileRuntime => Some("reconcile"),
         CoordinatorCommand::CleanupMaintenance => Some("cleanup"),
         _ => None,
@@ -199,6 +201,27 @@ pub fn handle(
             "{}\t{}\t{}\t{}",
             selected.id, selected.title, selected.tool, selected.base_branch
         );
+    }
+    if let Some(audit) = response.audit_prd_report {
+        println!(
+            "Audit PRD: {} completed task(s) with context, {} todo task(s)",
+            audit.completed_with_context, audit.todo_tasks
+        );
+        if audit.prompt_generated {
+            if matches!(command, CoordinatorCommand::AuditPrd { dry_run: true, .. })
+                || matches!(command, CoordinatorCommand::AuditPrd { tool: None, .. })
+            {
+                println!("--- BEGIN AUDIT PROMPT ---");
+                if let Some(ref prompt) = audit.prompt {
+                    println!("{}", prompt);
+                }
+                println!("--- END AUDIT PROMPT ---");
+            } else {
+                println!("Audit prompt sent to tool.");
+            }
+        } else {
+            println!("No tasks to audit.");
+        }
     }
     Ok(())
 }

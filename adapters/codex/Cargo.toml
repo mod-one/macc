@@ -9,3 +9,4 @@ macc-core = { path = "../../core" }
 macc-adapter-shared = { path = "../shared" }
 toml = "0.8"
 serde_json = "1.0.149"
+regex = "1.10"

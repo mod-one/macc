@@ -696,10 +696,6 @@ pub async fn advance_tasks_native(
                     .merge_ai_fix
                     .or_else(|| coordinator.and_then(|c| c.merge_ai_fix))
                     .unwrap_or(false);
-                let merge_fix_hook = env_cfg
-                    .merge_fix_hook
-                    .clone()
-                    .or_else(|| coordinator.and_then(|c| c.merge_fix_hook.clone()));
                 let merge_hook_timeout = env_cfg
                     .merge_hook_timeout_seconds
                     .or_else(|| coordinator.and_then(|c| c.merge_hook_timeout_seconds));
@@ -716,7 +712,6 @@ pub async fn advance_tasks_native(
                             &branch_for_worker,
                             &base_for_worker,
                             merge_ai_fix,
-                            merge_fix_hook.as_deref(),
                             merge_hook_timeout,
                             |event_type, task_id, phase, status, message, severity| {
                                 let _ = append_coordinator_event_with_severity(
@@ -801,15 +796,29 @@ pub async fn monitor_active_jobs_native(
                         phase_timeout_seconds,
                         elapsed_seconds: job.started_at.elapsed().as_secs(),
                         status_text: evt.status_text.clone(),
+                        completion_kind: evt.completion_kind,
                         error_code: evt.error_code.clone(),
                         error_origin: evt.error_origin.clone(),
                         error_message: evt.error_message.clone(),
                         auto_retry_error_codes: retry_codes.clone(),
                         auto_retry_max: retry_max,
+                        backoff_base_seconds: resolve_rate_limit_backoff_base_seconds(env_cfg, coordinator),
+                        backoff_max_seconds: resolve_rate_limit_backoff_max_seconds(env_cfg, coordinator),
+                        normalizer_input: None,
                     },
                     &now_iso_coordinator(),
                 )?;
                 if let Some(log) = logger {
+                    if let Some(source) = evt.completion_details_source.as_deref() {
+                        let _ = log.note(format!(
+                            "- completion details source={} task={} kind={}",
+                            source,
+                            evt.task_id,
+                            evt.completion_kind
+                                .map(|kind| kind.as_str())
+                                .unwrap_or("unknown")
+                        ));
+                    }
                     let _ = log.note(format!(
                         "- Lifecycle task={} stage=monitor status=completion_applied new_state={} should_retry={}",
                         evt.task_id, completion.status_label, completion.should_retry
@@ -823,7 +832,98 @@ pub async fn monitor_active_jobs_native(
                     &registry,
                 )?;
                 aggregate_performer_logs_after_completion(repo_root, &evt.task_id, logger);
-                if !completion.should_retry && completion.status_label == "phase_done" {
+                // RL-ROUTE-005 / RL-THROTTLE-006: maintain throttle registry and
+                // adjust effective concurrency based on rate-limit signals.
+                if completion.status_label == "rate_limit_backoff" {
+                    // Extract the throttle state written by the engine and
+                    // cache it in the volatile registry so `pick_tool()` can
+                    // skip this tool on the next dispatch cycle.
+                    let task_typed = crate::coordinator::model::TaskRegistry::from_value(
+                        &registry,
+                    )
+                    .ok()
+                    .and_then(|reg| {
+                        reg.tasks
+                            .into_iter()
+                            .find(|t| t.id == evt.task_id)
+                    });
+                    if let Some(task) = task_typed {
+                        if let Some(ts_val) = task.task_runtime.extra.get("throttle_state") {
+                            if let Ok(ts) = serde_json::from_value::<
+                                crate::coordinator::rate_limit::ToolThrottleState,
+                            >(ts_val.clone())
+                            {
+                                state
+                                    .throttle_registry
+                                    .insert(job.tool.clone(), ts);
+                            }
+                        }
+                    }
+                    if resolve_rate_limit_throttle_parallel(env_cfg, coordinator) {
+                        let new_val = state.reduce_parallel();
+                        let msg = format!(
+                            "concurrency_adjusted task={} tool={} reason=rate_limit_backoff effective_max_parallel={}",
+                            evt.task_id, job.tool, new_val
+                        );
+                        let _ = append_coordinator_event_with_severity(
+                            repo_root,
+                            "concurrency_adjusted",
+                            &evt.task_id,
+                            "dev",
+                            "info",
+                            &msg,
+                            "info",
+                        );
+                        if let Some(log) = logger {
+                            let _ = log.note(format!("- {}", msg));
+                        }
+                    }
+                } else if evt.success
+                    || matches!(
+                        completion.completion_kind,
+                        Some(
+                            crate::coordinator::PerformerCompletionKind::SuccessWithChanges
+                                | crate::coordinator::PerformerCompletionKind::SuccessWithoutChanges
+                                | crate::coordinator::PerformerCompletionKind::AlreadySatisfied
+                        )
+                    )
+                {
+                    // RL-ROUTE-005: clear throttle on success so the tool is
+                    // re-enabled for future tasks.
+                    if state.throttle_registry.contains_key(&job.tool) {
+                        state.throttle_registry.remove(&job.tool);
+                        if resolve_rate_limit_throttle_parallel(env_cfg, coordinator) {
+                            let new_val = state.restore_parallel();
+                            let msg = format!(
+                                "concurrency_adjusted task={} tool={} reason=rate_limit_cleared effective_max_parallel={}",
+                                evt.task_id, job.tool, new_val
+                            );
+                            let _ = append_coordinator_event_with_severity(
+                                repo_root,
+                                "concurrency_adjusted",
+                                &evt.task_id,
+                                "dev",
+                                "info",
+                                &msg,
+                                "info",
+                            );
+                            if let Some(log) = logger {
+                                let _ = log.note(format!("- {}", msg));
+                            }
+                        }
+                    }
+                }
+                if !completion.should_retry
+                    && (evt.success
+                        || matches!(
+                            completion.completion_kind,
+                            Some(
+                                crate::coordinator::PerformerCompletionKind::SuccessWithChanges
+                                    | crate::coordinator::PerformerCompletionKind::SuccessWithoutChanges
+                                    | crate::coordinator::PerformerCompletionKind::AlreadySatisfied
+                            )
+                        ))
+                {
                     let sealed = crate::coordinator::session_manager::seal_worktree_scoped_session(
                         repo_root,
                         &job.tool,
@@ -884,10 +984,9 @@ pub async fn monitor_active_jobs_native(
                         ));
                     }
                 } else if let Some(log) = logger {
-                    let status = if evt.success { "phase_done" } else { "failed" };
                     let _ = log.note(format!(
                         "- Task {} completion status={} attempt={} detail={}",
-                        evt.task_id, status, job.attempt, evt.status_text
+                        evt.task_id, completion.status_label, job.attempt, evt.status_text
                     ));
                 }
             }
@@ -918,6 +1017,18 @@ fn apply_runtime_event_bus_updates(
     loop {
         match state.runtime_event_bus_rx.try_recv() {
             Ok(event) => {
+                if let Some(log) = logger {
+                    let event_type = match &event.kind {
+                        CoordinatorRuntimeEventKind::Heartbeat => "heartbeat",
+                        CoordinatorRuntimeEventKind::Progress { .. } => "progress",
+                        CoordinatorRuntimeEventKind::PhaseResult { .. } => "phase_result",
+                        CoordinatorRuntimeEventKind::Failed { .. } => "failed",
+                    };
+                    let _ = log.note(format!(
+                        "- performer event received task={} type={} source={}",
+                        event.task_id, event_type, event.source
+                    ));
+                }
                 let update = runtime_updates.entry(event.task_id.clone()).or_default();
                 update.last_heartbeat = Some(event.ts.clone());
                 match event.kind {
@@ -940,6 +1051,12 @@ fn apply_runtime_event_bus_updates(
                         phase,
                         message,
                     } => {
+                        if let Some(log) = logger {
+                            let _ = log.note(format!(
+                                "- performer phase_result persisted task={} source={} status={}",
+                                event.task_id, event.source, status
+                            ));
+                        }
                         update.status = Some(status);
                         if let Some(phase) = phase {
                             update.phase = Some(phase);
@@ -1262,7 +1379,7 @@ fn resolve_error_code_retry_list(
         .error_code_retry_list
         .clone()
         .or_else(|| coordinator.and_then(|c| c.error_code_retry_list.clone()))
-        .unwrap_or_else(|| "E101,E102,E103,E301,E302,E303".to_string());
+        .unwrap_or_else(|| "E101,E102,E103,E301,E302,E303,E601,E603".to_string());
     raw.split(',')
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
@@ -1277,6 +1394,46 @@ fn resolve_error_code_retry_max(
         .error_code_retry_max
         .or_else(|| coordinator.and_then(|c| c.error_code_retry_max))
         .unwrap_or(2)
+}
+
+fn resolve_rate_limit_backoff_base_seconds(
+    env_cfg: &CoordinatorEnvConfig,
+    coordinator: Option<&crate::config::CoordinatorConfig>,
+) -> u64 {
+    env_cfg
+        .rate_limit_backoff_base_seconds
+        .or_else(|| coordinator.and_then(|c| c.rate_limit_backoff_base_seconds))
+        .unwrap_or(30)
+}
+
+fn resolve_rate_limit_backoff_max_seconds(
+    env_cfg: &CoordinatorEnvConfig,
+    coordinator: Option<&crate::config::CoordinatorConfig>,
+) -> u64 {
+    env_cfg
+        .rate_limit_backoff_max_seconds
+        .or_else(|| coordinator.and_then(|c| c.rate_limit_backoff_max_seconds))
+        .unwrap_or(300)
+}
+
+fn resolve_rate_limit_fallback_enabled(
+    env_cfg: &CoordinatorEnvConfig,
+    coordinator: Option<&crate::config::CoordinatorConfig>,
+) -> bool {
+    env_cfg
+        .rate_limit_fallback_enabled
+        .or_else(|| coordinator.and_then(|c| c.rate_limit_fallback_enabled))
+        .unwrap_or(true)
+}
+
+fn resolve_rate_limit_throttle_parallel(
+    env_cfg: &CoordinatorEnvConfig,
+    coordinator: Option<&crate::config::CoordinatorConfig>,
+) -> bool {
+    env_cfg
+        .rate_limit_throttle_parallel
+        .or_else(|| coordinator.and_then(|c| c.rate_limit_throttle_parallel))
+        .unwrap_or(true)
 }
 
 pub async fn monitor_merge_jobs_native(
@@ -1401,6 +1558,12 @@ pub async fn dispatch_ready_tasks_native(
         .or_else(|| coordinator.and_then(|c| c.max_parallel))
         .unwrap_or(3);
 
+    // RL-THROTTLE-006: lazy-initialize effective/original concurrency.
+    if state.original_max_parallel == 0 {
+        state.original_max_parallel = max_parallel;
+        state.effective_max_parallel = max_parallel;
+    }
+
     if max_dispatch_total > 0 && state.dispatched_total_run >= max_dispatch_total {
         if !state.dispatch_limit_event_emitted {
             let msg = format!(
@@ -1430,7 +1593,9 @@ pub async fn dispatch_ready_tasks_native(
     };
 
     while dispatched < remaining_budget {
-        if max_parallel > 0 && state.active_jobs.len() >= max_parallel {
+        if state.effective_max_parallel > 0
+            && state.active_jobs.len() >= state.effective_max_parallel
+        {
             break;
         }
 
@@ -1477,13 +1642,20 @@ pub async fn dispatch_ready_tasks_native(
                     })
                 })
                 .unwrap_or_default(),
-            max_parallel,
+            max_parallel: state.effective_max_parallel,
             default_tool: canonical.tools.enabled.first().cloned().unwrap_or_default(),
             default_base_branch: env_cfg
                 .reference_branch
                 .clone()
                 .or_else(|| coordinator.and_then(|c| c.reference_branch.clone()))
                 .unwrap_or_else(|| "master".to_string()),
+            now: chrono::Utc::now()
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            throttle_registry: state.throttle_registry.clone(),
+            rate_limit_fallback_enabled: resolve_rate_limit_fallback_enabled(
+                env_cfg,
+                coordinator,
+            ),
         };
 
         if let Some(reason) =
@@ -1525,6 +1697,25 @@ pub async fn dispatch_ready_tasks_native(
         else {
             break;
         };
+        // RL-ROUTE-005: emit tool_fallback event when primary tool is throttled.
+        if selected.is_fallback {
+            let msg = format!(
+                "tool_fallback task={} selected_tool={} reason=rate_limit_throttled",
+                selected.id, selected.tool
+            );
+            let _ = append_coordinator_event_with_severity(
+                repo_root,
+                "tool_fallback",
+                &selected.id,
+                "dev",
+                "info",
+                &msg,
+                "info",
+            );
+            if let Some(log) = logger {
+                let _ = log.note(format!("- {}", msg));
+            }
+        }
         if let Some(until) = state.dispatch_retry_not_before.get(&selected.id) {
             let now = Instant::now();
             if *until > now {
@@ -1598,7 +1789,7 @@ pub async fn dispatch_ready_tasks_native(
             (path, branch, last_commit)
         } else {
             let pool_count = count_pool_worktrees(repo_root)?;
-            if max_parallel > 0 && pool_count >= max_parallel {
+            if state.effective_max_parallel > 0 && pool_count >= state.effective_max_parallel {
                 if let Some((reason, detail)) = reuse_prepare_error {
                     emit_dispatch_skipped(repo_root, logger, &selected.id, &reason, &detail);
                     if cooldown_seconds > 0 {

@@ -120,6 +120,8 @@ enum Commands {
     },
     /// Open the interactive TUI
     Tui,
+    /// Launch the web UI server
+    Web,
     /// Tool management
     Tool {
         #[command(subcommand)]
@@ -189,7 +191,7 @@ enum Commands {
     },
     /// Run the project coordinator automation script
     Coordinator {
-        /// Coordinator command (run, control-plane-run, dispatch, advance, resume, sync, status, reconcile, unlock, cleanup, retry-phase, cutover-gate, stop, validate-transition, validate-runtime-transition, runtime-status-from-event, storage-import, storage-export, events-export, storage-verify, storage-sync, select-ready-task, state-apply-transition, state-set-runtime, state-task-field, state-task-exists, state-counts, state-locks, state-set-merge-pending, state-set-merge-processed, state-increment-retries, state-upsert-slo-warning, state-slo-metric)
+        /// Coordinator command (run, control-plane-run, dispatch, advance, resume, sync, sync-prd, audit-prd, status, reconcile, unlock, cleanup, retry-phase, cutover-gate, stop, validate-transition, validate-runtime-transition, runtime-status-from-event, storage-import, storage-export, events-export, storage-verify, storage-sync, select-ready-task, state-apply-transition, state-set-runtime, state-task-field, state-task-exists, state-counts, state-locks, state-set-merge-pending, state-set-merge-processed, state-increment-retries, state-upsert-slo-warning, state-slo-metric)
         #[arg(default_value = "run")]
         command_name: String,
         /// Disable TUI live view for `macc coordinator run`
@@ -261,9 +263,6 @@ enum Commands {
         /// Enable AI-driven merge conflict resolution
         #[arg(long)]
         merge_ai_fix: Option<bool>,
-        /// Override merge-fix hook path
-        #[arg(long)]
-        merge_fix_hook: Option<String>,
         /// Timeout for merge operations in seconds
         #[arg(long)]
         merge_job_timeout_seconds: Option<usize>,
@@ -651,6 +650,11 @@ fn get_exit_code(err: &MaccError) -> i32 {
         MaccError::SecretDetected { .. } => 6,
         MaccError::HomeDirNotFound => 7,
         MaccError::ToolSpec { .. } => 8,
+        MaccError::Coordinator { .. } => 9,
+        MaccError::Storage { .. } => 10,
+        MaccError::Git { .. } => 11,
+        MaccError::Fetch { .. } => 12,
+        MaccError::Catalog { .. } => 13,
     }
 }
 
@@ -737,6 +741,7 @@ fn run_with_engine_provider(
                 source: std::io::Error::other(e.to_string()),
             })
         }
+        Some(Commands::Web) => commands::web::WebCommand::new(app.clone()).run(),
         Some(Commands::Tool { tool_command }) => {
             commands::tool::ToolCommand::new(app.clone(), tool_command).run()
         }
@@ -809,7 +814,6 @@ fn run_with_engine_provider(
             stale_action,
             storage_mode,
             merge_ai_fix,
-            merge_fix_hook,
             merge_job_timeout_seconds,
             merge_hook_timeout_seconds,
             ghost_heartbeat_grace_seconds,
@@ -850,7 +854,6 @@ fn run_with_engine_provider(
                     stale_action: stale_action.clone(),
                     storage_mode: storage_mode.clone(),
                     merge_ai_fix: *merge_ai_fix,
-                    merge_fix_hook: merge_fix_hook.clone(),
                     merge_job_timeout_seconds: *merge_job_timeout_seconds,
                     merge_hook_timeout_seconds: *merge_hook_timeout_seconds,
                     ghost_heartbeat_grace_seconds: *ghost_heartbeat_grace_seconds,
@@ -862,6 +865,10 @@ fn run_with_engine_provider(
                     cutover_gate_window_events: *cutover_gate_window_events,
                     cutover_gate_max_blocked_ratio: *cutover_gate_max_blocked_ratio,
                     cutover_gate_max_stale_ratio: *cutover_gate_max_stale_ratio,
+                    rate_limit_backoff_base_seconds: None,
+                    rate_limit_backoff_max_seconds: None,
+                    rate_limit_fallback_enabled: None,
+                    rate_limit_throttle_parallel: None,
                 },
                 extra_args: extra_args.clone(),
             },
@@ -2222,7 +2229,6 @@ fi
                     stale_action: None,
                     storage_mode: None,
                     merge_ai_fix: None,
-                    merge_fix_hook: None,
                     merge_job_timeout_seconds: None,
                     merge_hook_timeout_seconds: None,
                     ghost_heartbeat_grace_seconds: None,

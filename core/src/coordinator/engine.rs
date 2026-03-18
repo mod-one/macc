@@ -1,7 +1,15 @@
-use super::{RuntimeStatus, WorkflowState};
+use super::{PerformerCompletionKind, RuntimeStatus, WorkflowState};
 use crate::config::{CanonicalConfig, CoordinatorConfig};
 use crate::coordinator::control_plane::CoordinatorLog;
+use crate::coordinator::error_normalizer::{CanonicalClass, ErrorNormalizer, ToolError};
 use crate::coordinator::model::{Task, TaskRegistry};
+use crate::coordinator::normalizers::{
+    ClaudeErrorNormalizer, CodexErrorNormalizer, GeminiErrorNormalizer,
+};
+use crate::coordinator::rate_limit::{
+    compute_backoff_delay, update_throttle_state, RateLimitInfo, ToolThrottleState,
+    E601_RATE_LIMITED, E602_QUOTA_EXHAUSTED,
+};
 use crate::coordinator::runtime::{
     process_branch_cleanup_queue, terminate_active_jobs, CoordinatorRunState,
 };
@@ -78,6 +86,19 @@ pub struct DispatchClaimUpdate {
     pub now: String,
 }
 
+/// Raw output captured from a performer process for error normalization.
+/// Passed as part of [`JobCompletionInput`] when the caller has access to
+/// the process's exit code and stdio streams.
+#[derive(Debug, Clone, Default)]
+pub struct NormalizerInput {
+    /// Process exit code (non-zero indicates failure).
+    pub exit_code: i32,
+    /// Full stderr text from the performer process.
+    pub stderr: String,
+    /// Full stdout text from the performer process.
+    pub stdout: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct JobCompletionInput {
     pub success: bool,
@@ -87,11 +108,22 @@ pub struct JobCompletionInput {
     pub phase_timeout_seconds: usize,
     pub elapsed_seconds: u64,
     pub status_text: String,
+    pub completion_kind: Option<PerformerCompletionKind>,
     pub error_code: Option<String>,
     pub error_origin: Option<String>,
     pub error_message: Option<String>,
     pub auto_retry_error_codes: Vec<String>,
     pub auto_retry_max: usize,
+    /// Base backoff delay in seconds for E601 rate-limit retries.
+    /// Resolved from config; defaults to 30 when not set.
+    pub backoff_base_seconds: u64,
+    /// Maximum backoff delay in seconds for E601 rate-limit retries.
+    /// Resolved from config; defaults to 300 when not set.
+    pub backoff_max_seconds: u64,
+    /// Raw performer output for per-adapter error normalization.
+    /// `None` when the caller does not have access to the raw process output
+    /// (e.g. in legacy paths or unit tests that pre-classify errors).
+    pub normalizer_input: Option<NormalizerInput>,
 }
 
 #[derive(Debug, Clone)]
@@ -99,6 +131,10 @@ pub struct JobCompletionResult {
     pub should_retry: bool,
     pub status_label: &'static str,
     pub detail: String,
+    pub completion_kind: Option<PerformerCompletionKind>,
+    /// Canonical error classification produced by the per-adapter normalizer.
+    /// `None` when the job succeeded or the normalizer was not invoked.
+    pub tool_error: Option<ToolError>,
 }
 
 #[derive(Debug, Clone)]
@@ -205,20 +241,26 @@ fn transition_workflow_state(from: WorkflowState, event: WorkflowEvent) -> Resul
         | (WorkflowState::Queued, WorkflowEvent::MergeFailed) => WorkflowState::Blocked,
         (WorkflowState::Queued, WorkflowEvent::MergeSucceeded) => WorkflowState::Merged,
         _ => {
-            return Err(MaccError::Validation(format!(
-                "Invalid coordinator FSM transition: from={} event={:?}",
-                from.as_str(),
-                event
-            )));
+            return Err(MaccError::Coordinator {
+                code: "invalid_transition",
+                message: format!(
+                    "Invalid coordinator FSM transition: from={} event={:?}",
+                    from.as_str(),
+                    event
+                ),
+            });
         }
     };
 
     if !super::is_valid_workflow_transition(from, to) {
-        return Err(MaccError::Validation(format!(
-            "Coordinator FSM produced invalid workflow transition {} -> {}",
-            from.as_str(),
-            to.as_str()
-        )));
+        return Err(MaccError::Coordinator {
+            code: "invalid_transition",
+            message: format!(
+                "Coordinator FSM produced invalid workflow transition {} -> {}",
+                from.as_str(),
+                to.as_str()
+            ),
+        });
     }
 
     Ok(to)
@@ -230,7 +272,10 @@ pub fn apply_dispatch_claim_in_registry(
 ) -> Result<()> {
     let mut typed = TaskRegistry::from_value(registry)?;
     let task = typed.find_task_mut(&update.task_id).ok_or_else(|| {
-        MaccError::Validation(format!("Task '{}' not found in registry", update.task_id))
+        MaccError::Coordinator {
+            code: "task_not_found",
+            message: format!("Task '{}' not found in registry", update.task_id),
+        }
     })?;
     apply_dispatch_claim_typed(task, update);
     *registry = typed.to_value()?;
@@ -244,7 +289,10 @@ pub fn apply_dispatch_pid_in_registry(
 ) -> Result<()> {
     let mut typed = TaskRegistry::from_value(registry)?;
     let task = typed.find_task_mut(task_id).ok_or_else(|| {
-        MaccError::Validation(format!("Task '{}' not found in registry", task_id))
+        MaccError::Coordinator {
+            code: "task_not_found",
+            message: format!("Task '{}' not found in registry", task_id),
+        }
     })?;
     apply_dispatch_pid_typed(task, pid);
     *registry = typed.to_value()?;
@@ -303,7 +351,10 @@ pub fn apply_phase_outcome_in_registry(
 ) -> Result<()> {
     let mut typed = TaskRegistry::from_value(registry)?;
     let task = typed.find_task_mut(task_id).ok_or_else(|| {
-        MaccError::Validation(format!("Task '{}' not found in registry", task_id))
+        MaccError::Coordinator {
+            code: "task_not_found",
+            message: format!("Task '{}' not found in registry", task_id),
+        }
     })?;
     if let Some(reason) = phase_error {
         apply_phase_failure_typed(task, mode, reason, now)?;
@@ -344,7 +395,10 @@ pub fn apply_job_completion_in_registry(
 ) -> Result<JobCompletionResult> {
     let mut typed = TaskRegistry::from_value(registry)?;
     let task = typed.find_task_mut(task_id).ok_or_else(|| {
-        MaccError::Validation(format!("Task '{}' not found in registry", task_id))
+        MaccError::Coordinator {
+            code: "task_not_found",
+            message: format!("Task '{}' not found in registry", task_id),
+        }
     })?;
     let out = apply_job_completion_typed(task, input, now);
     *registry = typed.to_value()?;
@@ -360,7 +414,10 @@ pub fn apply_merge_result_in_registry(
 ) -> Result<()> {
     let mut typed = TaskRegistry::from_value(registry)?;
     let task = typed.find_task_mut(task_id).ok_or_else(|| {
-        MaccError::Validation(format!("Task '{}' not found in registry", task_id))
+        MaccError::Coordinator {
+            code: "task_not_found",
+            message: format!("Task '{}' not found in registry", task_id),
+        }
     })?;
     if success {
         apply_merge_success_typed(task, now)?
@@ -577,12 +634,52 @@ pub(crate) fn apply_merge_failure_typed(task: &mut Task, reason: &str, now: &str
     Ok(())
 }
 
+/// Return the per-adapter error normalizer for the given tool identifier.
+/// Returns `None` for unknown tools (caller falls back to generic E101).
+pub(crate) fn get_normalizer_for_tool(tool_id: &str) -> Option<Box<dyn ErrorNormalizer>> {
+    match tool_id {
+        "claude" => Some(Box::new(ClaudeErrorNormalizer)),
+        "codex" => Some(Box::new(CodexErrorNormalizer)),
+        "gemini" => Some(Box::new(GeminiErrorNormalizer)),
+        _ => None,
+    }
+}
+
+/// Store a classified [`ToolError`] (and, when applicable, [`RateLimitInfo`])
+/// into `task_runtime.extra` for diagnostics and downstream consumers.
+fn store_classified_error_in_extra(
+    runtime: &mut crate::coordinator::model::TaskRuntime,
+    tool_error: &Option<ToolError>,
+    now_ts: u64,
+) {
+    let Some(te) = tool_error else { return };
+    if let Ok(v) = serde_json::to_value(te) {
+        runtime.extra.insert("tool_error".to_string(), v);
+    }
+    if matches!(
+        te.canonical_class,
+        CanonicalClass::RateLimit | CanonicalClass::QuotaExhausted
+    ) {
+        let rli = RateLimitInfo {
+            tool_id: te.provider.clone(),
+            error_code: te.error_code.clone(),
+            retry_after_seconds: te.retry_after_seconds,
+            detected_at: now_ts,
+            source_header: None,
+        };
+        if let Ok(v) = serde_json::to_value(&rli) {
+            runtime.extra.insert("rate_limit_info".to_string(), v);
+        }
+    }
+}
+
 fn apply_job_completion_typed(
     task: &mut Task,
     input: &JobCompletionInput,
     now: &str,
 ) -> JobCompletionResult {
-    let error_code = input
+    // ── Baseline error classification from caller ────────────────────
+    let raw_error_code = input
         .error_code
         .clone()
         .unwrap_or_else(|| "E101".to_string());
@@ -590,10 +687,12 @@ fn apply_job_completion_typed(
         .error_origin
         .clone()
         .unwrap_or_else(|| "runner".to_string());
-    let error_message = input
+    let raw_error_message = input
         .error_message
         .clone()
         .unwrap_or_else(|| input.status_text.clone());
+
+    // ── Guard: invalid attempt counters ─────────────────────────────
     if input.attempt == 0 || input.max_attempts == 0 {
         task.set_workflow_state(WorkflowState::Blocked);
         let runtime = task.ensure_runtime();
@@ -607,6 +706,8 @@ fn apply_job_completion_typed(
             should_retry: false,
             status_label: "failed",
             detail,
+            completion_kind: None,
+            tool_error: None,
         };
     }
     if input.status_text.is_empty() {
@@ -622,26 +723,217 @@ fn apply_job_completion_typed(
             should_retry: false,
             status_label: "failed",
             detail,
+            completion_kind: None,
+            tool_error: None,
         };
     }
+
+    // ── Per-adapter error normalization ──────────────────────────────
+    // Run when the caller provides raw process output AND the job failed.
+    // The normalizer output takes priority over the caller-supplied error code.
+    let classified_tool_error: Option<ToolError> = if !input.success {
+        input.normalizer_input.as_ref().and_then(|ni| {
+            let tool_id = task.tool.as_deref().unwrap_or("");
+            get_normalizer_for_tool(tool_id).and_then(|n| {
+                n.normalize(ni.exit_code, &ni.stderr, &ni.stdout).map(|mut te| {
+                    te.attempt = input.attempt as u32;
+                    te.operation = "performer_run".to_string();
+                    te
+                })
+            })
+        })
+    } else {
+        None
+    };
+
+    // Override caller-supplied error code/message with normalizer output.
+    let error_code = classified_tool_error
+        .as_ref()
+        .map(|te| te.error_code.clone())
+        .unwrap_or(raw_error_code);
+    let error_message = classified_tool_error
+        .as_ref()
+        .map(|te| te.raw_message.clone())
+        .unwrap_or(raw_error_message);
+
+    // ── Success ──────────────────────────────────────────────────────
     if input.success {
-        task.set_workflow_state(WorkflowState::InProgress);
+        let completion_kind = input
+            .completion_kind
+            .unwrap_or(PerformerCompletionKind::SuccessWithChanges);
+        let terminal_noop = completion_kind == PerformerCompletionKind::AlreadySatisfied
+            || completion_kind == PerformerCompletionKind::SuccessWithoutChanges;
+        task.set_workflow_state(if terminal_noop {
+            WorkflowState::Merged
+        } else {
+            WorkflowState::InProgress
+        });
         let runtime = task.ensure_runtime();
-        runtime.set_status(RuntimeStatus::PhaseDone);
-        runtime.current_phase = Some("dev".to_string());
+        runtime.completion_kind = Some(completion_kind.as_str().to_string());
+        runtime.set_status(if terminal_noop {
+            RuntimeStatus::Idle
+        } else {
+            RuntimeStatus::PhaseDone
+        });
+        runtime.current_phase = if terminal_noop {
+            None
+        } else {
+            Some("dev".to_string())
+        };
         runtime.pid = None;
         task.touch_state_changed(now);
         return JobCompletionResult {
             should_retry: false,
-            status_label: "phase_done",
+            status_label: match completion_kind {
+                PerformerCompletionKind::SuccessWithChanges => "phase_done",
+                PerformerCompletionKind::SuccessWithoutChanges => "success_without_changes",
+                PerformerCompletionKind::AlreadySatisfied => "already_satisfied",
+            },
             detail: input.status_text.clone(),
+            completion_kind: Some(completion_kind),
+            tool_error: None,
         };
     }
+
+    // ── Exit-code override ───────────────────────────────────────────
+    // When a performer exits non-zero but its stdout contains a success
+    // marker AND the only detected error was transient (Overloaded /
+    // RateLimit), the task likely completed before the transient error
+    // fired. Treat as AlreadySatisfied to avoid losing completed work.
+    // This addresses the "Run 2 bug" where Claude returned already_satisfied
+    // but exit code was 1 due to an earlier 529 overload hit on teardown.
+    if let Some(ref ni) = input.normalizer_input {
+        let stdout_says_done = ni.stdout.contains("MACC_TASK_RESULT: success")
+            || ni.stdout.contains("already_satisfied");
+        let transient_error = classified_tool_error
+            .as_ref()
+            .map(|te| {
+                matches!(
+                    te.canonical_class,
+                    CanonicalClass::Overloaded | CanonicalClass::RateLimit
+                )
+            })
+            .unwrap_or(false);
+        if stdout_says_done && transient_error {
+            task.set_workflow_state(WorkflowState::Merged);
+            let runtime = task.ensure_runtime();
+            runtime.completion_kind =
+                Some(PerformerCompletionKind::AlreadySatisfied.as_str().to_string());
+            runtime.set_status(RuntimeStatus::Idle);
+            runtime.current_phase = None;
+            runtime.pid = None;
+            task.touch_state_changed(now);
+            return JobCompletionResult {
+                should_retry: false,
+                status_label: "already_satisfied",
+                detail:
+                    "exit-code override: stdout indicates completion despite transient error"
+                        .to_string(),
+                completion_kind: Some(PerformerCompletionKind::AlreadySatisfied),
+                tool_error: classified_tool_error,
+            };
+        }
+    }
+
+    let now_ts = chrono::DateTime::parse_from_rfc3339(now)
+        .map(|dt| dt.timestamp() as u64)
+        .unwrap_or(0);
+
+    // ── Rate-limit backoff (E601) ─────────────────────────────────────
+    // Re-queue the task as Todo with a delayed_until timestamp instead of
+    // consuming an attempt. The rate-limit was not the task's fault.
+    if error_code == E601_RATE_LIMITED {
+        let retry_after = classified_tool_error
+            .as_ref()
+            .and_then(|te| te.retry_after_seconds);
+        let backoff = compute_backoff_delay(input.attempt as usize, input.backoff_base_seconds, input.backoff_max_seconds, retry_after);
+        let delayed_until_str = chrono::DateTime::parse_from_rfc3339(now)
+            .ok()
+            .and_then(|dt| {
+                dt.checked_add_signed(chrono::Duration::seconds(backoff as i64))
+            })
+            .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+            .unwrap_or_default();
+        // Update per-tool throttle state stored in extra.
+        let tool_id_str = task.tool.as_deref().unwrap_or("").to_string();
+        let runtime = task.ensure_runtime();
+        let mut throttle: ToolThrottleState = runtime
+            .extra
+            .get("throttle_state")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_else(|| ToolThrottleState {
+                tool_id: tool_id_str.clone(),
+                ..Default::default()
+            });
+        let rli = RateLimitInfo {
+            tool_id: tool_id_str,
+            error_code: E601_RATE_LIMITED.to_string(),
+            retry_after_seconds: retry_after,
+            detected_at: now_ts,
+            source_header: None,
+        };
+        update_throttle_state(&mut throttle, &rli, backoff, now_ts);
+        if let Ok(v) = serde_json::to_value(&throttle) {
+            runtime.extra.insert("throttle_state".to_string(), v);
+        }
+        runtime.delayed_until = Some(delayed_until_str.clone());
+        runtime.set_status(RuntimeStatus::Idle);
+        runtime.current_phase = Some("dev".to_string());
+        runtime.completion_kind = None;
+        runtime.pid = None;
+        runtime.set_last_error_details(
+            error_code.clone(),
+            error_origin.clone(),
+            error_message.clone(),
+        );
+        runtime.last_error = Some(format!("rate-limited; backoff {}s", backoff));
+        store_classified_error_in_extra(runtime, &classified_tool_error, now_ts);
+        task.set_workflow_state(WorkflowState::Todo);
+        task.touch_state_changed(now);
+        return JobCompletionResult {
+            should_retry: false,
+            status_label: "rate_limit_backoff",
+            detail: format!(
+                "rate-limited; backoff {}s, delayed until {}",
+                backoff, delayed_until_str
+            ),
+            completion_kind: None,
+            tool_error: classified_tool_error,
+        };
+    }
+
+    // ── Quota exhausted (E602) ────────────────────────────────────────
+    // Block the task immediately — quota requires human intervention.
+    if error_code == E602_QUOTA_EXHAUSTED {
+        task.set_workflow_state(WorkflowState::Blocked);
+        let runtime = task.ensure_runtime();
+        runtime.set_status(RuntimeStatus::Failed);
+        runtime.completion_kind = None;
+        runtime.pid = None;
+        runtime.set_last_error_details(
+            error_code.clone(),
+            error_origin.clone(),
+            error_message.clone(),
+        );
+        runtime.last_error = Some(error_message.clone());
+        store_classified_error_in_extra(runtime, &classified_tool_error, now_ts);
+        task.touch_state_changed(now);
+        return JobCompletionResult {
+            should_retry: false,
+            status_label: "quota_exhausted",
+            detail: error_message,
+            completion_kind: None,
+            tool_error: classified_tool_error,
+        };
+    }
+
+    // ── Retry (attempt < max_attempts) ───────────────────────────────
     if input.attempt < input.max_attempts {
         task.set_workflow_state(WorkflowState::Claimed);
         let runtime = task.ensure_runtime();
         runtime.set_status(RuntimeStatus::Running);
         runtime.current_phase = Some("dev".to_string());
+        runtime.completion_kind = None;
         runtime.pid = None;
         let reason = if input.timed_out {
             format!(
@@ -660,13 +952,17 @@ fn apply_job_completion_typed(
             error_message.clone(),
         );
         runtime.last_error = Some(reason.clone());
+        store_classified_error_in_extra(runtime, &classified_tool_error, now_ts);
         task.touch_state_changed(now);
         return JobCompletionResult {
             should_retry: true,
             status_label: "retry",
             detail: reason,
+            completion_kind: None,
+            tool_error: classified_tool_error,
         };
     }
+
     let reason = if input.timed_out {
         format!(
             "performer timed out after {}s (max attempts reached: {}, elapsed={}s)",
@@ -678,6 +974,7 @@ fn apply_job_completion_typed(
             input.attempt, input.status_text
         )
     };
+
     let retries_total = task.task_runtime.retries_count();
     if should_auto_retry_error_code(
         &error_code,
@@ -691,30 +988,40 @@ fn apply_job_completion_typed(
         runtime.set_status(RuntimeStatus::Idle);
         runtime.pid = None;
         runtime.current_phase = Some("dev".to_string());
+        runtime.completion_kind = None;
         runtime.set_last_error_details(
             error_code.clone(),
             error_origin.clone(),
             error_message.clone(),
         );
         runtime.last_error = Some(reason.clone());
+        store_classified_error_in_extra(runtime, &classified_tool_error, now_ts);
         task.touch_state_changed(now);
         return JobCompletionResult {
             should_retry: false,
             status_label: "auto_retry",
             detail: format!("auto-retry scheduled for error code {}", error_code),
+            completion_kind: None,
+            tool_error: classified_tool_error,
         };
     }
+
+    // ── Terminal failure ─────────────────────────────────────────────
     task.set_workflow_state(WorkflowState::Blocked);
     let runtime = task.ensure_runtime();
     runtime.set_status(RuntimeStatus::Failed);
+    runtime.completion_kind = None;
     runtime.pid = None;
     runtime.set_last_error_details(error_code, error_origin, error_message);
     runtime.last_error = Some(reason.clone());
+    store_classified_error_in_extra(runtime, &classified_tool_error, now_ts);
     task.touch_state_changed(now);
     JobCompletionResult {
         should_retry: false,
         status_label: "failed",
         detail: reason,
+        completion_kind: None,
+        tool_error: classified_tool_error,
     }
 }
 
@@ -1439,11 +1746,15 @@ mod tests {
                 phase_timeout_seconds: 0,
                 elapsed_seconds: 2,
                 status_text: "exit status: 0".to_string(),
+                completion_kind: None,
                 error_code: None,
                 error_origin: None,
                 error_message: None,
                 auto_retry_error_codes: Vec::new(),
                 auto_retry_max: 0,
+                backoff_base_seconds: 30,
+                backoff_max_seconds: 300,
+                normalizer_input: None,
             },
             "2026-02-21T00:00:00Z",
         );
@@ -1451,6 +1762,209 @@ mod tests {
         assert_eq!(task["state"], "in_progress");
         assert_eq!(task["task_runtime"]["status"], "phase_done");
         assert!(task["task_runtime"]["pid"].is_null());
+    }
+
+    #[test]
+    fn apply_job_completion_already_satisfied_is_explicit_success() {
+        let mut task =
+            json!({"id":"T3b","state":"claimed","task_runtime":{"status":"running","pid":123}});
+        let out = apply_job_completion(
+            &mut task,
+            &JobCompletionInput {
+                success: true,
+                attempt: 1,
+                max_attempts: 1,
+                timed_out: false,
+                phase_timeout_seconds: 0,
+                elapsed_seconds: 1,
+                status_text: "task already satisfied; verified axum/tokio config".to_string(),
+                completion_kind: Some(PerformerCompletionKind::AlreadySatisfied),
+                error_code: None,
+                error_origin: None,
+                error_message: None,
+                auto_retry_error_codes: Vec::new(),
+                auto_retry_max: 0,
+                backoff_base_seconds: 30,
+                backoff_max_seconds: 300,
+                normalizer_input: None,
+            },
+            "2026-02-21T00:00:00Z",
+        );
+        assert!(!out.should_retry);
+        assert_eq!(out.status_label, "already_satisfied");
+        assert_eq!(
+            out.completion_kind,
+            Some(PerformerCompletionKind::AlreadySatisfied)
+        );
+        assert_eq!(task["state"], "merged");
+        assert_eq!(task["task_runtime"]["status"], "idle");
+        assert_eq!(task["task_runtime"]["completion_kind"], "already_satisfied");
+        assert!(task["task_runtime"]["current_phase"].is_null());
+    }
+
+    #[test]
+    fn apply_job_completion_success_without_changes_bypasses_review() {
+        let mut task =
+            json!({"id":"T3c","state":"claimed","task_runtime":{"status":"running","pid":123}});
+        let out = apply_job_completion(
+            &mut task,
+            &JobCompletionInput {
+                success: true,
+                attempt: 1,
+                max_attempts: 1,
+                timed_out: false,
+                phase_timeout_seconds: 0,
+                elapsed_seconds: 1,
+                status_text: "performer finished but no changes made".to_string(),
+                completion_kind: Some(PerformerCompletionKind::SuccessWithoutChanges),
+                error_code: None,
+                error_origin: None,
+                error_message: None,
+                auto_retry_error_codes: Vec::new(),
+                auto_retry_max: 0,
+                backoff_base_seconds: 30,
+                backoff_max_seconds: 300,
+                normalizer_input: None,
+            },
+            "2026-02-21T00:00:00Z",
+        );
+        assert!(!out.should_retry);
+        assert_eq!(out.status_label, "success_without_changes");
+        assert_eq!(task["state"], "merged");
+        assert_eq!(task["task_runtime"]["status"], "idle");
+        assert_eq!(
+            task["task_runtime"]["completion_kind"],
+            "success_without_changes"
+        );
+        assert!(task["task_runtime"]["current_phase"].is_null());
+    }
+
+    #[test]
+    fn already_satisfied_task_does_not_schedule_review_or_merge() {
+        let mut registry = json!({
+            "tasks": [
+                {
+                    "id": "DONE",
+                    "title": "done",
+                    "state": "claimed",
+                    "priority": "0",
+                    "dependencies": [],
+                    "exclusive_resources": [],
+                    "task_runtime": {
+                        "status": "running",
+                        "pid": 123
+                    }
+                },
+                {
+                    "id": "NEXT",
+                    "title": "next",
+                    "state": "todo",
+                    "priority": "1",
+                    "dependencies": [],
+                    "exclusive_resources": []
+                }
+            ],
+            "resource_locks": {}
+        });
+        let completion = apply_job_completion_in_registry(
+            &mut registry,
+            "DONE",
+            &JobCompletionInput {
+                success: true,
+                attempt: 1,
+                max_attempts: 1,
+                timed_out: false,
+                phase_timeout_seconds: 0,
+                elapsed_seconds: 1,
+                status_text: "task already satisfied".to_string(),
+                completion_kind: Some(PerformerCompletionKind::AlreadySatisfied),
+                error_code: None,
+                error_origin: None,
+                error_message: None,
+                auto_retry_error_codes: Vec::new(),
+                auto_retry_max: 0,
+                backoff_base_seconds: 30,
+                backoff_max_seconds: 300,
+                normalizer_input: None,
+            },
+            "2026-02-21T00:00:00Z",
+        )
+        .expect("apply completion");
+        assert_eq!(completion.status_label, "already_satisfied");
+        assert_eq!(registry["tasks"][0]["state"], "merged");
+        let actions = build_advance_actions(&registry, &HashSet::new()).expect("advance actions");
+        assert!(!actions.iter().any(|action| {
+            matches!(
+                action,
+                AdvanceTaskAction::RunPhase { task_id, .. }
+                    | AdvanceTaskAction::QueueMerge { task_id, .. }
+                    if task_id == "DONE"
+            )
+        }));
+    }
+
+    #[test]
+    fn success_without_changes_task_does_not_schedule_review_or_merge() {
+        let mut registry = json!({
+            "tasks": [
+                {
+                    "id": "DONE",
+                    "title": "done",
+                    "state": "claimed",
+                    "priority": "0",
+                    "dependencies": [],
+                    "exclusive_resources": [],
+                    "task_runtime": {
+                        "status": "running",
+                        "pid": 123
+                    }
+                },
+                {
+                    "id": "NEXT",
+                    "title": "next",
+                    "state": "todo",
+                    "priority": "1",
+                    "dependencies": [],
+                    "exclusive_resources": []
+                }
+            ],
+            "resource_locks": {}
+        });
+        let completion = apply_job_completion_in_registry(
+            &mut registry,
+            "DONE",
+            &JobCompletionInput {
+                success: true,
+                attempt: 1,
+                max_attempts: 1,
+                timed_out: false,
+                phase_timeout_seconds: 0,
+                elapsed_seconds: 1,
+                status_text: "task completed without code changes".to_string(),
+                completion_kind: Some(PerformerCompletionKind::SuccessWithoutChanges),
+                error_code: None,
+                error_origin: None,
+                error_message: None,
+                auto_retry_error_codes: Vec::new(),
+                auto_retry_max: 0,
+                backoff_base_seconds: 30,
+                backoff_max_seconds: 300,
+                normalizer_input: None,
+            },
+            "2026-02-21T00:00:00Z",
+        )
+        .expect("apply completion");
+        assert_eq!(completion.status_label, "success_without_changes");
+        assert_eq!(registry["tasks"][0]["state"], "merged");
+        let actions = build_advance_actions(&registry, &HashSet::new()).expect("advance actions");
+        assert!(!actions.iter().any(|action| {
+            matches!(
+                action,
+                AdvanceTaskAction::RunPhase { task_id, .. }
+                    | AdvanceTaskAction::QueueMerge { task_id, .. }
+                    if task_id == "DONE"
+            )
+        }));
     }
 
     #[test]
@@ -1527,6 +2041,317 @@ mod tests {
                 .contains("Invalid coordinator FSM transition"),
             "unexpected error: {}",
             err
+        );
+    }
+
+    // ── Normalizer routing & integration tests ───────────────────────
+
+    fn make_failure_input(
+        tool_id: &str,
+        stderr: &str,
+        stdout: &str,
+    ) -> (serde_json::Value, JobCompletionInput) {
+        let task = json!({
+            "id": "TN1",
+            "state": "claimed",
+            "tool": tool_id,
+            "task_runtime": { "status": "running", "pid": 1 }
+        });
+        let input = JobCompletionInput {
+            success: false,
+            attempt: 1,
+            max_attempts: 1,
+            timed_out: false,
+            phase_timeout_seconds: 300,
+            elapsed_seconds: 10,
+            status_text: "performer exited with error".to_string(),
+            completion_kind: None,
+            error_code: None,
+            error_origin: None,
+            error_message: None,
+            auto_retry_error_codes: Vec::new(),
+            auto_retry_max: 0,
+            backoff_base_seconds: 30,
+            backoff_max_seconds: 300,
+            normalizer_input: Some(NormalizerInput {
+                exit_code: 1,
+                stderr: stderr.to_string(),
+                stdout: stdout.to_string(),
+            }),
+        };
+        (task, input)
+    }
+
+    #[test]
+    fn normalizer_routes_claude_529_to_overloaded() {
+        let (mut task_val, input) =
+            make_failure_input("claude", "Error: 529 API overloaded", "");
+        let out = apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
+        // E601 always re-queues with backoff regardless of attempt count.
+        assert_eq!(out.status_label, "rate_limit_backoff");
+        assert_eq!(task_val["task_runtime"]["last_error_code"], "E601");
+        assert_eq!(task_val["state"], "todo");
+        assert!(
+            !task_val["task_runtime"]["delayed_until"].is_null(),
+            "delayed_until should be set"
+        );
+        let te = out.tool_error.unwrap();
+        assert_eq!(te.canonical_class, CanonicalClass::Overloaded);
+        assert_eq!(te.error_code, "E601");
+        assert_eq!(te.provider, "claude");
+        assert!(te.retryable);
+    }
+
+    #[test]
+    fn normalizer_routes_codex_insufficient_quota_to_e602() {
+        let (mut task_val, input) = make_failure_input(
+            "codex",
+            "429 insufficient_quota: You exceeded your current quota",
+            "",
+        );
+        let out = apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
+        assert_eq!(task_val["task_runtime"]["last_error_code"], "E602");
+        let te = out.tool_error.unwrap();
+        assert_eq!(te.canonical_class, CanonicalClass::QuotaExhausted);
+        assert_eq!(te.error_code, "E602");
+        assert_eq!(te.provider, "codex");
+        assert!(!te.retryable);
+    }
+
+    #[test]
+    fn normalizer_routes_gemini_resource_exhausted_quota_to_e602() {
+        let (mut task_val, input) = make_failure_input(
+            "gemini",
+            "429 RESOURCE_EXHAUSTED: Quota exceeded for requests per minute",
+            "",
+        );
+        let out = apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
+        assert_eq!(task_val["task_runtime"]["last_error_code"], "E602");
+        let te = out.tool_error.unwrap();
+        assert_eq!(te.canonical_class, CanonicalClass::QuotaExhausted);
+        assert_eq!(te.provider, "gemini");
+    }
+
+    #[test]
+    fn normalizer_routes_gemini_resource_exhausted_rate_limit_to_e601() {
+        let (mut task_val, input) = make_failure_input(
+            "gemini",
+            "429 RESOURCE_EXHAUSTED: Rate limit for model",
+            "",
+        );
+        let out = apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
+        assert_eq!(task_val["task_runtime"]["last_error_code"], "E601");
+        let te = out.tool_error.unwrap();
+        assert_eq!(te.canonical_class, CanonicalClass::RateLimit);
+    }
+
+    #[test]
+    fn tool_error_stored_in_extra() {
+        let (mut task_val, input) =
+            make_failure_input("claude", "Error: 529 API overloaded", "");
+        apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
+        let stored = &task_val["task_runtime"]["tool_error"];
+        assert!(!stored.is_null(), "tool_error should be stored in extra");
+        assert_eq!(stored["canonical_class"], "Overloaded");
+        assert_eq!(stored["error_code"], "E601");
+        assert_eq!(stored["provider"], "claude");
+    }
+
+    #[test]
+    fn rate_limit_info_stored_in_extra_for_e601() {
+        let (mut task_val, input) =
+            make_failure_input("claude", "Error: 429 Rate limit exceeded", "");
+        apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
+        let rli = &task_val["task_runtime"]["rate_limit_info"];
+        assert!(!rli.is_null(), "rate_limit_info should be stored for E601");
+        assert_eq!(rli["tool_id"], "claude");
+        assert_eq!(rli["error_code"], "E601");
+    }
+
+    #[test]
+    fn rate_limit_info_stored_in_extra_for_e602() {
+        let (mut task_val, input) = make_failure_input(
+            "codex",
+            "429 insufficient_quota: quota exceeded",
+            "",
+        );
+        apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
+        let rli = &task_val["task_runtime"]["rate_limit_info"];
+        assert!(!rli.is_null(), "rate_limit_info should be stored for E602");
+        assert_eq!(rli["tool_id"], "codex");
+        assert_eq!(rli["error_code"], "E602");
+    }
+
+    #[test]
+    fn exit_code_override_already_satisfied_with_transient_error() {
+        // Performer signals already_satisfied in stdout but exits non-zero
+        // due to a 529 overload on teardown. Should be treated as success.
+        let (mut task_val, input) = make_failure_input(
+            "claude",
+            "Error: 529 API overloaded",
+            "already_satisfied",
+        );
+        let out = apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
+        assert_eq!(out.status_label, "already_satisfied");
+        assert_eq!(task_val["state"], "merged");
+        assert_eq!(task_val["task_runtime"]["status"], "idle");
+        assert_eq!(
+            task_val["task_runtime"]["completion_kind"],
+            "already_satisfied"
+        );
+    }
+
+    #[test]
+    fn exit_code_override_macc_task_result_success_marker() {
+        let (mut task_val, input) = make_failure_input(
+            "claude",
+            "Error: 529 overloaded",
+            "MACC_TASK_RESULT: success",
+        );
+        let out = apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
+        assert_eq!(out.status_label, "already_satisfied");
+        assert_eq!(task_val["state"], "merged");
+    }
+
+    #[test]
+    fn exit_code_override_does_not_fire_for_hard_quota_error() {
+        // QuotaExhausted is not transient, so override must NOT fire even if
+        // stdout says "already_satisfied".
+        let (mut task_val, input) = make_failure_input(
+            "codex",
+            "429 insufficient_quota",
+            "already_satisfied",
+        );
+        let out = apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
+        // Quota exhausted: blocked immediately, not overridden to success.
+        assert_eq!(out.status_label, "quota_exhausted");
+        assert_eq!(task_val["state"], "blocked");
+    }
+
+    #[test]
+    fn unknown_tool_falls_back_to_e101() {
+        // No normalizer for tool "agentic-x" → falls through to caller's E101.
+        let (mut task_val, mut input) =
+            make_failure_input("agentic-x", "some unexpected error text", "");
+        // Caller provides no pre-classified error code either.
+        input.error_code = None;
+        apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
+        assert_eq!(task_val["task_runtime"]["last_error_code"], "E101");
+        assert!(task_val["task_runtime"]["tool_error"].is_null());
+    }
+
+    #[test]
+    fn normalizer_not_invoked_when_normalizer_input_is_none() {
+        // Legacy path: no normalizer_input → caller's error_code wins.
+        let mut task_val = json!({
+            "id": "TN2",
+            "state": "claimed",
+            "tool": "claude",
+            "task_runtime": { "status": "running" }
+        });
+        let out = apply_job_completion(
+            &mut task_val,
+            &JobCompletionInput {
+                success: false,
+                attempt: 1,
+                max_attempts: 1,
+                timed_out: false,
+                phase_timeout_seconds: 300,
+                elapsed_seconds: 5,
+                status_text: "performer failed".to_string(),
+                completion_kind: None,
+                error_code: Some("E201".to_string()),
+                error_origin: Some("runner".to_string()),
+                error_message: Some("auth error".to_string()),
+                auto_retry_error_codes: Vec::new(),
+                auto_retry_max: 0,
+                backoff_base_seconds: 30,
+                backoff_max_seconds: 300,
+                normalizer_input: None,
+            },
+            "2026-02-21T00:00:00Z",
+        );
+        assert_eq!(out.status_label, "failed");
+        assert_eq!(task_val["task_runtime"]["last_error_code"], "E201");
+        assert!(out.tool_error.is_none());
+    }
+
+    #[test]
+    fn get_normalizer_for_tool_routing() {
+        assert!(get_normalizer_for_tool("claude").is_some());
+        assert!(get_normalizer_for_tool("codex").is_some());
+        assert!(get_normalizer_for_tool("gemini").is_some());
+        assert!(get_normalizer_for_tool("unknown-tool").is_none());
+        assert!(get_normalizer_for_tool("").is_none());
+    }
+
+    // ── RL-BACKOFF-003: backoff engine integration ────────────────────
+
+    #[test]
+    fn e601_requeues_todo_with_delayed_until() {
+        let (mut task_val, input) =
+            make_failure_input("claude", "Error: 429 Rate limit exceeded", "");
+        let out = apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
+        assert_eq!(out.status_label, "rate_limit_backoff");
+        assert_eq!(task_val["state"], "todo");
+        assert_eq!(task_val["task_runtime"]["status"], "idle");
+        assert_eq!(task_val["task_runtime"]["last_error_code"], "E601");
+        let delayed = task_val["task_runtime"]["delayed_until"].as_str().unwrap();
+        assert!(!delayed.is_empty(), "delayed_until must be set for E601");
+        // Must be parseable ISO 8601
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(delayed).is_ok(),
+            "delayed_until must be valid RFC 3339"
+        );
+    }
+
+    #[test]
+    fn e601_throttle_state_stored_in_extra() {
+        let (mut task_val, input) =
+            make_failure_input("claude", "Error: 429 Rate limit exceeded", "");
+        apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
+        let ts = &task_val["task_runtime"]["throttle_state"];
+        assert!(!ts.is_null(), "throttle_state should be stored in extra for E601");
+        assert_eq!(ts["consecutive_429_count"], 1);
+        assert!(ts["backoff_seconds"].as_u64().unwrap() > 0);
+        assert!(ts["throttled_until"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn e602_blocks_task_as_quota_exhausted() {
+        let (mut task_val, input) = make_failure_input(
+            "codex",
+            "429 insufficient_quota: You exceeded your current quota",
+            "",
+        );
+        let out = apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
+        assert_eq!(out.status_label, "quota_exhausted");
+        assert_eq!(task_val["state"], "blocked");
+        assert_eq!(task_val["task_runtime"]["status"], "failed");
+        assert_eq!(task_val["task_runtime"]["last_error_code"], "E602");
+        // delayed_until must NOT be set for E602 (no retry)
+        assert!(
+            task_val["task_runtime"]["delayed_until"].is_null(),
+            "delayed_until must not be set for E602"
+        );
+    }
+
+    #[test]
+    fn e601_delayed_until_is_in_the_future() {
+        let now = "2026-02-21T00:00:00Z";
+        let (mut task_val, input) =
+            make_failure_input("gemini", "429 RESOURCE_EXHAUSTED: Rate limit for model", "");
+        apply_job_completion(&mut task_val, &input, now);
+        let delayed = task_val["task_runtime"]["delayed_until"]
+            .as_str()
+            .expect("delayed_until must be a string");
+        let delayed_dt = chrono::DateTime::parse_from_rfc3339(delayed).unwrap();
+        let now_dt = chrono::DateTime::parse_from_rfc3339(now).unwrap();
+        assert!(
+            delayed_dt > now_dt,
+            "delayed_until ({}) must be in the future relative to now ({})",
+            delayed,
+            now
         );
     }
 }

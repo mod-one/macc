@@ -29,10 +29,13 @@ pub fn parse_source_kind(kind: &str) -> Result<SourceKind> {
         "git" => Ok(SourceKind::Git),
         "http" => Ok(SourceKind::Http),
         "local" => Ok(SourceKind::Local),
-        _ => Err(MaccError::Validation(format!(
-            "Invalid source kind: {}. Must be 'git', 'http', or 'local'.",
-            kind
-        ))),
+        _ => Err(MaccError::Catalog {
+            operation: "add_source".to_string(),
+            message: format!(
+                "Invalid source kind: {}. Must be 'git', 'http', or 'local'.",
+                kind
+            ),
+        }),
     }
 }
 
@@ -128,10 +131,10 @@ pub fn upsert_skill(
 
 pub fn remove_skill(paths: &ProjectPaths, catalog: &mut SkillsCatalog, id: &str) -> Result<bool> {
     if is_required_skill(id) {
-        return Err(MaccError::Validation(format!(
-            "cannot disable required skill '{}'",
-            id
-        )));
+        return Err(MaccError::Catalog {
+            operation: "lookup_skill".to_string(),
+            message: format!("cannot disable required skill '{}'", id),
+        });
     }
     let removed = catalog.delete_skill_entry(id);
     if removed {

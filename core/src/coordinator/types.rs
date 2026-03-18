@@ -19,7 +19,6 @@ pub struct CoordinatorEnvConfig {
     pub stale_action: Option<String>,
     pub storage_mode: Option<String>,
     pub merge_ai_fix: Option<bool>,
-    pub merge_fix_hook: Option<String>,
     pub merge_job_timeout_seconds: Option<usize>,
     pub merge_hook_timeout_seconds: Option<u64>,
     pub ghost_heartbeat_grace_seconds: Option<i64>,
@@ -31,4 +30,8 @@ pub struct CoordinatorEnvConfig {
     pub cutover_gate_window_events: Option<usize>,
     pub cutover_gate_max_blocked_ratio: Option<f64>,
     pub cutover_gate_max_stale_ratio: Option<f64>,
+    pub rate_limit_backoff_base_seconds: Option<u64>,
+    pub rate_limit_backoff_max_seconds: Option<u64>,
+    pub rate_limit_fallback_enabled: Option<bool>,
+    pub rate_limit_throttle_parallel: Option<bool>,
 }

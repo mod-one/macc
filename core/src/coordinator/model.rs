@@ -118,6 +118,8 @@ pub struct TaskRuntime {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retries: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metrics: Option<TaskRuntimeMetrics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slo_warnings: Option<BTreeMap<String, SloWarningRecord>>,
@@ -137,6 +139,11 @@ pub struct TaskRuntime {
     pub last_merge_result_rc: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_merge_result_at: Option<String>,
+    /// ISO 8601 timestamp before which this task must not be re-dispatched.
+    /// Set by the backoff engine when a rate-limit (E601) is received.
+    /// Cleared on successful dispatch or when the timestamp is in the past.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delayed_until: Option<String>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -261,7 +268,10 @@ fn is_default_task_runtime(runtime: &TaskRuntime) -> bool {
 impl TaskRegistry {
     pub fn from_value(value: &Value) -> Result<Self> {
         serde_json::from_value::<Self>(value.clone()).map_err(|e| {
-            MaccError::Validation(format!("Failed to parse typed coordinator registry: {}", e))
+            MaccError::Coordinator {
+                code: "registry_parse",
+                message: format!("Failed to parse typed coordinator registry: {}", e),
+            }
         })
     }
 

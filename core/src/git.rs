@@ -67,10 +67,13 @@ pub fn worktree_list_porcelain(repo_root: &Path) -> Result<String> {
         "run git worktree list",
     )?;
     if !output.status.success() {
-        return Err(MaccError::Validation(format!(
-            "git worktree list failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )));
+        return Err(MaccError::Git {
+            operation: "worktree_list".to_string(),
+            message: format!(
+                "git worktree list failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        });
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
@@ -89,10 +92,13 @@ pub fn worktree_add(repo_root: &Path, branch: &str, path: &Path, base: &str) -> 
         "run git worktree add",
     )?;
     if !output.status.success() {
-        return Err(MaccError::Validation(format!(
-            "git worktree add failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )));
+        return Err(MaccError::Git {
+            operation: "worktree_add".to_string(),
+            message: format!(
+                "git worktree add failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        });
     }
     Ok(())
 }
@@ -106,10 +112,13 @@ pub fn worktree_remove(repo_root: &Path, path: &Path, force: bool) -> Result<()>
     };
     let output = run_git_output(repo_root, &args, "run git worktree remove")?;
     if !output.status.success() {
-        return Err(MaccError::Validation(format!(
-            "git worktree remove failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )));
+        return Err(MaccError::Git {
+            operation: "worktree_remove".to_string(),
+            message: format!(
+                "git worktree remove failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        });
     }
     Ok(())
 }
@@ -117,10 +126,13 @@ pub fn worktree_remove(repo_root: &Path, path: &Path, force: bool) -> Result<()>
 pub fn worktree_prune(repo_root: &Path) -> Result<()> {
     let output = run_git_output(repo_root, &["worktree", "prune"], "run git worktree prune")?;
     if !output.status.success() {
-        return Err(MaccError::Validation(format!(
-            "git worktree prune failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )));
+        return Err(MaccError::Git {
+            operation: "worktree_prune".to_string(),
+            message: format!(
+                "git worktree prune failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        });
     }
     Ok(())
 }
@@ -257,10 +269,13 @@ pub fn merge_ff_only(repo_or_worktree: &Path, reference: &str) -> Result<bool> {
 pub fn head_commit(repo_or_worktree: &Path) -> Result<String> {
     let output = run_git_output(repo_or_worktree, &["rev-parse", "HEAD"], "read git head")?;
     if !output.status.success() {
-        return Err(MaccError::Validation(format!(
-            "Failed to resolve HEAD in {}",
-            repo_or_worktree.display()
-        )));
+        return Err(MaccError::Git {
+            operation: "log".to_string(),
+            message: format!(
+                "Failed to resolve HEAD in {}",
+                repo_or_worktree.display()
+            ),
+        });
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
@@ -272,10 +287,13 @@ pub fn current_branch(repo_or_worktree: &Path) -> Result<String> {
         "read git current branch",
     )?;
     if !output.status.success() {
-        return Err(MaccError::Validation(format!(
-            "Failed to resolve current branch in {}",
-            repo_or_worktree.display()
-        )));
+        return Err(MaccError::Git {
+            operation: "status".to_string(),
+            message: format!(
+                "Failed to resolve current branch in {}",
+                repo_or_worktree.display()
+            ),
+        });
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
@@ -329,10 +347,13 @@ pub async fn head_commit_async(repo_or_worktree: &Path) -> Result<String> {
     let output =
         run_git_output_async(repo_or_worktree, &["rev-parse", "HEAD"], "read git head").await?;
     if !output.status.success() {
-        return Err(MaccError::Validation(format!(
-            "Failed to resolve HEAD in {}",
-            repo_or_worktree.display()
-        )));
+        return Err(MaccError::Git {
+            operation: "log".to_string(),
+            message: format!(
+                "Failed to resolve HEAD in {}",
+                repo_or_worktree.display()
+            ),
+        });
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
@@ -349,10 +370,13 @@ pub fn delete_local_branch(repo_root: &Path, branch: &str, force: bool) -> Resul
     };
     let output = run_git_output(repo_root, &args, "run git branch delete")?;
     if !output.status.success() {
-        return Err(MaccError::Validation(format!(
-            "git branch delete failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )));
+        return Err(MaccError::Git {
+            operation: "branch_delete".to_string(),
+            message: format!(
+                "git branch delete failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        });
     }
     Ok(())
 }

@@ -77,7 +77,15 @@
         "task_runtime_orphan",
         "local_merge_failed",
         "merge_worker_started",
-        "merge_worker_complete"
+        "merge_worker_complete",
+        "tool_error_classified",
+        "quota_exhausted",
+        "tool_fallback",
+        "concurrency_adjusted",
+        "dispatch_limit_reached",
+        "dispatch_skipped",
+        "sanitize_done",
+        "dispatch_failed"
       ]
     },
     "phase": {

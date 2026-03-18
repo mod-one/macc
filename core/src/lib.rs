@@ -1,5 +1,6 @@
 pub mod automation;
 pub mod catalog;
+pub mod commit_message;
 pub mod config;
 pub mod coordinator;
 pub mod coordinator_storage;
@@ -80,6 +81,27 @@ pub enum MaccError {
 
     #[error("Secret(s) detected in generated output for {path}: {details}")]
     SecretDetected { path: String, details: String },
+
+    #[error("Coordinator error [{code}]: {message}")]
+    Coordinator {
+        code: &'static str,
+        message: String,
+    },
+
+    #[error("Storage error ({backend}): {message}")]
+    Storage {
+        backend: &'static str,
+        message: String,
+    },
+
+    #[error("Git error during {operation}: {message}")]
+    Git { operation: String, message: String },
+
+    #[error("Fetch error for {url}: {message}")]
+    Fetch { url: String, message: String },
+
+    #[error("Catalog error during {operation}: {message}")]
+    Catalog { operation: String, message: String },
 }
 
 pub type Result<T> = std::result::Result<T, MaccError>;

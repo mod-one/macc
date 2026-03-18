@@ -1,6 +1,7 @@
 use crate::coordinator::engine::ReviewVerdict;
 use crate::coordinator::model::Task;
-use crate::coordinator::CoordinatorEventRecord;
+use crate::coordinator::rate_limit::ToolThrottleRegistry;
+use crate::coordinator::{CoordinatorEventRecord, PerformerCompletionKind};
 use crate::coordinator_storage::CoordinatorStorage;
 use crate::git;
 use crate::{MaccError, Result};
@@ -29,6 +30,8 @@ pub struct CoordinatorJobEvent {
     pub success: bool,
     pub status_text: String,
     pub timed_out: bool,
+    pub completion_kind: Option<PerformerCompletionKind>,
+    pub completion_details_source: Option<String>,
     pub error_code: Option<String>,
     pub error_origin: Option<String>,
     pub error_message: Option<String>,
@@ -87,6 +90,11 @@ pub struct CoordinatorRunState {
     pub dispatch_limit_event_emitted: bool,
     pub performer_ipc_addr: Option<String>,
     pub performer_ipc_listener_started: bool,
+    // RL-ROUTE-005: per-tool throttle state
+    pub throttle_registry: ToolThrottleRegistry,
+    // RL-THROTTLE-006: dynamic concurrency control
+    pub effective_max_parallel: usize,
+    pub original_max_parallel: usize,
 }
 
 pub trait PhaseExecutor {
@@ -123,13 +131,85 @@ impl CoordinatorRunState {
             dispatch_limit_event_emitted: false,
             performer_ipc_addr: None,
             performer_ipc_listener_started: false,
+            throttle_registry: ToolThrottleRegistry::default(),
+            effective_max_parallel: 0,
+            original_max_parallel: 0,
         }
+    }
+
+    /// Reduce effective concurrency by 1 (minimum 1).
+    /// Returns the new value.
+    pub fn reduce_parallel(&mut self) -> usize {
+        if self.effective_max_parallel > 1 {
+            self.effective_max_parallel -= 1;
+        }
+        self.effective_max_parallel
+    }
+
+    /// Restore effective concurrency by 1 (capped at `original_max_parallel`).
+    /// Returns the new value.
+    pub fn restore_parallel(&mut self) -> usize {
+        if self.original_max_parallel > 0 {
+            self.effective_max_parallel =
+                (self.effective_max_parallel + 1).min(self.original_max_parallel);
+        }
+        self.effective_max_parallel
     }
 }
 
 impl Default for CoordinatorRunState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state_with_parallel(original: usize) -> CoordinatorRunState {
+        let mut s = CoordinatorRunState::new();
+        s.original_max_parallel = original;
+        s.effective_max_parallel = original;
+        s
+    }
+
+    #[test]
+    fn reduce_parallel_decrements_by_one() {
+        let mut s = state_with_parallel(3);
+        assert_eq!(s.reduce_parallel(), 2);
+        assert_eq!(s.effective_max_parallel, 2);
+    }
+
+    #[test]
+    fn reduce_parallel_does_not_go_below_one() {
+        let mut s = state_with_parallel(1);
+        assert_eq!(s.reduce_parallel(), 1);
+        assert_eq!(s.effective_max_parallel, 1);
+    }
+
+    #[test]
+    fn restore_parallel_increments_by_one() {
+        let mut s = state_with_parallel(3);
+        s.effective_max_parallel = 2;
+        assert_eq!(s.restore_parallel(), 3);
+        assert_eq!(s.effective_max_parallel, 3);
+    }
+
+    #[test]
+    fn restore_parallel_does_not_exceed_original() {
+        let mut s = state_with_parallel(3);
+        // already at original
+        assert_eq!(s.restore_parallel(), 3);
+        assert_eq!(s.effective_max_parallel, 3);
+    }
+
+    #[test]
+    fn restore_parallel_no_op_when_original_is_zero() {
+        let mut s = CoordinatorRunState::new();
+        // original_max_parallel == 0 → restore is a no-op
+        s.effective_max_parallel = 0;
+        assert_eq!(s.restore_parallel(), 0);
     }
 }
 
@@ -304,10 +384,20 @@ pub fn resolve_phase_runner(
     let explicit = worktree_path
         .join(".macc")
         .join("automation")
-        .join("runners")
+        .join("embedded")
+        .join("adapters")
+        .join(tool)
         .join(format!("{}.performer.sh", tool));
     if explicit.exists() {
         return Ok(Some(explicit));
+    }
+    let legacy = worktree_path
+        .join(".macc")
+        .join("automation")
+        .join("runners")
+        .join(format!("{}.performer.sh", tool));
+    if legacy.exists() {
+        return Ok(Some(legacy));
     }
     let tool_json_path = worktree_path.join(".macc").join("tool.json");
     if !tool_json_path.exists() {
@@ -416,6 +506,7 @@ pub fn spawn_performer_job(
     let pid = child.id().map(|v| v as i64);
     let repo_root_owned = repo_root.to_path_buf();
     let task_id_owned = task_id.to_string();
+    let worktree_path_owned = worktree_path.to_path_buf();
     let event_source_owned = event_source.clone();
     let tx = event_tx.clone();
     join_set.spawn(async move {
@@ -439,6 +530,34 @@ pub fn spawn_performer_job(
                 Err(err) => (false, err.to_string(), false),
             }
         };
+        let reported_success = success;
+        let (completion_details, completion_details_source) = if reported_success {
+            if let Some(details) =
+                read_last_completion_details(&repo_root_owned, &task_id_owned, &event_source_owned)
+            {
+                (Some(details), Some("sqlite".to_string()))
+            } else if compat_phase_result_log_fallback_enabled() {
+                (
+                    read_completion_details_from_worktree_log(&worktree_path_owned, &task_id_owned),
+                    Some("log-fallback".to_string()),
+                )
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        };
+        let success = if reported_success {
+            completion_details.is_some()
+        } else {
+            false
+        };
+        let status_text = if reported_success && completion_details.is_none() {
+            "performer exited successfully but no phase_result event was persisted via coordinator IPC"
+                .to_string()
+        } else {
+            status_text
+        };
         let mut error_code = None;
         let mut error_origin = None;
         let mut error_message = None;
@@ -449,13 +568,25 @@ pub fn spawn_performer_job(
                 error_code = details.error_code;
                 error_origin = details.error_origin;
                 error_message = details.error_message;
+            } else if reported_success {
+                error_code = Some("E901".to_string());
+                error_origin = Some("coordinator".to_string());
+                error_message = Some(
+                    "performer exited without persisting terminal phase_result event".to_string(),
+                );
             }
         }
         let _ = tx.send(CoordinatorJobEvent {
             task_id: task_id_owned,
             success,
-            status_text,
+            status_text: completion_details
+                .as_ref()
+                .and_then(|details| details.message.clone())
+                .filter(|message| !message.trim().is_empty())
+                .unwrap_or(status_text),
             timed_out,
+            completion_kind: completion_details.and_then(|details| details.result_kind),
+            completion_details_source,
             error_code,
             error_origin,
             error_message,
@@ -471,12 +602,112 @@ struct ErrorDetails {
     error_message: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct CompletionDetails {
+    result_kind: Option<PerformerCompletionKind>,
+    message: Option<String>,
+}
+
+const COORDINATOR_COMPAT_PHASE_RESULT_LOG_FALLBACK: &str =
+    "COORDINATOR_COMPAT_PHASE_RESULT_LOG_FALLBACK";
+
+fn compat_phase_result_log_fallback_enabled() -> bool {
+    std::env::var(COORDINATOR_COMPAT_PHASE_RESULT_LOG_FALLBACK)
+        .ok()
+        .map(|raw| {
+            matches!(
+                raw.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
 fn read_last_error_details(
     repo_root: &Path,
     task_id: &str,
     event_source: &str,
 ) -> Option<ErrorDetails> {
     read_last_error_details_from_sqlite(repo_root, task_id, event_source)
+}
+
+fn read_last_completion_details(
+    repo_root: &Path,
+    task_id: &str,
+    event_source: &str,
+) -> Option<CompletionDetails> {
+    let project_paths = crate::ProjectPaths::from_root(repo_root);
+    let storage_paths =
+        crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&project_paths);
+    let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
+    let snapshot = sqlite.load_snapshot().ok()?;
+    for event in snapshot.events.iter().rev() {
+        let Some(event_task_id) = event.task_id.as_deref() else {
+            continue;
+        };
+        if event_task_id != task_id {
+            continue;
+        }
+        if !event_source.is_empty() && event.source != event_source {
+            continue;
+        }
+        if event.event_type != "phase_result" {
+            continue;
+        }
+        return Some(CompletionDetails {
+            result_kind: event.payload_result_kind(),
+            message: event.message().map(|value| value.to_string()),
+        });
+    }
+    None
+}
+
+fn read_completion_details_from_worktree_log(
+    worktree_path: &Path,
+    task_id: &str,
+) -> Option<CompletionDetails> {
+    let log_path = performer_task_log_path(worktree_path, task_id);
+    let raw = std::fs::read_to_string(log_path).ok()?;
+    let mut result_kind = None;
+    let mut message = None;
+    for line in raw.lines().rev() {
+        let trimmed = line.trim();
+        if result_kind.is_none() {
+            if let Some(raw_kind) = trimmed.strip_prefix("- Result kind:") {
+                result_kind = raw_kind.trim().parse::<PerformerCompletionKind>().ok();
+                continue;
+            }
+            if let Some(raw_kind) = trimmed.strip_prefix("MACC_TASK_RESULT:") {
+                result_kind = raw_kind.trim().parse::<PerformerCompletionKind>().ok();
+                continue;
+            }
+        }
+        if message.is_none() && !trimmed.is_empty() && !trimmed.starts_with('-') {
+            message = Some(trimmed.to_string());
+        }
+        if result_kind.is_some() && message.is_some() {
+            break;
+        }
+    }
+    result_kind.map(|kind| CompletionDetails {
+        result_kind: Some(kind),
+        message,
+    })
+}
+
+fn performer_task_log_path(worktree_path: &Path, task_id: &str) -> PathBuf {
+    let safe: String = task_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+        .collect();
+    let file = if safe.is_empty() {
+        "task".to_string()
+    } else {
+        safe
+    };
+    worktree_path
+        .join(".macc/log/performer")
+        .join(format!("{}.md", file))
 }
 
 fn read_last_error_details_from_sqlite(
@@ -718,7 +949,6 @@ pub fn merge_task_with_policy_native<FE>(
     branch: &str,
     base: &str,
     merge_ai_fix: bool,
-    merge_fix_hook: Option<&str>,
     merge_hook_timeout: Option<u64>,
     mut emit_event: FE,
 ) -> Result<std::result::Result<(), String>>
@@ -754,7 +984,7 @@ where
     }
 
     let _ = git::checkout(repo_root, base, false);
-    let merge_msg = format!("macc: merge task {}", task_id);
+    let merge_msg = crate::commit_message::merge_commit(task_id).format();
     let merge = git::run_git_output_mapped(
         repo_root,
         &["merge", "--no-ff", "-m", &merge_msg, branch],
@@ -780,73 +1010,71 @@ where
 
     let mut hook_output = String::new();
     if merge_ai_fix {
-        if let Some(hook_path_str) = merge_fix_hook {
-            let hook = PathBuf::from(hook_path_str);
-            let hook_timeout_seconds = merge_hook_timeout.unwrap_or(90);
-            let hook_started = std::time::Instant::now();
-            emit_event(
-                "merge_hook",
-                task_id,
-                "integrate",
-                "started",
-                &format!(
-                    "merge-fix hook started task={} timeout_s={}",
-                    task_id, hook_timeout_seconds
-                ),
-                "info",
-            );
-            let hook_result = run_merge_hook_with_timeout(
-                repo_root,
-                &hook,
-                task_id,
-                branch,
-                base,
-                &conflicts,
-                hook_timeout_seconds,
-            );
-            let hook_elapsed = hook_started.elapsed().as_secs();
-            match hook_result {
-                Ok(HookRunResult::Completed { output, timed_out }) => {
-                    hook_output = output;
-                    emit_event(
-                        "merge_hook",
-                        task_id,
-                        "integrate",
-                        if timed_out { "timeout" } else { "done" },
-                        &format!(
-                            "merge-fix hook completed task={} elapsed={}s timeout={}",
-                            task_id, hook_elapsed, timed_out
-                        ),
-                        if timed_out { "warning" } else { "info" },
-                    );
-                }
-                Err(err) => {
-                    hook_output = format!("merge-fix hook execution error: {}", err);
-                    emit_event(
-                        "merge_hook",
-                        task_id,
-                        "integrate",
-                        "failed",
-                        &format!(
-                            "merge-fix hook failed task={} elapsed={}s error={}",
-                            task_id, hook_elapsed, err
-                        ),
-                        "warning",
-                    );
-                }
+        let hook = crate::ProjectPaths::from_root(repo_root).automation_merge_fix_hook_path();
+        let hook_timeout_seconds = merge_hook_timeout.unwrap_or(90);
+        let hook_started = std::time::Instant::now();
+        emit_event(
+            "merge_hook",
+            task_id,
+            "integrate",
+            "started",
+            &format!(
+                "merge-fix hook started task={} timeout_s={}",
+                task_id, hook_timeout_seconds
+            ),
+            "info",
+        );
+        let hook_result = run_merge_hook_with_timeout(
+            repo_root,
+            &hook,
+            task_id,
+            branch,
+            base,
+            &conflicts,
+            hook_timeout_seconds,
+        );
+        let hook_elapsed = hook_started.elapsed().as_secs();
+        match hook_result {
+            Ok(HookRunResult::Completed { output, timed_out }) => {
+                hook_output = output;
+                emit_event(
+                    "merge_hook",
+                    task_id,
+                    "integrate",
+                    if timed_out { "timeout" } else { "done" },
+                    &format!(
+                        "merge-fix hook completed task={} elapsed={}s timeout={}",
+                        task_id, hook_elapsed, timed_out
+                    ),
+                    if timed_out { "warning" } else { "info" },
+                );
             }
-            let unresolved = git::run_git_output_mapped(
-                repo_root,
-                &["diff", "--name-only", "--diff-filter=U"],
-                "list unresolved merge conflict files",
-            )
-            .ok()
-            .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
-            .unwrap_or(true);
-            let in_merge = git::rev_parse_verify(repo_root, "MERGE_HEAD").unwrap_or(false);
-            if !unresolved && !in_merge {
-                return Ok(Ok(()));
+            Err(err) => {
+                hook_output = format!("merge-fix hook execution error: {}", err);
+                emit_event(
+                    "merge_hook",
+                    task_id,
+                    "integrate",
+                    "failed",
+                    &format!(
+                        "merge-fix hook failed task={} elapsed={}s error={}",
+                        task_id, hook_elapsed, err
+                    ),
+                    "warning",
+                );
             }
+        }
+        let unresolved = git::run_git_output_mapped(
+            repo_root,
+            &["diff", "--name-only", "--diff-filter=U"],
+            "list unresolved merge conflict files",
+        )
+        .ok()
+        .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+        .unwrap_or(true);
+        let in_merge = git::rev_parse_verify(repo_root, "MERGE_HEAD").unwrap_or(false);
+        if !unresolved && !in_merge {
+            return Ok(Ok(()));
         }
     }
 

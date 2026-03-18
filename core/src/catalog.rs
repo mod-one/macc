@@ -122,18 +122,16 @@ impl SkillsCatalog {
             action: "read skills catalog".into(),
             source: e,
         })?;
-        serde_json::from_str(&content).map_err(|e| {
-            MaccError::Validation(format!(
-                "Failed to parse skills catalog at {}: {}",
-                path.display(),
-                e
-            ))
+        serde_json::from_str(&content).map_err(|e| MaccError::Catalog {
+            operation: "parse_skills".to_string(),
+            message: format!("Failed to parse skills catalog at {}: {}", path.display(), e),
         })
     }
 
     pub fn save_atomically(&self, paths: &ProjectPaths, path: &Path) -> MaccResult<()> {
-        let mut json = serde_json::to_string_pretty(self).map_err(|e| {
-            MaccError::Validation(format!("Failed to serialize skills catalog: {}", e))
+        let mut json = serde_json::to_string_pretty(self).map_err(|e| MaccError::Catalog {
+            operation: "serialize_skills".to_string(),
+            message: format!("Failed to serialize skills catalog: {}", e),
         })?;
         json.push('\n');
         let _ = write_if_changed(
@@ -190,14 +188,17 @@ const EMBEDDED_SKILLS_CATALOG_JSON: &str = include_str!("../../catalog/skills.ca
 const EMBEDDED_MCP_CATALOG_JSON: &str = include_str!("../../catalog/mcp.catalog.json");
 
 fn embedded_skills_catalog() -> MaccResult<SkillsCatalog> {
-    serde_json::from_str(EMBEDDED_SKILLS_CATALOG_JSON).map_err(|e| {
-        MaccError::Validation(format!("Failed to parse embedded skills catalog: {}", e))
+    serde_json::from_str(EMBEDDED_SKILLS_CATALOG_JSON).map_err(|e| MaccError::Catalog {
+        operation: "parse_skills".to_string(),
+        message: format!("Failed to parse embedded skills catalog: {}", e),
     })
 }
 
 fn embedded_mcp_catalog() -> MaccResult<McpCatalog> {
-    serde_json::from_str(EMBEDDED_MCP_CATALOG_JSON)
-        .map_err(|e| MaccError::Validation(format!("Failed to parse embedded MCP catalog: {}", e)))
+    serde_json::from_str(EMBEDDED_MCP_CATALOG_JSON).map_err(|e| MaccError::Catalog {
+        operation: "parse_mcp".to_string(),
+        message: format!("Failed to parse embedded MCP catalog: {}", e),
+    })
 }
 
 fn merge_skill_layers(base: SkillsCatalog, override_layer: SkillsCatalog) -> SkillsCatalog {
@@ -328,18 +329,16 @@ impl McpCatalog {
             action: "read mcp catalog".into(),
             source: e,
         })?;
-        serde_json::from_str(&content).map_err(|e| {
-            MaccError::Validation(format!(
-                "Failed to parse mcp catalog at {}: {}",
-                path.display(),
-                e
-            ))
+        serde_json::from_str(&content).map_err(|e| MaccError::Catalog {
+            operation: "parse_mcp".to_string(),
+            message: format!("Failed to parse mcp catalog at {}: {}", path.display(), e),
         })
     }
 
     pub fn save_atomically(&self, paths: &ProjectPaths, path: &Path) -> MaccResult<()> {
-        let mut json = serde_json::to_string_pretty(self).map_err(|e| {
-            MaccError::Validation(format!("Failed to serialize mcp catalog: {}", e))
+        let mut json = serde_json::to_string_pretty(self).map_err(|e| MaccError::Catalog {
+            operation: "serialize_mcp".to_string(),
+            message: format!("Failed to serialize mcp catalog: {}", e),
         })?;
         json.push('\n');
         let _ = write_if_changed(

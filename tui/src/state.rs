@@ -76,6 +76,14 @@ fn format_hms(total_secs: u64) -> String {
     format!("{}:{:02}:{:02}", hours, minutes, seconds)
 }
 
+/// Format an ISO 8601 timestamp as "HH:MM:SS UTC" for throttle-until display.
+fn throttle_until_hms(iso: &str) -> String {
+    DateTime::parse_from_rfc3339(iso)
+        .ok()
+        .map(|dt| dt.with_timezone(&Utc).format("%H:%M:%S UTC").to_string())
+        .unwrap_or_else(|| iso.to_string())
+}
+
 pub struct CoordinatorTaskSnapshot {
     pub total: usize,
     pub todo: usize,
@@ -83,6 +91,8 @@ pub struct CoordinatorTaskSnapshot {
     pub blocked: usize,
     pub merged: usize,
     pub active_tasks: Vec<CoordinatorActiveTask>,
+    /// RL-TUI-007: tools currently throttled due to rate-limiting.
+    pub throttled_tools: Vec<ThrottledToolInfo>,
 }
 
 #[derive(Clone)]
@@ -96,6 +106,20 @@ pub struct CoordinatorActiveTask {
     pub current_phase: String,
     pub last_error: String,
     pub last_heartbeat: String,
+    /// Most recent error code (e.g. "E601", "E602") for this task.
+    pub last_error_code: String,
+}
+
+/// RL-TUI-007: per-tool throttle state for TUI display.
+#[derive(Clone)]
+pub struct ThrottledToolInfo {
+    pub tool_id: String,
+    /// ISO 8601 timestamp when the throttle expires (raw, for sorting).
+    pub throttled_until: String,
+    /// Human-readable "HH:MM:SS UTC" form of `throttled_until`.
+    pub display_until: String,
+    pub backoff_seconds: u64,
+    pub consecutive_count: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -176,10 +200,14 @@ pub struct AppState {
     pub redo_stack: Vec<CanonicalConfig>,
     coordinator_running_elapsed_secs: Option<u64>,
     coordinator_pause_next_action: Option<CoordinatorPauseNextAction>,
+    /// RL-TUI-007: tools currently throttled due to rate-limiting.
+    pub coordinator_throttled_tools: Vec<ThrottledToolInfo>,
+    /// RL-TUI-007: (effective, original) max_parallel from concurrency_adjusted events.
+    pub coordinator_effective_max_parallel: Option<(usize, usize)>,
 }
 
 impl AppState {
-    const AUTOMATION_FIELD_COUNT: usize = 27;
+    const AUTOMATION_FIELD_COUNT: usize = 30;
     const COORDINATOR_EVENTS_EWMA_ALPHA: f64 = 0.30;
     const COORDINATOR_PAUSE_REL_PATH: &'static str = ".macc/automation/task/coordinator.pause.json";
 
@@ -267,6 +295,8 @@ impl AppState {
             redo_stack: Vec::new(),
             coordinator_running_elapsed_secs: None,
             coordinator_pause_next_action: None,
+            coordinator_throttled_tools: Vec::new(),
+            coordinator_effective_max_parallel: None,
         };
 
         state.refresh_tools();
@@ -516,7 +546,57 @@ impl AppState {
             blocked: 0,
             merged: 0,
             active_tasks: Vec::new(),
+            throttled_tools: Vec::new(),
         };
+        // RL-TUI-007: collect throttled tool info from tasks whose delayed_until is in the future.
+        let now_iso = Utc::now().to_rfc3339();
+        let mut throttle_map: BTreeMap<String, ThrottledToolInfo> = BTreeMap::new();
+        for task in &root.tasks {
+            if let (Some(delayed_until), Some(tool_id)) = (
+                task.task_runtime.delayed_until.as_deref(),
+                task.tool.as_deref(),
+            ) {
+                if !tool_id.is_empty() && delayed_until > now_iso.as_str() {
+                    let (backoff_seconds, consecutive_count) = task
+                        .task_runtime
+                        .extra
+                        .get("throttle_state")
+                        .and_then(|v| {
+                            let bs = v
+                                .get("backoff_seconds")
+                                .and_then(|x| x.as_u64())
+                                .unwrap_or(0);
+                            let cc = v
+                                .get("consecutive_429_count")
+                                .and_then(|x| x.as_u64())
+                                .unwrap_or(0) as u32;
+                            Some((bs, cc))
+                        })
+                        .unwrap_or((0, 0));
+                    let entry =
+                        throttle_map
+                            .entry(tool_id.to_string())
+                            .or_insert_with(|| ThrottledToolInfo {
+                                tool_id: tool_id.to_string(),
+                                throttled_until: delayed_until.to_string(),
+                                display_until: throttle_until_hms(delayed_until),
+                                backoff_seconds,
+                                consecutive_count,
+                            });
+                    // Keep the latest expiry for this tool.
+                    if delayed_until > entry.throttled_until.as_str() {
+                        *entry = ThrottledToolInfo {
+                            tool_id: tool_id.to_string(),
+                            throttled_until: delayed_until.to_string(),
+                            display_until: throttle_until_hms(delayed_until),
+                            backoff_seconds,
+                            consecutive_count,
+                        };
+                    }
+                }
+            }
+        }
+        snapshot.throttled_tools = throttle_map.into_values().collect();
         for task in &root.tasks {
             let id = if task.id.is_empty() {
                 "-".to_string()
@@ -549,6 +629,11 @@ impl AppState {
                 .clone()
                 .unwrap_or_else(|| "-".to_string());
             let last_error = task.task_runtime.last_error.clone().unwrap_or_default();
+            let last_error_code = task
+                .task_runtime
+                .last_error_code
+                .clone()
+                .unwrap_or_default();
             let last_heartbeat = task
                 .task_runtime
                 .last_heartbeat
@@ -575,6 +660,7 @@ impl AppState {
                         current_phase,
                         last_error,
                         last_heartbeat,
+                        last_error_code,
                     });
                 }
                 "claimed" => {
@@ -596,6 +682,7 @@ impl AppState {
             .and_then(|snapshot| self.read_registry_snapshot(&snapshot.registry))
         {
             Ok(snapshot) => {
+                self.coordinator_throttled_tools = snapshot.throttled_tools.clone();
                 self.coordinator_snapshot = Some(snapshot);
                 self.coordinator_last_refresh = Some(Instant::now());
             }
@@ -646,6 +733,10 @@ impl AppState {
                 | "phase_skipped"
                 | "events_rotated"
                 | "events_compacted"
+                // RL-TUI-007: rate-limit visibility events
+                | "concurrency_adjusted"
+                | "tool_fallback"
+                | "quota_exhausted"
         )
     }
 
@@ -787,6 +878,28 @@ impl AppState {
         self.coordinator_events = lines;
         self.coordinator_events_last_refresh = Some(now);
         self.coordinator_events_last_seen_count = total_count;
+        // RL-TUI-007: parse effective_max_parallel from the most recent concurrency_adjusted event.
+        if let Some(msg) = filtered
+            .iter()
+            .rev()
+            .find(|e| e.event_type == "concurrency_adjusted")
+            .and_then(|e| e.message.as_deref())
+        {
+            if let Some(effective) = msg
+                .split_whitespace()
+                .find(|s| s.starts_with("effective_max_parallel="))
+                .and_then(|s| s.split('=').nth(1))
+                .and_then(|v| v.parse::<usize>().ok())
+            {
+                let original = self
+                    .config
+                    .as_ref()
+                    .and_then(|c| c.automation.coordinator.as_ref())
+                    .and_then(|c| c.max_parallel)
+                    .unwrap_or(effective);
+                self.coordinator_effective_max_parallel = Some((effective, original));
+            }
+        }
     }
 
     pub fn refresh_tool_checks(&mut self) {
@@ -1812,15 +1925,18 @@ impl AppState {
             15 => "Log Flush Interval (ms)",
             16 => "JSON Export Debounce (ms)",
             17 => "Merge AI Fix",
-            18 => "Merge Fix Hook",
-            19 => "Merge Job Timeout (s)",
-            20 => "Merge Hook Timeout (s)",
-            21 => "Ghost Heartbeat Grace (s)",
-            22 => "Dispatch Cooldown (s)",
-            23 => "JSON Compatibility",
-            24 => "Retry Error Codes (CSV)",
-            25 => "Max Auto Retries",
-            26 => "Legacy JSON Fallback",
+            18 => "Merge Job Timeout (s)",
+            19 => "Merge Hook Timeout (s)",
+            20 => "Ghost Heartbeat Grace (s)",
+            21 => "Dispatch Cooldown (s)",
+            22 => "JSON Compatibility",
+            23 => "Retry Error Codes (CSV)",
+            24 => "Max Auto Retries",
+            25 => "Legacy JSON Fallback",
+            26 => "RL Backoff Base (s)",
+            27 => "RL Backoff Max (s)",
+            28 => "RL Fallback Enabled",
+            29 => "RL Throttle Parallel",
             _ => "",
         }
     }
@@ -1845,15 +1961,18 @@ impl AppState {
             15 => "Flush coordinator logs every N milliseconds (0 uses runtime default).",
             16 => "Debounce SQLite -> JSON compatibility export in ms (0 disables debounce).",
             17 => "Enable AI-driven resolution for merge conflicts.",
-            18 => "Custom script path to handle merge conflict resolution.",
-            19 => "Timeout for git merge operations in seconds.",
-            20 => "Timeout for AI merge-fix hook execution in seconds.",
-            21 => "Grace period before considering a dead process a 'ghost' in seconds.",
-            22 => "Wait time between task dispatch cycles in seconds.",
-            23 => "Enable JSON snapshot export for external tool compatibility.",
-            24 => "Comma-separated list of error codes that trigger an automatic task retry.",
-            25 => "Maximum number of automatic retries for a failed task.",
-            26 => "Allow falling back to JSON task registry if SQLite is corrupted or missing.",
+            18 => "Timeout for git merge operations in seconds.",
+            19 => "Timeout for AI merge-fix hook execution in seconds.",
+            20 => "Grace period before considering a dead process a 'ghost' in seconds.",
+            21 => "Wait time between task dispatch cycles in seconds.",
+            22 => "Enable JSON snapshot export for external tool compatibility.",
+            23 => "Comma-separated list of error codes that trigger an automatic task retry.",
+            24 => "Maximum number of automatic retries for a failed task.",
+            25 => "Allow falling back to JSON task registry if SQLite is corrupted or missing.",
+            26 => "Minimum backoff delay in seconds on first E601 rate-limit (default: 60).",
+            27 => "Maximum backoff delay cap in seconds for exponential growth (default: 3600).",
+            28 => "When the primary tool is throttled, dispatch to the next tool in priority order.",
+            29 => "Reduce effective_max_parallel by 1 on each E601; restore on recovery.",
             _ => "",
         }
     }
@@ -1936,40 +2055,53 @@ impl AppState {
                 .unwrap_or(false)
                 .to_string(),
             18 => coordinator
-                .and_then(|c| c.merge_fix_hook.clone())
-                .unwrap_or_else(|| "automat/hooks/ai-merge-fix.sh".to_string()),
-            19 => coordinator
                 .and_then(|c| c.merge_job_timeout_seconds)
                 .unwrap_or(0)
                 .to_string(),
-            20 => coordinator
+            19 => coordinator
                 .and_then(|c| c.merge_hook_timeout_seconds)
                 .unwrap_or(90)
                 .to_string(),
-            21 => coordinator
+            20 => coordinator
                 .and_then(|c| c.ghost_heartbeat_grace_seconds)
                 .unwrap_or(30)
                 .to_string(),
-            22 => coordinator
+            21 => coordinator
                 .and_then(|c| c.dispatch_cooldown_seconds)
                 .unwrap_or(2)
                 .to_string(),
-            23 => coordinator
+            22 => coordinator
                 .and_then(|c| c.json_compat)
                 .unwrap_or(false)
                 .to_string(),
-            24 => self
+            23 => self
                 .coordinator_env_cfg()
                 .error_code_retry_list
-                .unwrap_or_else(|| "E101,E102,E103,E301,E302,E303".to_string()),
-            25 => self
+                .unwrap_or_else(|| "E101,E102,E103,E301,E302,E303,E601,E603".to_string()),
+            24 => self
                 .coordinator_env_cfg()
                 .error_code_retry_max
                 .unwrap_or(2)
                 .to_string(),
-            26 => coordinator
+            25 => coordinator
                 .and_then(|c| c.legacy_json_fallback)
                 .unwrap_or(false)
+                .to_string(),
+            26 => coordinator
+                .and_then(|c| c.rate_limit_backoff_base_seconds)
+                .unwrap_or(60)
+                .to_string(),
+            27 => coordinator
+                .and_then(|c| c.rate_limit_backoff_max_seconds)
+                .unwrap_or(3600)
+                .to_string(),
+            28 => coordinator
+                .and_then(|c| c.rate_limit_fallback_enabled)
+                .unwrap_or(true)
+                .to_string(),
+            29 => coordinator
+                .and_then(|c| c.rate_limit_throttle_parallel)
+                .unwrap_or(true)
                 .to_string(),
             _ => String::new(),
         }
@@ -2132,7 +2264,7 @@ impl AppState {
             self.set_automation_field_string(13, next.to_string());
             return;
         }
-        if matches!(self.automation_field_index, 17 | 23 | 26) {
+        if matches!(self.automation_field_index, 17 | 22 | 25 | 28 | 29) {
             let current =
                 self.automation_field_display_value(self.automation_field_index) == "true";
             self.set_automation_field_bool(self.automation_field_index, !current);
@@ -2148,8 +2280,8 @@ impl AppState {
         let idx = self.automation_field_index;
         let input = self.automation_field_input.trim().to_string();
         let result = match idx {
-            0..=2 | 18 | 24 => {
-                if input.is_empty() && idx != 18 {
+            0..=2 | 23 => {
+                if input.is_empty() && idx != 23 {
                     Err("Value cannot be empty.".to_string())
                 } else {
                     self.set_automation_field_string(idx, input);
@@ -2162,21 +2294,21 @@ impl AppState {
             }
             4 => self.set_automation_field_tool_caps(input),
             5 => self.set_automation_field_tool_specializations(input),
-            6..=12 | 14 | 19 | 25 => match input.parse::<usize>() {
+            6..=12 | 14 | 18 | 24 => match input.parse::<usize>() {
                 Ok(value) => {
                     self.set_automation_field_usize(idx, value);
                     Ok(())
                 }
                 Err(_) => Err("Invalid integer value.".to_string()),
             },
-            15 | 16 | 20 | 22 => match input.parse::<u64>() {
+            15 | 16 | 19 | 21 | 26 | 27 => match input.parse::<u64>() {
                 Ok(value) => {
                     self.set_automation_field_u64(idx, value);
                     Ok(())
                 }
                 Err(_) => Err("Invalid integer value.".to_string()),
             },
-            21 => match input.parse::<i64>() {
+            20 => match input.parse::<i64>() {
                 Ok(value) => {
                     self.set_automation_field_i64(idx, value);
                     Ok(())
@@ -2192,7 +2324,7 @@ impl AppState {
                     Ok(())
                 }
             }
-            17 | 23 | 26 => {
+            17 | 22 | 25 | 28 | 29 => {
                 let value = input.to_lowercase();
                 if value == "true" {
                     self.set_automation_field_bool(idx, true);
@@ -2241,8 +2373,7 @@ impl AppState {
                 1 => coordinator.reference_branch = Some(value),
                 2 => coordinator.prd_file = Some(value),
                 13 => coordinator.stale_action = Some(value),
-                18 => coordinator.merge_fix_hook = Some(value),
-                24 => coordinator.error_code_retry_list = Some(value),
+                23 => coordinator.error_code_retry_list = Some(value),
                 _ => {}
             }
         }
@@ -2260,8 +2391,8 @@ impl AppState {
                 11 => coordinator.stale_in_progress_seconds = Some(value),
                 12 => coordinator.stale_changes_requested_seconds = Some(value),
                 14 => coordinator.log_flush_lines = Some(value),
-                19 => coordinator.merge_job_timeout_seconds = Some(value),
-                25 => coordinator.error_code_retry_max = Some(value),
+                18 => coordinator.merge_job_timeout_seconds = Some(value),
+                24 => coordinator.error_code_retry_max = Some(value),
                 _ => {}
             }
         }
@@ -2273,8 +2404,10 @@ impl AppState {
             match idx {
                 15 => coordinator.log_flush_ms = Some(value),
                 16 => coordinator.mirror_json_debounce_ms = Some(value),
-                20 => coordinator.merge_hook_timeout_seconds = Some(value),
-                22 => coordinator.dispatch_cooldown_seconds = Some(value),
+                19 => coordinator.merge_hook_timeout_seconds = Some(value),
+                21 => coordinator.dispatch_cooldown_seconds = Some(value),
+                26 => coordinator.rate_limit_backoff_base_seconds = Some(value),
+                27 => coordinator.rate_limit_backoff_max_seconds = Some(value),
                 _ => {}
             }
         }
@@ -2283,7 +2416,7 @@ impl AppState {
     fn set_automation_field_i64(&mut self, idx: usize, value: i64) {
         self.snapshot_before_config_change();
         if let Some(coordinator) = self.coordinator_config_mut() {
-            if idx == 21 {
+            if idx == 20 {
                 coordinator.ghost_heartbeat_grace_seconds = Some(value);
             }
         }
@@ -2294,8 +2427,10 @@ impl AppState {
         if let Some(coordinator) = self.coordinator_config_mut() {
             match idx {
                 17 => coordinator.merge_ai_fix = Some(value),
-                23 => coordinator.json_compat = Some(value),
-                26 => coordinator.legacy_json_fallback = Some(value),
+                22 => coordinator.json_compat = Some(value),
+                25 => coordinator.legacy_json_fallback = Some(value),
+                28 => coordinator.rate_limit_fallback_enabled = Some(value),
+                29 => coordinator.rate_limit_throttle_parallel = Some(value),
                 _ => {}
             }
         }
@@ -3430,15 +3565,22 @@ impl AppState {
             5 => serde_json::from_str::<BTreeMap<String, Vec<String>>>(input)
                 .err()
                 .map(|e| format!("Invalid JSON: {}", e)),
-            6..=12 | 14 => {
+            6..=12 | 14 | 18 | 24 => {
                 if input.parse::<usize>().is_err() {
                     Some("Invalid integer value.".to_string())
                 } else {
                     None
                 }
             }
-            15 | 16 => {
+            15 | 16 | 19 | 21 => {
                 if input.parse::<u64>().is_err() {
+                    Some("Invalid integer value.".to_string())
+                } else {
+                    None
+                }
+            }
+            20 => {
+                if input.parse::<i64>().is_err() {
                     Some("Invalid integer value.".to_string())
                 } else {
                     None

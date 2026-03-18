@@ -1254,16 +1254,30 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 .coordinator_last_result
                 .clone()
                 .unwrap_or_else(|| "Last result: n/a".to_string());
-            let runtime = format!(
-                "Coordinator runtime\n\n{}\n{}\n{}\n{}\n{}\n{}\n\n{}\n\nActions:\n- r: run full cycle\n- y: sync registry\n- c: reconcile\n- u: resume paused run\n- k: stop\n- l: refresh status",
-                status_line,
-                snapshot_line,
-                refresh_line,
-                events_rate_line,
-                event_age_line,
-                run_id_line,
-                result_line
-            );
+            // RL-TUI-007: concurrency display with throttle indicator.
+            let concurrency_line =
+                if let Some((effective, original)) = state.coordinator_effective_max_parallel {
+                    if effective < original {
+                        format!("Concurrency: {}/{} (throttled)", effective, original)
+                    } else {
+                        format!("Concurrency: {}/{}", effective, original)
+                    }
+                } else {
+                    String::new()
+                };
+            let runtime = if concurrency_line.is_empty() {
+                format!(
+                    "Coordinator runtime\n\n{}\n{}\n{}\n{}\n{}\n{}\n\n{}\n\nActions:\n- r: run full cycle\n- y: sync registry\n- c: reconcile\n- u: resume paused run\n- k: stop\n- l: refresh status",
+                    status_line, snapshot_line, refresh_line, events_rate_line, event_age_line,
+                    run_id_line, result_line
+                )
+            } else {
+                format!(
+                    "Coordinator runtime\n\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n\n{}\n\nActions:\n- r: run full cycle\n- y: sync registry\n- c: reconcile\n- u: resume paused run\n- k: stop\n- l: refresh status",
+                    status_line, snapshot_line, concurrency_line, refresh_line, events_rate_line,
+                    event_age_line, run_id_line, result_line
+                )
+            };
             let runtime_para = wrapped_paragraph(runtime, "Runtime");
             f.render_widget(runtime_para, body_chunks[0]);
 
@@ -1276,12 +1290,18 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                         let frames = ["|", "/", "-", "\\"];
                         let spinner = frames
                             [((state.coordinator_spinner_tick as usize) + idx) % frames.len()];
+                        // RL-TUI-007: show "rate-limited" instead of raw status for E601 tasks.
+                        let display_status = if task.last_error_code.starts_with("E601") {
+                            "rate-limited"
+                        } else {
+                            &task.runtime_status
+                        };
                         active_view.push_str(&format!(
                             "{} {} [{}|{}|{}] tool={} hb={} updated={}\n",
                             spinner,
                             task.id,
                             task.state,
-                            task.runtime_status,
+                            display_status,
                             task.current_phase,
                             task.tool,
                             task.last_heartbeat,
@@ -1289,6 +1309,16 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                         ));
                         if !task.last_error.is_empty() {
                             active_view.push_str(&format!("    error: {}\n", task.last_error));
+                        }
+                    }
+                    // RL-TUI-007: throttled tools section below active tasks.
+                    if !state.coordinator_throttled_tools.is_empty() {
+                        active_view.push_str("\nThrottled Tools:\n");
+                        for t in &state.coordinator_throttled_tools {
+                            active_view.push_str(&format!(
+                                "! {}: throttled until {} (backoff: {}s, consecutive: {})\n",
+                                t.tool_id, t.display_until, t.backoff_seconds, t.consecutive_count
+                            ));
                         }
                     }
                 }
@@ -1648,14 +1678,31 @@ fn render_coordinator_pause_overlay(f: &mut Frame, state: &AppState) {
         (Some(task), None) => format!("task={} phase=dev", task),
         _ => "global/blocking (no task context)".to_string(),
     };
-    let text = format!(
-        "Coordinator Paused (blocking error)\n\n{}\n\nTarget:\n- {}\n\nFix the issue in your repo/worktree, then choose:\n\n- Press 'r' or Enter: retry failed phase, then resume run\n- Press 's': skip failed phase (move task to todo), then resume run\n- Press 'u': send manual resume signal (same as `macc coordinator resume`)\n- Press 'o': open Logs screen\n- Press 'k' or Esc: stop and keep paused state\n- Press 'c': resume run without retry\n\nCommand: {}\n",
-        message, retry_target, command_name
-    );
+    // RL-TUI-007: show a specific banner when quota is exhausted (E602).
+    let is_quota_error = message.contains("quota_exhausted")
+        || message.contains("E602")
+        || message.to_ascii_lowercase().contains("quota exhausted");
+    let (title, text) = if is_quota_error {
+        (
+            "Coordinator Paused — Quota Exhausted",
+            format!(
+                "PAUSED: Quota exhausted.\n\n{}\n\nTarget:\n- {}\n\nOptions:\n- Wait for quota reset, then press 'u' to resume\n- Switch to another tool in your macc config, then press 'u'\n- Press 'r' or Enter: retry failed phase\n- Press 's': skip failed phase (move task to todo)\n- Press 'k' or Esc: stop and keep paused state\n\nCommand: {}\n",
+                message, retry_target, command_name
+            ),
+        )
+    } else {
+        (
+            "Coordinator Error",
+            format!(
+                "Coordinator Paused (blocking error)\n\n{}\n\nTarget:\n- {}\n\nFix the issue in your repo/worktree, then choose:\n\n- Press 'r' or Enter: retry failed phase, then resume run\n- Press 's': skip failed phase (move task to todo), then resume run\n- Press 'u': send manual resume signal (same as `macc coordinator resume`)\n- Press 'o': open Logs screen\n- Press 'k' or Esc: stop and keep paused state\n- Press 'c': resume run without retry\n\nCommand: {}\n",
+                message, retry_target, command_name
+            ),
+        )
+    };
     let popup = Paragraph::new(text)
         .block(
             Block::default()
-                .title("Coordinator Error")
+                .title(title)
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Red)),
         )

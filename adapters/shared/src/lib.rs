@@ -1,6 +1,7 @@
 pub mod capabilities;
 pub mod catalog;
 pub mod diag;
+pub mod error_normalizer;
 pub mod fetch;
 pub mod merge;
 pub mod render;

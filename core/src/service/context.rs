@@ -313,6 +313,17 @@ fn truncate_text_for_prompt(input: &str, max_chars: usize) -> String {
     input.chars().take(max_chars).collect::<String>()
 }
 
+/// Public entry point for invoking a tool with a prompt string.
+///
+/// Used by context generation and PRD audit.
+pub fn invoke_tool_with_prompt(
+    paths: &ProjectPaths,
+    performer: &ToolPerformerSpec,
+    prompt: &str,
+) -> crate::Result<()> {
+    invoke_context_tool(paths, performer, prompt)
+}
+
 fn invoke_context_tool(
     paths: &ProjectPaths,
     performer: &ToolPerformerSpec,

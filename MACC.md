@@ -201,10 +201,14 @@ sequenceDiagram
 #### 3.4.5 Failure recovery
 Standard recovery sequence:
 1) `macc coordinator status`
-2) `macc coordinator reconcile`
-3) `macc coordinator unlock`
-4) `macc coordinator cleanup`
-5) `macc coordinator` (resume loop)
+2) `macc coordinator sync-prd` (reconcile tasks from commit history)
+3) `macc coordinator reconcile`
+4) `macc coordinator unlock`
+5) `macc coordinator cleanup`
+6) `macc coordinator` (resume loop)
+
+Post-run PRD enrichment (optional):
+- `macc coordinator audit-prd -- --tool <tool_id>` (AI-powered update of prd.json notes)
 
 Stop flow:
 - graceful stop: `macc coordinator stop --graceful`
@@ -234,6 +238,10 @@ Error code schema (v1):
 - `E500` Merge
   - `E501` Merge conflict
   - `E502` Merge worker failed
+- `E600` Rate-limit / Provider throttle
+  - `E601` Rate-limited / Transient 429 or 529 (overloaded). Retryable with backoff.
+  - `E602` Quota exhausted / Hard limit (monthly cap, budget). **Not retryable** — requires operator action.
+  - `E603` Session conflict (session ID already in use). Retryable with a new session.
 - `E900` Unknown/Unexpected
   - `E901` Unknown fatal error
 
@@ -242,8 +250,46 @@ Auto-retry controls (coordinator settings):
 - `error_code_retry_max`: max retries per task for eligible codes.
 
 Default policy:
-- `error_code_retry_list=E101,E102,E103,E301,E302,E303`
+- `error_code_retry_list=E101,E102,E103,E301,E302,E303,E601,E603`
 - `error_code_retry_max=2`
+
+Note: E602 is intentionally excluded from the default retry list. Quota exhaustion is a hard limit requiring operator action (e.g., wait for quota reset or switch to another tool). Retrying E602 immediately would waste quota.
+
+##### 3.4.5.2 Canonical error model
+
+MACC uses a three-layer canonical error model to normalize provider-specific errors into a uniform representation consumed by the coordinator, TUI, and Web API.
+
+**Three layers:**
+1. **Transport** — network/TLS failures, DNS resolution errors (→ `CanonicalClass::Network`)
+2. **Provider API** — HTTP status codes and provider-specific JSON error bodies (e.g., Claude 529, OpenAI 429, Gemini RESOURCE_EXHAUSTED)
+3. **Local tool** — exit-code interpretation, stdout/stderr parsing, output malformation
+
+**CanonicalClass enum** (defined in `core/src/coordinator/error_normalizer.rs`):
+
+| Class | E-code | Retryable | Description |
+|---|---|---|---|
+| `RateLimit` | E601 | yes | Transient rate-limit (HTTP 429) |
+| `Overloaded` | E601 | yes | Provider overloaded (HTTP 529, 503) |
+| `QuotaExhausted` | E602 | no | Hard quota (monthly cap, budget) |
+| `SessionConflict` | E603 | yes | Session ID collision/reuse |
+| `Auth` | E201 | no | Invalid or expired API key |
+| `Billing` | E201 | no | Account billing issue |
+| `PolicyViolation` | E201 | no | Content/safety policy violation |
+| `Timeout` | E101 | yes | Request or connection timeout |
+| `Network` | E101 | yes | DNS, TLS, or connection failure |
+| `ToolNotFound` | E102 | no | Tool CLI binary not found |
+| `OutputMalformed` | E103 | no | Tool output could not be parsed |
+| `Internal` | E901 | yes | Provider internal error (HTTP 500) |
+| `Unknown` | E901 | no | Cannot classify the error |
+
+**Per-adapter normalizers** (in `core/src/coordinator/normalizers.rs`):
+- `ClaudeErrorNormalizer` — matches Claude JSON error bodies (`overloaded_error` → E601, `insufficient_quota` → E602) and `req_xxx` request IDs.
+- `CodexErrorNormalizer` — matches OpenAI HTTP status + message patterns (`insufficient_quota` → E602, standard 429 → E601).
+- `GeminiErrorNormalizer` — matches gRPC status codes (`RESOURCE_EXHAUSTED` → E601) and quota patterns (E602).
+
+**ToolError struct** carries: `provider`, `canonical_class`, `retryable`, `retry_after_seconds`, `user_action_required`, `raw_message`, `error_code`, `request_id`, `attempt`, `operation`.
+
+The coordinator calls the appropriate normalizer based on the task's assigned `tool` field. If no normalizer matches, the error falls through to generic E101 classification.
 
 ---
 
@@ -574,7 +620,7 @@ Important behavior:
 
 - `macc coordinator` runs full-cycle mode by default (`run`).
 - Full-cycle loop: `sync -> dispatch -> advance -> reconcile -> cleanup` until convergence.
-- `macc coordinator [run|dispatch|advance|resume|sync|status|reconcile|unlock|cleanup]`
+- `macc coordinator [run|dispatch|advance|resume|sync|sync-prd|audit-prd|status|reconcile|unlock|cleanup]`
 - `run`, `dispatch`, `advance`, `reconcile`, and `cleanup` are handled natively in Rust.
 - Worktrees are reused as worker slots (not task-coupled names): once a task is merged, the slot is reset to reference, moved to a fresh branch, refreshed for the new task, then relaunched.
 - New worker worktrees are created only when no reusable slot is available; pool size is bounded by `max_parallel`.
@@ -589,8 +635,10 @@ Important behavior:
   - `--json-compat`, `--legacy-json-fallback`
   - `--error-code-retry-list`, `--error-code-retry-max`
   - `--cutover-gate-window-events`, `--cutover-gate-max-blocked-ratio`, `--cutover-gate-max-stale-ratio`
+  - `--rate-limit-backoff-base-seconds`, `--rate-limit-backoff-max-seconds`
+  - `--rate-limit-fallback-enabled`, `--rate-limit-throttle-parallel`
 - Coordinator settings are persisted in `.macc/macc.yaml` under `automation.coordinator`.
-- TUI (Automation Settings screen) allows visual editing of all 27 coordinator parameters.
+- TUI (Automation Settings screen) allows visual editing of all 31 coordinator parameters.
 - Heartbeat events update `task_runtime.last_heartbeat` from `events.jsonl`.
 - Stale heartbeat policy is enforced during control-plane runs; can be reset, blocked, or requeued based on `stale_action`.
 - Extra raw args with `--` are for coordinator subcommands that require raw passthrough args.
@@ -601,7 +649,79 @@ Important behavior:
   - Hook returns JSON object on stdout (mode-specific fields such as `pr_url`, `decision`, `status`, `reason`).
   - Without hook, coordinator can use local fallback merge when `COORDINATOR_AUTOMERGE=true`.
 
-### 12.3.1 Realtime orchestrator target (next evolution)
+### 12.3.1 Commit message convention
+
+MACC enforces a unified commit message format used by performers, merge workers, and the reconciliation engine. The format is defined in `core/src/commit_message.rs` (single source of truth).
+
+**Subject format**: `<type>: <TASK-ID> - <title>`
+
+Supported types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`, `macc`.
+
+**Trailers** (in commit body, one per line):
+- `[macc:task <TASK-ID>]` — required, links the commit to a task
+- `[macc:phase <phase>]` — optional, records the coordinator phase (dev/review/fix/integrate)
+- `[macc:tool <tool>]` — optional, records which AI tool produced the commit
+- `[macc:merge true]` — marks a merge commit
+
+**Parsing (3-tier extraction)**:
+1. Structured `[macc:task ID]` tags (highest priority)
+2. Conventional subject regex (`<type>: <ID> - ...`)
+3. Legacy heuristic regex (fallback for older commits)
+
+The `commit_message` module provides: `task_commit()`, `merge_commit()`, `parse()`, `shell_commit_args()`, and type-safe `CommitType` / `CommitMessage` / `ParsedCommit` structs.
+
+### 12.3.2 PRD reconciliation from commit history (`sync-prd`)
+
+**Command**: `macc coordinator sync-prd`
+
+Deterministic reconciliation that scans the reference branch for committed task IDs and transitions matching tasks to `merged`. No AI involved — pure pattern matching.
+
+**How it works**:
+1. Reads all commits on `reference_branch` (default: `main`) via `git log` with NUL-delimited format.
+2. Extracts task IDs from each commit using the 3-tier parser (§12.3.1).
+3. Compares extracted IDs against the task registry.
+4. Tasks in reconcilable states (`todo`, `claimed`, `in_progress`, `pr_open`, `changes_requested`, `queued`) are transitioned to `merged`.
+5. Tasks already in terminal states (`merged`, `abandoned`) are skipped.
+6. Saves updated registry back (respects storage mode: JSON or SQLite).
+
+**Integration**: `sync-prd` is also called automatically as part of `coordinator sync`, running after the PRD registry sync and before dispatch. This prevents re-dispatching tasks that were already merged on the reference branch.
+
+**Configuration**:
+- `reference_branch`: resolved from env → `automation.coordinator.reference_branch` → `"main"` (default).
+
+**Module**: `core/src/coordinator/commit_reconciler.rs` (pure business logic, no CLI/UI).
+
+### 12.3.3 AI-powered PRD audit (`audit-prd`)
+
+**Command**: `macc coordinator audit-prd [-- --tool <tool_id>] [-- --dry-run]`
+
+Uses an LLM to enrich `prd.json` based on what was actually delivered, updating completed task notes and rewriting todo task descriptions when the integrated code has changed the intended architecture.
+
+**How it works**:
+1. Loads the PRD file (`--prd` or `automation.coordinator.prd_file` or `prd.json`).
+2. Loads the task registry (respects storage mode).
+3. Reads all commits on `reference_branch` and maps them to completed tasks.
+4. Gathers `git diff --stat` for each commit to provide file-level change summaries.
+5. Builds a structured LLM prompt containing:
+   - The current `prd.json` content (truncated at 80k chars if needed).
+   - Per-completed-task commit context (SHA, subject, diff stats).
+   - List of todo task IDs for architectural impact review.
+6. If `--tool <tool_id>` is provided (and not `--dry-run`), sends the prompt to the tool via its performer spec.
+
+**LLM instructions in the prompt**:
+- Update `notes` of completed tasks to reflect what was actually delivered.
+- Rewrite `description`/`steps` of todo tasks if integrated code changed the architecture.
+- Never delete or rename task IDs.
+- Output the complete updated `prd.json`.
+
+**Modes**:
+- `--dry-run`: generate and display the prompt without invoking any tool.
+- No `--tool`: generate and display the prompt (same as dry-run).
+- `--tool <id>`: invoke the specified AI tool with the prompt.
+
+**Module**: `core/src/coordinator/prd_auditor.rs` (pure business logic — prompt building, context gathering, no tool invocation).
+
+### 12.3.4 Realtime orchestrator target (next evolution)
 
 To remove ambiguity between "task dispatched" and "task actually running", MACC targets a split model:
 
@@ -618,6 +738,46 @@ Migration direction:
 
 Reference short design doc:
 - `docs/COORDINATOR_REALTIME.md`
+
+### 12.3.5 Rate-limit handling
+
+MACC implements automatic, provider-aware rate-limit handling. The full flow:
+
+```
+Tool exit → stderr → ErrorNormalizer → CanonicalClass → E-code
+                                             ↓
+                                      E601/E603 → BackoffEngine → delayed_until on task
+                                      E602       → pause coordinator (quota hard stop)
+                                             ↓
+                                      ToolThrottleRegistry updated (in-memory)
+                                             ↓
+                                      TaskSelector: skip throttled tools → fallback tool
+                                             ↓
+                                      ConcurrencyController: reduce max_parallel → event
+                                             ↓
+                                      Recovery: success → clear throttle, restore parallel
+```
+
+**New coordinator settings (rate-limit controls):**
+
+| Setting | Type | Default | Description |
+|---|---|---|---|
+| `rate_limit_backoff_base_seconds` | `u64` | 60 | Minimum backoff delay on first E601 |
+| `rate_limit_backoff_max_seconds` | `u64` | 3600 | Maximum backoff delay (cap for exponential growth) |
+| `rate_limit_fallback_enabled` | `bool` | true | When the primary tool is throttled, dispatch to next tool in priority order |
+| `rate_limit_throttle_parallel` | `bool` | true | Reduce `effective_max_parallel` by 1 on each E601 (restored on recovery) |
+
+**Backoff formula**: `min(base * 2^(consecutive_429_count - 1), max)` with jitter.
+
+**Fallback dispatch**: if `rate_limit_fallback_enabled=true` and the next tool in `tool_priority` is not throttled, the task is dispatched immediately to that tool. The throttled tool remains in the `ToolThrottleRegistry` and is re-eligible after `delayed_until` passes.
+
+**Quota exhaustion (E602)**: triggers a coordinator pause (same path as merge conflicts). The TUI shows a specific "PAUSED: Quota exhausted" banner. Operator must either wait for quota reset or switch to another tool, then `macc coordinator resume`.
+
+**Visibility**:
+- TUI CoordinatorLive screen shows "Throttled Tools" section with countdown per tool.
+- Active tasks show `rate-limited` runtime status instead of `failed` for E601.
+- Concurrency line shows `Concurrency: N/M (throttled)` when effective < original.
+- Web API `/api/v1/status` returns `throttled_tools` array and `effective_max_parallel`.
 
 ---
 
@@ -795,7 +955,16 @@ macc/
 - ✅ `macc worktree list` shows worktrees.
 - ✅ `macc worktree prune` removes merged ones (or those removed in git).
 
-### 18.5 Security
+### 18.5 PRD reconciliation and audit
+- ✅ Unified commit message format with `[macc:task ID]` trailers enforced by performers and merge workers.
+- ✅ `macc coordinator sync-prd` deterministically transitions tasks to `merged` based on commit history (no AI).
+- ✅ `sync-prd` runs automatically as part of `coordinator sync` to prevent re-dispatching completed tasks.
+- ✅ 3-tier task ID extraction (structured tags → conventional subject → legacy heuristic) for backward compatibility.
+- ✅ `macc coordinator audit-prd` builds a structured LLM prompt from commit context for completed tasks.
+- ✅ `audit-prd --dry-run` previews the prompt without invoking any tool.
+- ✅ `audit-prd --tool <id>` sends the prompt to a selected AI tool via its performer spec.
+
+### 18.6 Security
 - ✅ No API key is written into the repo.
 - ✅ Remote packages are data-only; no scripts executed.
 - ✅ User-level modifications = backup + consent.
