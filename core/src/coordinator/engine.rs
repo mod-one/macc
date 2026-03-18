@@ -114,6 +114,12 @@ pub struct JobCompletionInput {
     pub error_message: Option<String>,
     pub auto_retry_error_codes: Vec<String>,
     pub auto_retry_max: usize,
+    /// Base backoff delay in seconds for E601 rate-limit retries.
+    /// Resolved from config; defaults to 30 when not set.
+    pub backoff_base_seconds: u64,
+    /// Maximum backoff delay in seconds for E601 rate-limit retries.
+    /// Resolved from config; defaults to 300 when not set.
+    pub backoff_max_seconds: u64,
     /// Raw performer output for per-adapter error normalization.
     /// `None` when the caller does not have access to the raw process output
     /// (e.g. in legacy paths or unit tests that pre-classify errors).
@@ -840,7 +846,7 @@ fn apply_job_completion_typed(
         let retry_after = classified_tool_error
             .as_ref()
             .and_then(|te| te.retry_after_seconds);
-        let backoff = compute_backoff_delay(input.attempt as usize, 30, 300, retry_after);
+        let backoff = compute_backoff_delay(input.attempt as usize, input.backoff_base_seconds, input.backoff_max_seconds, retry_after);
         let delayed_until_str = chrono::DateTime::parse_from_rfc3339(now)
             .ok()
             .and_then(|dt| {
@@ -1746,6 +1752,8 @@ mod tests {
                 error_message: None,
                 auto_retry_error_codes: Vec::new(),
                 auto_retry_max: 0,
+                backoff_base_seconds: 30,
+                backoff_max_seconds: 300,
                 normalizer_input: None,
             },
             "2026-02-21T00:00:00Z",
@@ -1776,6 +1784,8 @@ mod tests {
                 error_message: None,
                 auto_retry_error_codes: Vec::new(),
                 auto_retry_max: 0,
+                backoff_base_seconds: 30,
+                backoff_max_seconds: 300,
                 normalizer_input: None,
             },
             "2026-02-21T00:00:00Z",
@@ -1812,6 +1822,8 @@ mod tests {
                 error_message: None,
                 auto_retry_error_codes: Vec::new(),
                 auto_retry_max: 0,
+                backoff_base_seconds: 30,
+                backoff_max_seconds: 300,
                 normalizer_input: None,
             },
             "2026-02-21T00:00:00Z",
@@ -1871,6 +1883,8 @@ mod tests {
                 error_message: None,
                 auto_retry_error_codes: Vec::new(),
                 auto_retry_max: 0,
+                backoff_base_seconds: 30,
+                backoff_max_seconds: 300,
                 normalizer_input: None,
             },
             "2026-02-21T00:00:00Z",
@@ -1933,6 +1947,8 @@ mod tests {
                 error_message: None,
                 auto_retry_error_codes: Vec::new(),
                 auto_retry_max: 0,
+                backoff_base_seconds: 30,
+                backoff_max_seconds: 300,
                 normalizer_input: None,
             },
             "2026-02-21T00:00:00Z",
@@ -2055,6 +2071,8 @@ mod tests {
             error_message: None,
             auto_retry_error_codes: Vec::new(),
             auto_retry_max: 0,
+            backoff_base_seconds: 30,
+            backoff_max_seconds: 300,
             normalizer_input: Some(NormalizerInput {
                 exit_code: 1,
                 stderr: stderr.to_string(),
@@ -2247,6 +2265,8 @@ mod tests {
                 error_message: Some("auth error".to_string()),
                 auto_retry_error_codes: Vec::new(),
                 auto_retry_max: 0,
+                backoff_base_seconds: 30,
+                backoff_max_seconds: 300,
                 normalizer_input: None,
             },
             "2026-02-21T00:00:00Z",

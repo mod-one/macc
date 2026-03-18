@@ -802,6 +802,8 @@ pub async fn monitor_active_jobs_native(
                         error_message: evt.error_message.clone(),
                         auto_retry_error_codes: retry_codes.clone(),
                         auto_retry_max: retry_max,
+                        backoff_base_seconds: resolve_rate_limit_backoff_base_seconds(env_cfg, coordinator),
+                        backoff_max_seconds: resolve_rate_limit_backoff_max_seconds(env_cfg, coordinator),
                         normalizer_input: None,
                     },
                     &now_iso_coordinator(),
