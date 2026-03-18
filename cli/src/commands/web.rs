@@ -79,6 +79,7 @@ struct WebState {
 fn build_web_router(state: WebState) -> Router {
     Router::new()
         .route("/", get(root_handler))
+        .route("/api/v1/health", get(health_handler))
         .route("/api/v1/status", get(status_handler))
         .route("/api/v1/coordinator/run", post(coordinator_run_handler))
         .route("/api/v1/coordinator/stop", post(coordinator_stop_handler))
@@ -87,6 +88,10 @@ fn build_web_router(state: WebState) -> Router {
 
 async fn root_handler() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "status": "running" }))
+}
+
+async fn health_handler() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "status": "ok" }))
 }
 
 async fn status_handler(
@@ -612,6 +617,37 @@ mod tests {
             .to_bytes();
         let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
         assert_eq!(payload["status"], "running");
+    }
+
+    #[tokio::test]
+    async fn health_endpoint_returns_ok_status() {
+        let root = temp_root("health");
+        fs::create_dir_all(&root).expect("create root");
+        let state = WebState {
+            engine: Arc::new(TestEngine::with_fixtures()),
+            paths: ProjectPaths::from_root(&root),
+        };
+        let app = build_web_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/health")
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect")
+            .to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(payload["status"], "ok");
     }
 
     #[tokio::test]
