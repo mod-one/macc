@@ -67,6 +67,7 @@ pub const COORDINATOR_EVENT_TYPES_V1: &[&str] = &[
     "merge_worker_started",
     "merge_worker_complete",
     "tool_error_classified",
+    "quota_exhausted",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

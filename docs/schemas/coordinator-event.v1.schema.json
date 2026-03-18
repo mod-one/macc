@@ -78,7 +78,8 @@
         "local_merge_failed",
         "merge_worker_started",
         "merge_worker_complete",
-        "tool_error_classified"
+        "tool_error_classified",
+        "quota_exhausted"
       ]
     },
     "phase": {

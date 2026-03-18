@@ -139,6 +139,11 @@ pub struct TaskRuntime {
     pub last_merge_result_rc: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_merge_result_at: Option<String>,
+    /// ISO 8601 timestamp before which this task must not be re-dispatched.
+    /// Set by the backoff engine when a rate-limit (E601) is received.
+    /// Cleared on successful dispatch or when the timestamp is in the past.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delayed_until: Option<String>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }

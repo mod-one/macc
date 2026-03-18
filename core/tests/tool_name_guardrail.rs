@@ -135,5 +135,40 @@ fn is_allowed_occurrence(file: &Path, token: &str, line: &str) -> bool {
         return true;
     }
 
+    // normalizers.rs is the per-provider error normalizer implementation layer.
+    // It necessarily contains provider identifiers ("claude", "codex", "gemini")
+    // as Rust type names and as the `provider` field values it produces.
+    if path.ends_with("core/src/coordinator/normalizers.rs") {
+        return true;
+    }
+
+    // error_normalizer.rs defines the canonical classification table and helper
+    // functions. Its doc comments list provider names as illustrative examples.
+    if path.ends_with("core/src/coordinator/error_normalizer.rs") {
+        return true;
+    }
+
+    // engine.rs references per-provider normalizer struct types in its import
+    // block and in the `get_normalizer_for_tool` dispatch function.
+    if path.ends_with("core/src/coordinator/engine.rs") {
+        // Import of per-provider normalizer types (e.g. ClaudeErrorNormalizer).
+        if line.contains("errornormalizer") {
+            return true;
+        }
+        // Code comments may name specific tools in bug/context descriptions.
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") {
+            return true;
+        }
+    }
+
+    // rate_limit.rs has a doc-comment field description listing example tool IDs.
+    if path.ends_with("core/src/coordinator/rate_limit.rs") {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("///") || trimmed.starts_with("//") {
+            return true;
+        }
+    }
+
     false
 }

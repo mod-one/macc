@@ -6,7 +6,10 @@ use crate::coordinator::model::{Task, TaskRegistry};
 use crate::coordinator::normalizers::{
     ClaudeErrorNormalizer, CodexErrorNormalizer, GeminiErrorNormalizer,
 };
-use crate::coordinator::rate_limit::RateLimitInfo;
+use crate::coordinator::rate_limit::{
+    compute_backoff_delay, update_throttle_state, RateLimitInfo, ToolThrottleState,
+    E601_RATE_LIMITED, E602_QUOTA_EXHAUSTED,
+};
 use crate::coordinator::runtime::{
     process_branch_cleanup_queue, terminate_active_jobs, CoordinatorRunState,
 };
@@ -829,6 +832,94 @@ fn apply_job_completion_typed(
     let now_ts = chrono::DateTime::parse_from_rfc3339(now)
         .map(|dt| dt.timestamp() as u64)
         .unwrap_or(0);
+
+    // ── Rate-limit backoff (E601) ─────────────────────────────────────
+    // Re-queue the task as Todo with a delayed_until timestamp instead of
+    // consuming an attempt. The rate-limit was not the task's fault.
+    if error_code == E601_RATE_LIMITED {
+        let retry_after = classified_tool_error
+            .as_ref()
+            .and_then(|te| te.retry_after_seconds);
+        let backoff = compute_backoff_delay(input.attempt as usize, 30, 300, retry_after);
+        let delayed_until_str = chrono::DateTime::parse_from_rfc3339(now)
+            .ok()
+            .and_then(|dt| {
+                dt.checked_add_signed(chrono::Duration::seconds(backoff as i64))
+            })
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_default();
+        // Update per-tool throttle state stored in extra.
+        let tool_id_str = task.tool.as_deref().unwrap_or("").to_string();
+        let runtime = task.ensure_runtime();
+        let mut throttle: ToolThrottleState = runtime
+            .extra
+            .get("throttle_state")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_else(|| ToolThrottleState {
+                tool_id: tool_id_str.clone(),
+                ..Default::default()
+            });
+        let rli = RateLimitInfo {
+            tool_id: tool_id_str,
+            error_code: E601_RATE_LIMITED.to_string(),
+            retry_after_seconds: retry_after,
+            detected_at: now_ts,
+            source_header: None,
+        };
+        update_throttle_state(&mut throttle, &rli, backoff, now_ts);
+        if let Ok(v) = serde_json::to_value(&throttle) {
+            runtime.extra.insert("throttle_state".to_string(), v);
+        }
+        runtime.delayed_until = Some(delayed_until_str.clone());
+        runtime.set_status(RuntimeStatus::Idle);
+        runtime.current_phase = Some("dev".to_string());
+        runtime.completion_kind = None;
+        runtime.pid = None;
+        runtime.set_last_error_details(
+            error_code.clone(),
+            error_origin.clone(),
+            error_message.clone(),
+        );
+        runtime.last_error = Some(format!("rate-limited; backoff {}s", backoff));
+        store_classified_error_in_extra(runtime, &classified_tool_error, now_ts);
+        task.set_workflow_state(WorkflowState::Todo);
+        task.touch_state_changed(now);
+        return JobCompletionResult {
+            should_retry: false,
+            status_label: "rate_limit_backoff",
+            detail: format!(
+                "rate-limited; backoff {}s, delayed until {}",
+                backoff, delayed_until_str
+            ),
+            completion_kind: None,
+            tool_error: classified_tool_error,
+        };
+    }
+
+    // ── Quota exhausted (E602) ────────────────────────────────────────
+    // Block the task immediately — quota requires human intervention.
+    if error_code == E602_QUOTA_EXHAUSTED {
+        task.set_workflow_state(WorkflowState::Blocked);
+        let runtime = task.ensure_runtime();
+        runtime.set_status(RuntimeStatus::Failed);
+        runtime.completion_kind = None;
+        runtime.pid = None;
+        runtime.set_last_error_details(
+            error_code.clone(),
+            error_origin.clone(),
+            error_message.clone(),
+        );
+        runtime.last_error = Some(error_message.clone());
+        store_classified_error_in_extra(runtime, &classified_tool_error, now_ts);
+        task.touch_state_changed(now);
+        return JobCompletionResult {
+            should_retry: false,
+            status_label: "quota_exhausted",
+            detail: error_message,
+            completion_kind: None,
+            tool_error: classified_tool_error,
+        };
+    }
 
     // ── Retry (attempt < max_attempts) ───────────────────────────────
     if input.attempt < input.max_attempts {
@@ -1978,9 +2069,14 @@ mod tests {
         let (mut task_val, input) =
             make_failure_input("claude", "Error: 529 API overloaded", "");
         let out = apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
-        // Should be blocked (attempt == max_attempts) with E601
-        assert_eq!(out.status_label, "failed");
+        // E601 always re-queues with backoff regardless of attempt count.
+        assert_eq!(out.status_label, "rate_limit_backoff");
         assert_eq!(task_val["task_runtime"]["last_error_code"], "E601");
+        assert_eq!(task_val["state"], "todo");
+        assert!(
+            !task_val["task_runtime"]["delayed_until"].is_null(),
+            "delayed_until should be set"
+        );
         let te = out.tool_error.unwrap();
         assert_eq!(te.canonical_class, CanonicalClass::Overloaded);
         assert_eq!(te.error_code, "E601");
@@ -2109,8 +2205,8 @@ mod tests {
             "already_satisfied",
         );
         let out = apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
-        // Should remain a terminal failure, not override to success.
-        assert_eq!(out.status_label, "failed");
+        // Quota exhausted: blocked immediately, not overridden to success.
+        assert_eq!(out.status_label, "quota_exhausted");
         assert_eq!(task_val["state"], "blocked");
     }
 
@@ -2167,5 +2263,75 @@ mod tests {
         assert!(get_normalizer_for_tool("gemini").is_some());
         assert!(get_normalizer_for_tool("unknown-tool").is_none());
         assert!(get_normalizer_for_tool("").is_none());
+    }
+
+    // ── RL-BACKOFF-003: backoff engine integration ────────────────────
+
+    #[test]
+    fn e601_requeues_todo_with_delayed_until() {
+        let (mut task_val, input) =
+            make_failure_input("claude", "Error: 429 Rate limit exceeded", "");
+        let out = apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
+        assert_eq!(out.status_label, "rate_limit_backoff");
+        assert_eq!(task_val["state"], "todo");
+        assert_eq!(task_val["task_runtime"]["status"], "idle");
+        assert_eq!(task_val["task_runtime"]["last_error_code"], "E601");
+        let delayed = task_val["task_runtime"]["delayed_until"].as_str().unwrap();
+        assert!(!delayed.is_empty(), "delayed_until must be set for E601");
+        // Must be parseable ISO 8601
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(delayed).is_ok(),
+            "delayed_until must be valid RFC 3339"
+        );
+    }
+
+    #[test]
+    fn e601_throttle_state_stored_in_extra() {
+        let (mut task_val, input) =
+            make_failure_input("claude", "Error: 429 Rate limit exceeded", "");
+        apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
+        let ts = &task_val["task_runtime"]["throttle_state"];
+        assert!(!ts.is_null(), "throttle_state should be stored in extra for E601");
+        assert_eq!(ts["consecutive_429_count"], 1);
+        assert!(ts["backoff_seconds"].as_u64().unwrap() > 0);
+        assert!(ts["throttled_until"].as_u64().unwrap() > 0);
+    }
+
+    #[test]
+    fn e602_blocks_task_as_quota_exhausted() {
+        let (mut task_val, input) = make_failure_input(
+            "codex",
+            "429 insufficient_quota: You exceeded your current quota",
+            "",
+        );
+        let out = apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
+        assert_eq!(out.status_label, "quota_exhausted");
+        assert_eq!(task_val["state"], "blocked");
+        assert_eq!(task_val["task_runtime"]["status"], "failed");
+        assert_eq!(task_val["task_runtime"]["last_error_code"], "E602");
+        // delayed_until must NOT be set for E602 (no retry)
+        assert!(
+            task_val["task_runtime"]["delayed_until"].is_null(),
+            "delayed_until must not be set for E602"
+        );
+    }
+
+    #[test]
+    fn e601_delayed_until_is_in_the_future() {
+        let now = "2026-02-21T00:00:00Z";
+        let (mut task_val, input) =
+            make_failure_input("gemini", "429 RESOURCE_EXHAUSTED: Rate limit for model", "");
+        apply_job_completion(&mut task_val, &input, now);
+        let delayed = task_val["task_runtime"]["delayed_until"]
+            .as_str()
+            .expect("delayed_until must be a string");
+        let delayed_dt = chrono::DateTime::parse_from_rfc3339(delayed).unwrap();
+        let now_dt = chrono::DateTime::parse_from_rfc3339(now).unwrap();
+        assert!(
+            delayed_dt > now_dt,
+            "delayed_until ({}) must be in the future relative to now ({})",
+            delayed,
+            now
+        );
     }
 }
