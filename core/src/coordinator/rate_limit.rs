@@ -330,7 +330,11 @@ mod tests {
         );
         let expiry = next_throttle_expiry(&reg).unwrap();
         // 1_500_000_000 seconds epoch = 2017-07-14T02:40:00Z
-        assert!(expiry.starts_with("2017-"), "expected 2017 epoch, got {}", expiry);
+        assert!(
+            expiry.starts_with("2017-"),
+            "expected 2017 epoch, got {}",
+            expiry
+        );
     }
 
     #[test]

@@ -124,7 +124,11 @@ impl SkillsCatalog {
         })?;
         serde_json::from_str(&content).map_err(|e| MaccError::Catalog {
             operation: "parse_skills".to_string(),
-            message: format!("Failed to parse skills catalog at {}: {}", path.display(), e),
+            message: format!(
+                "Failed to parse skills catalog at {}: {}",
+                path.display(),
+                e
+            ),
         })
     }
 

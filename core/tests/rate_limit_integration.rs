@@ -5,6 +5,7 @@
 //! All tests operate entirely in-memory — no filesystem or git required.
 
 use macc_core::coordinator::error_normalizer::{CanonicalClass, ErrorNormalizer};
+use macc_core::coordinator::model::{Task, TaskRegistry};
 use macc_core::coordinator::normalizers::{
     ClaudeErrorNormalizer, CodexErrorNormalizer, GeminiErrorNormalizer,
 };
@@ -14,7 +15,6 @@ use macc_core::coordinator::rate_limit::{
     ToolThrottleState,
 };
 use macc_core::coordinator::task_selector::{select_next_ready_task_typed, TaskSelectorConfig};
-use macc_core::coordinator::model::{Task, TaskRegistry};
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -24,7 +24,10 @@ fn far_future_epoch() -> u64 {
 }
 
 fn make_registry_with_tools(tasks: Vec<Task>) -> TaskRegistry {
-    TaskRegistry { tasks, ..Default::default() }
+    TaskRegistry {
+        tasks,
+        ..Default::default()
+    }
 }
 
 fn make_todo_task(id: &str, tool: &str) -> Task {
@@ -80,7 +83,10 @@ fn claude_529_overloaded_produces_e601() {
         err.canonical_class
     );
     assert!(err.retryable, "E601 must be retryable");
-    assert!(!err.user_action_required, "E601 must not require user action");
+    assert!(
+        !err.user_action_required,
+        "E601 must not require user action"
+    );
     assert!(
         err.request_id.is_some(),
         "req_xxx request_id must be extracted"
@@ -97,17 +103,17 @@ fn codex_429_insufficient_quota_produces_e602() {
     let result = normalizer.normalize(1, stderr, "");
 
     let err = result.expect("Codex quota error should produce a ToolError");
-    assert_eq!(err.error_code, "E602", "insufficient_quota must map to E602");
+    assert_eq!(
+        err.error_code, "E602",
+        "insufficient_quota must map to E602"
+    );
     assert!(
         matches!(err.canonical_class, CanonicalClass::QuotaExhausted),
         "class must be QuotaExhausted, got {:?}",
         err.canonical_class
     );
     assert!(!err.retryable, "E602 must NOT be retryable");
-    assert!(
-        err.user_action_required,
-        "E602 must require user action"
-    );
+    assert!(err.user_action_required, "E602 must require user action");
     assert_eq!(err.provider, "codex");
 }
 
@@ -194,7 +200,12 @@ fn backoff_increases_exponentially_and_is_capped() {
         d_large
     );
     // First attempt must be at least base.
-    assert!(d1 >= base, "first backoff must be >= base ({} < {})", d1, base);
+    assert!(
+        d1 >= base,
+        "first backoff must be >= base ({} < {})",
+        d1,
+        base
+    );
 }
 
 #[test]
@@ -326,7 +337,10 @@ fn fallback_disabled_does_not_filter_throttled_tools() {
     );
     let s = selected.unwrap();
     assert_eq!(s.tool, "claude");
-    assert!(!s.is_fallback, "must not be marked fallback when filter is disabled");
+    assert!(
+        !s.is_fallback,
+        "must not be marked fallback when filter is disabled"
+    );
 }
 
 #[test]
@@ -354,7 +368,10 @@ fn recovery_clears_throttle_and_tool_becomes_eligible_again() {
         .expect("claude must be dispatchable after throttle cleared");
 
     assert_eq!(selected.tool, "claude");
-    assert!(!selected.is_fallback, "primary tool must not be marked as fallback after recovery");
+    assert!(
+        !selected.is_fallback,
+        "primary tool must not be marked as fallback after recovery"
+    );
 }
 
 // ── Scenario 6: is_task_delayed ──────────────────────────────────────

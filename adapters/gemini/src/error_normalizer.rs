@@ -411,10 +411,7 @@ mod tests {
     fn extracts_request_id() {
         let stderr = r#"429 RESOURCE_EXHAUSTED {"requestId":"vertex-ai-abc123def456"}"#;
         let err = norm(1, stderr, "").unwrap();
-        assert_eq!(
-            err.request_id,
-            Some("vertex-ai-abc123def456".to_string())
-        );
+        assert_eq!(err.request_id, Some("vertex-ai-abc123def456".to_string()));
     }
 
     #[test]

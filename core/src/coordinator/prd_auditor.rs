@@ -168,7 +168,9 @@ pub fn build_audit_prompt(context: &AuditContext) -> String {
     let mut prompt = String::with_capacity(4096);
 
     prompt.push_str("# MACC PRD Audit\n\n");
-    prompt.push_str("You are an AI auditor for a project managed by MACC (Multi-Agentic Coding Config).\n");
+    prompt.push_str(
+        "You are an AI auditor for a project managed by MACC (Multi-Agentic Coding Config).\n",
+    );
     prompt.push_str("Your task is to update the PRD (Product Requirements Document) based on what was actually delivered.\n\n");
 
     prompt.push_str("## Target file\n\n");
@@ -199,7 +201,10 @@ pub fn build_audit_prompt(context: &AuditContext) -> String {
     prompt.push_str("4. Preserve all existing fields and structure. Only modify `notes` for completed tasks and `description`/`steps` for todo tasks whose context has changed.\n\n");
 
     // PRD content
-    prompt.push_str(&format!("## Current PRD content (`{}`)\n\n```json\n", context.prd_path));
+    prompt.push_str(&format!(
+        "## Current PRD content (`{}`)\n\n```json\n",
+        context.prd_path
+    ));
     if context.prd_json.chars().count() > MAX_PRD_CHARS {
         let truncated: String = context.prd_json.chars().take(MAX_PRD_CHARS).collect();
         prompt.push_str(&truncated);
@@ -305,15 +310,16 @@ fn is_completed_state(state: &str) -> bool {
 ///
 /// Uses `git diff --stat <sha>^..<sha>` for each commit and concatenates.
 /// Returns None if no stats could be gathered.
-fn gather_diff_stat_for_commits(
-    repo_root: &Path,
-    commits: &[&GitCommitInfo],
-) -> Option<String> {
+fn gather_diff_stat_for_commits(repo_root: &Path, commits: &[&GitCommitInfo]) -> Option<String> {
     let mut stats = String::new();
     for commit in commits {
         let output = git::run_git_output_mapped(
             repo_root,
-            &["diff", "--stat", &format!("{}^..{}", commit.sha, commit.sha)],
+            &[
+                "diff",
+                "--stat",
+                &format!("{}^..{}", commit.sha, commit.sha),
+            ],
             "gather diff stat for audit",
         );
         if let Ok(out) = output {
@@ -454,14 +460,12 @@ mod tests {
 
     #[test]
     fn gather_context_skips_tasks_without_commits() {
-        let registry = make_registry(vec![
-            make_task("T-1", "merged"),
-            make_task("T-2", "merged"),
-        ]);
+        let registry = make_registry(vec![make_task("T-1", "merged"), make_task("T-2", "merged")]);
         // Only T-1 has a matching commit
-        let commits = vec![
-            make_commit("abc1234", "feat: T-1 - impl\n\n[macc:task T-1]"),
-        ];
+        let commits = vec![make_commit(
+            "abc1234",
+            "feat: T-1 - impl\n\n[macc:task T-1]",
+        )];
         let contexts =
             gather_task_commit_context(Path::new("."), &registry, &commits, false).unwrap();
         assert_eq!(contexts.len(), 1);

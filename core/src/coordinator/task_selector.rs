@@ -502,7 +502,8 @@ mod tests {
           "resource_locks": {}
         });
         let cfg = cfg_with_now("2026-03-18T12:00:00Z");
-        let selected = select_next_ready_task(&registry, &cfg).expect("should select eligible task");
+        let selected =
+            select_next_ready_task(&registry, &cfg).expect("should select eligible task");
         assert_eq!(selected.id, "READY");
     }
 
@@ -522,7 +523,8 @@ mod tests {
           "resource_locks": {}
         });
         let cfg = cfg_with_now("2026-03-18T12:00:00Z");
-        let selected = select_next_ready_task(&registry, &cfg).expect("should select undelayed task");
+        let selected =
+            select_next_ready_task(&registry, &cfg).expect("should select undelayed task");
         assert_eq!(selected.id, "NODLY");
     }
 
@@ -551,7 +553,8 @@ mod tests {
           "resource_locks": {}
         });
         let cfg = cfg_with_now("2026-03-18T12:00:00Z");
-        let selected = select_next_ready_task(&registry, &cfg).expect("should select non-delayed task");
+        let selected =
+            select_next_ready_task(&registry, &cfg).expect("should select non-delayed task");
         assert_eq!(selected.id, "FREE");
     }
 
@@ -573,7 +576,8 @@ mod tests {
           "resource_locks": {}
         });
         let cfg = cfg_with_now(""); // empty disables filter
-        let selected = select_next_ready_task(&registry, &cfg).expect("filter disabled → task selected");
+        let selected =
+            select_next_ready_task(&registry, &cfg).expect("filter disabled → task selected");
         assert_eq!(selected.id, "T1");
     }
 
@@ -663,9 +667,13 @@ mod tests {
             now: "2026-03-18T12:00:00Z".into(),
             ..TaskSelectorConfig::default()
         };
-        let selected = select_next_ready_task(&registry, &cfg).expect("primary selected after expiry");
+        let selected =
+            select_next_ready_task(&registry, &cfg).expect("primary selected after expiry");
         assert_eq!(selected.tool, "primary");
-        assert!(!selected.is_fallback, "is_fallback must be false when throttle expired");
+        assert!(
+            !selected.is_fallback,
+            "is_fallback must be false when throttle expired"
+        );
     }
 
     #[test]
@@ -687,7 +695,8 @@ mod tests {
             now: "2026-03-18T12:00:00Z".into(),
             ..TaskSelectorConfig::default()
         };
-        let selected = select_next_ready_task(&registry, &cfg).expect("primary selected (fallback disabled)");
+        let selected =
+            select_next_ready_task(&registry, &cfg).expect("primary selected (fallback disabled)");
         assert_eq!(selected.tool, "primary");
         assert!(!selected.is_fallback);
     }
@@ -719,7 +728,8 @@ mod tests {
             now: "2026-03-18T12:00:00Z".into(),
             ..TaskSelectorConfig::default()
         };
-        let selected = select_next_ready_task(&registry, &cfg).expect("primary selected (review phase)");
+        let selected =
+            select_next_ready_task(&registry, &cfg).expect("primary selected (review phase)");
         assert_eq!(selected.tool, "primary");
         assert!(!selected.is_fallback, "review phase must not fall back");
     }
@@ -751,7 +761,8 @@ mod tests {
             now: "2026-03-18T12:00:00Z".into(),
             ..TaskSelectorConfig::default()
         };
-        let selected = select_next_ready_task(&registry, &cfg).expect("primary selected (fix phase)");
+        let selected =
+            select_next_ready_task(&registry, &cfg).expect("primary selected (fix phase)");
         assert_eq!(selected.tool, "primary");
         assert!(!selected.is_fallback, "fix phase must not fall back");
     }

@@ -271,10 +271,7 @@ pub fn head_commit(repo_or_worktree: &Path) -> Result<String> {
     if !output.status.success() {
         return Err(MaccError::Git {
             operation: "log".to_string(),
-            message: format!(
-                "Failed to resolve HEAD in {}",
-                repo_or_worktree.display()
-            ),
+            message: format!("Failed to resolve HEAD in {}", repo_or_worktree.display()),
         });
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -349,10 +346,7 @@ pub async fn head_commit_async(repo_or_worktree: &Path) -> Result<String> {
     if !output.status.success() {
         return Err(MaccError::Git {
             operation: "log".to_string(),
-            message: format!(
-                "Failed to resolve HEAD in {}",
-                repo_or_worktree.display()
-            ),
+            message: format!("Failed to resolve HEAD in {}", repo_or_worktree.display()),
         });
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())

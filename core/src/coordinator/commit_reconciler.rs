@@ -79,10 +79,7 @@ pub fn read_commit_range(
         if stderr.contains("unknown revision") || stderr.contains("bad revision") {
             return Ok(Vec::new());
         }
-        return Err(MaccError::Validation(format!(
-            "git log failed: {}",
-            stderr
-        )));
+        return Err(MaccError::Validation(format!("git log failed: {}", stderr)));
     }
     let raw = String::from_utf8_lossy(&output.stdout);
     let mut commits = Vec::new();
@@ -145,9 +142,7 @@ fn build_task_state_map(registry: &TaskRegistry) -> BTreeMap<String, String> {
 /// Extract all task IDs found in a list of commits.
 ///
 /// Returns a map of task_id -> (first matching commit sha, subject).
-fn extract_task_ids_from_commits(
-    commits: &[GitCommitInfo],
-) -> BTreeMap<String, (String, String)> {
+fn extract_task_ids_from_commits(commits: &[GitCommitInfo]) -> BTreeMap<String, (String, String)> {
     let mut found: BTreeMap<String, (String, String)> = BTreeMap::new();
     for commit in commits {
         let parsed = commit_message::parse(&commit.full_message);
@@ -164,10 +159,7 @@ fn extract_task_ids_from_commits(
 ///
 /// Compares task IDs found in commits against the registry and produces
 /// a report of tasks to transition.
-pub fn reconcile(
-    registry: &TaskRegistry,
-    commits: &[GitCommitInfo],
-) -> ReconcileReport {
+pub fn reconcile(registry: &TaskRegistry, commits: &[GitCommitInfo]) -> ReconcileReport {
     let task_states = build_task_state_map(registry);
     let commit_tasks = extract_task_ids_from_commits(commits);
     let mut report = ReconcileReport {
@@ -201,11 +193,7 @@ pub fn reconcile(
 /// Apply the reconciliation report to a mutable task registry.
 ///
 /// Transitions reconciled tasks to `merged` and clears their assignment.
-pub fn apply_reconcile_report(
-    registry: &mut TaskRegistry,
-    report: &ReconcileReport,
-    now: &str,
-) {
+pub fn apply_reconcile_report(registry: &mut TaskRegistry, report: &ReconcileReport, now: &str) {
     let reconciled_ids: BTreeSet<&str> = report
         .reconciled
         .iter()
@@ -270,9 +258,10 @@ mod tests {
             make_task("WEB-001", "todo"),
             make_task("WEB-002", "in_progress"),
         ]);
-        let commits = vec![
-            make_commit("abc123", "feat: WEB-001 - setup\n\n[macc:task WEB-001]"),
-        ];
+        let commits = vec![make_commit(
+            "abc123",
+            "feat: WEB-001 - setup\n\n[macc:task WEB-001]",
+        )];
         let report = reconcile(&registry, &commits);
         assert_eq!(report.reconciled.len(), 1);
         assert_eq!(report.reconciled[0].task_id, "WEB-001");
@@ -283,9 +272,10 @@ mod tests {
     #[test]
     fn reconcile_already_merged_task_skipped() {
         let registry = make_registry(vec![make_task("WEB-001", "merged")]);
-        let commits = vec![
-            make_commit("abc123", "feat: WEB-001\n\n[macc:task WEB-001]"),
-        ];
+        let commits = vec![make_commit(
+            "abc123",
+            "feat: WEB-001\n\n[macc:task WEB-001]",
+        )];
         let report = reconcile(&registry, &commits);
         assert_eq!(report.reconciled.len(), 0);
         assert_eq!(report.already_done, vec!["WEB-001"]);
@@ -294,9 +284,10 @@ mod tests {
     #[test]
     fn reconcile_legacy_commit_without_tags() {
         let registry = make_registry(vec![make_task("WEB-FRONTEND-006", "in_progress")]);
-        let commits = vec![
-            make_commit("def456", "feat: WEB-FRONTEND-006 - Integrate Headless UI"),
-        ];
+        let commits = vec![make_commit(
+            "def456",
+            "feat: WEB-FRONTEND-006 - Integrate Headless UI",
+        )];
         let report = reconcile(&registry, &commits);
         assert_eq!(report.reconciled.len(), 1);
         assert_eq!(report.reconciled[0].task_id, "WEB-FRONTEND-006");
@@ -305,9 +296,10 @@ mod tests {
     #[test]
     fn reconcile_unknown_task_id_ignored() {
         let registry = make_registry(vec![make_task("WEB-001", "todo")]);
-        let commits = vec![
-            make_commit("aaa111", "feat: UNKNOWN-999\n\n[macc:task UNKNOWN-999]"),
-        ];
+        let commits = vec![make_commit(
+            "aaa111",
+            "feat: UNKNOWN-999\n\n[macc:task UNKNOWN-999]",
+        )];
         let report = reconcile(&registry, &commits);
         assert_eq!(report.reconciled.len(), 0);
         assert_eq!(report.already_done.len(), 0);

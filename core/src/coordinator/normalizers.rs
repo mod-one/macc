@@ -153,9 +153,7 @@ fn claude_request_id_regex() -> &'static Regex {
 
 fn retry_after_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"(?i)(?:retry[-_]after)\s*[:=]\s*(\d+)").unwrap()
-    })
+    RE.get_or_init(|| Regex::new(r"(?i)(?:retry[-_]after)\s*[:=]\s*(\d+)").unwrap())
 }
 
 impl ErrorNormalizer for ClaudeErrorNormalizer {
@@ -486,7 +484,11 @@ mod tests {
     #[test]
     fn codex_quota_takes_priority_over_429() {
         let e = CodexErrorNormalizer
-            .normalize(1, "429 You exceeded your current quota: insufficient_quota", "")
+            .normalize(
+                1,
+                "429 You exceeded your current quota: insufficient_quota",
+                "",
+            )
             .unwrap();
         assert_eq!(e.canonical_class, CanonicalClass::QuotaExhausted);
         assert!(!e.retryable);
@@ -563,7 +565,11 @@ mod tests {
     #[test]
     fn gemini_unavailable() {
         let e = GeminiErrorNormalizer
-            .normalize(1, "503 UNAVAILABLE: The service is temporarily unavailable", "")
+            .normalize(
+                1,
+                "503 UNAVAILABLE: The service is temporarily unavailable",
+                "",
+            )
             .unwrap();
         assert_eq!(e.canonical_class, CanonicalClass::Overloaded);
         assert!(e.retryable);
@@ -581,7 +587,11 @@ mod tests {
     #[test]
     fn gemini_permission_denied() {
         let e = GeminiErrorNormalizer
-            .normalize(1, "403 PERMISSION_DENIED: The caller does not have permission", "")
+            .normalize(
+                1,
+                "403 PERMISSION_DENIED: The caller does not have permission",
+                "",
+            )
             .unwrap();
         assert_eq!(e.canonical_class, CanonicalClass::PolicyViolation);
         assert!(!e.retryable);
@@ -590,7 +600,11 @@ mod tests {
     #[test]
     fn gemini_invalid_argument() {
         let e = GeminiErrorNormalizer
-            .normalize(1, "400 INVALID_ARGUMENT: Request contains invalid field", "")
+            .normalize(
+                1,
+                "400 INVALID_ARGUMENT: Request contains invalid field",
+                "",
+            )
             .unwrap();
         assert_eq!(e.canonical_class, CanonicalClass::OutputMalformed);
         assert!(!e.retryable);
