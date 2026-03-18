@@ -44,25 +44,22 @@ pub fn write_coordinator_pause_file(
         "reason": reason,
         "updated_at": now_iso_coordinator(),
     });
-    let payload: CoordinatorPauseFile = serde_json::from_value(payload).map_err(|e| {
-        MaccError::Coordinator {
+    let payload: CoordinatorPauseFile =
+        serde_json::from_value(payload).map_err(|e| MaccError::Coordinator {
             code: "runtime_state",
             message: format!(
                 "Failed to build coordinator pause file '{}': {}",
                 path.display(),
                 e
             ),
-        }
-    })?;
-    let body = serde_json::to_string_pretty(&payload).map_err(|e| {
-        MaccError::Coordinator {
-            code: "runtime_state",
-            message: format!(
-                "Failed to serialize coordinator pause file '{}': {}",
-                path.display(),
-                e
-            ),
-        }
+        })?;
+    let body = serde_json::to_string_pretty(&payload).map_err(|e| MaccError::Coordinator {
+        code: "runtime_state",
+        message: format!(
+            "Failed to serialize coordinator pause file '{}': {}",
+            path.display(),
+            e
+        ),
     })?;
     std::fs::write(&path, body).map_err(|e| MaccError::Io {
         path: path.to_string_lossy().into(),
@@ -94,16 +91,15 @@ pub fn read_coordinator_pause_file(repo_root: &Path) -> Result<Option<Coordinato
         action: "read coordinator pause file".into(),
         source: e,
     })?;
-    let value: CoordinatorPauseFile = serde_json::from_str(&raw).map_err(|e| {
-        MaccError::Coordinator {
+    let value: CoordinatorPauseFile =
+        serde_json::from_str(&raw).map_err(|e| MaccError::Coordinator {
             code: "runtime_state",
             message: format!(
                 "Failed to parse coordinator pause file '{}': {}",
                 path.display(),
                 e
             ),
-        }
-    })?;
+        })?;
     Ok(Some(value))
 }
 

@@ -802,8 +802,14 @@ pub async fn monitor_active_jobs_native(
                         error_message: evt.error_message.clone(),
                         auto_retry_error_codes: retry_codes.clone(),
                         auto_retry_max: retry_max,
-                        backoff_base_seconds: resolve_rate_limit_backoff_base_seconds(env_cfg, coordinator),
-                        backoff_max_seconds: resolve_rate_limit_backoff_max_seconds(env_cfg, coordinator),
+                        backoff_base_seconds: resolve_rate_limit_backoff_base_seconds(
+                            env_cfg,
+                            coordinator,
+                        ),
+                        backoff_max_seconds: resolve_rate_limit_backoff_max_seconds(
+                            env_cfg,
+                            coordinator,
+                        ),
                         normalizer_input: None,
                     },
                     &now_iso_coordinator(),
@@ -838,24 +844,16 @@ pub async fn monitor_active_jobs_native(
                     // Extract the throttle state written by the engine and
                     // cache it in the volatile registry so `pick_tool()` can
                     // skip this tool on the next dispatch cycle.
-                    let task_typed = crate::coordinator::model::TaskRegistry::from_value(
-                        &registry,
-                    )
-                    .ok()
-                    .and_then(|reg| {
-                        reg.tasks
-                            .into_iter()
-                            .find(|t| t.id == evt.task_id)
-                    });
+                    let task_typed = crate::coordinator::model::TaskRegistry::from_value(&registry)
+                        .ok()
+                        .and_then(|reg| reg.tasks.into_iter().find(|t| t.id == evt.task_id));
                     if let Some(task) = task_typed {
                         if let Some(ts_val) = task.task_runtime.extra.get("throttle_state") {
                             if let Ok(ts) = serde_json::from_value::<
                                 crate::coordinator::rate_limit::ToolThrottleState,
                             >(ts_val.clone())
                             {
-                                state
-                                    .throttle_registry
-                                    .insert(job.tool.clone(), ts);
+                                state.throttle_registry.insert(job.tool.clone(), ts);
                             }
                         }
                     }
@@ -1649,13 +1647,9 @@ pub async fn dispatch_ready_tasks_native(
                 .clone()
                 .or_else(|| coordinator.and_then(|c| c.reference_branch.clone()))
                 .unwrap_or_else(|| "master".to_string()),
-            now: chrono::Utc::now()
-                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            now: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             throttle_registry: state.throttle_registry.clone(),
-            rate_limit_fallback_enabled: resolve_rate_limit_fallback_enabled(
-                env_cfg,
-                coordinator,
-            ),
+            rate_limit_fallback_enabled: resolve_rate_limit_fallback_enabled(env_cfg, coordinator),
         };
 
         if let Some(reason) =

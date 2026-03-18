@@ -417,10 +417,7 @@ mod tests {
             CanonicalClass::Internal,
         ];
         for class in &retryable_classes {
-            assert!(
-                is_retryable(class),
-                "{class} should be retryable"
-            );
+            assert!(is_retryable(class), "{class} should be retryable");
         }
 
         // Non-retryable classes that require user action should not be retried
@@ -431,10 +428,7 @@ mod tests {
             CanonicalClass::PolicyViolation,
         ];
         for class in &non_retryable_user {
-            assert!(
-                !is_retryable(class),
-                "{class} should NOT be retryable"
-            );
+            assert!(!is_retryable(class), "{class} should NOT be retryable");
             assert!(
                 is_user_action_required(class),
                 "{class} should require user action"

@@ -1092,13 +1092,13 @@ pub fn get_coordinator_status(paths: &ProjectPaths) -> Result<CoordinatorStatus>
                     .and_then(|v| v.get("consecutive_429_count"))
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0) as usize;
-                let entry = throttle_map
-                    .entry(tool_id.to_string())
-                    .or_insert_with(|| ThrottledToolStatus {
+                let entry = throttle_map.entry(tool_id.to_string()).or_insert_with(|| {
+                    ThrottledToolStatus {
                         tool_id: tool_id.to_string(),
                         throttled_until: delayed_until.to_string(),
                         consecutive_count,
-                    });
+                    }
+                });
                 if delayed_until > entry.throttled_until.as_str() {
                     entry.throttled_until = delayed_until.to_string();
                     entry.consecutive_count = consecutive_count;
@@ -1344,16 +1344,13 @@ pub fn coordinator_sync_prd(
     }
 
     // Load the task registry
-    let storage_mode =
-        coordinator_engine::resolve_storage_mode(env_cfg, coordinator_cfg)?;
+    let storage_mode = coordinator_engine::resolve_storage_mode(env_cfg, coordinator_cfg)?;
     let store_paths = CoordinatorStoragePaths::from_project_paths(paths);
     let mut snapshot = match storage_mode {
         CoordinatorStorageMode::Json => {
             crate::coordinator_storage::JsonStorage::new(store_paths.clone()).load_snapshot()?
         }
-        _ => {
-            crate::coordinator_storage::SqliteStorage::new(store_paths.clone()).load_snapshot()?
-        }
+        _ => crate::coordinator_storage::SqliteStorage::new(store_paths.clone()).load_snapshot()?,
     };
 
     // Reconcile
@@ -1456,8 +1453,7 @@ pub fn coordinator_audit_prd(
         .unwrap_or("main");
 
     // Run sync-prd first and capture the reconcile result for the prompt
-    let sync_report =
-        coordinator_sync_prd(paths, coordinator_cfg, env_cfg, logger)?;
+    let sync_report = coordinator_sync_prd(paths, coordinator_cfg, env_cfg, logger)?;
     let sync_summary = build_sync_summary_for_prompt(&sync_report);
 
     if let Some(log) = logger {
@@ -1492,16 +1488,11 @@ pub fn coordinator_audit_prd(
     })?;
 
     // Load task registry (after sync so states are up to date)
-    let storage_mode =
-        coordinator_engine::resolve_storage_mode(env_cfg, coordinator_cfg)?;
+    let storage_mode = coordinator_engine::resolve_storage_mode(env_cfg, coordinator_cfg)?;
     let store_paths = CoordinatorStoragePaths::from_project_paths(paths);
     let snapshot = match storage_mode {
-        CoordinatorStorageMode::Json => {
-            JsonStorage::new(store_paths.clone()).load_snapshot()?
-        }
-        _ => {
-            SqliteStorage::new(store_paths.clone()).load_snapshot()?
-        }
+        CoordinatorStorageMode::Json => JsonStorage::new(store_paths.clone()).load_snapshot()?,
+        _ => SqliteStorage::new(store_paths.clone()).load_snapshot()?,
     };
 
     // Build the audit report with prompt
@@ -1535,7 +1526,11 @@ pub fn coordinator_audit_prd(
     // If dry_run or no tool, just return the prompt
     if dry_run || tool.is_none() {
         if let Some(log) = logger {
-            let mode = if dry_run { "dry-run" } else { "no tool specified" };
+            let mode = if dry_run {
+                "dry-run"
+            } else {
+                "no tool specified"
+            };
             let _ = log.note(format!(
                 "- Audit PRD: prompt generated ({}) — use --tool <id> to invoke an AI tool",
                 mode
@@ -1546,7 +1541,12 @@ pub fn coordinator_audit_prd(
 
     // Invoke the tool
     let tool_id = tool.unwrap();
-    invoke_audit_tool(paths, tool_id, report.prompt.as_deref().unwrap_or(""), logger)?;
+    invoke_audit_tool(
+        paths,
+        tool_id,
+        report.prompt.as_deref().unwrap_or(""),
+        logger,
+    )?;
 
     if let Some(log) = logger {
         let _ = log.note(format!(
@@ -1570,16 +1570,17 @@ fn invoke_audit_tool(
     let loader = ToolSpecLoader::new(ToolSpecLoader::default_search_paths(&paths.root));
     let (specs, _) = loader.load_all_with_embedded();
 
-    let spec = specs
-        .iter()
-        .find(|s| s.id == tool_id)
-        .ok_or_else(|| {
-            MaccError::Validation(format!(
-                "Tool '{}' not found. Available tools: {}",
-                tool_id,
-                specs.iter().map(|s| s.id.as_str()).collect::<Vec<_>>().join(", ")
-            ))
-        })?;
+    let spec = specs.iter().find(|s| s.id == tool_id).ok_or_else(|| {
+        MaccError::Validation(format!(
+            "Tool '{}' not found. Available tools: {}",
+            tool_id,
+            specs
+                .iter()
+                .map(|s| s.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+    })?;
 
     let performer = spec.performer.as_ref().ok_or_else(|| {
         MaccError::Validation(format!(
@@ -2318,12 +2319,9 @@ fn parse_select_ready_task_command(args: &[String]) -> Result<CoordinatorCommand
                 .map_err(|e| MaccError::Validation(format!("Invalid max-parallel value: {}", e)))?,
             default_tool,
             default_base_branch,
-            now: map
-                .get("now")
-                .cloned()
-                .unwrap_or_else(|| {
-                    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-                }),
+            now: map.get("now").cloned().unwrap_or_else(|| {
+                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+            }),
             throttle_registry: Default::default(),
             rate_limit_fallback_enabled: false,
         },

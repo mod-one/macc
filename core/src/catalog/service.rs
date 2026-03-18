@@ -192,8 +192,11 @@ pub fn install_skill(
     backend: &dyn CatalogInstallBackend,
 ) -> Result<InstallSkillOutcome> {
     let catalog = load_effective_skills_catalog(paths)?;
-    let entry =
-        catalog.entries.iter().find(|e| e.id == id).ok_or_else(|| MaccError::Catalog {
+    let entry = catalog
+        .entries
+        .iter()
+        .find(|e| e.id == id)
+        .ok_or_else(|| MaccError::Catalog {
             operation: "lookup_skill".to_string(),
             message: format!("Skill '{}' not found in catalog.", id),
         })?;
@@ -252,10 +255,14 @@ pub fn install_mcp(
     backend: &dyn CatalogInstallBackend,
 ) -> Result<InstallMcpOutcome> {
     let catalog = load_effective_mcp_catalog(paths)?;
-    let entry = catalog.entries.iter().find(|e| e.id == id).ok_or_else(|| MaccError::Catalog {
-        operation: "lookup_mcp".to_string(),
-        message: format!("MCP server '{}' not found in catalog.", id),
-    })?;
+    let entry = catalog
+        .entries
+        .iter()
+        .find(|e| e.id == id)
+        .ok_or_else(|| MaccError::Catalog {
+            operation: "lookup_mcp".to_string(),
+            message: format!("MCP server '{}' not found in catalog.", id),
+        })?;
 
     let mut source = entry.source.clone();
     if !entry.selector.subpath.is_empty() && entry.selector.subpath != "." {

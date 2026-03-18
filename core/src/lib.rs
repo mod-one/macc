@@ -83,10 +83,7 @@ pub enum MaccError {
     SecretDetected { path: String, details: String },
 
     #[error("Coordinator error [{code}]: {message}")]
-    Coordinator {
-        code: &'static str,
-        message: String,
-    },
+    Coordinator { code: &'static str, message: String },
 
     #[error("Storage error ({backend}): {message}")]
     Storage {
