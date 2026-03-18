@@ -207,7 +207,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    const AUTOMATION_FIELD_COUNT: usize = 26;
+    const AUTOMATION_FIELD_COUNT: usize = 30;
     const COORDINATOR_EVENTS_EWMA_ALPHA: f64 = 0.30;
     const COORDINATOR_PAUSE_REL_PATH: &'static str = ".macc/automation/task/coordinator.pause.json";
 
@@ -1933,6 +1933,10 @@ impl AppState {
             23 => "Retry Error Codes (CSV)",
             24 => "Max Auto Retries",
             25 => "Legacy JSON Fallback",
+            26 => "RL Backoff Base (s)",
+            27 => "RL Backoff Max (s)",
+            28 => "RL Fallback Enabled",
+            29 => "RL Throttle Parallel",
             _ => "",
         }
     }
@@ -1965,6 +1969,10 @@ impl AppState {
             23 => "Comma-separated list of error codes that trigger an automatic task retry.",
             24 => "Maximum number of automatic retries for a failed task.",
             25 => "Allow falling back to JSON task registry if SQLite is corrupted or missing.",
+            26 => "Minimum backoff delay in seconds on first E601 rate-limit (default: 60).",
+            27 => "Maximum backoff delay cap in seconds for exponential growth (default: 3600).",
+            28 => "When the primary tool is throttled, dispatch to the next tool in priority order.",
+            29 => "Reduce effective_max_parallel by 1 on each E601; restore on recovery.",
             _ => "",
         }
     }
@@ -2069,7 +2077,7 @@ impl AppState {
             23 => self
                 .coordinator_env_cfg()
                 .error_code_retry_list
-                .unwrap_or_else(|| "E101,E102,E103,E301,E302,E303".to_string()),
+                .unwrap_or_else(|| "E101,E102,E103,E301,E302,E303,E601,E603".to_string()),
             24 => self
                 .coordinator_env_cfg()
                 .error_code_retry_max
@@ -2078,6 +2086,22 @@ impl AppState {
             25 => coordinator
                 .and_then(|c| c.legacy_json_fallback)
                 .unwrap_or(false)
+                .to_string(),
+            26 => coordinator
+                .and_then(|c| c.rate_limit_backoff_base_seconds)
+                .unwrap_or(60)
+                .to_string(),
+            27 => coordinator
+                .and_then(|c| c.rate_limit_backoff_max_seconds)
+                .unwrap_or(3600)
+                .to_string(),
+            28 => coordinator
+                .and_then(|c| c.rate_limit_fallback_enabled)
+                .unwrap_or(true)
+                .to_string(),
+            29 => coordinator
+                .and_then(|c| c.rate_limit_throttle_parallel)
+                .unwrap_or(true)
                 .to_string(),
             _ => String::new(),
         }
@@ -2240,7 +2264,7 @@ impl AppState {
             self.set_automation_field_string(13, next.to_string());
             return;
         }
-        if matches!(self.automation_field_index, 17 | 22 | 25) {
+        if matches!(self.automation_field_index, 17 | 22 | 25 | 28 | 29) {
             let current =
                 self.automation_field_display_value(self.automation_field_index) == "true";
             self.set_automation_field_bool(self.automation_field_index, !current);
@@ -2277,7 +2301,7 @@ impl AppState {
                 }
                 Err(_) => Err("Invalid integer value.".to_string()),
             },
-            15 | 16 | 19 | 21 => match input.parse::<u64>() {
+            15 | 16 | 19 | 21 | 26 | 27 => match input.parse::<u64>() {
                 Ok(value) => {
                     self.set_automation_field_u64(idx, value);
                     Ok(())
@@ -2300,7 +2324,7 @@ impl AppState {
                     Ok(())
                 }
             }
-            17 | 22 | 25 => {
+            17 | 22 | 25 | 28 | 29 => {
                 let value = input.to_lowercase();
                 if value == "true" {
                     self.set_automation_field_bool(idx, true);
@@ -2382,6 +2406,8 @@ impl AppState {
                 16 => coordinator.mirror_json_debounce_ms = Some(value),
                 19 => coordinator.merge_hook_timeout_seconds = Some(value),
                 21 => coordinator.dispatch_cooldown_seconds = Some(value),
+                26 => coordinator.rate_limit_backoff_base_seconds = Some(value),
+                27 => coordinator.rate_limit_backoff_max_seconds = Some(value),
                 _ => {}
             }
         }
@@ -2403,6 +2429,8 @@ impl AppState {
                 17 => coordinator.merge_ai_fix = Some(value),
                 22 => coordinator.json_compat = Some(value),
                 25 => coordinator.legacy_json_fallback = Some(value),
+                28 => coordinator.rate_limit_fallback_enabled = Some(value),
+                29 => coordinator.rate_limit_throttle_parallel = Some(value),
                 _ => {}
             }
         }

@@ -238,6 +238,10 @@ Error code schema (v1):
 - `E500` Merge
   - `E501` Merge conflict
   - `E502` Merge worker failed
+- `E600` Rate-limit / Provider throttle
+  - `E601` Rate-limited / Transient 429 or 529 (overloaded). Retryable with backoff.
+  - `E602` Quota exhausted / Hard limit (monthly cap, budget). **Not retryable** — requires operator action.
+  - `E603` Session conflict (session ID already in use). Retryable with a new session.
 - `E900` Unknown/Unexpected
   - `E901` Unknown fatal error
 
@@ -246,8 +250,46 @@ Auto-retry controls (coordinator settings):
 - `error_code_retry_max`: max retries per task for eligible codes.
 
 Default policy:
-- `error_code_retry_list=E101,E102,E103,E301,E302,E303`
+- `error_code_retry_list=E101,E102,E103,E301,E302,E303,E601,E603`
 - `error_code_retry_max=2`
+
+Note: E602 is intentionally excluded from the default retry list. Quota exhaustion is a hard limit requiring operator action (e.g., wait for quota reset or switch to another tool). Retrying E602 immediately would waste quota.
+
+##### 3.4.5.2 Canonical error model
+
+MACC uses a three-layer canonical error model to normalize provider-specific errors into a uniform representation consumed by the coordinator, TUI, and Web API.
+
+**Three layers:**
+1. **Transport** — network/TLS failures, DNS resolution errors (→ `CanonicalClass::Network`)
+2. **Provider API** — HTTP status codes and provider-specific JSON error bodies (e.g., Claude 529, OpenAI 429, Gemini RESOURCE_EXHAUSTED)
+3. **Local tool** — exit-code interpretation, stdout/stderr parsing, output malformation
+
+**CanonicalClass enum** (defined in `core/src/coordinator/error_normalizer.rs`):
+
+| Class | E-code | Retryable | Description |
+|---|---|---|---|
+| `RateLimit` | E601 | yes | Transient rate-limit (HTTP 429) |
+| `Overloaded` | E601 | yes | Provider overloaded (HTTP 529, 503) |
+| `QuotaExhausted` | E602 | no | Hard quota (monthly cap, budget) |
+| `SessionConflict` | E603 | yes | Session ID collision/reuse |
+| `Auth` | E201 | no | Invalid or expired API key |
+| `Billing` | E201 | no | Account billing issue |
+| `PolicyViolation` | E201 | no | Content/safety policy violation |
+| `Timeout` | E101 | yes | Request or connection timeout |
+| `Network` | E101 | yes | DNS, TLS, or connection failure |
+| `ToolNotFound` | E102 | no | Tool CLI binary not found |
+| `OutputMalformed` | E103 | no | Tool output could not be parsed |
+| `Internal` | E901 | yes | Provider internal error (HTTP 500) |
+| `Unknown` | E901 | no | Cannot classify the error |
+
+**Per-adapter normalizers** (in `core/src/coordinator/normalizers.rs`):
+- `ClaudeErrorNormalizer` — matches Claude JSON error bodies (`overloaded_error` → E601, `insufficient_quota` → E602) and `req_xxx` request IDs.
+- `CodexErrorNormalizer` — matches OpenAI HTTP status + message patterns (`insufficient_quota` → E602, standard 429 → E601).
+- `GeminiErrorNormalizer` — matches gRPC status codes (`RESOURCE_EXHAUSTED` → E601) and quota patterns (E602).
+
+**ToolError struct** carries: `provider`, `canonical_class`, `retryable`, `retry_after_seconds`, `user_action_required`, `raw_message`, `error_code`, `request_id`, `attempt`, `operation`.
+
+The coordinator calls the appropriate normalizer based on the task's assigned `tool` field. If no normalizer matches, the error falls through to generic E101 classification.
 
 ---
 
@@ -593,8 +635,10 @@ Important behavior:
   - `--json-compat`, `--legacy-json-fallback`
   - `--error-code-retry-list`, `--error-code-retry-max`
   - `--cutover-gate-window-events`, `--cutover-gate-max-blocked-ratio`, `--cutover-gate-max-stale-ratio`
+  - `--rate-limit-backoff-base-seconds`, `--rate-limit-backoff-max-seconds`
+  - `--rate-limit-fallback-enabled`, `--rate-limit-throttle-parallel`
 - Coordinator settings are persisted in `.macc/macc.yaml` under `automation.coordinator`.
-- TUI (Automation Settings screen) allows visual editing of all 27 coordinator parameters.
+- TUI (Automation Settings screen) allows visual editing of all 31 coordinator parameters.
 - Heartbeat events update `task_runtime.last_heartbeat` from `events.jsonl`.
 - Stale heartbeat policy is enforced during control-plane runs; can be reset, blocked, or requeued based on `stale_action`.
 - Extra raw args with `--` are for coordinator subcommands that require raw passthrough args.
@@ -694,6 +738,46 @@ Migration direction:
 
 Reference short design doc:
 - `docs/COORDINATOR_REALTIME.md`
+
+### 12.3.5 Rate-limit handling
+
+MACC implements automatic, provider-aware rate-limit handling. The full flow:
+
+```
+Tool exit → stderr → ErrorNormalizer → CanonicalClass → E-code
+                                             ↓
+                                      E601/E603 → BackoffEngine → delayed_until on task
+                                      E602       → pause coordinator (quota hard stop)
+                                             ↓
+                                      ToolThrottleRegistry updated (in-memory)
+                                             ↓
+                                      TaskSelector: skip throttled tools → fallback tool
+                                             ↓
+                                      ConcurrencyController: reduce max_parallel → event
+                                             ↓
+                                      Recovery: success → clear throttle, restore parallel
+```
+
+**New coordinator settings (rate-limit controls):**
+
+| Setting | Type | Default | Description |
+|---|---|---|---|
+| `rate_limit_backoff_base_seconds` | `u64` | 60 | Minimum backoff delay on first E601 |
+| `rate_limit_backoff_max_seconds` | `u64` | 3600 | Maximum backoff delay (cap for exponential growth) |
+| `rate_limit_fallback_enabled` | `bool` | true | When the primary tool is throttled, dispatch to next tool in priority order |
+| `rate_limit_throttle_parallel` | `bool` | true | Reduce `effective_max_parallel` by 1 on each E601 (restored on recovery) |
+
+**Backoff formula**: `min(base * 2^(consecutive_429_count - 1), max)` with jitter.
+
+**Fallback dispatch**: if `rate_limit_fallback_enabled=true` and the next tool in `tool_priority` is not throttled, the task is dispatched immediately to that tool. The throttled tool remains in the `ToolThrottleRegistry` and is re-eligible after `delayed_until` passes.
+
+**Quota exhaustion (E602)**: triggers a coordinator pause (same path as merge conflicts). The TUI shows a specific "PAUSED: Quota exhausted" banner. Operator must either wait for quota reset or switch to another tool, then `macc coordinator resume`.
+
+**Visibility**:
+- TUI CoordinatorLive screen shows "Throttled Tools" section with countdown per tool.
+- Active tasks show `rate-limited` runtime status instead of `failed` for E601.
+- Concurrency line shows `Concurrency: N/M (throttled)` when effective < original.
+- Web API `/api/v1/status` returns `throttled_tools` array and `effective_max_parallel`.
 
 ---
 

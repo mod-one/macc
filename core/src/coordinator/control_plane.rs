@@ -1377,7 +1377,7 @@ fn resolve_error_code_retry_list(
         .error_code_retry_list
         .clone()
         .or_else(|| coordinator.and_then(|c| c.error_code_retry_list.clone()))
-        .unwrap_or_else(|| "E101,E102,E103,E301,E302,E303".to_string());
+        .unwrap_or_else(|| "E101,E102,E103,E301,E302,E303,E601,E603".to_string());
     raw.split(',')
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())

@@ -230,6 +230,10 @@ MACC emits structured error codes when a performer or coordinator step fails. Th
 - `E500` Merge
   - `E501` Merge conflict
   - `E502` Merge worker failed
+- `E600` Rate-limit / Provider throttle
+  - `E601` Rate-limited / transient 429 or 529. Retryable with exponential backoff.
+  - `E602` Quota exhausted / hard limit. **Not retryable** — requires operator action.
+  - `E603` Session conflict. Retryable with a new session.
 - `E900` Unknown/Unexpected
   - `E901` Unknown fatal error
 
@@ -237,10 +241,30 @@ MACC emits structured error codes when a performer or coordinator step fails. Th
 
 Coordinator can auto-retry failed tasks based on error code. This is configured in `.macc/macc.yaml` under `automation.coordinator`:
 
-- `error_code_retry_list` default: `E101,E102,E103,E301,E302,E303`
+- `error_code_retry_list` default: `E101,E102,E103,E301,E302,E303,E601,E603`
 - `error_code_retry_max` default: `2`
 
 When a failed task has an error code in the allow-list and retries are below the max, the task is requeued to `todo` with an `auto_retry:<code>` reason.
+
+E602 (quota exhausted) is intentionally excluded — it requires operator action, not automatic retry.
+
+### Rate-limit handling
+
+MACC automatically handles provider rate-limits (HTTP 429/529) via:
+
+- **Canonical error normalization**: per-adapter normalizers (Claude, Codex, Gemini) classify errors into `CanonicalClass::RateLimit` (E601) or `CanonicalClass::QuotaExhausted` (E602).
+- **Exponential backoff**: E601 tasks get a `delayed_until` timestamp; the coordinator skips them until the delay expires.
+- **Tool fallback**: when the primary tool is throttled, the coordinator dispatches to the next tool in `tool_priority` (if `rate_limit_fallback_enabled=true`).
+- **Concurrency reduction**: `effective_max_parallel` is reduced on each E601 and restored on recovery (if `rate_limit_throttle_parallel=true`).
+- **Quota hard stop**: E602 pauses the coordinator with a specific "quota exhausted" banner; resume with `macc coordinator resume` after fixing quota.
+
+Rate-limit controls in `.macc/macc.yaml` → `automation.coordinator`:
+```yaml
+rate_limit_backoff_base_seconds: 60
+rate_limit_backoff_max_seconds: 3600
+rate_limit_fallback_enabled: true
+rate_limit_throttle_parallel: true
+```
 
 Logs:
 - coordinator: `.macc/log/coordinator/`
