@@ -189,9 +189,9 @@ pub fn build_audit_prompt(context: &AuditContext) -> String {
         "1. For each **completed task** listed below, update its `notes` field in `{}` to reflect what was actually delivered based on the commit history.\n",
         context.prd_path
     ));
-    prompt.push_str("2. Move every completed task (state `merged` or `abandoned`) that requires **no further modification** into the top-level `tasks_done` array. ");
+    prompt.push_str("2. Move the **entire JSON object** of every completed task (state `merged` or `abandoned`) that requires **no further modification** into the top-level `tasks_done` array. ");
     prompt.push_str("If `tasks_done` does not exist in the file, create it as an empty array `[]` and populate it. ");
-    prompt.push_str("Remove moved tasks from their original array. **Never delete or rename task IDs.**\n");
+    prompt.push_str("Remove the complete task object from its original array (e.g. `tasks`). Do not just move the task ID or name, move the whole object. **Never delete or rename task IDs.**\n");
     prompt.push_str(&format!(
         "3. For **todo tasks** in `{}`, review if the integrated code changes have modified the intended architecture. If so, rewrite the task `description` and `steps` to reflect the new reality. **Never delete or rename task IDs.**\n",
         context.prd_path
@@ -209,7 +209,23 @@ pub fn build_audit_prompt(context: &AuditContext) -> String {
     }
     prompt.push_str("\n```\n\n");
 
-    // ... (rest of the prompt remains the same)
+    // Completed task context
+    if !context.completed_tasks.is_empty() {
+        prompt.push_str("## Completed Task Commit Context\n\n");
+        for tc in &context.completed_tasks {
+            prompt.push_str(&format!("### Task `{}`\n\n", tc.task_id));
+            prompt.push_str("Commits:\n");
+            for commit in &tc.commits {
+                prompt.push_str(&format!("- `{}` {}\n", commit.sha_short, commit.subject));
+            }
+            if let Some(ref stat) = tc.diff_stat {
+                prompt.push_str("\nDiff stat:\n```\n");
+                prompt.push_str(stat);
+                prompt.push_str("\n```\n");
+            }
+            prompt.push('\n');
+        }
+    }
 
     // Todo tasks
     if !context.todo_task_ids.is_empty() {
