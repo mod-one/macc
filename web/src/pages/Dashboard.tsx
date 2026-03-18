@@ -1,6 +1,7 @@
 import React from 'react';
 import { getStatus } from '../api/client';
 import type { ApiCoordinatorStatus } from '../api/models';
+import ApiHealth from '../components/ApiHealth';
 
 const Dashboard: React.FC = () => {
   const [status, setStatus] = React.useState<ApiCoordinatorStatus | null>(null);
@@ -43,6 +44,7 @@ const Dashboard: React.FC = () => {
       ) : (
         <p>Loading coordinator status...</p>
       )}
+      <ApiHealth />
     </div>
   );
 };
