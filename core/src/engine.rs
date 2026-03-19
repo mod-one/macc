@@ -1156,6 +1156,7 @@ pub struct CoordinatorStatusSnapshot {
 pub struct CoordinatorEvent {
     pub event_id: Option<String>,
     pub run_id: Option<String>,
+    pub seq: i64,
     pub event_type: String,
     pub task_id: Option<String>,
     pub phase: Option<String>,
@@ -1172,6 +1173,7 @@ impl CoordinatorEvent {
         Self {
             event_id: (!record.event_id.is_empty()).then(|| record.event_id.clone()),
             run_id: record.run_id.clone(),
+            seq: record.seq,
             event_type: record.event_type.clone(),
             task_id: record.task_id.clone(),
             phase: record.phase.clone(),

@@ -1,14 +1,19 @@
 use crate::commands::AppContext;
 use crate::commands::Command;
 use crate::services::engine_provider::SharedEngine;
+use async_stream::stream;
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::http::StatusCode;
+use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Json;
 use axum::Router;
 use macc_core::coordinator::task_selector::SelectedTask;
 use macc_core::coordinator::types::CoordinatorEnvConfig;
+use macc_core::coordinator::COORDINATOR_EVENT_SCHEMA_VERSION;
+use macc_core::engine::CoordinatorEvent;
 use macc_core::service::coordinator_workflow::{
     CoordinatorCommand, CoordinatorCommandRequest, CoordinatorCommandResult, CoordinatorStatus,
     ThrottledToolStatus,
@@ -16,7 +21,10 @@ use macc_core::service::coordinator_workflow::{
 use macc_core::service::diagnostic::{FailureKind, FailureReport};
 use macc_core::{load_canonical_config, MaccError, ProjectPaths, Result};
 use serde::Serialize;
+use std::collections::VecDeque;
+use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub struct WebCommand {
     app: AppContext,
@@ -88,11 +96,15 @@ struct WebState {
     paths: ProjectPaths,
 }
 
+const SSE_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const SSE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+
 fn build_web_router(state: WebState) -> Router {
     Router::new()
         .route("/", get(root_handler))
         .route("/api/v1/health", get(health_handler))
         .route("/api/v1/status", get(status_handler))
+        .route("/api/v1/events", get(events_handler))
         .route("/api/v1/coordinator/run", post(coordinator_run_handler))
         .route(
             "/api/v1/coordinator/dispatch",
@@ -134,6 +146,33 @@ async fn status_handler(
         .get_coordinator_status(&state.paths)
         .map_err(ApiError::from)?;
     Ok(Json(ApiCoordinatorStatus::from(status)))
+}
+
+async fn events_handler(
+    State(state): State<WebState>,
+    headers: HeaderMap,
+) -> std::result::Result<
+    Sse<impl tokio_stream::Stream<Item = std::result::Result<Event, Infallible>>>,
+    ApiError,
+> {
+    let initial_events = state
+        .engine
+        .get_coordinator_events(&state.paths)
+        .map_err(ApiError::from)?;
+    let last_event_id = headers
+        .get("last-event-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+
+    Ok(Sse::new(coordinator_event_stream(
+        state,
+        initial_events,
+        last_event_id,
+        SSE_POLL_INTERVAL,
+        SSE_HEARTBEAT_INTERVAL,
+    )))
 }
 
 async fn coordinator_run_handler(
@@ -259,6 +298,128 @@ async fn coordinator_resume_handler(
             ..CoordinatorCommandResult::default()
         },
     )))
+}
+
+fn coordinator_event_stream(
+    state: WebState,
+    initial_events: Vec<CoordinatorEvent>,
+    last_event_id: Option<String>,
+    poll_interval: Duration,
+    heartbeat_interval: Duration,
+) -> impl tokio_stream::Stream<Item = std::result::Result<Event, Infallible>> {
+    stream! {
+        let mut source_seq_cursor = resolve_source_seq_cursor(&initial_events, last_event_id.as_deref());
+        let mut pending_events = pending_events_after(&initial_events, source_seq_cursor);
+        let mut poll_tick = tokio::time::interval(poll_interval);
+        let mut heartbeat_tick = tokio::time::interval(heartbeat_interval);
+        poll_tick.tick().await;
+        heartbeat_tick.tick().await;
+
+        loop {
+            while let Some(event) = pending_events.pop_front() {
+                source_seq_cursor = source_seq_cursor.max(event.seq);
+                yield Ok(build_coordinator_sse_event(&event));
+            }
+
+            tokio::select! {
+                _ = poll_tick.tick() => {
+                    match state.engine.get_coordinator_events(&state.paths) {
+                        Ok(events) => {
+                            pending_events = pending_events_after(&events, source_seq_cursor);
+                        }
+                        Err(err) => {
+                            tracing::warn!("failed to refresh coordinator SSE events: {}", err);
+                        }
+                    }
+                }
+                _ = heartbeat_tick.tick() => {
+                    yield Ok(build_heartbeat_sse_event(source_seq_cursor));
+                }
+            }
+        }
+    }
+}
+
+fn pending_events_after(
+    events: &[CoordinatorEvent],
+    source_seq_cursor: i64,
+) -> VecDeque<CoordinatorEvent> {
+    events
+        .iter()
+        .filter(|event| event.seq > source_seq_cursor)
+        .cloned()
+        .collect()
+}
+
+fn resolve_source_seq_cursor(events: &[CoordinatorEvent], last_event_id: Option<&str>) -> i64 {
+    last_event_id
+        .and_then(|id| {
+            events
+                .iter()
+                .find(|event| coordinator_event_sse_id(event) == id)
+                .map(|event| event.seq)
+                .or_else(|| parse_source_seq_from_sse_id(id))
+        })
+        .unwrap_or_default()
+}
+
+fn coordinator_event_sse_id(event: &CoordinatorEvent) -> String {
+    event
+        .event_id
+        .clone()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| format!("cursor-{}", event.seq))
+}
+
+fn parse_source_seq_from_sse_id(event_id: &str) -> Option<i64> {
+    if let Some(seq) = event_id.strip_prefix("cursor-") {
+        return seq.parse::<i64>().ok();
+    }
+
+    if let Some(heartbeat) = event_id.strip_prefix("hb-") {
+        let seq = heartbeat.split('-').next()?;
+        return seq.parse::<i64>().ok();
+    }
+
+    None
+}
+
+fn build_coordinator_sse_event(event: &CoordinatorEvent) -> Event {
+    Event::default()
+        .id(coordinator_event_sse_id(event))
+        .event("coordinator_event")
+        .json_data(event.raw.clone())
+        .expect("serialize coordinator event payload")
+}
+
+fn build_heartbeat_sse_event(source_seq_cursor: i64) -> Event {
+    let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let heartbeat_id = format!("hb-{}-{}", source_seq_cursor, unix_timestamp_millis());
+    let payload = serde_json::json!({
+        "schema_version": COORDINATOR_EVENT_SCHEMA_VERSION,
+        "event_id": heartbeat_id,
+        "seq": source_seq_cursor,
+        "ts": ts,
+        "source": "coordinator",
+        "type": "heartbeat",
+        "status": "ok"
+    });
+
+    Event::default()
+        .id(payload["event_id"]
+            .as_str()
+            .expect("heartbeat id")
+            .to_string())
+        .event("heartbeat")
+        .json_data(payload)
+        .expect("serialize heartbeat payload")
+}
+
+fn unix_timestamp_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
 }
 
 #[derive(Debug, Serialize)]
@@ -602,6 +763,7 @@ mod tests {
     use axum::http::Request;
     use http_body_util::BodyExt;
     use macc_core::config::CanonicalConfig;
+    use macc_core::engine::CoordinatorEvent;
     use macc_core::resolve::CliOverrides;
     use macc_core::TestEngine;
     use std::fs;
@@ -643,6 +805,7 @@ mod tests {
         cleanup_result: std::sync::Mutex<Option<std::result::Result<(), MaccError>>>,
         stop_result: std::sync::Mutex<Option<std::result::Result<(), MaccError>>>,
         resume_result: std::sync::Mutex<Option<std::result::Result<(), MaccError>>>,
+        coordinator_events: std::sync::Mutex<Vec<Vec<CoordinatorEvent>>>,
     }
 
     impl WebTestEngine {
@@ -653,6 +816,7 @@ mod tests {
                 cleanup_result: std::sync::Mutex::new(Some(Ok(()))),
                 stop_result: std::sync::Mutex::new(Some(Ok(()))),
                 resume_result: std::sync::Mutex::new(Some(Ok(()))),
+                coordinator_events: std::sync::Mutex::new(vec![Vec::new()]),
             }
         }
 
@@ -663,6 +827,7 @@ mod tests {
                 cleanup_result: std::sync::Mutex::new(Some(result)),
                 stop_result: std::sync::Mutex::new(Some(Ok(()))),
                 resume_result: std::sync::Mutex::new(Some(Ok(()))),
+                coordinator_events: std::sync::Mutex::new(vec![Vec::new()]),
             }
         }
 
@@ -673,6 +838,7 @@ mod tests {
                 cleanup_result: std::sync::Mutex::new(Some(Ok(()))),
                 stop_result: std::sync::Mutex::new(Some(result)),
                 resume_result: std::sync::Mutex::new(Some(Ok(()))),
+                coordinator_events: std::sync::Mutex::new(vec![Vec::new()]),
             }
         }
 
@@ -683,6 +849,18 @@ mod tests {
                 cleanup_result: std::sync::Mutex::new(Some(Ok(()))),
                 stop_result: std::sync::Mutex::new(Some(Ok(()))),
                 resume_result: std::sync::Mutex::new(Some(result)),
+                coordinator_events: std::sync::Mutex::new(vec![Vec::new()]),
+            }
+        }
+
+        fn with_event_snapshots(event_snapshots: Vec<Vec<CoordinatorEvent>>) -> Self {
+            Self {
+                inner: TestEngine::with_fixtures(),
+                run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
+                cleanup_result: std::sync::Mutex::new(Some(Ok(()))),
+                stop_result: std::sync::Mutex::new(Some(Ok(()))),
+                resume_result: std::sync::Mutex::new(Some(Ok(()))),
+                coordinator_events: std::sync::Mutex::new(event_snapshots),
             }
         }
     }
@@ -773,6 +951,42 @@ mod tests {
                 .expect("lock")
                 .take()
                 .unwrap_or_else(|| Ok(()))
+        }
+
+        fn get_coordinator_events(&self, _paths: &ProjectPaths) -> Result<Vec<CoordinatorEvent>> {
+            let mut snapshots = self.coordinator_events.lock().expect("lock");
+            let snapshot = if snapshots.len() > 1 {
+                snapshots.remove(0)
+            } else {
+                snapshots.first().cloned().unwrap_or_default()
+            };
+            Ok(snapshot)
+        }
+    }
+
+    fn coordinator_event(seq: i64, event_id: &str, event_type: &str) -> CoordinatorEvent {
+        CoordinatorEvent {
+            event_id: Some(event_id.to_string()),
+            run_id: Some("run-1".to_string()),
+            seq,
+            event_type: event_type.to_string(),
+            task_id: Some("WEB-BACKEND-008".to_string()),
+            phase: Some("implement".to_string()),
+            status: Some("ok".to_string()),
+            ts: Some("2026-03-19T12:00:00Z".to_string()),
+            message: None,
+            raw: serde_json::json!({
+                "schema_version": COORDINATOR_EVENT_SCHEMA_VERSION,
+                "event_id": event_id,
+                "run_id": "run-1",
+                "seq": seq,
+                "ts": "2026-03-19T12:00:00Z",
+                "source": "coordinator",
+                "task_id": "WEB-BACKEND-008",
+                "type": event_type,
+                "phase": "implement",
+                "status": "ok",
+            }),
         }
     }
 
@@ -921,6 +1135,152 @@ mod tests {
         assert_eq!(payload["error"]["category"], "Validation");
         assert!(payload["error"]["message"].is_string());
         assert!(payload["error"].get("context").is_none());
+    }
+
+    #[tokio::test]
+    async fn events_endpoint_streams_coordinator_events() {
+        let root = temp_root("events-stream");
+        fs::create_dir_all(&root).expect("create root");
+        let state = WebState {
+            engine: Arc::new(WebTestEngine::with_event_snapshots(vec![vec![
+                coordinator_event(42, "evt-42", "task_transition"),
+            ]])),
+            paths: ProjectPaths::from_root(&root),
+        };
+        let app = build_web_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/events")
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .expect("content type"),
+            "text/event-stream"
+        );
+
+        let mut body = response.into_body();
+        let first_frame = tokio::time::timeout(Duration::from_secs(1), body.frame())
+            .await
+            .expect("frame timeout")
+            .expect("frame")
+            .expect("body frame");
+        let chunk = first_frame.into_data().expect("data frame");
+        let text = String::from_utf8(chunk.to_vec()).expect("utf8");
+
+        assert!(text.contains("event: coordinator_event"), "{text}");
+        assert!(text.contains("id: evt-42"), "{text}");
+        assert!(text.contains("\"type\":\"task_transition\""), "{text}");
+    }
+
+    #[tokio::test]
+    async fn events_endpoint_respects_last_event_id_cursor() {
+        let root = temp_root("events-cursor");
+        fs::create_dir_all(&root).expect("create root");
+        let state = WebState {
+            engine: Arc::new(WebTestEngine::with_event_snapshots(vec![vec![
+                coordinator_event(41, "evt-41", "task_transition"),
+                coordinator_event(42, "evt-42", "task_transition"),
+            ]])),
+            paths: ProjectPaths::from_root(&root),
+        };
+        let app = build_web_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/events")
+                    .method("GET")
+                    .header("Last-Event-ID", "evt-41")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        let mut body = response.into_body();
+        let first_frame = tokio::time::timeout(Duration::from_secs(1), body.frame())
+            .await
+            .expect("frame timeout")
+            .expect("frame")
+            .expect("body frame");
+        let chunk = first_frame.into_data().expect("data frame");
+        let text = String::from_utf8(chunk.to_vec()).expect("utf8");
+
+        assert!(text.contains("id: evt-42"), "{text}");
+        assert!(!text.contains("evt-41"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn coordinator_event_stream_delivers_new_events_after_connect() {
+        let root = temp_root("events-live");
+        fs::create_dir_all(&root).expect("create root");
+        let state = WebState {
+            engine: Arc::new(WebTestEngine::with_event_snapshots(vec![
+                Vec::new(),
+                vec![coordinator_event(43, "evt-43", "task_transition")],
+            ])),
+            paths: ProjectPaths::from_root(&root),
+        };
+        let response = Sse::new(coordinator_event_stream(
+            state,
+            Vec::new(),
+            None,
+            Duration::from_millis(10),
+            Duration::from_millis(100),
+        ))
+        .into_response();
+        let mut body = response.into_body();
+
+        let frame = tokio::time::timeout(Duration::from_millis(100), body.frame())
+            .await
+            .expect("live event timeout")
+            .expect("frame")
+            .expect("body frame");
+        let data =
+            String::from_utf8(frame.into_data().expect("data frame").to_vec()).expect("utf8");
+
+        assert!(data.contains("event: coordinator_event"), "{data}");
+        assert!(data.contains("id: evt-43"), "{data}");
+    }
+
+    #[tokio::test]
+    async fn coordinator_event_stream_emits_heartbeat_records() {
+        let root = temp_root("events-heartbeat");
+        fs::create_dir_all(&root).expect("create root");
+        let state = WebState {
+            engine: Arc::new(WebTestEngine::with_event_snapshots(vec![Vec::new()])),
+            paths: ProjectPaths::from_root(&root),
+        };
+        let response = Sse::new(coordinator_event_stream(
+            state,
+            Vec::new(),
+            None,
+            Duration::from_millis(50),
+            Duration::from_millis(10),
+        ))
+        .into_response();
+        let mut body = response.into_body();
+
+        let frame = tokio::time::timeout(Duration::from_millis(100), body.frame())
+            .await
+            .expect("heartbeat timeout")
+            .expect("frame")
+            .expect("body frame");
+        let data =
+            String::from_utf8(frame.into_data().expect("data frame").to_vec()).expect("utf8");
+
+        assert!(data.contains("event: heartbeat"), "{data}");
+        assert!(data.contains("\"type\":\"heartbeat\""), "{data}");
+        assert!(data.contains("\"status\":\"ok\""), "{data}");
     }
 
     #[test]
