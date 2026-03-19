@@ -31,7 +31,7 @@
                 "Run `npm create vite@latest` within `/web`, selecting React and TypeScript.",
                 "Run `npm install` to verify dependency installation."
             ],
-            "notes": "This is the first step and has no dependencies. It prepares the ground for all subsequent frontend work.",
+            "notes": "Delivered. Scaffolded a full Vite + React 19 + TypeScript 5.9 project with ESLint config, public assets, and standard tsconfig files (tsconfig.json, tsconfig.app.json, tsconfig.node.json). Uses @vitejs/plugin-react with Oxc.",
             "exclusive_resources": [
                 "web/"
             ],
@@ -49,7 +49,7 @@
                 "Edit `cli/Cargo.toml` to add the new dependencies.",
                 "Run `cargo check` or `cargo build` to ensure dependencies resolve correctly."
             ],
-            "notes": "This is a foundational step for the backend, enabling all subsequent server-side development.",
+            "notes": "Delivered. Added axum 0.7 and tokio 1.48 (full features) to cli/Cargo.toml. Cargo.lock updated with 89 new lines of transitive dependencies.",
             "exclusive_resources": [
                 "cli/Cargo.toml",
                 "Cargo.lock"
@@ -70,7 +70,7 @@
                 "Implement the `run` method for the `web` command to print a message.",
                 "Compile and run `macc web` to verify."
             ],
-            "notes": "This structures the CLI to accommodate the new server functionality.",
+            "notes": "Delivered. Created cli/src/commands/web.rs with a WebCommand struct wrapping AppContext. Wired into cli/src/main.rs as Commands::Web variant (line 744). Also added a --web_port global CLI flag at the top level.",
             "exclusive_resources": [
                 "cli/src/main.rs",
                 "cli/src/commands/"
@@ -93,7 +93,7 @@
                 "Bind the server to an address like `127.0.0.1:3000`.",
                 "Start the server and have it log a startup message."
             ],
-            "notes": "This task makes the web server 'real'.",
+            "notes": "Delivered. Server binds to 127.0.0.1 with port from canonical config (web_port setting, default 3450 — not 3000 as originally planned). Uses Tokio multi-threaded runtime. Router uses Axum with_state pattern sharing a WebState struct containing SharedEngine and ProjectPaths.",
             "exclusive_resources": [
                 "cli/src/commands/web.rs"
             ],
@@ -106,16 +106,16 @@
             "id": "WEB-BACKEND-004",
             "title": "Create a health-check API endpoint (/api/health)",
             "category": "BACKEND",
-            "description": "Problem/Goal: To establish a basic, versioned API structure and provide a standardized way for clients to check server availability. Key actions: In the Axum server, create a new route `/api/v1/health`. The handler for this route should return a `200 OK` with a JSON body: `{\"status\": \"ok\"}`. Out of scope: Any other API functionality. Success criteria: The Axum server has a new route. `curl http://localhost:3000/api/v1/health` returns the correct JSON response and status code.",
+            "description": "Problem/Goal: To establish a basic, versioned API structure and provide a standardized way for clients to check server availability. Key actions: In the Axum server, create a new route `/api/v1/health`. The handler for this route should return a `200 OK` with a JSON body: `{\"status\": \"ok\"}`. Out of scope: Any other API functionality. Success criteria: The Axum server has a new route. `curl http://localhost:3450/api/v1/health` returns the correct JSON response and status code.",
             "objective": "To establish the API's routing structure and provide a simple test endpoint.",
             "result": "The server exposes a functional `/api/v1/health` endpoint.",
             "steps": [
                 "Create a new handler function for the health check.",
-                "Add the `/api/v1/health` route to the Axum router, pointing to the new handler.",
+                "Add the `/api/v1/health` route to the existing Axum router (which already has /api/v1/status and coordinator action routes).",
                 "Use `axum::Json` to return the response.",
-                "Test the endpoint using `curl`."
+                "Test the endpoint using `curl` (note: default port is 3450, not 3000)."
             ],
-            "notes": "This is a contract-first step for the API, establishing the `/api/v1` prefix.",
+            "notes": "The /api/v1 prefix and router pattern are already established by WEB-BACKEND-006. The health endpoint is defined in docs/WEB_API_CONTRACT.md but not yet implemented. This task simply adds a lightweight handler to the existing router.",
             "exclusive_resources": [
                 "cli/src/commands/web.rs"
             ],
@@ -138,7 +138,7 @@
                 "Create simple functional components for the two pages.",
                 "Add `<Link>` components to navigate between them."
             ],
-            "notes": "This provides the skeleton of the frontend application.",
+            "notes": "Delivered. Uses react-router-dom v7 (latest) with BrowserRouter. Layout component (web/src/components/Layout.tsx) provides a fixed-width sidebar (200px, gray-100) with navigation via Radix-UI Button + Link composition, and an Outlet for nested route rendering. Dashboard and Logs pages are placeholder components.",
             "exclusive_resources": [
                 "web/src/"
             ],
@@ -161,7 +161,7 @@
                 "Add the `@tailwind` directives to the main CSS file (e.g., `index.css`).",
                 "Test by adding a utility class to `App.tsx`."
             ],
-            "notes": "A key step for ensuring a professional look and feel.",
+            "notes": "Delivered. Installed Tailwind CSS 4.2.1 with PostCSS and autoprefixer. Created tailwind.config.js and postcss.config.js. Added @tailwind directives to index.css with custom CSS variables for theming. Migrated legacy Vite starter CSS to Tailwind utility classes. Removed App.css. A blue test banner in App.tsx validates integration. Layout component fully styled with Tailwind utilities.",
             "exclusive_resources": [
                 "web/"
             ],
@@ -174,15 +174,15 @@
             "id": "WEB-INTEGRATION-001",
             "title": "Configure Vite dev server to proxy /api requests",
             "category": "INTEGRATION",
-            "description": "Problem/Goal: To solve CORS issues during development and allow the frontend dev server to communicate with the backend API seamlessly. Key actions: In `web/vite.config.ts`, add a `server.proxy` configuration object. This object should proxy any request to a path starting with `/api` to the Rust backend server's address (e.g., `http://localhost:3000`). Out of scope: This only affects the development environment (`npm run dev`). Success criteria: `web/vite.config.ts` is updated. While the Vite dev server is running, a `fetch('/api/v1/health')` call from within the React app successfully receives the response from the Axum server.",
+            "description": "Problem/Goal: To solve CORS issues during development and allow the frontend dev server to communicate with the backend API seamlessly. Key actions: In `web/vite.config.ts`, add a `server.proxy` configuration object. This object should proxy any request to a path starting with `/api` to the Rust backend server's address (e.g., `http://localhost:3450`). Out of scope: This only affects the development environment (`npm run dev`). Success criteria: `web/vite.config.ts` is updated. While the Vite dev server is running, a `fetch('/api/v1/health')` call from within the React app successfully receives the response from the Axum server.",
             "objective": "To enable smooth frontend-backend communication during development.",
             "result": "`web/vite.config.ts` contains a `server.proxy` configuration.",
             "steps": [
                 "Modify `web/vite.config.ts` to include the `server` key.",
-                "Add the `proxy` object, targeting `/api` and rewriting to the backend address.",
+                "Add the `proxy` object, targeting `/api` and rewriting to the backend address (`http://localhost:3450` — the default web server port).",
                 "Create a simple test component that fetches from `/api/v1/health` on mount and displays the result."
             ],
-            "notes": "This is crucial for developer experience (DX).",
+            "notes": "The backend default port is 3450 (configurable via web_port setting), not 3000 as originally assumed. vite.config.ts is currently minimal (just the react plugin) so the proxy config is a clean addition.",
             "exclusive_resources": [
                 "web/vite.config.ts"
             ],
@@ -196,17 +196,17 @@
             "id": "WEB-INTEGRATION-002",
             "title": "Serve compiled frontend from the Axum server",
             "category": "INTEGRATION",
-            "description": "Problem/Goal: To enable the single `macc` binary to serve the entire web application, making it self-contained. Key actions: Add `tower-http` with `fs` feature. In the Axum server logic, configure a `ServeDir` service to serve static files from the `web/dist` directory. A fallback service should be configured to always serve `web/dist/index.html` for any non-API, non-file request, to support client-side routing. Out of scope: Does not yet embed the assets into the binary. Success criteria: After running `npm run build` in `/web`, starting the `macc web` server allows a user to navigate to `http://localhost:3000` and use the full React application, including its client-side routes.",
+            "description": "Problem/Goal: To enable the single `macc` binary to serve the entire web application, making it self-contained. Key actions: Add `tower-http` with `fs` feature. In the Axum server logic, configure a `ServeDir` service to serve static files from the `web/dist` directory. A fallback service should be configured to always serve `web/dist/index.html` for any non-API, non-file request, to support client-side routing. Out of scope: Does not yet embed the assets into the binary. Success criteria: After running `npm run build` in `/web`, starting the `macc web` server allows a user to navigate to `http://localhost:3450` and use the full React application, including its client-side routes.",
             "objective": "To make the Rust binary capable of serving the production-built SPA.",
             "result": "The Axum server serves the static content from `web/dist`.",
             "steps": [
                 "Add `tower-http` to `cli/Cargo.toml`.",
                 "In `cli/src/commands/web.rs`, create a `ServeDir` service pointing to `web/dist`.",
-                "Combine the API router with the static file service, ensuring API routes have precedence.",
-                "Add the fallback to `index.html`.",
+                "Combine the API router with the static file service, ensuring API routes have precedence (the existing router already has /api/v1/* routes with_state).",
+                "Add the fallback to `index.html` to support client-side routing (react-router-dom v7).",
                 "Document the build-and-run process for testing."
             ],
-            "notes": "This is the first step towards a production-ready setup.",
+            "notes": "The Axum router already uses with_state(WebState) for API routes. Static file serving must be layered beneath API routes. Default port is 3450.",
             "exclusive_resources": [
                 "cli/src/commands/web.rs",
                 "cli/Cargo.toml"
@@ -252,7 +252,7 @@
                 "Define and document a standard JSON error response format (e.g., { \"error\": { \"code\": \"MACC-WEB-1001\", \"message\": \"...\" } }).",
                 "Define and document the SSE event envelope (e.g., {id, event, data}) and a heartbeat event."
             ],
-            "notes": "Keep the contract small and aligned with existing core diagnostics and coordinator status structures.",
+            "notes": "Delivered. Created docs/WEB_API_CONTRACT.md (162 lines) defining 4 endpoints: GET /api/v1/health, GET /api/v1/status, POST /api/v1/coordinator/{action}, GET /api/v1/events (SSE). Created docs/ERRORS.md (25 lines) establishing the MACC-<DOMAIN>-<4digits> error code format with categories (Validation, Auth, Dependency, Conflict, NotFound, Internal). Error envelope: {error: {code, category, message, context?, cause?}}. SSE envelope uses coordinator_event and heartbeat event types.",
             "exclusive_resources": [
                 "docs/"
             ],
@@ -274,7 +274,7 @@
                 "Map potential Engine errors to the standard error format.",
                 "Add a backend integration test for both success and error cases of the /api/v1/status endpoint."
             ],
-            "notes": "If Engine has not yet exposed status, add a minimal facade method as part of this task.",
+            "notes": "Delivered. Implemented comprehensive status endpoint with ApiCoordinatorStatus struct mapping CoordinatorStatus fields (total, todo, active, blocked, merged, paused, pause_reason, pause_task, pause_phase, latest_error, failure_report). Includes rate-limit fields: throttled_tools (vec of ApiThrottledToolStatus) and effective_max_parallel. Also delivered the full ApiError system (ApiErrorEnvelope, ApiErrorBody) with From<MaccError> mapping all error variants to HTTP status codes and categories. Added http-body-util and tower as test dependencies. 8 integration tests using tower::ServiceExt with a WebTestEngine mock.",
             "exclusive_resources": [
                 "cli/src/commands/web.rs",
                 "core/src/engine.rs"
@@ -294,9 +294,9 @@
             "steps": [
                 "Add SSE handler using axum::response::sse.",
                 "Wire to an Engine event source (e.g., a broadcast channel).",
-                "Implement the event envelope and heartbeat mechanism as defined in the contract."
+                "Implement the event envelope and heartbeat mechanism as defined in docs/WEB_API_CONTRACT.md (coordinator_event and heartbeat event types)."
             ],
-            "notes": "Prefer Engine event sourcing (SQLite-first or brokered stream) over direct log file reads for performance.",
+            "notes": "Prefer Engine event sourcing (SQLite-first or brokered stream) over direct log file reads for performance. The SSE envelope is already specified in docs/WEB_API_CONTRACT.md.",
             "exclusive_resources": [
                 "cli/src/commands/web.rs",
                 "core/src/engine.rs",
@@ -315,11 +315,11 @@
             "objective": "To keep frontend data access consistent, typed, and maintainable.",
             "result": "`web/src/api/client.ts` and `web/src/api/models.ts` exist and align with the API contract.",
             "steps": [
-                "Define TypeScript interfaces for all API payloads in `models.ts`.",
-                "Implement fetch wrappers in `client.ts` that handle standardized success and error responses.",
-                "Expose functions: getHealth, getStatus, postCoordinatorAction, etc."
+                "Define TypeScript interfaces for all API payloads in `models.ts`, matching the backend structs (ApiCoordinatorStatus, ApiErrorEnvelope, ApiErrorBody, ApiThrottledToolStatus, ApiCoordinatorCommandResult, ApiSelectedTask, ApiFailureReport).",
+                "Implement fetch wrappers in `client.ts` that handle the standardized success and error envelope (error.code, error.category, error.message, error.context?, error.cause?).",
+                "Expose functions: getHealth, getStatus, postCoordinatorAction (run/stop/resume/dispatch/advance/reconcile/cleanup)."
             ],
-            "notes": "Types must be kept in sync with the backend API contract.",
+            "notes": "Types must match the backend API structs already implemented in cli/src/commands/web.rs. The error envelope is {error: {code, category, message, context?, cause?}}. Status response includes rate-limit fields (throttled_tools, effective_max_parallel). See docs/WEB_API_CONTRACT.md for full contract.",
             "exclusive_resources": [
                 "web/src/"
             ],
@@ -337,19 +337,20 @@
             "objective": "Make the web UI usable for daily orchestration.",
             "result": "Dashboard page is wired to the API and provides basic coordinator controls.",
             "steps": [
-                "Use the API client to load status on mount.",
-                "Implement control buttons that call the API client.",
+                "Use the API client to load status on mount (replace current placeholder in web/src/pages/Dashboard.tsx).",
+                "Implement control buttons using the existing Radix-UI Button component (web/src/components/Button.tsx) that call the API client for run, stop, and other coordinator actions.",
                 "Render error responses in a user-friendly way (e.g., a toast notification).",
                 "Display a loading state while requests are in flight."
             ],
-            "notes": "Focus on a clear and responsive user experience.",
+            "notes": "The existing Dashboard is a bare placeholder (<h1>Dashboard</h1>). The Radix-UI Button component with asChild prop is already available. Focus on a clear and responsive user experience.",
             "exclusive_resources": [
                 "web/src/"
             ],
             "dependencies": [
                 "WEB-FRONTEND-003",
                 "WEB-BACKEND-006",
-                "WEB-BACKEND-007"
+                "WEB-BACKEND-007A",
+                "WEB-BACKEND-007B"
             ],
             "priority": "1"
         },
@@ -362,11 +363,11 @@
             "result": "Logs page shows a live, formatted stream of events.",
             "steps": [
                 "Create a custom React hook (e.g., `useEventSource`) to manage the connection.",
-                "Render events, parsing the data according to the event envelope.",
+                "Render events in web/src/pages/Logs.tsx (replace current placeholder), parsing the data according to the event envelope defined in docs/WEB_API_CONTRACT.md (coordinator_event and heartbeat types).",
                 "Handle connection state changes (connecting, open, closed).",
                 "Add basic filtering controls (e.g., by event type)."
             ],
-            "notes": "Keep the UI rendering lightweight to handle high event volume.",
+            "notes": "The existing Logs page is a bare placeholder (<h1>Logs</h1>). Keep the UI rendering lightweight to handle high event volume.",
             "exclusive_resources": [
                 "web/src/"
             ],
@@ -403,16 +404,16 @@
             "id": "WEB-BACKEND-009",
             "title": "Bind web server to localhost by default with explicit expose flag",
             "category": "BACKEND",
-            "description": "Problem/Goal: Prevent accidental remote exposure of the local UI. Key actions: Default bind address to 127.0.0.1. Add a CLI flag (e.g., --host) to override the bind address to `0.0.0.0` or another IP. Out of scope: auth. Success criteria: Without flags, the server is only accessible locally. With `--host 0.0.0.0`, it is accessible over the network.",
-            "objective": "To ensure a safe-by-default configuration for the local UI.",
-            "result": "CLI exposes bind configuration and defaults to localhost.",
+            "description": "Problem/Goal: Add CLI flags to control the bind address and port. The server already binds to 127.0.0.1 by default (delivered in WEB-BACKEND-003). Key actions: Add --host and --port CLI flags to the web subcommand so the bind address and port can be overridden at the command line (currently port comes from canonical config only). Out of scope: auth. Success criteria: `macc web --host 0.0.0.0 --port 8080` binds to all interfaces on port 8080. Without flags, the server binds to 127.0.0.1 on the configured port (default 3450).",
+            "objective": "To ensure a safe-by-default configuration with explicit override capability.",
+            "result": "CLI exposes --host and --port flags, defaulting to 127.0.0.1 and 3450.",
             "steps": [
-                "Add `--host` and `--port` CLI options to the `web` subcommand.",
-                "Use `127.0.0.1` as the default value for `--host`.",
-                "Use the provided host and port when binding the Axum server.",
+                "Add `--host` and `--port` CLI options to the `web` subcommand (the WebCommand struct or its clap args).",
+                "Use `127.0.0.1` as the default value for `--host` and the canonical config web_port (default 3450) for `--port`.",
+                "Override the current bind logic in web.rs to use the CLI-provided host and port.",
                 "Document the flags in the command's help text."
             ],
-            "notes": "This is a critical security and usability feature.",
+            "notes": "The server already binds to 127.0.0.1 (WEB-BACKEND-003). Port is currently read from canonical.settings.web_port with fallback to 3450. This task adds explicit CLI override flags.",
             "exclusive_resources": [
                 "cli/src/commands/web.rs"
             ],
@@ -425,15 +426,15 @@
             "id": "WEB-BACKEND-011",
             "title": "Centralize Web Server Configuration",
             "category": "BACKEND",
-            "description": "Problem/Goal: To manage all web server settings from a single, clear source, improving maintainability and separating concerns. Key actions: Create a `WebServerConfig` struct in the `web` command module. Populate this struct from the parsed CLI arguments (`--host`, `--port`, `--assets-mode`, etc.). Pass this config struct to the server setup logic. Out of scope: Reading from `macc.yaml`. Success criteria: Server startup logic reads all configuration from a single struct, not directly from `clap` matches.",
+            "description": "Problem/Goal: To manage all web server settings from a single, clear source, improving maintainability and separating concerns. Key actions: Create a `WebServerConfig` struct in the `web` command module. Populate this struct from the parsed CLI arguments (`--host`, `--port`, `--assets-mode`, etc.) and the existing canonical config (web_port). Pass this config struct to the server setup logic. Out of scope: Reading from `macc.yaml`. Success criteria: Server startup logic reads all configuration from a single struct, not directly from `clap` matches or canonical config.",
             "objective": "To improve code structure by centralizing configuration.",
             "result": "A `WebServerConfig` struct is used to configure and launch the server.",
             "steps": [
-                "Define a `WebServerConfig` struct.",
-                "In the `web` command's `run` function, create an instance of the struct from CLI arguments.",
-                "Refactor the server setup logic to accept the config struct as an argument."
+                "Define a `WebServerConfig` struct (separate from the existing WebState which holds SharedEngine + ProjectPaths at runtime).",
+                "In the `web` command's `run` function, create an instance of the struct from CLI arguments and canonical config.",
+                "Refactor the server setup logic to accept the config struct as an argument instead of reading canonical.settings.web_port directly."
             ],
-            "notes": "This refactoring makes the server logic more modular and easier to test.",
+            "notes": "WebState (SharedEngine + ProjectPaths) already exists for runtime state. WebServerConfig is about startup/bind configuration. Keep the two concerns separate.",
             "exclusive_resources": [
                 "cli/src/commands/web.rs"
             ],
@@ -453,10 +454,10 @@
             "steps": [
                 "Install `vitest`, `jsdom`, and `@testing-library/react`.",
                 "Configure `vite.config.ts` and `tsconfig.json` for testing.",
-                "Write a simple unit test for a UI component (e.g., a button).",
+                "Write a simple unit test for a UI component (e.g., the existing Button component in web/src/components/Button.tsx).",
                 "Write a test for an API client function, using a mock handler (e.g., with `msw`)."
             ],
-            "notes": "A solid testing foundation is crucial for long-term maintainability.",
+            "notes": "No testing libraries are currently installed. The frontend has a Button component and Layout component that can serve as initial test targets. A solid testing foundation is crucial for long-term maintainability.",
             "exclusive_resources": [
                 "web/"
             ],
@@ -478,7 +479,7 @@
                 "Replace the basic HTML element with the Radix primitive and apply Tailwind classes.",
                 "Verify that functionality and accessibility are preserved or improved."
             ],
-            "notes": "Radix UI + Tailwind CSS is a powerful combination for building custom design systems.",
+            "notes": "Delivered. Installed @radix-ui/react-slot v1.2.4. Created web/src/components/Button.tsx using the Slot primitive for polymorphic rendering (asChild prop). Component uses React.forwardRef, supports full HTML button attributes via spread, and is styled with Tailwind CSS utilities (flex, rounded-md, ring-offset, focus-visible, disabled, hover states). Used in Layout.tsx for sidebar navigation links via asChild + Link composition.",
             "exclusive_resources": [
                 "web/src/",
                 "web/package.json"
@@ -498,10 +499,10 @@
             "steps": [
                 "Run `npm install zustand`.",
                 "Create a `store.ts` file and define a `useCoordinatorStore`.",
-                "The store should hold the status data and any loading/error states.",
+                "The store should hold the status data (matching ApiCoordinatorStatus shape from the API client models) and any loading/error states.",
                 "Refactor the Dashboard component to get its data and trigger API calls via the store's actions."
             ],
-            "notes": "Zustand is lightweight and a good starting point before considering more complex solutions like Redux.",
+            "notes": "Zustand is lightweight and a good starting point. The store should align with the API response types defined in WEB-FRONTEND-003.",
             "exclusive_resources": [
                 "web/src/",
                 "web/package.json"
@@ -569,7 +570,7 @@
                 "Map errors to the standard error schema.",
                 "Add an integration test for success and failure."
             ],
-            "notes": "Keep payload empty for now; extend later if needed.",
+            "notes": "Delivered. Implemented POST /api/v1/coordinator/run handler returning ApiCoordinatorCommandResult (with optional fields: selected_task, advanced, dispatched, reconciled, stopped, cleaned_up, message). Uses the shared ApiError system with From<MaccError> mapping. Integration tests cover both success envelope and error cases using WebTestEngine mock and tower::ServiceExt.",
             "exclusive_resources": [
                 "cli/src/commands/web.rs",
                 "core/src/engine.rs"
@@ -591,7 +592,7 @@
                 "Map errors to the standard error schema.",
                 "Add an integration test for success and failure."
             ],
-            "notes": "Align response with other coordinator endpoints.",
+            "notes": "Delivered. Implemented POST /api/v1/coordinator/stop handler following the same pattern as /coordinator/run. Returns ApiCoordinatorCommandResult. Integration tests cover success and error cases. Uses the same ApiError mapping and WebTestEngine mock.",
             "exclusive_resources": [
                 "cli/src/commands/web.rs",
                 "core/src/engine.rs"
@@ -609,11 +610,12 @@
             "objective": "Expose coordinator resume action via API.",
             "result": "Resume endpoint is implemented and tested.",
             "steps": [
-                "Add handler that invokes Engine coordinator resume.",
-                "Map errors to the standard error schema.",
-                "Add an integration test for success and failure."
+                "Add a resume handler following the established pattern (see coordinator_run_handler and coordinator_stop_handler in web.rs).",
+                "Return ApiCoordinatorCommandResult, map errors via ApiError::from(MaccError).",
+                "Add the route to the existing Axum router: `.route(\"/api/v1/coordinator/resume\", post(coordinator_resume_handler))`.",
+                "Add integration tests using the WebTestEngine mock and tower::ServiceExt pattern."
             ],
-            "notes": "If resume is a no-op when not paused, return success with a flag.",
+            "notes": "Follow the exact pattern established by WEB-BACKEND-007A/007B. The ApiCoordinatorCommandResult struct and ApiError system are already in place. If resume is a no-op when not paused, return success with a flag.",
             "exclusive_resources": [
                 "cli/src/commands/web.rs",
                 "core/src/engine.rs"
@@ -631,11 +633,12 @@
             "objective": "Expose coordinator dispatch action via API.",
             "result": "Dispatch endpoint is implemented and tested.",
             "steps": [
-                "Add handler that invokes Engine coordinator dispatch.",
-                "Map errors to the standard error schema.",
-                "Add an integration test for success and failure."
+                "Add a dispatch handler following the established pattern (see coordinator_run_handler and coordinator_stop_handler in web.rs).",
+                "Return ApiCoordinatorCommandResult, map errors via ApiError::from(MaccError).",
+                "Add the route to the existing Axum router: `.route(\"/api/v1/coordinator/dispatch\", post(coordinator_dispatch_handler))`.",
+                "Add integration tests using the WebTestEngine mock and tower::ServiceExt pattern."
             ],
-            "notes": "Keep input empty; extend later if needed.",
+            "notes": "Follow the exact pattern established by WEB-BACKEND-007A/007B. Keep input empty; extend later if needed.",
             "exclusive_resources": [
                 "cli/src/commands/web.rs",
                 "core/src/engine.rs"
@@ -653,11 +656,12 @@
             "objective": "Expose coordinator advance action via API.",
             "result": "Advance endpoint is implemented and tested.",
             "steps": [
-                "Add handler that invokes Engine coordinator advance.",
-                "Map errors to the standard error schema.",
-                "Add an integration test for success and failure."
+                "Add an advance handler following the established pattern (see coordinator_run_handler and coordinator_stop_handler in web.rs).",
+                "Return ApiCoordinatorCommandResult, map errors via ApiError::from(MaccError).",
+                "Add the route to the existing Axum router: `.route(\"/api/v1/coordinator/advance\", post(coordinator_advance_handler))`.",
+                "Add integration tests using the WebTestEngine mock and tower::ServiceExt pattern."
             ],
-            "notes": "Keep input empty; extend later if needed.",
+            "notes": "Follow the exact pattern established by WEB-BACKEND-007A/007B. Keep input empty; extend later if needed.",
             "exclusive_resources": [
                 "cli/src/commands/web.rs",
                 "core/src/engine.rs"
@@ -675,11 +679,12 @@
             "objective": "Expose coordinator reconcile action via API.",
             "result": "Reconcile endpoint is implemented and tested.",
             "steps": [
-                "Add handler that invokes Engine coordinator reconcile.",
-                "Map errors to the standard error schema.",
-                "Add an integration test for success and failure."
+                "Add a reconcile handler following the established pattern (see coordinator_run_handler and coordinator_stop_handler in web.rs).",
+                "Return ApiCoordinatorCommandResult, map errors via ApiError::from(MaccError).",
+                "Add the route to the existing Axum router: `.route(\"/api/v1/coordinator/reconcile\", post(coordinator_reconcile_handler))`.",
+                "Add integration tests using the WebTestEngine mock and tower::ServiceExt pattern."
             ],
-            "notes": "Align error mapping with other actions.",
+            "notes": "Follow the exact pattern established by WEB-BACKEND-007A/007B. Align error mapping with other actions.",
             "exclusive_resources": [
                 "cli/src/commands/web.rs",
                 "core/src/engine.rs"
@@ -697,11 +702,12 @@
             "objective": "Expose coordinator cleanup action via API.",
             "result": "Cleanup endpoint is implemented and tested.",
             "steps": [
-                "Add handler that invokes Engine coordinator cleanup.",
-                "Map errors to the standard error schema.",
-                "Add an integration test for success and failure."
+                "Add a cleanup handler following the established pattern (see coordinator_run_handler and coordinator_stop_handler in web.rs).",
+                "Return ApiCoordinatorCommandResult, map errors via ApiError::from(MaccError).",
+                "Add the route to the existing Axum router: `.route(\"/api/v1/coordinator/cleanup\", post(coordinator_cleanup_handler))`.",
+                "Add integration tests using the WebTestEngine mock and tower::ServiceExt pattern."
             ],
-            "notes": "Cleanup should be non-blocking on warnings; map warnings in response if needed.",
+            "notes": "Follow the exact pattern established by WEB-BACKEND-007A/007B. Cleanup should be non-blocking on warnings; map warnings in response if needed.",
             "exclusive_resources": [
                 "cli/src/commands/web.rs",
                 "core/src/engine.rs"
@@ -715,15 +721,15 @@
             "id": "WEB-BACKEND-012",
             "title": "Define API error schema and add tests",
             "category": "BACKEND",
-            "description": "Problem/Goal: Standardize error responses across the API. Key actions: Define a single error response schema (code/message/details) and implement helper to map Engine errors. Add integration tests validating error responses for at least /api/v1/status and one coordinator action. Out of scope: full error catalog. Success criteria: All endpoints return the same error envelope on failure and tests cover the contract.",
-            "objective": "Make errors predictable for the web client.",
-            "result": "Standard error schema and tests are in place.",
+            "description": "Problem/Goal: Expand error codes beyond MACC-WEB-0000 and increase test coverage. The error response schema (ApiErrorEnvelope, ApiErrorBody) and the From<MaccError> mapper are already implemented (delivered in WEB-BACKEND-006). Key actions: Replace the placeholder MACC-WEB-0000 code with domain-specific error codes as cataloged in docs/ERRORS.md. Add integration tests validating error responses for at least /api/v1/status and one coordinator action. Out of scope: full error catalog. Success criteria: Error codes are specific and meaningful. Tests validate the error envelope contract.",
+            "objective": "Make errors predictable and debuggable for the web client.",
+            "result": "Specific error codes replace the MACC-WEB-0000 placeholder. Additional tests validate the contract.",
             "steps": [
-                "Define ErrorResponse struct and JSON serialization.",
-                "Add a mapper from Engine errors to ErrorResponse.",
-                "Add integration tests asserting error schema."
+                "Define specific MACC-WEB-XXXX error codes in docs/ERRORS.md for each error category (Validation, NotFound, Coordinator, Storage, etc.).",
+                "Update the From<MaccError> impl in web.rs to emit specific codes instead of MACC-WEB-0000.",
+                "Add integration tests asserting specific error codes and the envelope shape."
             ],
-            "notes": "Keep the schema minimal: code, message, optional details.",
+            "notes": "The ApiErrorEnvelope/ApiErrorBody structs and From<MaccError> mapping already exist in web.rs (delivered by WEB-BACKEND-006). Currently all errors use hardcoded MACC-WEB-0000. This task focuses on making error codes specific and expanding test coverage. Existing tests already cover some error cases via WebTestEngine mock.",
             "exclusive_resources": [
                 "cli/src/commands/web.rs",
                 "core/src/engine.rs",

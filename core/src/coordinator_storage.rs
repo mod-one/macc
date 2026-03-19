@@ -265,8 +265,9 @@ impl CoordinatorStorage for JsonStorage {
 
         let mut events_buf = String::new();
         for event in &snapshot.events {
-            let line = serde_json::to_string(event).map_err(|e| {
-                MaccError::Storage { backend: "json", message: format!("Failed to serialize event json: {}", e) }
+            let line = serde_json::to_string(event).map_err(|e| MaccError::Storage {
+                backend: "json",
+                message: format!("Failed to serialize event json: {}", e),
             })?;
             events_buf.push_str(&line);
             events_buf.push('\n');
@@ -317,7 +318,10 @@ impl SqliteStorage {
 
     pub fn append_event(&self, event: &Value) -> Result<bool> {
         let record =
-            CoordinatorEventRecord::from_value(event.clone()).map_err(|e| MaccError::Storage { backend: "sqlite", message: e })?;
+            CoordinatorEventRecord::from_value(event.clone()).map_err(|e| MaccError::Storage {
+                backend: "sqlite",
+                message: e,
+            })?;
         self.append_event_record(&record)
     }
 
@@ -379,11 +383,15 @@ impl SqliteStorage {
         raw_event.run_id = Some(run_id.clone());
         raw_event.seq = seq;
         raw_event.ts = ts.to_string();
-        let payload_raw = serde_json::to_string(&raw_event.payload).map_err(|e| {
-            MaccError::Storage { backend: "sqlite", message: format!("Failed to serialize event payload: {}", e) }
+        let payload_raw =
+            serde_json::to_string(&raw_event.payload).map_err(|e| MaccError::Storage {
+                backend: "sqlite",
+                message: format!("Failed to serialize event payload: {}", e),
+            })?;
+        let raw_json = serde_json::to_string(&raw_event).map_err(|e| MaccError::Storage {
+            backend: "sqlite",
+            message: format!("Failed to serialize event json: {}", e),
         })?;
-        let raw_json = serde_json::to_string(&raw_event)
-            .map_err(|e| MaccError::Storage { backend: "sqlite", message: format!("Failed to serialize event json: {}", e) })?;
         let inserted = tx
             .execute(
                 "INSERT OR IGNORE INTO events (event_id, seq, ts, source, task_id, event_type, phase, status, payload_json, raw_json)
@@ -434,9 +442,11 @@ impl SqliteStorage {
             .filter(|s| !s.trim().is_empty())
             .map(|s| s.to_string())
             .unwrap_or_else(|| format!("evt-{}-{}-{}", event.event_type, event.task_id, seq));
-        let payload_raw = serde_json::to_string(event.payload.as_value()).map_err(|e| {
-            MaccError::Storage { backend: "sqlite", message: format!("Failed to serialize event payload: {}", e) }
-        })?;
+        let payload_raw =
+            serde_json::to_string(event.payload.as_value()).map_err(|e| MaccError::Storage {
+                backend: "sqlite",
+                message: format!("Failed to serialize event payload: {}", e),
+            })?;
         let raw_json = serde_json::to_string(&json!({
             "schema_version":"1",
             "event_id": event_id,
@@ -450,7 +460,10 @@ impl SqliteStorage {
             "status": event.status,
             "payload": event.payload.as_value()
         }))
-        .map_err(|e| MaccError::Storage { backend: "sqlite", message: format!("Failed to serialize event json: {}", e) })?;
+        .map_err(|e| MaccError::Storage {
+            backend: "sqlite",
+            message: format!("Failed to serialize event json: {}", e),
+        })?;
 
         let inserted = tx
             .execute(
@@ -475,7 +488,14 @@ impl SqliteStorage {
 
     fn open(&self) -> Result<Connection> {
         ensure_parent_dir(&self.paths.sqlite_path)?;
-        Connection::open(&self.paths.sqlite_path).map_err(sql_err)
+        let conn = Connection::open(&self.paths.sqlite_path).map_err(sql_err)?;
+        // WAL mode allows concurrent readers and writers without blocking.
+        conn.execute_batch("PRAGMA journal_mode=WAL;")
+            .map_err(sql_err)?;
+        // Prevent SQLITE_BUSY errors when multiple performers write concurrently.
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(sql_err)?;
+        Ok(conn)
     }
 
     fn init_schema(&self, conn: &Connection) -> Result<()> {
@@ -575,7 +595,10 @@ impl SqliteStorage {
             updated_at: Some(now.clone()),
             ..CoordinatorCursor::default()
         })
-        .map_err(|e| MaccError::Storage { backend: "sqlite", message: format!("Failed to serialize cursor payload: {}", e) })?;
+        .map_err(|e| MaccError::Storage {
+            backend: "sqlite",
+            message: format!("Failed to serialize cursor payload: {}", e),
+        })?;
         conn.execute(
             "INSERT INTO cursors (name, offset, last_event_id, updated_at, payload_json) VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(name) DO UPDATE SET offset=?2, last_event_id=?3, updated_at=?4",
@@ -643,8 +666,9 @@ impl SqliteStorage {
         let title = task.title.clone().unwrap_or_default();
         let priority = task.priority.clone().unwrap_or_default();
         let tool = task.tool.clone().unwrap_or_default();
-        let payload = serde_json::to_string(&task).map_err(|e| {
-            MaccError::Storage { backend: "sqlite", message: format!("Failed to serialize task payload: {}", e) }
+        let payload = serde_json::to_string(&task).map_err(|e| MaccError::Storage {
+            backend: "sqlite",
+            message: format!("Failed to serialize task payload: {}", e),
         })?;
         tx.execute(
             "UPDATE tasks SET state=?2, title=?3, priority=?4, tool=?5, payload_json=?6, updated_at=?7 WHERE task_id=?1",
@@ -741,8 +765,9 @@ impl SqliteStorage {
         let title = task.title.clone().unwrap_or_default();
         let priority = task.priority.clone().unwrap_or_default();
         let tool = task.tool.clone().unwrap_or_default();
-        let payload = serde_json::to_string(&task).map_err(|e| {
-            MaccError::Storage { backend: "sqlite", message: format!("Failed to serialize task payload: {}", e) }
+        let payload = serde_json::to_string(&task).map_err(|e| MaccError::Storage {
+            backend: "sqlite",
+            message: format!("Failed to serialize task payload: {}", e),
         })?;
         tx.execute(
             "UPDATE tasks SET state=?2, title=?3, priority=?4, tool=?5, payload_json=?6, updated_at=?7 WHERE task_id=?1",
@@ -782,8 +807,9 @@ impl SqliteStorage {
         let title = task.title.clone().unwrap_or_default();
         let priority = task.priority.clone().unwrap_or_default();
         let tool = task.tool.clone().unwrap_or_default();
-        let payload = serde_json::to_string(&task).map_err(|e| {
-            MaccError::Storage { backend: "sqlite", message: format!("Failed to serialize task payload: {}", e) }
+        let payload = serde_json::to_string(&task).map_err(|e| MaccError::Storage {
+            backend: "sqlite",
+            message: format!("Failed to serialize task payload: {}", e),
         })?;
         tx.execute(
             "UPDATE tasks SET state=?2, title=?3, priority=?4, tool=?5, payload_json=?6, updated_at=?7 WHERE task_id=?1",
@@ -829,8 +855,9 @@ impl SqliteStorage {
         let title = task.title.clone().unwrap_or_default();
         let priority = task.priority.clone().unwrap_or_default();
         let tool = task.tool.clone().unwrap_or_default();
-        let payload = serde_json::to_string(&task).map_err(|e| {
-            MaccError::Storage { backend: "sqlite", message: format!("Failed to serialize task payload: {}", e) }
+        let payload = serde_json::to_string(&task).map_err(|e| MaccError::Storage {
+            backend: "sqlite",
+            message: format!("Failed to serialize task payload: {}", e),
         })?;
         tx.execute(
             "UPDATE tasks SET state=?2, title=?3, priority=?4, tool=?5, payload_json=?6, updated_at=?7 WHERE task_id=?1",
@@ -864,8 +891,9 @@ impl SqliteStorage {
         let title = task.title.clone().unwrap_or_default();
         let priority = task.priority.clone().unwrap_or_default();
         let tool = task.tool.clone().unwrap_or_default();
-        let payload = serde_json::to_string(&task).map_err(|e| {
-            MaccError::Storage { backend: "sqlite", message: format!("Failed to serialize task payload: {}", e) }
+        let payload = serde_json::to_string(&task).map_err(|e| MaccError::Storage {
+            backend: "sqlite",
+            message: format!("Failed to serialize task payload: {}", e),
         })?;
         tx.execute(
             "UPDATE tasks SET state=?2, title=?3, priority=?4, tool=?5, payload_json=?6, updated_at=?7 WHERE task_id=?1",
@@ -904,8 +932,9 @@ impl SqliteStorage {
         let title = task.title.clone().unwrap_or_default();
         let priority = task.priority.clone().unwrap_or_default();
         let tool = task.tool.clone().unwrap_or_default();
-        let payload = serde_json::to_string(&task).map_err(|e| {
-            MaccError::Storage { backend: "sqlite", message: format!("Failed to serialize task payload: {}", e) }
+        let payload = serde_json::to_string(&task).map_err(|e| MaccError::Storage {
+            backend: "sqlite",
+            message: format!("Failed to serialize task payload: {}", e),
         })?;
         tx.execute(
             "UPDATE tasks SET state=?2, title=?3, priority=?4, tool=?5, payload_json=?6, updated_at=?7 WHERE task_id=?1",
@@ -939,11 +968,12 @@ impl SqliteStorage {
             .get("last_heartbeat")
             .and_then(Value::as_str)
             .unwrap_or("");
-        let runtime_raw = serde_json::to_string(runtime).map_err(|e| {
-            MaccError::Storage { backend: "sqlite", message: format!(
+        let runtime_raw = serde_json::to_string(runtime).map_err(|e| MaccError::Storage {
+            backend: "sqlite",
+            message: format!(
                 "Failed to serialize task_runtime payload for '{}': {}",
                 task_id, e
-            ) }
+            ),
         })?;
         tx.execute(
             "INSERT INTO task_runtime (task_id, status, current_phase, pid, last_error, last_heartbeat, payload_json, updated_at)
@@ -1017,11 +1047,12 @@ impl SqliteStorage {
                     locked_at: locked_at.clone(),
                     extra: Default::default(),
                 };
-                let lock_json = serde_json::to_value(&lock).map_err(|e| {
-                    MaccError::Storage { backend: "sqlite", message: format!(
+                let lock_json = serde_json::to_value(&lock).map_err(|e| MaccError::Storage {
+                    backend: "sqlite",
+                    message: format!(
                         "Failed to serialize typed resource lock '{}': {}",
                         resource_name, e
-                    ) }
+                    ),
                 })?;
                 let payload = if worktree_path.is_empty() {
                     // Keep historical shape where missing worktree_path becomes null in payload.
@@ -1108,7 +1139,10 @@ impl CoordinatorStorage for SqliteStorage {
             |row| row.get::<_, String>(0),
         ) {
             Ok(raw) => Some(serde_json::from_str::<TaskRegistry>(&raw).map_err(|e| {
-                MaccError::Storage { backend: "sqlite", message: format!("Failed to parse registry_json metadata: {}", e) }
+                MaccError::Storage {
+                    backend: "sqlite",
+                    message: format!("Failed to parse registry_json metadata: {}", e),
+                }
             })?),
             Err(rusqlite::Error::QueryReturnedNoRows) => None,
             Err(e) => return Err(sql_err(e)),
@@ -1162,7 +1196,10 @@ impl CoordinatorStorage for SqliteStorage {
         ) {
             Ok(raw) => Some(
                 serde_json::from_str::<CoordinatorCursor>(&raw).map_err(|e| {
-                    MaccError::Storage { backend: "sqlite", message: format!("Failed to parse cursor payload_json: {}", e) }
+                    MaccError::Storage {
+                        backend: "sqlite",
+                        message: format!("Failed to parse cursor payload_json: {}", e),
+                    }
                 })?,
             ),
             Err(rusqlite::Error::QueryReturnedNoRows) => None,
@@ -1186,14 +1223,18 @@ impl CoordinatorStorage for SqliteStorage {
             .map_err(sql_err)?;
         tx.execute("DELETE FROM resource_locks", [])
             .map_err(sql_err)?;
-        tx.execute("DELETE FROM events", []).map_err(sql_err)?;
+        // Events are append-only — never delete them during snapshot save.
+        // IPC handlers write events concurrently; deleting + re-inserting
+        // creates a race window that loses events (including phase_results).
         tx.execute("DELETE FROM cursors", []).map_err(sql_err)?;
         tx.execute("DELETE FROM jobs", []).map_err(sql_err)?;
 
         let now = now_iso_string();
-        let registry_raw = serde_json::to_string(&snapshot.registry).map_err(|e| {
-            MaccError::Storage { backend: "sqlite", message: format!("Failed to serialize registry json: {}", e) }
-        })?;
+        let registry_raw =
+            serde_json::to_string(&snapshot.registry).map_err(|e| MaccError::Storage {
+                backend: "sqlite",
+                message: format!("Failed to serialize registry json: {}", e),
+            })?;
         tx.execute(
             "INSERT OR REPLACE INTO metadata (key, value, updated_at) VALUES ('registry_json', ?1, ?2)",
             params![registry_raw, now],
@@ -1210,8 +1251,9 @@ impl CoordinatorStorage for SqliteStorage {
             let priority = task.priority.clone().unwrap_or_default();
             let tool = task.tool.clone().unwrap_or_default();
             let task_updated = task.updated_at.as_deref().unwrap_or(now.as_str());
-            let task_raw = serde_json::to_string(task).map_err(|e| {
-                MaccError::Storage { backend: "sqlite", message: format!("Failed to serialize task payload: {}", e) }
+            let task_raw = serde_json::to_string(task).map_err(|e| MaccError::Storage {
+                backend: "sqlite",
+                message: format!("Failed to serialize task payload: {}", e),
             })?;
             tx.execute(
                 "INSERT INTO tasks (task_id, state, title, priority, tool, payload_json, updated_at)
@@ -1235,8 +1277,9 @@ impl CoordinatorStorage for SqliteStorage {
                 .get("last_heartbeat")
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            let runtime_raw = serde_json::to_string(&runtime).map_err(|e| {
-                MaccError::Storage { backend: "sqlite", message: format!("Failed to serialize task_runtime payload: {}", e) }
+            let runtime_raw = serde_json::to_string(&runtime).map_err(|e| MaccError::Storage {
+                backend: "sqlite",
+                message: format!("Failed to serialize task_runtime payload: {}", e),
             })?;
             let runtime_updated = runtime
                 .get("updated_at")
@@ -1306,8 +1349,9 @@ impl CoordinatorStorage for SqliteStorage {
             let task_id = lock_value.task_id.as_str();
             let worktree_path = lock_value.worktree_path.as_str();
             let locked_at = lock_value.locked_at.as_str();
-            let lock_raw = serde_json::to_string(lock_value).map_err(|e| {
-                MaccError::Storage { backend: "sqlite", message: format!("Failed to serialize resource lock payload: {}", e) }
+            let lock_raw = serde_json::to_string(lock_value).map_err(|e| MaccError::Storage {
+                backend: "sqlite",
+                message: format!("Failed to serialize resource lock payload: {}", e),
             })?;
             tx.execute(
                 "INSERT INTO resource_locks (resource, task_id, worktree_path, locked_at, payload_json, updated_at)
@@ -1335,14 +1379,16 @@ impl CoordinatorStorage for SqliteStorage {
             let phase = event.phase.as_deref().unwrap_or("");
             let status = event.status.as_str();
             let payload = event.payload.clone();
-            let payload_raw = serde_json::to_string(&payload).map_err(|e| {
-                MaccError::Storage { backend: "sqlite", message: format!("Failed to serialize event payload: {}", e) }
+            let payload_raw = serde_json::to_string(&payload).map_err(|e| MaccError::Storage {
+                backend: "sqlite",
+                message: format!("Failed to serialize event payload: {}", e),
             })?;
-            let event_raw = serde_json::to_string(event).map_err(|e| {
-                MaccError::Storage { backend: "sqlite", message: format!("Failed to serialize raw event: {}", e) }
+            let event_raw = serde_json::to_string(event).map_err(|e| MaccError::Storage {
+                backend: "sqlite",
+                message: format!("Failed to serialize raw event: {}", e),
             })?;
             tx.execute(
-                "INSERT INTO events (event_id, seq, ts, source, task_id, event_type, phase, status, payload_json, raw_json)
+                "INSERT OR IGNORE INTO events (event_id, seq, ts, source, task_id, event_type, phase, status, payload_json, raw_json)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     event_id,
@@ -1361,8 +1407,9 @@ impl CoordinatorStorage for SqliteStorage {
         }
 
         if let Some(cursor) = &snapshot.cursor {
-            let cursor_raw = serde_json::to_string(cursor).map_err(|e| {
-                MaccError::Storage { backend: "sqlite", message: format!("Failed to serialize cursor payload: {}", e) }
+            let cursor_raw = serde_json::to_string(cursor).map_err(|e| MaccError::Storage {
+                backend: "sqlite",
+                message: format!("Failed to serialize cursor payload: {}", e),
             })?;
             let path = cursor.path.as_deref().unwrap_or("");
             let inode = cursor.inode.unwrap_or(0);
@@ -1543,8 +1590,10 @@ fn read_json_or_default(path: &Path, action: &str, default: Value) -> Result<Val
         action: action.into(),
         source: e,
     })?;
-    serde_json::from_str::<Value>(&raw)
-        .map_err(|e| MaccError::Storage { backend: "json", message: format!("Failed to parse {}: {}", path.display(), e) })
+    serde_json::from_str::<Value>(&raw).map_err(|e| MaccError::Storage {
+        backend: "json",
+        message: format!("Failed to parse {}: {}", path.display(), e),
+    })
 }
 
 fn read_json_typed_or_default<T>(path: &Path, action: &str, default: T) -> Result<T>
@@ -1559,8 +1608,10 @@ where
         action: action.into(),
         source: e,
     })?;
-    serde_json::from_str::<T>(&raw)
-        .map_err(|e| MaccError::Storage { backend: "json", message: format!("Failed to parse {}: {}", path.display(), e) })
+    serde_json::from_str::<T>(&raw).map_err(|e| MaccError::Storage {
+        backend: "json",
+        message: format!("Failed to parse {}: {}", path.display(), e),
+    })
 }
 
 fn read_registry_or_default(path: &Path, action: &str) -> Result<TaskRegistry> {
@@ -1572,8 +1623,10 @@ fn read_registry_or_default(path: &Path, action: &str) -> Result<TaskRegistry> {
         action: action.into(),
         source: e,
     })?;
-    serde_json::from_str::<TaskRegistry>(&raw)
-        .map_err(|e| MaccError::Storage { backend: "json", message: format!("Failed to parse {}: {}", path.display(), e) })
+    serde_json::from_str::<TaskRegistry>(&raw).map_err(|e| MaccError::Storage {
+        backend: "json",
+        message: format!("Failed to parse {}: {}", path.display(), e),
+    })
 }
 
 fn ensure_parent_dir(path: &Path) -> Result<()> {
@@ -1604,8 +1657,10 @@ fn write_text_atomic(path: &Path, content: &str) -> Result<()> {
 }
 
 fn write_json_atomic<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
-    let content = serde_json::to_string_pretty(value)
-        .map_err(|e| MaccError::Storage { backend: "json", message: format!("Failed to serialize json: {}", e) })?;
+    let content = serde_json::to_string_pretty(value).map_err(|e| MaccError::Storage {
+        backend: "json",
+        message: format!("Failed to serialize json: {}", e),
+    })?;
     write_text_atomic(path, &content)
 }
 
@@ -1636,11 +1691,12 @@ fn default_registry() -> TaskRegistry {
 }
 
 fn parse_task_payload(task_id: &str, raw: &str) -> Result<Task> {
-    serde_json::from_str::<Task>(raw).map_err(|e| {
-        MaccError::Storage { backend: "sqlite", message: format!(
+    serde_json::from_str::<Task>(raw).map_err(|e| MaccError::Storage {
+        backend: "sqlite",
+        message: format!(
             "Failed to parse typed task payload for '{}': {}",
             task_id, e
-        ) }
+        ),
     })
 }
 
@@ -1649,7 +1705,10 @@ fn parse_task_runtime_value(task: &Task) -> Value {
 }
 
 fn sql_err(e: rusqlite::Error) -> MaccError {
-    MaccError::Storage { backend: "sqlite", message: format!("SQLite coordinator storage error: {}", e) }
+    MaccError::Storage {
+        backend: "sqlite",
+        message: format!("SQLite coordinator storage error: {}", e),
+    }
 }
 
 #[cfg(test)]

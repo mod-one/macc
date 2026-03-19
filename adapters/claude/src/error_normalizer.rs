@@ -112,9 +112,7 @@ fn request_id_regex() -> &'static Regex {
 /// Regex for extracting `retry-after` or reset-time hints from text.
 fn retry_after_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"(?i)(?:retry.after|retry_after)\s*[:=]\s*(\d+)").unwrap()
-    })
+    RE.get_or_init(|| Regex::new(r"(?i)(?:retry.after|retry_after)\s*[:=]\s*(\d+)").unwrap())
 }
 
 impl ErrorNormalizer for ClaudeErrorNormalizer {
@@ -201,7 +199,8 @@ mod tests {
 
     #[test]
     fn overloaded_error_without_529() {
-        let stderr = r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#;
+        let stderr =
+            r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#;
         let err = norm(1, stderr, "").unwrap();
         assert_eq!(err.canonical_class, CanonicalClass::Overloaded);
         assert!(err.retryable);
@@ -221,7 +220,8 @@ mod tests {
 
     #[test]
     fn rate_limit_error_type() {
-        let stderr = r#"{"type":"error","error":{"type":"rate_limit_error","message":"Rate limited"}}"#;
+        let stderr =
+            r#"{"type":"error","error":{"type":"rate_limit_error","message":"Rate limited"}}"#;
         let err = norm(1, stderr, "").unwrap();
         assert_eq!(err.canonical_class, CanonicalClass::RateLimit);
         assert!(err.retryable);
@@ -282,8 +282,7 @@ mod tests {
 
     #[test]
     fn authentication_error() {
-        let stderr =
-            r#"{"type":"error","error":{"type":"authentication_error","message":"Invalid API key"}}"#;
+        let stderr = r#"{"type":"error","error":{"type":"authentication_error","message":"Invalid API key"}}"#;
         let err = norm(1, stderr, "").unwrap();
         assert_eq!(err.canonical_class, CanonicalClass::Auth);
         assert!(!err.retryable);

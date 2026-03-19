@@ -540,8 +540,10 @@ pub trait Engine {
         backend: &mut dyn coordinator::engine::ControlPlaneBackend,
         cfg: coordinator::engine::ControlPlaneLoopConfig,
     ) -> Result<()> {
-        let runtime = tokio::runtime::Builder::new_current_thread()
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
             .enable_time()
+            .enable_io()
             .build()
             .map_err(|e| {
                 crate::MaccError::Validation(format!("build runtime for coordinator run: {}", e))
@@ -796,6 +798,10 @@ pub trait Engine {
             "dev",
             &format!("stopped: {}", reason),
         )
+    }
+
+    fn coordinator_cleanup(&self, paths: &ProjectPaths) -> Result<()> {
+        self.coordinator_cleanup_workflow(paths, None)
     }
 
     fn coordinator_resume(&self, repo_root: &Path) -> Result<()> {
@@ -1152,6 +1158,7 @@ pub struct CoordinatorStatusSnapshot {
 pub struct CoordinatorEvent {
     pub event_id: Option<String>,
     pub run_id: Option<String>,
+    pub seq: i64,
     pub event_type: String,
     pub task_id: Option<String>,
     pub phase: Option<String>,
@@ -1168,6 +1175,7 @@ impl CoordinatorEvent {
         Self {
             event_id: (!record.event_id.is_empty()).then(|| record.event_id.clone()),
             run_id: record.run_id.clone(),
+            seq: record.seq,
             event_type: record.event_type.clone(),
             task_id: record.task_id.clone(),
             phase: record.phase.clone(),

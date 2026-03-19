@@ -1,5 +1,54 @@
 # React + TypeScript + Vite
 
+## Development with `npm run dev` + `macc web`
+
+Run the backend from the repository root:
+
+```bash
+cargo run -p macc-cli --bin macc -- web
+```
+
+In a second terminal, start the Vite dev server:
+
+```bash
+cd web
+npm install
+npm run dev
+```
+
+During development the frontend defaults to relative `/api/v1/*` URLs, so `/api/v1/status` and `/api/v1/events` flow through the proxy defined in [`vite.config.ts`](./vite.config.ts) to `http://localhost:3450`.
+
+If you need to bypass the proxy and point the frontend directly at another backend origin, set `VITE_API_BASE_URL` before starting Vite:
+
+```bash
+cd web
+VITE_API_BASE_URL=http://localhost:3450 npm run dev
+```
+
+## Production build with `macc web`
+
+Build the SPA into `web/dist`, then start the Axum server from the repository root:
+
+```bash
+npm install
+npm run build
+cargo run -p macc-cli --bin macc -- web
+```
+
+The `macc web` command serves the compiled frontend on `http://localhost:3450` by default, keeps `/api/v1/*` on the same server, and falls back to `web/dist/index.html` for client-side routes.
+
+Asset mode selection:
+
+```bash
+# Development default: serve files directly from web/dist
+cargo run -p macc-cli --bin macc -- web --assets dist
+
+# Production-style self-contained binary: serve embedded assets
+cargo run -p macc-cli --bin macc -- web --assets embedded
+```
+
+You can also set `settings.web_assets: dist` or `settings.web_assets: embedded` in the canonical config. When unset, debug builds default to `dist` and release builds default to `embedded`.
+
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 
 Currently, two official plugins are available:

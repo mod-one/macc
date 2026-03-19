@@ -83,10 +83,7 @@ pub enum MaccError {
     SecretDetected { path: String, details: String },
 
     #[error("Coordinator error [{code}]: {message}")]
-    Coordinator {
-        code: &'static str,
-        message: String,
-    },
+    Coordinator { code: &'static str, message: String },
 
     #[error("Storage error ({backend}): {message}")]
     Storage {
@@ -102,6 +99,14 @@ pub enum MaccError {
 
     #[error("Catalog error during {operation}: {message}")]
     Catalog { operation: String, message: String },
+}
+
+impl MaccError {
+    /// Returns `true` for errors that may resolve on their own (disk I/O,
+    /// SQLite contention) and should not immediately abort a coordinator run.
+    pub fn is_transient(&self) -> bool {
+        matches!(self, MaccError::Storage { .. } | MaccError::Io { .. })
+    }
 }
 
 pub type Result<T> = std::result::Result<T, MaccError>;

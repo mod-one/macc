@@ -391,10 +391,7 @@ mod tests {
     fn extracts_request_id() {
         let stderr = r#"Error: 429 Rate limit {"request_id":"req_01abcdef1234567890"}"#;
         let err = norm(1, stderr, "").unwrap();
-        assert_eq!(
-            err.request_id,
-            Some("req_01abcdef1234567890".to_string())
-        );
+        assert_eq!(err.request_id, Some("req_01abcdef1234567890".to_string()));
     }
 
     #[test]

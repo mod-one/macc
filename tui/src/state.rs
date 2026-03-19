@@ -573,16 +573,15 @@ impl AppState {
                             Some((bs, cc))
                         })
                         .unwrap_or((0, 0));
-                    let entry =
-                        throttle_map
-                            .entry(tool_id.to_string())
-                            .or_insert_with(|| ThrottledToolInfo {
-                                tool_id: tool_id.to_string(),
-                                throttled_until: delayed_until.to_string(),
-                                display_until: throttle_until_hms(delayed_until),
-                                backoff_seconds,
-                                consecutive_count,
-                            });
+                    let entry = throttle_map.entry(tool_id.to_string()).or_insert_with(|| {
+                        ThrottledToolInfo {
+                            tool_id: tool_id.to_string(),
+                            throttled_until: delayed_until.to_string(),
+                            display_until: throttle_until_hms(delayed_until),
+                            backoff_seconds,
+                            consecutive_count,
+                        }
+                    });
                     // Keep the latest expiry for this tool.
                     if delayed_until > entry.throttled_until.as_str() {
                         *entry = ThrottledToolInfo {

@@ -44,10 +44,14 @@ pub struct CommitSummary {
 pub struct AuditContext {
     /// Current PRD JSON content (potentially truncated).
     pub prd_json: String,
+    /// Repo-relative path to the PRD file the agent must edit.
+    pub prd_path: String,
     /// Per-task commit context for completed tasks.
     pub completed_tasks: Vec<TaskCommitContext>,
     /// Task IDs that are still in "todo" state.
     pub todo_task_ids: Vec<String>,
+    /// Human-readable summary of what sync-prd reconciled before the audit.
+    pub sync_summary: Option<String>,
 }
 
 /// Result of the audit-prd operation.
@@ -137,14 +141,18 @@ pub fn collect_todo_task_ids(registry: &TaskRegistry) -> Vec<String> {
 /// Build the full audit context.
 pub fn build_audit_context(
     prd_json: &str,
+    prd_path: &str,
     registry: &TaskRegistry,
     completed_contexts: Vec<TaskCommitContext>,
+    sync_summary: Option<String>,
 ) -> AuditContext {
     let todo_task_ids = collect_todo_task_ids(registry);
     AuditContext {
         prd_json: prd_json.to_string(),
+        prd_path: prd_path.to_string(),
         completed_tasks: completed_contexts,
         todo_task_ids,
+        sync_summary,
     }
 }
 
@@ -160,17 +168,43 @@ pub fn build_audit_prompt(context: &AuditContext) -> String {
     let mut prompt = String::with_capacity(4096);
 
     prompt.push_str("# MACC PRD Audit\n\n");
-    prompt.push_str("You are an AI auditor for a project managed by MACC (Multi-Agentic Coding Config).\n");
+    prompt.push_str(
+        "You are an AI auditor for a project managed by MACC (Multi-Agentic Coding Config).\n",
+    );
     prompt.push_str("Your task is to update the PRD (Product Requirements Document) based on what was actually delivered.\n\n");
 
+    prompt.push_str("## Target file\n\n");
+    prompt.push_str(&format!(
+        "The PRD file you must edit is: `{}`\n\n",
+        context.prd_path
+    ));
+
+    // Sync-prd result
+    if let Some(ref summary) = context.sync_summary {
+        prompt.push_str("## Sync-PRD result (run immediately before this audit)\n\n");
+        prompt.push_str(summary);
+        prompt.push_str("\n\n");
+    }
+
     prompt.push_str("## Instructions\n\n");
-    prompt.push_str("1. For each **completed task** listed below, update its `notes` field to reflect what was actually delivered based on the commit history.\n");
-    prompt.push_str("2. For **todo tasks**, review if the integrated code changes have modified the intended architecture. If so, rewrite the task `description` and `steps` to reflect the new reality. **Never delete or rename task IDs.**\n");
-    prompt.push_str("3. Output the **complete updated `prd.json`** with your modifications. Preserve all existing fields and structure.\n");
-    prompt.push_str("4. Only modify `notes` for completed tasks and `description`/`steps` for todo tasks whose context has changed.\n\n");
+    prompt.push_str(&format!(
+        "1. For each **completed task** listed below, update its `notes` field in `{}` to reflect what was actually delivered based on the commit history.\n",
+        context.prd_path
+    ));
+    prompt.push_str("2. Move the **entire JSON object** of every completed task (state `merged` or `abandoned`) that requires **no further modification** into the top-level `tasks_done` array. ");
+    prompt.push_str("If `tasks_done` does not exist in the file, create it as an empty array `[]` and populate it. ");
+    prompt.push_str("Remove the complete task object from its original array (e.g. `tasks`). Do not just move the task ID or name, move the whole object. **Never delete or rename task IDs.**\n");
+    prompt.push_str(&format!(
+        "3. For **todo tasks** in `{}`, review if the integrated code changes have modified the intended architecture. If so, rewrite the task `description` and `steps` to reflect the new reality. **Never delete or rename task IDs.**\n",
+        context.prd_path
+    ));
+    prompt.push_str("4. Preserve all existing fields and structure. Only modify `notes` for completed tasks and `description`/`steps` for todo tasks whose context has changed.\n\n");
 
     // PRD content
-    prompt.push_str("## Current PRD (`prd.json`)\n\n```json\n");
+    prompt.push_str(&format!(
+        "## Current PRD content (`{}`)\n\n```json\n",
+        context.prd_path
+    ));
     if context.prd_json.chars().count() > MAX_PRD_CHARS {
         let truncated: String = context.prd_json.chars().take(MAX_PRD_CHARS).collect();
         prompt.push_str(&truncated);
@@ -211,7 +245,15 @@ pub fn build_audit_prompt(context: &AuditContext) -> String {
     }
 
     prompt.push_str("## Output\n\n");
-    prompt.push_str("Output the complete updated `prd.json` as a single JSON code block.\n");
+    prompt.push_str(&format!(
+        "Edit `{}` directly in the repository using your file-editing tools.\n",
+        context.prd_path
+    ));
+    prompt.push_str("Do not print the full file content in your response.\n");
+    prompt.push_str(&format!(
+        "At the end, print a short status line confirming the file was updated (e.g. `{} updated`).\n",
+        context.prd_path
+    ));
 
     prompt
 }
@@ -220,9 +262,11 @@ pub fn build_audit_prompt(context: &AuditContext) -> String {
 pub fn prepare_audit(
     repo_root: &Path,
     prd_json: &str,
+    prd_path: &str,
     registry: &TaskRegistry,
     reference_branch: &str,
     include_diff_stat: bool,
+    sync_summary: Option<String>,
 ) -> Result<AuditPrdReport> {
     let commits = commit_reconciler::read_commit_range(repo_root, None, reference_branch)?;
 
@@ -237,7 +281,13 @@ pub fn prepare_audit(
         });
     }
 
-    let context = build_audit_context(prd_json, registry, completed_contexts.clone());
+    let context = build_audit_context(
+        prd_json,
+        prd_path,
+        registry,
+        completed_contexts.clone(),
+        sync_summary,
+    );
     let prompt = build_audit_prompt(&context);
 
     Ok(AuditPrdReport {
@@ -260,15 +310,16 @@ fn is_completed_state(state: &str) -> bool {
 ///
 /// Uses `git diff --stat <sha>^..<sha>` for each commit and concatenates.
 /// Returns None if no stats could be gathered.
-fn gather_diff_stat_for_commits(
-    repo_root: &Path,
-    commits: &[&GitCommitInfo],
-) -> Option<String> {
+fn gather_diff_stat_for_commits(repo_root: &Path, commits: &[&GitCommitInfo]) -> Option<String> {
     let mut stats = String::new();
     for commit in commits {
         let output = git::run_git_output_mapped(
             repo_root,
-            &["diff", "--stat", &format!("{}^..{}", commit.sha, commit.sha)],
+            &[
+                "diff",
+                "--stat",
+                &format!("{}^..{}", commit.sha, commit.sha),
+            ],
             "gather diff stat for audit",
         );
         if let Ok(out) = output {
@@ -360,6 +411,7 @@ mod tests {
     fn build_prompt_contains_prd_and_tasks() {
         let context = AuditContext {
             prd_json: r#"{"lot":"test","tasks":[]}"#.to_string(),
+            prd_path: "scripts/prd.json".to_string(),
             completed_tasks: vec![TaskCommitContext {
                 task_id: "X-1".to_string(),
                 commits: vec![CommitSummary {
@@ -369,13 +421,16 @@ mod tests {
                 diff_stat: None,
             }],
             todo_task_ids: vec!["X-2".to_string()],
+            sync_summary: Some("1 commit(s) scanned — no task states changed.".to_string()),
         };
         let prompt = build_audit_prompt(&context);
         assert!(prompt.contains("MACC PRD Audit"));
+        assert!(prompt.contains("scripts/prd.json"));
         assert!(prompt.contains(r#"{"lot":"test","tasks":[]}"#));
         assert!(prompt.contains("`X-1`"));
         assert!(prompt.contains("abc1234"));
         assert!(prompt.contains("`X-2`"));
+        assert!(prompt.contains("tasks_done"));
     }
 
     #[test]
@@ -394,8 +449,10 @@ mod tests {
         let large_prd = "x".repeat(MAX_PRD_CHARS + 1000);
         let context = AuditContext {
             prd_json: large_prd,
+            prd_path: "prd.json".to_string(),
             completed_tasks: vec![],
             todo_task_ids: vec!["T-1".to_string()],
+            sync_summary: None,
         };
         let prompt = build_audit_prompt(&context);
         assert!(prompt.contains("[truncated]"));
@@ -403,14 +460,12 @@ mod tests {
 
     #[test]
     fn gather_context_skips_tasks_without_commits() {
-        let registry = make_registry(vec![
-            make_task("T-1", "merged"),
-            make_task("T-2", "merged"),
-        ]);
+        let registry = make_registry(vec![make_task("T-1", "merged"), make_task("T-2", "merged")]);
         // Only T-1 has a matching commit
-        let commits = vec![
-            make_commit("abc1234", "feat: T-1 - impl\n\n[macc:task T-1]"),
-        ];
+        let commits = vec![make_commit(
+            "abc1234",
+            "feat: T-1 - impl\n\n[macc:task T-1]",
+        )];
         let contexts =
             gather_task_commit_context(Path::new("."), &registry, &commits, false).unwrap();
         assert_eq!(contexts.len(), 1);

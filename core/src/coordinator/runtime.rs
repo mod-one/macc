@@ -90,6 +90,7 @@ pub struct CoordinatorRunState {
     pub dispatch_limit_event_emitted: bool,
     pub performer_ipc_addr: Option<String>,
     pub performer_ipc_listener_started: bool,
+    pub performer_ipc_listener_alive: std::sync::Arc<std::sync::atomic::AtomicBool>,
     // RL-ROUTE-005: per-tool throttle state
     pub throttle_registry: ToolThrottleRegistry,
     // RL-THROTTLE-006: dynamic concurrency control
@@ -131,6 +132,9 @@ impl CoordinatorRunState {
             dispatch_limit_event_emitted: false,
             performer_ipc_addr: None,
             performer_ipc_listener_started: false,
+            performer_ipc_listener_alive: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                false,
+            )),
             throttle_registry: ToolThrottleRegistry::default(),
             effective_max_parallel: 0,
             original_max_parallel: 0,
@@ -636,11 +640,43 @@ fn read_last_completion_details(
     task_id: &str,
     event_source: &str,
 ) -> Option<CompletionDetails> {
+    // Retry a few times to handle the race where the IPC handler has not yet
+    // committed the phase_result event to SQLite when the monitor checks.
+    for attempt in 0..3u8 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+        if let Some(details) =
+            read_last_completion_details_once(repo_root, task_id, event_source, attempt)
+        {
+            return Some(details);
+        }
+    }
+    None
+}
+
+fn read_last_completion_details_once(
+    repo_root: &Path,
+    task_id: &str,
+    event_source: &str,
+    attempt: u8,
+) -> Option<CompletionDetails> {
     let project_paths = crate::ProjectPaths::from_root(repo_root);
     let storage_paths =
         crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&project_paths);
     let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
-    let snapshot = sqlite.load_snapshot().ok()?;
+    let snapshot = match sqlite.load_snapshot() {
+        Ok(snap) => snap,
+        Err(err) => {
+            tracing::warn!(
+                task_id,
+                attempt,
+                "read_last_completion_details: load_snapshot failed: {}",
+                err
+            );
+            return None;
+        }
+    };
     for event in snapshot.events.iter().rev() {
         let Some(event_task_id) = event.task_id.as_deref() else {
             continue;
@@ -658,6 +694,13 @@ fn read_last_completion_details(
             result_kind: event.payload_result_kind(),
             message: event.message().map(|value| value.to_string()),
         });
+    }
+    if attempt < 2 {
+        tracing::debug!(
+            task_id,
+            attempt,
+            "read_last_completion_details: phase_result not found yet, will retry"
+        );
     }
     None
 }
@@ -719,7 +762,17 @@ fn read_last_error_details_from_sqlite(
     let storage_paths =
         crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&project_paths);
     let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
-    let snapshot = sqlite.load_snapshot().ok()?;
+    let snapshot = match sqlite.load_snapshot() {
+        Ok(snap) => snap,
+        Err(err) => {
+            tracing::warn!(
+                task_id,
+                "read_last_error_details_from_sqlite: load_snapshot failed: {}",
+                err
+            );
+            return None;
+        }
+    };
     let mut failed_candidate: Option<ErrorDetails> = None;
     let mut saw_terminal_success_before_failed = false;
     for event in snapshot.events.iter().rev() {

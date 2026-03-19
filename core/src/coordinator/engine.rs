@@ -271,12 +271,12 @@ pub fn apply_dispatch_claim_in_registry(
     update: &DispatchClaimUpdate,
 ) -> Result<()> {
     let mut typed = TaskRegistry::from_value(registry)?;
-    let task = typed.find_task_mut(&update.task_id).ok_or_else(|| {
-        MaccError::Coordinator {
+    let task = typed
+        .find_task_mut(&update.task_id)
+        .ok_or_else(|| MaccError::Coordinator {
             code: "task_not_found",
             message: format!("Task '{}' not found in registry", update.task_id),
-        }
-    })?;
+        })?;
     apply_dispatch_claim_typed(task, update);
     *registry = typed.to_value()?;
     Ok(())
@@ -288,12 +288,12 @@ pub fn apply_dispatch_pid_in_registry(
     pid: Option<i64>,
 ) -> Result<()> {
     let mut typed = TaskRegistry::from_value(registry)?;
-    let task = typed.find_task_mut(task_id).ok_or_else(|| {
-        MaccError::Coordinator {
+    let task = typed
+        .find_task_mut(task_id)
+        .ok_or_else(|| MaccError::Coordinator {
             code: "task_not_found",
             message: format!("Task '{}' not found in registry", task_id),
-        }
-    })?;
+        })?;
     apply_dispatch_pid_typed(task, pid);
     *registry = typed.to_value()?;
     Ok(())
@@ -350,12 +350,12 @@ pub fn apply_phase_outcome_in_registry(
     now: &str,
 ) -> Result<()> {
     let mut typed = TaskRegistry::from_value(registry)?;
-    let task = typed.find_task_mut(task_id).ok_or_else(|| {
-        MaccError::Coordinator {
+    let task = typed
+        .find_task_mut(task_id)
+        .ok_or_else(|| MaccError::Coordinator {
             code: "task_not_found",
             message: format!("Task '{}' not found in registry", task_id),
-        }
-    })?;
+        })?;
     if let Some(reason) = phase_error {
         apply_phase_failure_typed(task, mode, reason, now)?;
         *registry = typed.to_value()?;
@@ -394,12 +394,12 @@ pub fn apply_job_completion_in_registry(
     now: &str,
 ) -> Result<JobCompletionResult> {
     let mut typed = TaskRegistry::from_value(registry)?;
-    let task = typed.find_task_mut(task_id).ok_or_else(|| {
-        MaccError::Coordinator {
+    let task = typed
+        .find_task_mut(task_id)
+        .ok_or_else(|| MaccError::Coordinator {
             code: "task_not_found",
             message: format!("Task '{}' not found in registry", task_id),
-        }
-    })?;
+        })?;
     let out = apply_job_completion_typed(task, input, now);
     *registry = typed.to_value()?;
     Ok(out)
@@ -413,12 +413,12 @@ pub fn apply_merge_result_in_registry(
     now: &str,
 ) -> Result<()> {
     let mut typed = TaskRegistry::from_value(registry)?;
-    let task = typed.find_task_mut(task_id).ok_or_else(|| {
-        MaccError::Coordinator {
+    let task = typed
+        .find_task_mut(task_id)
+        .ok_or_else(|| MaccError::Coordinator {
             code: "task_not_found",
             message: format!("Task '{}' not found in registry", task_id),
-        }
-    })?;
+        })?;
     if success {
         apply_merge_success_typed(task, now)?
     } else {
@@ -735,11 +735,12 @@ fn apply_job_completion_typed(
         input.normalizer_input.as_ref().and_then(|ni| {
             let tool_id = task.tool.as_deref().unwrap_or("");
             get_normalizer_for_tool(tool_id).and_then(|n| {
-                n.normalize(ni.exit_code, &ni.stderr, &ni.stdout).map(|mut te| {
-                    te.attempt = input.attempt as u32;
-                    te.operation = "performer_run".to_string();
-                    te
-                })
+                n.normalize(ni.exit_code, &ni.stderr, &ni.stdout)
+                    .map(|mut te| {
+                        te.attempt = input.attempt as u32;
+                        te.operation = "performer_run".to_string();
+                        te
+                    })
             })
         })
     } else {
@@ -817,8 +818,11 @@ fn apply_job_completion_typed(
         if stdout_says_done && transient_error {
             task.set_workflow_state(WorkflowState::Merged);
             let runtime = task.ensure_runtime();
-            runtime.completion_kind =
-                Some(PerformerCompletionKind::AlreadySatisfied.as_str().to_string());
+            runtime.completion_kind = Some(
+                PerformerCompletionKind::AlreadySatisfied
+                    .as_str()
+                    .to_string(),
+            );
             runtime.set_status(RuntimeStatus::Idle);
             runtime.current_phase = None;
             runtime.pid = None;
@@ -826,9 +830,8 @@ fn apply_job_completion_typed(
             return JobCompletionResult {
                 should_retry: false,
                 status_label: "already_satisfied",
-                detail:
-                    "exit-code override: stdout indicates completion despite transient error"
-                        .to_string(),
+                detail: "exit-code override: stdout indicates completion despite transient error"
+                    .to_string(),
                 completion_kind: Some(PerformerCompletionKind::AlreadySatisfied),
                 tool_error: classified_tool_error,
             };
@@ -846,12 +849,15 @@ fn apply_job_completion_typed(
         let retry_after = classified_tool_error
             .as_ref()
             .and_then(|te| te.retry_after_seconds);
-        let backoff = compute_backoff_delay(input.attempt as usize, input.backoff_base_seconds, input.backoff_max_seconds, retry_after);
+        let backoff = compute_backoff_delay(
+            input.attempt as usize,
+            input.backoff_base_seconds,
+            input.backoff_max_seconds,
+            retry_after,
+        );
         let delayed_until_str = chrono::DateTime::parse_from_rfc3339(now)
             .ok()
-            .and_then(|dt| {
-                dt.checked_add_signed(chrono::Duration::seconds(backoff as i64))
-            })
+            .and_then(|dt| dt.checked_add_signed(chrono::Duration::seconds(backoff as i64)))
             .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
             .unwrap_or_default();
         // Update per-tool throttle state stored in extra.
@@ -1087,6 +1093,8 @@ where
         let new_state = if old_state == WorkflowState::Claimed.as_str() && phase == "dev" {
             task.set_workflow_state(WorkflowState::Todo);
             task.assignee = None;
+            // Clear worktree attachment so the task can be re-dispatched.
+            task.worktree = None;
             WorkflowState::Todo.as_str().to_string()
         } else {
             task.set_workflow_state(WorkflowState::Blocked);
@@ -1162,44 +1170,68 @@ pub async fn run_control_plane<B: ControlPlaneBackend + ?Sized>(
 ) -> Result<()> {
     let mut controller = CoordinatorRunController::new(cfg);
     let mut cycle: usize = 0;
+    let mut consecutive_transient_errors: usize = 0;
+    const MAX_TRANSIENT_ERRORS: usize = 5;
     loop {
         cycle += 1;
-        backend.on_cycle_start(cycle).await?;
-
-        backend.monitor_active_jobs().await?;
-        if let Some((task_id, reason)) = backend.monitor_merge_jobs().await? {
-            backend.on_blocked_merge(&task_id, &reason).await?;
-        }
-
-        let advance = backend.advance_tasks().await?;
-
-        backend.monitor_active_jobs().await?;
-        if let Some((task_id, reason)) = backend
-            .monitor_merge_jobs()
-            .await?
-            .or_else(|| advance.blocked_merge.clone())
-        {
-            backend.on_blocked_merge(&task_id, &reason).await?;
-        }
-
-        let dispatched = backend.dispatch_ready_tasks().await?;
-
-        if let Some((task_id, reason)) = backend.monitor_merge_jobs().await? {
-            backend.on_blocked_merge(&task_id, &reason).await?;
-        }
-
-        let counts = backend.on_cycle_end(cycle, &advance, dispatched).await?;
-        if backend.should_terminate_run(&counts) {
-            return Ok(());
-        }
-        match controller.on_cycle_counts(counts) {
-            Ok(ControlPlaneDecision::Continue) => {}
+        match run_control_plane_cycle(backend, &mut controller, cycle).await {
+            Ok(ControlPlaneDecision::Continue) => {
+                consecutive_transient_errors = 0;
+            }
             Ok(ControlPlaneDecision::Complete) => return Ok(()),
+            Err(err) if err.is_transient() => {
+                consecutive_transient_errors += 1;
+                tracing::warn!(
+                    cycle,
+                    consecutive = consecutive_transient_errors,
+                    "control plane cycle failed with transient error, will retry: {}",
+                    err
+                );
+                if consecutive_transient_errors >= MAX_TRANSIENT_ERRORS {
+                    return Err(err);
+                }
+                // Wait before retrying to give the system time to recover.
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
             Err(err) => return Err(err),
         }
-
-        backend.sleep_between_cycles().await?;
     }
+}
+
+async fn run_control_plane_cycle<B: ControlPlaneBackend + ?Sized>(
+    backend: &mut B,
+    controller: &mut CoordinatorRunController,
+    cycle: usize,
+) -> std::result::Result<ControlPlaneDecision, MaccError> {
+    backend.on_cycle_start(cycle).await?;
+
+    backend.monitor_active_jobs().await?;
+    if let Some((task_id, reason)) = backend.monitor_merge_jobs().await? {
+        backend.on_blocked_merge(&task_id, &reason).await?;
+    }
+
+    let advance = backend.advance_tasks().await?;
+
+    backend.monitor_active_jobs().await?;
+    if let Some((task_id, reason)) = backend
+        .monitor_merge_jobs()
+        .await?
+        .or_else(|| advance.blocked_merge.clone())
+    {
+        backend.on_blocked_merge(&task_id, &reason).await?;
+    }
+
+    let dispatched = backend.dispatch_ready_tasks().await?;
+
+    if let Some((task_id, reason)) = backend.monitor_merge_jobs().await? {
+        backend.on_blocked_merge(&task_id, &reason).await?;
+    }
+
+    let counts = backend.on_cycle_end(cycle, &advance, dispatched).await?;
+    if backend.should_terminate_run(&counts) {
+        return Ok(ControlPlaneDecision::Complete);
+    }
+    controller.on_cycle_counts(counts)
 }
 
 struct NativeControlPlaneBackend<'a> {
@@ -1571,7 +1603,7 @@ pub async fn run_native_control_plane(
         } else {
             None
         },
-        max_no_progress_cycles: 2,
+        max_no_progress_cycles: 5,
     };
 
     // Set up graceful shutdown signal handling
@@ -2084,8 +2116,7 @@ mod tests {
 
     #[test]
     fn normalizer_routes_claude_529_to_overloaded() {
-        let (mut task_val, input) =
-            make_failure_input("claude", "Error: 529 API overloaded", "");
+        let (mut task_val, input) = make_failure_input("claude", "Error: 529 API overloaded", "");
         let out = apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
         // E601 always re-queues with backoff regardless of attempt count.
         assert_eq!(out.status_label, "rate_limit_backoff");
@@ -2134,11 +2165,8 @@ mod tests {
 
     #[test]
     fn normalizer_routes_gemini_resource_exhausted_rate_limit_to_e601() {
-        let (mut task_val, input) = make_failure_input(
-            "gemini",
-            "429 RESOURCE_EXHAUSTED: Rate limit for model",
-            "",
-        );
+        let (mut task_val, input) =
+            make_failure_input("gemini", "429 RESOURCE_EXHAUSTED: Rate limit for model", "");
         let out = apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
         assert_eq!(task_val["task_runtime"]["last_error_code"], "E601");
         let te = out.tool_error.unwrap();
@@ -2147,8 +2175,7 @@ mod tests {
 
     #[test]
     fn tool_error_stored_in_extra() {
-        let (mut task_val, input) =
-            make_failure_input("claude", "Error: 529 API overloaded", "");
+        let (mut task_val, input) = make_failure_input("claude", "Error: 529 API overloaded", "");
         apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
         let stored = &task_val["task_runtime"]["tool_error"];
         assert!(!stored.is_null(), "tool_error should be stored in extra");
@@ -2170,11 +2197,8 @@ mod tests {
 
     #[test]
     fn rate_limit_info_stored_in_extra_for_e602() {
-        let (mut task_val, input) = make_failure_input(
-            "codex",
-            "429 insufficient_quota: quota exceeded",
-            "",
-        );
+        let (mut task_val, input) =
+            make_failure_input("codex", "429 insufficient_quota: quota exceeded", "");
         apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
         let rli = &task_val["task_runtime"]["rate_limit_info"];
         assert!(!rli.is_null(), "rate_limit_info should be stored for E602");
@@ -2186,11 +2210,8 @@ mod tests {
     fn exit_code_override_already_satisfied_with_transient_error() {
         // Performer signals already_satisfied in stdout but exits non-zero
         // due to a 529 overload on teardown. Should be treated as success.
-        let (mut task_val, input) = make_failure_input(
-            "claude",
-            "Error: 529 API overloaded",
-            "already_satisfied",
-        );
+        let (mut task_val, input) =
+            make_failure_input("claude", "Error: 529 API overloaded", "already_satisfied");
         let out = apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
         assert_eq!(out.status_label, "already_satisfied");
         assert_eq!(task_val["state"], "merged");
@@ -2217,11 +2238,8 @@ mod tests {
     fn exit_code_override_does_not_fire_for_hard_quota_error() {
         // QuotaExhausted is not transient, so override must NOT fire even if
         // stdout says "already_satisfied".
-        let (mut task_val, input) = make_failure_input(
-            "codex",
-            "429 insufficient_quota",
-            "already_satisfied",
-        );
+        let (mut task_val, input) =
+            make_failure_input("codex", "429 insufficient_quota", "already_satisfied");
         let out = apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
         // Quota exhausted: blocked immediately, not overridden to success.
         assert_eq!(out.status_label, "quota_exhausted");
@@ -2311,7 +2329,10 @@ mod tests {
             make_failure_input("claude", "Error: 429 Rate limit exceeded", "");
         apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
         let ts = &task_val["task_runtime"]["throttle_state"];
-        assert!(!ts.is_null(), "throttle_state should be stored in extra for E601");
+        assert!(
+            !ts.is_null(),
+            "throttle_state should be stored in extra for E601"
+        );
         assert_eq!(ts["consecutive_429_count"], 1);
         assert!(ts["backoff_seconds"].as_u64().unwrap() > 0);
         assert!(ts["throttled_until"].as_u64().unwrap() > 0);

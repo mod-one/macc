@@ -276,8 +276,7 @@ fn subject_regex() -> &'static Regex {
 fn tag_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r"\[macc:(?P<key>[a-z_]+)\s+(?P<value>[^\]]+)\]")
-            .expect("invalid tag regex")
+        Regex::new(r"\[macc:(?P<key>[a-z_]+)\s+(?P<value>[^\]]+)\]").expect("invalid tag regex")
     })
 }
 
@@ -397,7 +396,12 @@ mod tests {
 
     #[test]
     fn format_task_commit_with_title() {
-        let msg = task_commit(CommitType::Feat, "WEB-FRONTEND-006", Some("Integrate Headless UI"), Some("dev"));
+        let msg = task_commit(
+            CommitType::Feat,
+            "WEB-FRONTEND-006",
+            Some("Integrate Headless UI"),
+            Some("dev"),
+        );
         let formatted = msg.format();
         assert!(formatted.starts_with("feat: WEB-FRONTEND-006 - Integrate Headless UI"));
         assert!(formatted.contains("[macc:task WEB-FRONTEND-006]"));
@@ -468,8 +472,13 @@ mod tests {
 
     #[test]
     fn roundtrip_format_then_parse() {
-        let original = task_commit(CommitType::Refactor, "CORE-010", Some("Split engine trait"), Some("dev"))
-            .with_tool("claude");
+        let original = task_commit(
+            CommitType::Refactor,
+            "CORE-010",
+            Some("Split engine trait"),
+            Some("dev"),
+        )
+        .with_tool("claude");
         let formatted = original.format();
         let parsed = parse(&formatted);
         assert!(parsed.message.is_some());
@@ -515,8 +524,7 @@ mod tests {
 
     #[test]
     fn tag_value_lookup() {
-        let msg = task_commit(CommitType::Feat, "X-1", None, Some("review"))
-            .with_tool("gemini");
+        let msg = task_commit(CommitType::Feat, "X-1", None, Some("review")).with_tool("gemini");
         assert_eq!(msg.tag_value(TAG_PHASE), Some("review"));
         assert_eq!(msg.tag_value(TAG_TOOL), Some("gemini"));
         assert_eq!(msg.tag_value("nonexistent"), None);

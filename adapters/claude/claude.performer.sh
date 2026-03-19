@@ -306,6 +306,26 @@ expand_config_args() {
   for token in "${args[@]}"; do
     out_ref+=("${token//\{session_id\}/$current_sid}")
   done
+
+  # RL-PERFORMER-012: When running under the Coordinator (headless /
+  # non-interactive mode), inject --dangerously-skip-permissions so that
+  # Claude Code does not block on an interactive permission prompt that
+  # no human can answer.  The MACC_COORDINATOR_IPC_ADDR env var is only
+  # set by the Coordinator dispatch path (runtime.rs / task_runner.rs),
+  # so this guard ensures the flag is never added during manual /
+  # interactive runs.
+  if [[ -n "${MACC_COORDINATOR_IPC_ADDR:-}" ]]; then
+    local already_has_skip=false
+    for token in "${out_ref[@]}"; do
+      if [[ "$token" == "--dangerously-skip-permissions" ]]; then
+        already_has_skip=true
+        break
+      fi
+    done
+    if [[ "$already_has_skip" == false ]]; then
+      out_ref+=("--dangerously-skip-permissions")
+    fi
+  fi
 }
 
 run_resume_and_capture() {

@@ -776,9 +776,9 @@ commit_changes() {
       trailer="${trailer}
 [macc:phase ${CURRENT_PHASE}]"
     fi
-    if [[ -n "$TOOL" ]]; then
+    if [[ -n "$tool" ]]; then
       trailer="${trailer}
-[macc:tool ${TOOL}]"
+[macc:tool ${tool}]"
     fi
     if ! git_commit_output="$(git commit -m "$subject" -m "" -m "$trailer" 2>&1)"; then
       git_commit_output="${git_commit_output//$'\n'/ }"

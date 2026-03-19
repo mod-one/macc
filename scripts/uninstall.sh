@@ -27,8 +27,13 @@ remove_path_entry() {
   local profile="$1"
   [[ -f "$profile" ]] || return
   if grep -Fq "# Added by MACC installer" "$profile"; then
-    sed -i.bak "/# Added by MACC installer/,+1d" "$profile"
-    rm -f "${profile}.bak"
+    if sed --version >/dev/null 2>&1; then
+      # GNU sed
+      sed -i "/# Added by MACC installer/,+1d" "$profile"
+    else
+      # BSD/macOS sed
+      sed -i '' '/# Added by MACC installer/{N;d;}' "$profile"
+    fi
     echo "Cleaned PATH entry from $profile"
   fi
 }
