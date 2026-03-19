@@ -121,7 +121,14 @@ enum Commands {
     /// Open the interactive TUI
     Tui,
     /// Launch the web UI server
-    Web,
+    Web {
+        /// Bind address for the web server. Use `0.0.0.0` to expose it explicitly.
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        /// Bind port for the web server. Defaults to the configured web port or `3450`.
+        #[arg(long)]
+        port: Option<u16>,
+    },
     /// Tool management
     Tool {
         #[command(subcommand)]
@@ -741,7 +748,9 @@ fn run_with_engine_provider(
                 source: std::io::Error::other(e.to_string()),
             })
         }
-        Some(Commands::Web) => commands::web::WebCommand::new(app.clone()).run(),
+        Some(Commands::Web { host, port }) => {
+            commands::web::WebCommand::new(app.clone(), host.clone(), *port).run()
+        }
         Some(Commands::Tool { tool_command }) => {
             commands::tool::ToolCommand::new(app.clone(), tool_command).run()
         }
@@ -3551,5 +3560,32 @@ fi
             Some("1.2.3-beta".to_string())
         );
         assert_eq!(extract_version_token("no version here"), None);
+    }
+
+    #[test]
+    fn test_web_command_parses_host_and_port_flags() {
+        let cli = Cli::try_parse_from(["macc", "web", "--host", "0.0.0.0", "--port", "8080"])
+            .expect("parse web command");
+
+        match cli.command {
+            Some(Commands::Web { host, port }) => {
+                assert_eq!(host, "0.0.0.0");
+                assert_eq!(port, Some(8080));
+            }
+            other => panic!("unexpected command: {:?}", other.map(|_| "non-web")),
+        }
+    }
+
+    #[test]
+    fn test_web_command_defaults_host_and_leaves_port_unset() {
+        let cli = Cli::try_parse_from(["macc", "web"]).expect("parse web command");
+
+        match cli.command {
+            Some(Commands::Web { host, port }) => {
+                assert_eq!(host, "127.0.0.1");
+                assert_eq!(port, None);
+            }
+            other => panic!("unexpected command: {:?}", other.map(|_| "non-web")),
+        }
     }
 }
