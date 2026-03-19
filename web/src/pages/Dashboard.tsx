@@ -1,14 +1,8 @@
 import React from 'react';
-import { getStatus } from '../api/client';
 import { Button } from '../components/Button';
-import { ApiClientError, getStatus, postCoordinatorAction } from '../api/client';
-import type {
-  ApiCoordinatorAction,
-  ApiCoordinatorCommandResult,
-  ApiCoordinatorStatus,
-  ApiFailureReport,
-} from '../api/models';
-import ApiHealth from '../components/ApiHealth';
+import { ApiClientError } from '../api/client';
+import type { ApiCoordinatorAction, ApiCoordinatorCommandResult, ApiCoordinatorStatus, ApiFailureReport } from '../api/models';
+import { useCoordinatorStore } from '../store';
 
 type NoticeTone = 'success' | 'error';
 
@@ -136,11 +130,13 @@ const StatCard: React.FC<StatCardProps> = ({ label, value, tone = 'default' }) =
 };
 
 const Dashboard: React.FC = () => {
-  const [status, setStatus] = React.useState<ApiCoordinatorStatus | null>(null);
-  const [loadError, setLoadError] = React.useState<string | null>(null);
   const [notice, setNotice] = React.useState<NoticeState | null>(null);
-  const [isLoadingStatus, setIsLoadingStatus] = React.useState(true);
-  const [pendingAction, setPendingAction] = React.useState<ApiCoordinatorAction | null>(null);
+  const status = useCoordinatorStore((state) => state.status);
+  const loadError = useCoordinatorStore((state) => state.loadError);
+  const isLoadingStatus = useCoordinatorStore((state) => state.isLoadingStatus);
+  const pendingAction = useCoordinatorStore((state) => state.pendingAction);
+  const loadStatus = useCoordinatorStore((state) => state.loadStatus);
+  const runCoordinatorAction = useCoordinatorStore((state) => state.runAction);
 
   const showNotice = React.useCallback((tone: NoticeTone, message: string) => {
     setNotice({ tone, message });
@@ -160,62 +156,40 @@ const Dashboard: React.FC = () => {
     };
   }, [notice]);
 
-  const loadCoordinatorStatus = React.useCallback(
+  const refreshCoordinatorStatus = React.useCallback(
     async (signal?: AbortSignal): Promise<ApiCoordinatorStatus | null> => {
-      setIsLoadingStatus(true);
       try {
-        const nextStatus = await getStatus({ signal });
-        setStatus(nextStatus);
-        setLoadError(null);
-        return nextStatus;
+        return await loadStatus(signal);
       } catch (error) {
         if (error instanceof DOMException && error.name === 'AbortError') {
           return null;
         }
-        const message = formatApiError(error);
-        setLoadError(message);
-        showNotice('error', message);
+        showNotice('error', formatApiError(error));
         return null;
-      } finally {
-        setIsLoadingStatus(false);
       }
     },
-    [showNotice],
+    [loadStatus, showNotice],
   );
 
   React.useEffect(() => {
     const abortController = new AbortController();
-    void loadCoordinatorStatus(abortController.signal);
+    void refreshCoordinatorStatus(abortController.signal);
 
     return () => {
       abortController.abort();
     };
-  }, [loadCoordinatorStatus]);
+  }, [refreshCoordinatorStatus]);
 
   const handleAction = React.useCallback(
     async (action: ApiCoordinatorAction): Promise<void> => {
-      setPendingAction(action);
-
       try {
-        const result = await postCoordinatorAction(action);
-
-        if (result.status) {
-          setStatus(result.status);
-          setLoadError(null);
-        } else {
-          await loadCoordinatorStatus();
-        }
-
+        const result = await runCoordinatorAction(action);
         showNotice('success', formatResultSummary(action, result));
       } catch (error) {
-        const message = formatApiError(error);
-        setLoadError(message);
-        showNotice('error', message);
-      } finally {
-        setPendingAction(null);
+        showNotice('error', formatApiError(error));
       }
     },
-    [loadCoordinatorStatus, showNotice],
+    [runCoordinatorAction, showNotice],
   );
 
   const summary = failureSummary(status?.failure_report ?? null);
@@ -286,7 +260,7 @@ const Dashboard: React.FC = () => {
               className="bg-white text-slate-900 border border-slate-300 hover:bg-slate-100"
               disabled={isLoadingStatus || isBusy}
               onClick={() => {
-                void loadCoordinatorStatus();
+                void refreshCoordinatorStatus();
               }}
               type="button"
             >
