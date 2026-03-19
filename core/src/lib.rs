@@ -101,6 +101,14 @@ pub enum MaccError {
     Catalog { operation: String, message: String },
 }
 
+impl MaccError {
+    /// Returns `true` for errors that may resolve on their own (disk I/O,
+    /// SQLite contention) and should not immediately abort a coordinator run.
+    pub fn is_transient(&self) -> bool {
+        matches!(self, MaccError::Storage { .. } | MaccError::Io { .. })
+    }
+}
+
 pub type Result<T> = std::result::Result<T, MaccError>;
 
 #[derive(Debug, Clone, Default)]

@@ -1093,6 +1093,8 @@ where
         let new_state = if old_state == WorkflowState::Claimed.as_str() && phase == "dev" {
             task.set_workflow_state(WorkflowState::Todo);
             task.assignee = None;
+            // Clear worktree attachment so the task can be re-dispatched.
+            task.worktree = None;
             WorkflowState::Todo.as_str().to_string()
         } else {
             task.set_workflow_state(WorkflowState::Blocked);
@@ -1168,44 +1170,68 @@ pub async fn run_control_plane<B: ControlPlaneBackend + ?Sized>(
 ) -> Result<()> {
     let mut controller = CoordinatorRunController::new(cfg);
     let mut cycle: usize = 0;
+    let mut consecutive_transient_errors: usize = 0;
+    const MAX_TRANSIENT_ERRORS: usize = 5;
     loop {
         cycle += 1;
-        backend.on_cycle_start(cycle).await?;
-
-        backend.monitor_active_jobs().await?;
-        if let Some((task_id, reason)) = backend.monitor_merge_jobs().await? {
-            backend.on_blocked_merge(&task_id, &reason).await?;
-        }
-
-        let advance = backend.advance_tasks().await?;
-
-        backend.monitor_active_jobs().await?;
-        if let Some((task_id, reason)) = backend
-            .monitor_merge_jobs()
-            .await?
-            .or_else(|| advance.blocked_merge.clone())
-        {
-            backend.on_blocked_merge(&task_id, &reason).await?;
-        }
-
-        let dispatched = backend.dispatch_ready_tasks().await?;
-
-        if let Some((task_id, reason)) = backend.monitor_merge_jobs().await? {
-            backend.on_blocked_merge(&task_id, &reason).await?;
-        }
-
-        let counts = backend.on_cycle_end(cycle, &advance, dispatched).await?;
-        if backend.should_terminate_run(&counts) {
-            return Ok(());
-        }
-        match controller.on_cycle_counts(counts) {
-            Ok(ControlPlaneDecision::Continue) => {}
+        match run_control_plane_cycle(backend, &mut controller, cycle).await {
+            Ok(ControlPlaneDecision::Continue) => {
+                consecutive_transient_errors = 0;
+            }
             Ok(ControlPlaneDecision::Complete) => return Ok(()),
+            Err(err) if err.is_transient() => {
+                consecutive_transient_errors += 1;
+                tracing::warn!(
+                    cycle,
+                    consecutive = consecutive_transient_errors,
+                    "control plane cycle failed with transient error, will retry: {}",
+                    err
+                );
+                if consecutive_transient_errors >= MAX_TRANSIENT_ERRORS {
+                    return Err(err);
+                }
+                // Wait before retrying to give the system time to recover.
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
             Err(err) => return Err(err),
         }
-
-        backend.sleep_between_cycles().await?;
     }
+}
+
+async fn run_control_plane_cycle<B: ControlPlaneBackend + ?Sized>(
+    backend: &mut B,
+    controller: &mut CoordinatorRunController,
+    cycle: usize,
+) -> std::result::Result<ControlPlaneDecision, MaccError> {
+    backend.on_cycle_start(cycle).await?;
+
+    backend.monitor_active_jobs().await?;
+    if let Some((task_id, reason)) = backend.monitor_merge_jobs().await? {
+        backend.on_blocked_merge(&task_id, &reason).await?;
+    }
+
+    let advance = backend.advance_tasks().await?;
+
+    backend.monitor_active_jobs().await?;
+    if let Some((task_id, reason)) = backend
+        .monitor_merge_jobs()
+        .await?
+        .or_else(|| advance.blocked_merge.clone())
+    {
+        backend.on_blocked_merge(&task_id, &reason).await?;
+    }
+
+    let dispatched = backend.dispatch_ready_tasks().await?;
+
+    if let Some((task_id, reason)) = backend.monitor_merge_jobs().await? {
+        backend.on_blocked_merge(&task_id, &reason).await?;
+    }
+
+    let counts = backend.on_cycle_end(cycle, &advance, dispatched).await?;
+    if backend.should_terminate_run(&counts) {
+        return Ok(ControlPlaneDecision::Complete);
+    }
+    controller.on_cycle_counts(counts)
 }
 
 struct NativeControlPlaneBackend<'a> {
@@ -1577,7 +1603,7 @@ pub async fn run_native_control_plane(
         } else {
             None
         },
-        max_no_progress_cycles: 2,
+        max_no_progress_cycles: 5,
     };
 
     // Set up graceful shutdown signal handling
