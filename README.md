@@ -105,6 +105,41 @@ macc apply --allow-user-scope
 - `macc` (no subcommand) runs `init` if needed, then opens the TUI.
 - `macc tui` also ensures initialization first.
 
+## Web UI
+
+The web UI lives in [`web/`](web) and talks to the MACC backend served by `macc web`.
+These commands assume `macc` is already available in `PATH` (for example via `./scripts/install.sh --release`).
+
+Development workflow:
+
+```bash
+cd web
+npm install
+npm run dev
+```
+
+In a second terminal, start the backend from the repo root:
+
+```bash
+macc web
+```
+
+Open `http://localhost:5173`. The Vite dev server proxies `/api` requests to `http://localhost:3450`.
+
+Production-like workflow (`web/dist` served by the backend):
+
+```bash
+cd web
+npm install
+npm run build
+cd ..
+macc web --assets dist
+```
+
+Open `http://localhost:3450`.
+
+Embedded mode note: `macc web --assets embedded` serves assets baked into the binary. Build `web/dist` first, then rebuild the `macc` binary so the latest frontend is embedded.
+
 ## Operational runbook (blank machine -> full automation cycle)
 
 ### 1) Prepare a blank machine
