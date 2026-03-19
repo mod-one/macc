@@ -14,7 +14,7 @@ use macc_core::service::coordinator_workflow::{
     ThrottledToolStatus,
 };
 use macc_core::service::diagnostic::{FailureKind, FailureReport};
-use macc_core::{MaccError, ProjectPaths, Result};
+use macc_core::{load_canonical_config, MaccError, ProjectPaths, Result};
 use serde::Serialize;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
@@ -83,6 +83,10 @@ fn build_web_router(state: WebState) -> Router {
         .route("/api/v1/status", get(status_handler))
         .route("/api/v1/coordinator/run", post(coordinator_run_handler))
         .route(
+            "/api/v1/coordinator/dispatch",
+            post(coordinator_dispatch_handler),
+        )
+        .route(
             "/api/v1/coordinator/advance",
             post(coordinator_advance_handler),
         )
@@ -147,6 +151,26 @@ async fn coordinator_stop_handler(
     Ok(Json(ApiCoordinatorCommandResult::from(
         CoordinatorCommandResult::default(),
     )))
+}
+async fn coordinator_dispatch_handler(
+    State(state): State<WebState>,
+) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
+    let canonical = load_canonical_config(&state.paths.config_path).map_err(ApiError::from)?;
+    let env_cfg = CoordinatorEnvConfig::default();
+    let result = state
+        .engine
+        .coordinator_execute_command(
+            &state.paths,
+            CoordinatorCommand::DispatchReadyTasks,
+            CoordinatorCommandRequest {
+                canonical: Some(&canonical),
+                coordinator_cfg: None,
+                env_cfg: &env_cfg,
+                logger: None,
+            },
+        )
+        .map_err(ApiError::from)?;
+    Ok(Json(ApiCoordinatorCommandResult::from(result)))
 }
 
 async fn coordinator_advance_handler(
@@ -547,6 +571,7 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use http_body_util::BodyExt;
+    use macc_core::config::CanonicalConfig;
     use macc_core::TestEngine;
     use std::fs;
     use std::sync::Arc;
@@ -559,6 +584,15 @@ mod tests {
             .expect("time")
             .as_nanos();
         std::env::temp_dir().join(format!("macc-web-{}-{}", label, nanos))
+    }
+
+    fn write_test_config(root: &std::path::Path) {
+        let paths = ProjectPaths::from_root(root);
+        fs::create_dir_all(paths.config_path.parent().expect("config dir")).expect("mkdir config");
+        let yaml = CanonicalConfig::default()
+            .to_yaml()
+            .expect("serialize config");
+        fs::write(&paths.config_path, yaml).expect("write config");
     }
 
     struct WebTestEngine {
@@ -969,6 +1003,114 @@ mod tests {
         assert_eq!(payload["error"]["code"], WEB_ERR_COORDINATOR);
         assert_eq!(payload["error"]["category"], "Internal");
         assert_eq!(payload["error"]["context"]["code"], "E901");
+    }
+
+    #[tokio::test]
+    async fn coordinator_dispatch_endpoint_returns_envelope() {
+        let root = temp_root("dispatch-ok");
+        fs::create_dir_all(&root).expect("create root");
+        write_test_config(&root);
+        let result = CoordinatorCommandResult {
+            status: Some(CoordinatorStatus {
+                total: 3,
+                todo: 1,
+                active: 1,
+                blocked: 0,
+                merged: 1,
+                paused: false,
+                pause_reason: None,
+                pause_task_id: None,
+                pause_phase: None,
+                latest_error: None,
+                failure_report: None,
+                throttled_tools: vec![],
+                effective_max_parallel: None,
+            }),
+            resumed: Some(false),
+            aggregated_performer_logs: Some(0),
+            runtime_status: Some("running".to_string()),
+            exported_events_path: None,
+            removed_worktrees: Some(0),
+            selected_task: Some(SelectedTask {
+                id: "TASK-2".to_string(),
+                title: "Dispatch".to_string(),
+                tool: "mock".to_string(),
+                base_branch: "main".to_string(),
+                is_fallback: false,
+            }),
+            audit_prd_report: None,
+        };
+        let state = WebState {
+            engine: Arc::new(WebTestEngine::new(Ok(result))),
+            paths: ProjectPaths::from_root(&root),
+        };
+        let app = build_web_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/coordinator/dispatch")
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect")
+            .to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        for key in [
+            "status",
+            "resumed",
+            "aggregated_performer_logs",
+            "runtime_status",
+            "exported_events_path",
+            "removed_worktrees",
+            "selected_task",
+        ] {
+            assert!(payload.get(key).is_some(), "missing {}", key);
+        }
+    }
+
+    #[tokio::test]
+    async fn coordinator_dispatch_endpoint_maps_errors() {
+        let root = temp_root("dispatch-error");
+        fs::create_dir_all(&root).expect("create root");
+        write_test_config(&root);
+        let state = WebState {
+            engine: Arc::new(WebTestEngine::new(Err(MaccError::Validation(
+                "dispatch failed".to_string(),
+            )))),
+            paths: ProjectPaths::from_root(&root),
+        };
+        let app = build_web_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/coordinator/dispatch")
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect")
+            .to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(payload["error"]["code"], WEB_ERR_VALIDATION);
+        assert_eq!(payload["error"]["category"], "Validation");
+        assert_eq!(payload["error"]["message"], "dispatch failed");
     }
 
     #[tokio::test]
