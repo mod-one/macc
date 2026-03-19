@@ -19,15 +19,18 @@ MACC must enable:
 1) **Fast installation** on Linux & Windows, then **easy initialization** on a target project.
 2) A **consistent experience** across multiple AI tools via a canonical “source of truth” + tool-specific config generation.
 3) A **TUI (Text-based UI)** to select tools, standards, skills, agents, MCP servers, and worktrees.
-4) Support for **parallelism** (worktrees) and automation scripts like **ralph**.
-5) Safe **merge/backup** mechanisms for user-level settings, with explicit consent.
-6) **Remote distribution of Skills and MCP servers** via Git/HTTP links, with safe download + install into tool-specific locations (see §8.5).
+4) A **local Web UI** (SPA served by the `macc` binary) providing feature parity with the TUI plus web-only observability, editing, terminals, and git graph visualization (see §3.5).
+5) Support for **parallelism** (worktrees) and automation scripts like **ralph**.
+6) Safe **merge/backup** mechanisms for user-level settings, with explicit consent.
+7) **Remote distribution of Skills and MCP servers** via Git/HTTP links, with safe download + install into tool-specific locations (see §8.5).
 
 ### 1.3 Non-goals (v1)
 - Replace the tools themselves (MACC does not re-implement the AI tools).
 - Store or sync **secrets** in Git (API keys, tokens).
 - Execute remote code as part of installation (no post-install scripts/hooks).
 - Provide a full “CI/CD orchestrator” (MACC can help, but it is not a pipeline).
+- Multi-project management (MACC operates on a single repository at a time).
+- Remote/public hosting of the web UI (localhost only by default; explicit flag to expose).
 
 ---
 
@@ -97,7 +100,171 @@ Minimum screens:
 6) Preview & Apply (summary of files to be written, backups, consent prompts)
 
 
-### 3.4 Operational runbook (reference)
+### 3.4 Web Client (Local Web UI)
+
+**Full specification**: see `MACC_Web_Client_spec.md`.
+
+MACC provides a local SPA web client served by the `macc` binary, offering **feature parity** with the CLI/TUI plus web-only features: rich observability dashboards, interactive editors, embedded terminals, and an always-visible git graph.
+
+#### 3.4.1 Architecture
+
+- `macc web` starts the web server (Axum) serving:
+  - REST API (`/api/v1/*`) — JSON request/response
+  - SSE streaming (`/api/v1/events`, `/api/v1/logs/tail`) — real-time events and log tailing
+  - WebSocket (`/api/v1/terminal/*`) — PTY terminal sessions
+  - SPA static assets — embedded in the binary (`--assets embedded`) or served from disk (`--assets dist`)
+- **Binding**: `127.0.0.1:3450` by default. Use `--host 0.0.0.0` to expose on all interfaces.
+- **No authentication**: the web client is accessible without login or token. Security relies on localhost binding.
+- **Single project**: the web UI operates on the project directory where `macc web` was launched.
+
+#### 3.4.2 Frontend stack
+
+- React 19 + TypeScript + Vite
+- Tailwind CSS 4 (dark theme, console-grade readability)
+- Radix UI (headless accessible primitives)
+- Zustand (state management)
+- react-router-dom v7 (client-side routing)
+- `commit-graph` (git graph visualization)
+- xterm.js (embedded terminals)
+
+#### 3.4.3 UX modes
+
+The UI uses two consistent modes accessible via sidebar navigation:
+
+1. **Setup & Config Mode** — onboarding, tools/adapters, standards, skills/agents/MCP, plan/apply, PRD editing, settings.
+2. **Ops Mode** — coordinator console, registry inspector, live wall, dependency graph, diagnostics, logs explorer, backups, git graph.
+
+#### 3.4.4 App shell
+
+- **Left sidebar**: collapsible navigation organized by mode (Setup & Config, Ops).
+- **Top bar**: project path, connection status indicator, global search trigger (Ctrl+/), command palette (Ctrl+K).
+- **Bottom status strip**: coordinator state, active workers, throttled tools summary.
+- **Git Graph side panel**: always-visible collapsible panel (right side) showing the commit/branch graph. Can be expanded to a full page (`/ops/git`).
+
+#### 3.4.5 Pages
+
+**Setup & Config:**
+
+| Route | Page | Description |
+|---|---|---|
+| `/welcome` | Welcome / Quick Start | First-run onboarding cards |
+| `/init` | Init Wizard | 4-step project initialization |
+| `/dashboard` | Dashboard | Project summary, coordinator KPIs, alerts |
+| `/config/tools` | Tools & Adapters | Card grid with right drawer editor |
+| `/config/standards` | Standards | Preset selector + override editor |
+| `/config/skills` | Skills / Agents / MCP | Catalog browser with install flow |
+| `/config/settings` | Settings | General / Coordinator / Advanced tabs |
+| `/prd` | PRD Editor | Table + detail + graph (DAG) + diff views |
+| `/plan` | Plan | Run plan, display ActionPlan with diffs |
+| `/apply` | Apply | Confirmation, apply, results + backup info |
+
+**Ops:**
+
+| Route | Page | Description |
+|---|---|---|
+| `/ops/console` | Coordinator Console | KPIs, active performer streams, quick actions |
+| `/ops/registry` | Registry & Inspector | Task table + event timeline + operator actions |
+| `/ops/live` | Live Wall | Multi-stream grid (20+ concurrent tiles) |
+| `/ops/worker/:id` | Worker Detail | Fullscreen: live logs, events, artifacts |
+| `/ops/locks` | Dependency Graph | Task dependencies + resource contention + deadlock detection |
+| `/ops/diagnostics` | Diagnostics (Doctor) | Health score, issue cards, bulk safe fix |
+| `/ops/logs` | Logs Explorer | File browser, search, tail, structured events |
+| `/ops/backups` | Backups & Restore | Chronological list, restore with safety gates |
+| `/ops/git` | Git Graph (full page) | Full-page commit/branch graph |
+
+**Shared:**
+
+| Route | Page | Description |
+|---|---|---|
+| `/help` | Help | Offline docs viewer, contextual help |
+| `/about` | About | Version, paths, support info |
+
+#### 3.4.6 API contract
+
+**Core endpoints (implemented):**
+- `GET  /api/v1/health` — server availability
+- `GET  /api/v1/status` — coordinator status (task counts, pause state, rate-limit info)
+- `POST /api/v1/coordinator/{action}` — run, stop, resume, dispatch, advance, reconcile, cleanup
+- `GET  /api/v1/events` — SSE stream of coordinator events
+
+**Extended endpoints:**
+- `GET|PUT /api/v1/config` — read/write canonical config
+- `GET|PUT /api/v1/prd` — read/write PRD (`?path=` for worktree PRDs)
+- `POST /api/v1/plan` — run plan preview
+- `POST /api/v1/apply` — apply with confirmation gate (`confirmed` field required)
+- `GET|POST|DELETE /api/v1/worktrees` — worktree CRUD
+- `POST /api/v1/worktrees/{id}/run` — trigger performer run
+- `GET  /api/v1/worktrees/{id}/logs` — SSE per-worktree log stream
+- `GET  /api/v1/registry/tasks` — task registry listing
+- `POST /api/v1/registry/tasks/{id}/{action}` — requeue, reassign
+- `GET  /api/v1/logs` — list log files by category
+- `GET  /api/v1/logs/{path}` — read log content (paginated, searchable)
+- `GET  /api/v1/logs/tail` — SSE log tail stream
+- `GET  /api/v1/git/graph` — commit graph data (`?limit=`, `?since=`)
+- `GET  /api/v1/doctor` — diagnostics report
+- `POST /api/v1/doctor/fix` — apply safe fixes
+- `GET  /api/v1/backups` — list backups
+- `POST /api/v1/backups/{id}/restore` — restore with confirmation gate
+- `POST /api/v1/terminal` — create terminal session
+- `WS   /api/v1/terminal/{session}` — PTY WebSocket
+
+**Error model:**
+All errors return a structured envelope: `{ error: { code, category, message, retryable, recommended_action } }`. Error codes follow `MACC-WEB-XXXX` with domain ranges (1000=validation, 2000=not found, 3000=conflict, 4000=engine, 5000=internal).
+
+#### 3.4.7 Consent gates and risk levels
+
+All write actions are classified:
+- **Safe**: read-only operations, viewing logs, browsing.
+- **Caution**: project-level writes (apply, config edit, create worktree) → single confirm.
+- **Dangerous**: destructive operations (remove worktree, restore backup, emergency stop) → double confirm or typed phrase.
+
+#### 3.4.8 Streaming
+
+- **SSE** for coordinator events, log tails, and long-operation progress. Supports `Last-Event-ID` for reconnect replay. Heartbeats every 15s.
+- **WebSocket** for terminal PTY (bidirectional I/O).
+- Client implements exponential backoff reconnect with gap detection.
+- Bounded buffers per stream (max 500 lines per tile, configurable).
+
+#### 3.4.9 Git Graph (always visible)
+
+The git commit graph is a first-class UI element:
+- **Side panel** (right, 350px, collapsible): always visible during navigation, shows recent commit history with branch rails and merge edges.
+- **Full page** (`/ops/git`): expanded view with more history and controls.
+- Commits linked to MACC tasks (via `[macc:task]` tags) show task ID badges.
+- Infinite scroll for pagination. Auto-refresh every 30s.
+- Backend: `GET /api/v1/git/graph` calls `git log --parents --decorate` (CLI-based, no git library dependency).
+- Frontend: `commit-graph` npm package (actively maintained, React-native, MIT).
+
+#### 3.4.10 Embedded terminals
+
+- PTY over WebSocket with directory restriction (project root or worktree path).
+- Multi-tab sessions (max 5 concurrent).
+- Idle timeout (5 minutes). Session cleanup on disconnect.
+- Rendered with xterm.js in a bottom drawer.
+
+#### 3.4.11 Ops audit log
+
+All mutating API requests (POST, PUT, DELETE) are logged to `.macc/log/ops.jsonl` with: timestamp, method, path, status code, duration.
+
+#### 3.4.12 Performance targets
+
+- UI initial load < 2s (cached assets).
+- Virtualized tables for large PRDs (500+ tasks) and logs (10000+ lines).
+- 20+ concurrent stream tiles for the Live Wall.
+
+#### 3.4.13 Development workflow
+
+```bash
+# Dev mode (hot reload + API proxy)
+cd web && npm install && npm run dev   # Vite dev server on :5173
+macc web                                # Backend on :3450
+
+# Production mode (embedded assets)
+cd web && npm run build
+macc web --assets embedded              # Single binary serves everything
+```
+
+### 3.5 Operational runbook (reference)
 For production-like usage, the recommended sequence is:
 1) blank machine bootstrap,
 2) AI tool installation + health checks,
@@ -105,13 +272,13 @@ For production-like usage, the recommended sequence is:
 4) coordinator full-cycle execution,
 5) deterministic failure recovery.
 
-#### 3.4.1 Blank machine bootstrap
+#### 3.5.1 Blank machine bootstrap
 - Install system dependencies (`git`, `curl`, `jq`, build toolchain).
 - Install MACC via `./scripts/install.sh --release` or:
   - `curl -sSL https://raw.githubusercontent.com/Brand201/macc/master/scripts/install.sh | bash -s -- --release`
 - Verify binary in PATH with `macc --version`.
 
-#### 3.4.2 Tool installation and validation
+#### 3.5.2 Tool installation and validation
 - Run `macc tui`, open `Tools`, install missing tools via install action.
 - Before install, users must confirm they already have account/API credentials.
 - After install, run login/API-key setup through the tool's own command flow.
@@ -120,19 +287,19 @@ For production-like usage, the recommended sequence is:
   - CLI: `macc context [--tool <tool_id>]`
   - TUI: `Tools` screen, press `f` on a selected tool.
 
-#### 3.4.3 Project init
+#### 3.5.3 Project init
 - In target repo: `macc init`, then `macc tui`.
 - Configure tools + automation/coordinator settings (reference branch, dispatch/parallel limits, timeout/staleness policy).
 - Persist and materialize with `macc apply`.
 
-#### 3.4.4 Coordinator execution
+#### 3.5.4 Coordinator execution
 - Start full cycle with `macc coordinator`.
 - Monitor with `macc coordinator status`.
 - Logs must be consumed from:
   - `.macc/log/coordinator/`
   - `.macc/log/performer/`
 
-#### 3.4.4.1 Coordinator mechanism (end-to-end diagram)
+#### 3.5.4.1 Coordinator mechanism (end-to-end diagram)
 
 ```mermaid
 flowchart TD
@@ -198,7 +365,7 @@ sequenceDiagram
     end
 ```
 
-#### 3.4.5 Failure recovery
+#### 3.5.5 Failure recovery
 Standard recovery sequence:
 1) `macc coordinator status`
 2) `macc coordinator sync-prd` (reconcile tasks from commit history)
@@ -217,7 +384,7 @@ Stop flow:
 Project reset:
 - `macc clear` (confirmation required, worktree cleanup executed first, only MACC-managed paths removed).
 
-##### 3.4.5.1 Error codes + auto-retry (v1)
+##### 3.5.5.1 Error codes + auto-retry (v1)
 MACC records structured error codes for failures to distinguish origin and apply consistent remediation.
 
 Error code schema (v1):
@@ -255,7 +422,7 @@ Default policy:
 
 Note: E602 is intentionally excluded from the default retry list. Quota exhaustion is a hard limit requiring operator action (e.g., wait for quota reset or switch to another tool). Retrying E602 immediately would waste quota.
 
-##### 3.4.5.2 Canonical error model
+##### 3.5.5.2 Canonical error model
 
 MACC uses a three-layer canonical error model to normalize provider-specific errors into a uniform representation consumed by the coordinator, TUI, and Web API.
 
@@ -862,12 +1029,28 @@ Enable multiple parallel sessions:
 - Strict prohibition on committing secrets.
 - Templates with placeholders only.
 - Robust `.gitignore` entries (including `.macc/cache/`).
+- Web UI must redact likely secrets in logs/diffs (best effort).
+- MCP env values must be placeholders (e.g., `${ENV_VAR}`).
 
 ### 14.2 Permissions
 - MACC must make explicit:
   - auto-approved commands (pnpm dev/build/test…),
   - forbidden commands by default (e.g., `rm -rf`, `curl|sh`).
 - Any permission escalation must require consent.
+
+### 14.3 Web API security
+- Web server binds to `127.0.0.1` by default (no external exposure).
+- No authentication required (single local operator).
+- Explicit `--host 0.0.0.0` flag required to expose on all interfaces.
+- API must not read/write outside the project root, except user-level config operations with explicit consent.
+- Terminal sessions restricted to project root and worktree paths.
+- All mutating API requests logged to `.macc/log/ops.jsonl` for audit.
+- Path parameters sanitized to prevent directory traversal.
+
+### 14.4 Package safety (Skills/MCP)
+- Remote packages must be **data-only** and include `macc.package.json`.
+- No post-install scripts; no executing downloaded code.
+- Web install review UI must show permissions/risks (env/network/fs).
 
 ---
 
@@ -881,12 +1064,17 @@ Enable multiple parallel sessions:
 ### 15.2 Implementation & dependencies
 - **Primary implementation language: Rust (stable)**.
 - **TUI: Ratatui** (`ratatui`) + typical terminal stack (`crossterm`).
-- Git is required.
+- **Web backend: Axum** (HTTP server, SSE, WebSocket) + **Tokio** (async runtime) + **RustEmbed** (embedded SPA assets).
+- **Web frontend: React 19** + TypeScript + Vite + Tailwind CSS 4 + Radix UI + Zustand + `commit-graph` + xterm.js.
+- Git is required (CLI-based invocations; no native git library dependency).
 - Prefer distributing **prebuilt binaries**; Rust toolchain should be required only for contributors/build-from-source.
 
 ### 15.3 Performance
 - `macc apply` should be fast (< 1s on a standard project excluding downloads).
 - Downloads are cached and should be incremental.
+- Web UI initial load < 2s (cached assets, code splitting via React.lazy).
+- Virtualized tables for large datasets (PRD 500+ tasks, logs 10000+ lines).
+- 20+ concurrent SSE stream tiles supported for Live Wall.
 
 ---
 
@@ -900,6 +1088,9 @@ Enable multiple parallel sessions:
 - `docs/TOOL_ONBOARDING.md` (unified “add tool end-to-end” guide)
 - `docs/COMPATIBILITY.md` (OS + Rust compatibility policy)
 - `docs/RELEASE.md` (SemVer/tag/release process)
+- `docs/WEB_API_CONTRACT.md` (web API endpoints, request/response shapes, error codes)
+- `docs/ERRORS.md` (error code format and catalog)
+- `MACC_Web_Client_spec.md` (full web client specification)
 - Additional guides: installation, init/apply, worktrees, MCP, Ralph
 
 ---
@@ -907,24 +1098,53 @@ Enable multiple parallel sessions:
 ## 17. Tree structure (updated)
 ```
 macc/
-  crates/
-    macc-core/
-      src/
-        config/              # parse + validate canonical config
-        catalog/             # skill/mcp catalog, remote sources, indexes
-        resolve/             # canonical -> resolved selections
-        tool_api/            # ToolAdapter trait + registry
-        plan/                # ActionPlan, scopes, diffs, consent gates
-        fetch/               # git/http fetchers (into .macc/cache)
-        packages/            # macc.package.json parsing + validation
-        install/             # package -> tool install mapping (plan actions)
-        io/                  # atomic write, backup, filesystem ops
-        merge/               # json/toml merge + policies
-        security/            # secret scanning, deny patterns
-        doctor/              # diagnostics framework
-    macc-adapters/           # tool-specific planners
-    macc-cli/                # clap commands, calls core
-    macc-tui/                # ratatui state machine (later)
+  core/                        # macc-core crate
+    src/
+      config/                  # parse + validate canonical config
+      catalog/                 # skill/mcp catalog, remote sources, indexes
+      resolve/                 # canonical -> resolved selections
+      tool_api/                # ToolAdapter trait + registry
+      plan/                    # ActionPlan, scopes, diffs, consent gates
+      fetch/                   # git/http fetchers (into .macc/cache)
+      packages/                # macc.package.json parsing + validation
+      install/                 # package -> tool install mapping (plan actions)
+      io/                      # atomic write, backup, filesystem ops
+      merge/                   # json/toml merge + policies
+      security/                # secret scanning, deny patterns
+      doctor/                  # diagnostics framework
+      coordinator/             # coordinator runtime, IPC, control plane, storage
+      git.rs                   # git CLI wrapper (worktrees, log, status, merge)
+  cli/                         # macc-cli crate (clap commands)
+    src/
+      commands/
+        web/                   # web server module (Axum)
+          mod.rs               # server setup, router, state
+          errors.rs            # ApiError types, MACC-WEB-XXXX codes
+          types.rs             # API request/response types
+          coordinator.rs       # coordinator action handlers
+          config.rs            # config read/write handlers
+          prd.rs               # PRD read/write handlers
+          plan.rs              # plan handler
+          apply.rs             # apply handler
+          worktrees.rs         # worktree CRUD + run + logs
+          registry.rs          # task registry handlers
+          logs.rs              # log list, read, SSE tail
+          git.rs               # git graph data handler
+          doctor.rs            # diagnostics handlers
+          backups.rs           # backup list + restore
+          terminal.rs          # WebSocket PTY gateway
+          audit.rs             # ops audit logging middleware
+          sse.rs               # SSE streaming handler
+          assets.rs            # embedded/dist asset serving
+  tui/                         # macc-tui crate (ratatui)
+  web/                         # frontend SPA
+    src/
+      api/                     # API client + TypeScript models
+      components/              # shared components (KpiCard, StatusBadge, etc.)
+      pages/                   # route pages (Dashboard, Console, PRD, etc.)
+      stores/                  # Zustand stores
+      hooks/                   # custom React hooks (useEventSource, etc.)
+    dist/                      # production build output (gitignored)
 ```
 ---
 
@@ -964,10 +1184,25 @@ macc/
 - ✅ `audit-prd --dry-run` previews the prompt without invoking any tool.
 - ✅ `audit-prd --tool <id>` sends the prompt to a selected AI tool via its performer spec.
 
-### 18.6 Security
+### 18.6 Web Client
+- `macc web` launches the web UI on localhost without authentication.
+- Config editor reads/writes `.macc/macc.yaml` with validation and backups.
+- Plan displays ActionPlan diffs without writing.
+- Apply writes atomically, creates backups, and enforces consent gates.
+- Worktrees page lists and manages worktrees; can open worktree details and live logs.
+- Coordinator console shows state, metrics, throttling, and can run actions (run/stop/resume/reconcile/cleanup).
+- PRD editor supports table + detail + graph (DAG) + diff views with validation and save backups.
+- Git graph is always visible (side panel) and expandable to full page.
+- Live Wall supports 20+ concurrent stream tiles with bounded buffers.
+- Embedded terminals work for project root and worktree paths with directory restriction.
+- All mutating API requests are audit-logged to `.macc/log/ops.jsonl`.
+
+### 18.7 Security
 - ✅ No API key is written into the repo.
 - ✅ Remote packages are data-only; no scripts executed.
 - ✅ User-level modifications = backup + consent.
+- ✅ Web server binds to localhost by default; explicit flag for external exposure.
+- ✅ API path parameters sanitized against directory traversal.
 
 ---
 
@@ -975,12 +1210,13 @@ macc/
 - **v0.1**: init/plan/apply + standards + 2 skills + worktree create/list/apply
 - **v0.2**: full TUI (Rust + Ratatui) + ralph + MCP templates + consented merges. See [Acceptance Checklist](docs/v0.2-checklist.md).
 - **v0.3**: **remote catalog + git/http package fetch** for skills/MCP
+- **v0.4**: **Web Client MVP** — dashboard, coordinator console, SSE streaming, git graph, embedded assets
+- **v0.5**: **Web Client completion** — config editor, PRD editor (table/graph/diff), worktree management, live wall, diagnostics, embedded terminals, command palette
 - **v1.0**: stability, docs, modules, skill/agent marketplace (indexes + signatures), broader tool support
 
 ---
 
 ## 20. References & Prior Art
 - Codex (OpenAI)
-- Gemini Code Assist
+- Gemini Cli
 - Claude Code
-- Copilot
