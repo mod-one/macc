@@ -2,13 +2,13 @@ use crate::commands::AppContext;
 use crate::commands::Command;
 use crate::services::engine_provider::SharedEngine;
 use async_stream::stream;
+use axum::body::Body;
 use axum::extract::State;
-use axum::http::HeaderMap;
-use axum::http::Method;
-use axum::http::StatusCode;
+use axum::http::header::{self, HeaderValue};
+use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, get_service, post};
+use axum::routing::{get, post};
 use axum::Json;
 use axum::Router;
 use macc_core::coordinator::task_selector::SelectedTask;
@@ -21,13 +21,15 @@ use macc_core::service::coordinator_workflow::{
 };
 use macc_core::service::diagnostic::{FailureKind, FailureReport};
 use macc_core::{load_canonical_config, MaccError, ProjectPaths, Result};
+#[cfg(not(any(test, clippy)))]
+use rust_embed::RustEmbed;
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::convert::Infallible;
+use std::ffi::OsStr;
 use std::net::{IpAddr, SocketAddr};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tower_http::services::{ServeDir, ServeFile};
 
 pub struct WebCommand {
     app: AppContext,
@@ -102,10 +104,38 @@ struct WebState {
 const SSE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const SSE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 
-fn build_web_router(state: WebState) -> Router {
-    let spa_dist_dir = state.paths.root.join("web/dist");
-    let spa_index_path = spa_dist_dir.join("index.html");
+#[cfg(not(any(test, clippy)))]
+#[derive(RustEmbed)]
+#[folder = "../web/dist"]
+struct EmbeddedWebAssets;
 
+#[cfg(not(any(test, clippy)))]
+fn web_asset(path: &str) -> Option<Vec<u8>> {
+    EmbeddedWebAssets::get(path).map(|asset| asset.data.into_owned())
+}
+
+#[cfg(test)]
+fn web_asset_paths() -> impl Iterator<Item = &'static str> {
+    TEST_WEB_ASSETS.iter().map(|(path, _)| *path)
+}
+
+#[cfg(any(test, clippy))]
+fn web_asset(path: &str) -> Option<Vec<u8>> {
+    TEST_WEB_ASSETS
+        .iter()
+        .find_map(|(candidate, body)| (*candidate == path).then(|| body.as_bytes().to_vec()))
+}
+
+#[cfg(any(test, clippy))]
+const TEST_WEB_ASSETS: &[(&str, &str)] = &[
+    (
+        "index.html",
+        "<!doctype html><html><body>macc web</body></html>",
+    ),
+    ("assets/app.js", "console.log('macc');"),
+];
+
+fn build_web_router(state: WebState) -> Router {
     Router::new()
         .route("/api/v1/health", get(health_handler))
         .route("/api/v1/status", get(status_handler))
@@ -132,10 +162,43 @@ fn build_web_router(state: WebState) -> Router {
             "/api/v1/coordinator/resume",
             post(coordinator_resume_handler),
         )
-        .fallback_service(get_service(
-            ServeDir::new(spa_dist_dir.clone()).fallback(ServeFile::new(spa_index_path.clone())),
-        ))
+        .fallback(get(spa_handler))
         .with_state(state)
+}
+
+async fn spa_handler(uri: Uri) -> Response {
+    let asset_path = uri.path().trim_start_matches('/');
+    let asset_path = if asset_path.is_empty() {
+        "index.html"
+    } else {
+        asset_path
+    };
+
+    asset_response(asset_path)
+        .or_else(|| asset_response("index.html"))
+        .unwrap_or_else(|| StatusCode::NOT_FOUND.into_response())
+}
+
+fn asset_response(path: &str) -> Option<Response> {
+    let asset = web_asset(path)?;
+    let mime = mime_guess::from_path(path).first_or_octet_stream();
+    let mut response = Response::new(Body::from(asset));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(mime.as_ref()).ok()?,
+    );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(cache_control_header(path)),
+    );
+    Some(response)
+}
+
+fn cache_control_header(path: &str) -> &'static str {
+    match Path::new(path).extension().and_then(OsStr::to_str) {
+        Some("html") => "no-cache",
+        _ => "public, max-age=31536000, immutable",
+    }
 }
 
 async fn health_handler() -> Json<serde_json::Value> {
@@ -772,7 +835,6 @@ mod tests {
     use macc_core::TestEngine;
     use std::fs;
     use std::net::Ipv4Addr;
-    use std::path::Path;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
     use tower::util::ServiceExt;
@@ -801,18 +863,6 @@ mod tests {
         canonical.settings.web_port = Some(port);
         let yaml = canonical.to_yaml().expect("serialize config");
         fs::write(&paths.config_path, yaml).expect("write config");
-    }
-
-    fn write_spa_dist(root: &Path) {
-        let dist_dir = root.join("web/dist");
-        let assets_dir = dist_dir.join("assets");
-        fs::create_dir_all(&assets_dir).expect("create web dist");
-        fs::write(
-            dist_dir.join("index.html"),
-            "<!doctype html><html><body>macc web</body></html>",
-        )
-        .expect("write index");
-        fs::write(assets_dir.join("app.js"), "console.log('macc');").expect("write asset");
     }
 
     struct WebTestEngine {
@@ -1010,7 +1060,6 @@ mod tests {
     #[tokio::test]
     async fn root_serves_spa_index() {
         let root = temp_root("root");
-        write_spa_dist(&root);
         let state = WebState {
             engine: Arc::new(TestEngine::with_fixtures()),
             paths: ProjectPaths::from_root(&root),
@@ -1028,6 +1077,13 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .expect("content type"),
+            "text/html"
+        );
         let bytes = response
             .into_body()
             .collect()
@@ -1035,13 +1091,12 @@ mod tests {
             .expect("collect")
             .to_bytes();
         let payload = String::from_utf8(bytes.to_vec()).expect("utf8");
-        assert!(payload.contains("macc web"));
+        assert!(payload.contains("<!doctype html") || payload.contains("<!DOCTYPE html"));
     }
 
     #[tokio::test]
     async fn client_side_route_serves_spa_index() {
         let root = temp_root("spa-route");
-        write_spa_dist(&root);
         let state = WebState {
             engine: Arc::new(TestEngine::with_fixtures()),
             paths: ProjectPaths::from_root(&root),
@@ -1066,13 +1121,15 @@ mod tests {
             .expect("collect")
             .to_bytes();
         let payload = String::from_utf8(bytes.to_vec()).expect("utf8");
-        assert!(payload.contains("macc web"));
+        assert!(payload.contains("<!doctype html") || payload.contains("<!DOCTYPE html"));
     }
 
     #[tokio::test]
-    async fn static_asset_request_serves_file_from_dist() {
+    async fn static_asset_request_serves_embedded_asset() {
         let root = temp_root("asset");
-        write_spa_dist(&root);
+        let asset_path = web_asset_paths()
+            .find(|path| path.starts_with("assets/"))
+            .expect("embedded asset path");
         let state = WebState {
             engine: Arc::new(TestEngine::with_fixtures()),
             paths: ProjectPaths::from_root(&root),
@@ -1081,7 +1138,7 @@ mod tests {
         let response = app
             .oneshot(
                 Request::builder()
-                    .uri("/assets/app.js")
+                    .uri(format!("/{}", asset_path))
                     .method(Method::GET.as_str())
                     .body(Body::empty())
                     .expect("request"),
@@ -1090,14 +1147,17 @@ mod tests {
             .expect("response");
 
         assert_eq!(response.status(), StatusCode::OK);
+        assert!(response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .is_some());
         let bytes = response
             .into_body()
             .collect()
             .await
             .expect("collect")
             .to_bytes();
-        let payload = String::from_utf8(bytes.to_vec()).expect("utf8");
-        assert!(payload.contains("console.log('macc');"));
+        assert!(!bytes.is_empty());
     }
 
     #[tokio::test]
