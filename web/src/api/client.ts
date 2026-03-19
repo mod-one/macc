@@ -5,8 +5,7 @@ import type {
   ApiErrorEnvelope,
   ApiHealthResponse,
 } from './models';
-
-export const API_PREFIX = '/api/v1';
+import { API_PREFIX, resolveApiBaseUrl } from './config';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -47,10 +46,11 @@ function fallbackErrorEnvelope(message: string, cause?: string): ApiErrorEnvelop
 }
 
 export function buildUrl(path: string, baseUrl?: string): string {
-  if (!baseUrl) {
+  const resolvedBaseUrl = resolveApiBaseUrl(baseUrl);
+  if (!resolvedBaseUrl) {
     return `${API_PREFIX}${path}`;
   }
-  return new URL(`${API_PREFIX}${path}`, baseUrl).toString();
+  return new URL(`${API_PREFIX}${path}`, resolvedBaseUrl).toString();
 }
 
 async function requestJson<T>(
