@@ -1,6 +1,8 @@
 use clap::{Parser, Subcommand};
 use commands::Command;
 #[cfg(test)]
+use macc_core::config::WebAssetsMode;
+#[cfg(test)]
 use macc_core::coordinator::{RuntimeStatus, WorkflowState};
 #[cfg(test)]
 use macc_core::coordinator_storage::CoordinatorStorageTransfer;
@@ -128,6 +130,9 @@ enum Commands {
         /// Bind port for the web server. Defaults to the configured web port or `3450`.
         #[arg(long)]
         port: Option<u16>,
+        /// Static asset source. `dist` serves from `web/dist`; `embedded` serves rust-embed assets.
+        #[arg(long, value_enum)]
+        assets: Option<WebAssetsArg>,
     },
     /// Tool management
     Tool {
@@ -307,6 +312,21 @@ enum Commands {
         #[arg(last = true)]
         extra_args: Vec<String>,
     },
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum WebAssetsArg {
+    Dist,
+    Embedded,
+}
+
+impl From<WebAssetsArg> for macc_core::config::WebAssetsMode {
+    fn from(value: WebAssetsArg) -> Self {
+        match value {
+            WebAssetsArg::Dist => Self::Dist,
+            WebAssetsArg::Embedded => Self::Embedded,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -748,9 +768,13 @@ fn run_with_engine_provider(
                 source: std::io::Error::other(e.to_string()),
             })
         }
-        Some(Commands::Web { host, port }) => {
-            commands::web::WebCommand::new(app.clone(), host.clone(), *port).run()
-        }
+        Some(Commands::Web { host, port, assets }) => commands::web::WebCommand::new(
+            app.clone(),
+            host.clone(),
+            *port,
+            assets.map(|value| value.into()),
+        )
+        .run(),
         Some(Commands::Tool { tool_command }) => {
             commands::tool::ToolCommand::new(app.clone(), tool_command).run()
         }
@@ -3564,13 +3588,19 @@ fi
 
     #[test]
     fn test_web_command_parses_host_and_port_flags() {
-        let cli = Cli::try_parse_from(["macc", "web", "--host", "0.0.0.0", "--port", "8080"])
-            .expect("parse web command");
+        let cli = Cli::try_parse_from([
+            "macc", "web", "--host", "0.0.0.0", "--port", "8080", "--assets", "embedded",
+        ])
+        .expect("parse web command");
 
         match cli.command {
-            Some(Commands::Web { host, port }) => {
+            Some(Commands::Web { host, port, assets }) => {
                 assert_eq!(host, "0.0.0.0");
                 assert_eq!(port, Some(8080));
+                assert_eq!(
+                    assets.map(WebAssetsMode::from),
+                    Some(WebAssetsMode::Embedded)
+                );
             }
             other => panic!("unexpected command: {:?}", other.map(|_| "non-web")),
         }
@@ -3581,9 +3611,10 @@ fi
         let cli = Cli::try_parse_from(["macc", "web"]).expect("parse web command");
 
         match cli.command {
-            Some(Commands::Web { host, port }) => {
+            Some(Commands::Web { host, port, assets }) => {
                 assert_eq!(host, "127.0.0.1");
                 assert_eq!(port, None);
+                assert_eq!(assets, None);
             }
             other => panic!("unexpected command: {:?}", other.map(|_| "non-web")),
         }
