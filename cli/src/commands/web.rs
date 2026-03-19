@@ -94,6 +94,10 @@ fn build_web_router(state: WebState) -> Router {
             "/api/v1/coordinator/reconcile",
             post(coordinator_reconcile_handler),
         )
+        .route(
+            "/api/v1/coordinator/cleanup",
+            post(coordinator_cleanup_handler),
+        )
         .route("/api/v1/coordinator/stop", post(coordinator_stop_handler))
         .route(
             "/api/v1/coordinator/resume",
@@ -152,6 +156,19 @@ async fn coordinator_stop_handler(
         CoordinatorCommandResult::default(),
     )))
 }
+
+async fn coordinator_cleanup_handler(
+    State(state): State<WebState>,
+) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
+    state
+        .engine
+        .coordinator_cleanup(&state.paths)
+        .map_err(ApiError::from)?;
+    Ok(Json(ApiCoordinatorCommandResult::from(
+        CoordinatorCommandResult::default(),
+    )))
+}
+
 async fn coordinator_dispatch_handler(
     State(state): State<WebState>,
 ) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
@@ -599,6 +616,7 @@ mod tests {
         inner: TestEngine,
         run_result:
             std::sync::Mutex<Option<std::result::Result<CoordinatorCommandResult, MaccError>>>,
+        cleanup_result: std::sync::Mutex<Option<std::result::Result<(), MaccError>>>,
         stop_result: std::sync::Mutex<Option<std::result::Result<(), MaccError>>>,
         resume_result: std::sync::Mutex<Option<std::result::Result<(), MaccError>>>,
     }
@@ -608,6 +626,17 @@ mod tests {
             Self {
                 inner: TestEngine::with_fixtures(),
                 run_result: std::sync::Mutex::new(Some(result)),
+                cleanup_result: std::sync::Mutex::new(Some(Ok(()))),
+                stop_result: std::sync::Mutex::new(Some(Ok(()))),
+                resume_result: std::sync::Mutex::new(Some(Ok(()))),
+            }
+        }
+
+        fn with_cleanup_result(result: std::result::Result<(), MaccError>) -> Self {
+            Self {
+                inner: TestEngine::with_fixtures(),
+                run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
+                cleanup_result: std::sync::Mutex::new(Some(result)),
                 stop_result: std::sync::Mutex::new(Some(Ok(()))),
                 resume_result: std::sync::Mutex::new(Some(Ok(()))),
             }
@@ -617,6 +646,7 @@ mod tests {
             Self {
                 inner: TestEngine::with_fixtures(),
                 run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
+                cleanup_result: std::sync::Mutex::new(Some(Ok(()))),
                 stop_result: std::sync::Mutex::new(Some(result)),
                 resume_result: std::sync::Mutex::new(Some(Ok(()))),
             }
@@ -626,6 +656,7 @@ mod tests {
             Self {
                 inner: TestEngine::with_fixtures(),
                 run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
+                cleanup_result: std::sync::Mutex::new(Some(Ok(()))),
                 stop_result: std::sync::Mutex::new(Some(Ok(()))),
                 resume_result: std::sync::Mutex::new(Some(result)),
             }
@@ -698,6 +729,14 @@ mod tests {
 
         fn coordinator_stop(&self, _repo_root: &std::path::Path, _reason: &str) -> Result<()> {
             self.stop_result
+                .lock()
+                .expect("lock")
+                .take()
+                .unwrap_or_else(|| Ok(()))
+        }
+
+        fn coordinator_cleanup(&self, _paths: &ProjectPaths) -> Result<()> {
+            self.cleanup_result
                 .lock()
                 .expect("lock")
                 .take()
@@ -1186,6 +1225,82 @@ mod tests {
         let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
         assert_eq!(payload["error"]["code"], WEB_ERR_VALIDATION);
         assert_eq!(payload["error"]["category"], "Validation");
+    }
+
+    #[tokio::test]
+    async fn coordinator_cleanup_endpoint_returns_envelope() {
+        let root = temp_root("cleanup-ok");
+        fs::create_dir_all(&root).expect("create root");
+        let state = WebState {
+            engine: Arc::new(WebTestEngine::with_cleanup_result(Ok(()))),
+            paths: ProjectPaths::from_root(&root),
+        };
+        let app = build_web_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/coordinator/cleanup")
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect")
+            .to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        for key in [
+            "status",
+            "resumed",
+            "aggregated_performer_logs",
+            "runtime_status",
+            "exported_events_path",
+            "removed_worktrees",
+            "selected_task",
+        ] {
+            assert!(payload.get(key).is_some(), "missing {}", key);
+        }
+    }
+
+    #[tokio::test]
+    async fn coordinator_cleanup_endpoint_maps_errors() {
+        let root = temp_root("cleanup-error");
+        fs::create_dir_all(&root).expect("create root");
+        let state = WebState {
+            engine: Arc::new(WebTestEngine::with_cleanup_result(Err(
+                MaccError::Validation("cleanup failed".to_string()),
+            ))),
+            paths: ProjectPaths::from_root(&root),
+        };
+        let app = build_web_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/coordinator/cleanup")
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect")
+            .to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(payload["error"]["code"], WEB_ERR_VALIDATION);
+        assert_eq!(payload["error"]["category"], "Validation");
+        assert_eq!(payload["error"]["message"], "cleanup failed");
     }
 
     #[tokio::test]
