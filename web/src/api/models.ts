@@ -81,6 +81,8 @@ export type ApiCoordinatorAction =
   | 'reconcile'
   | 'cleanup';
 
+export type ApiEventStreamName = 'coordinator_event' | 'heartbeat';
+
 export interface ApiEventPayload {
   schema_version: string;
   event_id: string;
@@ -90,4 +92,11 @@ export interface ApiEventPayload {
   type: string;
   status: string;
   [key: string]: unknown;
+}
+
+export interface ApiEventStreamMessage {
+  stream: ApiEventStreamName;
+  eventId: string | null;
+  receivedAt: string;
+  payload: ApiEventPayload;
 }
