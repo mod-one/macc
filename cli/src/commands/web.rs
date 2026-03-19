@@ -16,22 +16,23 @@ use macc_core::service::coordinator_workflow::{
 use macc_core::service::diagnostic::{FailureKind, FailureReport};
 use macc_core::{load_canonical_config, MaccError, ProjectPaths, Result};
 use serde::Serialize;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 
 pub struct WebCommand {
     app: AppContext,
+    host: String,
+    port: Option<u16>,
 }
 
 impl WebCommand {
-    pub fn new(app: AppContext) -> Self {
-        Self { app }
+    pub fn new(app: AppContext, host: String, port: Option<u16>) -> Self {
+        Self { app, host, port }
     }
 }
 
 impl Command for WebCommand {
     fn run(&self) -> Result<()> {
-        let port = self.web_port()?;
-        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+        let addr = self.bind_addr()?;
         let state = WebState {
             engine: self.app.engine.clone(),
             paths: self.app.project_paths()?,
@@ -64,7 +65,18 @@ impl Command for WebCommand {
 }
 
 impl WebCommand {
+    fn bind_addr(&self) -> Result<SocketAddr> {
+        let host = self.host.parse::<IpAddr>().map_err(|e| {
+            MaccError::Validation(format!("invalid web host '{}': {}", self.host, e))
+        })?;
+        Ok(SocketAddr::new(host, self.web_port()?))
+    }
+
     fn web_port(&self) -> Result<u16> {
+        if let Some(port) = self.port {
+            return Ok(port);
+        }
+
         let canonical = self.app.canonical_config()?;
         Ok(canonical.settings.web_port.unwrap_or(3450))
     }
@@ -585,12 +597,15 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::AppContext;
     use axum::body::Body;
     use axum::http::Request;
     use http_body_util::BodyExt;
     use macc_core::config::CanonicalConfig;
+    use macc_core::resolve::CliOverrides;
     use macc_core::TestEngine;
     use std::fs;
+    use std::net::Ipv4Addr;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
     use tower::util::ServiceExt;
@@ -609,6 +624,15 @@ mod tests {
         let yaml = CanonicalConfig::default()
             .to_yaml()
             .expect("serialize config");
+        fs::write(&paths.config_path, yaml).expect("write config");
+    }
+
+    fn write_test_config_with_port(root: &std::path::Path, port: u16) {
+        let paths = ProjectPaths::from_root(root);
+        fs::create_dir_all(paths.config_path.parent().expect("config dir")).expect("mkdir config");
+        let mut canonical = CanonicalConfig::default();
+        canonical.settings.web_port = Some(port);
+        let yaml = canonical.to_yaml().expect("serialize config");
         fs::write(&paths.config_path, yaml).expect("write config");
     }
 
@@ -897,6 +921,49 @@ mod tests {
         assert_eq!(payload["error"]["category"], "Validation");
         assert!(payload["error"]["message"].is_string());
         assert!(payload["error"].get("context").is_none());
+    }
+
+    #[test]
+    fn bind_addr_defaults_to_localhost_and_configured_port() {
+        let root = temp_root("bind-default");
+        fs::create_dir_all(&root).expect("create root");
+        write_test_config_with_port(&root, 4567);
+        let command = WebCommand::new(
+            AppContext::new(
+                root.clone(),
+                Arc::new(TestEngine::with_fixtures()),
+                CliOverrides::default(),
+            ),
+            Ipv4Addr::LOCALHOST.to_string(),
+            None,
+        );
+
+        let addr = command.bind_addr().expect("bind addr");
+
+        assert_eq!(addr, SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4567));
+    }
+
+    #[test]
+    fn bind_addr_uses_cli_overrides() {
+        let root = temp_root("bind-override");
+        fs::create_dir_all(&root).expect("create root");
+        write_test_config_with_port(&root, 4567);
+        let command = WebCommand::new(
+            AppContext::new(
+                root.clone(),
+                Arc::new(TestEngine::with_fixtures()),
+                CliOverrides::default(),
+            ),
+            "0.0.0.0".to_string(),
+            Some(8080),
+        );
+
+        let addr = command.bind_addr().expect("bind addr");
+
+        assert_eq!(
+            addr,
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 8080)
+        );
     }
 
     #[tokio::test]
