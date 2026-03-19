@@ -1,5 +1,6 @@
 import React from 'react';
 import { buildUrl } from '../api/client';
+import { resolveApiBaseUrl } from '../api/config';
 import type { ApiEventPayload, ApiEventStreamMessage, ApiEventStreamName } from '../api/models';
 
 export type EventSourceConnectionState = 'connecting' | 'open' | 'closed';
@@ -62,7 +63,8 @@ function buildEventSourceUrl(
   baseUrl: string | undefined,
   lastEventId: string | null,
 ): string {
-  const url = new URL(buildUrl(path, baseUrl), baseUrl ?? window.location.origin);
+  const resolvedBaseUrl = resolveApiBaseUrl(baseUrl);
+  const url = new URL(buildUrl(path, resolvedBaseUrl), resolvedBaseUrl ?? window.location.origin);
 
   if (lastEventId) {
     url.searchParams.set('last_event_id', lastEventId);
@@ -70,7 +72,7 @@ function buildEventSourceUrl(
     url.searchParams.delete('last_event_id');
   }
 
-  if (!baseUrl) {
+  if (!resolvedBaseUrl) {
     return `${url.pathname}${url.search}`;
   }
 
