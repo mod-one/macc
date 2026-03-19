@@ -489,6 +489,9 @@ impl SqliteStorage {
     fn open(&self) -> Result<Connection> {
         ensure_parent_dir(&self.paths.sqlite_path)?;
         let conn = Connection::open(&self.paths.sqlite_path).map_err(sql_err)?;
+        // WAL mode allows concurrent readers and writers without blocking.
+        conn.execute_batch("PRAGMA journal_mode=WAL;")
+            .map_err(sql_err)?;
         // Prevent SQLITE_BUSY errors when multiple performers write concurrently.
         conn.busy_timeout(std::time::Duration::from_secs(5))
             .map_err(sql_err)?;

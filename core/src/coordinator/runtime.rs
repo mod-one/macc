@@ -636,6 +636,27 @@ fn read_last_completion_details(
     task_id: &str,
     event_source: &str,
 ) -> Option<CompletionDetails> {
+    // Retry a few times to handle the race where the IPC handler has not yet
+    // committed the phase_result event to SQLite when the monitor checks.
+    for attempt in 0..3u8 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+        if let Some(details) =
+            read_last_completion_details_once(repo_root, task_id, event_source, attempt)
+        {
+            return Some(details);
+        }
+    }
+    None
+}
+
+fn read_last_completion_details_once(
+    repo_root: &Path,
+    task_id: &str,
+    event_source: &str,
+    attempt: u8,
+) -> Option<CompletionDetails> {
     let project_paths = crate::ProjectPaths::from_root(repo_root);
     let storage_paths =
         crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&project_paths);
@@ -645,6 +666,7 @@ fn read_last_completion_details(
         Err(err) => {
             tracing::warn!(
                 task_id,
+                attempt,
                 "read_last_completion_details: load_snapshot failed: {}",
                 err
             );
@@ -668,6 +690,13 @@ fn read_last_completion_details(
             result_kind: event.payload_result_kind(),
             message: event.message().map(|value| value.to_string()),
         });
+    }
+    if attempt < 2 {
+        tracing::debug!(
+            task_id,
+            attempt,
+            "read_last_completion_details: phase_result not found yet, will retry"
+        );
     }
     None
 }
