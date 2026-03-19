@@ -6,7 +6,7 @@ import type {
   ApiHealthResponse,
 } from './models';
 
-const API_PREFIX = '/api/v1';
+export const API_PREFIX = '/api/v1';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -46,7 +46,7 @@ function fallbackErrorEnvelope(message: string, cause?: string): ApiErrorEnvelop
   };
 }
 
-function buildUrl(path: string, baseUrl?: string): string {
+export function buildUrl(path: string, baseUrl?: string): string {
   if (!baseUrl) {
     return `${API_PREFIX}${path}`;
   }
