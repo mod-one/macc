@@ -86,6 +86,10 @@ fn build_web_router(state: WebState) -> Router {
             "/api/v1/coordinator/advance",
             post(coordinator_advance_handler),
         )
+        .route(
+            "/api/v1/coordinator/reconcile",
+            post(coordinator_reconcile_handler),
+        )
         .route("/api/v1/coordinator/stop", post(coordinator_stop_handler))
         .route(
             "/api/v1/coordinator/resume",
@@ -154,6 +158,26 @@ async fn coordinator_advance_handler(
         .coordinator_execute_command(
             &state.paths,
             CoordinatorCommand::AdvanceTasks,
+            CoordinatorCommandRequest {
+                canonical: None,
+                coordinator_cfg: None,
+                env_cfg: &env_cfg,
+                logger: None,
+            },
+        )
+        .map_err(ApiError::from)?;
+    Ok(Json(ApiCoordinatorCommandResult::from(result)))
+}
+
+async fn coordinator_reconcile_handler(
+    State(state): State<WebState>,
+) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
+    let env_cfg = CoordinatorEnvConfig::default();
+    let result = state
+        .engine
+        .coordinator_execute_command(
+            &state.paths,
+            CoordinatorCommand::ReconcileRuntime,
             CoordinatorCommandRequest {
                 canonical: None,
                 coordinator_cfg: None,
@@ -1117,6 +1141,90 @@ mod tests {
         assert_eq!(payload["error"]["code"], WEB_ERR_VALIDATION);
         assert_eq!(payload["error"]["category"], "Validation");
         assert_eq!(payload["error"]["message"], "advance failed");
+        assert!(payload["error"].get("cause").is_none());
+    }
+
+    #[tokio::test]
+    async fn coordinator_reconcile_endpoint_returns_envelope() {
+        let root = temp_root("reconcile-ok");
+        fs::create_dir_all(&root).expect("create root");
+        let result = CoordinatorCommandResult {
+            runtime_status: Some("running".to_string()),
+            removed_worktrees: Some(1),
+            ..CoordinatorCommandResult::default()
+        };
+        let state = WebState {
+            engine: Arc::new(WebTestEngine::new(Ok(result))),
+            paths: ProjectPaths::from_root(&root),
+        };
+        let app = build_web_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/coordinator/reconcile")
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect")
+            .to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        for key in [
+            "status",
+            "resumed",
+            "aggregated_performer_logs",
+            "runtime_status",
+            "exported_events_path",
+            "removed_worktrees",
+            "selected_task",
+        ] {
+            assert!(payload.get(key).is_some(), "missing {}", key);
+        }
+        assert_eq!(payload["runtime_status"], "running");
+        assert_eq!(payload["removed_worktrees"], 1);
+    }
+
+    #[tokio::test]
+    async fn coordinator_reconcile_endpoint_maps_errors() {
+        let root = temp_root("reconcile-error");
+        fs::create_dir_all(&root).expect("create root");
+        let state = WebState {
+            engine: Arc::new(WebTestEngine::new(Err(MaccError::Validation(
+                "reconcile failed".to_string(),
+            )))),
+            paths: ProjectPaths::from_root(&root),
+        };
+        let app = build_web_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/coordinator/reconcile")
+                    .method("POST")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect")
+            .to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(payload["error"]["code"], WEB_ERR_VALIDATION);
+        assert_eq!(payload["error"]["category"], "Validation");
+        assert_eq!(payload["error"]["message"], "reconcile failed");
         assert!(payload["error"].get("cause").is_none());
     }
 
