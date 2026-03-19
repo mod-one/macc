@@ -798,6 +798,10 @@ pub trait Engine {
         )
     }
 
+    fn coordinator_cleanup(&self, paths: &ProjectPaths) -> Result<()> {
+        self.coordinator_cleanup_workflow(paths, None)
+    }
+
     fn coordinator_resume(&self, repo_root: &Path) -> Result<()> {
         if let Some(pause) = coordinator::state_runtime::read_coordinator_pause_file(repo_root)? {
             let task_id = pause.task_id.as_str();
