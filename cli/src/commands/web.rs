@@ -39,6 +39,13 @@ pub struct WebCommand {
     assets_mode: Option<WebAssetsMode>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WebServerConfig {
+    host: IpAddr,
+    port: u16,
+    assets_mode: WebAssetsMode,
+}
+
 impl WebCommand {
     pub fn new(
         app: AppContext,
@@ -57,15 +64,15 @@ impl WebCommand {
 
 impl Command for WebCommand {
     fn run(&self) -> Result<()> {
-        let addr = self.bind_addr()?;
+        let config = self.server_config()?;
         let state = WebState {
             engine: self.app.engine.clone(),
             paths: self.app.project_paths()?,
-            assets_mode: self.assets_mode()?,
+            assets_mode: config.assets_mode,
         };
         let app = build_web_router(state);
 
-        println!("Web server starting on http://{}...", addr);
+        println!("Web server starting on http://{}...", config.bind_addr());
 
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -73,6 +80,7 @@ impl Command for WebCommand {
             .map_err(|e| MaccError::Validation(format!("build web runtime: {}", e)))?;
 
         runtime.block_on(async move {
+            let addr = config.bind_addr();
             let listener =
                 tokio::net::TcpListener::bind(addr)
                     .await
@@ -91,32 +99,29 @@ impl Command for WebCommand {
 }
 
 impl WebCommand {
-    fn bind_addr(&self) -> Result<SocketAddr> {
+    fn server_config(&self) -> Result<WebServerConfig> {
+        let canonical = self.app.canonical_config()?;
         let host = self.host.parse::<IpAddr>().map_err(|e| {
             MaccError::Validation(format!("invalid web host '{}': {}", self.host, e))
         })?;
-        Ok(SocketAddr::new(host, self.web_port()?))
+        Ok(WebServerConfig {
+            host,
+            port: self
+                .port
+                .unwrap_or(canonical.settings.web_port.unwrap_or(3450)),
+            assets_mode: self.assets_mode.unwrap_or_else(|| {
+                canonical
+                    .settings
+                    .web_assets
+                    .unwrap_or_else(default_web_assets_mode)
+            }),
+        })
     }
+}
 
-    fn web_port(&self) -> Result<u16> {
-        if let Some(port) = self.port {
-            return Ok(port);
-        }
-
-        let canonical = self.app.canonical_config()?;
-        Ok(canonical.settings.web_port.unwrap_or(3450))
-    }
-
-    fn assets_mode(&self) -> Result<WebAssetsMode> {
-        if let Some(mode) = self.assets_mode {
-            return Ok(mode);
-        }
-
-        let canonical = self.app.canonical_config()?;
-        Ok(canonical
-            .settings
-            .web_assets
-            .unwrap_or_else(default_web_assets_mode))
+impl WebServerConfig {
+    fn bind_addr(self) -> SocketAddr {
+        SocketAddr::new(self.host, self.port)
     }
 }
 
@@ -1578,7 +1583,7 @@ mod tests {
     }
 
     #[test]
-    fn bind_addr_defaults_to_localhost_and_configured_port() {
+    fn server_config_defaults_to_localhost_and_configured_port() {
         let root = temp_root("bind-default");
         fs::create_dir_all(&root).expect("create root");
         write_test_config_with_port(&root, 4567);
@@ -1593,16 +1598,28 @@ mod tests {
             None,
         );
 
-        let addr = command.bind_addr().expect("bind addr");
+        let config = command.server_config().expect("server config");
 
-        assert_eq!(addr, SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4567));
+        assert_eq!(
+            config,
+            WebServerConfig {
+                host: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                port: 4567,
+                assets_mode: WebAssetsMode::Dist,
+            }
+        );
+        assert_eq!(
+            config.bind_addr(),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4567)
+        );
     }
 
     #[test]
-    fn bind_addr_uses_cli_overrides() {
+    fn server_config_uses_cli_overrides() {
         let root = temp_root("bind-override");
         fs::create_dir_all(&root).expect("create root");
         write_test_config_with_port(&root, 4567);
+        write_test_config_with_assets_mode(&root, WebAssetsMode::Dist);
         let command = WebCommand::new(
             AppContext::new(
                 root.clone(),
@@ -1611,19 +1628,23 @@ mod tests {
             ),
             "0.0.0.0".to_string(),
             Some(8080),
-            None,
+            Some(WebAssetsMode::Embedded),
         );
 
-        let addr = command.bind_addr().expect("bind addr");
+        let config = command.server_config().expect("server config");
 
         assert_eq!(
-            addr,
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 8080)
+            config,
+            WebServerConfig {
+                host: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                port: 8080,
+                assets_mode: WebAssetsMode::Embedded,
+            }
         );
     }
 
     #[test]
-    fn assets_mode_defaults_to_dist_in_dev() {
+    fn server_config_assets_mode_defaults_to_dist_in_dev() {
         let root = temp_root("assets-default");
         fs::create_dir_all(&root).expect("create root");
         write_test_config(&root);
@@ -1639,13 +1660,13 @@ mod tests {
         );
 
         assert_eq!(
-            command.assets_mode().expect("assets mode"),
+            command.server_config().expect("server config").assets_mode,
             WebAssetsMode::Dist
         );
     }
 
     #[test]
-    fn assets_mode_uses_config_when_cli_flag_is_absent() {
+    fn server_config_assets_mode_uses_config_when_cli_flag_is_absent() {
         let root = temp_root("assets-config");
         fs::create_dir_all(&root).expect("create root");
         write_test_config_with_assets_mode(&root, WebAssetsMode::Embedded);
@@ -1661,13 +1682,13 @@ mod tests {
         );
 
         assert_eq!(
-            command.assets_mode().expect("assets mode"),
+            command.server_config().expect("server config").assets_mode,
             WebAssetsMode::Embedded
         );
     }
 
     #[test]
-    fn assets_mode_cli_flag_overrides_config() {
+    fn server_config_assets_mode_cli_flag_overrides_config() {
         let root = temp_root("assets-cli");
         fs::create_dir_all(&root).expect("create root");
         write_test_config_with_assets_mode(&root, WebAssetsMode::Dist);
@@ -1683,7 +1704,7 @@ mod tests {
         );
 
         assert_eq!(
-            command.assets_mode().expect("assets mode"),
+            command.server_config().expect("server config").assets_mode,
             WebAssetsMode::Embedded
         );
     }
