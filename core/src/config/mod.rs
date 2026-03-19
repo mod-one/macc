@@ -31,6 +31,15 @@ pub struct SettingsConfig {
     pub offline: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub web_port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub web_assets: Option<WebAssetsMode>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum WebAssetsMode {
+    Dist,
+    Embedded,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
@@ -590,6 +599,27 @@ standards:
         let reserialized = config.to_yaml().expect("Should serialize back to yaml");
         assert!(reserialized.contains("language: English"));
         assert!(reserialized.contains("package_manager: pnpm"));
+    }
+
+    #[test]
+    fn test_settings_web_assets_roundtrip() {
+        let yaml = r#"tools:
+  enabled: []
+settings:
+  web_port: 3450
+  web_assets: embedded
+"#;
+        let config = CanonicalConfig::from_yaml(yaml).expect("Should parse settings");
+
+        assert_eq!(config.settings.web_port, Some(3450));
+        assert_eq!(config.settings.web_assets, Some(WebAssetsMode::Embedded));
+
+        let reserialized = config.to_yaml().expect("Should serialize back to yaml");
+        assert!(reserialized.contains("web_assets: embedded"));
+
+        let config2 =
+            CanonicalConfig::from_yaml(&reserialized).expect("Should parse reserialized yaml");
+        assert_eq!(config, config2);
     }
 
     #[test]

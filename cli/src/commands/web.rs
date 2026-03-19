@@ -11,6 +11,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Json;
 use axum::Router;
+use macc_core::config::WebAssetsMode;
 use macc_core::coordinator::task_selector::SelectedTask;
 use macc_core::coordinator::types::CoordinatorEnvConfig;
 use macc_core::coordinator::COORDINATOR_EVENT_SCHEMA_VERSION;
@@ -35,11 +36,22 @@ pub struct WebCommand {
     app: AppContext,
     host: String,
     port: Option<u16>,
+    assets_mode: Option<WebAssetsMode>,
 }
 
 impl WebCommand {
-    pub fn new(app: AppContext, host: String, port: Option<u16>) -> Self {
-        Self { app, host, port }
+    pub fn new(
+        app: AppContext,
+        host: String,
+        port: Option<u16>,
+        assets_mode: Option<WebAssetsMode>,
+    ) -> Self {
+        Self {
+            app,
+            host,
+            port,
+            assets_mode,
+        }
     }
 }
 
@@ -49,6 +61,7 @@ impl Command for WebCommand {
         let state = WebState {
             engine: self.app.engine.clone(),
             paths: self.app.project_paths()?,
+            assets_mode: self.assets_mode()?,
         };
         let app = build_web_router(state);
 
@@ -93,16 +106,39 @@ impl WebCommand {
         let canonical = self.app.canonical_config()?;
         Ok(canonical.settings.web_port.unwrap_or(3450))
     }
+
+    fn assets_mode(&self) -> Result<WebAssetsMode> {
+        if let Some(mode) = self.assets_mode {
+            return Ok(mode);
+        }
+
+        let canonical = self.app.canonical_config()?;
+        Ok(canonical
+            .settings
+            .web_assets
+            .unwrap_or_else(default_web_assets_mode))
+    }
 }
 
 #[derive(Clone)]
 struct WebState {
     engine: SharedEngine,
     paths: ProjectPaths,
+    assets_mode: WebAssetsMode,
 }
 
 const SSE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const SSE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+
+#[cfg(debug_assertions)]
+fn default_web_assets_mode() -> WebAssetsMode {
+    WebAssetsMode::Dist
+}
+
+#[cfg(not(debug_assertions))]
+fn default_web_assets_mode() -> WebAssetsMode {
+    WebAssetsMode::Embedded
+}
 
 #[cfg(not(any(test, clippy)))]
 #[derive(RustEmbed)]
@@ -166,7 +202,7 @@ fn build_web_router(state: WebState) -> Router {
         .with_state(state)
 }
 
-async fn spa_handler(uri: Uri) -> Response {
+async fn spa_handler(State(state): State<WebState>, uri: Uri) -> Response {
     let asset_path = uri.path().trim_start_matches('/');
     let asset_path = if asset_path.is_empty() {
         "index.html"
@@ -174,13 +210,16 @@ async fn spa_handler(uri: Uri) -> Response {
         asset_path
     };
 
-    asset_response(asset_path)
-        .or_else(|| asset_response("index.html"))
+    asset_response(&state, asset_path)
+        .or_else(|| asset_response(&state, "index.html"))
         .unwrap_or_else(|| StatusCode::NOT_FOUND.into_response())
 }
 
-fn asset_response(path: &str) -> Option<Response> {
-    let asset = web_asset(path)?;
+fn asset_response(state: &WebState, path: &str) -> Option<Response> {
+    let asset = match state.assets_mode {
+        WebAssetsMode::Dist => dist_asset(path, &state.paths.root),
+        WebAssetsMode::Embedded => web_asset(path),
+    }?;
     let mime = mime_guess::from_path(path).first_or_octet_stream();
     let mut response = Response::new(Body::from(asset));
     response.headers_mut().insert(
@@ -192,6 +231,10 @@ fn asset_response(path: &str) -> Option<Response> {
         HeaderValue::from_static(cache_control_header(path)),
     );
     Some(response)
+}
+
+fn dist_asset(path: &str, root: &Path) -> Option<Vec<u8>> {
+    std::fs::read(root.join("web").join("dist").join(path)).ok()
 }
 
 fn cache_control_header(path: &str) -> &'static str {
@@ -865,6 +908,38 @@ mod tests {
         fs::write(&paths.config_path, yaml).expect("write config");
     }
 
+    fn write_test_config_with_assets_mode(root: &std::path::Path, assets_mode: WebAssetsMode) {
+        let paths = ProjectPaths::from_root(root);
+        fs::create_dir_all(paths.config_path.parent().expect("config dir")).expect("mkdir config");
+        let mut canonical = CanonicalConfig::default();
+        canonical.settings.web_assets = Some(assets_mode);
+        let yaml = canonical.to_yaml().expect("serialize config");
+        fs::write(&paths.config_path, yaml).expect("write config");
+    }
+
+    fn write_test_dist_assets(root: &std::path::Path) {
+        let dist_dir = root.join("web").join("dist").join("assets");
+        fs::create_dir_all(&dist_dir).expect("mkdir dist assets");
+        fs::write(
+            root.join("web").join("dist").join("index.html"),
+            "<!doctype html><html><body>dist web</body></html>",
+        )
+        .expect("write index");
+        fs::write(dist_dir.join("app.js"), "console.log('dist');").expect("write asset");
+    }
+
+    fn test_web_state(
+        root: &std::path::Path,
+        engine: SharedEngine,
+        assets_mode: WebAssetsMode,
+    ) -> WebState {
+        WebState {
+            engine,
+            paths: ProjectPaths::from_root(root),
+            assets_mode,
+        }
+    }
+
     struct WebTestEngine {
         inner: TestEngine,
         run_result:
@@ -1060,10 +1135,11 @@ mod tests {
     #[tokio::test]
     async fn root_serves_spa_index() {
         let root = temp_root("root");
-        let state = WebState {
-            engine: Arc::new(TestEngine::with_fixtures()),
-            paths: ProjectPaths::from_root(&root),
-        };
+        let state = test_web_state(
+            &root,
+            Arc::new(TestEngine::with_fixtures()),
+            WebAssetsMode::Embedded,
+        );
         let app = build_web_router(state);
         let response = app
             .oneshot(
@@ -1097,10 +1173,11 @@ mod tests {
     #[tokio::test]
     async fn client_side_route_serves_spa_index() {
         let root = temp_root("spa-route");
-        let state = WebState {
-            engine: Arc::new(TestEngine::with_fixtures()),
-            paths: ProjectPaths::from_root(&root),
-        };
+        let state = test_web_state(
+            &root,
+            Arc::new(TestEngine::with_fixtures()),
+            WebAssetsMode::Embedded,
+        );
         let app = build_web_router(state);
         let response = app
             .oneshot(
@@ -1130,10 +1207,11 @@ mod tests {
         let asset_path = web_asset_paths()
             .find(|path| path.starts_with("assets/"))
             .expect("embedded asset path");
-        let state = WebState {
-            engine: Arc::new(TestEngine::with_fixtures()),
-            paths: ProjectPaths::from_root(&root),
-        };
+        let state = test_web_state(
+            &root,
+            Arc::new(TestEngine::with_fixtures()),
+            WebAssetsMode::Embedded,
+        );
         let app = build_web_router(state);
         let response = app
             .oneshot(
@@ -1161,13 +1239,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dist_asset_mode_serves_files_from_disk() {
+        let root = temp_root("dist-asset");
+        write_test_dist_assets(&root);
+        let state = test_web_state(
+            &root,
+            Arc::new(TestEngine::with_fixtures()),
+            WebAssetsMode::Dist,
+        );
+        let app = build_web_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/assets/app.js")
+                    .method(Method::GET.as_str())
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .is_some());
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect")
+            .to_bytes();
+        assert_eq!(
+            String::from_utf8(bytes.to_vec()).expect("utf8"),
+            "console.log('dist');"
+        );
+    }
+
+    #[tokio::test]
+    async fn dist_asset_mode_falls_back_to_dist_index_for_client_routes() {
+        let root = temp_root("dist-spa");
+        write_test_dist_assets(&root);
+        let state = test_web_state(
+            &root,
+            Arc::new(TestEngine::with_fixtures()),
+            WebAssetsMode::Dist,
+        );
+        let app = build_web_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/runs/active")
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect")
+            .to_bytes();
+        let payload = String::from_utf8(bytes.to_vec()).expect("utf8");
+        assert!(payload.contains("dist web"));
+    }
+
+    #[tokio::test]
     async fn health_endpoint_returns_ok_status() {
         let root = temp_root("health");
         fs::create_dir_all(&root).expect("create root");
-        let state = WebState {
-            engine: Arc::new(TestEngine::with_fixtures()),
-            paths: ProjectPaths::from_root(&root),
-        };
+        let state = test_web_state(
+            &root,
+            Arc::new(TestEngine::with_fixtures()),
+            WebAssetsMode::Embedded,
+        );
         let app = build_web_router(state);
         let response = app
             .oneshot(
@@ -1195,10 +1344,11 @@ mod tests {
     async fn status_endpoint_returns_status_payload() {
         let root = temp_root("ok");
         fs::create_dir_all(&root).expect("create root");
-        let state = WebState {
-            engine: Arc::new(TestEngine::with_fixtures()),
-            paths: ProjectPaths::from_root(&root),
-        };
+        let state = test_web_state(
+            &root,
+            Arc::new(TestEngine::with_fixtures()),
+            WebAssetsMode::Embedded,
+        );
         let app = build_web_router(state);
         let response = app
             .oneshot(
@@ -1246,10 +1396,11 @@ mod tests {
             .join("task_registry.json");
         fs::create_dir_all(registry_path.parent().expect("parent")).expect("mkdir");
         fs::write(&registry_path, "{not-json").expect("write");
-        let state = WebState {
-            engine: Arc::new(TestEngine::with_fixtures()),
-            paths: ProjectPaths::from_root(&root),
-        };
+        let state = test_web_state(
+            &root,
+            Arc::new(TestEngine::with_fixtures()),
+            WebAssetsMode::Embedded,
+        );
         let app = build_web_router(state);
         let response = app
             .oneshot(
@@ -1280,12 +1431,13 @@ mod tests {
     async fn events_endpoint_streams_coordinator_events() {
         let root = temp_root("events-stream");
         fs::create_dir_all(&root).expect("create root");
-        let state = WebState {
-            engine: Arc::new(WebTestEngine::with_event_snapshots(vec![vec![
+        let state = test_web_state(
+            &root,
+            Arc::new(WebTestEngine::with_event_snapshots(vec![vec![
                 coordinator_event(42, "evt-42", "task_transition"),
             ]])),
-            paths: ProjectPaths::from_root(&root),
-        };
+            WebAssetsMode::Embedded,
+        );
         let app = build_web_router(state);
         let response = app
             .oneshot(
@@ -1325,13 +1477,14 @@ mod tests {
     async fn events_endpoint_respects_last_event_id_cursor() {
         let root = temp_root("events-cursor");
         fs::create_dir_all(&root).expect("create root");
-        let state = WebState {
-            engine: Arc::new(WebTestEngine::with_event_snapshots(vec![vec![
+        let state = test_web_state(
+            &root,
+            Arc::new(WebTestEngine::with_event_snapshots(vec![vec![
                 coordinator_event(41, "evt-41", "task_transition"),
                 coordinator_event(42, "evt-42", "task_transition"),
             ]])),
-            paths: ProjectPaths::from_root(&root),
-        };
+            WebAssetsMode::Embedded,
+        );
         let app = build_web_router(state);
         let response = app
             .oneshot(
@@ -1362,13 +1515,14 @@ mod tests {
     async fn coordinator_event_stream_delivers_new_events_after_connect() {
         let root = temp_root("events-live");
         fs::create_dir_all(&root).expect("create root");
-        let state = WebState {
-            engine: Arc::new(WebTestEngine::with_event_snapshots(vec![
+        let state = test_web_state(
+            &root,
+            Arc::new(WebTestEngine::with_event_snapshots(vec![
                 Vec::new(),
                 vec![coordinator_event(43, "evt-43", "task_transition")],
             ])),
-            paths: ProjectPaths::from_root(&root),
-        };
+            WebAssetsMode::Embedded,
+        );
         let response = Sse::new(coordinator_event_stream(
             state,
             Vec::new(),
@@ -1395,10 +1549,11 @@ mod tests {
     async fn coordinator_event_stream_emits_heartbeat_records() {
         let root = temp_root("events-heartbeat");
         fs::create_dir_all(&root).expect("create root");
-        let state = WebState {
-            engine: Arc::new(WebTestEngine::with_event_snapshots(vec![Vec::new()])),
-            paths: ProjectPaths::from_root(&root),
-        };
+        let state = test_web_state(
+            &root,
+            Arc::new(WebTestEngine::with_event_snapshots(vec![Vec::new()])),
+            WebAssetsMode::Embedded,
+        );
         let response = Sse::new(coordinator_event_stream(
             state,
             Vec::new(),
@@ -1435,6 +1590,7 @@ mod tests {
             ),
             Ipv4Addr::LOCALHOST.to_string(),
             None,
+            None,
         );
 
         let addr = command.bind_addr().expect("bind addr");
@@ -1455,6 +1611,7 @@ mod tests {
             ),
             "0.0.0.0".to_string(),
             Some(8080),
+            None,
         );
 
         let addr = command.bind_addr().expect("bind addr");
@@ -1462,6 +1619,72 @@ mod tests {
         assert_eq!(
             addr,
             SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 8080)
+        );
+    }
+
+    #[test]
+    fn assets_mode_defaults_to_dist_in_dev() {
+        let root = temp_root("assets-default");
+        fs::create_dir_all(&root).expect("create root");
+        write_test_config(&root);
+        let command = WebCommand::new(
+            AppContext::new(
+                root.clone(),
+                Arc::new(TestEngine::with_fixtures()),
+                CliOverrides::default(),
+            ),
+            Ipv4Addr::LOCALHOST.to_string(),
+            None,
+            None,
+        );
+
+        assert_eq!(
+            command.assets_mode().expect("assets mode"),
+            WebAssetsMode::Dist
+        );
+    }
+
+    #[test]
+    fn assets_mode_uses_config_when_cli_flag_is_absent() {
+        let root = temp_root("assets-config");
+        fs::create_dir_all(&root).expect("create root");
+        write_test_config_with_assets_mode(&root, WebAssetsMode::Embedded);
+        let command = WebCommand::new(
+            AppContext::new(
+                root.clone(),
+                Arc::new(TestEngine::with_fixtures()),
+                CliOverrides::default(),
+            ),
+            Ipv4Addr::LOCALHOST.to_string(),
+            None,
+            None,
+        );
+
+        assert_eq!(
+            command.assets_mode().expect("assets mode"),
+            WebAssetsMode::Embedded
+        );
+    }
+
+    #[test]
+    fn assets_mode_cli_flag_overrides_config() {
+        let root = temp_root("assets-cli");
+        fs::create_dir_all(&root).expect("create root");
+        write_test_config_with_assets_mode(&root, WebAssetsMode::Dist);
+        let command = WebCommand::new(
+            AppContext::new(
+                root.clone(),
+                Arc::new(TestEngine::with_fixtures()),
+                CliOverrides::default(),
+            ),
+            Ipv4Addr::LOCALHOST.to_string(),
+            None,
+            Some(WebAssetsMode::Embedded),
+        );
+
+        assert_eq!(
+            command.assets_mode().expect("assets mode"),
+            WebAssetsMode::Embedded
         );
     }
 
@@ -1501,10 +1724,11 @@ mod tests {
             }),
             audit_prd_report: None,
         };
-        let state = WebState {
-            engine: Arc::new(WebTestEngine::new(Ok(result))),
-            paths: ProjectPaths::from_root(&root),
-        };
+        let state = test_web_state(
+            &root,
+            Arc::new(WebTestEngine::new(Ok(result))),
+            WebAssetsMode::Embedded,
+        );
         let app = build_web_router(state);
         let response = app
             .oneshot(
@@ -1542,12 +1766,13 @@ mod tests {
     async fn coordinator_run_endpoint_maps_errors() {
         let root = temp_root("run-error");
         fs::create_dir_all(&root).expect("create root");
-        let state = WebState {
-            engine: Arc::new(WebTestEngine::new(Err(MaccError::Validation(
+        let state = test_web_state(
+            &root,
+            Arc::new(WebTestEngine::new(Err(MaccError::Validation(
                 "coordinator failed".to_string(),
             )))),
-            paths: ProjectPaths::from_root(&root),
-        };
+            WebAssetsMode::Embedded,
+        );
         let app = build_web_router(state);
         let response = app
             .oneshot(
@@ -1578,13 +1803,14 @@ mod tests {
     async fn coordinator_run_endpoint_maps_internal_coordinator_error_code() {
         let root = temp_root("run-coordinator-error");
         fs::create_dir_all(&root).expect("create root");
-        let state = WebState {
-            engine: Arc::new(WebTestEngine::new(Err(MaccError::Coordinator {
+        let state = test_web_state(
+            &root,
+            Arc::new(WebTestEngine::new(Err(MaccError::Coordinator {
                 code: "E901",
                 message: "coordinator crashed".to_string(),
             }))),
-            paths: ProjectPaths::from_root(&root),
-        };
+            WebAssetsMode::Embedded,
+        );
         let app = build_web_router(state);
         let response = app
             .oneshot(
@@ -1645,10 +1871,11 @@ mod tests {
             }),
             audit_prd_report: None,
         };
-        let state = WebState {
-            engine: Arc::new(WebTestEngine::new(Ok(result))),
-            paths: ProjectPaths::from_root(&root),
-        };
+        let state = test_web_state(
+            &root,
+            Arc::new(WebTestEngine::new(Ok(result))),
+            WebAssetsMode::Embedded,
+        );
         let app = build_web_router(state);
         let response = app
             .oneshot(
@@ -1687,12 +1914,13 @@ mod tests {
         let root = temp_root("dispatch-error");
         fs::create_dir_all(&root).expect("create root");
         write_test_config(&root);
-        let state = WebState {
-            engine: Arc::new(WebTestEngine::new(Err(MaccError::Validation(
+        let state = test_web_state(
+            &root,
+            Arc::new(WebTestEngine::new(Err(MaccError::Validation(
                 "dispatch failed".to_string(),
             )))),
-            paths: ProjectPaths::from_root(&root),
-        };
+            WebAssetsMode::Embedded,
+        );
         let app = build_web_router(state);
         let response = app
             .oneshot(
@@ -1722,10 +1950,11 @@ mod tests {
     async fn coordinator_stop_endpoint_returns_envelope() {
         let root = temp_root("stop-ok");
         fs::create_dir_all(&root).expect("create root");
-        let state = WebState {
-            engine: Arc::new(WebTestEngine::with_stop_result(Ok(()))),
-            paths: ProjectPaths::from_root(&root),
-        };
+        let state = test_web_state(
+            &root,
+            Arc::new(WebTestEngine::with_stop_result(Ok(()))),
+            WebAssetsMode::Embedded,
+        );
         let app = build_web_router(state);
         let response = app
             .oneshot(
@@ -1763,12 +1992,13 @@ mod tests {
     async fn coordinator_stop_endpoint_maps_errors() {
         let root = temp_root("stop-error");
         fs::create_dir_all(&root).expect("create root");
-        let state = WebState {
-            engine: Arc::new(WebTestEngine::with_stop_result(Err(MaccError::Validation(
+        let state = test_web_state(
+            &root,
+            Arc::new(WebTestEngine::with_stop_result(Err(MaccError::Validation(
                 "stop failed".to_string(),
             )))),
-            paths: ProjectPaths::from_root(&root),
-        };
+            WebAssetsMode::Embedded,
+        );
         let app = build_web_router(state);
         let response = app
             .oneshot(
@@ -1797,10 +2027,11 @@ mod tests {
     async fn coordinator_cleanup_endpoint_returns_envelope() {
         let root = temp_root("cleanup-ok");
         fs::create_dir_all(&root).expect("create root");
-        let state = WebState {
-            engine: Arc::new(WebTestEngine::with_cleanup_result(Ok(()))),
-            paths: ProjectPaths::from_root(&root),
-        };
+        let state = test_web_state(
+            &root,
+            Arc::new(WebTestEngine::with_cleanup_result(Ok(()))),
+            WebAssetsMode::Embedded,
+        );
         let app = build_web_router(state);
         let response = app
             .oneshot(
@@ -1838,12 +2069,13 @@ mod tests {
     async fn coordinator_cleanup_endpoint_maps_errors() {
         let root = temp_root("cleanup-error");
         fs::create_dir_all(&root).expect("create root");
-        let state = WebState {
-            engine: Arc::new(WebTestEngine::with_cleanup_result(Err(
+        let state = test_web_state(
+            &root,
+            Arc::new(WebTestEngine::with_cleanup_result(Err(
                 MaccError::Validation("cleanup failed".to_string()),
             ))),
-            paths: ProjectPaths::from_root(&root),
-        };
+            WebAssetsMode::Embedded,
+        );
         let app = build_web_router(state);
         let response = app
             .oneshot(
@@ -1894,10 +2126,11 @@ mod tests {
             removed_worktrees: Some(0),
             ..CoordinatorCommandResult::default()
         };
-        let state = WebState {
-            engine: Arc::new(WebTestEngine::new(Ok(result))),
-            paths: ProjectPaths::from_root(&root),
-        };
+        let state = test_web_state(
+            &root,
+            Arc::new(WebTestEngine::new(Ok(result))),
+            WebAssetsMode::Embedded,
+        );
         let app = build_web_router(state);
         let response = app
             .oneshot(
@@ -1935,12 +2168,13 @@ mod tests {
     async fn coordinator_advance_endpoint_maps_errors() {
         let root = temp_root("advance-error");
         fs::create_dir_all(&root).expect("create root");
-        let state = WebState {
-            engine: Arc::new(WebTestEngine::new(Err(MaccError::Validation(
+        let state = test_web_state(
+            &root,
+            Arc::new(WebTestEngine::new(Err(MaccError::Validation(
                 "advance failed".to_string(),
             )))),
-            paths: ProjectPaths::from_root(&root),
-        };
+            WebAssetsMode::Embedded,
+        );
         let app = build_web_router(state);
         let response = app
             .oneshot(
@@ -1976,10 +2210,11 @@ mod tests {
             removed_worktrees: Some(1),
             ..CoordinatorCommandResult::default()
         };
-        let state = WebState {
-            engine: Arc::new(WebTestEngine::new(Ok(result))),
-            paths: ProjectPaths::from_root(&root),
-        };
+        let state = test_web_state(
+            &root,
+            Arc::new(WebTestEngine::new(Ok(result))),
+            WebAssetsMode::Embedded,
+        );
         let app = build_web_router(state);
         let response = app
             .oneshot(
@@ -2019,12 +2254,13 @@ mod tests {
     async fn coordinator_reconcile_endpoint_maps_errors() {
         let root = temp_root("reconcile-error");
         fs::create_dir_all(&root).expect("create root");
-        let state = WebState {
-            engine: Arc::new(WebTestEngine::new(Err(MaccError::Validation(
+        let state = test_web_state(
+            &root,
+            Arc::new(WebTestEngine::new(Err(MaccError::Validation(
                 "reconcile failed".to_string(),
             )))),
-            paths: ProjectPaths::from_root(&root),
-        };
+            WebAssetsMode::Embedded,
+        );
         let app = build_web_router(state);
         let response = app
             .oneshot(
@@ -2062,10 +2298,11 @@ mod tests {
             "paused for test",
         )
         .expect("write pause file");
-        let state = WebState {
-            engine: Arc::new(WebTestEngine::with_resume_result(Ok(()))),
-            paths: ProjectPaths::from_root(&root),
-        };
+        let state = test_web_state(
+            &root,
+            Arc::new(WebTestEngine::with_resume_result(Ok(()))),
+            WebAssetsMode::Embedded,
+        );
         let app = build_web_router(state);
         let response = app
             .oneshot(
@@ -2104,10 +2341,11 @@ mod tests {
     async fn coordinator_resume_endpoint_returns_envelope_with_resumed_false_when_not_paused() {
         let root = temp_root("resume-noop");
         fs::create_dir_all(&root).expect("create root");
-        let state = WebState {
-            engine: Arc::new(WebTestEngine::with_resume_result(Ok(()))),
-            paths: ProjectPaths::from_root(&root),
-        };
+        let state = test_web_state(
+            &root,
+            Arc::new(WebTestEngine::with_resume_result(Ok(()))),
+            WebAssetsMode::Embedded,
+        );
         let app = build_web_router(state);
         let response = app
             .oneshot(
@@ -2135,12 +2373,13 @@ mod tests {
     async fn coordinator_resume_endpoint_maps_errors() {
         let root = temp_root("resume-error");
         fs::create_dir_all(&root).expect("create root");
-        let state = WebState {
-            engine: Arc::new(WebTestEngine::with_resume_result(Err(
+        let state = test_web_state(
+            &root,
+            Arc::new(WebTestEngine::with_resume_result(Err(
                 MaccError::Validation("resume failed".to_string()),
             ))),
-            paths: ProjectPaths::from_root(&root),
-        };
+            WebAssetsMode::Embedded,
+        );
         let app = build_web_router(state);
         let response = app
             .oneshot(

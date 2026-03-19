@@ -132,9 +132,9 @@ impl CoordinatorRunState {
             dispatch_limit_event_emitted: false,
             performer_ipc_addr: None,
             performer_ipc_listener_started: false,
-            performer_ipc_listener_alive: std::sync::Arc::new(
-                std::sync::atomic::AtomicBool::new(false),
-            ),
+            performer_ipc_listener_alive: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                false,
+            )),
             throttle_registry: ToolThrottleRegistry::default(),
             effective_max_parallel: 0,
             original_max_parallel: 0,

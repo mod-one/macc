@@ -12,6 +12,18 @@ cargo run -p macc-cli --bin macc -- web
 
 The `macc web` command serves the compiled frontend on `http://localhost:3450` by default, keeps `/api/v1/*` on the same server, and falls back to `web/dist/index.html` for client-side routes.
 
+Asset mode selection:
+
+```bash
+# Development default: serve files directly from web/dist
+cargo run -p macc-cli --bin macc -- web --assets dist
+
+# Production-style self-contained binary: serve embedded assets
+cargo run -p macc-cli --bin macc -- web --assets embedded
+```
+
+You can also set `settings.web_assets: dist` or `settings.web_assets: embedded` in the canonical config. When unset, debug builds default to `dist` and release builds default to `embedded`.
+
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 
 Currently, two official plugins are available:
