@@ -2,6 +2,7 @@ mod assets;
 mod coordinator;
 mod errors;
 mod sse;
+mod types;
 #[cfg(test)]
 mod tests;
 
