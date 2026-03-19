@@ -1223,7 +1223,9 @@ impl CoordinatorStorage for SqliteStorage {
             .map_err(sql_err)?;
         tx.execute("DELETE FROM resource_locks", [])
             .map_err(sql_err)?;
-        tx.execute("DELETE FROM events", []).map_err(sql_err)?;
+        // Events are append-only — never delete them during snapshot save.
+        // IPC handlers write events concurrently; deleting + re-inserting
+        // creates a race window that loses events (including phase_results).
         tx.execute("DELETE FROM cursors", []).map_err(sql_err)?;
         tx.execute("DELETE FROM jobs", []).map_err(sql_err)?;
 
@@ -1386,7 +1388,7 @@ impl CoordinatorStorage for SqliteStorage {
                 message: format!("Failed to serialize raw event: {}", e),
             })?;
             tx.execute(
-                "INSERT INTO events (event_id, seq, ts, source, task_id, event_type, phase, status, payload_json, raw_json)
+                "INSERT OR IGNORE INTO events (event_id, seq, ts, source, task_id, event_type, phase, status, payload_json, raw_json)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     event_id,
