@@ -565,7 +565,11 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
             let canonical = request.canonical.ok_or_else(|| {
                 MaccError::Validation("run-control-plane requires canonical config".into())
             })?;
-            let runtime = tokio::runtime::Builder::new_current_thread()
+            // Multi-threaded runtime so that the IPC listener task is never
+            // starved by synchronous (blocking) file/SQLite operations on the
+            // main control-plane loop.
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
                 .enable_time()
                 .enable_io()
                 .build()
@@ -1871,7 +1875,8 @@ fn retry_dev_phase<E: crate::engine::Engine + ?Sized>(
         .ok_or_else(|| MaccError::Validation("retry-phase requires worktree".into()))?;
     let worktree = std::path::PathBuf::from(worktree_path);
     let mut state = coordinator_runtime::CoordinatorRunState::new();
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
         .enable_time()
         .enable_io()
         .build()

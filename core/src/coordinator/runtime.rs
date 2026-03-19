@@ -90,6 +90,7 @@ pub struct CoordinatorRunState {
     pub dispatch_limit_event_emitted: bool,
     pub performer_ipc_addr: Option<String>,
     pub performer_ipc_listener_started: bool,
+    pub performer_ipc_listener_alive: std::sync::Arc<std::sync::atomic::AtomicBool>,
     // RL-ROUTE-005: per-tool throttle state
     pub throttle_registry: ToolThrottleRegistry,
     // RL-THROTTLE-006: dynamic concurrency control
@@ -131,6 +132,9 @@ impl CoordinatorRunState {
             dispatch_limit_event_emitted: false,
             performer_ipc_addr: None,
             performer_ipc_listener_started: false,
+            performer_ipc_listener_alive: std::sync::Arc::new(
+                std::sync::atomic::AtomicBool::new(false),
+            ),
             throttle_registry: ToolThrottleRegistry::default(),
             effective_max_parallel: 0,
             original_max_parallel: 0,

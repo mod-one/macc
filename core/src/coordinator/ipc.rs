@@ -58,6 +58,20 @@ pub async fn ensure_performer_ipc_listener(
     state: &mut CoordinatorRunState,
     logger: Option<&dyn CoordinatorLog>,
 ) -> Result<()> {
+    // If the listener was started but has since died, reset so we can restart it.
+    if state.performer_ipc_listener_started
+        && !state
+            .performer_ipc_listener_alive
+            .load(std::sync::atomic::Ordering::Relaxed)
+    {
+        if let Some(log) = logger {
+            let _ = log.note(
+                "- WARNING: IPC listener died, restarting...".to_string(),
+            );
+        }
+        tracing::warn!("coordinator IPC listener died, restarting");
+        state.performer_ipc_listener_started = false;
+    }
     if state.performer_ipc_listener_started {
         return Ok(());
     }
@@ -71,15 +85,46 @@ pub async fn ensure_performer_ipc_listener(
     let addr = local_addr.to_string();
     let runtime_event_bus_tx = state.runtime_event_bus_tx.clone();
     let project_paths = ProjectPaths::from_root(repo_root);
+    let alive_flag = state.performer_ipc_listener_alive.clone();
+    alive_flag.store(true, std::sync::atomic::Ordering::Relaxed);
 
-    tokio::spawn(async move {
+    tokio::spawn({
+        let alive_flag = alive_flag.clone();
+        async move {
+        // Ensure the alive flag is cleared when this task exits for any reason.
+        struct AliveGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for AliveGuard {
+            fn drop(&mut self) {
+                self.0.store(false, std::sync::atomic::Ordering::Relaxed);
+                tracing::warn!("coordinator IPC listener task exiting");
+            }
+        }
+        let _guard = AliveGuard(alive_flag);
+        let mut consecutive_errors: usize = 0;
+        const MAX_CONSECUTIVE_ACCEPT_ERRORS: usize = 50;
         loop {
             let accepted = listener.accept().await;
             let (stream, _) = match accepted {
-                Ok(pair) => pair,
+                Ok(pair) => {
+                    consecutive_errors = 0;
+                    pair
+                }
                 Err(err) => {
-                    tracing::warn!("coordinator IPC accept failed: {}", err);
-                    break;
+                    consecutive_errors += 1;
+                    tracing::warn!(
+                        consecutive = consecutive_errors,
+                        "coordinator IPC accept failed: {}", err
+                    );
+                    if consecutive_errors >= MAX_CONSECUTIVE_ACCEPT_ERRORS {
+                        tracing::error!(
+                            "coordinator IPC listener giving up after {} consecutive accept errors",
+                            consecutive_errors
+                        );
+                        break;
+                    }
+                    // Back off briefly before retrying to avoid a tight error loop.
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    continue;
                 }
             };
             let runtime_event_bus_tx = runtime_event_bus_tx.clone();
@@ -92,7 +137,7 @@ pub async fn ensure_performer_ipc_listener(
                 }
             });
         }
-    });
+    }});
 
     state.performer_ipc_addr = Some(addr.clone());
     state.performer_ipc_listener_started = true;

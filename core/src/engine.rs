@@ -540,8 +540,10 @@ pub trait Engine {
         backend: &mut dyn coordinator::engine::ControlPlaneBackend,
         cfg: coordinator::engine::ControlPlaneLoopConfig,
     ) -> Result<()> {
-        let runtime = tokio::runtime::Builder::new_current_thread()
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
             .enable_time()
+            .enable_io()
             .build()
             .map_err(|e| {
                 crate::MaccError::Validation(format!("build runtime for coordinator run: {}", e))
