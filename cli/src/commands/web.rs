@@ -4,10 +4,11 @@ use crate::services::engine_provider::SharedEngine;
 use async_stream::stream;
 use axum::extract::State;
 use axum::http::HeaderMap;
+use axum::http::Method;
 use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, get_service, post};
 use axum::Json;
 use axum::Router;
 use macc_core::coordinator::task_selector::SelectedTask;
@@ -24,7 +25,9 @@ use serde::Serialize;
 use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tower_http::services::{ServeDir, ServeFile};
 
 pub struct WebCommand {
     app: AppContext,
@@ -100,8 +103,10 @@ const SSE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const SSE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 
 fn build_web_router(state: WebState) -> Router {
+    let spa_dist_dir = state.paths.root.join("web/dist");
+    let spa_index_path = spa_dist_dir.join("index.html");
+
     Router::new()
-        .route("/", get(root_handler))
         .route("/api/v1/health", get(health_handler))
         .route("/api/v1/status", get(status_handler))
         .route("/api/v1/events", get(events_handler))
@@ -127,11 +132,10 @@ fn build_web_router(state: WebState) -> Router {
             "/api/v1/coordinator/resume",
             post(coordinator_resume_handler),
         )
+        .fallback_service(get_service(
+            ServeDir::new(spa_dist_dir.clone()).fallback(ServeFile::new(spa_index_path.clone())),
+        ))
         .with_state(state)
-}
-
-async fn root_handler() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "status": "running" }))
 }
 
 async fn health_handler() -> Json<serde_json::Value> {
@@ -768,6 +772,7 @@ mod tests {
     use macc_core::TestEngine;
     use std::fs;
     use std::net::Ipv4Addr;
+    use std::path::Path;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
     use tower::util::ServiceExt;
@@ -796,6 +801,18 @@ mod tests {
         canonical.settings.web_port = Some(port);
         let yaml = canonical.to_yaml().expect("serialize config");
         fs::write(&paths.config_path, yaml).expect("write config");
+    }
+
+    fn write_spa_dist(root: &Path) {
+        let dist_dir = root.join("web/dist");
+        let assets_dir = dist_dir.join("assets");
+        fs::create_dir_all(&assets_dir).expect("create web dist");
+        fs::write(
+            dist_dir.join("index.html"),
+            "<!doctype html><html><body>macc web</body></html>",
+        )
+        .expect("write index");
+        fs::write(assets_dir.join("app.js"), "console.log('macc');").expect("write asset");
     }
 
     struct WebTestEngine {
@@ -991,9 +1008,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn root_returns_running_status() {
+    async fn root_serves_spa_index() {
         let root = temp_root("root");
-        fs::create_dir_all(&root).expect("create root");
+        write_spa_dist(&root);
         let state = WebState {
             engine: Arc::new(TestEngine::with_fixtures()),
             paths: ProjectPaths::from_root(&root),
@@ -1017,8 +1034,70 @@ mod tests {
             .await
             .expect("collect")
             .to_bytes();
-        let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
-        assert_eq!(payload["status"], "running");
+        let payload = String::from_utf8(bytes.to_vec()).expect("utf8");
+        assert!(payload.contains("macc web"));
+    }
+
+    #[tokio::test]
+    async fn client_side_route_serves_spa_index() {
+        let root = temp_root("spa-route");
+        write_spa_dist(&root);
+        let state = WebState {
+            engine: Arc::new(TestEngine::with_fixtures()),
+            paths: ProjectPaths::from_root(&root),
+        };
+        let app = build_web_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/runs/active")
+                    .method("GET")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect")
+            .to_bytes();
+        let payload = String::from_utf8(bytes.to_vec()).expect("utf8");
+        assert!(payload.contains("macc web"));
+    }
+
+    #[tokio::test]
+    async fn static_asset_request_serves_file_from_dist() {
+        let root = temp_root("asset");
+        write_spa_dist(&root);
+        let state = WebState {
+            engine: Arc::new(TestEngine::with_fixtures()),
+            paths: ProjectPaths::from_root(&root),
+        };
+        let app = build_web_router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/assets/app.js")
+                    .method(Method::GET.as_str())
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect")
+            .to_bytes();
+        let payload = String::from_utf8(bytes.to_vec()).expect("utf8");
+        assert!(payload.contains("console.log('macc');"));
     }
 
     #[tokio::test]

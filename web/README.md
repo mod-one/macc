@@ -1,5 +1,17 @@
 # React + TypeScript + Vite
 
+## Production build with `macc web`
+
+Build the SPA into `web/dist`, then start the Axum server from the repository root:
+
+```bash
+npm install
+npm run build
+cargo run -p macc-cli --bin macc -- web
+```
+
+The `macc web` command serves the compiled frontend on `http://localhost:3450` by default, keeps `/api/v1/*` on the same server, and falls back to `web/dist/index.html` for client-side routes.
+
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 
 Currently, two official plugins are available:
