@@ -361,6 +361,27 @@ struct NativePhaseExecutor<'a> {
     logger: Option<&'a dyn CoordinatorLog>,
 }
 
+/// Append a line to the performer log file for this task.
+/// Mirrors the format used by performer.sh so all phases appear in the same log.
+fn append_performer_log(worktree: &Path, task_id: &str, line: &str) {
+    let safe: String = task_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+        .collect();
+    let file = if safe.is_empty() { "task" } else { safe.as_str() };
+    let log_dir = worktree.join(".macc/log/performer");
+    let log_path = log_dir.join(format!("{}.md", file));
+    let _ = std::fs::create_dir_all(&log_dir);
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .and_then(|mut f| {
+            use std::io::Write;
+            writeln!(f, "{}", line)
+        });
+}
+
 impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
     fn run_phase(
         &self,
@@ -441,14 +462,38 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
             )));
         }
         let attempts = max_attempts.max(1);
+        let phase_started_at = chrono::Utc::now();
         if let Some(log) = self.logger {
             let _ = log.note(format!(
-                "- Phase {} start task={} tool={} attempts={}",
-                mode, task_id, phase_tool, attempts
+                "- Phase {} start task={} tool={} attempts={} at={}",
+                mode,
+                task_id,
+                phase_tool,
+                attempts,
+                phase_started_at.format("%H:%M:%SZ"),
             ));
         }
+        // Log phase start to performer log so all phases appear in one file.
+        append_performer_log(
+            &worktree,
+            task_id,
+            &format!(
+                "## Phase: {} (tool={} attempts={})\n\n- Task ID: {}\n- Tool: {}\n- Started: {}\n",
+                mode,
+                phase_tool,
+                attempts,
+                task_id,
+                phase_tool,
+                chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ"),
+            ),
+        );
         let mut last_reason = String::new();
         for attempt in 1..=attempts {
+            append_performer_log(
+                &worktree,
+                task_id,
+                &format!("### Attempt {}/{}\n", attempt, attempts),
+            );
             let mut command = std::process::Command::new(&runner_path);
             command
                 .current_dir(&worktree)
@@ -491,6 +536,11 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                     mode,
                     runner_path.display()
                 );
+                append_performer_log(
+                    &worktree,
+                    task_id,
+                    &format!("- Result: failed (runner could not be executed)\n"),
+                );
                 continue;
             };
             let combined_output = format!(
@@ -498,12 +548,77 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                 String::from_utf8_lossy(&out.stdout),
                 String::from_utf8_lossy(&out.stderr)
             );
+            // Log the tool output and exit status to the performer log.
+            append_performer_log(
+                &worktree,
+                task_id,
+                &format!(
+                    "```text\n{}\n```\n\n- Exit status: {}\n",
+                    combined_output.trim(),
+                    out.status,
+                ),
+            );
             if out.status.success() {
+                // Auto-commit any uncommitted changes produced by the phase runner.
+                // The review phase explicitly must not commit; implement/dev commits
+                // are managed by performer.sh. Fix and integrate phases may leave
+                // uncommitted file changes that must be committed before merging.
+                if mode != "review" {
+                    if crate::git::is_dirty(&worktree).unwrap_or(false) {
+                        let _ = crate::git::run_git_output_mapped(
+                            &worktree,
+                            &["add", "-A"],
+                            "stage all changes after phase",
+                        );
+                        let commit_type = if mode == "fix" {
+                            crate::commit_message::CommitType::Fix
+                        } else {
+                            crate::commit_message::CommitType::Feat
+                        };
+                        let commit_msg = crate::commit_message::task_commit(
+                            commit_type,
+                            task_id,
+                            task.title.as_deref(),
+                            Some(mode),
+                        )
+                        .with_tool(&phase_tool)
+                        .format();
+                        let commit_out = crate::git::run_git_output_mapped(
+                            &worktree,
+                            &["commit", "-m", &commit_msg],
+                            "auto-commit phase changes",
+                        );
+                        if let Some(log) = self.logger {
+                            match commit_out {
+                                Ok(ref o) if o.status.success() => {
+                                    let _ = log.note(format!(
+                                        "- Phase {} auto-committed changes task={}",
+                                        mode, task_id
+                                    ));
+                                }
+                                _ => {
+                                    let _ = log.note(format!(
+                                        "- Phase {} auto-commit failed task={} (continuing)",
+                                        mode, task_id
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+                append_performer_log(
+                    &worktree,
+                    task_id,
+                    &format!("- Result: **done** (phase={} attempt={}/{})\n", mode, attempt, attempts),
+                );
+                let elapsed = chrono::Utc::now()
+                    .signed_duration_since(phase_started_at)
+                    .num_seconds();
                 let _ = std::fs::remove_file(&prompt_path);
                 if let Some(log) = self.logger {
                     let _ = log.note(format!(
-                        "- Phase {} done task={} attempt={}",
-                        mode, task_id, attempt
+                        "- Phase {} done task={} attempt={} elapsed={}s",
+                        mode, task_id, attempt, elapsed
                     ));
                 }
                 return Ok(Ok(combined_output));
@@ -518,14 +633,27 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                 coordinator_runtime::summarize_output(&String::from_utf8_lossy(&out.stdout)),
                 coordinator_runtime::summarize_output(&String::from_utf8_lossy(&out.stderr))
             );
+            append_performer_log(
+                &worktree,
+                task_id,
+                &format!("- Result: **failed** (phase={} attempt={}/{})\n", mode, attempt, attempts),
+            );
         }
+        let elapsed = chrono::Utc::now()
+            .signed_duration_since(phase_started_at)
+            .num_seconds();
         let _ = std::fs::remove_file(&prompt_path);
         if let Some(log) = self.logger {
             let _ = log.note(format!(
-                "- Phase {} failed task={} reason={}",
-                mode, task_id, last_reason
+                "- Phase {} failed task={} elapsed={}s reason={}",
+                mode, task_id, elapsed, last_reason
             ));
         }
+        append_performer_log(
+            &worktree,
+            task_id,
+            &format!("- Phase {} exhausted all {} attempt(s): {}\n", mode, attempts, last_reason),
+        );
         Ok(Err(last_reason))
     }
 }
@@ -605,12 +733,18 @@ pub async fn advance_tasks_native(
                         })?;
                 let executor = NativePhaseExecutor { repo_root, logger };
                 if mode == "review" {
-                    match coordinator_runtime::run_review_phase(
-                        &executor,
-                        &task_snapshot,
-                        coordinator_tool_override,
-                        phase_runner_max_attempts,
-                    )? {
+                    // block_in_place: the phase runner is synchronous blocking I/O (spawns
+                    // an external process and waits). Running it directly in the async
+                    // executor would seize the tokio thread for minutes, preventing heartbeat
+                    // monitoring, merge detection, and rate-limit timers from firing.
+                    match tokio::task::block_in_place(|| {
+                        coordinator_runtime::run_review_phase(
+                            &executor,
+                            &task_snapshot,
+                            coordinator_tool_override,
+                            phase_runner_max_attempts,
+                        )
+                    })? {
                         Ok(verdict) => {
                             let verdict_status = match verdict {
                                 coordinator_engine::ReviewVerdict::Ok => "ok",
@@ -647,13 +781,15 @@ pub async fn advance_tasks_native(
                         )?,
                     }
                 } else {
-                    match coordinator_runtime::run_phase(
-                        &executor,
-                        &task_snapshot,
-                        mode,
-                        coordinator_tool_override,
-                        phase_runner_max_attempts,
-                    )? {
+                    match tokio::task::block_in_place(|| {
+                        coordinator_runtime::run_phase(
+                            &executor,
+                            &task_snapshot,
+                            mode,
+                            coordinator_tool_override,
+                            phase_runner_max_attempts,
+                        )
+                    })? {
                         Ok(_) => coordinator_engine::apply_phase_outcome_in_registry(
                             &mut registry,
                             &task_id,
