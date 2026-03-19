@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Logs from './Logs';
 
@@ -68,6 +68,7 @@ describe('Logs page', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
     globalThis.EventSource = originalEventSource;
   });
@@ -80,60 +81,135 @@ describe('Logs page', () => {
     expect(MockEventSource.instances[0]?.url).toBe('/api/v1/events');
 
     const source = MockEventSource.instances[0]!;
-    source.emitOpen();
+    act(() => {
+      source.emitOpen();
+    });
 
     expect(await screen.findByText('open')).toBeInTheDocument();
 
-    source.emitMessage(
-      'coordinator_event',
-      {
-        schema_version: '1',
-        event_id: 'evt-1',
-        seq: 4,
-        ts: '2026-03-19T10:00:00Z',
-        source: 'coordinator',
-        type: 'task_transition',
-        status: 'ok',
-        task_id: 'WEB-FRONTEND-005',
-        phase: 'dev',
-        detail: 'Task moved to dev.',
-      },
-      'evt-1',
-    );
-    source.emitMessage(
-      'heartbeat',
-      {
-        schema_version: '1',
-        event_id: 'hb-1',
-        seq: 5,
-        ts: '2026-03-19T10:00:05Z',
-        source: 'coordinator',
-        type: 'heartbeat',
-        status: 'ok',
-      },
-      'hb-1',
-    );
+    act(() => {
+      source.emitMessage(
+        'coordinator_event',
+        {
+          schema_version: '1',
+          event_id: 'evt-1',
+          seq: 4,
+          ts: '2026-03-19T10:00:00Z',
+          source: 'coordinator',
+          type: 'task_transition',
+          status: 'ok',
+          task_id: 'WEB-FRONTEND-005',
+          phase: 'dev',
+          detail: 'Task moved to dev.',
+        },
+        'evt-1',
+      );
+      source.emitMessage(
+        'heartbeat',
+        {
+          schema_version: '1',
+          event_id: 'hb-1',
+          seq: 5,
+          ts: '2026-03-19T10:00:05Z',
+          source: 'coordinator',
+          type: 'heartbeat',
+          status: 'ok',
+        },
+        'hb-1',
+      );
+    });
 
-    expect(await screen.findByText('task_transition')).toBeInTheDocument();
-    expect(screen.getByText('heartbeat')).toBeInTheDocument();
+    expect(screen.getAllByText('task_transition').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('heartbeat').length).toBeGreaterThan(0);
     expect(screen.getByText(/task moved to dev/i)).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText(/event type/i), {
       target: { value: 'heartbeat' },
     });
 
-    expect(screen.queryByText('task_transition')).not.toBeInTheDocument();
-    expect(screen.getByText('heartbeat')).toBeInTheDocument();
+    expect(screen.queryByText('task_transition', { selector: 'span' })).not.toBeInTheDocument();
+    expect(screen.getAllByText('heartbeat').length).toBeGreaterThan(0);
   });
 
-  it('shows reconnecting and closed states from EventSource errors', async () => {
+  it('reconnects with last_event_id after disconnects', async () => {
+    vi.useFakeTimers();
     render(<Logs />);
 
     const source = MockEventSource.instances[0]!;
-    source.emitError(MockEventSource.CONNECTING);
-    expect(await screen.findByText('connecting')).toBeInTheDocument();
+    act(() => {
+      source.emitMessage(
+        'coordinator_event',
+        {
+          schema_version: '1',
+          event_id: 'evt-8',
+          seq: 8,
+          ts: '2026-03-19T10:00:00Z',
+          source: 'coordinator',
+          type: 'task_transition',
+          status: 'ok',
+        },
+        'evt-8',
+      );
+      source.emitError(MockEventSource.CONNECTING);
+    });
 
-    source.emitError(MockEventSource.CLOSED);
-    expect(await screen.findByText('closed')).toBeInTheDocument();
+    expect(screen.getByText('connecting')).toBeInTheDocument();
+    expect(screen.getByText(/attempt 1/i)).toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+
+    expect(MockEventSource.instances).toHaveLength(2);
+    expect(MockEventSource.instances[1]?.url).toBe('/api/v1/events?last_event_id=evt-8');
+    vi.useRealTimers();
+  });
+
+  it('indicates when the resumed stream skips events after reconnect', async () => {
+    vi.useFakeTimers();
+    render(<Logs />);
+
+    const source = MockEventSource.instances[0]!;
+    act(() => {
+      source.emitMessage(
+        'coordinator_event',
+        {
+          schema_version: '1',
+          event_id: 'evt-8',
+          seq: 8,
+          ts: '2026-03-19T10:00:00Z',
+          source: 'coordinator',
+          type: 'task_transition',
+          status: 'ok',
+        },
+        'evt-8',
+      );
+      source.emitError(MockEventSource.CONNECTING);
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+
+    const reconnectedSource = MockEventSource.instances[1]!;
+    act(() => {
+      reconnectedSource.emitOpen();
+      reconnectedSource.emitMessage(
+        'coordinator_event',
+        {
+          schema_version: '1',
+          event_id: 'evt-12',
+          seq: 12,
+          ts: '2026-03-19T10:00:10Z',
+          source: 'coordinator',
+          type: 'task_transition',
+          status: 'ok',
+        },
+        'evt-12',
+      );
+    });
+
+    expect(screen.getByText(/stream resumed live without replay support/i)).toBeInTheDocument();
+    vi.useRealTimers();
   });
 });

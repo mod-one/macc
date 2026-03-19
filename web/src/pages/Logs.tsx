@@ -26,7 +26,7 @@ function summarizeEvent(event: ApiEventStreamMessage): string {
   const { payload } = event;
   const fragments = [payload.msg, payload.detail, payload.command, payload.event, payload.state];
   const summary = fragments.find((fragment) => typeof fragment === 'string' && fragment.length > 0);
-  return summary ?? 'Coordinator event received.';
+  return typeof summary === 'string' ? summary : 'Coordinator event received.';
 }
 
 function eventDetails(event: ApiEventStreamMessage): string | null {
@@ -48,7 +48,10 @@ function eventDetails(event: ApiEventStreamMessage): string | null {
 }
 
 const Logs: React.FC = () => {
-  const { connectionState, events } = useEventSource('/events', { maxEvents: EVENT_LIMIT });
+  const { connectionState, events, replayGapDetected, reconnectAttempt } = useEventSource(
+    '/events',
+    { maxEvents: EVENT_LIMIT },
+  );
   const [selectedType, setSelectedType] = React.useState<string>('all');
 
   const eventTypes = Array.from(new Set(events.map((event) => event.payload.type))).sort();
@@ -119,6 +122,16 @@ const Logs: React.FC = () => {
             <p className="text-sm leading-6 text-slate-500">
               Heartbeats and coordinator events arrive over the same stream.
             </p>
+            {connectionState === 'connecting' && reconnectAttempt > 0 ? (
+              <p className="mt-2 text-sm font-medium text-amber-700">
+                Reconnecting to the event stream (attempt {reconnectAttempt}).
+              </p>
+            ) : null}
+            {replayGapDetected ? (
+              <p className="mt-2 text-sm font-medium text-amber-700">
+                Stream resumed live without replay support. Some earlier events may be missing.
+              </p>
+            ) : null}
           </div>
           <p className="text-sm text-slate-500">
             Showing {filteredEvents.length} of {events.length}
