@@ -1,0 +1,165 @@
+mod assets;
+mod coordinator;
+mod errors;
+mod sse;
+#[cfg(test)]
+mod tests;
+
+use crate::commands::AppContext;
+use crate::commands::Command;
+use crate::services::engine_provider::SharedEngine;
+use axum::routing::{get, post};
+use axum::Json;
+use axum::Router;
+use macc_core::config::WebAssetsMode;
+use macc_core::{MaccError, ProjectPaths, Result};
+use std::net::{IpAddr, SocketAddr};
+
+pub struct WebCommand {
+    app: AppContext,
+    host: String,
+    port: Option<u16>,
+    assets_mode: Option<WebAssetsMode>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WebServerConfig {
+    host: IpAddr,
+    port: u16,
+    assets_mode: WebAssetsMode,
+}
+
+#[derive(Clone)]
+struct WebState {
+    engine: SharedEngine,
+    paths: ProjectPaths,
+    assets_mode: WebAssetsMode,
+}
+
+impl WebCommand {
+    pub fn new(
+        app: AppContext,
+        host: String,
+        port: Option<u16>,
+        assets_mode: Option<WebAssetsMode>,
+    ) -> Self {
+        Self {
+            app,
+            host,
+            port,
+            assets_mode,
+        }
+    }
+
+    fn server_config(&self) -> Result<WebServerConfig> {
+        let canonical = self.app.canonical_config()?;
+        let host = self.host.parse::<IpAddr>().map_err(|e| {
+            MaccError::Validation(format!("invalid web host '{}': {}", self.host, e))
+        })?;
+        Ok(WebServerConfig {
+            host,
+            port: self
+                .port
+                .unwrap_or(canonical.settings.web_port.unwrap_or(3450)),
+            assets_mode: self.assets_mode.unwrap_or_else(|| {
+                canonical
+                    .settings
+                    .web_assets
+                    .unwrap_or_else(default_web_assets_mode)
+            }),
+        })
+    }
+}
+
+impl Command for WebCommand {
+    fn run(&self) -> Result<()> {
+        let config = self.server_config()?;
+        let state = WebState {
+            engine: self.app.engine.clone(),
+            paths: self.app.project_paths()?,
+            assets_mode: config.assets_mode,
+        };
+        let app = build_web_router(state);
+
+        println!("Web server starting on http://{}...", config.bind_addr());
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| MaccError::Validation(format!("build web runtime: {}", e)))?;
+
+        runtime.block_on(async move {
+            let addr = config.bind_addr();
+            let listener =
+                tokio::net::TcpListener::bind(addr)
+                    .await
+                    .map_err(|e| MaccError::Io {
+                        path: addr.to_string(),
+                        action: "bind web server".into(),
+                        source: e,
+                    })?;
+            axum::serve(listener, app)
+                .await
+                .map_err(|e| MaccError::Validation(format!("web server failed: {}", e)))
+        })?;
+
+        Ok(())
+    }
+}
+
+impl WebServerConfig {
+    fn bind_addr(self) -> SocketAddr {
+        SocketAddr::new(self.host, self.port)
+    }
+}
+
+fn build_web_router(state: WebState) -> Router {
+    Router::new()
+        .route("/api/v1/health", get(health_handler))
+        .route("/api/v1/status", get(coordinator::status_handler))
+        .route("/api/v1/events", get(sse::events_handler))
+        .route(
+            "/api/v1/coordinator/run",
+            post(coordinator::coordinator_run_handler),
+        )
+        .route(
+            "/api/v1/coordinator/dispatch",
+            post(coordinator::coordinator_dispatch_handler),
+        )
+        .route(
+            "/api/v1/coordinator/advance",
+            post(coordinator::coordinator_advance_handler),
+        )
+        .route(
+            "/api/v1/coordinator/reconcile",
+            post(coordinator::coordinator_reconcile_handler),
+        )
+        .route(
+            "/api/v1/coordinator/cleanup",
+            post(coordinator::coordinator_cleanup_handler),
+        )
+        .route(
+            "/api/v1/coordinator/stop",
+            post(coordinator::coordinator_stop_handler),
+        )
+        .route(
+            "/api/v1/coordinator/resume",
+            post(coordinator::coordinator_resume_handler),
+        )
+        .fallback(get(assets::spa_handler))
+        .with_state(state)
+}
+
+async fn health_handler() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "status": "ok" }))
+}
+
+#[cfg(debug_assertions)]
+fn default_web_assets_mode() -> WebAssetsMode {
+    WebAssetsMode::Dist
+}
+
+#[cfg(not(debug_assertions))]
+fn default_web_assets_mode() -> WebAssetsMode {
+    WebAssetsMode::Embedded
+}
