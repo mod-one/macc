@@ -264,10 +264,14 @@ export interface ApiPrdUpdateRequest {
 export interface ApiPlanRequest {
   scope?: ApiScope | null;
   tools?: string[];
+  worktrees?: string[];
   allowUserScope?: boolean | null;
+  offline?: boolean | null;
   includeDiff?: boolean | null;
   explain?: boolean | null;
 }
+
+export type ApiRiskLevel = 'safe' | 'caution' | 'dangerous';
 
 export interface ApiPlanSummary {
   totalActions: number;
@@ -285,6 +289,8 @@ export interface ApiPlanFile {
   consentRequired: boolean;
   backupRequired: boolean;
   setExecutable: boolean;
+  riskLevel: ApiRiskLevel;
+  contentPreview: string | null;
   explain: string | null;
 }
 
@@ -295,9 +301,15 @@ export interface ApiPlanDiff {
   diffTruncated: boolean;
 }
 
+export interface ApiPlanRisk {
+  level: ApiRiskLevel;
+  message: string;
+}
+
 export interface ApiPlanConsent {
   id: string;
   scope: ApiScope;
+  classification: ApiRiskLevel;
   message: string;
   paths: string[];
 }
@@ -306,7 +318,7 @@ export interface ApiPlanResponse {
   summary: ApiPlanSummary;
   files: ApiPlanFile[];
   diffs: ApiPlanDiff[];
-  risks: string[];
+  risks: ApiPlanRisk[];
   consents: ApiPlanConsent[];
 }
 
