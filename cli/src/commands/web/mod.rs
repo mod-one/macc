@@ -12,12 +12,13 @@ mod sse;
 #[cfg(test)]
 mod tests;
 mod types;
+mod worktrees;
 
 use crate::commands::AppContext;
 use crate::commands::Command;
 use crate::services::engine_provider::SharedEngine;
 use axum::middleware::from_fn_with_state;
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::Json;
 use axum::Router;
 use macc_core::config::WebAssetsMode;
@@ -137,6 +138,14 @@ fn build_web_router(state: WebState) -> Router {
         .route(
             "/api/v1/backups/:id/restore",
             post(backups::restore_backup_handler),
+        )
+        .route(
+            "/api/v1/worktrees",
+            get(worktrees::list_worktrees_handler).post(worktrees::create_worktree_handler),
+        )
+        .route(
+            "/api/v1/worktrees/:id",
+            delete(worktrees::delete_worktree_handler),
         )
         .route("/api/v1/events", get(sse::events_handler))
         .route(

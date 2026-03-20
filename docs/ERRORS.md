@@ -27,7 +27,7 @@ The API error envelope uses these categories:
 ### Validation (1000 range)
 
 - `MACC-WEB-1000`: Generic validation failure (`MaccError::Validation`).
-- `MACC-WEB-1001`: Apply confirmation required before write execution.
+- `MACC-WEB-1001`: Operator confirmation required before destructive web actions.
 - `MACC-WEB-1002`: Secret scan validation failure (`MaccError::SecretDetected`).
 - `MACC-WEB-1003`: Configuration parse/validation failure (`MaccError::Config`).
 - `MACC-WEB-1004`: Catalog operation validation failure (`MaccError::Catalog`).
@@ -40,11 +40,13 @@ The API error envelope uses these categories:
 - `MACC-WEB-2001`: User home directory cannot be resolved (`MaccError::HomeDirNotFound`).
 - `MACC-WEB-2002`: Registry task was not found for the requested operator action.
 - `MACC-WEB-2003`: Backup set was not found for the requested restore action.
+- `MACC-WEB-2004`: Worktree was not found for the requested web action.
 
 ### Conflict / Auth (3000 range)
 
 - `MACC-WEB-3000`: User-scope operation denied in current mode (`MaccError::UserScopeNotAllowed`).
 - `MACC-WEB-3001`: Registry operator action conflicts with the task's current state/runtime.
+- `MACC-WEB-3002`: Worktree action conflicts with the current git/worktree state.
 
 ### Dependency / Engine (4000 range)
 
