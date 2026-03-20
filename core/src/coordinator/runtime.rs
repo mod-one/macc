@@ -1008,12 +1008,7 @@ fn run_merge_hook_with_timeout(
 
             (base_log, branch_log, base_stat, branch_stat)
         } else {
-            (
-                String::new(),
-                String::new(),
-                String::new(),
-                String::new(),
-            )
+            (String::new(), String::new(), String::new(), String::new())
         };
 
     // Build the targeted diff for only the conflicting files so the AI can see

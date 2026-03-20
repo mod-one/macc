@@ -14,11 +14,14 @@ use macc_core::coordinator::{CoordinatorEventPayload, CoordinatorEventRecord, Ru
 use macc_core::coordinator_storage::{
     CoordinatorSnapshot, CoordinatorStorage, CoordinatorStoragePaths, SqliteStorage,
 };
+use macc_core::doctor::{ToolCheck, ToolStatus};
 use macc_core::engine::CoordinatorEvent;
 use macc_core::resolve::CliOverrides;
 use macc_core::service::coordinator_workflow::{
     CoordinatorCommand, CoordinatorCommandRequest, CoordinatorCommandResult, CoordinatorStatus,
 };
+use macc_core::service::interaction::InteractionHandler;
+use macc_core::tool::spec::{CheckSeverity, DoctorCheckKind};
 use macc_core::TestEngine;
 use macc_core::{MaccError, ProjectPaths, Result};
 use std::fs;
@@ -250,6 +253,8 @@ struct WebTestEngine {
     cleanup_result: std::sync::Mutex<Option<std::result::Result<(), MaccError>>>,
     stop_result: std::sync::Mutex<Option<std::result::Result<(), MaccError>>>,
     resume_result: std::sync::Mutex<Option<std::result::Result<(), MaccError>>>,
+    doctor_snapshots: std::sync::Mutex<Option<Vec<Vec<ToolCheck>>>>,
+    doctor_fix_result: std::sync::Mutex<Option<std::result::Result<(), MaccError>>>,
     coordinator_events: std::sync::Mutex<Vec<Vec<CoordinatorEvent>>>,
 }
 
@@ -261,6 +266,8 @@ impl WebTestEngine {
             cleanup_result: std::sync::Mutex::new(Some(Ok(()))),
             stop_result: std::sync::Mutex::new(Some(Ok(()))),
             resume_result: std::sync::Mutex::new(Some(Ok(()))),
+            doctor_snapshots: std::sync::Mutex::new(None),
+            doctor_fix_result: std::sync::Mutex::new(None),
             coordinator_events: std::sync::Mutex::new(vec![Vec::new()]),
         }
     }
@@ -272,6 +279,8 @@ impl WebTestEngine {
             cleanup_result: std::sync::Mutex::new(Some(result)),
             stop_result: std::sync::Mutex::new(Some(Ok(()))),
             resume_result: std::sync::Mutex::new(Some(Ok(()))),
+            doctor_snapshots: std::sync::Mutex::new(None),
+            doctor_fix_result: std::sync::Mutex::new(None),
             coordinator_events: std::sync::Mutex::new(vec![Vec::new()]),
         }
     }
@@ -283,6 +292,8 @@ impl WebTestEngine {
             cleanup_result: std::sync::Mutex::new(Some(Ok(()))),
             stop_result: std::sync::Mutex::new(Some(result)),
             resume_result: std::sync::Mutex::new(Some(Ok(()))),
+            doctor_snapshots: std::sync::Mutex::new(None),
+            doctor_fix_result: std::sync::Mutex::new(None),
             coordinator_events: std::sync::Mutex::new(vec![Vec::new()]),
         }
     }
@@ -294,6 +305,8 @@ impl WebTestEngine {
             cleanup_result: std::sync::Mutex::new(Some(Ok(()))),
             stop_result: std::sync::Mutex::new(Some(Ok(()))),
             resume_result: std::sync::Mutex::new(Some(result)),
+            doctor_snapshots: std::sync::Mutex::new(None),
+            doctor_fix_result: std::sync::Mutex::new(None),
             coordinator_events: std::sync::Mutex::new(vec![Vec::new()]),
         }
     }
@@ -305,7 +318,25 @@ impl WebTestEngine {
             cleanup_result: std::sync::Mutex::new(Some(Ok(()))),
             stop_result: std::sync::Mutex::new(Some(Ok(()))),
             resume_result: std::sync::Mutex::new(Some(Ok(()))),
+            doctor_snapshots: std::sync::Mutex::new(None),
+            doctor_fix_result: std::sync::Mutex::new(None),
             coordinator_events: std::sync::Mutex::new(event_snapshots),
+        }
+    }
+
+    fn with_doctor_snapshots(
+        snapshots: Vec<Vec<ToolCheck>>,
+        fix_result: std::result::Result<(), MaccError>,
+    ) -> Self {
+        Self {
+            inner: TestEngine::with_fixtures(),
+            run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
+            cleanup_result: std::sync::Mutex::new(Some(Ok(()))),
+            stop_result: std::sync::Mutex::new(Some(Ok(()))),
+            resume_result: std::sync::Mutex::new(Some(Ok(()))),
+            doctor_snapshots: std::sync::Mutex::new(Some(snapshots)),
+            doctor_fix_result: std::sync::Mutex::new(Some(fix_result)),
+            coordinator_events: std::sync::Mutex::new(vec![Vec::new()]),
         }
     }
 }
@@ -322,6 +353,15 @@ impl macc_core::engine::Engine for WebTestEngine {
     }
 
     fn doctor(&self, paths: &ProjectPaths) -> Vec<macc_core::doctor::ToolCheck> {
+        let mut snapshots = self.doctor_snapshots.lock().expect("lock");
+        if let Some(snapshots) = snapshots.as_mut() {
+            if snapshots.len() > 1 {
+                return snapshots.remove(0);
+            }
+            if let Some(last) = snapshots.first() {
+                return last.clone();
+            }
+        }
         self.inner.doctor(paths)
     }
 
@@ -406,6 +446,39 @@ impl macc_core::engine::Engine for WebTestEngine {
             snapshots.first().cloned().unwrap_or_default()
         };
         Ok(snapshot)
+    }
+
+    fn project_run_doctor(
+        &self,
+        paths: &ProjectPaths,
+        fix: bool,
+        interaction: &dyn InteractionHandler,
+    ) -> Result<()> {
+        if fix {
+            let mut result = self.doctor_fix_result.lock().expect("lock");
+            if let Some(result) = result.take() {
+                return result;
+            }
+        }
+        macc_core::engine::Engine::project_run_doctor(&self.inner, paths, fix, interaction)
+    }
+}
+
+fn doctor_check(
+    name: &str,
+    tool_id: Option<&str>,
+    target: &str,
+    kind: DoctorCheckKind,
+    severity: CheckSeverity,
+    status: ToolStatus,
+) -> ToolCheck {
+    ToolCheck {
+        name: name.to_string(),
+        tool_id: tool_id.map(ToString::to_string),
+        check_target: target.to_string(),
+        kind,
+        status,
+        severity,
     }
 }
 

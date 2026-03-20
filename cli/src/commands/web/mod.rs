@@ -4,6 +4,7 @@ mod audit;
 mod backups;
 mod config;
 mod coordinator;
+mod doctor;
 mod errors;
 mod git;
 mod prd;
@@ -127,6 +128,8 @@ fn build_web_router(state: WebState) -> Router {
     let audit_state = state.clone();
     Router::new()
         .route("/api/v1/health", get(health_handler))
+        .route("/api/v1/doctor", get(doctor::get_doctor_handler))
+        .route("/api/v1/doctor/fix", post(doctor::run_doctor_fix_handler))
         .route(
             "/api/v1/config",
             get(config::get_config_handler).put(config::update_config_handler),

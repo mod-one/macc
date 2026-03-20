@@ -205,6 +205,344 @@ async fn health_endpoint_returns_ok_status() {
     let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
     assert_eq!(payload["status"], "ok");
 }
+
+#[tokio::test]
+async fn doctor_endpoint_returns_empty_report_when_all_checks_pass() {
+    let root = temp_root("doctor-report-empty");
+    fs::create_dir_all(&root).expect("create root");
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/doctor")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(payload["healthScore"], 100);
+    assert!(
+        payload["issues"].is_null()
+            || payload["issues"] == serde_json::json!([])
+    );
+}
+
+#[tokio::test]
+async fn doctor_endpoint_returns_structured_issues() {
+    let root = temp_root("doctor-report-issues");
+    fs::create_dir_all(&root).expect("create root");
+    let state = test_web_state(
+        &root,
+        Arc::new(WebTestEngine::with_doctor_snapshots(
+            vec![vec![
+                doctor_check(
+                    "Git",
+                    None,
+                    "git",
+                    DoctorCheckKind::Which,
+                    CheckSeverity::Error,
+                    ToolStatus::Missing,
+                ),
+                doctor_check(
+                    "Codex",
+                    Some("codex"),
+                    "/tmp/codex",
+                    DoctorCheckKind::PathExists,
+                    CheckSeverity::Warning,
+                    ToolStatus::Missing,
+                ),
+            ]],
+            Ok(()),
+        )),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/doctor")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    let issues = payload["issues"].as_array().expect("issues");
+    assert_eq!(payload["issuesBySeverity"]["error"], 1);
+    assert_eq!(payload["issuesBySeverity"]["warning"], 1);
+    assert_eq!(payload["issuesByCategory"]["tooling"], 1);
+    assert_eq!(payload["issuesByCategory"]["filesystem"], 1);
+    assert_eq!(issues.len(), 2);
+    assert_eq!(issues[0]["code"], "doctor.git.which.git");
+    assert_eq!(issues[0]["description"], "Git requires 'git' to be available in PATH.");
+    assert_eq!(issues[0]["currentState"], "missing");
+    assert_eq!(issues[0]["expectedState"], "binary is available in PATH");
+    assert_eq!(issues[0]["fixAvailable"], true);
+}
+
+#[tokio::test]
+async fn doctor_fix_endpoint_returns_success_when_safe_issue_is_resolved() {
+    let root = temp_root("doctor-fix-success");
+    fs::create_dir_all(&root).expect("create root");
+    let state = test_web_state(
+        &root,
+        Arc::new(WebTestEngine::with_doctor_snapshots(
+            vec![
+                vec![doctor_check(
+                    "Git",
+                    None,
+                    "git",
+                    DoctorCheckKind::Which,
+                    CheckSeverity::Error,
+                    ToolStatus::Missing,
+                )],
+                Vec::new(),
+            ],
+            Ok(()),
+        )),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/doctor/fix")
+                .method("POST")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["attemptedCount"], 1);
+    assert_eq!(payload["fixedCount"], 1);
+    assert_eq!(payload["failedCount"], 0);
+    assert!(
+        payload["report"]["issues"].is_null()
+            || payload["report"]["issues"] == serde_json::json!([])
+    );
+    assert_eq!(payload["results"][0]["code"], "doctor.git.which.git");
+    assert_eq!(payload["results"][0]["fixed"], true);
+}
+
+#[tokio::test]
+async fn doctor_fix_endpoint_rejects_selective_issue_targeting() {
+    let root = temp_root("doctor-fix-selective");
+    fs::create_dir_all(&root).expect("create root");
+    let state = test_web_state(
+        &root,
+        Arc::new(WebTestEngine::with_doctor_snapshots(
+            vec![vec![doctor_check(
+                "Git",
+                None,
+                "git",
+                DoctorCheckKind::Which,
+                CheckSeverity::Error,
+                ToolStatus::Missing,
+            )]],
+            Ok(()),
+        )),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/doctor/fix")
+                .method("POST")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({
+                        "issueCodes": ["doctor.git.which.git"]
+                    }))
+                    .expect("json body"),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(payload["error"]["code"], errors::WEB_ERR_VALIDATION);
+    assert_eq!(payload["error"]["category"], "Validation");
+    assert_eq!(
+        payload["error"]["message"],
+        "Selective doctor fixes are not supported; omit issueCodes to run all safe fixes."
+    );
+}
+
+#[tokio::test]
+async fn doctor_fix_endpoint_ignores_non_fixable_issues_in_bulk_mode() {
+    let root = temp_root("doctor-fix-non-fixable");
+    fs::create_dir_all(&root).expect("create root");
+    let state = test_web_state(
+        &root,
+        Arc::new(WebTestEngine::with_doctor_snapshots(
+            vec![vec![doctor_check(
+                "Custom Tool",
+                Some("custom-tool"),
+                "custom-check",
+                DoctorCheckKind::Custom,
+                CheckSeverity::Warning,
+                ToolStatus::Error("unsupported".to_string()),
+            )]],
+            Ok(()),
+        )),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/doctor/fix")
+                .method("POST")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["attemptedCount"], 0);
+    assert_eq!(payload["fixedCount"], 0);
+    assert_eq!(payload["failedCount"], 0);
+    assert_eq!(
+        payload["message"],
+        "No doctor issues support automatic fixes."
+    );
+    assert!(
+        payload["results"].is_null() || payload["results"] == serde_json::json!([])
+    );
+    assert_eq!(payload["report"]["issues"].as_array().expect("issues").len(), 1);
+}
+
+#[tokio::test]
+async fn doctor_fix_endpoint_returns_partial_failure_when_issue_remains() {
+    let root = temp_root("doctor-fix-partial");
+    fs::create_dir_all(&root).expect("create root");
+    let state = test_web_state(
+        &root,
+        Arc::new(WebTestEngine::with_doctor_snapshots(
+            vec![
+                vec![
+                    doctor_check(
+                        "Git",
+                        None,
+                        "git",
+                        DoctorCheckKind::Which,
+                        CheckSeverity::Error,
+                        ToolStatus::Missing,
+                    ),
+                    doctor_check(
+                        "Codex",
+                        Some("codex"),
+                        "/tmp/codex",
+                        DoctorCheckKind::PathExists,
+                        CheckSeverity::Warning,
+                        ToolStatus::Missing,
+                    ),
+                ],
+                vec![doctor_check(
+                    "Codex",
+                    Some("codex"),
+                    "/tmp/codex",
+                    DoctorCheckKind::PathExists,
+                    CheckSeverity::Warning,
+                    ToolStatus::Missing,
+                )],
+            ],
+            Err(MaccError::Validation("Doctor checks failed.".to_string())),
+        )),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/doctor/fix")
+                .method("POST")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(payload["status"], "partial");
+    assert_eq!(payload["attemptedCount"], 2);
+    assert_eq!(payload["fixedCount"], 1);
+    assert_eq!(payload["failedCount"], 1);
+    assert_eq!(payload["report"]["issues"].as_array().expect("issues").len(), 1);
+    let failed_result = payload["results"]
+        .as_array()
+        .expect("results")
+        .iter()
+        .find(|result| result["fixed"] == serde_json::json!(false))
+        .expect("failed result");
+    assert_eq!(failed_result["code"], "doctor.codex.path_exists.tmp-codex");
+}
+
 #[tokio::test]
 async fn audit_log_skips_get_requests() {
     let root = temp_root("audit-skip-get");
