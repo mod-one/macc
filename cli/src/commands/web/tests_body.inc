@@ -2659,6 +2659,49 @@ async fn worktrees_list_endpoint_returns_managed_worktree_metadata() {
 }
 
 #[tokio::test]
+async fn worktrees_list_endpoint_normalizes_unmanaged_branch_names() {
+    let root = temp_root("worktrees-list-unmanaged");
+    init_worktree_repo(&root);
+    let unmanaged_path = root.join(".macc").join("worktree").join("plain-branch");
+    run_git_ok(
+        &root,
+        &[
+            "worktree",
+            "add",
+            unmanaged_path.to_str().expect("worktree path"),
+            "-b",
+            "plain-branch",
+            "main",
+        ],
+    );
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/worktrees")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = response.into_body().collect().await.expect("collect").to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    let items = payload.as_array().expect("array");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["branch"], "plain-branch");
+    assert_eq!(items[0]["tool"], serde_json::Value::Null);
+}
+
+#[tokio::test]
 async fn worktrees_create_endpoint_creates_worktree_and_returns_payload() {
     let root = temp_root("worktrees-create");
     init_worktree_repo(&root);

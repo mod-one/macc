@@ -274,7 +274,7 @@ fn map_entry_to_api(
         (
             fallback_worktree_id(&entry.path),
             None,
-            entry.branch.clone(),
+            entry.branch.as_deref().map(normalize_branch_name),
             None,
             None,
             None,
@@ -324,6 +324,13 @@ fn map_created_to_api(
         prunable: false,
         session_label,
     })
+}
+
+fn normalize_branch_name(branch: &str) -> String {
+    branch
+        .strip_prefix("refs/heads/")
+        .unwrap_or(branch)
+        .to_string()
 }
 
 fn derive_worktree_status(entry: &WorktreeEntry, dirty: bool) -> String {
