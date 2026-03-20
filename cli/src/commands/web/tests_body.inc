@@ -205,6 +205,212 @@ async fn health_endpoint_returns_ok_status() {
     let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
     assert_eq!(payload["status"], "ok");
 }
+
+#[tokio::test]
+async fn logs_endpoint_lists_categorized_log_files() {
+    let root = temp_root("logs-list");
+    let coordinator_dir = root.join(".macc/log/coordinator");
+    let performer_dir = root.join(".macc/log/performer");
+    fs::create_dir_all(&coordinator_dir).expect("create coordinator dir");
+    fs::create_dir_all(&performer_dir).expect("create performer dir");
+    fs::write(coordinator_dir.join("events.jsonl"), "{\"type\":\"started\"}\n").expect("write coordinator log");
+    fs::write(performer_dir.join("task.md"), "# performer\n").expect("write performer log");
+    fs::write(root.join(".macc/log/ops.jsonl"), "{\"action\":\"noop\"}\n").expect("write ops log");
+
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/logs")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    let files = payload.as_array().expect("array");
+    assert_eq!(files.len(), 2);
+    assert_eq!(files[0]["path"], "coordinator/events.jsonl");
+    assert_eq!(files[0]["category"], "coordinator");
+    assert!(files[0]["size"].as_u64().expect("size") > 0);
+    assert!(files[0]["modified"].as_str().is_some());
+    assert_eq!(files[1]["path"], "performer/task.md");
+    assert_eq!(files[1]["category"], "performer");
+}
+
+#[tokio::test]
+async fn log_read_endpoint_returns_full_content() {
+    let root = temp_root("logs-read");
+    let coordinator_dir = root.join(".macc/log/coordinator");
+    fs::create_dir_all(&coordinator_dir).expect("create coordinator dir");
+    fs::write(coordinator_dir.join("events.jsonl"), "line-1\nline-2\nline-3\n").expect("write log");
+
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/logs/coordinator%2Fevents.jsonl")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(payload["path"], "coordinator/events.jsonl");
+    assert_eq!(payload["total"], 3);
+    assert_eq!(payload["hasMore"], false);
+    assert_eq!(
+        payload["lines"],
+        serde_json::json!(["line-1", "line-2", "line-3"])
+    );
+}
+
+#[tokio::test]
+async fn log_read_endpoint_supports_pagination() {
+    let root = temp_root("logs-pagination");
+    let coordinator_dir = root.join(".macc/log/coordinator");
+    fs::create_dir_all(&coordinator_dir).expect("create coordinator dir");
+    fs::write(
+        coordinator_dir.join("events.jsonl"),
+        "line-1\nline-2\nline-3\nline-4\n",
+    )
+    .expect("write log");
+
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/logs/coordinator%2Fevents.jsonl?offset=1&limit=2")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(payload["total"], 4);
+    assert_eq!(payload["hasMore"], true);
+    assert_eq!(payload["lines"], serde_json::json!(["line-2", "line-3"]));
+}
+
+#[tokio::test]
+async fn log_read_endpoint_supports_search_filtering() {
+    let root = temp_root("logs-search");
+    let performer_dir = root.join(".macc/log/performer");
+    fs::create_dir_all(&performer_dir).expect("create performer dir");
+    fs::write(
+        performer_dir.join("task.md"),
+        "INFO start\nERROR failed\nINFO retry\nERROR recovered\n",
+    )
+    .expect("write log");
+
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/logs/performer%2Ftask.md?search=ERROR")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(payload["total"], 2);
+    assert_eq!(payload["hasMore"], false);
+    assert_eq!(
+        payload["lines"],
+        serde_json::json!(["ERROR failed", "ERROR recovered"])
+    );
+}
+
+#[tokio::test]
+async fn log_read_endpoint_rejects_traversal_paths() {
+    let root = temp_root("logs-traversal");
+    fs::create_dir_all(root.join(".macc/log/coordinator")).expect("create log dir");
+
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/logs/..%2F..%2Fetc%2Fpasswd")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(payload["error"]["code"], errors::WEB_ERR_LOG_VALIDATION);
+    assert_eq!(payload["error"]["category"], "Validation");
+}
 #[tokio::test]
 async fn audit_log_skips_get_requests() {
     let root = temp_root("audit-skip-get");
