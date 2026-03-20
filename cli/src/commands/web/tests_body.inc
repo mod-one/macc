@@ -3195,6 +3195,37 @@ async fn prd_endpoint_read_worktree_prd() {
 }
 
 #[tokio::test]
+async fn prd_endpoint_read_missing_prd_returns_domain_error() {
+    let root = temp_root("prd-read-missing");
+    fs::create_dir_all(&root).expect("create root");
+
+    let state = test_web_state(
+        &root,
+        Arc::new(WebTestEngine::new(Ok(CoordinatorCommandResult::default()))),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/prd")
+                .method("GET")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::BAD_GATEWAY);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["error"]["code"], "MACC-WEB-4000");
+    assert_eq!(payload["error"]["category"], "Dependency");
+    assert_ne!(payload["error"]["code"], "MACC-WEB-0000");
+}
+
+#[tokio::test]
 async fn prd_endpoint_write_prd_with_backup() {
     let root = temp_root("prd-write");
     fs::create_dir_all(&root).expect("create root");
@@ -3255,6 +3286,38 @@ async fn prd_endpoint_write_validation_error() {
 
     let response = app.oneshot(Request::builder().uri("/api/v1/prd").method("PUT").header("content-type", "application/json").body(Body::from(serde_json::to_vec(&update_payload).unwrap())).unwrap()).await.unwrap();
     assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn prd_endpoint_write_invalid_json_returns_validation_error() {
+    let root = temp_root("prd-write-invalid-json");
+    fs::create_dir_all(&root).expect("create root");
+
+    let state = test_web_state(
+        &root,
+        Arc::new(WebTestEngine::new(Ok(CoordinatorCommandResult::default()))),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/prd")
+                .method("PUT")
+                .header("content-type", "application/json")
+                .body(Body::from("{"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["error"]["code"], errors::WEB_ERR_VALIDATION);
+    assert_eq!(payload["error"]["category"], "Validation");
+    assert_ne!(payload["error"]["code"], "MACC-WEB-0000");
 }
 
 #[tokio::test]
