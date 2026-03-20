@@ -25,6 +25,7 @@ use macc_core::tool::spec::{CheckSeverity, DoctorCheckKind};
 use macc_core::TestEngine;
 use macc_core::{MaccError, ProjectPaths, Result};
 use std::fs;
+use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::sync::Arc;
@@ -186,6 +187,7 @@ fn test_web_state(
         engine,
         paths: ProjectPaths::from_root(root),
         assets_mode,
+        tail_stream_limiter: logs::TailStreamLimiter::default(),
     }
 }
 

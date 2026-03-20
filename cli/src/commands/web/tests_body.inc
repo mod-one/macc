@@ -748,6 +748,233 @@ async fn log_read_endpoint_rejects_traversal_paths() {
     assert_eq!(payload["error"]["category"], "Validation");
 }
 
+#[tokio::test]
+async fn log_tail_endpoint_streams_appended_lines() {
+    let root = temp_root("logs-tail-stream");
+    let coordinator_dir = root.join(".macc/log/coordinator");
+    fs::create_dir_all(&coordinator_dir).expect("create coordinator dir");
+    let log_path = coordinator_dir.join("events.jsonl");
+    fs::write(&log_path, "existing\n").expect("write seed log");
+
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/logs/tail?path=coordinator%2Fevents.jsonl")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .expect("content type"),
+        "text/event-stream"
+    );
+
+    let mut body = response.into_body();
+    let log_path_for_append = log_path.clone();
+    let append_task = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&log_path_for_append)
+            .expect("open log for append");
+        writeln!(file, "next line").expect("append line");
+    });
+    let frame = tokio::time::timeout(Duration::from_secs(2), body.frame())
+        .await
+        .expect("tail frame timeout")
+        .expect("frame")
+        .expect("body frame");
+    append_task.await.expect("append task");
+    let data = String::from_utf8(frame.into_data().expect("data frame").to_vec()).expect("utf8");
+
+    assert!(data.contains("event: log_line"), "{data}");
+    assert!(data.contains("\"content\":\"next line\""), "{data}");
+    assert!(data.contains("\"path\":\"coordinator/events.jsonl\""), "{data}");
+}
+
+#[tokio::test]
+async fn log_tail_endpoint_respects_last_event_id_cursor() {
+    let root = temp_root("logs-tail-cursor");
+    let coordinator_dir = root.join(".macc/log/coordinator");
+    fs::create_dir_all(&coordinator_dir).expect("create coordinator dir");
+    let log_path = coordinator_dir.join("events.jsonl");
+    fs::write(&log_path, "line-1\nline-2\n").expect("write log");
+
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/logs/tail?path=coordinator%2Fevents.jsonl")
+                .method("GET")
+                .header("Last-Event-ID", "off-7")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let mut body = response.into_body();
+    let frame = tokio::time::timeout(Duration::from_secs(2), body.frame())
+        .await
+        .expect("cursor frame timeout")
+        .expect("frame")
+        .expect("body frame");
+    let data = String::from_utf8(frame.into_data().expect("data frame").to_vec()).expect("utf8");
+
+    assert!(data.contains("\"content\":\"line-2\""), "{data}");
+    assert!(!data.contains("line-1"), "{data}");
+}
+
+#[tokio::test]
+async fn log_tail_stream_emits_heartbeat_records() {
+    let root = temp_root("logs-tail-heartbeat");
+    let coordinator_dir = root.join(".macc/log/coordinator");
+    fs::create_dir_all(&coordinator_dir).expect("create coordinator dir");
+    let log_path = coordinator_dir.join("events.jsonl");
+    fs::write(&log_path, "").expect("write log");
+
+    let permit = logs::TailStreamLimiter::default()
+        .try_acquire("heartbeat-client".to_string())
+        .expect("permit");
+    let response = axum::response::sse::Sse::new(logs::tail_log_stream(
+        "coordinator/events.jsonl".to_string(),
+        log_path,
+        None,
+        permit,
+        Duration::from_millis(50),
+        Duration::from_millis(10),
+    ))
+    .into_response();
+    let mut body = response.into_body();
+
+    let frame = tokio::time::timeout(Duration::from_millis(100), body.frame())
+        .await
+        .expect("heartbeat timeout")
+        .expect("frame")
+        .expect("body frame");
+    let data = String::from_utf8(frame.into_data().expect("data frame").to_vec()).expect("utf8");
+
+    assert!(data.contains("event: heartbeat"), "{data}");
+    assert!(data.contains("\"type\":\"heartbeat\""), "{data}");
+    assert!(data.contains("\"status\":\"ok\""), "{data}");
+}
+
+#[tokio::test]
+async fn log_tail_stream_recovers_after_truncation() {
+    let root = temp_root("logs-tail-rotation");
+    let coordinator_dir = root.join(".macc/log/coordinator");
+    fs::create_dir_all(&coordinator_dir).expect("create coordinator dir");
+    let log_path = coordinator_dir.join("events.jsonl");
+    fs::write(&log_path, "line-1\n").expect("write log");
+
+    let permit = logs::TailStreamLimiter::default()
+        .try_acquire("rotation-client".to_string())
+        .expect("permit");
+    let response = axum::response::sse::Sse::new(logs::tail_log_stream(
+        "coordinator/events.jsonl".to_string(),
+        log_path.clone(),
+        None,
+        permit,
+        Duration::from_millis(20),
+        Duration::from_secs(1),
+    ))
+    .into_response();
+    let mut body = response.into_body();
+
+    let log_path_for_rotation = log_path.clone();
+    let rotate_task = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        fs::write(&log_path_for_rotation, "").expect("truncate log");
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        fs::write(&log_path_for_rotation, "rotated-line\n").expect("rewrite rotated log");
+    });
+    let frame = tokio::time::timeout(Duration::from_millis(250), body.frame())
+        .await
+        .expect("rotation timeout")
+        .expect("frame")
+        .expect("body frame");
+    rotate_task.await.expect("rotate task");
+    let data = String::from_utf8(frame.into_data().expect("data frame").to_vec()).expect("utf8");
+
+    assert!(data.contains("\"content\":\"rotated-line\""), "{data}");
+}
+
+#[tokio::test]
+async fn log_tail_endpoint_limits_concurrent_streams_per_client() {
+    let root = temp_root("logs-tail-limit");
+    let coordinator_dir = root.join(".macc/log/coordinator");
+    fs::create_dir_all(&coordinator_dir).expect("create coordinator dir");
+    fs::write(coordinator_dir.join("events.jsonl"), "").expect("write log");
+
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+    let mut responses = Vec::new();
+
+    for _ in 0..25 {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/logs/tail?path=coordinator%2Fevents.jsonl")
+                    .method("GET")
+                    .header("X-Forwarded-For", "live-wall")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        responses.push(response);
+    }
+
+    let rejected = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/logs/tail?path=coordinator%2Fevents.jsonl")
+                .method("GET")
+                .header("X-Forwarded-For", "live-wall")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(rejected.status(), axum::http::StatusCode::CONFLICT);
+    let bytes = rejected
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(payload["error"]["code"], errors::WEB_ERR_REGISTRY_CONFLICT);
+
+    drop(responses);
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn logs_endpoint_skips_symlinked_directories_outside_log_root() {
