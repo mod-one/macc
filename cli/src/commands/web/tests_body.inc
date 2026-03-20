@@ -411,6 +411,48 @@ async fn log_read_endpoint_rejects_traversal_paths() {
     assert_eq!(payload["error"]["code"], errors::WEB_ERR_LOG_VALIDATION);
     assert_eq!(payload["error"]["category"], "Validation");
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn logs_endpoint_skips_symlinked_directories_outside_log_root() {
+    let root = temp_root("logs-symlink-dir");
+    let coordinator_dir = root.join(".macc/log/coordinator");
+    let external_dir = root.join("external-logs");
+    fs::create_dir_all(&coordinator_dir).expect("create coordinator dir");
+    fs::create_dir_all(&external_dir).expect("create external dir");
+    fs::write(external_dir.join("outside.log"), "outside\n").expect("write external log");
+    std::os::unix::fs::symlink(&external_dir, coordinator_dir.join("linked"))
+        .expect("create symlink");
+
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/logs")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    let files = payload.as_array().expect("array");
+    assert!(files.is_empty());
+}
+
 #[tokio::test]
 async fn audit_log_skips_get_requests() {
     let root = temp_root("audit-skip-get");

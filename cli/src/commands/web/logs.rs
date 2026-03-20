@@ -27,9 +27,17 @@ pub(super) async fn list_logs_handler(
     maybe_aggregate_performer_logs(&state);
 
     let log_root = state.paths.macc_dir.join("log");
+    if !log_root.exists() {
+        return Ok(Json(Vec::new()));
+    }
+    let canonical_root = fs::canonicalize(&log_root).map_err(|err| macc_core::MaccError::Io {
+        path: log_root.to_string_lossy().into_owned(),
+        action: "canonicalize web log root".into(),
+        source: err,
+    })?;
     let mut files = Vec::new();
-    collect_category_logs(&log_root, CATEGORY_COORDINATOR, &mut files)?;
-    collect_category_logs(&log_root, CATEGORY_PERFORMER, &mut files)?;
+    collect_category_logs(&log_root, &canonical_root, CATEGORY_COORDINATOR, &mut files)?;
+    collect_category_logs(&log_root, &canonical_root, CATEGORY_PERFORMER, &mut files)?;
     files.sort_by(|left, right| {
         left.category
             .cmp(&right.category)
@@ -84,6 +92,7 @@ fn maybe_aggregate_performer_logs(state: &WebState) {
 
 fn collect_category_logs(
     log_root: &StdPath,
+    canonical_root: &StdPath,
     category: &str,
     out: &mut Vec<ApiLogFile>,
 ) -> std::result::Result<(), ApiError> {
@@ -92,11 +101,12 @@ fn collect_category_logs(
         return Ok(());
     }
 
-    collect_logs_recursive(log_root, &category_root, category, out)
+    collect_logs_recursive(log_root, canonical_root, &category_root, category, out)
 }
 
 fn collect_logs_recursive(
     log_root: &StdPath,
+    canonical_root: &StdPath,
     current_dir: &StdPath,
     category: &str,
     out: &mut Vec<ApiLogFile>,
@@ -113,7 +123,17 @@ fn collect_logs_recursive(
         })?;
         let path = entry.path();
         if path.is_dir() {
-            collect_logs_recursive(log_root, &path, category, out)?;
+            let canonical_dir =
+                fs::canonicalize(&path).map_err(|err| macc_core::MaccError::Io {
+                    path: path.to_string_lossy().into_owned(),
+                    action: "canonicalize web log directory".into(),
+                    source: err,
+                })?;
+            if !canonical_dir.starts_with(canonical_root) {
+                continue;
+            }
+
+            collect_logs_recursive(log_root, canonical_root, &path, category, out)?;
             continue;
         }
         if !path.is_file() {
@@ -127,12 +147,6 @@ fn collect_logs_recursive(
             continue;
         }
 
-        let canonical_root =
-            fs::canonicalize(log_root).map_err(|err| macc_core::MaccError::Io {
-                path: log_root.to_string_lossy().into_owned(),
-                action: "canonicalize web log root".into(),
-                source: err,
-            })?;
         let canonical_path = fs::canonicalize(&path).map_err(|err| macc_core::MaccError::Io {
             path: path.to_string_lossy().into_owned(),
             action: "canonicalize web log file".into(),
