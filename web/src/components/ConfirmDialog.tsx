@@ -4,6 +4,7 @@ import { AlertTriangleIcon } from './icons';
 import { cn } from './styles';
 
 export type ConfirmDialogIntent = 'caution' | 'danger';
+export type DangerousConfirmationMode = 'phrase' | 'double-confirm';
 
 export interface ConfirmDialogProps {
   open: boolean;
@@ -14,6 +15,8 @@ export interface ConfirmDialogProps {
   cancelLabel?: string;
   intent?: ConfirmDialogIntent;
   confirmationPhrase?: string;
+  dangerousConfirmationMode?: DangerousConfirmationMode;
+  secondaryConfirmationLabel?: string;
   onConfirm: () => void;
 }
 
@@ -26,17 +29,22 @@ export function ConfirmDialog({
   cancelLabel = 'Cancel',
   intent = 'caution',
   confirmationPhrase = 'CONFIRM',
+  dangerousConfirmationMode = 'phrase',
+  secondaryConfirmationLabel = 'I understand this action cannot be undone.',
   onConfirm,
 }: ConfirmDialogProps) {
   const [typedPhrase, setTypedPhrase] = useState('');
+  const [isAcknowledged, setIsAcknowledged] = useState(false);
   const isDangerous = intent === 'danger';
-  const isConfirmed = !isDangerous || typedPhrase.trim() === confirmationPhrase;
+  const requiresPhrase = isDangerous && dangerousConfirmationMode === 'phrase';
+  const isConfirmed = !isDangerous || (requiresPhrase ? typedPhrase.trim() === confirmationPhrase : isAcknowledged);
 
   return (
     <AlertDialog.Root
       onOpenChange={(nextOpen) => {
         if (!nextOpen) {
           setTypedPhrase('');
+          setIsAcknowledged(false);
         }
         onOpenChange(nextOpen);
       }}
@@ -64,7 +72,7 @@ export function ConfirmDialog({
             </div>
           </div>
 
-          {isDangerous && (
+          {requiresPhrase && (
             <div className="mt-5 space-y-2">
               <label className="block text-sm font-medium" htmlFor="danger-confirmation-phrase">
                 Type <span className="font-mono text-[var(--text-primary)]">{confirmationPhrase}</span> to
@@ -76,6 +84,20 @@ export function ConfirmDialog({
                 onChange={(event) => setTypedPhrase(event.target.value)}
                 value={typedPhrase}
               />
+            </div>
+          )}
+
+          {isDangerous && !requiresPhrase && (
+            <div className="mt-5">
+              <label className="flex items-start gap-3 rounded-md border border-white/10 bg-black/20 px-3 py-3 text-sm text-[var(--text-secondary)]">
+                <input
+                  checked={isAcknowledged}
+                  className="mt-0.5 h-4 w-4 rounded border-white/20 bg-transparent text-[var(--accent)]"
+                  onChange={(event) => setIsAcknowledged(event.target.checked)}
+                  type="checkbox"
+                />
+                <span>{secondaryConfirmationLabel}</span>
+              </label>
             </div>
           )}
 

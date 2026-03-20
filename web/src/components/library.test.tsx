@@ -68,6 +68,32 @@ describe('shared component library', () => {
     await waitFor(() => expect(handleConfirm).toHaveBeenCalledTimes(1));
   });
 
+  it('supports a double-confirm flow for dangerous confirmations', async () => {
+    const handleConfirm = vi.fn();
+
+    render(
+      <ConfirmDialog
+        dangerousConfirmationMode="double-confirm"
+        description="Dangerous action"
+        intent="danger"
+        onConfirm={handleConfirm}
+        onOpenChange={() => undefined}
+        open
+        title="Delete run"
+      />,
+    );
+
+    const confirmButton = screen.getByRole('button', { name: 'Confirm' });
+    expect(confirmButton).toBeDisabled();
+
+    fireEvent.click(screen.getByRole('checkbox'));
+
+    expect(confirmButton).toBeEnabled();
+    fireEvent.click(confirmButton);
+
+    await waitFor(() => expect(handleConfirm).toHaveBeenCalledTimes(1));
+  });
+
   it('wires error banner actions', () => {
     const onRetry = vi.fn();
     const onCopy = vi.fn();
