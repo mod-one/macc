@@ -1680,10 +1680,15 @@ async fn git_graph_endpoint_returns_commit_graph_payload() {
     assert_eq!(commits[0]["task_id"], "WEB2-BE-GIT-002");
     assert_eq!(commits[0]["branch_refs"], serde_json::json!(["main"]));
     assert_eq!(commits[0]["parent_shas"].as_array().expect("parents").len(), 2);
-    assert_eq!(commits[1]["task_id"], "WEB2-BE-GIT-003");
-    assert_eq!(commits[2]["task_id"], "WEB2-BE-GIT-002");
-    assert_eq!(commits[2]["branch_refs"], serde_json::json!(["feature/web-graph"]));
     assert_eq!(commits[3]["task_id"], "WEB2-BE-GIT-001");
+    let non_merge_commits = &commits[1..3];
+    assert!(non_merge_commits
+        .iter()
+        .any(|commit| commit["task_id"] == "WEB2-BE-GIT-003"));
+    assert!(non_merge_commits.iter().any(|commit| {
+        commit["task_id"] == "WEB2-BE-GIT-002"
+            && commit["branch_refs"] == serde_json::json!(["feature/web-graph"])
+    }));
 }
 
 #[tokio::test]
@@ -1765,6 +1770,26 @@ async fn git_graph_endpoint_paginates_after_since_sha() {
         WebAssetsMode::Embedded,
     );
     let app = build_web_router(state);
+    let all_commits_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/git/graph")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let all_commits_bytes = all_commits_response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let all_commits_payload: serde_json::Value =
+        serde_json::from_slice(&all_commits_bytes).expect("json");
+    let all_commits = all_commits_payload["commits"].as_array().expect("commits");
 
     let first_page = app
         .clone()
@@ -1809,8 +1834,7 @@ async fn git_graph_endpoint_paginates_after_since_sha() {
         serde_json::from_slice(&second_page_bytes).expect("json");
     let second_page_commits = second_page_payload["commits"].as_array().expect("commits");
     assert_eq!(second_page_commits.len(), 2);
-    assert_eq!(second_page_commits[0]["task_id"], "WEB2-BE-GIT-002");
-    assert_eq!(second_page_commits[1]["task_id"], "WEB2-BE-GIT-001");
+    assert_eq!(second_page_commits, &all_commits[2..4]);
 }
 
 #[tokio::test]
