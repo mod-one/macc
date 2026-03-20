@@ -476,6 +476,291 @@ async fn status_endpoint_maps_engine_errors() {
 }
 
 #[tokio::test]
+async fn registry_tasks_endpoint_returns_registry_metadata() {
+    let root = temp_root("registry-list");
+    fs::create_dir_all(&root).expect("create root");
+
+    let mut task = registry_task("WEB2-BE-REG-001", "Registry task", "blocked", Some("codex"));
+    task.task_runtime.status = Some(RuntimeStatus::Failed.as_str().to_string());
+    task.task_runtime.attempt = Some(2);
+    task.task_runtime.last_heartbeat = Some("2026-03-20T12:00:00Z".to_string());
+    task.task_runtime.delayed_until = Some("2026-03-20T13:00:00Z".to_string());
+    task.task_runtime.current_phase = Some("review".to_string());
+    task.task_runtime.last_error = Some("tool failed".to_string());
+    task.task_runtime.last_error_code = Some("E901".to_string());
+    task.updated_at = Some("2026-03-20T12:05:00Z".to_string());
+    task.worktree = Some(TaskWorktree {
+        worktree_path: Some("/tmp/macc-wt".to_string()),
+        branch: Some("feature/registry".to_string()),
+        base_branch: Some("main".to_string()),
+        last_commit: Some("abc123".to_string()),
+        session_id: Some("session-1".to_string()),
+        ..TaskWorktree::default()
+    });
+
+    write_registry_snapshot(
+        &root,
+        &CoordinatorSnapshot {
+            registry: TaskRegistry {
+                tasks: vec![task],
+                updated_at: Some("2026-03-20T12:05:00Z".to_string()),
+                ..TaskRegistry::default()
+            },
+            events: vec![registry_event(
+                "WEB2-BE-REG-001",
+                "evt-reg-1",
+                "task_blocked",
+            )],
+            cursor: None,
+        },
+    );
+
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/registry/tasks")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    let tasks = payload.as_array().expect("tasks");
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0]["id"], "WEB2-BE-REG-001");
+    assert_eq!(tasks[0]["title"], "Registry task");
+    assert_eq!(tasks[0]["priority"], "P1");
+    assert_eq!(tasks[0]["state"], "blocked");
+    assert_eq!(tasks[0]["tool"], "codex");
+    assert_eq!(tasks[0]["attempts"], 2);
+    assert_eq!(tasks[0]["heartbeat"], "2026-03-20T12:00:00Z");
+    assert_eq!(tasks[0]["delayedUntil"], "2026-03-20T13:00:00Z");
+    assert_eq!(tasks[0]["lastErrorCode"], "E901");
+    assert_eq!(tasks[0]["worktree"]["branch"], "feature/registry");
+    assert_eq!(tasks[0]["events"][0]["eventType"], "task_blocked");
+}
+
+#[tokio::test]
+async fn registry_task_action_requeues_failed_task() {
+    let root = temp_root("registry-requeue");
+    fs::create_dir_all(&root).expect("create root");
+
+    let mut task = registry_task("WEB2-BE-REG-002", "Blocked task", "blocked", Some("codex"));
+    task.assignee = Some(serde_json::json!({ "tool": "codex" }));
+    task.claimed_at = Some("2026-03-20T11:00:00Z".to_string());
+    task.worktree = Some(TaskWorktree {
+        worktree_path: Some("/tmp/requeue".to_string()),
+        ..TaskWorktree::default()
+    });
+    task.task_runtime.status = Some(RuntimeStatus::Failed.as_str().to_string());
+    task.task_runtime.current_phase = Some("review".to_string());
+    task.task_runtime.last_error = Some("boom".to_string());
+    task.task_runtime.last_error_code = Some("E901".to_string());
+    task.task_runtime.attempt = Some(3);
+    task.task_runtime.last_heartbeat = Some("2026-03-20T11:59:00Z".to_string());
+    task.task_runtime.delayed_until = Some("2026-03-20T12:30:00Z".to_string());
+
+    write_registry_snapshot(
+        &root,
+        &CoordinatorSnapshot {
+            registry: TaskRegistry {
+                tasks: vec![task],
+                ..TaskRegistry::default()
+            },
+            events: Vec::new(),
+            cursor: None,
+        },
+    );
+
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/registry/tasks/WEB2-BE-REG-002/requeue")
+                .method("POST")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({
+                        "kind": "requeue",
+                        "justification": "operator retry"
+                    }))
+                    .expect("json body"),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(payload["state"], "todo");
+    assert_eq!(payload["tool"], "codex");
+    assert!(payload["assignee"].is_null());
+    assert!(payload["worktree"].is_null());
+    assert!(payload["attempts"].is_null());
+    assert!(payload["heartbeat"].is_null());
+    assert!(payload["delayedUntil"].is_null());
+    assert!(payload["lastError"].is_null());
+    assert!(payload["lastErrorCode"].is_null());
+
+    let project_paths = ProjectPaths::from_root(&root);
+    let storage_paths = CoordinatorStoragePaths::from_project_paths(&project_paths);
+    let snapshot = SqliteStorage::new(storage_paths)
+        .load_snapshot()
+        .expect("load snapshot");
+    let stored = snapshot
+        .registry
+        .find_task("WEB2-BE-REG-002")
+        .expect("stored task");
+    assert_eq!(stored.state, "todo");
+    assert!(stored.assignee.is_none());
+    assert!(stored.worktree.is_none());
+    assert_eq!(
+        stored.task_runtime.status.as_deref(),
+        Some(RuntimeStatus::Idle.as_str())
+    );
+}
+
+#[tokio::test]
+async fn registry_task_action_reassigns_tool() {
+    let root = temp_root("registry-reassign");
+    fs::create_dir_all(&root).expect("create root");
+
+    let task = registry_task("WEB2-BE-REG-003", "Todo task", "todo", Some("codex"));
+    write_registry_snapshot(
+        &root,
+        &CoordinatorSnapshot {
+            registry: TaskRegistry {
+                tasks: vec![task],
+                ..TaskRegistry::default()
+            },
+            events: Vec::new(),
+            cursor: None,
+        },
+    );
+
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/registry/tasks/WEB2-BE-REG-003/reassign")
+                .method("POST")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({
+                        "kind": "reassign",
+                        "tool": "gemini",
+                        "justification": "specialized follow-up"
+                    }))
+                    .expect("json body"),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(payload["tool"], "gemini");
+    assert_eq!(payload["state"], "todo");
+
+    let project_paths = ProjectPaths::from_root(&root);
+    let storage_paths = CoordinatorStoragePaths::from_project_paths(&project_paths);
+    let snapshot = SqliteStorage::new(storage_paths)
+        .load_snapshot()
+        .expect("load snapshot");
+    let stored = snapshot
+        .registry
+        .find_task("WEB2-BE-REG-003")
+        .expect("stored task");
+    assert_eq!(stored.tool.as_deref(), Some("gemini"));
+}
+
+#[tokio::test]
+async fn registry_task_action_rejects_invalid_action() {
+    let root = temp_root("registry-invalid-action");
+    fs::create_dir_all(&root).expect("create root");
+
+    let task = registry_task("WEB2-BE-REG-004", "Todo task", "todo", Some("codex"));
+    write_registry_snapshot(
+        &root,
+        &CoordinatorSnapshot {
+            registry: TaskRegistry {
+                tasks: vec![task],
+                ..TaskRegistry::default()
+            },
+            events: Vec::new(),
+            cursor: None,
+        },
+    );
+
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/registry/tasks/WEB2-BE-REG-004/pause")
+                .method("POST")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(payload["error"]["code"], errors::WEB_ERR_REGISTRY_VALIDATION);
+    assert_eq!(payload["error"]["category"], "Validation");
+}
+
+#[tokio::test]
 async fn events_endpoint_streams_coordinator_events() {
     let root = temp_root("events-stream");
     fs::create_dir_all(&root).expect("create root");

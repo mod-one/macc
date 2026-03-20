@@ -1,14 +1,19 @@
 use super::*;
 use crate::commands::AppContext;
-use crate::test_support::run_git_ok;
+use crate::test_support::{run_git_ok, run_git_ok_with_env};
 use axum::body::Body;
 use axum::http::Request;
 use axum::response::IntoResponse;
 use http_body_util::BodyExt;
 use macc_core::config::CanonicalConfig;
 use macc_core::config::WebAssetsMode;
+use macc_core::coordinator::model::{Task, TaskRegistry, TaskWorktree};
 use macc_core::coordinator::task_selector::SelectedTask;
 use macc_core::coordinator::COORDINATOR_EVENT_SCHEMA_VERSION;
+use macc_core::coordinator::{CoordinatorEventPayload, CoordinatorEventRecord, RuntimeStatus};
+use macc_core::coordinator_storage::{
+    CoordinatorSnapshot, CoordinatorStorage, CoordinatorStoragePaths, SqliteStorage,
+};
 use macc_core::engine::CoordinatorEvent;
 use macc_core::resolve::CliOverrides;
 use macc_core::service::coordinator_workflow::{
@@ -19,7 +24,6 @@ use macc_core::{MaccError, ProjectPaths, Result};
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
-use std::process::Command as ProcessCommand;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tower::util::ServiceExt;
@@ -87,37 +91,29 @@ fn commit_file(
 ) {
     fs::write(root.join(file_name), contents).expect("write file");
     run_git_ok(root, &["add", file_name]);
-    let mut command = ProcessCommand::new("git");
-    command.current_dir(root);
-    command.env("GIT_AUTHOR_DATE", timestamp);
-    command.env("GIT_COMMITTER_DATE", timestamp);
-    command.args(["commit", "-m", subject]);
-    if !body.is_empty() {
-        command.args(["-m", body]);
-    }
-    let output = command.output().expect("run git commit");
-    if !output.status.success() {
-        panic!(
-            "git commit failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+    let envs = [
+        ("GIT_AUTHOR_DATE", timestamp),
+        ("GIT_COMMITTER_DATE", timestamp),
+    ];
+    if body.is_empty() {
+        run_git_ok_with_env(root, &["commit", "-m", subject], &envs);
+    } else {
+        run_git_ok_with_env(root, &["commit", "-m", subject, "-m", body], &envs);
     }
 }
 
 fn merge_branch(root: &Path, branch: &str, subject: &str, body: &str, timestamp: &str) {
-    let mut command = ProcessCommand::new("git");
-    command.current_dir(root);
-    command.env("GIT_AUTHOR_DATE", timestamp);
-    command.env("GIT_COMMITTER_DATE", timestamp);
-    command.args(["merge", "--no-ff", branch, "-m", subject]);
-    if !body.is_empty() {
-        command.args(["-m", body]);
-    }
-    let output = command.output().expect("run git merge");
-    if !output.status.success() {
-        panic!(
-            "git merge failed: {}",
-            String::from_utf8_lossy(&output.stderr)
+    let envs = [
+        ("GIT_AUTHOR_DATE", timestamp),
+        ("GIT_COMMITTER_DATE", timestamp),
+    ];
+    if body.is_empty() {
+        run_git_ok_with_env(root, &["merge", "--no-ff", branch, "-m", subject], &envs);
+    } else {
+        run_git_ok_with_env(
+            root,
+            &["merge", "--no-ff", branch, "-m", subject, "-m", body],
+            &envs,
         );
     }
 }
@@ -168,6 +164,47 @@ fn test_web_state(
         engine,
         paths: ProjectPaths::from_root(root),
         assets_mode,
+    }
+}
+
+fn write_registry_snapshot(root: &Path, snapshot: &CoordinatorSnapshot) {
+    let project_paths = ProjectPaths::from_root(root);
+    let storage_paths = CoordinatorStoragePaths::from_project_paths(&project_paths);
+    SqliteStorage::new(storage_paths)
+        .save_snapshot(snapshot)
+        .expect("save registry snapshot");
+}
+
+fn registry_task(id: &str, title: &str, state: &str, tool: Option<&str>) -> Task {
+    Task {
+        id: id.to_string(),
+        title: Some(title.to_string()),
+        priority: Some("P1".to_string()),
+        state: state.to_string(),
+        tool: tool.map(ToString::to_string),
+        ..Task::default()
+    }
+}
+
+fn registry_event(task_id: &str, event_id: &str, event_type: &str) -> CoordinatorEventRecord {
+    CoordinatorEventRecord {
+        schema_version: COORDINATOR_EVENT_SCHEMA_VERSION.to_string(),
+        event_id: event_id.to_string(),
+        run_id: Some("run-1".to_string()),
+        seq: 1,
+        ts: "2026-03-20T12:00:00Z".to_string(),
+        source: "coordinator:web".to_string(),
+        task_id: Some(task_id.to_string()),
+        event_type: event_type.to_string(),
+        phase: Some("dev".to_string()),
+        status: "ok".to_string(),
+        detail: Some(format!("{event_type} for {task_id}")),
+        msg: None,
+        payload: CoordinatorEventPayload::from(serde_json::json!({
+            "message": format!("{event_type} for {task_id}")
+        }))
+        .into_value(),
+        extra: Default::default(),
     }
 }
 

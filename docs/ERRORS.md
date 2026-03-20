@@ -31,15 +31,18 @@ The API error envelope uses these categories:
 - `MACC-WEB-1002`: Secret scan validation failure (`MaccError::SecretDetected`).
 - `MACC-WEB-1003`: Configuration parse/validation failure (`MaccError::Config`).
 - `MACC-WEB-1004`: Catalog operation validation failure (`MaccError::Catalog`).
+- `MACC-WEB-1005`: Registry action payload or path validation failure.
 
 ### NotFound (2000 range)
 
 - `MACC-WEB-2000`: Project root cannot be resolved (`MaccError::ProjectRootNotFound`).
 - `MACC-WEB-2001`: User home directory cannot be resolved (`MaccError::HomeDirNotFound`).
+- `MACC-WEB-2002`: Registry task was not found for the requested operator action.
 
 ### Conflict / Auth (3000 range)
 
 - `MACC-WEB-3000`: User-scope operation denied in current mode (`MaccError::UserScopeNotAllowed`).
+- `MACC-WEB-3001`: Registry operator action conflicts with the task's current state/runtime.
 
 ### Dependency / Engine (4000 range)
 

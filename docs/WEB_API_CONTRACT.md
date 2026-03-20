@@ -128,6 +128,70 @@ Response 200 (shape mirrors `CoordinatorCommandResult`):
 Notes:
 - Fields are optional and may be `null` depending on the action.
 
+### GET `/api/v1/registry/tasks`
+
+Purpose: list coordinator registry tasks with operator-facing metadata.
+
+Response 200:
+```json
+[
+  {
+    "id": "WEB2-BE-REG-001",
+    "title": "Implement registry task list and action endpoints",
+    "priority": "P1",
+    "state": "blocked",
+    "tool": "codex",
+    "attempts": 2,
+    "heartbeat": "2026-03-20T12:00:00Z",
+    "delayedUntil": null,
+    "currentPhase": "review",
+    "lastError": "performer failed",
+    "lastErrorCode": "E901",
+    "assignee": null,
+    "worktree": null,
+    "events": [],
+    "updatedAt": "2026-03-20T12:05:00Z"
+  }
+]
+```
+
+Notes:
+- `events` contains coordinator event excerpts already present in the storage snapshot.
+- `attempts` reflects the task runtime attempt counter when present.
+
+### POST `/api/v1/registry/tasks/{id}/{action}`
+
+Purpose: apply operator actions to a single registry task.
+
+Path parameters:
+- `id` (string, required): registry task ID.
+- `action` (string, required): `requeue | reassign`.
+
+Request body for `requeue`:
+```json
+{
+  "kind": "requeue",
+  "justification": "optional operator note"
+}
+```
+
+Request body for `reassign`:
+```json
+{
+  "kind": "reassign",
+  "tool": "gemini",
+  "justification": "optional operator note"
+}
+```
+
+Response 200:
+- Updated `ApiRegistryTask` payload for the mutated task.
+
+Notes:
+- `requeue` resets blocked/failed tasks back to `todo`.
+- `reassign` updates the task's assigned tool and rejects active or merged tasks.
+- Invalid actions use the standard error envelope instead of falling through to SPA routing.
+
 ### GET `/api/v1/events` (SSE)
 
 Purpose: stream coordinator events.

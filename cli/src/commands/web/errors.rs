@@ -28,9 +28,12 @@ const WEB_ERR_TOOLSPEC: &str = "MACC-WEB-1001";
 const WEB_ERR_SECRET_DETECTED: &str = "MACC-WEB-1002";
 const WEB_ERR_CONFIG: &str = "MACC-WEB-1003";
 const WEB_ERR_CATALOG: &str = "MACC-WEB-1004";
+pub(super) const WEB_ERR_REGISTRY_VALIDATION: &str = "MACC-WEB-1005";
 const WEB_ERR_AUTH_SCOPE: &str = "MACC-WEB-3000";
+pub(super) const WEB_ERR_REGISTRY_CONFLICT: &str = "MACC-WEB-3001";
 const WEB_ERR_PROJECT_ROOT_NOT_FOUND: &str = "MACC-WEB-2000";
 const WEB_ERR_HOME_NOT_FOUND: &str = "MACC-WEB-2001";
+pub(super) const WEB_ERR_REGISTRY_TASK_NOT_FOUND: &str = "MACC-WEB-2002";
 const WEB_ERR_IO: &str = "MACC-WEB-4000";
 const WEB_ERR_FETCH: &str = "MACC-WEB-4001";
 pub(super) const WEB_ERR_COORDINATOR: &str = "MACC-WEB-5000";
@@ -43,7 +46,7 @@ pub(super) struct ApiError {
 }
 
 impl ApiError {
-    fn new(
+    pub(super) fn new(
         status: StatusCode,
         code: &str,
         category: &str,
@@ -67,6 +70,48 @@ impl ApiError {
                 },
             },
         }
+    }
+
+    pub(super) fn validation(message: impl Into<String>) -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            WEB_ERR_REGISTRY_VALIDATION,
+            "Validation",
+            message.into(),
+            false,
+            Some("Check the requested registry action payload".to_string()),
+            None,
+            None,
+        )
+    }
+
+    pub(super) fn not_found(
+        message: impl Into<String>,
+        context: Option<serde_json::Value>,
+    ) -> Self {
+        Self::new(
+            StatusCode::NOT_FOUND,
+            WEB_ERR_REGISTRY_TASK_NOT_FOUND,
+            "NotFound",
+            message.into(),
+            false,
+            Some("Verify the task ID exists in the coordinator registry".to_string()),
+            context,
+            None,
+        )
+    }
+
+    pub(super) fn conflict(message: impl Into<String>, context: Option<serde_json::Value>) -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            WEB_ERR_REGISTRY_CONFLICT,
+            "Conflict",
+            message.into(),
+            false,
+            Some("Move the task into an operator-manageable state, then retry".to_string()),
+            context,
+            None,
+        )
     }
 }
 
@@ -242,7 +287,10 @@ mod tests {
 
     #[test]
     fn api_error_mapping_not_found() {
-        let err: ApiError = MaccError::ProjectRootNotFound { start_dir: "/tmp".to_string() }.into();
+        let err: ApiError = MaccError::ProjectRootNotFound {
+            start_dir: "/tmp".to_string(),
+        }
+        .into();
         assert_eq!(err.body.error.code, "MACC-WEB-2000");
         assert_eq!(err.body.error.category, "NotFound");
         assert_eq!(err.body.error.retryable, false);
@@ -260,7 +308,12 @@ mod tests {
 
     #[test]
     fn api_error_mapping_dependency() {
-        let err: ApiError = MaccError::Io { path: "f".to_string(), action: "read".to_string(), source: std::io::Error::from(std::io::ErrorKind::NotFound).into() }.into();
+        let err: ApiError = MaccError::Io {
+            path: "f".to_string(),
+            action: "read".to_string(),
+            source: std::io::Error::from(std::io::ErrorKind::NotFound).into(),
+        }
+        .into();
         assert_eq!(err.body.error.code, "MACC-WEB-4000");
         assert_eq!(err.body.error.category, "Dependency");
         assert_eq!(err.body.error.retryable, true);
@@ -269,7 +322,11 @@ mod tests {
 
     #[test]
     fn api_error_mapping_internal() {
-        let err: ApiError = MaccError::Coordinator { code: "C", message: "M".to_string() }.into();
+        let err: ApiError = MaccError::Coordinator {
+            code: "C",
+            message: "M".to_string(),
+        }
+        .into();
         assert_eq!(err.body.error.code, "MACC-WEB-5000");
         assert_eq!(err.body.error.category, "Internal");
         assert_eq!(err.body.error.retryable, true);

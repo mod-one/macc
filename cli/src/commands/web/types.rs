@@ -530,6 +530,8 @@ pub(crate) struct ApiRegistryTask {
     pub id: String,
     /// Human-readable task title.
     pub title: Option<String>,
+    /// Priority preserved from the task registry.
+    pub priority: Option<String>,
     /// Current task state from the registry.
     pub state: String,
     /// Assigned tool ID.
