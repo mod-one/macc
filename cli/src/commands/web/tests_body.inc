@@ -651,8 +651,8 @@ async fn plan_endpoint_returns_structured_preview_with_diffs() {
     let root = temp_root("plan-default");
     fs::create_dir_all(&root).expect("create root");
     let paths = ProjectPaths::from_root(&root);
-    let engine = Arc::new(TestEngine::with_fixtures());
-    let tool_id = engine.fixture_ids()[0].to_string();
+    let engine = Arc::new(WebTestEngine::with_fixture_plan_from_overrides());
+    let tool_id = engine.inner.fixture_ids()[0].to_string();
     write_test_config_with_tools(&root, vec![tool_id.clone()]);
     let state = test_web_state(&root, engine, WebAssetsMode::Embedded);
     let app = build_web_router(state);
@@ -713,9 +713,9 @@ async fn plan_endpoint_returns_structured_preview_with_diffs() {
 async fn plan_endpoint_filters_tools_and_accepts_offline_scope_fields() {
     let root = temp_root("plan-filtered");
     fs::create_dir_all(&root).expect("create root");
-    let engine = Arc::new(TestEngine::with_fixtures());
-    let tool_one = engine.fixture_ids()[0].to_string();
-    let tool_two = engine.fixture_ids()[1].to_string();
+    let engine = Arc::new(WebTestEngine::with_fixture_plan_from_overrides());
+    let tool_one = engine.inner.fixture_ids()[0].to_string();
+    let tool_two = engine.inner.fixture_ids()[1].to_string();
     write_test_config_with_tools(&root, vec![tool_one.clone(), tool_two.clone()]);
     let state = test_web_state(&root, engine, WebAssetsMode::Embedded);
     let app = build_web_router(state);
@@ -791,6 +791,49 @@ async fn plan_endpoint_maps_missing_config_to_api_error() {
     let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
     assert_eq!(payload["error"]["code"], "MACC-WEB-4000");
     assert_eq!(payload["error"]["category"], "Dependency");
+}
+
+#[tokio::test]
+async fn plan_endpoint_rejects_user_scope_without_explicit_opt_in() {
+    let root = temp_root("plan-user-scope-rejected");
+    fs::create_dir_all(&root).expect("create root");
+    write_test_config(&root);
+    let mut builder = macc_core::plan::ActionPlan::builder(macc_core::plan::Scope::User);
+    let plan = builder
+        .write_text(".codex/config.toml", "model = \"gpt-5.4\"\n")
+        .expect("user-scope write")
+        .build();
+    let state = test_web_state(
+        &root,
+        Arc::new(WebTestEngine::with_plan_result(Ok(plan))),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/plan")
+                .method("POST")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({})).expect("json body"),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(payload["error"]["code"], "MACC-WEB-3000");
+    assert_eq!(payload["error"]["category"], "Auth");
 }
 
 #[tokio::test]

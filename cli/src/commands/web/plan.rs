@@ -10,6 +10,7 @@ use axum::Json;
 use macc_core::config::CanonicalConfig;
 use macc_core::plan::{ActionPlan, PlannedOp, PlannedOpKind, Scope};
 use macc_core::resolve::{resolve, resolve_fetch_units, CliOverrides};
+use macc_core::MaccError;
 use macc_core::ProjectPaths;
 
 pub(super) async fn run_plan_handler(
@@ -29,6 +30,8 @@ pub(super) async fn run_plan_handler(
         .map_err(ApiError::from)?;
     let overrides = build_overrides(&state, &request).map_err(ApiError::from)?;
     let plan = build_plan(&state, &canonical, &overrides).map_err(ApiError::from)?;
+    validate_preview_plan(&plan, request.allow_user_scope.unwrap_or(false))
+        .map_err(ApiError::from)?;
     let ops = state.engine.plan_operations(&state.paths, &plan);
 
     Ok(Json(build_plan_response(
@@ -154,6 +157,26 @@ pub(super) fn build_plan_response(
             })
             .collect(),
     }
+}
+
+fn validate_preview_plan(plan: &ActionPlan, allow_user_scope: bool) -> macc_core::Result<()> {
+    if allow_user_scope {
+        return Ok(());
+    }
+
+    if let Some(path) = plan
+        .actions
+        .iter()
+        .find(|action| action.scope() == Scope::User)
+        .map(|action| action.path().to_string())
+    {
+        return Err(MaccError::UserScopeNotAllowed(format!(
+            "Action for path '{}' is User scope",
+            path
+        )));
+    }
+
+    Ok(())
 }
 
 fn build_plan_risks(ops: &[PlannedOp]) -> Vec<ApiPlanRisk> {

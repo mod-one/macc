@@ -249,6 +249,9 @@ fn registry_event(task_id: &str, event_id: &str, event_type: &str) -> Coordinato
 
 struct WebTestEngine {
     inner: TestEngine,
+    use_fixture_plan_from_overrides: bool,
+    plan_result:
+        std::sync::Mutex<Option<std::result::Result<macc_core::plan::ActionPlan, MaccError>>>,
     run_result: std::sync::Mutex<Option<std::result::Result<CoordinatorCommandResult, MaccError>>>,
     cleanup_result: std::sync::Mutex<Option<std::result::Result<(), MaccError>>>,
     stop_result: std::sync::Mutex<Option<std::result::Result<(), MaccError>>>,
@@ -262,6 +265,8 @@ impl WebTestEngine {
     fn new(result: std::result::Result<CoordinatorCommandResult, MaccError>) -> Self {
         Self {
             inner: TestEngine::with_fixtures(),
+            use_fixture_plan_from_overrides: false,
+            plan_result: std::sync::Mutex::new(None),
             run_result: std::sync::Mutex::new(Some(result)),
             cleanup_result: std::sync::Mutex::new(Some(Ok(()))),
             stop_result: std::sync::Mutex::new(Some(Ok(()))),
@@ -275,6 +280,8 @@ impl WebTestEngine {
     fn with_cleanup_result(result: std::result::Result<(), MaccError>) -> Self {
         Self {
             inner: TestEngine::with_fixtures(),
+            use_fixture_plan_from_overrides: false,
+            plan_result: std::sync::Mutex::new(None),
             run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
             cleanup_result: std::sync::Mutex::new(Some(result)),
             stop_result: std::sync::Mutex::new(Some(Ok(()))),
@@ -288,6 +295,8 @@ impl WebTestEngine {
     fn with_stop_result(result: std::result::Result<(), MaccError>) -> Self {
         Self {
             inner: TestEngine::with_fixtures(),
+            use_fixture_plan_from_overrides: false,
+            plan_result: std::sync::Mutex::new(None),
             run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
             cleanup_result: std::sync::Mutex::new(Some(Ok(()))),
             stop_result: std::sync::Mutex::new(Some(result)),
@@ -301,6 +310,8 @@ impl WebTestEngine {
     fn with_resume_result(result: std::result::Result<(), MaccError>) -> Self {
         Self {
             inner: TestEngine::with_fixtures(),
+            use_fixture_plan_from_overrides: false,
+            plan_result: std::sync::Mutex::new(None),
             run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
             cleanup_result: std::sync::Mutex::new(Some(Ok(()))),
             stop_result: std::sync::Mutex::new(Some(Ok(()))),
@@ -314,6 +325,8 @@ impl WebTestEngine {
     fn with_event_snapshots(event_snapshots: Vec<Vec<CoordinatorEvent>>) -> Self {
         Self {
             inner: TestEngine::with_fixtures(),
+            use_fixture_plan_from_overrides: false,
+            plan_result: std::sync::Mutex::new(None),
             run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
             cleanup_result: std::sync::Mutex::new(Some(Ok(()))),
             stop_result: std::sync::Mutex::new(Some(Ok(()))),
@@ -330,12 +343,44 @@ impl WebTestEngine {
     ) -> Self {
         Self {
             inner: TestEngine::with_fixtures(),
+            use_fixture_plan_from_overrides: false,
+            plan_result: std::sync::Mutex::new(None),
             run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
             cleanup_result: std::sync::Mutex::new(Some(Ok(()))),
             stop_result: std::sync::Mutex::new(Some(Ok(()))),
             resume_result: std::sync::Mutex::new(Some(Ok(()))),
             doctor_snapshots: std::sync::Mutex::new(Some(snapshots)),
             doctor_fix_result: std::sync::Mutex::new(Some(fix_result)),
+            coordinator_events: std::sync::Mutex::new(vec![Vec::new()]),
+        }
+    }
+
+    fn with_plan_result(plan: std::result::Result<macc_core::plan::ActionPlan, MaccError>) -> Self {
+        Self {
+            inner: TestEngine::with_fixtures(),
+            use_fixture_plan_from_overrides: false,
+            plan_result: std::sync::Mutex::new(Some(plan)),
+            run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
+            cleanup_result: std::sync::Mutex::new(Some(Ok(()))),
+            stop_result: std::sync::Mutex::new(Some(Ok(()))),
+            resume_result: std::sync::Mutex::new(Some(Ok(()))),
+            doctor_snapshots: std::sync::Mutex::new(None),
+            doctor_fix_result: std::sync::Mutex::new(None),
+            coordinator_events: std::sync::Mutex::new(vec![Vec::new()]),
+        }
+    }
+
+    fn with_fixture_plan_from_overrides() -> Self {
+        Self {
+            inner: TestEngine::with_fixtures(),
+            use_fixture_plan_from_overrides: true,
+            plan_result: std::sync::Mutex::new(None),
+            run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
+            cleanup_result: std::sync::Mutex::new(Some(Ok(()))),
+            stop_result: std::sync::Mutex::new(Some(Ok(()))),
+            resume_result: std::sync::Mutex::new(Some(Ok(()))),
+            doctor_snapshots: std::sync::Mutex::new(None),
+            doctor_fix_result: std::sync::Mutex::new(None),
             coordinator_events: std::sync::Mutex::new(vec![Vec::new()]),
         }
     }
@@ -372,6 +417,26 @@ impl macc_core::engine::Engine for WebTestEngine {
         materialized_units: &[macc_core::resolve::MaterializedFetchUnit],
         overrides: &macc_core::resolve::CliOverrides,
     ) -> Result<macc_core::plan::ActionPlan> {
+        if let Some(result) = self.plan_result.lock().expect("lock").take() {
+            return result;
+        }
+        if self.use_fixture_plan_from_overrides {
+            let tool_ids = overrides
+                .tools
+                .clone()
+                .filter(|tools| !tools.is_empty())
+                .unwrap_or_else(|| config.tools.enabled.clone());
+            let mut plan = macc_core::plan::ActionPlan::new();
+            for tool_id in tool_ids {
+                plan.add_action(macc_core::plan::Action::WriteFile {
+                    path: format!("{tool_id}-output.txt"),
+                    content: format!("fixture content for {tool_id}\n").into_bytes(),
+                    scope: macc_core::plan::Scope::Project,
+                });
+            }
+            plan.normalize();
+            return Ok(plan);
+        }
         self.inner
             .plan(paths, config, materialized_units, overrides)
     }
