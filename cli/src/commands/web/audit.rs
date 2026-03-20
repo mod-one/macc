@@ -188,10 +188,10 @@ async fn append_record(state: &WebState, record: &AuditRecord) -> std::io::Resul
         .append(true)
         .open(&path)
         .await?;
-    let line = serde_json::to_vec(record)
+    let mut line = serde_json::to_vec(record)
         .map_err(|err| std::io::Error::other(format!("serialize audit record: {}", err)))?;
+    line.push(b'\n');
     file.write_all(&line).await?;
-    file.write_all(b"\n").await?;
     file.flush().await
 }
 
