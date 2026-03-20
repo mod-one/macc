@@ -1471,6 +1471,31 @@ where
     Ok(status)
 }
 
+pub fn save_canonical_config(
+    paths: &ProjectPaths,
+    config: &config::CanonicalConfig,
+) -> Result<plan::ActionStatus> {
+    config.validate()?;
+    let yaml = config
+        .to_yaml()
+        .map_err(|e| MaccError::Validation(format!("Failed to serialize config: {}", e)))?;
+    let logical_path =
+        relative_to_root(paths, &paths.config_path).unwrap_or_else(|| "macc.yaml".to_string());
+    let timestamp = Local::now().format("%Y%m%d-%H%M%S").to_string();
+    write_if_changed(
+        paths,
+        &logical_path,
+        &paths.config_path,
+        yaml.as_bytes(),
+        |existing| {
+            if existing.exists {
+                create_timestamped_backup(paths, &timestamp, &logical_path)?;
+            }
+            Ok(())
+        },
+    )
+}
+
 pub fn atomic_write(_paths: &ProjectPaths, target_path: &Path, content: &[u8]) -> Result<()> {
     let parent = target_path.parent().unwrap_or_else(|| Path::new(""));
     if !parent.as_os_str().is_empty() && !parent.exists() {

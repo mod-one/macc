@@ -1287,3 +1287,162 @@ async fn coordinator_resume_endpoint_maps_errors() {
     assert_eq!(payload["error"]["category"], "Validation");
     assert_eq!(payload["error"]["message"], "resume failed");
 }
+
+#[tokio::test]
+async fn config_get_endpoint_returns_canonical_config() {
+    let root = temp_root("config-get");
+    fs::create_dir_all(&root).expect("create root");
+    write_test_config_with_port(&root, 4567);
+    let state = test_web_state(&root, Arc::new(TestEngine::with_fixtures()), WebAssetsMode::Embedded);
+    let app = build_web_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/config")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(payload["webPort"], 4567);
+    assert_eq!(payload["quiet"], false);
+    assert_eq!(payload["offline"], false);
+}
+
+#[tokio::test]
+async fn config_put_endpoint_updates_config_file() {
+    let root = temp_root("config-put");
+    fs::create_dir_all(&root).expect("create root");
+    write_test_config(&root);
+    let state = test_web_state(&root, Arc::new(TestEngine::with_fixtures()), WebAssetsMode::Embedded);
+    let app = build_web_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/config")
+                .method("PUT")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "webPort": 4567,
+                        "quiet": true,
+                        "selectedSkills": ["macc-performer"]
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(payload["webPort"], 4567);
+    assert_eq!(payload["quiet"], true);
+    assert_eq!(payload["selectedSkills"], serde_json::json!(["macc-performer"]));
+
+    let paths = ProjectPaths::from_root(&root);
+    let updated = macc_core::load_canonical_config(&paths.config_path).expect("load config");
+    assert_eq!(updated.settings.web_port, Some(4567));
+    assert!(updated.settings.quiet);
+    assert_eq!(
+        updated
+            .selections
+            .as_ref()
+            .expect("selections")
+            .skills,
+        vec!["macc-performer".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn config_put_endpoint_returns_validation_error_for_invalid_json() {
+    let root = temp_root("config-put-invalid");
+    fs::create_dir_all(&root).expect("create root");
+    write_test_config(&root);
+    let state = test_web_state(&root, Arc::new(TestEngine::with_fixtures()), WebAssetsMode::Embedded);
+    let app = build_web_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/config")
+                .method("PUT")
+                .header("content-type", "application/json")
+                .body(Body::from("{"))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(payload["error"]["code"], errors::WEB_ERR_VALIDATION);
+    assert_eq!(payload["error"]["category"], "Validation");
+    assert!(
+        payload["error"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("Invalid config request body")
+    );
+}
+
+#[tokio::test]
+async fn config_put_endpoint_creates_backup_before_write() {
+    let root = temp_root("config-put-backup");
+    fs::create_dir_all(&root).expect("create root");
+    write_test_config(&root);
+    let paths = ProjectPaths::from_root(&root);
+    let original = fs::read_to_string(&paths.config_path).expect("read original");
+    let state = test_web_state(&root, Arc::new(TestEngine::with_fixtures()), WebAssetsMode::Embedded);
+    let app = build_web_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/config")
+                .method("PUT")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::json!({ "webPort": 5678 }).to_string()))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let backups = fs::read_dir(&paths.backups_dir).expect("read backups");
+    let mut backup_found = false;
+    for entry in backups {
+        let entry = entry.expect("entry");
+        if !entry.file_type().expect("file type").is_dir() {
+            continue;
+        }
+        let backup_file = entry.path().join(".macc/macc.yaml");
+        if backup_file.exists() {
+            assert_eq!(fs::read_to_string(backup_file).expect("read backup"), original);
+            backup_found = true;
+            break;
+        }
+    }
+    assert!(backup_found, "config backup not found");
+}
