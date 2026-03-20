@@ -22,7 +22,6 @@ import type {
   ApiRestoreRequest,
   ApiWorktree,
   ApiWorktreeCreateRequest,
-  JsonValue,
 } from './models';
 import { API_PREFIX, resolveApiBaseUrl } from './config';
 
@@ -141,7 +140,7 @@ function buildPath(path: string, query?: Record<string, QueryValue>): string {
   return queryString ? `${path}?${queryString}` : path;
 }
 
-async function sendJson<TResponse, TBody extends JsonValue | undefined = undefined>(
+async function sendJson<TResponse, TBody = undefined>(
   path: string,
   method: string,
   options: ApiQueryOptions = {},
