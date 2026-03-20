@@ -25,6 +25,7 @@ use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tower::util::ServiceExt;
 
@@ -36,12 +37,30 @@ fn temp_root(label: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!("macc-web-{}-{}", label, nanos))
 }
 
+fn apply_test_guard() -> MutexGuard<'static, ()> {
+    static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+    GUARD
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("apply test guard")
+}
+
 fn write_test_config(root: &std::path::Path) {
     let paths = ProjectPaths::from_root(root);
     fs::create_dir_all(paths.config_path.parent().expect("config dir")).expect("mkdir config");
     let yaml = CanonicalConfig::default()
         .to_yaml()
         .expect("serialize config");
+    fs::write(&paths.config_path, yaml).expect("write config");
+}
+
+fn write_test_config_with_tools(root: &std::path::Path, tools: Vec<String>) {
+    let paths = ProjectPaths::from_root(root);
+    fs::create_dir_all(paths.config_path.parent().expect("config dir")).expect("mkdir config");
+    let mut canonical = CanonicalConfig::default();
+    canonical.tools.enabled = tools;
+    canonical.settings.offline = true;
+    let yaml = canonical.to_yaml().expect("serialize config");
     fs::write(&paths.config_path, yaml).expect("write config");
 }
 

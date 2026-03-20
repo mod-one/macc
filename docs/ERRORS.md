@@ -27,11 +27,12 @@ The API error envelope uses these categories:
 ### Validation (1000 range)
 
 - `MACC-WEB-1000`: Generic validation failure (`MaccError::Validation`).
-- `MACC-WEB-1001`: Tool specification validation failure (`MaccError::ToolSpec`).
+- `MACC-WEB-1001`: Apply confirmation required before write execution.
 - `MACC-WEB-1002`: Secret scan validation failure (`MaccError::SecretDetected`).
 - `MACC-WEB-1003`: Configuration parse/validation failure (`MaccError::Config`).
 - `MACC-WEB-1004`: Catalog operation validation failure (`MaccError::Catalog`).
 - `MACC-WEB-1005`: Registry action payload or path validation failure.
+- `MACC-WEB-1006`: Tool specification validation failure (`MaccError::ToolSpec`).
 
 ### NotFound (2000 range)
 
