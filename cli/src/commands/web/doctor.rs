@@ -30,19 +30,22 @@ pub(super) async fn run_doctor_fix_handler(
     body: Bytes,
 ) -> std::result::Result<Json<ApiDoctorFixResponse>, ApiError> {
     let request = parse_fix_request(&body)?;
+    if request.issue_codes.is_some() {
+        return Err(ApiError::from(MaccError::Validation(
+            "Selective doctor fixes are not supported; omit issueCodes to run all safe fixes."
+                .to_string(),
+        )));
+    }
+
     let checks_before = state.engine.doctor(&state.paths);
     let issues_before = build_issues(&checks_before);
-    let issue_index = issues_before
+    let fixable_issue_codes = issues_before
         .iter()
-        .map(|issue| (issue.code.clone(), issue))
-        .collect::<BTreeMap<_, _>>();
+        .filter(|issue| issue.fix_available)
+        .map(|issue| issue.code.clone())
+        .collect::<BTreeSet<_>>();
 
-    let selected_codes = match request.issue_codes.as_ref() {
-        Some(codes) => normalize_selected_codes(codes, &issue_index)?,
-        None => issue_index.keys().cloned().collect(),
-    };
-
-    if !selected_codes.is_empty() {
+    if !fixable_issue_codes.is_empty() {
         let interaction = SilentInteraction;
         match state
             .engine
@@ -66,10 +69,8 @@ pub(super) async fn run_doctor_fix_handler(
     let mut failed_count = 0usize;
     let mut results = Vec::new();
 
-    for code in &selected_codes {
-        let issue = issue_index
-            .get(code)
-            .expect("validated issue code must exist before fix");
+    for issue in issues_before.iter().filter(|issue| issue.fix_available) {
+        let code = &issue.code;
         let fixed = !after_codes.contains(code.as_str());
         if fixed {
             fixed_count += 1;
@@ -95,8 +96,8 @@ pub(super) async fn run_doctor_fix_handler(
     } else {
         "partial"
     };
-    let message = if selected_codes.is_empty() {
-        "No doctor issues required fixing.".to_string()
+    let message = if fixable_issue_codes.is_empty() {
+        "No doctor issues support automatic fixes.".to_string()
     } else if failed_count == 0 {
         format!("Doctor fix resolved {} issue(s).", fixed_count)
     } else if fixed_count == 0 {
@@ -114,7 +115,7 @@ pub(super) async fn run_doctor_fix_handler(
     Ok(Json(ApiDoctorFixResponse {
         status: status.to_string(),
         message,
-        attempted_count: selected_codes.len(),
+        attempted_count: fixable_issue_codes.len(),
         fixed_count,
         failed_count,
         backup_location: None,
@@ -134,29 +135,6 @@ fn parse_fix_request(body: &Bytes) -> std::result::Result<ApiDoctorFixRequest, A
             err
         )))
     })
-}
-
-fn normalize_selected_codes(
-    codes: &[String],
-    known_issues: &BTreeMap<String, &ApiDoctorIssue>,
-) -> std::result::Result<BTreeSet<String>, ApiError> {
-    let mut normalized = BTreeSet::new();
-    for code in codes {
-        let trimmed = code.trim();
-        if trimmed.is_empty() {
-            return Err(ApiError::from(MaccError::Validation(
-                "doctor fix issue codes must not be empty".to_string(),
-            )));
-        }
-        if !known_issues.contains_key(trimmed) {
-            return Err(ApiError::from(MaccError::Validation(format!(
-                "unknown doctor issue code '{}'",
-                trimmed
-            ))));
-        }
-        normalized.insert(trimmed.to_string());
-    }
-    Ok(normalized)
 }
 
 fn build_report(checks: &[ToolCheck]) -> ApiDoctorReport {

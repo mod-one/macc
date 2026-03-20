@@ -342,10 +342,7 @@ pub fn build_advance_actions(
                 let base = task.base_branch("master");
                 let merge_context = MergeTaskContext {
                     tool: task.tool.clone().unwrap_or_default(),
-                    worktree_path: task
-                        .worktree_path()
-                        .unwrap_or_default()
-                        .to_string(),
+                    worktree_path: task.worktree_path().unwrap_or_default().to_string(),
                     title: task.title.clone().unwrap_or_default(),
                     description: task
                         .extra

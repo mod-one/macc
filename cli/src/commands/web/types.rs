@@ -688,7 +688,7 @@ pub(crate) struct ApiDoctorIssue {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ApiDoctorFixRequest {
-    /// Optional subset of doctor issue codes to target.
+    /// Reserved for future selective-fix support; omit to run all safe fixes.
     pub issue_codes: Option<Vec<String>>,
 }
 
