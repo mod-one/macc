@@ -58,6 +58,7 @@ function fallbackErrorEnvelope(message: string, cause?: string): ApiErrorEnvelop
       code: 'MACC-WEB-0000',
       category: 'Dependency',
       message,
+      retryable: true,
       ...(cause ? { cause } : {}),
     },
   };

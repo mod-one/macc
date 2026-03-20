@@ -24,30 +24,30 @@ The API error envelope uses these categories:
 
 - `MACC-WEB-0000`: Unspecified web API failure (fallback when no specific mapping is available).
 
-### Validation
+### Validation (1000 range)
 
-- `MACC-WEB-0100`: Generic validation failure (`MaccError::Validation`).
-- `MACC-WEB-0101`: Tool specification validation failure (`MaccError::ToolSpec`).
-- `MACC-WEB-0102`: Secret scan validation failure (`MaccError::SecretDetected`).
-- `MACC-WEB-0103`: Configuration parse/validation failure (`MaccError::Config`).
-- `MACC-WEB-0104`: Catalog operation validation failure (`MaccError::Catalog`).
+- `MACC-WEB-1000`: Generic validation failure (`MaccError::Validation`).
+- `MACC-WEB-1001`: Tool specification validation failure (`MaccError::ToolSpec`).
+- `MACC-WEB-1002`: Secret scan validation failure (`MaccError::SecretDetected`).
+- `MACC-WEB-1003`: Configuration parse/validation failure (`MaccError::Config`).
+- `MACC-WEB-1004`: Catalog operation validation failure (`MaccError::Catalog`).
 
-### Auth
+### NotFound (2000 range)
 
-- `MACC-WEB-0200`: User-scope operation denied in current mode (`MaccError::UserScopeNotAllowed`).
+- `MACC-WEB-2000`: Project root cannot be resolved (`MaccError::ProjectRootNotFound`).
+- `MACC-WEB-2001`: User home directory cannot be resolved (`MaccError::HomeDirNotFound`).
 
-### NotFound
+### Conflict / Auth (3000 range)
 
-- `MACC-WEB-0300`: Project root cannot be resolved (`MaccError::ProjectRootNotFound`).
-- `MACC-WEB-0301`: User home directory cannot be resolved (`MaccError::HomeDirNotFound`).
+- `MACC-WEB-3000`: User-scope operation denied in current mode (`MaccError::UserScopeNotAllowed`).
 
-### Dependency
+### Dependency / Engine (4000 range)
 
-- `MACC-WEB-0400`: Local I/O dependency failed (`MaccError::Io`).
-- `MACC-WEB-0401`: Remote fetch dependency failed (`MaccError::Fetch`).
+- `MACC-WEB-4000`: Local I/O dependency failed (`MaccError::Io`).
+- `MACC-WEB-4001`: Remote fetch dependency failed (`MaccError::Fetch`).
 
-### Internal
+### Internal (5000 range)
 
-- `MACC-WEB-0500`: Coordinator workflow failure (`MaccError::Coordinator`).
-- `MACC-WEB-0501`: Coordinator storage backend failure (`MaccError::Storage`).
-- `MACC-WEB-0502`: Git subsystem failure (`MaccError::Git`).
+- `MACC-WEB-5000`: Coordinator workflow failure (`MaccError::Coordinator`).
+- `MACC-WEB-5001`: Coordinator storage backend failure (`MaccError::Storage`).
+- `MACC-WEB-5002`: Git subsystem failure (`MaccError::Git`).

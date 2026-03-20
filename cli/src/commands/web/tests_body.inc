@@ -679,6 +679,8 @@ async fn coordinator_run_endpoint_maps_errors() {
     assert_eq!(payload["error"]["code"], errors::WEB_ERR_VALIDATION);
     assert_eq!(payload["error"]["category"], "Validation");
     assert_eq!(payload["error"]["message"], "coordinator failed");
+    assert_eq!(payload["error"]["retryable"], false);
+    assert!(payload["error"]["recommended_action"].is_string());
     assert!(payload["error"].get("cause").is_none());
 }
 
@@ -716,6 +718,8 @@ async fn coordinator_run_endpoint_maps_internal_coordinator_error_code() {
     let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
     assert_eq!(payload["error"]["code"], errors::WEB_ERR_COORDINATOR);
     assert_eq!(payload["error"]["category"], "Internal");
+    assert_eq!(payload["error"]["retryable"], true);
+    assert!(payload["error"]["recommended_action"].is_string());
     assert_eq!(payload["error"]["context"]["code"], "E901");
 }
 
