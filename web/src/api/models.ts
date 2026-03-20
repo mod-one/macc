@@ -10,6 +10,8 @@ export interface ApiErrorBody {
   code: string;
   category: ApiErrorCategory;
   message: string;
+  retryable: boolean;
+  recommended_action?: string;
   context?: Record<string, unknown>;
   cause?: string;
 }
