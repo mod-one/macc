@@ -158,6 +158,10 @@ fn reassign_task(
         .filter(|tool| !tool.is_empty())
         .ok_or_else(|| ApiError::validation("reassign action requires a non-empty tool"))?;
 
+    // Reassignment changes the dispatch tool. Any stale assignee/worktree
+    // attachment from a previous tool run must be dropped to keep registry
+    // state coherent for operators and later dispatch decisions.
+    task.clear_assignment();
     task.tool = Some(tool.to_string());
     task.updated_at = Some(now.to_string());
     Ok(())

@@ -652,7 +652,14 @@ async fn registry_task_action_reassigns_tool() {
     let root = temp_root("registry-reassign");
     fs::create_dir_all(&root).expect("create root");
 
-    let task = registry_task("WEB2-BE-REG-003", "Todo task", "todo", Some("codex"));
+    let mut task = registry_task("WEB2-BE-REG-003", "Todo task", "blocked", Some("codex"));
+    task.assignee = Some(serde_json::json!({ "tool": "codex" }));
+    task.claimed_at = Some("2026-03-20T11:00:00Z".to_string());
+    task.worktree = Some(TaskWorktree {
+        worktree_path: Some("/tmp/reassign".to_string()),
+        branch: Some("feature/reassign".to_string()),
+        ..TaskWorktree::default()
+    });
     write_registry_snapshot(
         &root,
         &CoordinatorSnapshot {
@@ -699,7 +706,9 @@ async fn registry_task_action_reassigns_tool() {
         .to_bytes();
     let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
     assert_eq!(payload["tool"], "gemini");
-    assert_eq!(payload["state"], "todo");
+    assert_eq!(payload["state"], "blocked");
+    assert!(payload["assignee"].is_null());
+    assert!(payload["worktree"].is_null());
 
     let project_paths = ProjectPaths::from_root(&root);
     let storage_paths = CoordinatorStoragePaths::from_project_paths(&project_paths);
@@ -711,6 +720,8 @@ async fn registry_task_action_reassigns_tool() {
         .find_task("WEB2-BE-REG-003")
         .expect("stored task");
     assert_eq!(stored.tool.as_deref(), Some("gemini"));
+    assert!(stored.assignee.is_none());
+    assert!(stored.worktree.is_none());
 }
 
 #[tokio::test]
