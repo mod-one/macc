@@ -1,6 +1,6 @@
 use macc_core::config::WebAssetsMode;
 use macc_core::plan::{PlannedOpKind, Scope};
-use macc_core::tool::spec::{CheckSeverity, DoctorCheckKind};
+use macc_core::tool::spec::CheckSeverity;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -656,6 +656,9 @@ pub(crate) struct ApiDoctorReport {
     /// Counts of issues grouped by severity.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub issues_by_severity: BTreeMap<String, usize>,
+    /// Counts of issues grouped by doctor category.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub issues_by_category: BTreeMap<String, usize>,
     /// Individual issues returned by doctor checks.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub issues: Vec<ApiDoctorIssue>,
@@ -665,20 +668,65 @@ pub(crate) struct ApiDoctorReport {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ApiDoctorIssue {
-    /// Human-readable check name.
-    pub name: String,
-    /// Tool ID associated with the check when available.
-    pub tool_id: Option<String>,
-    /// Check target such as a binary name or path.
-    pub target: String,
     /// Severity assigned to the issue.
     pub severity: CheckSeverity,
-    /// Doctor check kind that produced the issue.
-    pub kind: DoctorCheckKind,
-    /// Result status rendered for the UI.
+    /// Stable code for the doctor issue.
+    pub code: String,
+    /// Doctor category such as tooling or filesystem.
+    pub category: String,
+    /// Human-readable description of the failed diagnostic.
+    pub description: String,
+    /// Current observed state.
+    pub current_state: String,
+    /// Expected healthy state.
+    pub expected_state: String,
+    /// Whether the doctor fix flow can attempt an automated repair.
+    pub fix_available: bool,
+}
+
+/// Request accepted by doctor fix endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ApiDoctorFixRequest {
+    /// Optional subset of doctor issue codes to target.
+    pub issue_codes: Option<Vec<String>>,
+}
+
+/// Result returned by doctor fix endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ApiDoctorFixResponse {
+    /// Overall operation status.
     pub status: String,
-    /// Optional detailed message for errors.
-    pub message: Option<String>,
+    /// Human-readable completion summary.
+    pub message: String,
+    /// Number of issue codes considered for the run.
+    pub attempted_count: usize,
+    /// Number of issues resolved after the fix run.
+    pub fixed_count: usize,
+    /// Number of issues still failing after the fix run.
+    pub failed_count: usize,
+    /// Backup location when a fix created one.
+    pub backup_location: Option<String>,
+    /// Per-issue fix results.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub results: Vec<ApiDoctorFixIssueResult>,
+    /// Fresh report after the fix attempt.
+    pub report: ApiDoctorReport,
+}
+
+/// Per-issue doctor fix status.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ApiDoctorFixIssueResult {
+    /// Stable doctor issue code.
+    pub code: String,
+    /// Whether the issue disappeared after the fix run.
+    pub fixed: bool,
+    /// Human-readable status detail.
+    pub message: String,
+    /// Original severity for display purposes.
+    pub severity: CheckSeverity,
 }
 
 /// Backup set metadata returned by backup endpoints.

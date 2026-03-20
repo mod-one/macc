@@ -28,6 +28,7 @@ impl CheckRunner for SystemRunner {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolCheck {
     pub name: String,
     pub tool_id: Option<String>,
