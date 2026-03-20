@@ -1,4 +1,5 @@
 mod assets;
+mod audit;
 mod config;
 mod coordinator;
 mod errors;
@@ -13,6 +14,7 @@ mod types;
 use crate::commands::AppContext;
 use crate::commands::Command;
 use crate::services::engine_provider::SharedEngine;
+use axum::middleware::from_fn_with_state;
 use axum::routing::{get, post, put};
 use axum::Json;
 use axum::Router;
@@ -119,6 +121,7 @@ impl WebServerConfig {
 }
 
 fn build_web_router(state: WebState) -> Router {
+    let audit_state = state.clone();
     Router::new()
         .route("/api/v1/health", get(health_handler))
         .route(
@@ -167,6 +170,7 @@ fn build_web_router(state: WebState) -> Router {
         .route("/api/v1/prd", get(prd::get_prd_handler))
         .route("/api/v1/prd", put(prd::update_prd_handler))
         .fallback(get(assets::spa_handler))
+        .layer(from_fn_with_state(audit_state, audit::audit_middleware))
         .with_state(state)
 }
 
