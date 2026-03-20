@@ -2561,3 +2561,298 @@ async fn backup_restore_endpoint_creates_pre_restore_backup_and_restores_files()
         "current child"
     );
 }
+
+fn init_worktree_repo(root: &Path) {
+    init_git_repo(root);
+    commit_file(
+        root,
+        "README.md",
+        "# test\n",
+        "feat: seed repo",
+        "",
+        "2026-03-20T12:00:00Z",
+    );
+}
+
+fn create_test_worktree(root: &Path, slug: &str) -> macc_core::WorktreeCreateResult {
+    macc_core::create_worktrees(
+        root,
+        &macc_core::WorktreeCreateSpec {
+            slug: slug.to_string(),
+            tool: "codex".to_string(),
+            count: 1,
+            base: "main".to_string(),
+            dir: std::path::PathBuf::from(".macc/worktree"),
+            scope: Some("project".to_string()),
+            feature: Some("web".to_string()),
+        },
+    )
+    .expect("create worktree")
+    .into_iter()
+    .next()
+    .expect("created worktree")
+}
+
+#[tokio::test]
+async fn worktrees_list_endpoint_returns_empty_array_when_only_root_exists() {
+    let root = temp_root("worktrees-list-empty");
+    init_worktree_repo(&root);
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/worktrees")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = response.into_body().collect().await.expect("collect").to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(payload, serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn worktrees_list_endpoint_returns_managed_worktree_metadata() {
+    let root = temp_root("worktrees-list");
+    init_worktree_repo(&root);
+    let created = create_test_worktree(&root, "list-worktree");
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/worktrees")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = response.into_body().collect().await.expect("collect").to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    let items = payload.as_array().expect("array");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["id"], created.id);
+    assert_eq!(items[0]["tool"], "codex");
+    assert_eq!(items[0]["baseBranch"], "main");
+    assert_eq!(items[0]["scope"], "project");
+    assert_eq!(items[0]["feature"], "web");
+    assert_eq!(items[0]["status"], "dirty");
+    assert_eq!(items[0]["path"], created.path.to_string_lossy().to_string());
+}
+
+#[tokio::test]
+async fn worktrees_create_endpoint_creates_worktree_and_returns_payload() {
+    let root = temp_root("worktrees-create");
+    init_worktree_repo(&root);
+    write_test_config(&root);
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/worktrees")
+                .method("POST")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "slug": "api-create",
+                        "tool": "codex",
+                        "count": 1,
+                        "baseBranch": "main",
+                        "scope": "project",
+                        "feature": "web",
+                        "skipApply": true
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = response.into_body().collect().await.expect("collect").to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    let items = payload.as_array().expect("array");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["tool"], "codex");
+    assert_eq!(items[0]["baseBranch"], "main");
+    assert_eq!(items[0]["scope"], "project");
+    assert_eq!(items[0]["feature"], "web");
+    assert_eq!(items[0]["status"], "dirty");
+    let created_path = std::path::PathBuf::from(items[0]["path"].as_str().expect("path"));
+    assert!(created_path.exists());
+}
+
+#[tokio::test]
+async fn worktrees_create_endpoint_rejects_invalid_params() {
+    let root = temp_root("worktrees-create-invalid");
+    init_worktree_repo(&root);
+    write_test_config(&root);
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/worktrees")
+                .method("POST")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "slug": "invalid",
+                        "tool": "codex",
+                        "count": 0,
+                        "base": "main",
+                        "skipApply": true
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    let bytes = response.into_body().collect().await.expect("collect").to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(payload["error"]["code"], "MACC-WEB-1000");
+    assert_eq!(payload["error"]["message"], "worktree count must be >= 1");
+}
+
+#[tokio::test]
+async fn worktrees_delete_endpoint_removes_existing_worktree() {
+    let root = temp_root("worktrees-delete");
+    init_worktree_repo(&root);
+    let created = create_test_worktree(&root, "delete-worktree");
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/v1/worktrees/{}?force=true&removeBranch=true&forceConfirmed=true",
+                    created.id
+                ))
+                .method("DELETE")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "confirmed": true }).to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = response.into_body().collect().await.expect("collect").to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["id"], created.id);
+    assert!(!created.path.exists());
+    assert!(
+        !macc_core::git::rev_parse_verify(&root, &format!("refs/heads/{}", created.branch))
+            .expect("check branch removed")
+    );
+}
+
+#[tokio::test]
+async fn worktrees_delete_endpoint_returns_not_found_for_unknown_id() {
+    let root = temp_root("worktrees-delete-missing");
+    init_worktree_repo(&root);
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/worktrees/missing-worktree")
+                .method("DELETE")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "confirmed": true }).to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+    let bytes = response.into_body().collect().await.expect("collect").to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(payload["error"]["code"], "MACC-WEB-2004");
+    assert_eq!(payload["error"]["category"], "NotFound");
+}
+
+#[tokio::test]
+async fn worktrees_delete_endpoint_requires_double_confirmation_for_force() {
+    let root = temp_root("worktrees-delete-force");
+    init_worktree_repo(&root);
+    let created = create_test_worktree(&root, "force-worktree");
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/worktrees/{}?force=true", created.id))
+                .method("DELETE")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "confirmed": true }).to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    let bytes = response.into_body().collect().await.expect("collect").to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(payload["error"]["code"], "MACC-WEB-1001");
+    assert_eq!(
+        payload["error"]["message"],
+        "Force delete requires a second confirmation"
+    );
+    assert!(created.path.exists());
+}

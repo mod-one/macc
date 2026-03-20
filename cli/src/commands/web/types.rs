@@ -511,6 +511,7 @@ pub(crate) struct ApiWorktreeCreateRequest {
     /// Number of worktrees to create.
     pub count: usize,
     /// Base branch used for new worktrees.
+    #[serde(alias = "baseBranch", alias = "base_branch")]
     pub base: String,
     /// Optional scope written into worktree metadata.
     pub scope: Option<String>,
