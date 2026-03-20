@@ -1289,8 +1289,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                     for (idx, task) in snapshot.active_tasks.iter().take(8).enumerate() {
                         let frames = ["|", "/", "-", "\\"];
                         let spinner = if state.is_coordinator_running() {
-                            frames
-                                [((state.coordinator_spinner_tick as usize) + idx) % frames.len()]
+                            frames[((state.coordinator_spinner_tick as usize) + idx) % frames.len()]
                         } else {
                             "-"
                         };

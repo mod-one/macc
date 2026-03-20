@@ -253,6 +253,185 @@ async fn status_endpoint_returns_status_payload() {
 }
 
 #[tokio::test]
+async fn git_graph_endpoint_returns_commit_graph_payload() {
+    let root = temp_root("git-graph");
+    build_git_graph_repo(&root);
+    write_test_config(&root);
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/git/graph")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(payload["head"], "main");
+    assert!(payload["branches"]
+        .as_array()
+        .expect("branches")
+        .iter()
+        .any(|branch| branch == "main"));
+    assert!(payload["branches"]
+        .as_array()
+        .expect("branches")
+        .iter()
+        .any(|branch| branch == "feature/web-graph"));
+    let commits = payload["commits"].as_array().expect("commits");
+    assert_eq!(commits.len(), 4);
+    assert_eq!(commits[0]["task_id"], "WEB2-BE-GIT-002");
+    assert_eq!(commits[0]["branch_refs"], serde_json::json!(["main"]));
+    assert_eq!(commits[0]["parent_shas"].as_array().expect("parents").len(), 2);
+    assert_eq!(commits[1]["task_id"], "WEB2-BE-GIT-003");
+    assert_eq!(commits[2]["task_id"], "WEB2-BE-GIT-002");
+    assert_eq!(commits[2]["branch_refs"], serde_json::json!(["feature/web-graph"]));
+    assert_eq!(commits[3]["task_id"], "WEB2-BE-GIT-001");
+}
+
+#[tokio::test]
+async fn git_graph_endpoint_returns_empty_payload_for_empty_repo() {
+    let root = temp_root("git-graph-empty");
+    init_git_repo(&root);
+    write_test_config(&root);
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/git/graph")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(payload["head"], "main");
+    assert_eq!(payload["branches"], serde_json::json!([]));
+    assert_eq!(payload["commits"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn git_graph_endpoint_honors_limit_query() {
+    let root = temp_root("git-graph-limit");
+    build_git_graph_repo(&root);
+    write_test_config(&root);
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/git/graph?limit=2")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(payload["commits"].as_array().expect("commits").len(), 2);
+}
+
+#[tokio::test]
+async fn git_graph_endpoint_paginates_after_since_sha() {
+    let root = temp_root("git-graph-since");
+    build_git_graph_repo(&root);
+    write_test_config(&root);
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+
+    let first_page = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/git/graph?limit=2")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let first_page_bytes = first_page
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let first_page_payload: serde_json::Value =
+        serde_json::from_slice(&first_page_bytes).expect("json");
+    let first_page_commits = first_page_payload["commits"].as_array().expect("commits");
+    let since_sha = first_page_commits[1]["sha"].as_str().expect("sha");
+
+    let second_page = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/git/graph?limit=2&since={since_sha}"))
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(second_page.status(), axum::http::StatusCode::OK);
+    let second_page_bytes = second_page
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let second_page_payload: serde_json::Value =
+        serde_json::from_slice(&second_page_bytes).expect("json");
+    let second_page_commits = second_page_payload["commits"].as_array().expect("commits");
+    assert_eq!(second_page_commits.len(), 2);
+    assert_eq!(second_page_commits[0]["task_id"], "WEB2-BE-GIT-002");
+    assert_eq!(second_page_commits[1]["task_id"], "WEB2-BE-GIT-001");
+}
+
+#[tokio::test]
 async fn status_endpoint_maps_engine_errors() {
     let root = temp_root("error");
     let registry_path = root
