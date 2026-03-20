@@ -1,5 +1,6 @@
 use super::*;
 use crate::commands::AppContext;
+use crate::test_support::run_git_ok;
 use axum::body::Body;
 use axum::http::Request;
 use axum::response::IntoResponse;
@@ -17,6 +18,8 @@ use macc_core::TestEngine;
 use macc_core::{MaccError, ProjectPaths, Result};
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::Path;
+use std::process::Command as ProcessCommand;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tower::util::ServiceExt;
@@ -65,6 +68,95 @@ fn write_test_dist_assets(root: &std::path::Path) {
     )
     .expect("write index");
     fs::write(dist_dir.join("app.js"), "console.log('dist');").expect("write asset");
+}
+
+fn init_git_repo(root: &Path) {
+    fs::create_dir_all(root).expect("create repo root");
+    run_git_ok(root, &["init", "-b", "main"]);
+    run_git_ok(root, &["config", "user.name", "MACC Test"]);
+    run_git_ok(root, &["config", "user.email", "macc@example.com"]);
+}
+
+fn commit_file(
+    root: &Path,
+    file_name: &str,
+    contents: &str,
+    subject: &str,
+    body: &str,
+    timestamp: &str,
+) {
+    fs::write(root.join(file_name), contents).expect("write file");
+    run_git_ok(root, &["add", file_name]);
+    let mut command = ProcessCommand::new("git");
+    command.current_dir(root);
+    command.env("GIT_AUTHOR_DATE", timestamp);
+    command.env("GIT_COMMITTER_DATE", timestamp);
+    command.args(["commit", "-m", subject]);
+    if !body.is_empty() {
+        command.args(["-m", body]);
+    }
+    let output = command.output().expect("run git commit");
+    if !output.status.success() {
+        panic!(
+            "git commit failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+fn merge_branch(root: &Path, branch: &str, subject: &str, body: &str, timestamp: &str) {
+    let mut command = ProcessCommand::new("git");
+    command.current_dir(root);
+    command.env("GIT_AUTHOR_DATE", timestamp);
+    command.env("GIT_COMMITTER_DATE", timestamp);
+    command.args(["merge", "--no-ff", branch, "-m", subject]);
+    if !body.is_empty() {
+        command.args(["-m", body]);
+    }
+    let output = command.output().expect("run git merge");
+    if !output.status.success() {
+        panic!(
+            "git merge failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+fn build_git_graph_repo(root: &Path) {
+    init_git_repo(root);
+    commit_file(
+        root,
+        "base.txt",
+        "base\n",
+        "feat: WEB2-BE-GIT-001 - base commit",
+        "[macc:task WEB2-BE-GIT-001]",
+        "2026-03-18T10:00:00Z",
+    );
+    run_git_ok(root, &["checkout", "-b", "feature/web-graph"]);
+    commit_file(
+        root,
+        "feature.txt",
+        "feature\n",
+        "feat: WEB2-BE-GIT-002 - feature commit",
+        "[macc:task WEB2-BE-GIT-002]",
+        "2026-03-18T11:00:00Z",
+    );
+    run_git_ok(root, &["checkout", "main"]);
+    commit_file(
+        root,
+        "main.txt",
+        "main\n",
+        "chore: WEB2-BE-GIT-003 - main commit",
+        "[macc:task WEB2-BE-GIT-003]",
+        "2026-03-18T12:00:00Z",
+    );
+    merge_branch(
+        root,
+        "feature/web-graph",
+        "macc: merge task WEB2-BE-GIT-002",
+        "[macc:task WEB2-BE-GIT-002]\n[macc:merge true]",
+        "2026-03-18T13:00:00Z",
+    );
 }
 
 fn test_web_state(

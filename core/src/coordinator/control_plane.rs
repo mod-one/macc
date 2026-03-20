@@ -368,7 +368,11 @@ fn append_performer_log(worktree: &Path, task_id: &str, line: &str) {
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
         .collect();
-    let file = if safe.is_empty() { "task" } else { safe.as_str() };
+    let file = if safe.is_empty() {
+        "task"
+    } else {
+        safe.as_str()
+    };
     let log_dir = worktree.join(".macc/log/performer");
     let log_path = log_dir.join(format!("{}.md", file));
     let _ = std::fs::create_dir_all(&log_dir);
@@ -609,7 +613,10 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                 append_performer_log(
                     &worktree,
                     task_id,
-                    &format!("- Result: **done** (phase={} attempt={}/{})\n", mode, attempt, attempts),
+                    &format!(
+                        "- Result: **done** (phase={} attempt={}/{})\n",
+                        mode, attempt, attempts
+                    ),
                 );
                 let elapsed = chrono::Utc::now()
                     .signed_duration_since(phase_started_at)
@@ -636,7 +643,10 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
             append_performer_log(
                 &worktree,
                 task_id,
-                &format!("- Result: **failed** (phase={} attempt={}/{})\n", mode, attempt, attempts),
+                &format!(
+                    "- Result: **failed** (phase={} attempt={}/{})\n",
+                    mode, attempt, attempts
+                ),
             );
         }
         let elapsed = chrono::Utc::now()
@@ -652,7 +662,10 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
         append_performer_log(
             &worktree,
             task_id,
-            &format!("- Phase {} exhausted all {} attempt(s): {}\n", mode, attempts, last_reason),
+            &format!(
+                "- Phase {} exhausted all {} attempt(s): {}\n",
+                mode, attempts, last_reason
+            ),
         );
         Ok(Err(last_reason))
     }

@@ -1,10 +1,11 @@
 mod assets;
 mod coordinator;
 mod errors;
+mod git;
 mod sse;
-mod types;
 #[cfg(test)]
 mod tests;
+mod types;
 
 use crate::commands::AppContext;
 use crate::commands::Command;
@@ -118,6 +119,7 @@ fn build_web_router(state: WebState) -> Router {
     Router::new()
         .route("/api/v1/health", get(health_handler))
         .route("/api/v1/status", get(coordinator::status_handler))
+        .route("/api/v1/git/graph", get(git::get_git_graph_handler))
         .route("/api/v1/events", get(sse::events_handler))
         .route(
             "/api/v1/coordinator/run",

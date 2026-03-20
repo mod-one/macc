@@ -2,6 +2,17 @@ use crate::{MaccError, Result};
 use std::path::Path;
 use std::process::{ExitStatus, Output};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitGraphCommit {
+    pub sha: String,
+    pub parents: Vec<String>,
+    pub subject: String,
+    pub body: String,
+    pub author: String,
+    pub timestamp: i64,
+    pub refs: Vec<String>,
+}
+
 async fn run_git_output_async(current_dir: &Path, args: &[&str], action: &str) -> Result<Output> {
     tokio::process::Command::new("git")
         .args(args)
@@ -295,6 +306,134 @@ pub fn current_branch(repo_or_worktree: &Path) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+pub fn current_branch_name(repo_or_worktree: &Path) -> Result<String> {
+    let output = run_git_output(
+        repo_or_worktree,
+        &["branch", "--show-current"],
+        "read git current branch name",
+    )?;
+    if !output.status.success() {
+        return Err(MaccError::Git {
+            operation: "status".to_string(),
+            message: format!(
+                "Failed to resolve current branch in {}",
+                repo_or_worktree.display()
+            ),
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+pub fn git_log_graph(
+    repo_path: &Path,
+    limit: usize,
+    since_sha: Option<&str>,
+) -> Result<Vec<GitGraphCommit>> {
+    let output = run_git_output(
+        repo_path,
+        &[
+            "log",
+            "--all",
+            "--topo-order",
+            "--decorate=short",
+            "--parents",
+            "--format=%H%x1f%P%x1f%d%x1f%s%x1f%b%x1f%an%x1f%at%x00",
+        ],
+        "read git graph log",
+    )?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("does not have any commits yet")
+            || stderr.contains("your current branch")
+            || stderr.contains("bad default revision")
+        {
+            return Ok(Vec::new());
+        }
+        return Err(MaccError::Git {
+            operation: "log_graph".to_string(),
+            message: format!("git log graph failed: {}", stderr.trim()),
+        });
+    }
+
+    let raw = String::from_utf8_lossy(&output.stdout);
+    Ok(parse_git_graph_records(&raw, limit, since_sha))
+}
+
+fn parse_git_graph_records(
+    raw: &str,
+    limit: usize,
+    since_sha: Option<&str>,
+) -> Vec<GitGraphCommit> {
+    let commits: Vec<GitGraphCommit> = raw.split('\0').filter_map(parse_git_graph_record).collect();
+
+    let start = since_sha
+        .and_then(|cursor| {
+            commits
+                .iter()
+                .position(|commit| commit.sha == cursor || commit.sha.starts_with(cursor))
+                .map(|index| index + 1)
+        })
+        .unwrap_or(0);
+
+    commits.into_iter().skip(start).take(limit).collect()
+}
+
+fn parse_git_graph_record(record: &str) -> Option<GitGraphCommit> {
+    let record = record.trim();
+    if record.is_empty() {
+        return None;
+    }
+
+    let parts: Vec<&str> = record.splitn(7, '\x1f').collect();
+    if parts.len() != 7 {
+        return None;
+    }
+
+    let timestamp = parts[6].trim().parse::<i64>().ok()?;
+    Some(GitGraphCommit {
+        sha: parts[0].trim().to_string(),
+        parents: parts[1]
+            .split_whitespace()
+            .map(|parent| parent.to_string())
+            .collect(),
+        refs: parse_graph_refs(parts[2]),
+        subject: parts[3].trim().to_string(),
+        body: parts[4].trim().to_string(),
+        author: parts[5].trim().to_string(),
+        timestamp,
+    })
+}
+
+fn parse_graph_refs(raw: &str) -> Vec<String> {
+    let trimmed = raw.trim();
+    let inner = trimmed
+        .strip_prefix('(')
+        .and_then(|value| value.strip_suffix(')'))
+        .unwrap_or(trimmed)
+        .trim();
+    if inner.is_empty() {
+        return Vec::new();
+    }
+
+    inner
+        .split(", ")
+        .filter_map(|entry| {
+            let entry = entry.trim();
+            if entry.is_empty() || entry == "HEAD" || entry.starts_with("tag: ") {
+                return None;
+            }
+            if let Some((_, target)) = entry.split_once(" -> ") {
+                let target = target.trim();
+                if target.is_empty() {
+                    return None;
+                }
+                return Some(target.to_string());
+            }
+            Some(entry.to_string())
+        })
+        .collect()
+}
+
 pub fn rev_parse_verify(repo_or_worktree: &Path, reference: &str) -> Result<bool> {
     Ok(run_git_status(
         repo_or_worktree,
@@ -373,4 +512,46 @@ pub fn delete_local_branch(repo_root: &Path, branch: &str, force: bool) -> Resul
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_git_graph_record, parse_git_graph_records, parse_graph_refs};
+
+    #[test]
+    fn parse_graph_refs_strips_head_and_tags() {
+        assert_eq!(
+            parse_graph_refs("(HEAD -> main, origin/HEAD -> origin/main, tag: v1.0.0, feature)"),
+            vec![
+                "main".to_string(),
+                "origin/main".to_string(),
+                "feature".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_git_graph_record_reads_parents_and_body() {
+        let record = "abc\x1fdef ghi\x1f(HEAD -> main, feature)\x1fsubject\x1fbody line\x1fAlice\x1f1710000000";
+        let commit = parse_git_graph_record(record).expect("commit");
+        assert_eq!(commit.sha, "abc");
+        assert_eq!(commit.parents, vec!["def", "ghi"]);
+        assert_eq!(commit.refs, vec!["main", "feature"]);
+        assert_eq!(commit.subject, "subject");
+        assert_eq!(commit.body, "body line");
+        assert_eq!(commit.author, "Alice");
+        assert_eq!(commit.timestamp, 1710000000);
+    }
+
+    #[test]
+    fn parse_git_graph_records_applies_since_cursor() {
+        let raw = concat!(
+            "sha-1\x1f\x1f(HEAD -> main)\x1fone\x1f\x1fA\x1f1\x00",
+            "sha-2\x1fsha-1\x1f(feature)\x1ftwo\x1f\x1fB\x1f2\x00",
+            "sha-3\x1fsha-2\x1f\x1fthree\x1f\x1fC\x1f3\x00"
+        );
+        let commits = parse_git_graph_records(raw, 2, Some("sha-1"));
+        let shas: Vec<String> = commits.into_iter().map(|commit| commit.sha).collect();
+        assert_eq!(shas, vec!["sha-2".to_string(), "sha-3".to_string()]);
+    }
 }
