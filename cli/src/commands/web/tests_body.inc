@@ -918,6 +918,50 @@ async fn log_tail_stream_recovers_after_truncation() {
     assert!(data.contains("\"content\":\"rotated-line\""), "{data}");
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn log_tail_stream_resets_cursor_when_file_is_replaced() {
+    let root = temp_root("logs-tail-replaced-file");
+    let coordinator_dir = root.join(".macc/log/coordinator");
+    fs::create_dir_all(&coordinator_dir).expect("create coordinator dir");
+    let log_path = coordinator_dir.join("events.jsonl");
+    fs::write(&log_path, "seed-old\n").expect("write seed log");
+
+    let permit = logs::TailStreamLimiter::default()
+        .try_acquire("replaced-file-client".to_string())
+        .expect("permit");
+    let response = axum::response::sse::Sse::new(logs::tail_log_stream(
+        "coordinator/events.jsonl".to_string(),
+        log_path.clone(),
+        None,
+        permit,
+        Duration::from_millis(20),
+        Duration::from_secs(1),
+    ))
+    .into_response();
+    let mut body = response.into_body();
+
+    let log_path_for_rotation = log_path.clone();
+    let rotate_task = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        fs::rename(
+            &log_path_for_rotation,
+            log_path_for_rotation.with_extension("jsonl.1"),
+        )
+        .expect("rotate log file");
+        fs::write(&log_path_for_rotation, "new-line-1\nnew-line-2\n").expect("write replacement log");
+    });
+    let frame = tokio::time::timeout(Duration::from_millis(250), body.frame())
+        .await
+        .expect("replacement timeout")
+        .expect("frame")
+        .expect("body frame");
+    rotate_task.await.expect("rotate task");
+    let data = String::from_utf8(frame.into_data().expect("data frame").to_vec()).expect("utf8");
+
+    assert!(data.contains("\"content\":\"new-line-1\""), "{data}");
+}
+
 #[tokio::test]
 async fn log_tail_endpoint_limits_concurrent_streams_per_client() {
     let root = temp_root("logs-tail-limit");

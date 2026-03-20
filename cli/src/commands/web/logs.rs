@@ -12,6 +12,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fs;
+use std::fs::Metadata;
 use std::io::SeekFrom;
 use std::path::{Component, Path as StdPath, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -51,6 +52,15 @@ pub(super) struct TailStreamPermit {
 #[derive(Debug, Clone, Copy)]
 struct TailCursor {
     offset: u64,
+    file_identity: Option<FileIdentity>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileIdentity {
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
 }
 
 pub(super) async fn list_logs_handler(
@@ -451,16 +461,17 @@ fn client_stream_key(headers: &HeaderMap) -> String {
 }
 
 async fn resolve_tail_cursor(file_path: &StdPath, last_event_id: Option<&str>) -> TailCursor {
-    let size = tokio::fs::metadata(file_path)
-        .await
-        .map(|metadata| metadata.len())
-        .unwrap_or_default();
+    let metadata = tokio::fs::metadata(file_path).await.ok();
+    let size = metadata.as_ref().map(Metadata::len).unwrap_or_default();
     let offset = last_event_id
         .and_then(parse_tail_event_id)
         .map(|cursor| cursor.offset.min(size))
         .unwrap_or(size);
 
-    TailCursor { offset }
+    TailCursor {
+        offset,
+        file_identity: metadata.as_ref().and_then(file_identity),
+    }
 }
 
 async fn read_available_log_lines(
@@ -477,10 +488,19 @@ async fn read_available_log_lines(
                 action: "stat tailed web log file".into(),
                 source: err,
             })?;
+    let current_identity = file_identity(&metadata);
+    if cursor.file_identity.is_some()
+        && current_identity.is_some()
+        && cursor.file_identity != current_identity
+    {
+        cursor.offset = 0;
+        partial_line.clear();
+    }
     if metadata.len() < cursor.offset {
         cursor.offset = 0;
         partial_line.clear();
     }
+    cursor.file_identity = current_identity;
 
     let mut file =
         tokio::fs::File::open(file_path)
@@ -538,20 +558,38 @@ async fn read_available_log_lines(
     Ok(events)
 }
 
+fn file_identity(metadata: &Metadata) -> Option<FileIdentity> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        Some(FileIdentity {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+        })
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        None
+    }
+}
+
 fn parse_tail_event_id(value: &str) -> Option<TailCursor> {
     if let Some(offset) = value.strip_prefix("off-") {
-        return offset
-            .parse::<u64>()
-            .ok()
-            .map(|offset| TailCursor { offset });
+        return offset.parse::<u64>().ok().map(|offset| TailCursor {
+            offset,
+            file_identity: None,
+        });
     }
 
     if let Some(heartbeat) = value.strip_prefix("hb-") {
         let offset = heartbeat.split('-').next()?;
-        return offset
-            .parse::<u64>()
-            .ok()
-            .map(|offset| TailCursor { offset });
+        return offset.parse::<u64>().ok().map(|offset| TailCursor {
+            offset,
+            file_identity: None,
+        });
     }
 
     None
