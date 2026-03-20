@@ -3673,3 +3673,121 @@ async fn worktrees_delete_endpoint_requires_double_confirmation_for_force() {
     );
     assert!(created.path.exists());
 }
+
+#[tokio::test]
+async fn worktrees_run_endpoint_returns_started_status_and_triggers_engine() {
+    let root = temp_root("worktrees-run");
+    init_worktree_repo(&root);
+    let created = create_test_worktree(&root, "run-worktree");
+    let engine = Arc::new(WebTestEngine::with_worktree_run_result(Ok(())));
+    let state = test_web_state(&root, engine.clone(), WebAssetsMode::Embedded);
+    let app = build_web_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/worktrees/{}/run", created.id))
+                .method("POST")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::ACCEPTED);
+    let bytes = response.into_body().collect().await.expect("collect").to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(payload["status"], "started");
+    assert_eq!(payload["worktreeId"], created.id);
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(engine.worktree_run_calls(), vec![created.id]);
+}
+
+#[tokio::test]
+async fn worktrees_run_endpoint_returns_not_found_for_unknown_worktree() {
+    let root = temp_root("worktrees-run-missing");
+    init_worktree_repo(&root);
+    let state = test_web_state(
+        &root,
+        Arc::new(WebTestEngine::with_worktree_run_result(Ok(()))),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/worktrees/missing-worktree/run")
+                .method("POST")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+    let bytes = response.into_body().collect().await.expect("collect").to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(payload["error"]["code"], "MACC-WEB-2004");
+    assert_eq!(payload["error"]["category"], "NotFound");
+}
+
+#[tokio::test]
+async fn worktree_logs_endpoint_streams_log_lines_as_sse() {
+    let root = temp_root("worktrees-logs");
+    init_worktree_repo(&root);
+    let created = create_test_worktree(&root, "logs-worktree");
+    let log_dir = root
+        .join(".macc")
+        .join("log")
+        .join("performer")
+        .join(&created.id);
+    fs::create_dir_all(&log_dir).expect("create performer log dir");
+    fs::write(
+        log_dir.join("20260320-120000.md"),
+        "2026-03-20T12:00:00Z INFO boot\n2026-03-20T12:00:01Z ERROR failed step\n",
+    )
+    .expect("write performer log");
+    let state = test_web_state(
+        &root,
+        Arc::new(WebTestEngine::with_worktree_run_result(Ok(()))),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/worktrees/{}/logs", created.id))
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .expect("content type"),
+        "text/event-stream"
+    );
+
+    let mut body = response.into_body();
+    let first_frame = tokio::time::timeout(Duration::from_secs(1), body.frame())
+        .await
+        .expect("frame timeout")
+        .expect("frame")
+        .expect("body frame");
+    let text = String::from_utf8(first_frame.into_data().expect("data frame").to_vec())
+        .expect("utf8");
+
+    assert!(text.contains("event: log_line"), "{text}");
+    assert!(text.contains("id: 1"), "{text}");
+    assert!(text.contains("\"worktree_id\":\""), "{text}");
+    assert!(text.contains("\"level\":\"info\""), "{text}");
+    assert!(text.contains("\"message\":\"2026-03-20T12:00:00Z INFO boot\""), "{text}");
+}
