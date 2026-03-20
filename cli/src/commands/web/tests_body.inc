@@ -1470,6 +1470,114 @@ async fn coordinator_resume_endpoint_maps_errors() {
     assert_eq!(payload["error"]["category"], "Validation");
     assert_eq!(payload["error"]["message"], "resume failed");
 }
+#[tokio::test]
+async fn prd_endpoint_read_project_prd() {
+    let root = temp_root("prd-read-project");
+    fs::create_dir_all(&root).expect("create root");
+    let prd_content = serde_json::json!({
+        "tasks": [
+            { "id": "TASK-1", "title": "First task" }
+        ],
+        "lot": "Some Lot"
+    });
+    fs::write(root.join("prd.json"), serde_json::to_string(&prd_content).unwrap()).unwrap();
+
+    let state = test_web_state(&root, Arc::new(WebTestEngine::new(Ok(CoordinatorCommandResult::default()))), WebAssetsMode::Embedded);
+    let app = build_web_router(state);
+    
+    let response = app.oneshot(Request::builder().uri("/api/v1/prd").method("GET").body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["tasks"][0]["id"], "TASK-1");
+    assert_eq!(payload["metadata"]["lot"], "Some Lot");
+}
+
+#[tokio::test]
+async fn prd_endpoint_read_worktree_prd() {
+    let root = temp_root("prd-read-worktree");
+    fs::create_dir_all(root.join("worker-01")).expect("create root");
+    let prd_content = serde_json::json!({
+        "tasks": [
+            { "id": "WT-1", "title": "WT task" }
+        ]
+    });
+    fs::write(root.join("worker-01").join("worktree.prd.json"), serde_json::to_string(&prd_content).unwrap()).unwrap();
+
+    let state = test_web_state(&root, Arc::new(WebTestEngine::new(Ok(CoordinatorCommandResult::default()))), WebAssetsMode::Embedded);
+    let app = build_web_router(state);
+    
+    let response = app.oneshot(Request::builder().uri("/api/v1/prd?path=worker-01").method("GET").body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["tasks"][0]["id"], "WT-1");
+}
+
+#[tokio::test]
+async fn prd_endpoint_write_prd_with_backup() {
+    let root = temp_root("prd-write");
+    fs::create_dir_all(&root).expect("create root");
+    let prd_content = serde_json::json!({
+        "tasks": [],
+        "lot": "Old Lot"
+    });
+    fs::write(root.join("prd.json"), serde_json::to_string(&prd_content).unwrap()).unwrap();
+
+    let state = test_web_state(&root, Arc::new(WebTestEngine::new(Ok(CoordinatorCommandResult::default()))), WebAssetsMode::Embedded);
+    let app = build_web_router(state);
+    
+    let update_payload = serde_json::json!({
+        "tasks": [
+            { "id": "NEW-1", "title": "New task" }
+        ],
+        "metadata": {
+            "lot": "New Lot"
+        }
+    });
+
+    let response = app.oneshot(Request::builder().uri("/api/v1/prd").method("PUT").header("content-type", "application/json").body(Body::from(serde_json::to_vec(&update_payload).unwrap())).unwrap()).await.unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+
+    let backups_dir = root.join(".macc").join("backups");
+    let mut backup_found = false;
+    for entry in fs::read_dir(&backups_dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.file_name().unwrap().to_string_lossy().starts_with("prd.json.") {
+            backup_found = true;
+            let backup_content = fs::read_to_string(path).unwrap();
+            assert!(backup_content.contains("Old Lot"));
+            break;
+        }
+    }
+    assert!(backup_found);
+
+    let new_file_content: serde_json::Value = serde_json::from_str(&fs::read_to_string(root.join("prd.json")).unwrap()).unwrap();
+    assert_eq!(new_file_content["tasks"][0]["id"], "NEW-1");
+    assert_eq!(new_file_content["lot"], "New Lot");
+}
+
+#[tokio::test]
+async fn prd_endpoint_write_validation_error() {
+    let root = temp_root("prd-write-err");
+    fs::create_dir_all(&root).expect("create root");
+
+    let state = test_web_state(&root, Arc::new(WebTestEngine::new(Ok(CoordinatorCommandResult::default()))), WebAssetsMode::Embedded);
+    let app = build_web_router(state);
+    
+    let update_payload = serde_json::json!({
+        "tasks": [
+            { "id": "DUP-1" },
+            { "id": "DUP-1" }
+        ],
+        "metadata": {}
+    });
+
+    let response = app.oneshot(Request::builder().uri("/api/v1/prd").method("PUT").header("content-type", "application/json").body(Body::from(serde_json::to_vec(&update_payload).unwrap())).unwrap()).await.unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+}
 
 #[tokio::test]
 async fn config_get_endpoint_returns_canonical_config() {
