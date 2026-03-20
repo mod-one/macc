@@ -1,6 +1,7 @@
 mod assets;
 mod coordinator;
 mod errors;
+mod prd;
 mod sse;
 mod types;
 #[cfg(test)]
@@ -9,7 +10,7 @@ mod tests;
 use crate::commands::AppContext;
 use crate::commands::Command;
 use crate::services::engine_provider::SharedEngine;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::Json;
 use axum::Router;
 use macc_core::config::WebAssetsMode;
@@ -147,6 +148,8 @@ fn build_web_router(state: WebState) -> Router {
             "/api/v1/coordinator/resume",
             post(coordinator::coordinator_resume_handler),
         )
+        .route("/api/v1/prd", get(prd::get_prd_handler))
+        .route("/api/v1/prd", put(prd::update_prd_handler))
         .fallback(get(assets::spa_handler))
         .with_state(state)
 }
