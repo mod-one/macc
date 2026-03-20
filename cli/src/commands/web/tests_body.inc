@@ -3789,5 +3789,82 @@ async fn worktree_logs_endpoint_streams_log_lines_as_sse() {
     assert!(text.contains("id: 1"), "{text}");
     assert!(text.contains("\"worktree_id\":\""), "{text}");
     assert!(text.contains("\"level\":\"info\""), "{text}");
-    assert!(text.contains("\"message\":\"2026-03-20T12:00:00Z INFO boot\""), "{text}");
+    assert!(text.contains("\"message\":\"boot\""), "{text}");
+}
+
+#[tokio::test]
+async fn worktree_logs_endpoint_resumes_after_last_event_id() {
+    let root = temp_root("worktrees-logs-resume");
+    init_worktree_repo(&root);
+    let created = create_test_worktree(&root, "logs-resume-worktree");
+    let log_dir = root
+        .join(".macc")
+        .join("log")
+        .join("performer")
+        .join(&created.id);
+    fs::create_dir_all(&log_dir).expect("create performer log dir");
+    fs::write(
+        log_dir.join("20260320-120000.md"),
+        "2026-03-20T12:00:00Z INFO boot\n2026-03-20T12:00:01Z WARN retrying\n2026-03-20T12:00:02Z ERROR failed step\n",
+    )
+    .expect("write performer log");
+    let state = test_web_state(
+        &root,
+        Arc::new(WebTestEngine::with_worktree_run_result(Ok(()))),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/api/v1/worktrees/{}/logs", created.id))
+                .method("GET")
+                .header("Last-Event-ID", "2")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let mut body = response.into_body();
+    let frame = tokio::time::timeout(Duration::from_secs(1), body.frame())
+        .await
+        .expect("frame timeout")
+        .expect("frame")
+        .expect("body frame");
+    let text =
+        String::from_utf8(frame.into_data().expect("data frame").to_vec()).expect("utf8");
+
+    assert!(text.contains("id: 3"), "{text}");
+    assert!(text.contains("event: log_line"), "{text}");
+    assert!(text.contains("\"level\":\"error\""), "{text}");
+    assert!(text.contains("\"message\":\"failed step\""), "{text}");
+}
+
+#[tokio::test]
+async fn worktree_log_stream_emits_heartbeat_records() {
+    let response = axum::response::sse::Sse::new(worktrees::worktree_log_stream(
+        worktrees::WorktreeLogTarget {
+            worktree_id: "wt-1".to_string(),
+            log_path: temp_root("worktree-log-heartbeat").join("missing.log"),
+        },
+        None,
+        Duration::from_millis(50),
+        Duration::from_millis(10),
+    ))
+    .into_response();
+    let mut body = response.into_body();
+
+    let frame = tokio::time::timeout(Duration::from_millis(100), body.frame())
+        .await
+        .expect("heartbeat timeout")
+        .expect("frame")
+        .expect("body frame");
+    let data = String::from_utf8(frame.into_data().expect("data frame").to_vec()).expect("utf8");
+
+    assert!(data.contains("event: heartbeat"), "{data}");
+    assert!(data.contains("\"type\":\"heartbeat\""), "{data}");
+    assert!(data.contains("\"status\":\"ok\""), "{data}");
 }

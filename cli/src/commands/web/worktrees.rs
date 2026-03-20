@@ -46,9 +46,9 @@ pub(super) struct WorktreeRunResponse {
 }
 
 #[derive(Clone, Debug)]
-struct WorktreeLogTarget {
-    worktree_id: String,
-    log_path: PathBuf,
+pub(super) struct WorktreeLogTarget {
+    pub(super) worktree_id: String,
+    pub(super) log_path: PathBuf,
 }
 
 #[derive(Debug, Serialize)]
@@ -509,7 +509,7 @@ fn latest_aggregated_log(
     Ok(latest.map(|(_, path)| path))
 }
 
-fn worktree_log_stream(
+pub(super) fn worktree_log_stream(
     target: WorktreeLogTarget,
     last_event_id: Option<String>,
     poll_interval: Duration,
@@ -567,13 +567,7 @@ fn parse_worktree_log_cursor(last_event_id: Option<&str>) -> Option<usize> {
 }
 
 fn build_worktree_log_event(worktree_id: &str, line_number: usize, line: &str) -> Event {
-    let payload = WorktreeLogEventData {
-        timestamp: extract_log_timestamp(line).unwrap_or_else(|| {
-            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-        }),
-        level: infer_log_level(line).to_string(),
-        message: line.to_string(),
-    };
+    let payload = parse_worktree_log_event_data(line);
 
     Event::default()
         .id(line_number.to_string())
@@ -586,6 +580,49 @@ fn build_worktree_log_event(worktree_id: &str, line_number: usize, line: &str) -
             "message": payload.message,
         }))
         .expect("serialize worktree log payload")
+}
+
+fn parse_worktree_log_event_data(line: &str) -> WorktreeLogEventData {
+    let trimmed = line.trim();
+    if let Some((timestamp, level, message)) = parse_structured_worktree_log_line(trimmed) {
+        return WorktreeLogEventData {
+            timestamp,
+            level,
+            message,
+        };
+    }
+
+    WorktreeLogEventData {
+        timestamp: extract_log_timestamp(trimmed).unwrap_or_else(|| {
+            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        }),
+        level: infer_log_level(trimmed).to_string(),
+        message: trimmed.to_string(),
+    }
+}
+
+fn parse_structured_worktree_log_line(line: &str) -> Option<(String, String, String)> {
+    let mut parts = line
+        .splitn(3, char::is_whitespace)
+        .filter(|part| !part.is_empty());
+    let timestamp = parts.next()?;
+    let parsed_timestamp = chrono::DateTime::parse_from_rfc3339(timestamp)
+        .ok()?
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let level = normalize_log_level(parts.next()?);
+    let message = parts.next().unwrap_or_default().trim().to_string();
+
+    Some((parsed_timestamp, level.to_string(), message))
+}
+
+fn normalize_log_level(level: &str) -> &'static str {
+    match level.trim().to_ascii_lowercase().as_str() {
+        "error" | "err" | "fatal" => "error",
+        "warn" | "warning" => "warn",
+        "debug" => "debug",
+        "trace" => "trace",
+        _ => "info",
+    }
 }
 
 fn build_worktree_log_heartbeat(line_number: usize) -> Event {
