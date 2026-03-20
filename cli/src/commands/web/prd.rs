@@ -21,11 +21,13 @@ fn resolve_prd_path(state: &WebState, path_param: Option<&str>) -> Result<PathBu
     if let Some(p) = path_param {
         let p_path = Path::new(p);
         if p_path.is_absolute() {
-            return Err(MaccError::Validation("path parameter must be relative".to_string()).into());
+            return Err(
+                MaccError::Validation("path parameter must be relative".to_string()).into(),
+            );
         }
         target.push(p_path);
     }
-    
+
     // If the path points to a directory, append prd.json or worktree.prd.json
     // But typical usage is either path to file or we just append prd.json.
     // The spec says "Support an optional ?path= query param for worktree-specific PRDs."
@@ -68,22 +70,19 @@ pub(crate) async fn get_prd_handler(
         }
     })?;
 
-    let mut parsed: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
-        MaccError::Validation(format!("Failed to parse PRD JSON: {}", e))
-    })?;
+    let mut parsed: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| MaccError::Validation(format!("Failed to parse PRD JSON: {}", e)))?;
 
     let tasks_val = parsed
         .as_object_mut()
         .and_then(|obj| obj.remove("tasks"))
         .unwrap_or_else(|| serde_json::json!([]));
 
-    let tasks: Vec<ApiPrdTask> = serde_json::from_value(tasks_val).map_err(|e| {
-        MaccError::Validation(format!("Invalid PRD tasks format: {}", e))
-    })?;
+    let tasks: Vec<ApiPrdTask> = serde_json::from_value(tasks_val)
+        .map_err(|e| MaccError::Validation(format!("Invalid PRD tasks format: {}", e)))?;
 
-    let metadata: BTreeMap<String, serde_json::Value> = serde_json::from_value(parsed).map_err(|e| {
-        MaccError::Validation(format!("Invalid PRD metadata format: {}", e))
-    })?;
+    let metadata: BTreeMap<String, serde_json::Value> = serde_json::from_value(parsed)
+        .map_err(|e| MaccError::Validation(format!("Invalid PRD metadata format: {}", e)))?;
 
     Ok(Json(ApiPrdResponse { tasks, metadata }))
 }
@@ -107,13 +106,11 @@ pub(crate) async fn update_prd_handler(
     }
 
     // Reconstruct full JSON
-    let mut full_json = serde_json::to_value(&payload.metadata).map_err(|e| {
-        MaccError::Validation(format!("Failed to serialize metadata: {}", e))
-    })?;
+    let mut full_json = serde_json::to_value(&payload.metadata)
+        .map_err(|e| MaccError::Validation(format!("Failed to serialize metadata: {}", e)))?;
 
-    let tasks_json = serde_json::to_value(&payload.tasks).map_err(|e| {
-        MaccError::Validation(format!("Failed to serialize tasks: {}", e))
-    })?;
+    let tasks_json = serde_json::to_value(&payload.tasks)
+        .map_err(|e| MaccError::Validation(format!("Failed to serialize tasks: {}", e)))?;
 
     if let Some(obj) = full_json.as_object_mut() {
         obj.insert("tasks".to_string(), tasks_json);
@@ -121,9 +118,8 @@ pub(crate) async fn update_prd_handler(
         return Err(MaccError::Validation("Metadata must be an object".to_string()).into());
     }
 
-    let new_content = serde_json::to_string_pretty(&full_json).map_err(|e| {
-        MaccError::Validation(format!("Failed to serialize new PRD: {}", e))
-    })?;
+    let new_content = serde_json::to_string_pretty(&full_json)
+        .map_err(|e| MaccError::Validation(format!("Failed to serialize new PRD: {}", e)))?;
 
     // Create backup
     if prd_path.exists() {

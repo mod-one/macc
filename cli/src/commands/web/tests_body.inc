@@ -207,6 +207,109 @@ async fn health_endpoint_returns_ok_status() {
 }
 
 #[tokio::test]
+async fn audit_log_skips_get_requests() {
+    let root = temp_root("audit-skip-get");
+    fs::create_dir_all(&root).expect("create root");
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/status")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    assert!(read_ops_log_entries(&root).is_empty());
+}
+
+#[tokio::test]
+async fn audit_log_appends_entry_for_post_request() {
+    let root = temp_root("audit-post");
+    fs::create_dir_all(&root).expect("create root");
+    let state = test_web_state(
+        &root,
+        Arc::new(WebTestEngine::with_stop_result(Ok(()))),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/coordinator/stop")
+                .method("POST")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let entries = read_ops_log_entries(&root);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["action"], "POST /api/v1/coordinator/stop");
+    assert_eq!(entries[0]["result"]["status_code"], 200);
+    assert!(entries[0]["duration_ms"].is_number());
+}
+
+#[tokio::test]
+async fn audit_log_entry_includes_expected_fields_for_put_request() {
+    let root = temp_root("audit-put");
+    fs::create_dir_all(&root).expect("create root");
+    write_test_config(&root);
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/config")
+                .method("PUT")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "webPort": 4567,
+                        "quiet": true
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let entries = read_ops_log_entries(&root);
+    assert_eq!(entries.len(), 1);
+    let entry = &entries[0];
+    assert_eq!(entry["method"], "PUT");
+    assert_eq!(entry["path"], "/api/v1/config");
+    assert!(entry["timestamp"].as_str().is_some());
+    assert!(entry["actor"].as_str().is_some());
+    assert_eq!(entry["log_path"], ".macc/log/ops.jsonl");
+    assert_eq!(entry["inputs_summary"]["content_type"], "application/json");
+    assert_eq!(entry["inputs_summary"]["body"]["kind"], "json-object");
+    assert_eq!(
+        entry["inputs_summary"]["body"]["keys"],
+        serde_json::json!(["quiet", "webPort"])
+    );
+}
+
+#[tokio::test]
 async fn status_endpoint_returns_status_payload() {
     let root = temp_root("ok");
     fs::create_dir_all(&root).expect("create root");

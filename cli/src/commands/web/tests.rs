@@ -167,6 +167,23 @@ fn test_web_state(
     }
 }
 
+fn read_ops_log_entries(root: &Path) -> Vec<serde_json::Value> {
+    let path = ProjectPaths::from_root(root)
+        .root
+        .join(".macc")
+        .join("log")
+        .join("ops.jsonl");
+    let raw = match fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(err) => panic!("read ops log: {}", err),
+    };
+
+    raw.lines()
+        .map(|line| serde_json::from_str(line).expect("valid audit json line"))
+        .collect()
+}
+
 fn write_registry_snapshot(root: &Path, snapshot: &CoordinatorSnapshot) {
     let project_paths = ProjectPaths::from_root(root);
     let storage_paths = CoordinatorStoragePaths::from_project_paths(&project_paths);
