@@ -39,6 +39,7 @@ pub(super) async fn run_apply_handler(
     if !request.dry_run && !request.confirmed.unwrap_or(false) {
         return Err(ApiError::confirmation_required(
             "Confirmation required before apply can write changes.",
+            None,
         ));
     }
 

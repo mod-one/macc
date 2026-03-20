@@ -25,12 +25,10 @@ struct ApiErrorBody {
 
 pub(super) const WEB_ERR_VALIDATION: &str = "MACC-WEB-1000";
 pub(super) const WEB_ERR_CONFIRMATION_REQUIRED: &str = "MACC-WEB-1001";
-pub(super) const WEB_ERR_CONFIRMATION_REQUIRED: &str = "MACC-WEB-1001";
 const WEB_ERR_SECRET_DETECTED: &str = "MACC-WEB-1002";
 const WEB_ERR_CONFIG: &str = "MACC-WEB-1003";
 const WEB_ERR_CATALOG: &str = "MACC-WEB-1004";
 pub(super) const WEB_ERR_REGISTRY_VALIDATION: &str = "MACC-WEB-1005";
-const WEB_ERR_TOOLSPEC: &str = "MACC-WEB-1006";
 const WEB_ERR_TOOLSPEC: &str = "MACC-WEB-1006";
 const WEB_ERR_AUTH_SCOPE: &str = "MACC-WEB-3000";
 pub(super) const WEB_ERR_REGISTRY_CONFLICT: &str = "MACC-WEB-3001";
