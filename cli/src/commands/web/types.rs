@@ -690,24 +690,47 @@ pub(crate) struct ApiBackup {
     pub timestamp: String,
     /// Number of files contained in the backup set.
     pub files: usize,
+    /// Files contained in the backup set.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entries: Vec<ApiBackupFile>,
+    /// Total size in bytes across the backup set.
+    pub total_size: u64,
     /// Absolute path to the backup set directory.
     pub path: String,
     /// Whether the backup lives in the user-scoped backup root.
     pub user_scope: bool,
 }
 
+/// Backup file metadata returned by backup endpoints.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ApiBackupFile {
+    /// Path relative to the backup set root.
+    pub path: String,
+    /// Size in bytes.
+    pub size: u64,
+}
+
 /// Restore request accepted by backup restore endpoints.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct ApiRestoreRequest {
-    /// Explicit backup set identifier to restore.
-    pub backup_id: Option<String>,
-    /// Whether the latest backup set should be selected automatically.
-    pub latest: bool,
-    /// Whether the user-scoped backup root should be used.
-    pub user: bool,
-    /// Whether the restore should be simulated without writes.
-    pub dry_run: bool,
-    /// Whether restore confirmation prompts should be bypassed.
-    pub yes: Option<bool>,
+pub(crate) struct ApiBackupRestoreRequest {
+    /// Dangerous restores require an explicit confirmation flag.
+    pub confirmed: bool,
+}
+
+/// Restore result returned by backup restore endpoints.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ApiBackupRestoreResult {
+    /// Operation status for the UI.
+    pub status: String,
+    /// Human-readable completion summary.
+    pub message: String,
+    /// Backup set that was restored.
+    pub backup_id: String,
+    /// Timestamped pre-restore backup created before file copy.
+    pub restore_backup_id: String,
+    /// Number of files restored from the selected backup.
+    pub restored_files: usize,
 }

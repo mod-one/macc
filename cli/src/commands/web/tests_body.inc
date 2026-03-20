@@ -2136,3 +2136,194 @@ async fn config_put_endpoint_creates_backup_before_write() {
     }
     assert!(backup_found, "config backup not found");
 }
+
+#[tokio::test]
+async fn backups_list_endpoint_returns_empty_array_when_no_backups_exist() {
+    let root = temp_root("backups-list-empty");
+    fs::create_dir_all(&root).expect("create root");
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/backups")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = response.into_body().collect().await.expect("collect").to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(payload, serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn backups_list_endpoint_returns_chronological_backup_metadata() {
+    let root = temp_root("backups-list");
+    fs::create_dir_all(&root).expect("create root");
+    let backups_root = root.join(".macc").join("backups");
+    fs::create_dir_all(backups_root.join("20260320-120000").join("nested")).expect("mkdir old");
+    fs::create_dir_all(backups_root.join("20260320-130000")).expect("mkdir new");
+    fs::write(
+        backups_root.join("20260320-120000").join("nested").join("a.txt"),
+        "abc",
+    )
+    .expect("write backup file");
+    fs::write(backups_root.join("20260320-130000").join("b.txt"), "hello").expect("write backup");
+
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/backups")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = response.into_body().collect().await.expect("collect").to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(payload.as_array().expect("array").len(), 2);
+    assert_eq!(payload[0]["id"], "20260320-130000");
+    assert_eq!(payload[0]["timestamp"], "20260320-130000");
+    assert_eq!(payload[0]["files"], 1);
+    assert_eq!(payload[0]["totalSize"], 5);
+    assert_eq!(payload[0]["entries"][0]["path"], "b.txt");
+    assert_eq!(payload[0]["entries"][0]["size"], 5);
+    assert_eq!(payload[1]["id"], "20260320-120000");
+    assert_eq!(payload[1]["files"], 1);
+    assert_eq!(payload[1]["entries"][0]["path"], "nested/a.txt");
+    assert_eq!(payload[1]["entries"][0]["size"], 3);
+}
+
+#[tokio::test]
+async fn backup_restore_endpoint_requires_confirmation() {
+    let root = temp_root("backups-restore-no-confirm");
+    fs::create_dir_all(root.join(".macc").join("backups").join("20260320-120000"))
+        .expect("create backup dir");
+    fs::write(
+        root.join(".macc")
+            .join("backups")
+            .join("20260320-120000")
+            .join("file.txt"),
+        "restored",
+    )
+    .expect("write backup file");
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/backups/20260320-120000/restore")
+                .method("POST")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "confirmed": false }).to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    let bytes = response.into_body().collect().await.expect("collect").to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(payload["error"]["code"], "MACC-WEB-1001");
+    assert_eq!(payload["error"]["category"], "Validation");
+    assert_eq!(payload["error"]["message"], "Confirmation required");
+}
+
+#[tokio::test]
+async fn backup_restore_endpoint_creates_pre_restore_backup_and_restores_files() {
+    let root = temp_root("backups-restore");
+    fs::create_dir_all(&root).expect("create root");
+    let paths = ProjectPaths::from_root(&root);
+    let selected_backup = paths.backups_dir.join("20260320-120000");
+    fs::create_dir_all(selected_backup.join("nested")).expect("create backup dir");
+    fs::write(selected_backup.join("file.txt"), "restored value").expect("write backup file");
+    fs::write(selected_backup.join("nested").join("child.txt"), "child restore")
+        .expect("write nested backup file");
+    fs::write(root.join("file.txt"), "current value").expect("write current file");
+    fs::create_dir_all(root.join("nested")).expect("create current nested");
+    fs::write(root.join("nested").join("child.txt"), "current child")
+        .expect("write current nested file");
+
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/backups/20260320-120000/restore")
+                .method("POST")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "confirmed": true }).to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = response.into_body().collect().await.expect("collect").to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["backupId"], "20260320-120000");
+    assert_eq!(payload["restoredFiles"], 2);
+
+    let restore_backup_id = payload["restoreBackupId"]
+        .as_str()
+        .expect("restore backup id");
+    assert_ne!(restore_backup_id, "20260320-120000");
+    assert_eq!(
+        fs::read_to_string(root.join("file.txt")).expect("read restored root file"),
+        "restored value"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("nested").join("child.txt"))
+            .expect("read restored nested file"),
+        "child restore"
+    );
+    assert_eq!(
+        fs::read_to_string(paths.backups_dir.join(restore_backup_id).join("file.txt"))
+            .expect("read pre restore backup"),
+        "current value"
+    );
+    assert_eq!(
+        fs::read_to_string(
+            paths.backups_dir
+                .join(restore_backup_id)
+                .join("nested")
+                .join("child.txt")
+        )
+        .expect("read nested pre restore backup"),
+        "current child"
+    );
+}
