@@ -2,6 +2,7 @@ use crate::commands::web::errors::ApiError;
 use crate::commands::web::types::{ApiPrdResponse, ApiPrdTask, ApiPrdUpdateRequest};
 use crate::commands::web::WebState;
 use axum::{
+    body::Bytes,
     extract::{Query, State},
     Json,
 };
@@ -90,9 +91,11 @@ pub(crate) async fn get_prd_handler(
 pub(crate) async fn update_prd_handler(
     State(state): State<WebState>,
     Query(query): Query<PrdQuery>,
-    Json(payload): Json<ApiPrdUpdateRequest>,
+    body: Bytes,
 ) -> Result<Json<ApiPrdResponse>, ApiError> {
     let prd_path = resolve_prd_path(&state, query.path.as_deref())?;
+    let payload: ApiPrdUpdateRequest = serde_json::from_slice(&body)
+        .map_err(|err| MaccError::Validation(format!("Invalid PRD request body: {}", err)))?;
 
     // Validate JSON structure (unique task IDs, etc.)
     let mut seen_ids = HashSet::new();
