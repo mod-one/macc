@@ -33,6 +33,7 @@ The API error envelope uses these categories:
 - `MACC-WEB-1004`: Catalog operation validation failure (`MaccError::Catalog`).
 - `MACC-WEB-1005`: Registry action payload or path validation failure.
 - `MACC-WEB-1006`: Tool specification validation failure (`MaccError::ToolSpec`).
+- `MACC-WEB-1007`: Log API path or query validation failure.
 
 ### NotFound (2000 range)
 
@@ -41,6 +42,7 @@ The API error envelope uses these categories:
 - `MACC-WEB-2002`: Registry task was not found for the requested operator action.
 - `MACC-WEB-2003`: Backup set was not found for the requested restore action.
 - `MACC-WEB-2004`: Worktree was not found for the requested web action.
+- `MACC-WEB-2005`: Requested log file was not found under `.macc/log/`.
 
 ### Conflict / Auth (3000 range)
 

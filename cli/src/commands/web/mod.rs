@@ -7,6 +7,7 @@ mod coordinator;
 mod doctor;
 mod errors;
 mod git;
+mod logs;
 mod prd;
 mod registry;
 mod sse;
@@ -137,6 +138,8 @@ fn build_web_router(state: WebState) -> Router {
         .route("/api/v1/apply", post(apply::run_apply_handler))
         .route("/api/v1/status", get(coordinator::status_handler))
         .route("/api/v1/git/graph", get(git::get_git_graph_handler))
+        .route("/api/v1/logs", get(logs::list_logs_handler))
+        .route("/api/v1/logs/*path", get(logs::read_log_handler))
         .route("/api/v1/backups", get(backups::list_backups_handler))
         .route(
             "/api/v1/backups/:id/restore",

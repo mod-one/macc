@@ -628,6 +628,8 @@ pub(crate) enum ApiRegistryTaskAction {
 pub(crate) struct ApiLogFile {
     /// Log path relative to the logical log root.
     pub path: String,
+    /// Logical log category bucket.
+    pub category: String,
     /// File size in bytes.
     pub size: u64,
     /// Last modified timestamp in RFC 3339 format when available.
@@ -645,6 +647,8 @@ pub(crate) struct ApiLogContent {
     pub lines: Vec<String>,
     /// Total number of lines available in the source file.
     pub total: usize,
+    /// Whether more lines remain after the current page.
+    pub has_more: bool,
 }
 
 /// Doctor report returned by health endpoints.

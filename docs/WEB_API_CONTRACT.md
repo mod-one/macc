@@ -224,3 +224,57 @@ event: heartbeat
 data: {"schema_version":"1","event_id":"hb-42","seq":43,"ts":"2024-10-11T12:01:07Z","source":"coordinator","type":"heartbeat","status":"ok"}
 
 ```
+
+### GET `/api/v1/logs`
+
+Purpose: list browsable coordinator and performer log files under `.macc/log/`.
+
+Response 200:
+```json
+[
+  {
+    "path": "coordinator/events.jsonl",
+    "category": "coordinator",
+    "size": 2048,
+    "modified": "2026-03-20T12:00:00Z"
+  },
+  {
+    "path": "performer/worker-01--TASK-001-.md",
+    "category": "performer",
+    "size": 1024,
+    "modified": "2026-03-20T12:05:00Z"
+  }
+]
+```
+
+Notes:
+- Only files under `.macc/log/coordinator` and `.macc/log/performer` are listed.
+
+### GET `/api/v1/logs/{path}`
+
+Purpose: read a log file under `.macc/log/` with optional pagination and line filtering.
+
+Path parameter:
+- `path` (string, required): URL-encoded relative path such as `coordinator/events.jsonl`.
+
+Query parameters:
+- `offset` (number, optional): zero-based filtered line offset. Default `0`.
+- `limit` (number, optional): maximum filtered lines returned. Default `200`, capped server-side.
+- `search` (string, optional): substring filter applied before pagination.
+
+Response 200:
+```json
+{
+  "path": "coordinator/events.jsonl",
+  "lines": [
+    "{\"type\":\"task_started\"}",
+    "{\"type\":\"task_finished\"}"
+  ],
+  "total": 12,
+  "hasMore": true
+}
+```
+
+Notes:
+- The server rejects absolute paths and traversal attempts such as `..`.
+- `total` reflects the number of lines after `search` filtering when `search` is provided.
