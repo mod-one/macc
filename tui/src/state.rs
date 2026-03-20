@@ -1063,7 +1063,7 @@ impl AppState {
     }
 
     pub fn stop_coordinator_command(&mut self) {
-        let Some(paths) = self.project_paths.as_ref() else {
+        let Some(paths) = self.project_paths.clone() else {
             self.set_status(
                 UiStatusLevel::Warning,
                 "No project loaded.",
@@ -1074,11 +1074,18 @@ impl AppState {
 
         let stop_result = self
             .engine
-            .coordinator_stop_managed_command_process(paths, false);
+            .coordinator_stop_managed_command_process(&paths, false);
 
         self.coordinator_pause_next_action = None;
         self.coordinator_running_command = None;
         self.coordinator_running_elapsed_secs = None;
+
+        // Reconcile registry so dead-PID tasks are transitioned out of in_progress.
+        let env_cfg = self.coordinator_env_cfg();
+        let _ = self
+            .engine
+            .coordinator_reconcile_workflow(&paths, &env_cfg, None, None);
+
         self.refresh_coordinator_snapshot();
         self.refresh_coordinator_events();
         match stop_result {
@@ -4006,6 +4013,7 @@ mod tests {
             CoordinatorEvent {
                 event_id: None,
                 run_id: Some("run-1".to_string()),
+                seq: 0,
                 event_type: "heartbeat".to_string(),
                 task_id: None,
                 phase: None,
@@ -4017,6 +4025,7 @@ mod tests {
             CoordinatorEvent {
                 event_id: None,
                 run_id: Some("run-2".to_string()),
+                seq: 1,
                 event_type: "phase_result".to_string(),
                 task_id: None,
                 phase: None,
@@ -4037,6 +4046,7 @@ mod tests {
         let with_run = CoordinatorEvent {
             event_id: None,
             run_id: Some("run-2".to_string()),
+            seq: 0,
             event_type: "heartbeat".to_string(),
             task_id: None,
             phase: None,
@@ -4048,6 +4058,7 @@ mod tests {
         let without_run = CoordinatorEvent {
             event_id: None,
             run_id: None,
+            seq: 0,
             event_type: "heartbeat".to_string(),
             task_id: None,
             phase: None,

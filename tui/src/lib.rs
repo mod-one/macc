@@ -1288,8 +1288,12 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 } else {
                     for (idx, task) in snapshot.active_tasks.iter().take(8).enumerate() {
                         let frames = ["|", "/", "-", "\\"];
-                        let spinner = frames
-                            [((state.coordinator_spinner_tick as usize) + idx) % frames.len()];
+                        let spinner = if state.is_coordinator_running() {
+                            frames
+                                [((state.coordinator_spinner_tick as usize) + idx) % frames.len()]
+                        } else {
+                            "-"
+                        };
                         // RL-TUI-007: show "rate-limited" instead of raw status for E601 tasks.
                         let display_status = if task.last_error_code.starts_with("E601") {
                             "rate-limited"
