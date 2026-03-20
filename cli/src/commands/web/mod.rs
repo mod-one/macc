@@ -1,5 +1,6 @@
 mod assets;
 mod audit;
+mod backups;
 mod config;
 mod coordinator;
 mod errors;
@@ -130,6 +131,11 @@ fn build_web_router(state: WebState) -> Router {
         )
         .route("/api/v1/status", get(coordinator::status_handler))
         .route("/api/v1/git/graph", get(git::get_git_graph_handler))
+        .route("/api/v1/backups", get(backups::list_backups_handler))
+        .route(
+            "/api/v1/backups/:id/restore",
+            post(backups::restore_backup_handler),
+        )
         .route("/api/v1/events", get(sse::events_handler))
         .route(
             "/api/v1/coordinator/run",

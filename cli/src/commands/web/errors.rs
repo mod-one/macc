@@ -24,16 +24,18 @@ struct ApiErrorBody {
 }
 
 pub(super) const WEB_ERR_VALIDATION: &str = "MACC-WEB-1000";
-const WEB_ERR_TOOLSPEC: &str = "MACC-WEB-1001";
+pub(super) const WEB_ERR_CONFIRMATION_REQUIRED: &str = "MACC-WEB-1001";
 const WEB_ERR_SECRET_DETECTED: &str = "MACC-WEB-1002";
 const WEB_ERR_CONFIG: &str = "MACC-WEB-1003";
 const WEB_ERR_CATALOG: &str = "MACC-WEB-1004";
 pub(super) const WEB_ERR_REGISTRY_VALIDATION: &str = "MACC-WEB-1005";
+const WEB_ERR_TOOLSPEC: &str = "MACC-WEB-1006";
 const WEB_ERR_AUTH_SCOPE: &str = "MACC-WEB-3000";
 pub(super) const WEB_ERR_REGISTRY_CONFLICT: &str = "MACC-WEB-3001";
 const WEB_ERR_PROJECT_ROOT_NOT_FOUND: &str = "MACC-WEB-2000";
 const WEB_ERR_HOME_NOT_FOUND: &str = "MACC-WEB-2001";
 pub(super) const WEB_ERR_REGISTRY_TASK_NOT_FOUND: &str = "MACC-WEB-2002";
+pub(super) const WEB_ERR_BACKUP_NOT_FOUND: &str = "MACC-WEB-2003";
 const WEB_ERR_IO: &str = "MACC-WEB-4000";
 const WEB_ERR_FETCH: &str = "MACC-WEB-4001";
 pub(super) const WEB_ERR_COORDINATOR: &str = "MACC-WEB-5000";
@@ -85,6 +87,25 @@ impl ApiError {
         )
     }
 
+    pub(super) fn confirmation_required(
+        message: impl Into<String>,
+        context: Option<serde_json::Value>,
+    ) -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            WEB_ERR_CONFIRMATION_REQUIRED,
+            "Validation",
+            message.into(),
+            false,
+            Some(
+                "Repeat the request with confirmed=true after explicit operator confirmation"
+                    .to_string(),
+            ),
+            context,
+            None,
+        )
+    }
+
     pub(super) fn not_found(
         message: impl Into<String>,
         context: Option<serde_json::Value>,
@@ -96,6 +117,22 @@ impl ApiError {
             message.into(),
             false,
             Some("Verify the task ID exists in the coordinator registry".to_string()),
+            context,
+            None,
+        )
+    }
+
+    pub(super) fn backup_not_found(
+        message: impl Into<String>,
+        context: Option<serde_json::Value>,
+    ) -> Self {
+        Self::new(
+            StatusCode::NOT_FOUND,
+            WEB_ERR_BACKUP_NOT_FOUND,
+            "NotFound",
+            message.into(),
+            false,
+            Some("Verify the backup ID exists under .macc/backups and retry".to_string()),
             context,
             None,
         )
