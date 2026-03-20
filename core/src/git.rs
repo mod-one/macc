@@ -55,6 +55,24 @@ fn run_git_output(current_dir: &Path, args: &[&str], action: &str) -> Result<Out
         })
 }
 
+fn run_git_output_with_env(
+    current_dir: &Path,
+    args: &[&str],
+    envs: &[(&str, &str)],
+    action: &str,
+) -> Result<Output> {
+    let mut command = std::process::Command::new("git");
+    command.args(args).current_dir(current_dir);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    command.output().map_err(|e| MaccError::Io {
+        path: current_dir.to_string_lossy().into(),
+        action: action.to_string(),
+        source: e,
+    })
+}
+
 fn run_git_status(current_dir: &Path, args: &[&str], action: &str) -> Result<ExitStatus> {
     std::process::Command::new("git")
         .args(args)
@@ -69,6 +87,15 @@ fn run_git_status(current_dir: &Path, args: &[&str], action: &str) -> Result<Exi
 
 pub fn run_git_output_mapped(current_dir: &Path, args: &[&str], action: &str) -> Result<Output> {
     run_git_output(current_dir, args, action)
+}
+
+pub fn run_git_output_with_env_mapped(
+    current_dir: &Path,
+    args: &[&str],
+    envs: &[(&str, &str)],
+    action: &str,
+) -> Result<Output> {
+    run_git_output_with_env(current_dir, args, envs, action)
 }
 
 pub fn worktree_list_porcelain(repo_root: &Path) -> Result<String> {

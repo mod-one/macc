@@ -4,6 +4,7 @@ mod coordinator;
 mod errors;
 mod git;
 mod prd;
+mod registry;
 mod sse;
 #[cfg(test)]
 mod tests;
@@ -154,6 +155,14 @@ fn build_web_router(state: WebState) -> Router {
         .route(
             "/api/v1/coordinator/resume",
             post(coordinator::coordinator_resume_handler),
+        )
+        .route(
+            "/api/v1/registry/tasks",
+            get(registry::list_registry_tasks_handler),
+        )
+        .route(
+            "/api/v1/registry/tasks/:id/:action",
+            post(registry::task_action_handler),
         )
         .route("/api/v1/prd", get(prd::get_prd_handler))
         .route("/api/v1/prd", put(prd::update_prd_handler))
