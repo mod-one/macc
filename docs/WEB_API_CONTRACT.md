@@ -321,3 +321,58 @@ id: hb-128-1760000000000
 event: heartbeat
 data: {"path":"coordinator/events.jsonl","timestamp":"2026-03-20T12:01:17Z","offset":128,"type":"heartbeat","status":"ok"}
 ```
+
+### POST `/api/v1/worktrees/{id}/run`
+
+Purpose: trigger a performer run for a managed worktree without blocking the HTTP request.
+
+Path parameter:
+- `id` (string, required): worktree id such as `feature-web-01`.
+
+Response 202:
+```json
+{
+  "status": "started",
+  "worktreeId": "feature-web-01",
+  "path": "/repo/.macc/worktree/feature-web-01"
+}
+```
+
+Notes:
+- The endpoint rejects unknown worktrees with the standard error envelope.
+- If the same worktree is already running through this endpoint, the server returns a worktree conflict error.
+
+### GET `/api/v1/worktrees/{id}/logs` (SSE)
+
+Purpose: stream performer log lines for a single worktree.
+
+Headers:
+- `Accept: text/event-stream`
+- `Last-Event-ID` (optional): resume after the last delivered line number or heartbeat cursor.
+
+Response 200:
+- `Content-Type: text/event-stream`
+
+SSE envelope:
+- `event: log_line` for performer output lines.
+- `id`: 1-based line number.
+- `data`: JSON payload with `worktree_id`, `line`, `timestamp`, `level`, `message`.
+
+Heartbeat:
+- Emit `event: heartbeat` every 15 seconds.
+- `id` uses the format `hb-{line}-{timestamp_ms}` so reconnects can resume from the most recent delivered line.
+
+Example (wire format):
+```
+id: 1
+event: log_line
+data: {"worktree_id":"feature-web-01","line":1,"timestamp":"2026-03-20T12:00:00Z","level":"info","message":"boot"}
+
+id: hb-1-1760000000000
+event: heartbeat
+data: {"event_id":"hb-1-1760000000000","type":"heartbeat","status":"ok","line":1,"timestamp":"2026-03-20T12:00:15Z"}
+```
+
+Notes:
+- The stream tails the newest performer log available for the worktree.
+- When a log line starts with RFC3339 timestamp + log level, the server normalizes those fields into the JSON payload and sends the remaining text as `message`.

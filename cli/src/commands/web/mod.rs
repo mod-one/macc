@@ -158,6 +158,14 @@ fn build_web_router(state: WebState) -> Router {
             "/api/v1/worktrees/:id",
             delete(worktrees::delete_worktree_handler),
         )
+        .route(
+            "/api/v1/worktrees/:id/run",
+            post(worktrees::run_worktree_handler),
+        )
+        .route(
+            "/api/v1/worktrees/:id/logs",
+            get(worktrees::worktree_logs_handler),
+        )
         .route("/api/v1/events", get(sse::events_handler))
         .route(
             "/api/v1/coordinator/run",

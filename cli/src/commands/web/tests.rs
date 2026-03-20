@@ -255,6 +255,8 @@ struct WebTestEngine {
     plan_result:
         std::sync::Mutex<Option<std::result::Result<macc_core::plan::ActionPlan, MaccError>>>,
     run_result: std::sync::Mutex<Option<std::result::Result<CoordinatorCommandResult, MaccError>>>,
+    worktree_run_result: std::sync::Mutex<Option<std::result::Result<(), MaccError>>>,
+    worktree_run_calls: std::sync::Mutex<Vec<String>>,
     cleanup_result: std::sync::Mutex<Option<std::result::Result<(), MaccError>>>,
     stop_result: std::sync::Mutex<Option<std::result::Result<(), MaccError>>>,
     resume_result: std::sync::Mutex<Option<std::result::Result<(), MaccError>>>,
@@ -270,6 +272,8 @@ impl WebTestEngine {
             use_fixture_plan_from_overrides: false,
             plan_result: std::sync::Mutex::new(None),
             run_result: std::sync::Mutex::new(Some(result)),
+            worktree_run_result: std::sync::Mutex::new(Some(Ok(()))),
+            worktree_run_calls: std::sync::Mutex::new(Vec::new()),
             cleanup_result: std::sync::Mutex::new(Some(Ok(()))),
             stop_result: std::sync::Mutex::new(Some(Ok(()))),
             resume_result: std::sync::Mutex::new(Some(Ok(()))),
@@ -285,6 +289,8 @@ impl WebTestEngine {
             use_fixture_plan_from_overrides: false,
             plan_result: std::sync::Mutex::new(None),
             run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
+            worktree_run_result: std::sync::Mutex::new(Some(Ok(()))),
+            worktree_run_calls: std::sync::Mutex::new(Vec::new()),
             cleanup_result: std::sync::Mutex::new(Some(result)),
             stop_result: std::sync::Mutex::new(Some(Ok(()))),
             resume_result: std::sync::Mutex::new(Some(Ok(()))),
@@ -300,6 +306,8 @@ impl WebTestEngine {
             use_fixture_plan_from_overrides: false,
             plan_result: std::sync::Mutex::new(None),
             run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
+            worktree_run_result: std::sync::Mutex::new(Some(Ok(()))),
+            worktree_run_calls: std::sync::Mutex::new(Vec::new()),
             cleanup_result: std::sync::Mutex::new(Some(Ok(()))),
             stop_result: std::sync::Mutex::new(Some(result)),
             resume_result: std::sync::Mutex::new(Some(Ok(()))),
@@ -315,6 +323,8 @@ impl WebTestEngine {
             use_fixture_plan_from_overrides: false,
             plan_result: std::sync::Mutex::new(None),
             run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
+            worktree_run_result: std::sync::Mutex::new(Some(Ok(()))),
+            worktree_run_calls: std::sync::Mutex::new(Vec::new()),
             cleanup_result: std::sync::Mutex::new(Some(Ok(()))),
             stop_result: std::sync::Mutex::new(Some(Ok(()))),
             resume_result: std::sync::Mutex::new(Some(result)),
@@ -330,6 +340,8 @@ impl WebTestEngine {
             use_fixture_plan_from_overrides: false,
             plan_result: std::sync::Mutex::new(None),
             run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
+            worktree_run_result: std::sync::Mutex::new(Some(Ok(()))),
+            worktree_run_calls: std::sync::Mutex::new(Vec::new()),
             cleanup_result: std::sync::Mutex::new(Some(Ok(()))),
             stop_result: std::sync::Mutex::new(Some(Ok(()))),
             resume_result: std::sync::Mutex::new(Some(Ok(()))),
@@ -348,6 +360,8 @@ impl WebTestEngine {
             use_fixture_plan_from_overrides: false,
             plan_result: std::sync::Mutex::new(None),
             run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
+            worktree_run_result: std::sync::Mutex::new(Some(Ok(()))),
+            worktree_run_calls: std::sync::Mutex::new(Vec::new()),
             cleanup_result: std::sync::Mutex::new(Some(Ok(()))),
             stop_result: std::sync::Mutex::new(Some(Ok(()))),
             resume_result: std::sync::Mutex::new(Some(Ok(()))),
@@ -363,6 +377,8 @@ impl WebTestEngine {
             use_fixture_plan_from_overrides: false,
             plan_result: std::sync::Mutex::new(Some(plan)),
             run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
+            worktree_run_result: std::sync::Mutex::new(Some(Ok(()))),
+            worktree_run_calls: std::sync::Mutex::new(Vec::new()),
             cleanup_result: std::sync::Mutex::new(Some(Ok(()))),
             stop_result: std::sync::Mutex::new(Some(Ok(()))),
             resume_result: std::sync::Mutex::new(Some(Ok(()))),
@@ -378,6 +394,8 @@ impl WebTestEngine {
             use_fixture_plan_from_overrides: true,
             plan_result: std::sync::Mutex::new(None),
             run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
+            worktree_run_result: std::sync::Mutex::new(Some(Ok(()))),
+            worktree_run_calls: std::sync::Mutex::new(Vec::new()),
             cleanup_result: std::sync::Mutex::new(Some(Ok(()))),
             stop_result: std::sync::Mutex::new(Some(Ok(()))),
             resume_result: std::sync::Mutex::new(Some(Ok(()))),
@@ -385,6 +403,27 @@ impl WebTestEngine {
             doctor_fix_result: std::sync::Mutex::new(None),
             coordinator_events: std::sync::Mutex::new(vec![Vec::new()]),
         }
+    }
+
+    fn with_worktree_run_result(result: std::result::Result<(), MaccError>) -> Self {
+        Self {
+            inner: TestEngine::with_fixtures(),
+            use_fixture_plan_from_overrides: false,
+            plan_result: std::sync::Mutex::new(None),
+            run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
+            worktree_run_result: std::sync::Mutex::new(Some(result)),
+            worktree_run_calls: std::sync::Mutex::new(Vec::new()),
+            cleanup_result: std::sync::Mutex::new(Some(Ok(()))),
+            stop_result: std::sync::Mutex::new(Some(Ok(()))),
+            resume_result: std::sync::Mutex::new(Some(Ok(()))),
+            doctor_snapshots: std::sync::Mutex::new(None),
+            doctor_fix_result: std::sync::Mutex::new(None),
+            coordinator_events: std::sync::Mutex::new(vec![Vec::new()]),
+        }
+    }
+
+    fn worktree_run_calls(&self) -> Vec<String> {
+        self.worktree_run_calls.lock().expect("lock").clone()
     }
 }
 
@@ -499,6 +538,18 @@ impl macc_core::engine::Engine for WebTestEngine {
 
     fn coordinator_resume(&self, _repo_root: &std::path::Path) -> Result<()> {
         self.resume_result
+            .lock()
+            .expect("lock")
+            .take()
+            .unwrap_or_else(|| Ok(()))
+    }
+
+    fn worktree_run_task(&self, _paths: &ProjectPaths, id: &str) -> Result<()> {
+        self.worktree_run_calls
+            .lock()
+            .expect("lock")
+            .push(id.to_string());
+        self.worktree_run_result
             .lock()
             .expect("lock")
             .take()
