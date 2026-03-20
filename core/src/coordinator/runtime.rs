@@ -1,4 +1,4 @@
-use crate::coordinator::engine::ReviewVerdict;
+use crate::coordinator::engine::{MergeTaskContext, ReviewVerdict};
 use crate::coordinator::model::Task;
 use crate::coordinator::rate_limit::ToolThrottleRegistry;
 use crate::coordinator::{CoordinatorEventRecord, PerformerCompletionKind};
@@ -916,6 +916,22 @@ pub fn summarize_output(text: &str) -> String {
     }
 }
 
+/// Truncate a diff to a maximum number of lines to avoid overwhelming the
+/// merge-fix prompt with huge diffs.
+fn truncate_diff(text: &str, max_lines: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() <= max_lines {
+        text.to_string()
+    } else {
+        let mut result: String = lines[..max_lines].join("\n");
+        result.push_str(&format!(
+            "\n... ({} more lines truncated)",
+            lines.len() - max_lines
+        ));
+        result
+    }
+}
+
 fn coordinator_log_dir(repo_root: &Path) -> PathBuf {
     repo_root.join(".macc").join("log").join("coordinator")
 }
@@ -932,8 +948,117 @@ fn run_merge_hook_with_timeout(
     base: &str,
     conflicts: &str,
     timeout_seconds: u64,
+    ctx: &MergeTaskContext,
 ) -> Result<HookRunResult> {
     use std::process::{Command, Stdio};
+
+    // Build three-way diff context so the AI understands both sides of the
+    // conflict: what the base branch gained since the fork point, and what the
+    // feature branch changed.
+    let merge_base_sha = git::run_git_output_mapped(
+        repo_root,
+        &["merge-base", base, branch],
+        "compute merge-base for merge-fix context",
+    )
+    .ok()
+    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    .unwrap_or_default();
+
+    let (base_commits, branch_commits, base_diff_stat, branch_diff_stat) =
+        if !merge_base_sha.is_empty() {
+            let base_log = git::run_git_output_mapped(
+                repo_root,
+                &["log", "--oneline", &format!("{}..{}", merge_base_sha, base)],
+                "base commits since fork",
+            )
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+
+            let branch_log = git::run_git_output_mapped(
+                repo_root,
+                &[
+                    "log",
+                    "--oneline",
+                    &format!("{}..{}", merge_base_sha, branch),
+                ],
+                "branch commits since fork",
+            )
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+
+            let base_stat = git::run_git_output_mapped(
+                repo_root,
+                &["diff", "--stat", &merge_base_sha, base],
+                "base diff stat since fork",
+            )
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+
+            let branch_stat = git::run_git_output_mapped(
+                repo_root,
+                &["diff", "--stat", &merge_base_sha, branch],
+                "branch diff stat since fork",
+            )
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+
+            (base_log, branch_log, base_stat, branch_stat)
+        } else {
+            (
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+            )
+        };
+
+    // Build the targeted diff for only the conflicting files so the AI can see
+    // exactly what each side changed in those files.
+    let conflict_diff = if !merge_base_sha.is_empty() && !conflicts.is_empty() {
+        let conflict_files: Vec<&str> = conflicts.split(',').map(|s| s.trim()).collect();
+        let mut diff_sections = String::new();
+        for file in &conflict_files {
+            let base_side = git::run_git_output_mapped(
+                repo_root,
+                &["diff", &merge_base_sha, base, "--", file],
+                "base-side diff for conflict file",
+            )
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+
+            let branch_side = git::run_git_output_mapped(
+                repo_root,
+                &["diff", &merge_base_sha, branch, "--", file],
+                "branch-side diff for conflict file",
+            )
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+
+            if !base_side.is_empty() || !branch_side.is_empty() {
+                diff_sections.push_str(&format!("### {}\n", file));
+                diff_sections.push_str(&format!(
+                    "Base side ({}):\n```diff\n{}\n```\n",
+                    base,
+                    truncate_diff(&base_side, 200)
+                ));
+                diff_sections.push_str(&format!(
+                    "Branch side ({}):\n```diff\n{}\n```\n\n",
+                    branch,
+                    truncate_diff(&branch_side, 200)
+                ));
+            }
+        }
+        diff_sections
+    } else {
+        String::new()
+    };
+
     let mut child = Command::new(hook)
         .current_dir(repo_root)
         .arg("--repo")
@@ -950,6 +1075,28 @@ fn run_merge_hook_with_timeout(
         .arg("git merge reported conflicts")
         .arg("--conflicts")
         .arg(conflicts)
+        .arg("--tool")
+        .arg(&ctx.tool)
+        .arg("--worktree-path")
+        .arg(&ctx.worktree_path)
+        .arg("--task-title")
+        .arg(&ctx.title)
+        .arg("--task-description")
+        .arg(&ctx.description)
+        .arg("--task-objective")
+        .arg(&ctx.objective)
+        .arg("--merge-base")
+        .arg(&merge_base_sha)
+        .arg("--base-commits")
+        .arg(&base_commits)
+        .arg("--branch-commits")
+        .arg(&branch_commits)
+        .arg("--base-diff-stat")
+        .arg(&base_diff_stat)
+        .arg("--branch-diff-stat")
+        .arg(&branch_diff_stat)
+        .arg("--conflict-diff")
+        .arg(&conflict_diff)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -1003,6 +1150,7 @@ pub fn merge_task_with_policy_native<FE>(
     base: &str,
     merge_ai_fix: bool,
     merge_hook_timeout: Option<u64>,
+    merge_context: &MergeTaskContext,
     mut emit_event: FE,
 ) -> Result<std::result::Result<(), String>>
 where
@@ -1085,6 +1233,7 @@ where
             base,
             &conflicts,
             hook_timeout_seconds,
+            merge_context,
         );
         let hook_elapsed = hook_started.elapsed().as_secs();
         match hook_result {

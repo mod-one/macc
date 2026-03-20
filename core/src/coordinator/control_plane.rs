@@ -829,6 +829,7 @@ pub async fn advance_tasks_native(
                 task_id,
                 branch,
                 base,
+                merge_context,
             } => {
                 if let Some(log) = logger {
                     let _ = log.note(format!(
@@ -862,6 +863,7 @@ pub async fn advance_tasks_native(
                             &base_for_worker,
                             merge_ai_fix,
                             merge_hook_timeout,
+                            &merge_context,
                             |event_type, task_id, phase, status, message, severity| {
                                 let _ = append_coordinator_event_with_severity(
                                     &repo, event_type, task_id, phase, status, message, severity,

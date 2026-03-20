@@ -148,7 +148,19 @@ pub enum AdvanceTaskAction {
         task_id: String,
         branch: String,
         base: String,
+        merge_context: MergeTaskContext,
     },
+}
+
+/// Task metadata passed to the merge-fix hook so it can resolve conflicts
+/// without needing to read the task registry from disk.
+#[derive(Debug, Clone, Default)]
+pub struct MergeTaskContext {
+    pub tool: String,
+    pub worktree_path: String,
+    pub title: String,
+    pub description: String,
+    pub objective: String,
 }
 
 #[derive(Debug, Clone)]
@@ -328,10 +340,31 @@ pub fn build_advance_actions(
                     continue;
                 }
                 let base = task.base_branch("master");
+                let merge_context = MergeTaskContext {
+                    tool: task.tool.clone().unwrap_or_default(),
+                    worktree_path: task
+                        .worktree_path()
+                        .unwrap_or_default()
+                        .to_string(),
+                    title: task.title.clone().unwrap_or_default(),
+                    description: task
+                        .extra
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    objective: task
+                        .extra
+                        .get("objective")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                };
                 actions.push(AdvanceTaskAction::QueueMerge {
                     task_id,
                     branch,
                     base,
+                    merge_context,
                 });
             }
             AdvancePlan::Noop => {}
