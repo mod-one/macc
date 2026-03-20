@@ -47,6 +47,7 @@ struct WebState {
     engine: SharedEngine,
     paths: ProjectPaths,
     assets_mode: WebAssetsMode,
+    tail_stream_limiter: logs::TailStreamLimiter,
 }
 
 impl WebCommand {
@@ -91,6 +92,7 @@ impl Command for WebCommand {
             engine: self.app.engine.clone(),
             paths: self.app.project_paths()?,
             assets_mode: config.assets_mode,
+            tail_stream_limiter: logs::TailStreamLimiter::default(),
         };
         let app = build_web_router(state);
 
@@ -141,6 +143,7 @@ fn build_web_router(state: WebState) -> Router {
         .route("/api/v1/status", get(coordinator::status_handler))
         .route("/api/v1/git/graph", get(git::get_git_graph_handler))
         .route("/api/v1/logs", get(logs::list_logs_handler))
+        .route("/api/v1/logs/tail", get(logs::tail_log_handler))
         .route("/api/v1/logs/*path", get(logs::read_log_handler))
         .route("/api/v1/backups", get(backups::list_backups_handler))
         .route(
