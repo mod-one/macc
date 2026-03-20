@@ -278,3 +278,46 @@ Response 200:
 Notes:
 - The server rejects absolute paths and traversal attempts such as `..`.
 - `total` reflects the number of lines after `search` filtering when `search` is provided.
+
+### GET `/api/v1/logs/tail` (SSE)
+
+Purpose: tail a log file under `.macc/log/` and stream newly appended lines.
+
+Headers:
+- `Accept: text/event-stream`
+- `Last-Event-ID` (optional): resume from a previous SSE event id.
+
+Query parameters:
+- `path` (string, required): URL-encoded relative path such as `coordinator/events.jsonl`.
+
+Response 200:
+- `Content-Type: text/event-stream`
+
+SSE envelope:
+- `event: log_line` for each newly completed line appended to the target file.
+- `id`: byte-offset cursor in the form `off-<offset>`.
+- `data`: JSON payload with `path`, `timestamp`, and `content`.
+
+Heartbeat:
+- Emit `event: heartbeat` every 15 seconds while the stream is open.
+- Heartbeat `id` values use the form `hb-<offset>-<timestamp_ms>`.
+- Heartbeat `data` includes `path`, `timestamp`, `offset`, `type: "heartbeat"`, and `status: "ok"`.
+
+Reconnect and rotation:
+- `Last-Event-ID` accepts both `off-<offset>` and heartbeat ids.
+- On reconnect the server resumes from the provided byte offset, capped to the current file size.
+- If the file is truncated or replaced, the cursor resets to the beginning of the current file and streaming continues.
+
+Concurrency:
+- A single client may hold up to 25 concurrent log-tail streams.
+
+Example (wire format):
+```
+id: off-128
+event: log_line
+data: {"path":"coordinator/events.jsonl","timestamp":"2026-03-20T12:01:02Z","content":"worker started"}
+
+id: hb-128-1760000000000
+event: heartbeat
+data: {"path":"coordinator/events.jsonl","timestamp":"2026-03-20T12:01:17Z","offset":128,"type":"heartbeat","status":"ok"}
+```
