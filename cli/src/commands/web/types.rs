@@ -427,8 +427,8 @@ pub(crate) struct ApiApplyRequest {
     pub allow_user_scope: Option<bool>,
     /// Whether the endpoint should only simulate writes.
     pub dry_run: bool,
-    /// Whether prompts should be auto-confirmed.
-    pub yes: Option<bool>,
+    /// Explicit consent gate required before writes can occur.
+    pub confirmed: Option<bool>,
 }
 
 /// Apply result returned by execution endpoints.
