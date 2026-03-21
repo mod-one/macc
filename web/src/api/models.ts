@@ -505,16 +505,27 @@ export interface ApiBackup {
   id: string;
   timestamp: string;
   files: number;
+  entries: ApiBackupFile[];
+  totalSize: number;
   path: string;
   userScope: boolean;
 }
 
+export interface ApiBackupFile {
+  path: string;
+  size: number;
+}
+
 export interface ApiRestoreRequest {
-  backupId?: string | null;
-  latest: boolean;
-  user: boolean;
-  dryRun: boolean;
-  yes?: boolean | null;
+  confirmed: boolean;
+}
+
+export interface ApiBackupRestoreResult {
+  status: string;
+  message: string;
+  backupId: string;
+  restoreBackupId: string;
+  restoredFiles: number;
 }
 
 export interface ApiActionResult {
