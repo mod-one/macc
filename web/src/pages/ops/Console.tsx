@@ -1,9 +1,8 @@
-import React, { useCallback, useEffect, useState, useMemo } from 'react';
+import React, { useEffect, useState, useMemo } from 'react';
 import { useCoordinatorStore } from '../../store';
-import { getRegistryTasks, ApiClientError } from '../../api/client';
+import { getRegistryTasks } from '../../api/client';
 import type { 
   ApiCoordinatorAction, 
-  ApiCoordinatorStatus, 
   ApiRegistryTask,
   ApiThrottledToolStatus
 } from '../../api/models';
@@ -13,7 +12,8 @@ import { TaskListItem } from '../../components/TaskListItem';
 import { StatusBadge, type StatusTone } from '../../components/StatusBadge';
 import { Button } from '../../components/Button';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
-import { Icons } from '../../components/NavIcons';
+import * as Icons from '../../components/icons';
+import { Icons as NavIcons } from '../../components/NavIcons';
 import { cn } from '../../components/styles';
 
 // --- Types ---
@@ -30,10 +30,11 @@ interface ActiveWorktree {
 function getStatusTone(status: string | undefined): StatusTone {
   if (!status) return 'todo';
   const s = status.toLowerCase();
-  if (s === 'running' || s === 'active') return 'active';
-  if (s === 'complete' || s === 'success' || s === 'merged') return 'success';
-  if (s === 'failed' || s === 'error') return 'error';
-  if (s === 'blocked') return 'warning';
+  if (s === 'running' || s === 'active' || s === 'in_progress') return 'active';
+  if (s === 'complete' || s === 'success' || s === 'merged') return 'merged';
+  if (s === 'failed' || s === 'error') return 'failed';
+  if (s === 'blocked') return 'blocked';
+  if (s === 'paused') return 'paused';
   return 'todo';
 }
 
@@ -78,10 +79,9 @@ const ToolCooldownPanel: React.FC<{
             </p>
           </div>
           <Button
-            size="sm"
-            variant="secondary"
             disabled={isBusy}
             onClick={() => onClear(tool.tool_id)}
+            className="bg-[var(--bg-secondary)] border-[var(--border)] hover:bg-[var(--bg-hover)] text-xs h-8 px-3"
           >
             Clear
           </Button>
@@ -209,12 +209,12 @@ const Console: React.FC = () => {
     }
   };
 
-  const handleEmergencyStop = async () => {
+  const handleEmergencyStop = () => {
     setShowEmergencyStop(false);
-    await handleAction('stop');
+    handleAction('stop');
   };
 
-  const clearCooldown = async (toolId: string) => {
+  const clearCooldown = async () => {
     // Reconcile is the action to clear/refresh coordinator state including cooldowns
     await handleAction('reconcile');
   };
@@ -240,7 +240,7 @@ const Console: React.FC = () => {
                 )}
                 <StatusBadge 
                   status={status?.paused ? 'Paused' : (status?.active ?? 0) > 0 ? 'Running' : 'Idle'} 
-                  tone={status?.paused ? 'warning' : (status?.active ?? 0) > 0 ? 'active' : 'todo'}
+                  tone={status?.paused ? 'paused' : (status?.active ?? 0) > 0 ? 'active' : 'todo'}
                 />
                 {status?.throttled_tools && status.throttled_tools.length > 0 && (
                   <span className="rounded-full bg-rose-500/10 px-3 py-1 text-xs font-bold uppercase tracking-wider text-rose-500">
@@ -256,9 +256,7 @@ const Console: React.FC = () => {
 
           <div className="flex flex-wrap gap-3">
             <Button
-              variant="danger"
-              size="lg"
-              className="font-bold shadow-lg shadow-rose-500/20"
+              className="bg-rose-600 hover:bg-rose-700 text-white font-bold h-12 px-6 shadow-lg shadow-rose-500/20"
               onClick={() => setShowEmergencyStop(true)}
               disabled={isBusy}
             >
@@ -300,7 +298,7 @@ const Console: React.FC = () => {
               </div>
             ) : (
               <div className="rounded-2xl border border-dashed border-[var(--border)] bg-[var(--bg-secondary)]/30 py-12 text-center">
-                <Icons.Home className="mx-auto h-8 w-8 text-[var(--text-muted)] opacity-20" />
+                <NavIcons.Home />
                 <p className="mt-4 text-sm text-[var(--text-muted)]">No active performers at the moment.</p>
               </div>
             )}
@@ -310,7 +308,7 @@ const Console: React.FC = () => {
           <section className="space-y-4">
             <div className="flex items-center justify-between">
               <h2 className="text-xl font-bold text-[var(--text-primary)]">Task Registry</h2>
-              <Button variant="secondary" size="sm" onClick={() => handleAction('sync')}>
+              <Button className="h-8 px-3 text-xs" onClick={() => handleAction('sync')}>
                 Sync Registry
               </Button>
             </div>
@@ -336,7 +334,7 @@ const Console: React.FC = () => {
                 <p className="py-8 text-center text-sm text-[var(--text-muted)]">Registry is empty.</p>
               )}
               {tasks.length > 10 && (
-                <Button variant="ghost" className="w-full text-[var(--text-muted)]">
+                <Button className="w-full text-[var(--text-muted)] bg-transparent border-none hover:bg-white/5">
                   View all tasks in Registry →
                 </Button>
               )}
@@ -354,10 +352,10 @@ const Console: React.FC = () => {
               <ActionButton label="Stop" icon={<Icons.XCircleIcon className="h-4 w-4" />} onClick={() => handleAction('stop')} disabled={isBusy} />
               <ActionButton label="Resume" icon={<Icons.RefreshIcon className="h-4 w-4" />} onClick={() => handleAction('resume')} disabled={isBusy} />
               <ActionButton label="Dispatch" icon={<Icons.ArrowUpIcon className="h-4 w-4" />} onClick={() => handleAction('dispatch')} disabled={isBusy} />
-              <ActionButton label="Advance" icon={<Icons.ChevronRight className="h-4 w-4" />} onClick={() => handleAction('advance')} disabled={isBusy} />
+              <ActionButton label="Advance" icon={<NavIcons.ChevronRight />} onClick={() => handleAction('advance')} disabled={isBusy} />
               <ActionButton label="Reconcile" icon={<Icons.RefreshIcon className="h-4 w-4" />} onClick={() => handleAction('reconcile')} disabled={isBusy} />
-              <ActionButton label="Cleanup" icon={<Icons.TrashIcon className="h-4 w-4" />} onClick={() => handleAction('cleanup')} disabled={isBusy} />
-              <ActionButton label="Audit PRD" icon={<Icons.SearchIcon className="h-4 w-4" />} onClick={() => handleAction('audit-prd')} disabled={isBusy} />
+              <ActionButton label="Cleanup" icon={<Icons.XCircleIcon className="h-4 w-4" />} onClick={() => handleAction('cleanup')} disabled={isBusy} />
+              <ActionButton label="Audit PRD" icon={<NavIcons.Search />} onClick={() => handleAction('audit-prd')} disabled={isBusy} />
             </div>
           </section>
 
@@ -394,14 +392,14 @@ const Console: React.FC = () => {
       </div>
 
       <ConfirmDialog
-        isOpen={showEmergencyStop}
+        open={showEmergencyStop}
+        onOpenChange={setShowEmergencyStop}
         title="Emergency Stop"
-        message="This will immediately request the coordinator to halt all active operations. Performers already in flight will finish their current step. Are you sure?"
+        description="This will immediately request the coordinator to halt all active operations. Performers already in flight will finish their current step. Are you sure?"
         confirmLabel="Stop Everything"
         cancelLabel="Cancel"
         onConfirm={handleEmergencyStop}
-        onCancel={() => setShowEmergencyStop(false)}
-        variant="danger"
+        intent="danger"
       />
     </div>
   );

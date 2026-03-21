@@ -53,7 +53,9 @@ fn apply_test_guard() -> MutexGuard<'static, ()> {
 fn write_test_config(root: &std::path::Path) {
     let paths = ProjectPaths::from_root(root);
     fs::create_dir_all(paths.config_path.parent().expect("config dir")).expect("mkdir config");
-    let yaml = CanonicalConfig::default()
+    let mut canonical = CanonicalConfig::default();
+    canonical.settings.offline = true;
+    let yaml = canonical
         .to_yaml()
         .expect("serialize config");
     fs::write(&paths.config_path, yaml).expect("write config");
