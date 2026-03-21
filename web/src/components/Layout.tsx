@@ -24,6 +24,7 @@ const navGroups = [
     items: [
       { path: '/ops/console', label: 'Console', icon: Icons.Terminal },
       { path: '/ops/registry', label: 'Registry', icon: Icons.Database },
+      { path: '/ops/worktrees', label: 'Worktrees', icon: Icons.Folder },
       { path: '/ops/live', label: 'Live', icon: Icons.Activity },
       { path: '/ops/locks', label: 'Locks', icon: Icons.Lock },
       { path: '/ops/diagnostics', label: 'Diagnostics', icon: Icons.Stethoscope },
