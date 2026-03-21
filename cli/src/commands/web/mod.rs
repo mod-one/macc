@@ -196,6 +196,23 @@ fn build_web_router(state: WebState) -> Router {
             post(coordinator::coordinator_resume_handler),
         )
         .route(
+            "/api/v1/coordinator/sync",
+            post(coordinator::coordinator_sync_handler),
+        )
+        .route(
+            "/api/v1/coordinator/audit-prd",
+            post(coordinator::coordinator_audit_prd_handler),
+        )
+        .route(
+            "/api/v1/coordinator/tool-cooldown",
+            get(coordinator::get_tool_cooldowns_handler)
+                .post(coordinator::set_tool_cooldown_handler),
+        )
+        .route(
+            "/api/v1/coordinator/tool-cooldown/:tool",
+            delete(coordinator::clear_tool_cooldown_handler),
+        )
+        .route(
             "/api/v1/registry/tasks",
             get(registry::list_registry_tasks_handler),
         )

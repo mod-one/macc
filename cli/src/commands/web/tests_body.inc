@@ -3174,6 +3174,191 @@ async fn coordinator_resume_endpoint_maps_errors() {
     assert_eq!(payload["error"]["category"], "Validation");
     assert_eq!(payload["error"]["message"], "resume failed");
 }
+
+#[tokio::test]
+async fn coordinator_tool_cooldown_list_endpoint_returns_empty_list() {
+    let root = temp_root("tool-cooldown-list-empty");
+    fs::create_dir_all(&root).expect("create root");
+    let state = test_web_state(
+        &root,
+        Arc::new(WebTestEngine::with_real_tool_cooldown_commands()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/coordinator/tool-cooldown")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(payload["tool_cooldowns"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn coordinator_tool_cooldown_set_endpoint_persists_and_lists_entry() {
+    let root = temp_root("tool-cooldown-set");
+    fs::create_dir_all(&root).expect("create root");
+    let state = test_web_state(
+        &root,
+        Arc::new(WebTestEngine::with_real_tool_cooldown_commands()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/coordinator/tool-cooldown")
+                .method("POST")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "tool": "claude",
+                        "duration_seconds": 60
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    let entries = payload["tool_cooldowns"].as_array().expect("tool_cooldowns array");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["tool_id"], "claude");
+    assert_eq!(entries[0]["backoff_seconds"], 60);
+    let remaining = entries[0]["remaining_seconds"]
+        .as_i64()
+        .expect("remaining_seconds");
+    assert!((0..=60).contains(&remaining));
+    assert!(
+        entries[0]["throttled_until"]
+            .as_u64()
+            .expect("throttled_until")
+            > 0
+    );
+
+    let list_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/coordinator/tool-cooldown")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(list_response.status(), axum::http::StatusCode::OK);
+    let list_bytes = list_response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let list_payload: serde_json::Value = serde_json::from_slice(&list_bytes).expect("json");
+    let list_entries = list_payload["tool_cooldowns"]
+        .as_array()
+        .expect("tool_cooldowns array");
+    assert_eq!(list_entries.len(), 1);
+    assert_eq!(list_entries[0]["tool_id"], "claude");
+}
+
+#[tokio::test]
+async fn coordinator_tool_cooldown_clear_endpoint_removes_entry() {
+    let root = temp_root("tool-cooldown-clear");
+    fs::create_dir_all(&root).expect("create root");
+    let state = test_web_state(
+        &root,
+        Arc::new(WebTestEngine::with_real_tool_cooldown_commands()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+
+    let set_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/coordinator/tool-cooldown")
+                .method("POST")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "tool": "claude",
+                        "duration_seconds": 120
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(set_response.status(), axum::http::StatusCode::OK);
+
+    let clear_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/coordinator/tool-cooldown/claude")
+                .method("DELETE")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(clear_response.status(), axum::http::StatusCode::OK);
+    let clear_bytes = clear_response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let clear_payload: serde_json::Value = serde_json::from_slice(&clear_bytes).expect("json");
+    assert_eq!(clear_payload["tool_cooldowns"], serde_json::json!([]));
+
+    let list_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/coordinator/tool-cooldown")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(list_response.status(), axum::http::StatusCode::OK);
+    let list_bytes = list_response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let list_payload: serde_json::Value = serde_json::from_slice(&list_bytes).expect("json");
+    assert_eq!(list_payload["tool_cooldowns"], serde_json::json!([]));
+}
+
 #[tokio::test]
 async fn prd_endpoint_read_project_prd() {
     let root = temp_root("prd-read-project");

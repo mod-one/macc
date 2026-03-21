@@ -1,6 +1,6 @@
 use super::errors::ApiError;
 use super::WebState;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::Json;
 use macc_core::coordinator::task_selector::SelectedTask;
 use macc_core::coordinator::types::CoordinatorEnvConfig;
@@ -10,7 +10,7 @@ use macc_core::service::coordinator_workflow::{
     ThrottledToolStatus,
 };
 use macc_core::service::diagnostic::{FailureKind, FailureReport};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize)]
 pub(super) struct ApiCoordinatorStatus {
@@ -113,6 +113,12 @@ pub(super) struct ApiToolCooldownEntry {
     pub throttled_until: u64,
     pub remaining_seconds: i64,
     pub backoff_seconds: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct ApiToolCooldownSetRequest {
+    pub tool: String,
+    pub duration_seconds: u64,
 }
 
 impl From<macc_core::service::coordinator_workflow::ToolCooldownEntry> for ApiToolCooldownEntry {
@@ -313,4 +319,112 @@ pub(super) async fn coordinator_resume_handler(
             ..CoordinatorCommandResult::default()
         },
     )))
+}
+
+pub(super) async fn coordinator_sync_handler(
+    State(state): State<WebState>,
+) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
+    let env_cfg = CoordinatorEnvConfig::default();
+    let result = state
+        .engine
+        .coordinator_execute_command(
+            &state.paths,
+            CoordinatorCommand::SyncRegistry,
+            CoordinatorCommandRequest {
+                canonical: None,
+                coordinator_cfg: None,
+                env_cfg: &env_cfg,
+                logger: None,
+            },
+        )
+        .map_err(ApiError::from)?;
+    Ok(Json(ApiCoordinatorCommandResult::from(result)))
+}
+
+pub(super) async fn coordinator_audit_prd_handler(
+    State(state): State<WebState>,
+) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
+    let env_cfg = CoordinatorEnvConfig::default();
+    let result = state
+        .engine
+        .coordinator_execute_command(
+            &state.paths,
+            CoordinatorCommand::AuditPrd {
+                tool: None,
+                dry_run: false,
+            },
+            CoordinatorCommandRequest {
+                canonical: None,
+                coordinator_cfg: None,
+                env_cfg: &env_cfg,
+                logger: None,
+            },
+        )
+        .map_err(ApiError::from)?;
+    Ok(Json(ApiCoordinatorCommandResult::from(result)))
+}
+
+pub(super) async fn get_tool_cooldowns_handler(
+    State(state): State<WebState>,
+) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
+    let env_cfg = CoordinatorEnvConfig::default();
+    let result = state
+        .engine
+        .coordinator_execute_command(
+            &state.paths,
+            CoordinatorCommand::ToolCooldownList,
+            CoordinatorCommandRequest {
+                canonical: None,
+                coordinator_cfg: None,
+                env_cfg: &env_cfg,
+                logger: None,
+            },
+        )
+        .map_err(ApiError::from)?;
+    Ok(Json(ApiCoordinatorCommandResult::from(result)))
+}
+
+pub(super) async fn set_tool_cooldown_handler(
+    State(state): State<WebState>,
+    Json(request): Json<ApiToolCooldownSetRequest>,
+) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
+    let env_cfg = CoordinatorEnvConfig::default();
+    let result = state
+        .engine
+        .coordinator_execute_command(
+            &state.paths,
+            CoordinatorCommand::ToolCooldownSet {
+                tool: request.tool,
+                duration: request.duration_seconds,
+            },
+            CoordinatorCommandRequest {
+                canonical: None,
+                coordinator_cfg: None,
+                env_cfg: &env_cfg,
+                logger: None,
+            },
+        )
+        .map_err(ApiError::from)?;
+    Ok(Json(ApiCoordinatorCommandResult::from(result)))
+}
+
+pub(super) async fn clear_tool_cooldown_handler(
+    State(state): State<WebState>,
+    Path(tool): Path<String>,
+) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
+    let env_cfg = CoordinatorEnvConfig::default();
+    let result = state
+        .engine
+        .coordinator_execute_command(
+            &state.paths,
+            CoordinatorCommand::ToolCooldownClear { tool },
+            CoordinatorCommandRequest {
+                canonical: None,
+                coordinator_cfg: None,
+                env_cfg: &env_cfg,
+                logger: None,
+            },
+        )
+        .map_err(ApiError::from)?;
+    Ok(Json(ApiCoordinatorCommandResult::from(result)))
 }

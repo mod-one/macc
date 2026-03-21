@@ -81,7 +81,9 @@ export type ApiCoordinatorAction =
   | 'dispatch'
   | 'advance'
   | 'reconcile'
-  | 'cleanup';
+  | 'cleanup'
+  | 'sync'
+  | 'audit-prd';
 
 export type ApiEventStreamName = 'coordinator_event' | 'heartbeat';
 

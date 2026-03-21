@@ -201,9 +201,9 @@ const Console: React.FC = () => {
 
   // --- Handlers ---
 
-  const handleAction = async (action: ApiCoordinatorAction | string) => {
+  const handleAction = async (action: ApiCoordinatorAction) => {
     try {
-      await runAction(action as ApiCoordinatorAction);
+      await runAction(action);
     } catch (err) {
       console.error(`Action ${action} failed:`, err);
     }
