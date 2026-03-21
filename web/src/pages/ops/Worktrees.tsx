@@ -126,7 +126,7 @@ const Worktrees: React.FC = () => {
           <Button className="p-1 h-8 w-8 bg-transparent border-none hover:bg-white/10" onClick={() => runWorktree(info.row.original.id)} title="Run">
             <Icons.PlayIcon className="h-4 w-4" />
           </Button>
-          <Button className="p-1 h-8 w-8 bg-transparent border-none hover:bg-white/10 text-[var(--accent)]" onClick={() => {}} title="Doctor">
+          <Button className="p-1 h-8 w-8 bg-transparent border-none hover:bg-white/10 text-[var(--accent)]" onClick={() => navigate('/ops/diagnostics')} title="Doctor">
             <Icons.ActivityIcon className="h-4 w-4" />
           </Button>
           <Button className="p-1 h-8 w-8 bg-transparent border-none hover:bg-white/10 text-rose-500" onClick={() => setWorktreeToRemove(info.row.original.id)} title="Remove">
@@ -288,7 +288,7 @@ const Worktrees: React.FC = () => {
               key={w.id} 
               worktree={w} 
               onRun={runWorktree}
-              onDoctor={() => {}}
+              onDoctor={() => navigate('/ops/diagnostics')}
               onRemove={setWorktreeToRemove}
               onOpen={(id) => navigate(`/ops/worktrees/${id}`)}
             />
