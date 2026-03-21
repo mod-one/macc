@@ -404,3 +404,36 @@ export async function restoreBackup(
     request,
   );
 }
+
+export async function getToolCooldowns(
+  options: ApiRequestOptions = {},
+): Promise<ApiCoordinatorCommandResult> {
+  return sendJson<ApiCoordinatorCommandResult>('/coordinator/tool-cooldown', 'GET', options);
+}
+
+export async function setToolCooldown(
+  tool: string,
+  durationSeconds: number,
+  options: ApiRequestOptions = {},
+): Promise<ApiCoordinatorCommandResult> {
+  return sendJson<ApiCoordinatorCommandResult, { tool: string; duration_seconds: number }>(
+    '/coordinator/tool-cooldown',
+    'POST',
+    options,
+    {
+      tool,
+      duration_seconds: durationSeconds,
+    },
+  );
+}
+
+export async function clearToolCooldown(
+  tool: string,
+  options: ApiRequestOptions = {},
+): Promise<ApiCoordinatorCommandResult> {
+  return sendJson<ApiCoordinatorCommandResult>(
+    `/coordinator/tool-cooldown/${encodeURIComponent(tool)}`,
+    'DELETE',
+    options,
+  );
+}

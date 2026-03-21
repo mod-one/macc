@@ -376,3 +376,54 @@ data: {"event_id":"hb-1-1760000000000","type":"heartbeat","status":"ok","line":1
 Notes:
 - The stream tails the newest performer log available for the worktree.
 - When a log line starts with RFC3339 timestamp + log level, the server normalizes those fields into the JSON payload and sends the remaining text as `message`.
+
+### GET `/api/v1/coordinator/tool-cooldown`
+
+Purpose: list all active tool cooldowns.
+
+Response 200 (shape mirrors `ApiCoordinatorCommandResult`):
+```json
+{
+  "tool_cooldowns": [
+    {
+      "tool_id": "gemini",
+      "throttled_until": 1711000000,
+      "remaining_seconds": 3600,
+      "backoff_seconds": 60
+    }
+  ]
+}
+```
+
+### POST `/api/v1/coordinator/tool-cooldown`
+
+Purpose: manually set a tool cooldown.
+
+Request body:
+```json
+{
+  "tool": "gemini",
+  "duration_seconds": 3600
+}
+```
+
+Response 200 (shape mirrors `ApiCoordinatorCommandResult`):
+```json
+{
+  "tool_cooldowns": [...]
+}
+```
+
+### DELETE `/api/v1/coordinator/tool-cooldown/{tool}`
+
+Purpose: manually clear a tool cooldown.
+
+Path parameter:
+- `tool` (string, required): tool ID to clear.
+
+Response 200 (shape mirrors `ApiCoordinatorCommandResult`):
+```json
+{
+  "tool_cooldowns": [...]
+}
+```

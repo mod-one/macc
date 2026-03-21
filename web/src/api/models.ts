@@ -64,6 +64,13 @@ export interface ApiSelectedTask {
   base_branch: string;
 }
 
+export interface ApiToolCooldownEntry {
+  tool_id: string;
+  throttled_until: number;
+  remaining_seconds: number;
+  backoff_seconds: number;
+}
+
 export interface ApiCoordinatorCommandResult {
   status?: ApiCoordinatorStatus;
   resumed?: boolean;
@@ -72,6 +79,7 @@ export interface ApiCoordinatorCommandResult {
   exported_events_path?: string;
   removed_worktrees?: number;
   selected_task?: ApiSelectedTask;
+  tool_cooldowns?: ApiToolCooldownEntry[];
 }
 
 export type ApiCoordinatorAction =

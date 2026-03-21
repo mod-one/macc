@@ -3,8 +3,7 @@ import { useCoordinatorStore } from '../../store';
 import { getRegistryTasks } from '../../api/client';
 import type { 
   ApiCoordinatorAction, 
-  ApiRegistryTask,
-  ApiThrottledToolStatus
+  ApiRegistryTask
 } from '../../api/models';
 import { useEventSource } from '../../hooks/useEventSource';
 import { StreamTile } from '../../components/StreamTile';
@@ -12,6 +11,7 @@ import { TaskListItem } from '../../components/TaskListItem';
 import { StatusBadge, type StatusTone } from '../../components/StatusBadge';
 import { Button } from '../../components/Button';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
+import { ToolCooldownPanel } from '../../components/ToolCooldownPanel';
 import * as Icons from '../../components/icons';
 import { Icons as NavIcons } from '../../components/NavIcons';
 import { cn } from '../../components/styles';
@@ -45,51 +45,7 @@ function formatElapsedTime(seconds: number): string {
   return [h, m, s].map(v => v.toString().padStart(2, '0')).join(':');
 }
 
-// --- Components ---
-
-const ToolCooldownPanel: React.FC<{
-  throttledTools: ApiThrottledToolStatus[];
-  onClear: (toolId: string) => void;
-  isBusy: boolean;
-}> = ({ throttledTools, onClear, isBusy }) => {
-  if (throttledTools.length === 0) {
-    return (
-      <div className="rounded-xl border border-dashed border-[var(--border)] p-8 text-center">
-        <p className="text-sm text-[var(--text-muted)]">No active tool cooldowns.</p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-3">
-      {throttledTools.map((tool) => (
-        <div 
-          key={tool.tool_id}
-          className="flex items-center justify-between rounded-xl border border-[var(--border)] bg-[var(--bg-secondary)] p-4"
-        >
-          <div className="space-y-1">
-            <div className="flex items-center gap-2">
-              <span className="font-semibold text-[var(--text-primary)]">{tool.tool_id}</span>
-              <span className="rounded-full bg-rose-500/10 px-2 py-0.5 text-[0.65rem] font-bold uppercase tracking-wider text-rose-500">
-                Throttled
-              </span>
-            </div>
-            <p className="text-xs text-[var(--text-secondary)]">
-              Until: {new Date(tool.throttled_until).toLocaleTimeString()} ({tool.consecutive_count} events)
-            </p>
-          </div>
-          <Button
-            disabled={isBusy}
-            onClick={() => onClear(tool.tool_id)}
-            className="bg-[var(--bg-secondary)] border-[var(--border)] hover:bg-[var(--bg-hover)] text-xs h-8 px-3"
-          >
-            Clear
-          </Button>
-        </div>
-      ))}
-    </div>
-  );
-};
+// --- Main Component ---
 
 const Console: React.FC = () => {
   // --- State & Store ---
@@ -212,11 +168,6 @@ const Console: React.FC = () => {
   const handleEmergencyStop = () => {
     setShowEmergencyStop(false);
     handleAction('stop');
-  };
-
-  const clearCooldown = async () => {
-    // Reconcile is the action to clear/refresh coordinator state including cooldowns
-    await handleAction('reconcile');
   };
 
   const isBusy = pendingAction !== null;
@@ -380,12 +331,8 @@ const Console: React.FC = () => {
             </div>
 
             <div className="pt-4 border-t border-[var(--border)]">
-              <h3 className="mb-4 text-sm font-bold uppercase tracking-wider text-[var(--text-muted)]">Active Cooldowns</h3>
-              <ToolCooldownPanel 
-                throttledTools={status?.throttled_tools || []} 
-                onClear={clearCooldown}
-                isBusy={isBusy}
-              />
+              <h3 className="mb-4 text-sm font-bold uppercase tracking-wider text-[var(--text-muted)]">Tool Cooldown Manager</h3>
+              <ToolCooldownPanel />
             </div>
           </section>
         </aside>
