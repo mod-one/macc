@@ -19,7 +19,6 @@ import type {
   ApiPlanResponse,
   ApiRegistryTask,
   ApiRegistryTaskAction,
-  ApiRestoreRequest,
   ApiWorktree,
   ApiWorktreeCreateRequest,
 } from './models';
@@ -392,15 +391,35 @@ export async function getBackups(
   return sendJson<ApiBackup[]>('/backups', 'GET', options);
 }
 
-export async function restoreBackup(
-  id: string,
-  request: ApiRestoreRequest,
+export async function getToolCooldowns(
   options: ApiRequestOptions = {},
-): Promise<ApiActionResult> {
-  return sendJson<ApiActionResult, ApiRestoreRequest>(
-    `/backups/${encodeURIComponent(id)}/restore`,
+): Promise<ApiCoordinatorCommandResult> {
+  return sendJson<ApiCoordinatorCommandResult>('/coordinator/tool-cooldown', 'GET', options);
+}
+
+export async function setToolCooldown(
+  tool: string,
+  durationSeconds: number,
+  options: ApiRequestOptions = {},
+): Promise<ApiCoordinatorCommandResult> {
+  return sendJson<ApiCoordinatorCommandResult, { tool: string; duration_seconds: number }>(
+    '/coordinator/tool-cooldown',
     'POST',
     options,
-    request,
+    {
+      tool,
+      duration_seconds: durationSeconds,
+    },
+  );
+}
+
+export async function clearToolCooldown(
+  tool: string,
+  options: ApiRequestOptions = {},
+): Promise<ApiCoordinatorCommandResult> {
+  return sendJson<ApiCoordinatorCommandResult>(
+    `/coordinator/tool-cooldown/${encodeURIComponent(tool)}`,
+    'DELETE',
+    options,
   );
 }
