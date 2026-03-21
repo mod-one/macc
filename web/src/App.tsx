@@ -19,6 +19,7 @@ const Live = lazy(() => import('./pages/ops/Live'));
 const Locks = lazy(() => import('./pages/ops/Locks'));
 const Diagnostics = lazy(() => import('./pages/ops/Diagnostics'));
 const Logs = lazy(() => import('./pages/ops/Logs'));
+const Worktrees = lazy(() => import('./pages/ops/Worktrees'));
 const Backups = lazy(() => import('./pages/ops/Backups'));
 const Git = lazy(() => import('./pages/ops/Git'));
 const Help = lazy(() => import('./pages/Help'));
@@ -53,6 +54,7 @@ const App: React.FC = () => {
           <Route path="ops">
             <Route path="console" element={<Console />} />
             <Route path="registry" element={<Registry />} />
+            <Route path="worktrees" element={<Worktrees />} />
             <Route path="live" element={<Live />} />
             <Route path="locks" element={<Locks />} />
             <Route path="diagnostics" element={<Diagnostics />} />
