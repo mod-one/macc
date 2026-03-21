@@ -136,7 +136,7 @@ const Worktrees: React.FC = () => {
       ),
       size: 120,
     }),
-  ], [runWorktree]);
+  ], [runWorktree, navigate]);
 
   const table = useReactTable({
     data: filteredWorktrees,
