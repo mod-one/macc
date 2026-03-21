@@ -1,6 +1,6 @@
 import React from 'react';
-import type { ApiEventStreamMessage } from '../api/models';
-import { useEventSource } from '../hooks/useEventSource';
+import type { ApiEventStreamMessage } from '../../api/models';
+import { useEventSource } from '../../hooks/useEventSource';
 
 const EVENT_LIMIT = 250;
 

@@ -561,7 +561,7 @@ impl AppState {
                         .task_runtime
                         .extra
                         .get("throttle_state")
-                        .and_then(|v| {
+                        .map(|v| {
                             let bs = v
                                 .get("backoff_seconds")
                                 .and_then(|x| x.as_u64())
@@ -570,7 +570,7 @@ impl AppState {
                                 .get("consecutive_429_count")
                                 .and_then(|x| x.as_u64())
                                 .unwrap_or(0) as u32;
-                            Some((bs, cc))
+                            (bs, cc)
                         })
                         .unwrap_or((0, 0));
                     let entry = throttle_map.entry(tool_id.to_string()).or_insert_with(|| {

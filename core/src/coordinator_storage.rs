@@ -1476,11 +1476,10 @@ impl SqliteStorage {
             .map_err(sql_err)?;
         let now = now_iso_string();
         for (tool_id, state) in registry {
-            let payload =
-                serde_json::to_string(state).map_err(|e| MaccError::Storage {
-                    backend: "sqlite",
-                    message: format!("Failed to serialize throttle state for {}: {}", tool_id, e),
-                })?;
+            let payload = serde_json::to_string(state).map_err(|e| MaccError::Storage {
+                backend: "sqlite",
+                message: format!("Failed to serialize throttle state for {}: {}", tool_id, e),
+            })?;
             tx.execute(
                 "INSERT INTO tool_throttle (tool_id, throttled_until, payload_json, updated_at)
                  VALUES (?1, ?2, ?3, ?4)",

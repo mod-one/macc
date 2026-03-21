@@ -1,16 +1,70 @@
-import React from 'react';
-import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import React, { lazy } from 'react';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import Layout from './components/Layout';
-import Dashboard from './pages/Dashboard';
-import Logs from './pages/Logs';
+
+// Lazy load all pages for code splitting
+const Welcome = lazy(() => import('./pages/Welcome'));
+const Init = lazy(() => import('./pages/Init'));
+const Dashboard = lazy(() => import('./pages/Dashboard'));
+const Tools = lazy(() => import('./pages/config/Tools'));
+const Standards = lazy(() => import('./pages/config/Standards'));
+const Skills = lazy(() => import('./pages/config/Skills'));
+const Settings = lazy(() => import('./pages/config/Settings'));
+const Prd = lazy(() => import('./pages/Prd'));
+const Plan = lazy(() => import('./pages/Plan'));
+const Apply = lazy(() => import('./pages/Apply'));
+const Console = lazy(() => import('./pages/ops/Console'));
+const Registry = lazy(() => import('./pages/ops/Registry'));
+const Live = lazy(() => import('./pages/ops/Live'));
+const Locks = lazy(() => import('./pages/ops/Locks'));
+const Diagnostics = lazy(() => import('./pages/ops/Diagnostics'));
+const Logs = lazy(() => import('./pages/ops/Logs'));
+const Backups = lazy(() => import('./pages/ops/Backups'));
+const Help = lazy(() => import('./pages/Help'));
+const About = lazy(() => import('./pages/About'));
 
 const App: React.FC = () => {
   return (
     <BrowserRouter>
       <Routes>
         <Route path="/" element={<Layout />}>
-          <Route index element={<Dashboard />} />
-          <Route path="logs" element={<Logs />} />
+          {/* Index route redirects to /dashboard */}
+          <Route index element={<Navigate to="/dashboard" replace />} />
+          
+          <Route path="welcome" element={<Welcome />} />
+          <Route path="init" element={<Init />} />
+          <Route path="dashboard" element={<Dashboard />} />
+          
+          {/* Config group */}
+          <Route path="config">
+            <Route path="tools" element={<Tools />} />
+            <Route path="standards" element={<Standards />} />
+            <Route path="skills" element={<Skills />} />
+            <Route path="settings" element={<Settings />} />
+          </Route>
+
+          {/* Workflow stages */}
+          <Route path="prd" element={<Prd />} />
+          <Route path="plan" element={<Plan />} />
+          <Route path="apply" element={<Apply />} />
+
+          {/* Ops group */}
+          <Route path="ops">
+            <Route path="console" element={<Console />} />
+            <Route path="registry" element={<Registry />} />
+            <Route path="live" element={<Live />} />
+            <Route path="locks" element={<Locks />} />
+            <Route path="diagnostics" element={<Diagnostics />} />
+            <Route path="logs" element={<Logs />} />
+            <Route path="backups" element={<Backups />} />
+          </Route>
+
+          {/* Utility / Info */}
+          <Route path="help" element={<Help />} />
+          <Route path="about" element={<About />} />
+          
+          {/* Catch-all route redirects back to /dashboard */}
+          <Route path="*" element={<Navigate to="/dashboard" replace />} />
         </Route>
       </Routes>
     </BrowserRouter>

@@ -940,6 +940,7 @@ enum HookRunResult {
     Completed { output: String, timed_out: bool },
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_merge_hook_with_timeout(
     repo_root: &Path,
     hook: &Path,

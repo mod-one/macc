@@ -45,7 +45,7 @@ pub const E603_SESSION_CONFLICT: &str = "E603";
 /// Each adapter normalizer maps its native error patterns to one of these
 /// classes. The coordinator runtime only ever switches on `CanonicalClass`,
 /// never on raw provider strings or HTTP status codes.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
 pub enum CanonicalClass {
     /// Invalid or expired API key / token.
     Auth,
@@ -72,13 +72,8 @@ pub enum CanonicalClass {
     /// Provider internal error (HTTP 500).
     Internal,
     /// Cannot classify the error.
+    #[default]
     Unknown,
-}
-
-impl Default for CanonicalClass {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 impl std::fmt::Display for CanonicalClass {
@@ -223,7 +218,7 @@ pub fn truncate_raw_message(msg: &str) -> String {
         msg.to_string()
     } else {
         let mut s = msg[..500].to_string();
-        s.push_str("…");
+        s.push('…');
         s
     }
 }
