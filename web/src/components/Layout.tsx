@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Link, Outlet, useLocation } from 'react-router-dom';
 import { Icons } from './NavIcons';
+import GitGraphPanel from './GitGraphPanel';
 
 const navGroups = [
   {
@@ -28,6 +29,7 @@ const navGroups = [
       { path: '/ops/diagnostics', label: 'Diagnostics', icon: Icons.Stethoscope },
       { path: '/ops/logs', label: 'Logs', icon: Icons.AlignLeft },
       { path: '/ops/backups', label: 'Backups', icon: Icons.Archive },
+      { path: '/ops/git', label: 'Git Graph', icon: Icons.Activity },
     ]
   },
   {
@@ -42,6 +44,7 @@ const navGroups = [
 const Layout: React.FC = () => {
   const [isCollapsed, setIsCollapsed] = useState(false);
   const location = useLocation();
+  const showGitPanel = !location.pathname.startsWith('/ops/git');
 
   return (
     <div className="flex h-screen w-full bg-[var(--bg-primary)] text-[var(--text-primary)] overflow-hidden">
@@ -128,12 +131,15 @@ const Layout: React.FC = () => {
           </div>
         </header>
 
-        {/* Page Content */}
-        <main className="flex-1 overflow-auto bg-[var(--bg-primary)] p-6">
-          <React.Suspense fallback={<div className="flex items-center justify-center h-full text-[var(--text-muted)] animate-pulse">Loading...</div>}>
-            <Outlet />
-          </React.Suspense>
-        </main>
+        {/* Page Content + Git Graph Side Panel */}
+        <div className="flex min-h-0 flex-1">
+          <main className="flex-1 overflow-auto bg-[var(--bg-primary)] p-6">
+            <React.Suspense fallback={<div className="flex items-center justify-center h-full text-[var(--text-muted)] animate-pulse">Loading...</div>}>
+              <Outlet />
+            </React.Suspense>
+          </main>
+          {showGitPanel && <GitGraphPanel />}
+        </div>
 
         {/* Status Strip */}
         <footer className="h-8 bg-[var(--bg-secondary)] border-t border-[var(--border)] flex items-center px-4 text-xs font-mono text-[var(--text-muted)] shrink-0 justify-between">
