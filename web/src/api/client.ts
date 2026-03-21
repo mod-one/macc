@@ -3,6 +3,7 @@ import type {
   ApiApplyRequest,
   ApiApplyResponse,
   ApiBackup,
+  ApiBackupRestoreResult,
   ApiCoordinatorAction,
   ApiCoordinatorCommandResult,
   ApiCoordinatorStatus,
@@ -446,8 +447,8 @@ export async function restoreBackup(
   id: string,
   request: ApiRestoreRequest,
   options: ApiRequestOptions = {},
-): Promise<ApiActionResult> {
-  return sendJson<ApiActionResult, ApiRestoreRequest>(
+): Promise<ApiBackupRestoreResult> {
+  return sendJson<ApiBackupRestoreResult, ApiRestoreRequest>(
     `/backups/${encodeURIComponent(id)}/restore`,
     'POST',
     options,
