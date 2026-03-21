@@ -18,7 +18,8 @@ use macc_core::doctor::{ToolCheck, ToolStatus};
 use macc_core::engine::CoordinatorEvent;
 use macc_core::resolve::CliOverrides;
 use macc_core::service::coordinator_workflow::{
-    CoordinatorCommand, CoordinatorCommandRequest, CoordinatorCommandResult, CoordinatorStatus,
+    coordinator_execute_command as execute_coordinator_workflow_command, CoordinatorCommand,
+    CoordinatorCommandRequest, CoordinatorCommandResult, CoordinatorStatus,
 };
 use macc_core::service::interaction::InteractionHandler;
 use macc_core::tool::spec::{CheckSeverity, DoctorCheckKind};
@@ -252,6 +253,7 @@ fn registry_event(task_id: &str, event_id: &str, event_type: &str) -> Coordinato
 struct WebTestEngine {
     inner: TestEngine,
     use_fixture_plan_from_overrides: bool,
+    real_tool_cooldown_commands: bool,
     plan_result:
         std::sync::Mutex<Option<std::result::Result<macc_core::plan::ActionPlan, MaccError>>>,
     run_result: std::sync::Mutex<Option<std::result::Result<CoordinatorCommandResult, MaccError>>>,
@@ -270,6 +272,7 @@ impl WebTestEngine {
         Self {
             inner: TestEngine::with_fixtures(),
             use_fixture_plan_from_overrides: false,
+            real_tool_cooldown_commands: false,
             plan_result: std::sync::Mutex::new(None),
             run_result: std::sync::Mutex::new(Some(result)),
             worktree_run_result: std::sync::Mutex::new(Some(Ok(()))),
@@ -287,6 +290,7 @@ impl WebTestEngine {
         Self {
             inner: TestEngine::with_fixtures(),
             use_fixture_plan_from_overrides: false,
+            real_tool_cooldown_commands: false,
             plan_result: std::sync::Mutex::new(None),
             run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
             worktree_run_result: std::sync::Mutex::new(Some(Ok(()))),
@@ -304,6 +308,7 @@ impl WebTestEngine {
         Self {
             inner: TestEngine::with_fixtures(),
             use_fixture_plan_from_overrides: false,
+            real_tool_cooldown_commands: false,
             plan_result: std::sync::Mutex::new(None),
             run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
             worktree_run_result: std::sync::Mutex::new(Some(Ok(()))),
@@ -321,6 +326,7 @@ impl WebTestEngine {
         Self {
             inner: TestEngine::with_fixtures(),
             use_fixture_plan_from_overrides: false,
+            real_tool_cooldown_commands: false,
             plan_result: std::sync::Mutex::new(None),
             run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
             worktree_run_result: std::sync::Mutex::new(Some(Ok(()))),
@@ -338,6 +344,7 @@ impl WebTestEngine {
         Self {
             inner: TestEngine::with_fixtures(),
             use_fixture_plan_from_overrides: false,
+            real_tool_cooldown_commands: false,
             plan_result: std::sync::Mutex::new(None),
             run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
             worktree_run_result: std::sync::Mutex::new(Some(Ok(()))),
@@ -358,6 +365,7 @@ impl WebTestEngine {
         Self {
             inner: TestEngine::with_fixtures(),
             use_fixture_plan_from_overrides: false,
+            real_tool_cooldown_commands: false,
             plan_result: std::sync::Mutex::new(None),
             run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
             worktree_run_result: std::sync::Mutex::new(Some(Ok(()))),
@@ -375,6 +383,7 @@ impl WebTestEngine {
         Self {
             inner: TestEngine::with_fixtures(),
             use_fixture_plan_from_overrides: false,
+            real_tool_cooldown_commands: false,
             plan_result: std::sync::Mutex::new(Some(plan)),
             run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
             worktree_run_result: std::sync::Mutex::new(Some(Ok(()))),
@@ -392,6 +401,7 @@ impl WebTestEngine {
         Self {
             inner: TestEngine::with_fixtures(),
             use_fixture_plan_from_overrides: true,
+            real_tool_cooldown_commands: false,
             plan_result: std::sync::Mutex::new(None),
             run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
             worktree_run_result: std::sync::Mutex::new(Some(Ok(()))),
@@ -409,9 +419,28 @@ impl WebTestEngine {
         Self {
             inner: TestEngine::with_fixtures(),
             use_fixture_plan_from_overrides: false,
+            real_tool_cooldown_commands: false,
             plan_result: std::sync::Mutex::new(None),
             run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
             worktree_run_result: std::sync::Mutex::new(Some(result)),
+            worktree_run_calls: std::sync::Mutex::new(Vec::new()),
+            cleanup_result: std::sync::Mutex::new(Some(Ok(()))),
+            stop_result: std::sync::Mutex::new(Some(Ok(()))),
+            resume_result: std::sync::Mutex::new(Some(Ok(()))),
+            doctor_snapshots: std::sync::Mutex::new(None),
+            doctor_fix_result: std::sync::Mutex::new(None),
+            coordinator_events: std::sync::Mutex::new(vec![Vec::new()]),
+        }
+    }
+
+    fn with_real_tool_cooldown_commands() -> Self {
+        Self {
+            inner: TestEngine::with_fixtures(),
+            use_fixture_plan_from_overrides: false,
+            real_tool_cooldown_commands: true,
+            plan_result: std::sync::Mutex::new(None),
+            run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
+            worktree_run_result: std::sync::Mutex::new(Some(Ok(()))),
             worktree_run_calls: std::sync::Mutex::new(Vec::new()),
             cleanup_result: std::sync::Mutex::new(Some(Ok(()))),
             stop_result: std::sync::Mutex::new(Some(Ok(()))),
@@ -509,10 +538,20 @@ impl macc_core::engine::Engine for WebTestEngine {
 
     fn coordinator_execute_command(
         &self,
-        _paths: &ProjectPaths,
-        _command: CoordinatorCommand,
-        _request: CoordinatorCommandRequest<'_>,
+        paths: &ProjectPaths,
+        command: CoordinatorCommand,
+        request: CoordinatorCommandRequest<'_>,
     ) -> Result<CoordinatorCommandResult> {
+        if self.real_tool_cooldown_commands
+            && matches!(
+                command,
+                CoordinatorCommand::ToolCooldownList
+                    | CoordinatorCommand::ToolCooldownSet { .. }
+                    | CoordinatorCommand::ToolCooldownClear { .. }
+            )
+        {
+            return execute_coordinator_workflow_command(&self.inner, paths, command, request);
+        }
         self.run_result
             .lock()
             .expect("lock")
