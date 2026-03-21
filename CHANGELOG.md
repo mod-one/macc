@@ -8,6 +8,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ## [Unreleased]
 
 ### Added
+- Notifications center in the app shell for coordinator alerts and task status.
+- Real-time notification system using SSE event stream.
+- New notification store and hook for global notification management.
+- Notifications drawer for viewing and dismissing notifications.
 - Coordinator full-cycle command and stop flow improvements.
 - Worktree/performer logging improvements and `macc logs tail`.
 - Embedded automation/tool catalog defaults for clean-machine bootstrap.
