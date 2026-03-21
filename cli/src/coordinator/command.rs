@@ -223,5 +223,37 @@ pub fn handle(
             println!("No tasks to audit.");
         }
     }
+    if let Some(cooldowns) = response.tool_cooldowns {
+        if cooldowns.is_empty() {
+            println!("No tool cooldowns active.");
+        } else {
+            println!("{:<16} {:>12} {:>14}", "TOOL", "REMAINING", "BACKOFF");
+            for entry in &cooldowns {
+                let remaining = if entry.remaining_seconds > 0 {
+                    format_duration_human(entry.remaining_seconds as u64)
+                } else {
+                    "expired".to_string()
+                };
+                println!(
+                    "{:<16} {:>12} {:>12}s",
+                    entry.tool_id, remaining, entry.backoff_seconds
+                );
+            }
+        }
+    }
     Ok(())
+}
+
+fn format_duration_human(secs: u64) -> String {
+    if secs >= 3600 {
+        let h = secs / 3600;
+        let m = (secs % 3600) / 60;
+        format!("{}h{}m", h, m)
+    } else if secs >= 60 {
+        let m = secs / 60;
+        let s = secs % 60;
+        format!("{}m{}s", m, s)
+    } else {
+        format!("{}s", secs)
+    }
 }

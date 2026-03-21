@@ -939,11 +939,47 @@ fn apply_job_completion_typed(
     }
 
     // ── Quota exhausted (E602) ────────────────────────────────────────
-    // Block the task immediately — quota requires human intervention.
+    // Register a long cooldown for the exhausted tool and re-queue the task
+    // so the dispatch loop can fall back to a different tool.  The cooldown
+    // uses the provider's reset time when available, otherwise a default of
+    // 1 hour.  The task is NOT blocked — it goes back to its pre-phase
+    // state so pick_tool() can route it to another tool.
     if error_code == E602_QUOTA_EXHAUSTED {
-        task.set_workflow_state(WorkflowState::Blocked);
+        let retry_after = classified_tool_error
+            .as_ref()
+            .and_then(|te| te.retry_after_seconds);
+        let cooldown = retry_after.unwrap_or(3600); // default 1 hour
+        let delayed_until_str = chrono::DateTime::parse_from_rfc3339(now)
+            .ok()
+            .and_then(|dt| dt.checked_add_signed(chrono::Duration::seconds(cooldown as i64)))
+            .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+            .unwrap_or_default();
+        // Update per-tool throttle state stored in extra.
+        let tool_id_str = task.tool.as_deref().unwrap_or("").to_string();
         let runtime = task.ensure_runtime();
-        runtime.set_status(RuntimeStatus::Failed);
+        let mut throttle: ToolThrottleState = runtime
+            .extra
+            .get("throttle_state")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_else(|| ToolThrottleState {
+                tool_id: tool_id_str.clone(),
+                ..Default::default()
+            });
+        let rli = RateLimitInfo {
+            tool_id: tool_id_str,
+            error_code: E602_QUOTA_EXHAUSTED.to_string(),
+            retry_after_seconds: Some(cooldown),
+            detected_at: now_ts,
+            source_header: None,
+        };
+        update_throttle_state(&mut throttle, &rli, cooldown, now_ts);
+        if let Ok(v) = serde_json::to_value(&throttle) {
+            runtime.extra.insert("throttle_state".to_string(), v);
+        }
+        // Short delay before re-dispatch so the tool selector can pick a
+        // fallback tool on the next advance cycle.
+        runtime.delayed_until = Some(delayed_until_str.clone());
+        runtime.set_status(RuntimeStatus::Idle);
         runtime.completion_kind = None;
         runtime.pid = None;
         runtime.set_last_error_details(
@@ -951,13 +987,20 @@ fn apply_job_completion_typed(
             error_origin.clone(),
             error_message.clone(),
         );
-        runtime.last_error = Some(error_message.clone());
+        runtime.last_error = Some(format!("quota exhausted; cooldown {}s", cooldown));
         store_classified_error_in_extra(runtime, &classified_tool_error, now_ts);
+        // Re-queue the task as Todo so the dispatch loop can route it to a
+        // fallback tool.  The per-tool throttle entry ensures the exhausted
+        // tool is skipped during pick_tool().
+        task.set_workflow_state(WorkflowState::Todo);
         task.touch_state_changed(now);
         return JobCompletionResult {
             should_retry: false,
-            status_label: "quota_exhausted",
-            detail: error_message,
+            status_label: "quota_exhausted_requeue",
+            detail: format!(
+                "quota exhausted; cooldown {}s, re-queued for tool fallback",
+                cooldown
+            ),
             completion_kind: None,
             tool_error: classified_tool_error,
         };
@@ -1607,6 +1650,36 @@ pub async fn run_native_control_plane(
         }
     }
 
+    let mut run_state = CoordinatorRunState::new();
+    // ── Part D: restore persisted throttle state on startup ─────────────
+    {
+        let storage_paths =
+            crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(
+                &crate::ProjectPaths::from_root(repo_root),
+            );
+        let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
+        match sqlite.load_throttle_registry() {
+            Ok(reg) if !reg.is_empty() => {
+                if let Some(log) = logger {
+                    let _ = log.note(format!(
+                        "- Restored {} persisted tool throttle(s)",
+                        reg.len()
+                    ));
+                }
+                run_state.throttle_registry = reg;
+            }
+            Ok(_) => {} // empty — nothing to restore
+            Err(e) => {
+                if let Some(log) = logger {
+                    let _ = log.note(format!(
+                        "- Warning: failed to load persisted throttle state: {}",
+                        e
+                    ));
+                }
+            }
+        }
+    }
+
     let mut backend = NativeControlPlaneBackend {
         repo_root,
         canonical,
@@ -1614,7 +1687,7 @@ pub async fn run_native_control_plane(
         env_cfg,
         logger,
         prd_file,
-        run_state: CoordinatorRunState::new(),
+        run_state,
         phase_runner_max_attempts,
         coordinator_tool_override,
         phase_timeout_seconds,
@@ -2271,9 +2344,9 @@ mod tests {
         let (mut task_val, input) =
             make_failure_input("codex", "429 insufficient_quota", "already_satisfied");
         let out = apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
-        // Quota exhausted: blocked immediately, not overridden to success.
-        assert_eq!(out.status_label, "quota_exhausted");
-        assert_eq!(task_val["state"], "blocked");
+        // Quota exhausted: re-queued with cooldown, not overridden to success.
+        assert_eq!(out.status_label, "quota_exhausted_requeue");
+        assert_eq!(task_val["state"], "todo");
     }
 
     #[test]
@@ -2369,21 +2442,21 @@ mod tests {
     }
 
     #[test]
-    fn e602_blocks_task_as_quota_exhausted() {
+    fn e602_requeues_task_with_cooldown() {
         let (mut task_val, input) = make_failure_input(
             "codex",
             "429 insufficient_quota: You exceeded your current quota",
             "",
         );
         let out = apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
-        assert_eq!(out.status_label, "quota_exhausted");
-        assert_eq!(task_val["state"], "blocked");
-        assert_eq!(task_val["task_runtime"]["status"], "failed");
+        assert_eq!(out.status_label, "quota_exhausted_requeue");
+        assert_eq!(task_val["state"], "todo");
+        assert_eq!(task_val["task_runtime"]["status"], "idle");
         assert_eq!(task_val["task_runtime"]["last_error_code"], "E602");
-        // delayed_until must NOT be set for E602 (no retry)
+        // delayed_until MUST be set for re-queue cooldown
         assert!(
-            task_val["task_runtime"]["delayed_until"].is_null(),
-            "delayed_until must not be set for E602"
+            !task_val["task_runtime"]["delayed_until"].is_null(),
+            "delayed_until must be set for E602 re-queue"
         );
     }
 

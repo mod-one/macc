@@ -81,6 +81,8 @@ pub(super) struct ApiCoordinatorCommandResult {
     pub exported_events_path: Option<String>,
     pub removed_worktrees: Option<usize>,
     pub selected_task: Option<ApiSelectedTask>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_cooldowns: Option<Vec<ApiToolCooldownEntry>>,
 }
 
 impl From<CoordinatorCommandResult> for ApiCoordinatorCommandResult {
@@ -95,6 +97,28 @@ impl From<CoordinatorCommandResult> for ApiCoordinatorCommandResult {
                 .map(|path| path.to_string_lossy().into_owned()),
             removed_worktrees: result.removed_worktrees,
             selected_task: result.selected_task.map(ApiSelectedTask::from),
+            tool_cooldowns: result.tool_cooldowns.map(|entries| {
+                entries.into_iter().map(ApiToolCooldownEntry::from).collect()
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct ApiToolCooldownEntry {
+    pub tool_id: String,
+    pub throttled_until: u64,
+    pub remaining_seconds: i64,
+    pub backoff_seconds: u64,
+}
+
+impl From<macc_core::service::coordinator_workflow::ToolCooldownEntry> for ApiToolCooldownEntry {
+    fn from(e: macc_core::service::coordinator_workflow::ToolCooldownEntry) -> Self {
+        Self {
+            tool_id: e.tool_id,
+            throttled_until: e.throttled_until,
+            remaining_seconds: e.remaining_seconds,
+            backoff_seconds: e.backoff_seconds,
         }
     }
 }

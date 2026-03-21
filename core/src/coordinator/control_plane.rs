@@ -1,3 +1,4 @@
+use crate::coordinator::error_normalizer::ErrorNormalizer;
 use crate::coordinator::helpers::{
     append_coordinator_event, append_coordinator_event_with_severity, build_non_task_worker_slug,
     count_pool_worktrees, find_reusable_worktree_native, now_iso_coordinator,
@@ -5,6 +6,9 @@ use crate::coordinator::helpers::{
 };
 use crate::coordinator::ipc::{ensure_performer_ipc_listener, read_performer_ipc_addr};
 use crate::coordinator::model::{PrdInput, Task, TaskRegistry};
+use crate::coordinator::rate_limit::{
+    update_throttle_state, RateLimitInfo, ToolThrottleState, E602_QUOTA_EXHAUSTED,
+};
 use crate::coordinator::runtime::{
     CoordinatorJob, CoordinatorMergeJob, CoordinatorRunState, CoordinatorRuntimeEventKind,
 };
@@ -12,7 +16,7 @@ use crate::coordinator::types::CoordinatorEnvConfig;
 use crate::coordinator::{engine as coordinator_engine, runtime as coordinator_runtime};
 use crate::{MaccError, Result};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 pub trait CoordinatorLog: Sync {
@@ -84,6 +88,184 @@ fn resolve_merge_timeout_seconds(
         .merge_job_timeout_seconds
         .or_else(|| coordinator.and_then(|c| c.merge_job_timeout_seconds))
         .unwrap_or(0)
+}
+
+/// Persist the volatile throttle registry to SQLite so cooldowns survive restart.
+fn persist_throttle_registry(
+    repo_root: &Path,
+    registry: &crate::coordinator::rate_limit::ToolThrottleRegistry,
+) {
+    let paths = crate::ProjectPaths::from_root(repo_root);
+    let storage_paths =
+        crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&paths);
+    let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
+    let _ = sqlite.save_throttle_registry(registry);
+}
+
+/// Detect E602 (quota exhaustion) in a phase failure reason string.
+///
+/// The phase executor returns a free-form error string. We look for known
+/// markers that indicate the underlying tool hit a hard quota limit:
+/// - The canonical E602 error code
+/// - Provider-specific `TerminalQuotaError`
+/// - Generic "quota" + "exhausted" patterns
+fn is_quota_exhaustion_in_reason(reason: &str) -> bool {
+    if reason.contains(E602_QUOTA_EXHAUSTED) {
+        return true;
+    }
+    let lower = reason.to_ascii_lowercase();
+    if lower.contains("terminalquotaerror") {
+        return true;
+    }
+    if lower.contains("quota") && (lower.contains("exhaust") || lower.contains("exceeded")) {
+        return true;
+    }
+    if lower.contains("exhausted your capacity") {
+        return true;
+    }
+    false
+}
+
+/// Try to classify a phase failure reason via the per-adapter error normalizers.
+/// Returns the parsed `retry_after_seconds` if the error is E602.
+fn extract_quota_cooldown_from_reason(reason: &str, tool_id: &str) -> Option<u64> {
+    let normalizer = coordinator_engine::get_normalizer_for_tool(tool_id)?;
+    let te = normalizer.normalize(1, reason, reason)?;
+    if te.error_code == E602_QUOTA_EXHAUSTED {
+        // Return the provider's reset time, or a default of 1 hour.
+        Some(te.retry_after_seconds.unwrap_or(3600))
+    } else {
+        None
+    }
+}
+
+/// Reset a worktree to a known-good commit, discarding any uncommitted or
+/// partially committed changes made during a failed phase attempt.
+fn rollback_worktree_to_sha(worktree_path: &Path, target_sha: &str) -> bool {
+    let reset = crate::git::run_git_output_mapped(
+        worktree_path,
+        &["reset", "--hard", target_sha],
+        "rollback worktree to pre-phase SHA",
+    );
+    let clean = crate::git::run_git_output_mapped(
+        worktree_path,
+        &["clean", "-fd"],
+        "clean worktree after rollback",
+    );
+    reset.map(|o| o.status.success()).unwrap_or(false)
+        && clean.map(|o| o.status.success()).unwrap_or(false)
+}
+
+/// Part A: handle E602 (quota exhaustion) detected during a phase (review/fix/integrate).
+///
+/// 1. Roll back the worktree to the pre-phase HEAD so partial changes are discarded.
+/// 2. Register the tool in the throttle registry so `pick_tool()` skips it.
+/// 3. Re-queue the task (→ Todo) with a `delayed_until` cooldown instead of marking
+///    it as a phase failure.
+fn handle_phase_quota_exhaustion(
+    repo_root: &Path,
+    registry: &mut serde_json::Value,
+    state: &mut CoordinatorRunState,
+    task_snapshot: &Task,
+    task_id: &str,
+    phase: &str,
+    reason: &str,
+    pre_phase_sha: Option<&str>,
+    worktree_path_str: Option<&str>,
+    now: &str,
+    logger: Option<&dyn CoordinatorLog>,
+) -> Result<()> {
+    let tool_id = task_snapshot.tool.as_deref().unwrap_or("unknown");
+
+    // ── Step 1: roll back worktree ─────────────────────────────────────
+    let rolled_back = match (worktree_path_str, pre_phase_sha) {
+        (Some(wp), Some(sha)) => {
+            let ok = rollback_worktree_to_sha(Path::new(wp), sha);
+            if let Some(log) = logger {
+                let _ = log.note(format!(
+                    "- E602 rollback task={} worktree={} sha={} ok={}",
+                    task_id, wp, sha, ok
+                ));
+            }
+            ok
+        }
+        _ => {
+            if let Some(log) = logger {
+                let _ = log.note(format!(
+                    "- E602 rollback skipped task={} (no worktree/sha)",
+                    task_id
+                ));
+            }
+            false
+        }
+    };
+
+    // ── Step 2: compute cooldown and register tool throttle ────────────
+    let cooldown = extract_quota_cooldown_from_reason(reason, tool_id).unwrap_or(3600);
+    let now_epoch = chrono::DateTime::parse_from_rfc3339(now)
+        .map(|dt| dt.timestamp() as u64)
+        .unwrap_or(0);
+    let throttled_until = now_epoch + cooldown;
+
+    let ts = ToolThrottleState {
+        tool_id: tool_id.to_string(),
+        throttled_until,
+        consecutive_429_count: 1,
+        backoff_seconds: cooldown,
+        last_rate_limit_info: Some(RateLimitInfo {
+            tool_id: tool_id.to_string(),
+            error_code: E602_QUOTA_EXHAUSTED.to_string(),
+            retry_after_seconds: Some(cooldown),
+            detected_at: now_epoch,
+            source_header: None,
+        }),
+    };
+    state.throttle_registry.insert(tool_id.to_string(), ts);
+    persist_throttle_registry(repo_root, &state.throttle_registry);
+
+    // ── Step 3: re-queue the task ──────────────────────────────────────
+    let delayed_until_str = chrono::DateTime::parse_from_rfc3339(now)
+        .ok()
+        .and_then(|dt| dt.checked_add_signed(chrono::Duration::seconds(cooldown as i64)))
+        .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .unwrap_or_default();
+
+    let mut typed = TaskRegistry::from_value(registry)?;
+    if let Some(task) = typed.find_task_mut(task_id) {
+        let runtime = task.ensure_runtime();
+        runtime.delayed_until = Some(delayed_until_str.clone());
+        runtime.set_status(crate::coordinator::RuntimeStatus::Idle);
+        runtime.current_phase = None;
+        runtime.completion_kind = None;
+        runtime.pid = None;
+        runtime.last_error = Some(format!(
+            "E602 during {} phase; rolled_back={}; cooldown {}s",
+            phase, rolled_back, cooldown
+        ));
+        task.set_workflow_state(crate::coordinator::WorkflowState::Todo);
+        task.touch_state_changed(now);
+    }
+    *registry = typed.to_value()?;
+
+    // ── Log event ──────────────────────────────────────────────────────
+    let msg = format!(
+        "phase_quota_exhaustion task={} phase={} tool={} cooldown={}s rolled_back={} delayed_until={}",
+        task_id, phase, tool_id, cooldown, rolled_back, delayed_until_str
+    );
+    let _ = append_coordinator_event_with_severity(
+        repo_root,
+        "phase_quota_exhaustion",
+        task_id,
+        phase,
+        "requeued",
+        &msg,
+        "warning",
+    );
+    if let Some(log) = logger {
+        let _ = log.note(format!("- {}", msg));
+    }
+
+    Ok(())
 }
 
 async fn sanitize_worktree_to_base(worktree_path: &Path, base_branch: &str) -> Result<bool> {
@@ -744,6 +926,14 @@ pub async fn advance_tasks_native(
                                 task_id
                             ))
                         })?;
+
+                // ── Part A: snapshot HEAD before the phase so we can roll back
+                // if the tool hits quota exhaustion mid-phase. ──────────────────
+                let worktree_path_str = task_snapshot.worktree_path().map(|s| s.to_string());
+                let pre_phase_sha = worktree_path_str
+                    .as_deref()
+                    .and_then(|wp| crate::git::head_commit(Path::new(wp)).ok());
+
                 let executor = NativePhaseExecutor { repo_root, logger };
                 if mode == "review" {
                     // block_in_place: the phase runner is synchronous blocking I/O (spawns
@@ -783,15 +973,33 @@ pub async fn advance_tasks_native(
                                 &now,
                             )?
                         }
-                        Err(reason) => coordinator_engine::apply_phase_outcome_in_registry(
-                            &mut registry,
-                            &task_id,
-                            mode,
-                            transition,
-                            None,
-                            Some(&reason),
-                            &now,
-                        )?,
+                        Err(reason) => {
+                            if is_quota_exhaustion_in_reason(&reason) {
+                                handle_phase_quota_exhaustion(
+                                    repo_root,
+                                    &mut registry,
+                                    state,
+                                    &task_snapshot,
+                                    &task_id,
+                                    &mode,
+                                    &reason,
+                                    pre_phase_sha.as_deref(),
+                                    worktree_path_str.as_deref(),
+                                    &now,
+                                    logger,
+                                )?;
+                            } else {
+                                coordinator_engine::apply_phase_outcome_in_registry(
+                                    &mut registry,
+                                    &task_id,
+                                    mode,
+                                    transition,
+                                    None,
+                                    Some(&reason),
+                                    &now,
+                                )?;
+                            }
+                        }
                     }
                 } else {
                     match tokio::task::block_in_place(|| {
@@ -812,15 +1020,33 @@ pub async fn advance_tasks_native(
                             None,
                             &now,
                         )?,
-                        Err(reason) => coordinator_engine::apply_phase_outcome_in_registry(
-                            &mut registry,
-                            &task_id,
-                            mode,
-                            transition,
-                            None,
-                            Some(&reason),
-                            &now,
-                        )?,
+                        Err(reason) => {
+                            if is_quota_exhaustion_in_reason(&reason) {
+                                handle_phase_quota_exhaustion(
+                                    repo_root,
+                                    &mut registry,
+                                    state,
+                                    &task_snapshot,
+                                    &task_id,
+                                    &mode,
+                                    &reason,
+                                    pre_phase_sha.as_deref(),
+                                    worktree_path_str.as_deref(),
+                                    &now,
+                                    logger,
+                                )?;
+                            } else {
+                                coordinator_engine::apply_phase_outcome_in_registry(
+                                    &mut registry,
+                                    &task_id,
+                                    mode,
+                                    transition,
+                                    None,
+                                    Some(&reason),
+                                    &now,
+                                )?;
+                            }
+                        }
                     }
                 }
                 progressed = true;
@@ -1005,6 +1231,7 @@ pub async fn monitor_active_jobs_native(
                             >(ts_val.clone())
                             {
                                 state.throttle_registry.insert(job.tool.clone(), ts);
+                                persist_throttle_registry(repo_root, &state.throttle_registry);
                             }
                         }
                     }
@@ -1041,6 +1268,7 @@ pub async fn monitor_active_jobs_native(
                     // re-enabled for future tasks.
                     if state.throttle_registry.contains_key(&job.tool) {
                         state.throttle_registry.remove(&job.tool);
+                        persist_throttle_registry(repo_root, &state.throttle_registry);
                         if resolve_rate_limit_throttle_parallel(env_cfg, coordinator) {
                             let new_val = state.restore_parallel();
                             let msg = format!(

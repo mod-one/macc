@@ -2487,6 +2487,7 @@ async fn coordinator_run_endpoint_returns_envelope() {
             is_fallback: false,
         }),
         audit_prd_report: None,
+        tool_cooldowns: None,
     };
     let state = test_web_state(
         &root,
@@ -2638,6 +2639,7 @@ async fn coordinator_dispatch_endpoint_returns_envelope() {
             is_fallback: false,
         }),
         audit_prd_report: None,
+        tool_cooldowns: None,
     };
     let state = test_web_state(
         &root,

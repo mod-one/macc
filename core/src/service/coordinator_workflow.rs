@@ -135,6 +135,14 @@ pub enum CoordinatorCommand {
         task_id: String,
         metric: String,
     },
+    ToolCooldownList,
+    ToolCooldownSet {
+        tool: String,
+        duration: u64,
+    },
+    ToolCooldownClear {
+        tool: String,
+    },
     Stop {
         graceful: bool,
         remove_worktrees: bool,
@@ -166,6 +174,15 @@ pub struct CoordinatorCommandResult {
     pub removed_worktrees: Option<usize>,
     pub selected_task: Option<SelectedTask>,
     pub audit_prd_report: Option<crate::coordinator::prd_auditor::AuditPrdReport>,
+    pub tool_cooldowns: Option<Vec<ToolCooldownEntry>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolCooldownEntry {
+    pub tool_id: String,
+    pub throttled_until: u64,
+    pub remaining_seconds: i64,
+    pub backoff_seconds: u64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -238,6 +255,9 @@ pub fn coordinator_command_display_name(command: &CoordinatorCommand) -> &'stati
         CoordinatorCommand::StateIncrementRetries { .. } => "state-increment-retries",
         CoordinatorCommand::StateUpsertSloWarning { .. } => "state-upsert-slo-warning",
         CoordinatorCommand::StateSloMetric { .. } => "state-slo-metric",
+        CoordinatorCommand::ToolCooldownList => "tool-cooldown-list",
+        CoordinatorCommand::ToolCooldownSet { .. } => "tool-cooldown-set",
+        CoordinatorCommand::ToolCooldownClear { .. } => "tool-cooldown-clear",
         CoordinatorCommand::Stop { .. } => "stop",
     }
 }
@@ -416,6 +436,9 @@ pub fn coordinator_command_invocation(
         | CoordinatorCommand::StateIncrementRetries { .. }
         | CoordinatorCommand::StateUpsertSloWarning { .. }
         | CoordinatorCommand::StateSloMetric { .. }
+        | CoordinatorCommand::ToolCooldownList
+        | CoordinatorCommand::ToolCooldownSet { .. }
+        | CoordinatorCommand::ToolCooldownClear { .. }
         | CoordinatorCommand::RunCycle
         | CoordinatorCommand::GetStatus
         | CoordinatorCommand::ResumePausedRun
@@ -501,6 +524,9 @@ pub fn coordinator_command_from_name(
         "state-increment-retries" => Ok(parse_state_increment_retries_command(extra_args)?),
         "state-upsert-slo-warning" => Ok(parse_state_upsert_slo_warning_command(extra_args)?),
         "state-slo-metric" => Ok(parse_state_slo_metric_command(extra_args)?),
+        "tool-cooldown-list" | "tool-cooldown" => Ok(CoordinatorCommand::ToolCooldownList),
+        "tool-cooldown-set" => Ok(parse_tool_cooldown_set_command(extra_args)?),
+        "tool-cooldown-clear" => Ok(parse_tool_cooldown_clear_command(extra_args)?),
         "stop" => Ok(CoordinatorCommand::Stop {
             graceful,
             remove_worktrees,
@@ -947,6 +973,17 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
             args.insert("task-id".to_string(), task_id);
             args.insert("metric".to_string(), metric);
             engine.coordinator_state_slo_metric(&paths.root, &args)?;
+        }
+        CoordinatorCommand::ToolCooldownList => {
+            result.tool_cooldowns = Some(tool_cooldown_list(paths)?);
+        }
+        CoordinatorCommand::ToolCooldownSet { tool, duration } => {
+            tool_cooldown_set(paths, &tool, duration)?;
+            result.tool_cooldowns = Some(tool_cooldown_list(paths)?);
+        }
+        CoordinatorCommand::ToolCooldownClear { tool } => {
+            tool_cooldown_clear(paths, &tool)?;
+            result.tool_cooldowns = Some(tool_cooldown_list(paths)?);
         }
         CoordinatorCommand::Stop {
             graceful,
@@ -2413,6 +2450,75 @@ fn parse_json_string_vec_map(
         out.insert(k.clone(), values);
     }
     Ok(out)
+}
+
+// ── Tool cooldown CLI parse/core ────────────────────────────────────────
+
+fn parse_tool_cooldown_set_command(args: &[String]) -> Result<CoordinatorCommand> {
+    let map = parse_coordinator_extra_kv_args(args)?;
+    let tool = map
+        .get("tool")
+        .cloned()
+        .ok_or_else(|| MaccError::Validation("--tool is required".into()))?;
+    let duration_str = map
+        .get("duration")
+        .cloned()
+        .ok_or_else(|| MaccError::Validation("--duration <seconds> is required".into()))?;
+    let duration: u64 = duration_str
+        .parse()
+        .map_err(|_| MaccError::Validation(format!("Invalid duration: '{}'", duration_str)))?;
+    Ok(CoordinatorCommand::ToolCooldownSet { tool, duration })
+}
+
+fn parse_tool_cooldown_clear_command(args: &[String]) -> Result<CoordinatorCommand> {
+    let map = parse_coordinator_extra_kv_args(args)?;
+    let tool = map
+        .get("tool")
+        .cloned()
+        .ok_or_else(|| MaccError::Validation("--tool is required".into()))?;
+    Ok(CoordinatorCommand::ToolCooldownClear { tool })
+}
+
+fn tool_cooldown_list(paths: &ProjectPaths) -> Result<Vec<ToolCooldownEntry>> {
+    let storage_paths = CoordinatorStoragePaths::from_project_paths(paths);
+    let sqlite = SqliteStorage::new(storage_paths);
+    let registry = sqlite.load_throttle_registry()?;
+    let now_epoch = chrono::Utc::now().timestamp() as u64;
+    let mut entries: Vec<ToolCooldownEntry> = registry
+        .into_iter()
+        .map(|(tool_id, state)| {
+            let remaining = state.throttled_until as i64 - now_epoch as i64;
+            ToolCooldownEntry {
+                tool_id,
+                throttled_until: state.throttled_until,
+                remaining_seconds: remaining,
+                backoff_seconds: state.backoff_seconds,
+            }
+        })
+        .collect();
+    entries.sort_by(|a, b| a.tool_id.cmp(&b.tool_id));
+    Ok(entries)
+}
+
+fn tool_cooldown_set(paths: &ProjectPaths, tool: &str, duration: u64) -> Result<()> {
+    let storage_paths = CoordinatorStoragePaths::from_project_paths(paths);
+    let sqlite = SqliteStorage::new(storage_paths);
+    let now_epoch = chrono::Utc::now().timestamp() as u64;
+    let state = crate::coordinator::rate_limit::ToolThrottleState {
+        tool_id: tool.to_string(),
+        throttled_until: now_epoch + duration,
+        consecutive_429_count: 0,
+        backoff_seconds: duration,
+        last_rate_limit_info: None,
+    };
+    sqlite.upsert_tool_throttle(tool, &state)
+}
+
+fn tool_cooldown_clear(paths: &ProjectPaths, tool: &str) -> Result<()> {
+    let storage_paths = CoordinatorStoragePaths::from_project_paths(paths);
+    let sqlite = SqliteStorage::new(storage_paths);
+    sqlite.delete_tool_throttle(tool)?;
+    Ok(())
 }
 
 #[cfg(test)]

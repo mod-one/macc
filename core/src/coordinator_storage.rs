@@ -563,6 +563,12 @@ impl SqliteStorage {
               payload_json TEXT NOT NULL,
               updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS tool_throttle (
+              tool_id TEXT PRIMARY KEY,
+              throttled_until INTEGER NOT NULL,
+              payload_json TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
             ",
         )
         .map_err(sql_err)?;
@@ -1426,6 +1432,99 @@ impl CoordinatorStorage for SqliteStorage {
 
         tx.commit().map_err(sql_err)?;
         Ok(())
+    }
+}
+
+// ── Tool throttle persistence (inherent impl, not part of the trait) ───
+
+impl SqliteStorage {
+    /// Load the persisted tool throttle registry from SQLite.
+    pub fn load_throttle_registry(
+        &self,
+    ) -> Result<crate::coordinator::rate_limit::ToolThrottleRegistry> {
+        let conn = self.open()?;
+        self.init_schema(&conn)?;
+        let mut registry = crate::coordinator::rate_limit::ToolThrottleRegistry::new();
+        let mut stmt = conn
+            .prepare("SELECT tool_id, payload_json FROM tool_throttle")
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(sql_err)?;
+        for row in rows {
+            let (tool_id, payload) = row.map_err(sql_err)?;
+            if let Ok(state) =
+                serde_json::from_str::<crate::coordinator::rate_limit::ToolThrottleState>(&payload)
+            {
+                registry.insert(tool_id, state);
+            }
+        }
+        Ok(registry)
+    }
+
+    /// Persist the full tool throttle registry to SQLite (replace-all).
+    pub fn save_throttle_registry(
+        &self,
+        registry: &crate::coordinator::rate_limit::ToolThrottleRegistry,
+    ) -> Result<()> {
+        let mut conn = self.open()?;
+        self.init_schema(&conn)?;
+        let tx = conn.transaction().map_err(sql_err)?;
+        tx.execute("DELETE FROM tool_throttle", [])
+            .map_err(sql_err)?;
+        let now = now_iso_string();
+        for (tool_id, state) in registry {
+            let payload =
+                serde_json::to_string(state).map_err(|e| MaccError::Storage {
+                    backend: "sqlite",
+                    message: format!("Failed to serialize throttle state for {}: {}", tool_id, e),
+                })?;
+            tx.execute(
+                "INSERT INTO tool_throttle (tool_id, throttled_until, payload_json, updated_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![tool_id, state.throttled_until as i64, payload, now],
+            )
+            .map_err(sql_err)?;
+        }
+        tx.commit().map_err(sql_err)?;
+        Ok(())
+    }
+
+    /// Upsert a single tool's throttle state.
+    pub fn upsert_tool_throttle(
+        &self,
+        tool_id: &str,
+        state: &crate::coordinator::rate_limit::ToolThrottleState,
+    ) -> Result<()> {
+        let conn = self.open()?;
+        self.init_schema(&conn)?;
+        let now = now_iso_string();
+        let payload = serde_json::to_string(state).map_err(|e| MaccError::Storage {
+            backend: "sqlite",
+            message: format!("Failed to serialize throttle state for {}: {}", tool_id, e),
+        })?;
+        conn.execute(
+            "INSERT OR REPLACE INTO tool_throttle (tool_id, throttled_until, payload_json, updated_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![tool_id, state.throttled_until as i64, payload, now],
+        )
+        .map_err(sql_err)?;
+        Ok(())
+    }
+
+    /// Remove a single tool from the throttle registry.
+    pub fn delete_tool_throttle(&self, tool_id: &str) -> Result<bool> {
+        let conn = self.open()?;
+        self.init_schema(&conn)?;
+        let changed = conn
+            .execute(
+                "DELETE FROM tool_throttle WHERE tool_id = ?1",
+                params![tool_id],
+            )
+            .map_err(sql_err)?;
+        Ok(changed > 0)
     }
 }
 
