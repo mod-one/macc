@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Link, Outlet, useLocation } from 'react-router-dom';
 import { Icons } from './NavIcons';
 import GitGraphPanel from './GitGraphPanel';
+import CommandPalette from './CommandPalette';
 
 const navGroups = [
   {
@@ -44,8 +45,21 @@ const navGroups = [
 
 const Layout: React.FC = () => {
   const [isCollapsed, setIsCollapsed] = useState(false);
+  const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const location = useLocation();
   const showGitPanel = !location.pathname.startsWith('/ops/git');
+
+  React.useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        setIsCommandPaletteOpen(true);
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
 
   return (
     <div className="flex h-screen w-full bg-[var(--bg-primary)] text-[var(--text-primary)] overflow-hidden">
@@ -124,7 +138,11 @@ const Layout: React.FC = () => {
           </div>
           
           <div className="flex items-center">
-            <button className="flex items-center gap-2 px-3 py-1.5 bg-[var(--bg-secondary)] border border-[var(--border)] rounded-md text-sm text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:border-[var(--text-muted)] transition-colors">
+            <button
+              className="flex items-center gap-2 px-3 py-1.5 bg-[var(--bg-secondary)] border border-[var(--border)] rounded-md text-sm text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:border-[var(--text-muted)] transition-colors"
+              onClick={() => setIsCommandPaletteOpen(true)}
+              type="button"
+            >
               <Icons.Search />
               <span>Search...</span>
               <kbd className="ml-2 font-mono text-xs bg-[var(--bg-card)] px-1.5 py-0.5 rounded border border-[var(--border)]">Ctrl+K</kbd>
@@ -162,6 +180,7 @@ const Layout: React.FC = () => {
           </div>
         </footer>
       </div>
+      <CommandPalette open={isCommandPaletteOpen} onOpenChange={setIsCommandPaletteOpen} />
     </div>
   );
 };
