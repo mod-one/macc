@@ -50,3 +50,6 @@ export const LayoutGridIcon = createIcon('M3 3h7v7H3V3Zm11 0h7v7h-7V3ZM3 14h7v7H
 export const BranchIcon = createIcon('M18 15V6a2 2 0 0 0-2-2H8M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0Zm12 0a3 3 0 1 1-6 0 3 3 0 0 1 6 0Zm-12-6a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z');
 export const TrashIcon = createIcon('M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2');
 export const ArrowRightIcon = createIcon('m12 5 7 7-7 7M5 12h14');
+export const BellIcon = createIcon('M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9m3 13a3 3 0 0 0 6 0');
+export const InfoIcon = createIcon('M12 16h.01M12 8h.01M12 12h.01M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18Z');
+export const CheckCircleIcon = createIcon('M9 12l2 2 4-4m6 2a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z');

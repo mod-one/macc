@@ -23,3 +23,4 @@ export { Toast } from './Toast';
 export type { ToastProps, ToastVariant } from './Toast';
 export { WorktreeCard } from './WorktreeCard';
 export type { WorktreeCardProps } from './WorktreeCard';
+export { NotificationsDrawer } from './NotificationsDrawer';

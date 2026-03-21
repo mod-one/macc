@@ -2,6 +2,9 @@ import React, { useState } from 'react';
 import { Link, Outlet, useLocation } from 'react-router-dom';
 import { Icons } from './NavIcons';
 import GitGraphPanel from './GitGraphPanel';
+import { NotificationsDrawer } from './NotificationsDrawer';
+import { useNotificationStore } from '../stores/notificationStore';
+import { useNotificationCenter } from '../hooks/useNotificationCenter';
 
 const navGroups = [
   {
@@ -46,6 +49,10 @@ const Layout: React.FC = () => {
   const [isCollapsed, setIsCollapsed] = useState(false);
   const location = useLocation();
   const showGitPanel = !location.pathname.startsWith('/ops/git');
+  const { unreadCount, setIsOpen } = useNotificationStore();
+  
+  // Initialize global notification center
+  useNotificationCenter();
 
   return (
     <div className="flex h-screen w-full bg-[var(--bg-primary)] text-[var(--text-primary)] overflow-hidden">
@@ -123,7 +130,19 @@ const Layout: React.FC = () => {
             </div>
           </div>
           
-          <div className="flex items-center">
+          <div className="flex items-center gap-3">
+            <button 
+              onClick={() => setIsOpen(true)}
+              className="relative flex items-center justify-center h-9 w-9 bg-[var(--bg-secondary)] border border-[var(--border)] rounded-md text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:border-[var(--text-muted)] transition-colors"
+              title="Notifications"
+            >
+              <Icons.Bell />
+              {unreadCount > 0 && (
+                <span className="absolute -top-1 -right-1 flex h-4 w-4 items-center justify-center rounded-full bg-rose-500 text-[9px] font-bold text-white shadow-sm ring-2 ring-[var(--bg-primary)]">
+                  {unreadCount > 99 ? '9+' : unreadCount}
+                </span>
+              )}
+            </button>
             <button className="flex items-center gap-2 px-3 py-1.5 bg-[var(--bg-secondary)] border border-[var(--border)] rounded-md text-sm text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:border-[var(--text-muted)] transition-colors">
               <Icons.Search />
               <span>Search...</span>
@@ -162,6 +181,7 @@ const Layout: React.FC = () => {
           </div>
         </footer>
       </div>
+      <NotificationsDrawer />
     </div>
   );
 };
