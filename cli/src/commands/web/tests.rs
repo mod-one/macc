@@ -55,9 +55,7 @@ fn write_test_config(root: &std::path::Path) {
     fs::create_dir_all(paths.config_path.parent().expect("config dir")).expect("mkdir config");
     let mut canonical = CanonicalConfig::default();
     canonical.settings.offline = true;
-    let yaml = canonical
-        .to_yaml()
-        .expect("serialize config");
+    let yaml = canonical.to_yaml().expect("serialize config");
     fs::write(&paths.config_path, yaml).expect("write config");
 }
 
@@ -670,13 +668,13 @@ fn coordinator_event(seq: i64, event_id: &str, event_type: &str) -> CoordinatorE
 #[cfg(test)]
 mod tests {
     use super::*;
-    use macc_core::config::WebAssetsMode;
     use crate::commands::web::build_web_router;
     use crate::commands::web::errors;
     use crate::commands::web::WebState;
     use axum::body::Body;
     use axum::extract::Request;
     use http_body_util::BodyExt;
+    use macc_core::config::WebAssetsMode;
     use std::fs;
     use std::path::PathBuf;
     use std::sync::Arc;
