@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Link, Outlet, useLocation } from 'react-router-dom';
-import { Icons } from './Icons';
+import { Icons } from './NavIcons';
 
 const navGroups = [
   {

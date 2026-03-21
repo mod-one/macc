@@ -839,6 +839,7 @@ dependencies = [
  "inventory",
  "macc-adapter-shared",
  "macc-core",
+ "regex",
  "serde",
  "serde_json",
 ]
@@ -850,6 +851,7 @@ dependencies = [
  "inventory",
  "macc-adapter-shared",
  "macc-core",
+ "regex",
  "serde_json",
  "toml",
 ]
@@ -861,6 +863,7 @@ dependencies = [
  "inventory",
  "macc-adapter-shared",
  "macc-core",
+ "regex",
  "serde",
  "serde_json",
  "toml",

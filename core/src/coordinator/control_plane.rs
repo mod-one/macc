@@ -1,4 +1,3 @@
-use crate::coordinator::error_normalizer::ErrorNormalizer;
 use crate::coordinator::helpers::{
     append_coordinator_event, append_coordinator_event_with_severity, build_non_task_worker_slug,
     count_pool_worktrees, find_reusable_worktree_native, now_iso_coordinator,
@@ -6,9 +5,7 @@ use crate::coordinator::helpers::{
 };
 use crate::coordinator::ipc::{ensure_performer_ipc_listener, read_performer_ipc_addr};
 use crate::coordinator::model::{PrdInput, Task, TaskRegistry};
-use crate::coordinator::rate_limit::{
-    update_throttle_state, RateLimitInfo, ToolThrottleState, E602_QUOTA_EXHAUSTED,
-};
+use crate::coordinator::rate_limit::{RateLimitInfo, ToolThrottleState, E602_QUOTA_EXHAUSTED};
 use crate::coordinator::runtime::{
     CoordinatorJob, CoordinatorMergeJob, CoordinatorRunState, CoordinatorRuntimeEventKind,
 };
@@ -16,7 +13,7 @@ use crate::coordinator::types::CoordinatorEnvConfig;
 use crate::coordinator::{engine as coordinator_engine, runtime as coordinator_runtime};
 use crate::{MaccError, Result};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 pub trait CoordinatorLog: Sync {
@@ -162,6 +159,7 @@ fn rollback_worktree_to_sha(worktree_path: &Path, target_sha: &str) -> bool {
 /// 2. Register the tool in the throttle registry so `pick_tool()` skips it.
 /// 3. Re-queue the task (→ Todo) with a `delayed_until` cooldown instead of marking
 ///    it as a phase failure.
+#[allow(clippy::too_many_arguments)]
 fn handle_phase_quota_exhaustion(
     repo_root: &Path,
     registry: &mut serde_json::Value,
@@ -725,7 +723,7 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                 append_performer_log(
                     &worktree,
                     task_id,
-                    &format!("- Result: failed (runner could not be executed)\n"),
+                    "- Result: failed (runner could not be executed)\n",
                 );
                 continue;
             };
@@ -749,45 +747,43 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                 // The review phase explicitly must not commit; implement/dev commits
                 // are managed by performer.sh. Fix and integrate phases may leave
                 // uncommitted file changes that must be committed before merging.
-                if mode != "review" {
-                    if crate::git::is_dirty(&worktree).unwrap_or(false) {
-                        let _ = crate::git::run_git_output_mapped(
-                            &worktree,
-                            &["add", "-A"],
-                            "stage all changes after phase",
-                        );
-                        let commit_type = if mode == "fix" {
-                            crate::commit_message::CommitType::Fix
-                        } else {
-                            crate::commit_message::CommitType::Feat
-                        };
-                        let commit_msg = crate::commit_message::task_commit(
-                            commit_type,
-                            task_id,
-                            task.title.as_deref(),
-                            Some(mode),
-                        )
-                        .with_tool(&phase_tool)
-                        .format();
-                        let commit_out = crate::git::run_git_output_mapped(
-                            &worktree,
-                            &["commit", "-m", &commit_msg],
-                            "auto-commit phase changes",
-                        );
-                        if let Some(log) = self.logger {
-                            match commit_out {
-                                Ok(ref o) if o.status.success() => {
-                                    let _ = log.note(format!(
-                                        "- Phase {} auto-committed changes task={}",
-                                        mode, task_id
-                                    ));
-                                }
-                                _ => {
-                                    let _ = log.note(format!(
-                                        "- Phase {} auto-commit failed task={} (continuing)",
-                                        mode, task_id
-                                    ));
-                                }
+                if mode != "review" && crate::git::is_dirty(&worktree).unwrap_or(false) {
+                    let _ = crate::git::run_git_output_mapped(
+                        &worktree,
+                        &["add", "-A"],
+                        "stage all changes after phase",
+                    );
+                    let commit_type = if mode == "fix" {
+                        crate::commit_message::CommitType::Fix
+                    } else {
+                        crate::commit_message::CommitType::Feat
+                    };
+                    let commit_msg = crate::commit_message::task_commit(
+                        commit_type,
+                        task_id,
+                        task.title.as_deref(),
+                        Some(mode),
+                    )
+                    .with_tool(&phase_tool)
+                    .format();
+                    let commit_out = crate::git::run_git_output_mapped(
+                        &worktree,
+                        &["commit", "-m", &commit_msg],
+                        "auto-commit phase changes",
+                    );
+                    if let Some(log) = self.logger {
+                        match commit_out {
+                            Ok(ref o) if o.status.success() => {
+                                let _ = log.note(format!(
+                                    "- Phase {} auto-committed changes task={}",
+                                    mode, task_id
+                                ));
+                            }
+                            _ => {
+                                let _ = log.note(format!(
+                                    "- Phase {} auto-commit failed task={} (continuing)",
+                                    mode, task_id
+                                ));
                             }
                         }
                     }
@@ -981,7 +977,7 @@ pub async fn advance_tasks_native(
                                     state,
                                     &task_snapshot,
                                     &task_id,
-                                    &mode,
+                                    mode,
                                     &reason,
                                     pre_phase_sha.as_deref(),
                                     worktree_path_str.as_deref(),
@@ -1028,7 +1024,7 @@ pub async fn advance_tasks_native(
                                     state,
                                     &task_snapshot,
                                     &task_id,
-                                    &mode,
+                                    mode,
                                     &reason,
                                     pre_phase_sha.as_deref(),
                                     worktree_path_str.as_deref(),

@@ -98,7 +98,10 @@ impl From<CoordinatorCommandResult> for ApiCoordinatorCommandResult {
             removed_worktrees: result.removed_worktrees,
             selected_task: result.selected_task.map(ApiSelectedTask::from),
             tool_cooldowns: result.tool_cooldowns.map(|entries| {
-                entries.into_iter().map(ApiToolCooldownEntry::from).collect()
+                entries
+                    .into_iter()
+                    .map(ApiToolCooldownEntry::from)
+                    .collect()
             }),
         }
     }

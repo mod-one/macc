@@ -880,7 +880,7 @@ fn apply_job_completion_typed(
             .as_ref()
             .and_then(|te| te.retry_after_seconds);
         let backoff = compute_backoff_delay(
-            input.attempt as usize,
+            input.attempt,
             input.backoff_base_seconds,
             input.backoff_max_seconds,
             retry_after,
@@ -1653,10 +1653,9 @@ pub async fn run_native_control_plane(
     let mut run_state = CoordinatorRunState::new();
     // ── Part D: restore persisted throttle state on startup ─────────────
     {
-        let storage_paths =
-            crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(
-                &crate::ProjectPaths::from_root(repo_root),
-            );
+        let storage_paths = crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(
+            &crate::ProjectPaths::from_root(repo_root),
+        );
         let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
         match sqlite.load_throttle_registry() {
             Ok(reg) if !reg.is_empty() => {
