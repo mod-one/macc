@@ -1,7 +1,8 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { Icons } from './NavIcons';
-import GitGraphView from './GitGraphView';
+
+const GitGraphView = lazy(() => import('./GitGraphView'));
 
 const PANEL_COLLAPSED_KEY = 'macc.gitGraphPanel.collapsed';
 const PANEL_WIDTH_KEY = 'macc.gitGraphPanel.width';
@@ -10,11 +11,17 @@ const MAX_PANEL_WIDTH = 620;
 const DEFAULT_PANEL_WIDTH = 350;
 
 function readCollapsedState(): boolean {
+  if (typeof window === 'undefined') {
+    return false;
+  }
   const raw = window.localStorage.getItem(PANEL_COLLAPSED_KEY);
   return raw === '1';
 }
 
 function readPanelWidth(): number {
+  if (typeof window === 'undefined') {
+    return DEFAULT_PANEL_WIDTH;
+  }
   const raw = window.localStorage.getItem(PANEL_WIDTH_KEY);
   const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
   if (!Number.isFinite(parsed)) {
@@ -25,16 +32,11 @@ function readPanelWidth(): number {
 
 const GitGraphPanel: React.FC = () => {
   const location = useLocation();
-  const [collapsed, setCollapsed] = useState(false);
-  const [panelWidth, setPanelWidth] = useState(DEFAULT_PANEL_WIDTH);
+  const [collapsed, setCollapsed] = useState(readCollapsedState);
+  const [panelWidth, setPanelWidth] = useState(readPanelWidth);
   const [resizing, setResizing] = useState(false);
   const dragStartX = useRef(0);
   const dragStartWidth = useRef(DEFAULT_PANEL_WIDTH);
-
-  useEffect(() => {
-    setCollapsed(readCollapsedState());
-    setPanelWidth(readPanelWidth());
-  }, []);
 
   useEffect(() => {
     window.localStorage.setItem(PANEL_COLLAPSED_KEY, collapsed ? '1' : '0');
@@ -137,7 +139,15 @@ const GitGraphPanel: React.FC = () => {
 
       {!collapsed && (
         <div className="min-h-0 flex-1 p-2">
-          <GitGraphView mode="panel" />
+          <Suspense
+            fallback={
+              <div className="flex h-full items-center justify-center text-sm text-[var(--text-muted)]">
+                Loading git graph...
+              </div>
+            }
+          >
+            <GitGraphView mode="panel" />
+          </Suspense>
         </div>
       )}
     </aside>

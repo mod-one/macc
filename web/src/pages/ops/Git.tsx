@@ -1,6 +1,7 @@
-import React from 'react';
+import React, { Suspense, lazy } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import GitGraphView from '../../components/GitGraphView';
+
+const GitGraphView = lazy(() => import('../../components/GitGraphView'));
 
 interface LocationState {
   from?: string;
@@ -30,7 +31,15 @@ const Git: React.FC = () => {
       </header>
 
       <div className="min-h-0 flex-1">
-        <GitGraphView mode="page" />
+        <Suspense
+          fallback={
+            <div className="flex h-full items-center justify-center rounded-xl border border-[var(--border)] bg-[var(--bg-secondary)] text-sm text-[var(--text-muted)]">
+              Loading git graph...
+            </div>
+          }
+        >
+          <GitGraphView mode="page" />
+        </Suspense>
       </div>
     </div>
   );
