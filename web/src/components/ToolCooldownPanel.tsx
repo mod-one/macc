@@ -154,7 +154,7 @@ export const ToolCooldownPanel: React.FC<ToolCooldownPanelProps> = ({ className 
                     {formatDuration(c.remaining_seconds)}
                   </td>
                   <td className="px-4 py-3 text-[var(--text-secondary)] hidden sm:table-cell">
-                    {new Date(c.throttled_until).toLocaleTimeString()}
+                    {new Date(c.throttled_until * 1000).toLocaleTimeString()}
                   </td>
                   <td className="px-4 py-3 text-right text-[var(--text-muted)] hidden lg:table-cell">
                     {formatDuration(c.backoff_seconds)}

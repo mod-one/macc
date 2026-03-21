@@ -19,6 +19,7 @@ import type {
   ApiPlanResponse,
   ApiRegistryTask,
   ApiRegistryTaskAction,
+  ApiRestoreRequest,
   ApiWorktree,
   ApiWorktreeCreateRequest,
 } from './models';
@@ -389,6 +390,19 @@ export async function getBackups(
   options: ApiRequestOptions = {},
 ): Promise<ApiBackup[]> {
   return sendJson<ApiBackup[]>('/backups', 'GET', options);
+}
+
+export async function restoreBackup(
+  id: string,
+  request: ApiRestoreRequest,
+  options: ApiRequestOptions = {},
+): Promise<ApiActionResult> {
+  return sendJson<ApiActionResult, ApiRestoreRequest>(
+    `/backups/${encodeURIComponent(id)}/restore`,
+    'POST',
+    options,
+    request,
+  );
 }
 
 export async function getToolCooldowns(
