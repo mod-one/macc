@@ -1,7 +1,6 @@
 use super::errors::ApiError;
 use super::WebState;
-use axum::extract::Path;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::Json;
 use macc_core::coordinator::task_selector::SelectedTask;
 use macc_core::coordinator::types::CoordinatorEnvConfig;
@@ -322,6 +321,48 @@ pub(super) async fn coordinator_resume_handler(
     )))
 }
 
+pub(super) async fn coordinator_sync_handler(
+    State(state): State<WebState>,
+) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
+    let env_cfg = CoordinatorEnvConfig::default();
+    let result = state
+        .engine
+        .coordinator_execute_command(
+            &state.paths,
+            CoordinatorCommand::SyncRegistry,
+            CoordinatorCommandRequest {
+                canonical: None,
+                coordinator_cfg: None,
+                env_cfg: &env_cfg,
+                logger: None,
+            },
+        )
+        .map_err(ApiError::from)?;
+    Ok(Json(ApiCoordinatorCommandResult::from(result)))
+}
+
+pub(super) async fn coordinator_audit_prd_handler(
+    State(state): State<WebState>,
+) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
+    let env_cfg = CoordinatorEnvConfig::default();
+    let result = state
+        .engine
+        .coordinator_execute_command(
+            &state.paths,
+            CoordinatorCommand::AuditPrd {
+                tool: None,
+                dry_run: false,
+            },
+            CoordinatorCommandRequest {
+                canonical: None,
+                coordinator_cfg: None,
+                env_cfg: &env_cfg,
+                logger: None,
+            },
+        )
+        .map_err(ApiError::from)?;
+    Ok(Json(ApiCoordinatorCommandResult::from(result)))
+}
 pub(super) async fn get_tool_cooldowns_handler(
     State(state): State<WebState>,
 ) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {

@@ -28,7 +28,7 @@ use macc_core::{MaccError, ProjectPaths, Result};
 use std::fs;
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -53,7 +53,9 @@ fn apply_test_guard() -> MutexGuard<'static, ()> {
 fn write_test_config(root: &std::path::Path) {
     let paths = ProjectPaths::from_root(root);
     fs::create_dir_all(paths.config_path.parent().expect("config dir")).expect("mkdir config");
-    let yaml = CanonicalConfig::default()
+    let mut canonical = CanonicalConfig::default();
+    canonical.settings.offline = true;
+    let yaml = canonical
         .to_yaml()
         .expect("serialize config");
     fs::write(&paths.config_path, yaml).expect("write config");
@@ -665,4 +667,20 @@ fn coordinator_event(seq: i64, event_id: &str, event_type: &str) -> CoordinatorE
     }
 }
 
-include!("tests_body.inc");
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use macc_core::config::WebAssetsMode;
+    use crate::commands::web::build_web_router;
+    use crate::commands::web::errors;
+    use crate::commands::web::WebState;
+    use axum::body::Body;
+    use axum::extract::Request;
+    use http_body_util::BodyExt;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    include!("tests_body.inc");
+}
