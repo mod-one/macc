@@ -24,6 +24,40 @@ export interface ApiHealthResponse {
   status: 'ok';
 }
 
+export interface ApiGitCommit {
+  sha: string;
+  short_sha: string;
+  subject: string;
+  author: string;
+  timestamp: number;
+  parent_shas: string[];
+  branch_refs: string[];
+  task_id?: string;
+}
+
+export interface ApiGitGraphResponse {
+  commits: ApiGitCommit[];
+  branches: string[];
+  head: string;
+}
+
+export interface GitCommit {
+  sha: string;
+  shortSha: string;
+  subject: string;
+  author: string;
+  timestamp: number;
+  parentShas: string[];
+  branchRefs: string[];
+  taskId?: string;
+}
+
+export interface GitGraphResponse {
+  commits: GitCommit[];
+  branches: string[];
+  head: string;
+}
+
 export interface ApiThrottledToolStatus {
   tool_id: string;
   throttled_until: string;

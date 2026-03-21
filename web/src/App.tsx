@@ -20,6 +20,7 @@ const Locks = lazy(() => import('./pages/ops/Locks'));
 const Diagnostics = lazy(() => import('./pages/ops/Diagnostics'));
 const Logs = lazy(() => import('./pages/ops/Logs'));
 const Backups = lazy(() => import('./pages/ops/Backups'));
+const Git = lazy(() => import('./pages/ops/Git'));
 const Help = lazy(() => import('./pages/Help'));
 const About = lazy(() => import('./pages/About'));
 
@@ -57,6 +58,7 @@ const App: React.FC = () => {
             <Route path="diagnostics" element={<Diagnostics />} />
             <Route path="logs" element={<Logs />} />
             <Route path="backups" element={<Backups />} />
+            <Route path="git" element={<Git />} />
           </Route>
 
           {/* Utility / Info */}

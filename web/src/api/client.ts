@@ -10,6 +10,7 @@ import type {
   ApiConfigUpdateRequest,
   ApiDoctorReport,
   ApiErrorEnvelope,
+  ApiGitGraphResponse,
   ApiHealthResponse,
   ApiLogContent,
   ApiLogFile,
@@ -22,6 +23,8 @@ import type {
   ApiRestoreRequest,
   ApiWorktree,
   ApiWorktreeCreateRequest,
+  GitCommit,
+  GitGraphResponse,
 } from './models';
 import { API_PREFIX, resolveApiBaseUrl } from './config';
 
@@ -191,6 +194,40 @@ export async function getStatus(
     },
     options.baseUrl,
   );
+}
+
+function mapGitCommit(commit: ApiGitGraphResponse['commits'][number]): GitCommit {
+  return {
+    sha: commit.sha,
+    shortSha: commit.short_sha,
+    subject: commit.subject,
+    author: commit.author,
+    timestamp: commit.timestamp,
+    parentShas: commit.parent_shas,
+    branchRefs: commit.branch_refs,
+    taskId: commit.task_id,
+  };
+}
+
+export async function getGitGraph(
+  options: ApiQueryOptions & {
+    limit?: number;
+    since?: string;
+  } = {},
+): Promise<GitGraphResponse> {
+  const response = await sendJson<ApiGitGraphResponse>('/git/graph', 'GET', {
+    ...options,
+    query: {
+      limit: options.limit,
+      since: options.since,
+    },
+  });
+
+  return {
+    commits: response.commits.map(mapGitCommit),
+    branches: response.branches,
+    head: response.head,
+  };
 }
 
 export async function postCoordinatorAction(
