@@ -6,6 +6,8 @@ const navGroups = [
   {
     title: 'Setup & Config',
     items: [
+      { path: '/welcome', label: 'Welcome', icon: Icons.Activity },
+      { path: '/init', label: 'Init', icon: Icons.Terminal },
       { path: '/dashboard', label: 'Dashboard', icon: Icons.Home },
       { path: '/config/tools', label: 'Tools', icon: Icons.Wrench },
       { path: '/config/standards', label: 'Standards', icon: Icons.CheckSquare },
@@ -26,6 +28,13 @@ const navGroups = [
       { path: '/ops/diagnostics', label: 'Diagnostics', icon: Icons.Stethoscope },
       { path: '/ops/logs', label: 'Logs', icon: Icons.AlignLeft },
       { path: '/ops/backups', label: 'Backups', icon: Icons.Archive },
+    ]
+  },
+  {
+    title: 'Support',
+    items: [
+      { path: '/help', label: 'Help', icon: Icons.Search },
+      { path: '/about', label: 'About', icon: Icons.Activity },
     ]
   }
 ];
@@ -121,7 +130,9 @@ const Layout: React.FC = () => {
 
         {/* Page Content */}
         <main className="flex-1 overflow-auto bg-[var(--bg-primary)] p-6">
-          <Outlet />
+          <React.Suspense fallback={<div className="flex items-center justify-center h-full text-[var(--text-muted)] animate-pulse">Loading...</div>}>
+            <Outlet />
+          </React.Suspense>
         </main>
 
         {/* Status Strip */}
