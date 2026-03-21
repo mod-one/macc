@@ -374,6 +374,19 @@ export async function requeueTask(
   );
 }
 
+export async function abandonTask(
+  id: string,
+  action: Extract<ApiRegistryTaskAction, { kind: 'abandon' }>,
+  options: ApiRequestOptions = {},
+): Promise<ApiRegistryTask> {
+  return sendJson<ApiRegistryTask, Extract<ApiRegistryTaskAction, { kind: 'abandon' }>>(
+    `/registry/tasks/${encodeURIComponent(id)}/abandon`,
+    'POST',
+    options,
+    action,
+  );
+}
+
 export async function reassignTask(
   id: string,
   action: Extract<ApiRegistryTaskAction, { kind: 'reassign' }>,

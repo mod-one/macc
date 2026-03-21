@@ -40,3 +40,6 @@ export const ChevronUpIcon = createIcon('m18 15-6-6-6 6');
 export const ChevronDownIcon = createIcon('m6 9 6 6 6-6');
 export const FolderOpenIcon = createIcon('M2 11V6a2 2 0 0 1 2-2h7l2 3h7a2 2 0 0 1 2 2v2M2 11v7a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-7M2 11h20');
 export const XIcon = createIcon('M18 6 6 18M6 6l12 12');
+export const ActivityIcon = createIcon('M22 12h-4l-3 9L9 3l-3 9H2');
+export const DownloadIcon = createIcon('M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4m4-5 5 5 5-5m-5 5V3');
+export const SwitchIcon = createIcon('m16 3 4 4-4 4m-6 10-4-4 4-4m-6 4h14m-4-10H2');

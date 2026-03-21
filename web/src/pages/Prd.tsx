@@ -10,7 +10,7 @@ import {
 } from '@tanstack/react-table';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { getPrd, updatePrd } from '../api/client';
-import type { ApiPrdTask } from '../api/models';
+import type { ApiPrdTask, JsonValue } from '../api/models';
 import { Button } from '../components/Button';
 import * as Icons from '../components/icons';
 import { cn } from '../components/styles';
@@ -19,7 +19,7 @@ const columnHelper = createColumnHelper<ApiPrdTask>();
 
 const PrdPage: React.FC = () => {
   const [tasks, setTasks] = useState<ApiPrdTask[]>([]);
-  const [metadata, setMetadata] = useState<Record<string, any>>({});
+  const [metadata, setMetadata] = useState<Record<string, JsonValue>>({});
   const [isLoading, setIsLoading] = useState(true);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
@@ -299,7 +299,9 @@ const PrdPage: React.FC = () => {
                     try {
                       const parsed = JSON.parse(e.target.value);
                       handleTaskUpdate(parsed);
-                    } catch {}
+                    } catch {
+                      // Ignore invalid JSON during typing
+                    }
                   }}
                   className="w-full h-full font-mono text-xs bg-[var(--bg-secondary)] text-[var(--text-primary)] p-4 rounded-xl border border-[var(--border)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)]"
                   spellCheck={false}
@@ -321,8 +323,8 @@ interface TaskFormProps {
 }
 
 const TaskForm: React.FC<TaskFormProps> = ({ task, onChange }) => {
-  const handleChange = (field: keyof ApiPrdTask, value: any) => {
-    onChange({ ...task, [field]: value });
+  const handleChange = (field: keyof ApiPrdTask, value: JsonValue) => {
+    onChange({ ...task, [field]: value } as ApiPrdTask);
   };
 
   return (
