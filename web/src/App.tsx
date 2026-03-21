@@ -55,6 +55,8 @@ const App: React.FC = () => {
             <Route path="console" element={<Console />} />
             <Route path="registry" element={<Registry />} />
             <Route path="worktrees" element={<Worktrees />} />
+            <Route path="worktrees/create" element={<div className="p-10 text-center">Worktree Creation Wizard - Coming Soon</div>} />
+            <Route path="worktrees/:id" element={<div className="p-10 text-center">Worktree Details & Terminal - Coming Soon</div>} />
             <Route path="live" element={<Live />} />
             <Route path="locks" element={<Locks />} />
             <Route path="diagnostics" element={<Diagnostics />} />
