@@ -283,6 +283,8 @@ const Tools: React.FC = () => {
   const [selectedToolId, setSelectedToolId] = React.useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = React.useState(false);
   const [rawView, setRawView] = React.useState(false);
+  const [rawEditorText, setRawEditorText] = React.useState('');
+  const [rawEditorError, setRawEditorError] = React.useState<string | null>(null);
   const [copyState, setCopyState] = React.useState<'idle' | 'copied' | 'failed'>('idle');
   const [jsonFieldErrors, setJsonFieldErrors] = React.useState<Record<string, string>>({});
   const [jsonFieldDrafts, setJsonFieldDrafts] = React.useState<Record<string, string>>({});
@@ -302,6 +304,7 @@ const Tools: React.FC = () => {
       setDraftEnabledTools(new Set(nextConfig.enabledTools));
       setJsonFieldErrors({});
       setJsonFieldDrafts({});
+      setRawEditorError(null);
       setError(null);
     } catch (loadError) {
       setError(formatApiError(loadError));
@@ -419,13 +422,19 @@ const Tools: React.FC = () => {
     return false;
   }, [config, draftEnabledTools, draftToolSettings]);
 
-  const handleOpenTool = React.useCallback((toolId: string) => {
-    setSelectedToolId(toolId);
-    setRawView(false);
-    setJsonFieldErrors({});
-    setJsonFieldDrafts({});
-    setDrawerOpen(true);
-  }, []);
+  const handleOpenTool = React.useCallback(
+    (toolId: string) => {
+      const initialSettings = isJsonObject(draftToolSettings[toolId]) ? (draftToolSettings[toolId] as JsonObject) : {};
+      setSelectedToolId(toolId);
+      setRawView(false);
+      setRawEditorText(JSON.stringify(initialSettings, null, 2));
+      setRawEditorError(null);
+      setJsonFieldErrors({});
+      setJsonFieldDrafts({});
+      setDrawerOpen(true);
+    },
+    [draftToolSettings],
+  );
 
   const handleDrawerOpenChange = React.useCallback(
     (nextOpen: boolean) => {
@@ -491,6 +500,8 @@ const Tools: React.FC = () => {
 
     setJsonFieldErrors({});
     setJsonFieldDrafts({});
+    setRawEditorText(JSON.stringify(config.toolSettings[selectedToolId] ?? {}, null, 2));
+    setRawEditorError(null);
   }, [config, selectedToolId]);
 
   const handleApplyChanges = React.useCallback(async (): Promise<void> => {
@@ -512,6 +523,7 @@ const Tools: React.FC = () => {
       setDraftEnabledTools(new Set(updated.enabledTools));
       setJsonFieldErrors({});
       setJsonFieldDrafts({});
+      setRawEditorError(null);
     } catch (saveError) {
       setError(formatApiError(saveError));
     } finally {
@@ -661,6 +673,8 @@ const Tools: React.FC = () => {
     [selectedToolId, selectedSettings, jsonFieldErrors, jsonFieldDrafts, handleFieldChange],
   );
 
+  const hasBlockingEditorErrors = Object.keys(jsonFieldErrors).length > 0 || (rawView && rawEditorError !== null);
+
   if (isLoading) {
     return (
       <div className="rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-card)] p-6 text-[var(--text-secondary)] shadow-[var(--shadow-soft)]">
@@ -684,6 +698,14 @@ const Tools: React.FC = () => {
               className="border-[var(--border)] bg-[var(--bg-card)]"
               disabled={isRefreshing}
               onClick={() => {
+                if (hasAnyUnsavedChanges) {
+                  const proceed = window.confirm(
+                    'You have unsaved adapter changes. Refreshing will discard them. Continue?',
+                  );
+                  if (!proceed) {
+                    return;
+                  }
+                }
                 void loadConfig(true);
               }}
               type="button"
@@ -833,7 +855,7 @@ const Tools: React.FC = () => {
                 </Button>
                 <Button
                   className="border-transparent bg-[var(--accent)] text-white hover:brightness-110"
-                  disabled={!hasAnyUnsavedChanges || isSaving || Object.keys(jsonFieldErrors).length > 0}
+                  disabled={!hasAnyUnsavedChanges || isSaving || hasBlockingEditorErrors}
                   onClick={() => {
                     void handleApplyChanges();
                   }}
@@ -891,7 +913,11 @@ const Tools: React.FC = () => {
                       ? 'bg-[var(--accent)] text-white'
                       : 'border border-[var(--border)] bg-[var(--bg-secondary)] text-[var(--text-secondary)]',
                   )}
-                  onClick={() => setRawView(true)}
+                  onClick={() => {
+                    setRawEditorText(selectedSettingsRaw);
+                    setRawEditorError(null);
+                    setRawView(true);
+                  }}
                   type="button"
                 >
                   Raw JSON
@@ -910,24 +936,43 @@ const Tools: React.FC = () => {
             </div>
 
             {rawView ? (
-              <textarea
-                className="min-h-[420px] w-full rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-card)] p-3 font-mono text-xs text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/40"
-                value={selectedSettingsRaw}
-                onChange={(event) => {
-                  try {
-                    const parsed = JSON.parse(event.target.value) as JsonValue;
-                    if (isJsonObject(parsed)) {
+              <>
+                <textarea
+                  aria-label="Raw JSON editor"
+                  className={cn(
+                    'min-h-[420px] w-full rounded-[var(--radius-card)] border bg-[var(--bg-card)] p-3 font-mono text-xs text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/40',
+                    rawEditorError ? 'border-[var(--error)]' : 'border-[var(--border)]',
+                  )}
+                  value={rawEditorText}
+                  onChange={(event) => {
+                    const nextRaw = event.target.value;
+                    setRawEditorText(nextRaw);
+
+                    const trimmed = nextRaw.trim();
+                    if (trimmed.length === 0) {
+                      setRawEditorError('Raw JSON must be a JSON object.');
+                      return;
+                    }
+
+                    try {
+                      const parsed = JSON.parse(nextRaw) as JsonValue;
+                      if (!isJsonObject(parsed)) {
+                        setRawEditorError('Raw JSON must be a JSON object.');
+                        return;
+                      }
+
                       setDraftToolSettings((previous) => ({
                         ...previous,
                         [selectedTool.id]: parsed,
                       }));
-                      setJsonFieldErrors({});
+                      setRawEditorError(null);
+                    } catch {
+                      setRawEditorError('Invalid JSON. Fix before applying.');
                     }
-                  } catch {
-                    // Keep raw editor permissive while typing.
-                  }
-                }}
-              />
+                  }}
+                />
+                {rawEditorError && <p className="mt-2 text-xs text-[var(--error)]">{rawEditorError}</p>}
+              </>
             ) : (
               <div className="space-y-4">
                 {SCHEMA_SECTIONS.map((section) => (
