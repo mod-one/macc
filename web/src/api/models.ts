@@ -404,6 +404,7 @@ export interface ApiRegistryEvent {
 export interface ApiRegistryTask {
   id: string;
   title: string | null;
+  priority: string | null;
   state: string;
   tool: string | null;
   attempts: number | null;
@@ -412,6 +413,11 @@ export interface ApiRegistryTask {
   currentPhase: string | null;
   lastError: string | null;
   lastErrorCode: string | null;
+  description: string | null;
+  objective: string | null;
+  result: string | null;
+  steps: string[];
+  notes: string | null;
   assignee: JsonValue | null;
   worktree: ApiRegistryTaskWorktree | null;
   events: ApiRegistryEvent[];
@@ -421,6 +427,10 @@ export interface ApiRegistryTask {
 export type ApiRegistryTaskAction =
   | {
       kind: 'requeue';
+      justification?: string | null;
+    }
+  | {
+      kind: 'abandon';
       justification?: string | null;
     }
   | {

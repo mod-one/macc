@@ -579,6 +579,17 @@ pub(crate) struct ApiRegistryTask {
     pub last_error: Option<String>,
     /// Latest normalized task error code.
     pub last_error_code: Option<String>,
+    /// Human-readable task description.
+    pub description: Option<String>,
+    /// Task objective summary.
+    pub objective: Option<String>,
+    /// Expected result summary.
+    pub result: Option<String>,
+    /// Execution steps list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<String>,
+    /// Human-readable task notes.
+    pub notes: Option<String>,
     /// Assignee payload preserved from the registry.
     pub assignee: Option<Value>,
     /// Worktree metadata attached to the task.

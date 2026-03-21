@@ -71,6 +71,7 @@ pub(super) async fn task_action_handler(
         match action.as_str() {
             "requeue" => requeue_task(task, &now, body.justification.as_deref())?,
             "reassign" => reassign_task(task, &now, &body)?,
+            "abandon" => abandon_task(task, &now, body.justification.as_deref())?,
             other => {
                 return Err(ApiError::validation(format!(
                     "unsupported registry action '{}'",
@@ -127,6 +128,28 @@ fn requeue_task(
     }
 
     task.set_workflow_state(WorkflowState::Todo);
+    task.clear_assignment();
+    reset_task_runtime(task);
+    task.touch_state_changed(now);
+    Ok(())
+}
+
+fn abandon_task(
+    task: &mut Task,
+    now: &str,
+    _justification: Option<&str>,
+) -> std::result::Result<(), ApiError> {
+    if task.is_merged() {
+        return Err(ApiError::conflict(
+            format!(
+                "task '{}' is already merged and cannot be abandoned",
+                task.id
+            ),
+            None,
+        ));
+    }
+
+    task.set_workflow_state(WorkflowState::Abandoned);
     task.clear_assignment();
     reset_task_runtime(task);
     task.touch_state_changed(now);
@@ -199,6 +222,36 @@ fn task_to_api(task: &Task, events: &[ApiRegistryEvent]) -> ApiRegistryTask {
         current_phase: task.task_runtime.current_phase.clone(),
         last_error: task.task_runtime.last_error.clone(),
         last_error_code: task.task_runtime.last_error_code.clone(),
+        description: task
+            .extra
+            .get("description")
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string),
+        objective: task
+            .extra
+            .get("objective")
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string),
+        result: task
+            .extra
+            .get("result")
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string),
+        steps: task
+            .extra
+            .get("steps")
+            .and_then(|v| v.as_array())
+            .map(|v| {
+                v.iter()
+                    .filter_map(|s| s.as_str().map(ToString::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        notes: task
+            .extra
+            .get("notes")
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string),
         assignee: task.assignee.clone(),
         worktree: task.worktree.as_ref().map(worktree_to_api),
         events: events.to_vec(),

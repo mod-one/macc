@@ -18,6 +18,7 @@ export interface ConfirmDialogProps {
   dangerousConfirmationMode?: DangerousConfirmationMode;
   secondaryConfirmationLabel?: string;
   onConfirm: () => void;
+  children?: React.ReactNode;
 }
 
 export function ConfirmDialog({
@@ -32,6 +33,7 @@ export function ConfirmDialog({
   dangerousConfirmationMode = 'phrase',
   secondaryConfirmationLabel = 'I understand this action cannot be undone.',
   onConfirm,
+  children,
 }: ConfirmDialogProps) {
   const [typedPhrase, setTypedPhrase] = useState('');
   const [isAcknowledged, setIsAcknowledged] = useState(false);
@@ -71,6 +73,8 @@ export function ConfirmDialog({
               </AlertDialog.Description>
             </div>
           </div>
+
+          {children}
 
           {requiresPhrase && (
             <div className="mt-5 space-y-2">
