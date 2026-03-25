@@ -326,12 +326,15 @@ function AdvancedTab({
 }) {
   const [rawText, setRawText] = useState(() => JSON.stringify(config, null, 2));
   const [parseError, setParseError] = useState<string | null>(null);
+  const [prevConfig, setPrevConfig] = useState(config);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  useEffect(() => {
+  // Sync rawText when config reference changes (React-idiomatic state adjustment during render)
+  if (config !== prevConfig) {
+    setPrevConfig(config);
     setRawText(JSON.stringify(config, null, 2));
     setParseError(null);
-  }, [config]);
+  }
 
   const handleApply = useCallback(() => {
     try {
