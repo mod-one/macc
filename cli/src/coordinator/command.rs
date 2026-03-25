@@ -124,6 +124,25 @@ pub fn handle(
         let _ = engine.project_ensure_coordinator_run_id();
     }
 
+    // Preflight: abort before dispatching workers if git identity is not configured.
+    // A missing user.email / user.name causes every performer's `git commit` to fail,
+    // leaving changes uncommitted and the coordinator stuck.
+    if matches!(
+        command,
+        CoordinatorCommand::RunControlPlane | CoordinatorCommand::DispatchReadyTasks
+    ) {
+        let missing = macc_core::git::missing_git_identity_fields(&paths.root);
+        if !missing.is_empty() {
+            let fields = missing.join(", ");
+            return Err(MaccError::Validation(format!(
+                "Git identity is not configured ({fields}). \
+Performers cannot commit without it. Fix this first:\n\
+  git config --global user.email \"you@example.com\"\n\
+  git config --global user.name \"Your Name\""
+            )));
+        }
+    }
+
     if matches!(command, CoordinatorCommand::Stop { .. }) {
         let coordinator_path = paths.automation_coordinator_path();
         let stopped =

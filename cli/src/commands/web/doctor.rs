@@ -175,7 +175,10 @@ fn map_issue(check: &ToolCheck) -> ApiDoctorIssue {
         description: issue_description(check),
         current_state: current_state_label(&check.status),
         expected_state: expected_state_label(&check.kind),
-        fix_available: !matches!(check.kind, DoctorCheckKind::Custom),
+        fix_available: !matches!(
+            check.kind,
+            DoctorCheckKind::Custom | DoctorCheckKind::GitConfigKey
+        ),
     }
 }
 
@@ -216,6 +219,10 @@ fn issue_description(check: &ToolCheck) -> String {
             "{} requires path '{}' to exist.",
             check.name, check.check_target
         ),
+        DoctorCheckKind::GitConfigKey => format!(
+            "Git config key '{}' is not set. Run: git config --global {} \"<value>\"",
+            check.check_target, check.check_target
+        ),
         DoctorCheckKind::Custom => format!(
             "{} reported a custom diagnostic failure for '{}'.",
             check.name, check.check_target
@@ -235,6 +242,7 @@ fn expected_state_label(kind: &DoctorCheckKind) -> String {
     match kind {
         DoctorCheckKind::Which => "binary is available in PATH".to_string(),
         DoctorCheckKind::PathExists => "path exists".to_string(),
+        DoctorCheckKind::GitConfigKey => "git config key is set".to_string(),
         DoctorCheckKind::Custom => "custom diagnostic passes".to_string(),
     }
 }
@@ -250,6 +258,7 @@ fn category_label(kind: &DoctorCheckKind) -> &'static str {
     match kind {
         DoctorCheckKind::Which => "tooling",
         DoctorCheckKind::PathExists => "filesystem",
+        DoctorCheckKind::GitConfigKey => "git",
         DoctorCheckKind::Custom => "custom",
     }
 }
@@ -258,6 +267,7 @@ fn kind_label(kind: &DoctorCheckKind) -> &'static str {
     match kind {
         DoctorCheckKind::Which => "which",
         DoctorCheckKind::PathExists => "path_exists",
+        DoctorCheckKind::GitConfigKey => "git_config_key",
         DoctorCheckKind::Custom => "custom",
     }
 }

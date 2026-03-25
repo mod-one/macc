@@ -636,6 +636,7 @@ fn doctor_check(
         kind,
         status,
         severity,
+        fix_hint: None,
     }
 }
 

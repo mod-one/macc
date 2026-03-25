@@ -483,6 +483,26 @@ pub fn merge_base_is_ancestor(
     .success())
 }
 
+/// Returns the list of git identity fields that are not configured.
+/// Checks `user.email` and `user.name` via `git config` (respects global, local, and system).
+/// An empty vec means all required fields are set.
+pub fn missing_git_identity_fields(repo_root: &Path) -> Vec<&'static str> {
+    let mut missing = Vec::new();
+    for key in ["user.email", "user.name"] {
+        let configured = std::process::Command::new("git")
+            .args(["config", key])
+            .current_dir(repo_root)
+            .output()
+            .ok()
+            .map(|out| out.status.success() && !String::from_utf8_lossy(&out.stdout).trim().is_empty())
+            .unwrap_or(false);
+        if !configured {
+            missing.push(key);
+        }
+    }
+    missing
+}
+
 pub fn checkout_new_branch_from_base(
     repo_or_worktree: &Path,
     branch: &str,

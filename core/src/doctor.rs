@@ -12,6 +12,7 @@ pub enum ToolStatus {
 pub trait CheckRunner {
     fn which(&self, binary: &str) -> bool;
     fn path_exists(&self, path: &str) -> bool;
+    fn git_config_key(&self, key: &str) -> bool;
 }
 
 pub struct SystemRunner;
@@ -26,6 +27,13 @@ impl CheckRunner for SystemRunner {
     fn path_exists(&self, path: &str) -> bool {
         Path::new(path).exists()
     }
+
+    fn git_config_key(&self, key: &str) -> bool {
+        matches!(
+            Command::new("git").args(["config", key]).output(),
+            Ok(out) if out.status.success() && !String::from_utf8_lossy(&out.stdout).trim().is_empty()
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +44,8 @@ pub struct ToolCheck {
     pub kind: DoctorCheckKind,
     pub status: ToolStatus,
     pub severity: CheckSeverity,
+    /// Optional human-readable fix hint shown when the check fails.
+    pub fix_hint: Option<String>,
 }
 
 pub fn check_tool(runner: &dyn CheckRunner, kind: &DoctorCheckKind, value: &str) -> ToolStatus {
@@ -49,6 +59,13 @@ pub fn check_tool(runner: &dyn CheckRunner, kind: &DoctorCheckKind, value: &str)
         }
         DoctorCheckKind::PathExists => {
             if runner.path_exists(value) {
+                ToolStatus::Installed
+            } else {
+                ToolStatus::Missing
+            }
+        }
+        DoctorCheckKind::GitConfigKey => {
+            if runner.git_config_key(value) {
                 ToolStatus::Installed
             } else {
                 ToolStatus::Missing
@@ -69,6 +86,31 @@ pub fn checks_for_enabled_tools(specs: &[ToolSpec]) -> Vec<ToolCheck> {
         kind: DoctorCheckKind::Which,
         status: ToolStatus::Missing,
         severity: CheckSeverity::Error,
+        fix_hint: None,
+    });
+
+    // Git identity checks — required for commits to succeed.
+    checks.push(ToolCheck {
+        name: "Git user.email".to_string(),
+        tool_id: None,
+        check_target: "user.email".to_string(),
+        kind: DoctorCheckKind::GitConfigKey,
+        status: ToolStatus::Missing,
+        severity: CheckSeverity::Error,
+        fix_hint: Some(
+            "git config --global user.email \"you@example.com\"".to_string(),
+        ),
+    });
+    checks.push(ToolCheck {
+        name: "Git user.name".to_string(),
+        tool_id: None,
+        check_target: "user.name".to_string(),
+        kind: DoctorCheckKind::GitConfigKey,
+        status: ToolStatus::Missing,
+        severity: CheckSeverity::Error,
+        fix_hint: Some(
+            "git config --global user.name \"Your Name\"".to_string(),
+        ),
     });
 
     for spec in specs {
@@ -81,6 +123,7 @@ pub fn checks_for_enabled_tools(specs: &[ToolSpec]) -> Vec<ToolCheck> {
                     kind: check_spec.kind.clone(),
                     status: ToolStatus::Missing,
                     severity: check_spec.severity.clone(),
+                    fix_hint: None,
                 });
             }
         } else {
@@ -92,6 +135,7 @@ pub fn checks_for_enabled_tools(specs: &[ToolSpec]) -> Vec<ToolCheck> {
                 kind: DoctorCheckKind::Which,
                 status: ToolStatus::Missing,
                 severity: CheckSeverity::Warning,
+                fix_hint: None,
             });
         }
     }
@@ -121,6 +165,9 @@ mod tests {
         }
         fn path_exists(&self, path: &str) -> bool {
             self.paths.contains(&path.to_string())
+        }
+        fn git_config_key(&self, key: &str) -> bool {
+            self.installed.contains(&key.to_string())
         }
     }
 
@@ -169,9 +216,16 @@ mod tests {
         };
 
         let checks = checks_for_enabled_tools(&[spec]);
-        assert_eq!(checks.len(), 2); // Git + Test Tool
-        assert_eq!(checks[1].check_target, "test-bin");
-        assert_eq!(checks[1].kind, DoctorCheckKind::Which);
+        // Git + Git user.email + Git user.name + Test Tool
+        assert_eq!(checks.len(), 4);
+        assert_eq!(checks[1].check_target, "user.email");
+        assert_eq!(checks[1].kind, DoctorCheckKind::GitConfigKey);
+        assert!(checks[1].fix_hint.is_some());
+        assert_eq!(checks[2].check_target, "user.name");
+        assert_eq!(checks[2].kind, DoctorCheckKind::GitConfigKey);
+        assert!(checks[2].fix_hint.is_some());
+        assert_eq!(checks[3].check_target, "test-bin");
+        assert_eq!(checks[3].kind, DoctorCheckKind::Which);
     }
 
     fn uuid_v4_like() -> String {

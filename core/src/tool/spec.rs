@@ -124,6 +124,9 @@ pub enum DoctorCheckKind {
     Which,
     PathExists,
     Custom,
+    /// Check that `git config <check_target>` returns a non-empty value.
+    /// Used for baseline identity checks (user.email, user.name).
+    GitConfigKey,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
