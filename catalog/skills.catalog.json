@@ -4,7 +4,7 @@
   "updated_at": "2026-01-30",
   "entries": [
     {
-      "id": "macc-code-reviewer",
+      "id": "macc-reviewer",
       "name": "macc code reviewer",
       "description": "AI code reviewer for MACC tasks, providing feedback and validation against project standards.",
       "tags": [
@@ -13,7 +13,7 @@
         "quality"
       ],
       "selector": {
-        "subpath": "skills/macc-code-reviewer"
+        "subpath": "skills/macc-reviewer"
       },
       "source": {
         "kind": "git",
