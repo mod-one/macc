@@ -14,6 +14,9 @@ import type { ApiPrdTask, JsonValue } from '../api/models';
 import { Button } from '../components/Button';
 import * as Icons from '../components/icons';
 import { cn } from '../components/styles';
+import PrdGraph from '../components/PrdGraph';
+
+type PrdViewMode = 'table' | 'graph';
 
 const columnHelper = createColumnHelper<ApiPrdTask>();
 
@@ -28,8 +31,17 @@ const PrdPage: React.FC = () => {
   const [isJsonMode, setIsJsonMode] = useState(false);
   const [unsavedChanges, setUnsavedChanges] = useState(false);
   const [validationErrors, setValidationErrors] = useState<string[]>([]);
+  const [viewMode, setViewMode] = useState<PrdViewMode>(() => {
+    try { return (localStorage.getItem('prd-view-mode') as PrdViewMode) || 'table'; }
+    catch { return 'table'; }
+  });
 
   const tableContainerRef = useRef<HTMLDivElement>(null);
+
+  const handleViewModeChange = (mode: PrdViewMode) => {
+    setViewMode(mode);
+    try { localStorage.setItem('prd-view-mode', mode); } catch { /* noop */ }
+  };
 
   const fetchPrdData = async () => {
     setIsLoading(true);
@@ -169,6 +181,30 @@ const PrdPage: React.FC = () => {
         </div>
         
         <div className="flex items-center gap-3">
+          <div className="flex rounded-lg border border-[var(--border)] overflow-hidden">
+            <button
+              onClick={() => handleViewModeChange('table')}
+              className={cn(
+                "flex items-center gap-1.5 px-3 py-2 text-xs font-medium transition-colors",
+                viewMode === 'table' ? "bg-[var(--accent)] text-white" : "bg-[var(--bg-secondary)] text-[var(--text-muted)] hover:bg-[var(--bg-hover)]"
+              )}
+            >
+              <Icons.TableIcon className="h-3.5 w-3.5" />
+              Table
+            </button>
+            <button
+              onClick={() => handleViewModeChange('graph')}
+              className={cn(
+                "flex items-center gap-1.5 px-3 py-2 text-xs font-medium transition-colors",
+                viewMode === 'graph' ? "bg-[var(--accent)] text-white" : "bg-[var(--bg-secondary)] text-[var(--text-muted)] hover:bg-[var(--bg-hover)]"
+              )}
+            >
+              <Icons.BranchIcon className="h-3.5 w-3.5" />
+              Graph
+            </button>
+          </div>
+
+          {viewMode === 'table' && (
           <div className="relative">
             <Icons.SearchIcon className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--text-muted)]" />
             <input
@@ -179,6 +215,7 @@ const PrdPage: React.FC = () => {
               className="h-10 w-64 rounded-xl border border-[var(--border)] bg-[var(--bg-secondary)] pl-10 pr-4 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/50"
             />
           </div>
+          )}
           
           {unsavedChanges && (
             <div className="flex items-center gap-2">
@@ -207,8 +244,9 @@ const PrdPage: React.FC = () => {
       )}
 
       <div className="flex flex-1 gap-4 overflow-hidden">
-        {/* Table Section */}
-        <div 
+        {/* Table / Graph Section */}
+        {viewMode === 'table' ? (
+        <div
           ref={tableContainerRef}
           className="flex-1 overflow-auto rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] shadow-sm"
         >
@@ -217,7 +255,7 @@ const PrdPage: React.FC = () => {
               {table.getHeaderGroups().map(headerGroup => (
                 <tr key={headerGroup.id}>
                   {headerGroup.headers.map(header => (
-                    <th 
+                    <th
                       key={header.id}
                       onClick={header.column.getToggleSortingHandler()}
                       className="px-4 py-3 font-semibold text-[var(--text-secondary)] cursor-pointer hover:bg-[var(--bg-hover)] transition-colors"
@@ -239,7 +277,7 @@ const PrdPage: React.FC = () => {
               {rowVirtualizer.getVirtualItems().map(virtualRow => {
                 const row = rows[virtualRow.index];
                 return (
-                  <tr 
+                  <tr
                     key={row.id}
                     data-index={virtualRow.index}
                     ref={rowVirtualizer.measureElement}
@@ -267,6 +305,15 @@ const PrdPage: React.FC = () => {
             </div>
           )}
         </div>
+        ) : (
+        <div className="flex-1 overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] shadow-sm">
+          <PrdGraph
+            tasks={tasks}
+            onSelectTask={setSelectedTaskId}
+            selectedTaskId={selectedTaskId}
+          />
+        </div>
+        )}
 
         {/* Detail Pane */}
         {selectedTask && (
