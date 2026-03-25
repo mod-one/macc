@@ -79,10 +79,11 @@ fn claude_patterns() -> &'static Vec<Pattern> {
     static PATTERNS: OnceLock<Vec<Pattern>> = OnceLock::new();
     PATTERNS.get_or_init(|| {
         vec![
-            // Quota exhaustion — check before generic 429
+            // Quota exhaustion — check before generic 429 and session conflict.
+            // Also covers the "out of extra usage" daily-limit message emitted by the CLI.
             Pattern {
                 regex: Regex::new(
-                    r"(?i)(hit.*limit|usage.*limit|insufficient_quota|quota.*exceeded|plan.*limit)",
+                    r"(?i)(hit.*limit|usage.*limit|insufficient_quota|quota.*exceeded|plan.*limit|out of extra usage)",
                 )
                 .unwrap(),
                 class: CanonicalClass::QuotaExhausted,
@@ -302,10 +303,11 @@ fn gemini_patterns() -> &'static Vec<Pattern> {
     static PATTERNS: OnceLock<Vec<Pattern>> = OnceLock::new();
     PATTERNS.get_or_init(|| {
         vec![
-            // RESOURCE_EXHAUSTED + quota keywords — must precede bare RESOURCE_EXHAUSTED
+            // Hard quota exhaustion — TerminalQuotaError (human-readable) or
+            // RESOURCE_EXHAUSTED + quota keywords (gRPC). Must precede bare RESOURCE_EXHAUSTED.
             Pattern {
                 regex: Regex::new(
-                    r"(?i)RESOURCE_EXHAUSTED.{0,100}(quota|limit\s*per|exceeded.{0,30}(limit|cap)|tokens?\s*per|requests?\s*per)",
+                    r"(?i)(TerminalQuotaError|RESOURCE_EXHAUSTED.{0,100}(quota|limit\s*per|exceeded.{0,30}(limit|cap)|tokens?\s*per|requests?\s*per))",
                 )
                 .unwrap(),
                 class: CanonicalClass::QuotaExhausted,
@@ -379,6 +381,21 @@ fn gemini_request_id_regex() -> &'static Regex {
     })
 }
 
+/// Parse Gemini's human-readable reset time: "reset after 13h30m25s".
+/// Returns the total seconds, or `None` if the pattern is not present.
+fn extract_gemini_reset_seconds(text: &str) -> Option<u64> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(r"(?i)reset(?:s)?\s+after\s+(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?").unwrap()
+    });
+    let caps = re.captures(text)?;
+    let h = caps.get(1).and_then(|m| m.as_str().parse::<u64>().ok()).unwrap_or(0);
+    let m = caps.get(2).and_then(|m| m.as_str().parse::<u64>().ok()).unwrap_or(0);
+    let s = caps.get(3).and_then(|m| m.as_str().parse::<u64>().ok()).unwrap_or(0);
+    let total = h * 3600 + m * 60 + s;
+    if total > 0 { Some(total) } else { None }
+}
+
 impl ErrorNormalizer for GeminiErrorNormalizer {
     fn normalize(&self, exit_code: i32, stderr: &str, stdout: &str) -> Option<ToolError> {
         let combined = format!("{}\n{}", stderr, stdout);
@@ -394,7 +411,10 @@ impl ErrorNormalizer for GeminiErrorNormalizer {
             .captures(&combined)
             .and_then(|c| c.get(1))
             .map(|m| m.as_str().to_string());
-        let retry_after_seconds = extract_retry_after(&combined, retry_after_regex());
+        // Prefer the standard retry-after header; fall back to Gemini's
+        // human-readable "resets after Nh Nm Ns" format.
+        let retry_after_seconds = extract_retry_after(&combined, retry_after_regex())
+            .or_else(|| extract_gemini_reset_seconds(&combined));
         Some(build_tool_error(
             "gemini",
             class,
@@ -451,6 +471,22 @@ mod tests {
             .unwrap();
         assert_eq!(e.canonical_class, CanonicalClass::Auth);
         assert!(!e.retryable);
+    }
+
+    #[test]
+    fn claude_out_of_extra_usage_is_quota_exhausted() {
+        // Claude.ai daily-limit message emitted when session usage is depleted.
+        let e = ClaudeErrorNormalizer
+            .normalize(
+                1,
+                "",
+                "Error: Session ID abc123 is already in use. You're out of extra usage · resets 2pm (UTC)",
+            )
+            .unwrap();
+        assert_eq!(e.canonical_class, CanonicalClass::QuotaExhausted);
+        assert!(!e.retryable);
+        assert_eq!(e.error_code, "E602");
+        assert_eq!(e.provider, "claude");
     }
 
     #[test]
@@ -608,6 +644,24 @@ mod tests {
             .unwrap();
         assert_eq!(e.canonical_class, CanonicalClass::OutputMalformed);
         assert!(!e.retryable);
+    }
+
+    #[test]
+    fn gemini_quota_reset_human_readable_seconds_parsed() {
+        // Gemini emits "Your quota will reset after 13h30m25s" — verify that
+        // the human-readable duration is converted to seconds correctly so that
+        // the cooldown delay is set accurately (not hard-coded to 3600s).
+        let e = GeminiErrorNormalizer
+            .normalize(
+                1,
+                "",
+                "TerminalQuotaError: You have exhausted your capacity on this model. Your quota will reset after 13h30m25s.",
+            )
+            .unwrap();
+        assert_eq!(e.canonical_class, CanonicalClass::QuotaExhausted);
+        assert_eq!(e.error_code, "E602");
+        // 13*3600 + 30*60 + 25 = 46800 + 1800 + 25 = 48625
+        assert_eq!(e.retry_after_seconds, Some(48625));
     }
 
     #[test]

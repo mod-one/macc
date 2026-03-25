@@ -212,16 +212,43 @@ pub fn find_reusable_worktree_native(
 
         let previous_branch = git_current_branch_name(&entry.path).unwrap_or_default();
         if !is_branch_merged_into_base(&entry.path, &previous_branch, base_branch) {
-            last_prepare_error = Some((
-                "previous_branch_not_merged".to_string(),
-                format!(
-                    "worktree {} branch {} is not merged into {}",
-                    entry.path.display(),
-                    previous_branch,
-                    base_branch
-                ),
-            ));
-            continue;
+            // If the task that owns this branch is permanently stuck (blocked/failed/abandoned),
+            // it will never merge autonomously. Force-checkout to base to reclaim the slot
+            // rather than letting the coordinator deadlock.
+            let stuck = TaskRegistry::from_value(registry)
+                .map(|r| {
+                    r.task_on_worktree_is_permanently_stuck(&entry.path.to_string_lossy())
+                })
+                .unwrap_or(false);
+            if stuck {
+                // Abandon the unmerged branch by checking out base, then fall through
+                // to prepare_reused_worktree_base which will reset and clean.
+                if crate::git::checkout(&entry.path, base_branch, true).unwrap_or(false) {
+                    // Fall through — prepare_reused_worktree_base will reset HEAD.
+                } else {
+                    last_prepare_error = Some((
+                        "stuck_branch_checkout_failed".to_string(),
+                        format!(
+                            "worktree {} stuck branch {} could not be abandoned (checkout to {} failed)",
+                            entry.path.display(),
+                            previous_branch,
+                            base_branch
+                        ),
+                    ));
+                    continue;
+                }
+            } else {
+                last_prepare_error = Some((
+                    "previous_branch_not_merged".to_string(),
+                    format!(
+                        "worktree {} branch {} is not merged into {}",
+                        entry.path.display(),
+                        previous_branch,
+                        base_branch
+                    ),
+                ));
+                continue;
+            }
         }
 
         let (prepared, skipped_reset) = prepare_reused_worktree_base(&entry.path, base_branch)?;

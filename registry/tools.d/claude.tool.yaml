@@ -50,9 +50,10 @@ fields:
     label: Model
     kind:
       type: enum
-      options: [sonnet, opus, haiku]
+      options: [opus, sonnet, haiku]
     help: Claude model alias (e.g., sonnet, opus).
     pointer: /tools/config/claude/model
+    default: "sonnet"
   - id: language
     label: Language
     kind:
@@ -60,6 +61,7 @@ fields:
       options: [English, French, Spanish, German, Japanese]
     help: Primary language for prompts and output.
     pointer: /tools/config/claude/language
+    default: "English"
   - id: permissions
     label: Permissions
     kind:
@@ -67,6 +69,7 @@ fields:
       options: [safe, dev, strict]
     help: Permissions preset for Claude settings.json.
     pointer: /tools/config/claude/permissions
+    default: "safe"
   - id: rules_enabled
     label: Rules
     kind:

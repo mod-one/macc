@@ -120,6 +120,10 @@ fn is_quota_exhaustion_in_reason(reason: &str) -> bool {
     if lower.contains("exhausted your capacity") {
         return true;
     }
+    // Session daily-limit message: "You're out of extra usage · resets <time>"
+    if lower.contains("out of extra usage") {
+        return true;
+    }
     false
 }
 

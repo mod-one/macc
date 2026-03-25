@@ -374,6 +374,18 @@ impl TaskRegistry {
         seen
     }
 
+    /// Returns `true` if the task assigned to `worktree_path` is in a terminal/stuck
+    /// state that will never self-resolve (blocked, failed, abandoned).
+    /// Used by the worktree reuse logic to decide whether to abandon an unmerged
+    /// branch and reset the slot rather than deadlocking.
+    pub fn task_on_worktree_is_permanently_stuck(&self, worktree_path: &str) -> bool {
+        const STUCK: &[&str] = &["blocked", "failed", "abandoned"];
+        self.tasks.iter().any(|task| {
+            task.worktree_path().is_some_and(|p| p == worktree_path)
+                && STUCK.contains(&task.state.as_str())
+        })
+    }
+
     pub fn has_in_progress_or_queued_on_worktree(&self, worktree_path: &str) -> bool {
         self.tasks.iter().any(|task| {
             matches!(
