@@ -1,8 +1,9 @@
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ApiClientError, getConfig, runPlan } from '../api/client';
-import type { ApiPlanResponse, ApiRiskLevel, ApiScope } from '../api/models';
-import { Button, ErrorBanner, LoadingSpinner } from '../components';
+import { ApiClientError, getConfig, getWorktrees, runPlan } from '../api/client';
+import type { ApiPlanResponse, ApiRiskLevel, ApiScope, ApiWorktree } from '../api/models';
+import { Button, ErrorBanner, LoadingSpinner, StatusBadge } from '../components';
+import type { StatusTone } from '../components/StatusBadge';
 
 function formatError(error: unknown): string {
   if (error instanceof ApiClientError) {
@@ -14,25 +15,11 @@ function formatError(error: unknown): string {
   return 'Unexpected error.';
 }
 
-function riskClasses(level: string): string {
-  if (level === 'dangerous') {
-    return 'border-rose-500/40 bg-rose-500/10 text-rose-300';
-  }
-  if (level === 'caution') {
-    return 'border-amber-500/40 bg-amber-500/10 text-amber-300';
-  }
-  return 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300';
-}
-
-function RiskPill({ level }: { level: string }) {
-  return (
-    <span
-      className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold uppercase tracking-wide ${riskClasses(level)}`}
-    >
-      {level}
-    </span>
-  );
-}
+const RISK_TONE: Record<ApiRiskLevel, StatusTone> = {
+  safe: 'merged',
+  caution: 'blocked',
+  dangerous: 'failed',
+};
 
 function computePlanHash(plan: ApiPlanResponse): string {
   const payload = JSON.stringify({
@@ -53,7 +40,9 @@ const Plan: React.FC = () => {
   const [selectedTools, setSelectedTools] = React.useState<string[]>([]);
   const [scope, setScope] = React.useState<ApiScope>('project');
   const [offline, setOffline] = React.useState(false);
-  const [quiet, setQuiet] = React.useState(false);
+
+  const [worktrees, setWorktrees] = React.useState<ApiWorktree[]>([]);
+  const [selectedWorktrees, setSelectedWorktrees] = React.useState<string[]>([]);
 
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
@@ -71,6 +60,15 @@ const Plan: React.FC = () => {
       .catch(() => {
         /* config fetch is best-effort */
       });
+    getWorktrees()
+      .then((wts) => {
+        if (!cancelled) {
+          setWorktrees(wts);
+        }
+      })
+      .catch(() => {
+        /* worktree fetch is best-effort */
+      });
     return () => {
       cancelled = true;
     };
@@ -86,6 +84,7 @@ const Plan: React.FC = () => {
       const response = await runPlan({
         scope,
         tools: selectedTools.length > 0 ? selectedTools : undefined,
+        worktrees: selectedWorktrees.length > 0 ? selectedWorktrees : undefined,
         offline: offline || undefined,
         includeDiff: true,
         explain: true,
@@ -96,11 +95,17 @@ const Plan: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [scope, selectedTools, offline]);
+  }, [scope, selectedTools, selectedWorktrees, offline]);
 
   const toggleTool = React.useCallback((toolId: string) => {
     setSelectedTools((prev) =>
       prev.includes(toolId) ? prev.filter((t) => t !== toolId) : [...prev, toolId],
+    );
+  }, []);
+
+  const toggleWorktree = React.useCallback((id: string) => {
+    setSelectedWorktrees((prev) =>
+      prev.includes(id) ? prev.filter((w) => w !== id) : [...prev, id],
     );
   }, []);
 
@@ -216,6 +221,31 @@ const Plan: React.FC = () => {
           </div>
         </div>
 
+        {/* Worktree selector */}
+        {worktrees.length > 0 && scope === 'project' && (
+          <div className="mt-4">
+            <p className="text-xs font-semibold uppercase tracking-wide text-[var(--text-muted)]">
+              Worktrees (leave unchecked for all)
+            </p>
+            <div className="mt-2 flex flex-wrap gap-3">
+              {worktrees.map((wt) => (
+                <label
+                  className="flex items-center gap-2 rounded-lg border border-[var(--border)] bg-[var(--bg-card)] px-3 py-2 text-sm text-[var(--text-primary)] cursor-pointer hover:bg-[var(--bg-primary)] transition-colors"
+                  key={wt.id}
+                >
+                  <input
+                    checked={selectedWorktrees.includes(wt.id)}
+                    className="accent-[var(--accent)]"
+                    onChange={() => toggleWorktree(wt.id)}
+                    type="checkbox"
+                  />
+                  {wt.slug ?? wt.id}
+                </label>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Toggles */}
         <div className="mt-4 flex flex-wrap gap-4">
           <label className="flex items-center gap-2 text-sm text-[var(--text-primary)] cursor-pointer">
@@ -226,15 +256,6 @@ const Plan: React.FC = () => {
               type="checkbox"
             />
             Offline mode
-          </label>
-          <label className="flex items-center gap-2 text-sm text-[var(--text-primary)] cursor-pointer">
-            <input
-              checked={quiet}
-              className="accent-[var(--accent)]"
-              onChange={(e) => setQuiet(e.target.checked)}
-              type="checkbox"
-            />
-            Quiet output
           </label>
         </div>
 
@@ -290,18 +311,9 @@ const Plan: React.FC = () => {
 
             {/* Risk breakdown */}
             <div className="mt-4 flex flex-wrap gap-3">
-              <div className="flex items-center gap-2 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3 py-2">
-                <span className="text-xs font-semibold uppercase text-emerald-300">Safe</span>
-                <span className="text-lg font-semibold text-emerald-300">{riskCounts.safe}</span>
-              </div>
-              <div className="flex items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2">
-                <span className="text-xs font-semibold uppercase text-amber-300">Caution</span>
-                <span className="text-lg font-semibold text-amber-300">{riskCounts.caution}</span>
-              </div>
-              <div className="flex items-center gap-2 rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2">
-                <span className="text-xs font-semibold uppercase text-rose-300">Dangerous</span>
-                <span className="text-lg font-semibold text-rose-300">{riskCounts.dangerous}</span>
-              </div>
+              <StatusBadge status={`Safe ${riskCounts.safe}`} tone="merged" />
+              <StatusBadge status={`Caution ${riskCounts.caution}`} tone="blocked" />
+              <StatusBadge status={`Dangerous ${riskCounts.dangerous}`} tone="failed" />
             </div>
           </section>
 
@@ -336,7 +348,7 @@ const Plan: React.FC = () => {
                             </td>
                             <td className="px-3 py-2 text-[var(--text-secondary)]">{file.kind}</td>
                             <td className="px-3 py-2">
-                              <RiskPill level={file.riskLevel} />
+                              <StatusBadge status={file.riskLevel} tone={RISK_TONE[file.riskLevel]} />
                             </td>
                             <td className="px-3 py-2 text-[var(--text-secondary)]">
                               {file.consentRequired ? 'Required' : 'No'}
@@ -381,7 +393,7 @@ const Plan: React.FC = () => {
                     className="flex items-start gap-3 rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-3"
                     key={`${risk.level}:${index.toString()}`}
                   >
-                    <RiskPill level={risk.level} />
+                    <StatusBadge status={risk.level} tone={RISK_TONE[risk.level]} />
                     <p className="text-sm text-[var(--text-secondary)]">{risk.message}</p>
                   </li>
                 ))}
@@ -398,20 +410,20 @@ const Plan: React.FC = () => {
               <div className="mt-3 space-y-3">
                 {plan.consents.map((consent) => (
                   <article
-                    className={`rounded-xl border p-3 ${riskClasses(consent.classification)}`}
+                    className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-3"
                     key={consent.id}
                   >
                     <div className="flex flex-wrap items-center gap-2">
-                      <RiskPill level={consent.classification} />
+                      <StatusBadge status={consent.classification} tone={RISK_TONE[consent.classification]} />
                       <span className="text-xs uppercase text-[var(--text-muted)]">
                         {consent.scope}
                       </span>
                     </div>
-                    <p className="mt-2 text-sm">{consent.message}</p>
+                    <p className="mt-2 text-sm text-[var(--text-secondary)]">{consent.message}</p>
                     {consent.paths.length > 0 && (
                       <ul className="mt-2 space-y-0.5">
                         {consent.paths.map((p) => (
-                          <li className="font-mono text-xs" key={p}>
+                          <li className="font-mono text-xs text-[var(--text-secondary)]" key={p}>
                             {p}
                           </li>
                         ))}
