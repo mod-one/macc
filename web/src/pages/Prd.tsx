@@ -15,8 +15,9 @@ import { Button } from '../components/Button';
 import * as Icons from '../components/icons';
 import { cn } from '../components/styles';
 import PrdGraph from '../components/PrdGraph';
+import PrdDiff from '../components/PrdDiff';
 
-type PrdViewMode = 'table' | 'graph';
+type PrdViewMode = 'table' | 'graph' | 'diff';
 
 const columnHelper = createColumnHelper<ApiPrdTask>();
 
@@ -202,6 +203,16 @@ const PrdPage: React.FC = () => {
               <Icons.BranchIcon className="h-3.5 w-3.5" />
               Graph
             </button>
+            <button
+              onClick={() => handleViewModeChange('diff')}
+              className={cn(
+                "flex items-center gap-1.5 px-3 py-2 text-xs font-medium transition-colors",
+                viewMode === 'diff' ? "bg-[var(--accent)] text-white" : "bg-[var(--bg-secondary)] text-[var(--text-muted)] hover:bg-[var(--bg-hover)]"
+              )}
+            >
+              <Icons.SwitchIcon className="h-3.5 w-3.5" />
+              Diff
+            </button>
           </div>
 
           {viewMode === 'table' && (
@@ -305,12 +316,20 @@ const PrdPage: React.FC = () => {
             </div>
           )}
         </div>
-        ) : (
+        ) : viewMode === 'graph' ? (
         <div className="flex-1 overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] shadow-sm">
           <PrdGraph
             tasks={tasks}
             onSelectTask={setSelectedTaskId}
             selectedTaskId={selectedTaskId}
+          />
+        </div>
+        ) : (
+        <div className="flex-1 overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] shadow-sm">
+          <PrdDiff
+            currentTasks={tasks}
+            currentMetadata={metadata}
+            hasUnsavedChanges={unsavedChanges}
           />
         </div>
         )}
