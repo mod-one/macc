@@ -16,6 +16,18 @@ export const VirtualizedLogLines = forwardRef<VirtualizedLogLinesHandle, Virtual
   function VirtualizedLogLines({ lines, offset, highlightedIndex }, ref) {
     const shouldVirtualize = lines.length > 200;
     const parentRef = useRef<HTMLDivElement>(null);
+    const scrollToLineInStaticMode = (index: number) => {
+      const parent = parentRef.current;
+      if (!parent) return;
+      const lineEl = parent.querySelector<HTMLElement>(`[data-line-index="${index}"]`);
+      if (lineEl && typeof lineEl.scrollIntoView === 'function') {
+        lineEl.scrollIntoView({ block: 'center' });
+        return;
+      }
+      // Fallback to estimated row height when the target line is not found.
+      parent.scrollTop = Math.max(0, index * 24);
+    };
+
     const rowVirtualizer = useVirtualizer({
       count: shouldVirtualize ? lines.length : 0,
       getScrollElement: () => parentRef.current,
@@ -29,14 +41,24 @@ export const VirtualizedLogLines = forwardRef<VirtualizedLogLinesHandle, Virtual
       () => ({
         scrollToLine: (index: number) => {
           if (index < 0 || index >= lines.length) return;
+          if (!shouldVirtualize) {
+            scrollToLineInStaticMode(index);
+            return;
+          }
           rowVirtualizer.scrollToIndex(index, { align: 'center' });
         },
         scrollToBottom: () => {
           if (lines.length === 0) return;
+          if (!shouldVirtualize) {
+            const parent = parentRef.current;
+            if (!parent) return;
+            parent.scrollTop = parent.scrollHeight;
+            return;
+          }
           rowVirtualizer.scrollToIndex(lines.length - 1, { align: 'end' });
         },
       }),
-      [lines.length, rowVirtualizer],
+      [lines.length, rowVirtualizer, shouldVirtualize],
     );
 
     return (
