@@ -419,10 +419,13 @@ pub(super) async fn terminal_ws_handler(
         ));
     }
 
+    let attachment = session.begin_attach()?;
+
     Ok(ws.on_upgrade(move |socket| {
         let state = state.clone();
         async move {
-            if let Err(err) = handle_terminal_socket(state, session_id.clone(), session, socket).await
+            if let Err(err) =
+                handle_terminal_socket(state, session_id.clone(), session, attachment, socket).await
             {
                 warn!(session_id = %session_id, error = ?err, "terminal websocket closed with error");
             }
@@ -434,9 +437,9 @@ async fn handle_terminal_socket(
     state: WebState,
     session_id: String,
     session: Arc<TerminalSession>,
+    attachment: TerminalAttachment,
     socket: WebSocket,
 ) -> std::result::Result<(), ApiError> {
-    let attachment = session.begin_attach()?;
     let (output_tx, mut output_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let (input_tx, input_rx) = std::sync::mpsc::channel::<Vec<u8>>();
     let TerminalAttachment {
@@ -617,4 +620,38 @@ fn validate_worktree_id(worktree_id: &str) -> std::result::Result<(), ApiError> 
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::response::IntoResponse;
+
+    #[tokio::test]
+    async fn terminal_attach_conflict_is_rejected_before_upgrade() {
+        let store = TerminalSessionStore::new(1, Duration::from_secs(60));
+        let root = std::env::temp_dir().join(format!(
+            "macc-terminal-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("create root");
+
+        let created = store
+            .create(TerminalTargetType::Project, root.clone(), None)
+            .expect("create session");
+        let session = store.get(&created.session_id).expect("session present");
+
+        assert!(session.begin_attach().is_ok(), "first attach should succeed");
+
+        let conflict = session.begin_attach();
+        assert!(conflict.is_err(), "second attach should fail");
+        let response = conflict.err().expect("conflict error").into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+
+        store.remove(&created.session_id, "test cleanup");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
