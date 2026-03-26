@@ -1146,8 +1146,9 @@ pub async fn monitor_active_jobs_native(
 ) -> Result<()> {
     ensure_performer_ipc_listener(repo_root, state, logger).await?;
     consume_runtime_events(repo_root, state, logger)?;
-    apply_runtime_event_bus_updates(repo_root, state, logger)?;
+    apply_runtime_event_bus_updates(repo_root, env_cfg, coordinator, state, logger)?;
     apply_stale_heartbeat_policy(repo_root, env_cfg, coordinator, logger)?;
+    force_kill_stale_failures(repo_root, env_cfg, coordinator, state, logger);
     let retry_codes = resolve_error_code_retry_list(env_cfg, coordinator);
     let retry_max = resolve_error_code_retry_max(env_cfg, coordinator);
     loop {
@@ -1167,6 +1168,24 @@ pub async fn monitor_active_jobs_native(
                     repo_root,
                     &BTreeMap::new(),
                 )?;
+                // On failure, read the performer task log from the worktree
+                // and feed it to the per-adapter error normalizer.  This
+                // populates normalizer_input so that the canonical error
+                // classification pipeline actually runs in production.
+                let normalizer_input = if !evt.success {
+                    crate::coordinator::runtime::read_performer_log_tail(
+                        &job.worktree_path,
+                        &evt.task_id,
+                        8192,
+                    )
+                    .map(|log_content| coordinator_engine::NormalizerInput {
+                        exit_code: 1,
+                        stderr: log_content.clone(),
+                        stdout: log_content,
+                    })
+                } else {
+                    None
+                };
                 let completion = coordinator_engine::apply_job_completion_in_registry(
                     &mut registry,
                     &evt.task_id,
@@ -1192,7 +1211,7 @@ pub async fn monitor_active_jobs_native(
                             env_cfg,
                             coordinator,
                         ),
-                        normalizer_input: None,
+                        normalizer_input,
                     },
                     &state.normalizer_registry,
                     &now_iso_coordinator(),
@@ -1357,6 +1376,7 @@ pub async fn monitor_active_jobs_native(
                             attempt: job.attempt + 1,
                             started_at: std::time::Instant::now(),
                             pid: retry_pid,
+                            failure_signaled_at: None,
                         },
                     );
                     if let Some(log) = logger {
@@ -1385,6 +1405,8 @@ pub async fn monitor_active_jobs_native(
 
 fn apply_runtime_event_bus_updates(
     repo_root: &Path,
+    env_cfg: &CoordinatorEnvConfig,
+    coordinator: Option<&crate::config::CoordinatorConfig>,
     state: &mut CoordinatorRunState,
     logger: Option<&dyn CoordinatorLog>,
 ) -> Result<usize> {
@@ -1394,6 +1416,8 @@ fn apply_runtime_event_bus_updates(
         status: Option<String>,
         phase: Option<String>,
         last_error: Option<String>,
+        /// True when a terminal failure IPC event was received for this task.
+        failure_signaled: bool,
     }
 
     let mut runtime_updates: HashMap<String, PendingRuntimeUpdate> = HashMap::new();
@@ -1440,6 +1464,9 @@ fn apply_runtime_event_bus_updates(
                                 event.task_id, event.source, status
                             ));
                         }
+                        if status == "failed" {
+                            update.failure_signaled = true;
+                        }
                         update.status = Some(status);
                         if let Some(phase) = phase {
                             update.phase = Some(phase);
@@ -1449,6 +1476,7 @@ fn apply_runtime_event_bus_updates(
                         }
                     }
                     CoordinatorRuntimeEventKind::Failed { phase, message } => {
+                        update.failure_signaled = true;
                         update.status = Some(
                             crate::coordinator::RuntimeStatus::Failed
                                 .as_str()
@@ -1518,6 +1546,27 @@ fn apply_runtime_event_bus_updates(
         &registry.to_value()?,
     )?;
 
+    // Mark active jobs that received a terminal failure IPC signal so the
+    // force-kill grace period timer starts.
+    let grace_seconds = resolve_force_kill_grace_seconds(env_cfg, coordinator);
+    for (task_id, update) in &runtime_updates {
+        if update.failure_signaled {
+            if let Some(job) = state.active_jobs.get_mut(task_id.as_str()) {
+                if job.failure_signaled_at.is_none() {
+                    job.failure_signaled_at = Some(std::time::Instant::now());
+                    if let Some(log) = logger {
+                        let _ = log.note(format!(
+                            "- Force-kill grace timer started task={} pid={:?} grace={}s",
+                            task_id,
+                            job.pid,
+                            grace_seconds,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
     if let Some(log) = logger {
         state.heartbeat_updates_since_log += updated;
         let should_log = state
@@ -1535,6 +1584,76 @@ fn apply_runtime_event_bus_updates(
     }
 
     Ok(updated)
+}
+
+/// Force-kill performer processes that signaled failure via IPC but did not
+/// exit within the grace period ([`FORCE_KILL_GRACE_SECONDS`]).  Sends
+/// SIGKILL via `kill(2)` using the stored PID.  The async wrapper in
+/// `spawn_performer_job` will observe the child exit and emit the normal
+/// `CoordinatorJobEvent`, so the regular state-transition path still fires.
+fn force_kill_stale_failures(
+    repo_root: &Path,
+    env_cfg: &CoordinatorEnvConfig,
+    coordinator: Option<&crate::config::CoordinatorConfig>,
+    state: &mut CoordinatorRunState,
+    logger: Option<&dyn CoordinatorLog>,
+) {
+    let grace_seconds = resolve_force_kill_grace_seconds(env_cfg, coordinator);
+    let grace = std::time::Duration::from_secs(grace_seconds);
+    let mut killed: Vec<String> = Vec::new();
+
+    for (task_id, job) in &state.active_jobs {
+        let Some(signaled_at) = job.failure_signaled_at else {
+            continue;
+        };
+        if signaled_at.elapsed() < grace {
+            continue;
+        }
+        if let Some(pid) = job.pid {
+            // Send SIGKILL to the performer process via the kill command.
+            #[cfg(unix)]
+            {
+                let _ = std::process::Command::new("kill")
+                    .args(["-9", &pid.to_string()])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+            if let Some(log) = logger {
+                let _ = log.note(format!(
+                    "- Force-killed performer task={} pid={} reason=failure_signaled_grace_expired elapsed={:.1}s",
+                    task_id,
+                    pid,
+                    signaled_at.elapsed().as_secs_f64(),
+                ));
+            }
+            let _ = append_coordinator_event_with_severity(
+                repo_root,
+                "force_kill",
+                task_id,
+                "dev",
+                "failed",
+                &format!(
+                    "Force-killed performer pid={} after failure IPC grace period ({}s) expired",
+                    pid, grace_seconds
+                ),
+                "warning",
+            );
+            killed.push(task_id.clone());
+        } else if let Some(log) = logger {
+            let _ = log.note(format!(
+                "- Force-kill requested but no PID for task={} (already exited?)",
+                task_id,
+            ));
+        }
+    }
+
+    // Clear the failure signal for killed processes so we don't re-kill.
+    for task_id in &killed {
+        if let Some(job) = state.active_jobs.get_mut(task_id.as_str()) {
+            job.failure_signaled_at = None;
+        }
+    }
 }
 
 pub fn consume_heartbeat_events(
@@ -1817,6 +1936,16 @@ fn resolve_rate_limit_throttle_parallel(
         .rate_limit_throttle_parallel
         .or_else(|| coordinator.and_then(|c| c.rate_limit_throttle_parallel))
         .unwrap_or(true)
+}
+
+fn resolve_force_kill_grace_seconds(
+    env_cfg: &CoordinatorEnvConfig,
+    coordinator: Option<&crate::config::CoordinatorConfig>,
+) -> u64 {
+    env_cfg
+        .force_kill_grace_seconds
+        .or_else(|| coordinator.and_then(|c| c.force_kill_grace_seconds))
+        .unwrap_or(crate::coordinator::runtime::FORCE_KILL_GRACE_SECONDS)
 }
 
 pub async fn monitor_merge_jobs_native(
@@ -2613,7 +2742,7 @@ pub async fn dispatch_ready_tasks_native(
         let phase_timeout_seconds = env_cfg
             .stale_in_progress_seconds
             .or_else(|| coordinator.and_then(|c| c.stale_in_progress_seconds))
-            .unwrap_or(0);
+            .unwrap_or(600);
         let current_exe = std::env::current_exe().map_err(|e| {
             MaccError::Validation(format!("Failed to resolve current executable path: {}", e))
         })?;
@@ -2764,6 +2893,7 @@ pub async fn dispatch_ready_tasks_native(
                 attempt: 1,
                 started_at: std::time::Instant::now(),
                 pid,
+                failure_signaled_at: None,
             },
         );
         if let Some(log) = logger {

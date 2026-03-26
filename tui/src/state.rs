@@ -207,7 +207,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    const AUTOMATION_FIELD_COUNT: usize = 30;
+    const AUTOMATION_FIELD_COUNT: usize = 31;
     const COORDINATOR_EVENTS_EWMA_ALPHA: f64 = 0.30;
     const COORDINATOR_PAUSE_REL_PATH: &'static str = ".macc/automation/task/coordinator.pause.json";
 
@@ -1943,6 +1943,7 @@ impl AppState {
             27 => "RL Backoff Max (s)",
             28 => "RL Fallback Enabled",
             29 => "RL Throttle Parallel",
+            30 => "Force-Kill Grace (s)",
             _ => "",
         }
     }
@@ -1979,6 +1980,7 @@ impl AppState {
             27 => "Maximum backoff delay cap in seconds for exponential growth (default: 3600).",
             28 => "When the primary tool is throttled, dispatch to the next tool in priority order.",
             29 => "Reduce effective_max_parallel by 1 on each E601; restore on recovery.",
+            30 => "Seconds to wait after a performer signals failure via IPC before force-killing it (default: 30).",
             _ => "",
         }
     }
@@ -2108,6 +2110,10 @@ impl AppState {
             29 => coordinator
                 .and_then(|c| c.rate_limit_throttle_parallel)
                 .unwrap_or(true)
+                .to_string(),
+            30 => coordinator
+                .and_then(|c| c.force_kill_grace_seconds)
+                .unwrap_or(30)
                 .to_string(),
             _ => String::new(),
         }
@@ -2307,7 +2313,7 @@ impl AppState {
                 }
                 Err(_) => Err("Invalid integer value.".to_string()),
             },
-            15 | 16 | 19 | 21 | 26 | 27 => match input.parse::<u64>() {
+            15 | 16 | 19 | 21 | 26 | 27 | 30 => match input.parse::<u64>() {
                 Ok(value) => {
                     self.set_automation_field_u64(idx, value);
                     Ok(())
@@ -2414,6 +2420,7 @@ impl AppState {
                 21 => coordinator.dispatch_cooldown_seconds = Some(value),
                 26 => coordinator.rate_limit_backoff_base_seconds = Some(value),
                 27 => coordinator.rate_limit_backoff_max_seconds = Some(value),
+                30 => coordinator.force_kill_grace_seconds = Some(value),
                 _ => {}
             }
         }

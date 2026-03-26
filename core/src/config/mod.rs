@@ -165,6 +165,10 @@ pub struct CoordinatorConfig {
     pub rate_limit_fallback_enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_limit_throttle_parallel: Option<bool>,
+    /// Grace period in seconds between receiving a terminal failure IPC signal
+    /// and force-killing the performer process.  Default: 30.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub force_kill_grace_seconds: Option<u64>,
 }
 
 fn default_true() -> bool {

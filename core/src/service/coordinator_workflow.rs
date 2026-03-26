@@ -1944,6 +1944,7 @@ fn retry_dev_phase<E: crate::engine::Engine + ?Sized>(
             attempt: 1,
             started_at: std::time::Instant::now(),
             pid,
+            failure_signaled_at: None,
         },
     );
     runtime.block_on(async {

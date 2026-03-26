@@ -17,7 +17,16 @@ pub struct CoordinatorJob {
     pub attempt: usize,
     pub started_at: std::time::Instant,
     pub pid: Option<i64>,
+    /// Set when an IPC `phase_result status=failed` or `Failed` event is
+    /// received for this job.  If the performer process does not exit within
+    /// [`FORCE_KILL_GRACE_SECONDS`] after this instant, the coordinator will
+    /// send SIGKILL.
+    pub failure_signaled_at: Option<std::time::Instant>,
 }
+
+/// Grace period (seconds) between receiving a failure IPC signal and
+/// force-killing the performer process.
+pub const FORCE_KILL_GRACE_SECONDS: u64 = 30;
 
 #[derive(Debug, Clone)]
 pub struct CoordinatorMergeJob {
@@ -755,6 +764,25 @@ fn performer_task_log_path(worktree_path: &Path, task_id: &str) -> PathBuf {
     worktree_path
         .join(".macc/log/performer")
         .join(format!("{}.md", file))
+}
+
+/// Read the tail of the performer task log for use as normalizer input.
+/// Returns up to `max_bytes` from the end of the log file.
+pub fn read_performer_log_tail(
+    worktree_path: &Path,
+    task_id: &str,
+    max_bytes: usize,
+) -> Option<String> {
+    let log_path = performer_task_log_path(worktree_path, task_id);
+    let raw = std::fs::read_to_string(&log_path).ok()?;
+    if raw.is_empty() {
+        return None;
+    }
+    if raw.len() <= max_bytes {
+        Some(raw)
+    } else {
+        Some(raw[raw.len() - max_bytes..].to_string())
+    }
 }
 
 fn read_last_error_details_from_sqlite(

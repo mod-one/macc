@@ -129,6 +129,8 @@ pub(crate) struct ApiConfigResponse {
     pub rate_limit_fallback_enabled: Option<bool>,
     /// Whether rate limiting can reduce effective parallelism.
     pub rate_limit_throttle_parallel: Option<bool>,
+    /// Grace period before force-killing a performer that signaled failure via IPC.
+    pub force_kill_grace_seconds: Option<u64>,
     /// Whether managed environment constraints were detected.
     pub requirements_detected: bool,
     /// Managed-environment warnings surfaced to the UI.
@@ -244,6 +246,8 @@ pub(crate) struct ApiConfigUpdateRequest {
     pub rate_limit_fallback_enabled: Option<bool>,
     /// Updated rate-limit throttle-parallel flag.
     pub rate_limit_throttle_parallel: Option<bool>,
+    /// Updated force-kill grace period.
+    pub force_kill_grace_seconds: Option<u64>,
 }
 
 /// Standards preview request used by the standards configuration page.

@@ -50,6 +50,15 @@ fn patterns() -> &'static Vec<Pattern> {
     PATTERNS.get_or_init(|| {
         vec![
             // ── RESOURCE_EXHAUSTED: quota vs rate-limit ────────────
+            // Model capacity exhausted — transient server-side overload, not
+            // a quota limit.  Must precede the generic RESOURCE_EXHAUSTED rules.
+            Pattern {
+                regex: Regex::new(
+                    r"(?i)(MODEL_CAPACITY_EXHAUSTED|[Nn]o\s+capacity\s+available\s+for\s+model)",
+                )
+                .unwrap(),
+                class: CanonicalClass::Overloaded,
+            },
             // Quota / functional limit — must precede generic RESOURCE_EXHAUSTED
             Pattern {
                 regex: Regex::new(
@@ -198,6 +207,28 @@ mod tests {
 
     fn norm(exit_code: i32, stderr: &str, stdout: &str) -> Option<ToolError> {
         GeminiErrorNormalizer.normalize(exit_code, stderr, stdout)
+    }
+
+    // ── MODEL_CAPACITY_EXHAUSTED ────────────────────────────────────
+
+    #[test]
+    fn model_capacity_exhausted() {
+        let stderr = "429 RESOURCE_EXHAUSTED MODEL_CAPACITY_EXHAUSTED error code: 429 error message: No capacity available for model gemini-3.1-pro-preview on the server.";
+        let err = norm(1, stderr, "").unwrap();
+        assert_eq!(err.canonical_class, CanonicalClass::Overloaded);
+        assert!(err.retryable);
+        assert!(!err.user_action_required);
+        assert_eq!(err.error_code, "E601");
+        assert_eq!(err.provider, "gemini");
+    }
+
+    #[test]
+    fn no_capacity_available_for_model() {
+        let stderr = "No capacity available for model gemini-pro on the server.";
+        let err = norm(1, stderr, "").unwrap();
+        assert_eq!(err.canonical_class, CanonicalClass::Overloaded);
+        assert!(err.retryable);
+        assert_eq!(err.error_code, "E601");
     }
 
     // ── RESOURCE_EXHAUSTED: quota vs rate-limit ─────────────────────
