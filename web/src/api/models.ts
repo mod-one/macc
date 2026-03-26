@@ -277,6 +277,21 @@ export interface ApiConfigUpdateRequest {
   rateLimitThrottleParallel?: boolean | null;
 }
 
+export interface ApiStandardsPreviewRequest {
+  standardsPath: string | null;
+  standardsInline: Record<string, string>;
+}
+
+export interface ApiStandardsPreviewCard {
+  id: string;
+  title: string;
+  content: string;
+}
+
+export interface ApiStandardsPreviewResponse {
+  cards: ApiStandardsPreviewCard[];
+}
+
 export interface ApiPrdTask {
   id: string;
   title: string | null;

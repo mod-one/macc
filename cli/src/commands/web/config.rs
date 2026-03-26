@@ -1,10 +1,16 @@
 use super::errors::ApiError;
-use super::types::{ApiConfigResponse, ApiConfigUpdateRequest};
+use super::types::{
+    ApiConfigResponse, ApiConfigUpdateRequest, ApiStandardsPreviewCard, ApiStandardsPreviewRequest,
+    ApiStandardsPreviewResponse,
+};
 use super::WebState;
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::Json;
 use macc_core::config::{CanonicalConfig, CoordinatorConfig, RalphConfig};
+use macc_core::plan::{Action, ActionPlan};
+use macc_core::resolve::{self, CliOverrides, PlanningContext, ResolvedConfig};
+use macc_core::{ProjectPaths, ToolAdapter};
 
 pub(super) async fn get_config_handler(
     State(state): State<WebState>,
@@ -36,6 +42,87 @@ pub(super) async fn update_config_handler(
         .save_canonical_config(&state.paths, &canonical)
         .map_err(ApiError::from)?;
     Ok(Json(ApiConfigResponse::from(canonical)))
+}
+
+pub(super) async fn standards_preview_handler(
+    State(state): State<WebState>,
+    body: Bytes,
+) -> std::result::Result<Json<ApiStandardsPreviewResponse>, ApiError> {
+    let request: ApiStandardsPreviewRequest = serde_json::from_slice(&body).map_err(|err| {
+        ApiError::from(macc_core::MaccError::Validation(format!(
+            "Invalid standards preview request body: {}",
+            err
+        )))
+    })?;
+
+    let mut canonical = state
+        .engine
+        .load_canonical_config(&state.paths)
+        .map_err(ApiError::from)?;
+    canonical.standards.path = request.standards_path;
+    canonical.standards.inline = request.standards_inline;
+
+    let resolved = resolve::resolve(&canonical, &CliOverrides::default());
+    let cards = render_preview_cards(&state.paths, &resolved).map_err(ApiError::from)?;
+    Ok(Json(ApiStandardsPreviewResponse { cards }))
+}
+
+fn render_preview_cards(
+    paths: &ProjectPaths,
+    resolved: &ResolvedConfig,
+) -> macc_core::Result<Vec<ApiStandardsPreviewCard>> {
+    let materialized_units = Vec::new();
+    let planning_ctx = PlanningContext {
+        paths,
+        resolved,
+        materialized_units: &materialized_units,
+    };
+
+    let codex_plan = macc_adapter_codex::CodexAdapter.plan(&planning_ctx)?;
+    let claude_plan = macc_adapter_claude::ClaudeAdapter.plan(&planning_ctx)?;
+    let gemini_plan = macc_adapter_gemini::GeminiAdapter.plan(&planning_ctx)?;
+
+    Ok(vec![
+        ApiStandardsPreviewCard {
+            id: "codex".to_string(),
+            title: "Codex - AGENTS.md (rendered)".to_string(),
+            content: find_rendered_file(
+                &codex_plan,
+                "AGENTS.md",
+                "AGENTS.md is not generated when codex.rules_enabled is false.\n",
+            ),
+        },
+        ApiStandardsPreviewCard {
+            id: "claude".to_string(),
+            title: "Claude - CLAUDE.md (rendered)".to_string(),
+            content: find_rendered_file(
+                &claude_plan,
+                "CLAUDE.md",
+                "CLAUDE.md preview unavailable.\n",
+            ),
+        },
+        ApiStandardsPreviewCard {
+            id: "gemini".to_string(),
+            title: "Gemini - GEMINI.md (rendered)".to_string(),
+            content: find_rendered_file(
+                &gemini_plan,
+                "GEMINI.md",
+                "GEMINI.md preview unavailable.\n",
+            ),
+        },
+    ])
+}
+
+fn find_rendered_file(plan: &ActionPlan, target: &str, fallback: &str) -> String {
+    for action in &plan.actions {
+        if let Action::WriteFile { path, content, .. } = action {
+            if path == target {
+                return String::from_utf8_lossy(content).into_owned();
+            }
+        }
+    }
+
+    fallback.to_string()
 }
 
 impl From<CanonicalConfig> for ApiConfigResponse {

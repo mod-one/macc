@@ -207,7 +207,8 @@ fn handle_phase_quota_exhaustion(
     };
 
     // ── Step 2: compute cooldown and register tool throttle ────────────
-    let cooldown = extract_quota_cooldown_from_reason(reason, tool_id, &state.normalizer_registry).unwrap_or(3600);
+    let cooldown = extract_quota_cooldown_from_reason(reason, tool_id, &state.normalizer_registry)
+        .unwrap_or(3600);
     let now_epoch = chrono::DateTime::parse_from_rfc3339(now)
         .map(|dt| dt.timestamp() as u64)
         .unwrap_or(0);

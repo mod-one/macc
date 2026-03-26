@@ -138,7 +138,8 @@ impl CoordinatorRunState {
                 false,
             )),
             throttle_registry: ToolThrottleRegistry::default(),
-            normalizer_registry: crate::coordinator::error_normalizer::NormalizerRegistry::from_inventory(),
+            normalizer_registry:
+                crate::coordinator::error_normalizer::NormalizerRegistry::from_inventory(),
             effective_max_parallel: 0,
             original_max_parallel: 0,
         }

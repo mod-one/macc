@@ -38,10 +38,7 @@ pub fn run_doctor(
     let any_applied = false;
     for check in failed {
         if let Some(hint) = &check.fix_hint {
-            interaction.info(&format!(
-                "Fix for '{}': {}",
-                check.name, hint
-            ));
+            interaction.info(&format!("Fix for '{}': {}", check.name, hint));
         } else {
             interaction.info(&format!(
                 "No automatic fix registered for doctor check '{}' (target='{}').",

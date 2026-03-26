@@ -97,9 +97,7 @@ pub fn checks_for_enabled_tools(specs: &[ToolSpec]) -> Vec<ToolCheck> {
         kind: DoctorCheckKind::GitConfigKey,
         status: ToolStatus::Missing,
         severity: CheckSeverity::Error,
-        fix_hint: Some(
-            "git config --global user.email \"you@example.com\"".to_string(),
-        ),
+        fix_hint: Some("git config --global user.email \"you@example.com\"".to_string()),
     });
     checks.push(ToolCheck {
         name: "Git user.name".to_string(),
@@ -108,9 +106,7 @@ pub fn checks_for_enabled_tools(specs: &[ToolSpec]) -> Vec<ToolCheck> {
         kind: DoctorCheckKind::GitConfigKey,
         status: ToolStatus::Missing,
         severity: CheckSeverity::Error,
-        fix_hint: Some(
-            "git config --global user.name \"Your Name\"".to_string(),
-        ),
+        fix_hint: Some("git config --global user.name \"Your Name\"".to_string()),
     });
 
     for spec in specs {

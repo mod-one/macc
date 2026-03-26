@@ -138,6 +138,10 @@ fn build_web_router(state: WebState) -> Router {
             "/api/v1/config",
             get(config::get_config_handler).put(config::update_config_handler),
         )
+        .route(
+            "/api/v1/config/standards-preview",
+            post(config::standards_preview_handler),
+        )
         .route("/api/v1/plan", post(plan::run_plan_handler))
         .route("/api/v1/apply", post(apply::run_apply_handler))
         .route("/api/v1/status", get(coordinator::status_handler))
