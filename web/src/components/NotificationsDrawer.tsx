@@ -109,10 +109,12 @@ export const NotificationsDrawer: React.FC = () => {
               </div>
               <button
                 className="absolute right-2 top-2 rounded-md p-1 opacity-0 transition-opacity hover:bg-white/10 group-hover:opacity-100"
+                aria-label={`Dismiss notification: ${notif.title}`}
                 onClick={(e) => {
                   e.stopPropagation();
                   dismissNotification(notif.id);
                 }}
+                type="button"
                 title="Dismiss"
               >
                 <XIcon className="h-3.5 w-3.5" />
