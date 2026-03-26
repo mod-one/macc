@@ -218,4 +218,4 @@ else
 fi
 
 echo "Uninstall with: macc-uninstall"
-echo "Then in a new project: macc init && macc tui"
+echo "Then in a new project: macc init && macc"
