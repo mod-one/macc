@@ -193,4 +193,28 @@ describe('Init page', () => {
     });
     expect(navigateMock).toHaveBeenCalledWith('/dashboard');
   });
+
+  it('revalidates earlier steps when finishing from defaults', async () => {
+    getConfigMock.mockResolvedValueOnce(
+      buildConfig({
+        enabledTools: [],
+        toolConfig: {},
+        toolSettings: {},
+        toolPriority: [],
+      }),
+    );
+
+    const user = userEvent.setup();
+    render(<Init />);
+
+    await screen.findByText('Project initialization wizard');
+    await user.click(screen.getByRole('button', { name: 'Skip to defaults' }));
+    expect(await screen.findByText('Config preview')).toBeInTheDocument();
+    await user.click(screen.getByRole('checkbox', { name: 'I reviewed the config preview' }));
+    await user.click(screen.getByRole('button', { name: 'Create project' }));
+
+    expect(await screen.findByText('Enable at least one tool before continuing.')).toBeInTheDocument();
+    expect(updateConfigMock).not.toHaveBeenCalled();
+    expect(navigateMock).not.toHaveBeenCalled();
+  });
 });

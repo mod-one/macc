@@ -439,10 +439,13 @@ const Init: React.FC = () => {
   }, [selectedTools]);
 
   const handleFinish = React.useCallback(async () => {
-    const issue = validateStep(3);
-    if (issue) {
-      setStepError(issue);
-      return;
+    for (const candidateStep of [0, 1, 2, 3] as const) {
+      const issue = validateStep(candidateStep);
+      if (issue) {
+        setStep(candidateStep);
+        setStepError(issue);
+        return;
+      }
     }
 
     if (!config) {
