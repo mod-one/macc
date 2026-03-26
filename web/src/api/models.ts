@@ -10,6 +10,8 @@ export interface ApiErrorBody {
   code: string;
   category: ApiErrorCategory;
   message: string;
+  retryable: boolean;
+  recommended_action?: string;
   context?: Record<string, unknown>;
   cause?: string;
 }
@@ -20,6 +22,41 @@ export interface ApiErrorEnvelope {
 
 export interface ApiHealthResponse {
   status: 'ok';
+  project_root?: string;
+}
+
+export interface ApiGitCommit {
+  sha: string;
+  short_sha: string;
+  subject: string;
+  author: string;
+  timestamp: number;
+  parent_shas: string[];
+  branch_refs: string[];
+  task_id?: string;
+}
+
+export interface ApiGitGraphResponse {
+  commits: ApiGitCommit[];
+  branches: string[];
+  head: string;
+}
+
+export interface GitCommit {
+  sha: string;
+  shortSha: string;
+  subject: string;
+  author: string;
+  timestamp: number;
+  parentShas: string[];
+  branchRefs: string[];
+  taskId?: string;
+}
+
+export interface GitGraphResponse {
+  commits: GitCommit[];
+  branches: string[];
+  head: string;
 }
 
 export interface ApiThrottledToolStatus {
@@ -62,6 +99,13 @@ export interface ApiSelectedTask {
   base_branch: string;
 }
 
+export interface ApiToolCooldownEntry {
+  tool_id: string;
+  throttled_until: number;
+  remaining_seconds: number;
+  backoff_seconds: number;
+}
+
 export interface ApiCoordinatorCommandResult {
   status?: ApiCoordinatorStatus;
   resumed?: boolean;
@@ -70,6 +114,7 @@ export interface ApiCoordinatorCommandResult {
   exported_events_path?: string;
   removed_worktrees?: number;
   selected_task?: ApiSelectedTask;
+  tool_cooldowns?: ApiToolCooldownEntry[];
 }
 
 export type ApiCoordinatorAction =
@@ -79,7 +124,10 @@ export type ApiCoordinatorAction =
   | 'dispatch'
   | 'advance'
   | 'reconcile'
-  | 'cleanup';
+  | 'unlock'
+  | 'cleanup'
+  | 'sync'
+  | 'audit-prd';
 
 export type ApiEventStreamName = 'coordinator_event' | 'heartbeat';
 
@@ -99,4 +147,466 @@ export interface ApiEventStreamMessage {
   eventId: string | null;
   receivedAt: string;
   payload: ApiEventPayload;
+}
+
+export type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | JsonValue[]
+  | { [key: string]: JsonValue };
+
+export type ApiWebAssetsMode = 'dist' | 'embedded';
+
+export type ApiScope = 'project' | 'user';
+
+export type ApiPlannedOpKind = 'write' | 'merge' | 'delete' | 'mkdir' | 'other';
+
+export type ApiCheckSeverity = 'error' | 'warning';
+
+export type ApiDoctorCheckKind = 'which' | 'path_exists' | 'custom';
+
+export interface ApiConfigResponse {
+  version: string | null;
+  enabledTools: string[];
+  toolConfig: Record<string, JsonValue>;
+  toolSettings: Record<string, JsonValue>;
+  standardsPath: string | null;
+  standardsInline: Record<string, string>;
+  selectedSkills: string[];
+  selectedAgents: string[];
+  selectedMcp: string[];
+  quiet: boolean;
+  offline: boolean;
+  webPort: number | null;
+  webAssets: ApiWebAssetsMode | null;
+  ralphEnabled: boolean | null;
+  ralphIterationsDefault: number | null;
+  ralphBranchName: string | null;
+  ralphStopOnFailure: boolean | null;
+  coordinatorTool: string | null;
+  referenceBranch: string | null;
+  prdFile: string | null;
+  taskRegistryFile: string | null;
+  toolPriority: string[];
+  maxParallelPerTool: Record<string, number>;
+  toolSpecializations: Record<string, string[]>;
+  maxDispatch: number | null;
+  maxParallel: number | null;
+  timeoutSeconds: number | null;
+  phaseRunnerMaxAttempts: number | null;
+  logFlushLines: number | null;
+  logFlushMs: number | null;
+  mirrorJsonDebounceMs: number | null;
+  staleClaimedSeconds: number | null;
+  staleInProgressSeconds: number | null;
+  staleChangesRequestedSeconds: number | null;
+  staleAction: string | null;
+  storageMode: string | null;
+  mergeAiFix: boolean | null;
+  mergeJobTimeoutSeconds: number | null;
+  mergeHookTimeoutSeconds: number | null;
+  ghostHeartbeatGraceSeconds: number | null;
+  dispatchCooldownSeconds: number | null;
+  jsonCompat: boolean | null;
+  legacyJsonFallback: boolean | null;
+  errorCodeRetryList: string | null;
+  errorCodeRetryMax: number | null;
+  cutoverGateWindowEvents: number | null;
+  cutoverGateMaxBlockedRatio: number | null;
+  cutoverGateMaxStaleRatio: number | null;
+  rateLimitBackoffBaseSeconds: number | null;
+  rateLimitBackoffMaxSeconds: number | null;
+  rateLimitFallbackEnabled: boolean | null;
+  rateLimitThrottleParallel: boolean | null;
+  forceKillGraceSeconds: number | null;
+  requirementsDetected: boolean;
+  managedEnvironmentWarnings: string[];
+}
+
+export interface ApiConfigUpdateRequest {
+  version?: string | null;
+  enabledTools?: string[];
+  toolConfig?: Record<string, JsonValue>;
+  toolSettings?: Record<string, JsonValue>;
+  standardsPath?: string | null;
+  standardsInline?: Record<string, string>;
+  selectedSkills?: string[];
+  selectedAgents?: string[];
+  selectedMcp?: string[];
+  quiet?: boolean;
+  offline?: boolean;
+  webPort?: number | null;
+  webAssets?: ApiWebAssetsMode | null;
+  ralphEnabled?: boolean | null;
+  ralphIterationsDefault?: number | null;
+  ralphBranchName?: string | null;
+  ralphStopOnFailure?: boolean | null;
+  coordinatorTool?: string | null;
+  referenceBranch?: string | null;
+  prdFile?: string | null;
+  taskRegistryFile?: string | null;
+  toolPriority?: string[];
+  maxParallelPerTool?: Record<string, number>;
+  toolSpecializations?: Record<string, string[]>;
+  maxDispatch?: number | null;
+  maxParallel?: number | null;
+  timeoutSeconds?: number | null;
+  phaseRunnerMaxAttempts?: number | null;
+  logFlushLines?: number | null;
+  logFlushMs?: number | null;
+  mirrorJsonDebounceMs?: number | null;
+  staleClaimedSeconds?: number | null;
+  staleInProgressSeconds?: number | null;
+  staleChangesRequestedSeconds?: number | null;
+  staleAction?: string | null;
+  storageMode?: string | null;
+  mergeAiFix?: boolean | null;
+  mergeJobTimeoutSeconds?: number | null;
+  mergeHookTimeoutSeconds?: number | null;
+  ghostHeartbeatGraceSeconds?: number | null;
+  dispatchCooldownSeconds?: number | null;
+  jsonCompat?: boolean | null;
+  legacyJsonFallback?: boolean | null;
+  errorCodeRetryList?: string | null;
+  errorCodeRetryMax?: number | null;
+  cutoverGateWindowEvents?: number | null;
+  cutoverGateMaxBlockedRatio?: number | null;
+  cutoverGateMaxStaleRatio?: number | null;
+  rateLimitBackoffBaseSeconds?: number | null;
+  rateLimitBackoffMaxSeconds?: number | null;
+  rateLimitFallbackEnabled?: boolean | null;
+  rateLimitThrottleParallel?: boolean | null;
+  forceKillGraceSeconds?: number | null;
+}
+
+export interface ApiToolInstallDescriptor {
+  confirmMessage: string;
+}
+
+export type ApiToolActionKind =
+  | { action: 'openMcp'; targetPointer: string }
+  | { action: 'openSkills'; targetPointer: string }
+  | { action: 'openAgents'; targetPointer: string }
+  | { action: 'custom'; target: string };
+
+export type ApiToolFieldKind =
+  | { type: 'bool' }
+  | { type: 'enum'; options: string[] }
+  | { type: 'text' }
+  | { type: 'number' }
+  | { type: 'array' }
+  | { type: 'action'; action: ApiToolActionKind };
+
+export type ApiToolFieldDefault =
+  | { type: 'bool'; value: boolean }
+  | { type: 'text'; value: string }
+  | { type: 'enum'; value: string }
+  | { type: 'number'; value: number }
+  | { type: 'array'; value: string[] };
+
+export interface ApiToolField {
+  id: string;
+  label: string;
+  help: string;
+  path: string;
+  kind: ApiToolFieldKind;
+  default?: ApiToolFieldDefault | null;
+}
+
+export interface ApiToolDescriptor {
+  id: string;
+  title: string;
+  description: string;
+  fields: ApiToolField[];
+  install?: ApiToolInstallDescriptor | null;
+}
+
+export interface ApiStandardsPreviewRequest {
+  standardsPath: string | null;
+  standardsInline: Record<string, string>;
+}
+
+export interface ApiStandardsPreviewCard {
+  id: string;
+  title: string;
+  content: string;
+}
+
+export interface ApiStandardsPreviewResponse {
+  cards: ApiStandardsPreviewCard[];
+}
+
+export interface ApiPrdTask {
+  id: string;
+  title: string | null;
+  priority: string | null;
+  category: string | null;
+  scope: string | null;
+  baseBranch: string | null;
+  coordinatorTool: string | null;
+  description: string | null;
+  objective: string | null;
+  result: string | null;
+  dependencies: string[];
+  exclusiveResources: string[];
+  steps: string[];
+  notes: string | null;
+  metadata: Record<string, JsonValue>;
+}
+
+export interface ApiPrdResponse {
+  tasks: ApiPrdTask[];
+  metadata: Record<string, JsonValue>;
+}
+
+export interface ApiPrdUpdateRequest {
+  tasks: ApiPrdTask[];
+  metadata: Record<string, JsonValue>;
+}
+
+export interface ApiPlanRequest {
+  scope?: ApiScope | null;
+  tools?: string[];
+  worktrees?: string[];
+  allowUserScope?: boolean | null;
+  offline?: boolean | null;
+  includeDiff?: boolean | null;
+  explain?: boolean | null;
+}
+
+export type ApiRiskLevel = 'safe' | 'caution' | 'dangerous';
+
+export interface ApiPlanSummary {
+  totalActions: number;
+  filesWrite: number;
+  filesMerge: number;
+  consentRequired: number;
+  backupRequired: number;
+  backupPath: string;
+}
+
+export interface ApiPlanFile {
+  path: string;
+  kind: ApiPlannedOpKind;
+  scope: ApiScope;
+  consentRequired: boolean;
+  backupRequired: boolean;
+  setExecutable: boolean;
+  riskLevel: ApiRiskLevel;
+  contentPreview: string | null;
+  explain: string | null;
+}
+
+export interface ApiPlanDiff {
+  path: string;
+  diffKind: string;
+  diff: string | null;
+  diffTruncated: boolean;
+}
+
+export interface ApiPlanRisk {
+  level: ApiRiskLevel;
+  message: string;
+}
+
+export interface ApiPlanConsent {
+  id: string;
+  scope: ApiScope;
+  classification: ApiRiskLevel;
+  message: string;
+  paths: string[];
+}
+
+export interface ApiPlanResponse {
+  summary: ApiPlanSummary;
+  files: ApiPlanFile[];
+  diffs: ApiPlanDiff[];
+  risks: ApiPlanRisk[];
+  consents: ApiPlanConsent[];
+}
+
+export interface ApiApplyRequest {
+  scope?: ApiScope | null;
+  tools?: string[];
+  allowUserScope?: boolean | null;
+  dryRun: boolean;
+  yes?: boolean | null;
+}
+
+export interface ApiApplyResult {
+  path: string;
+  kind: ApiPlannedOpKind;
+  success: boolean;
+  message: string | null;
+  backupLocation: string | null;
+}
+
+export interface ApiApplyResponse {
+  dryRun: boolean;
+  appliedActions: number;
+  changedFiles: number;
+  backupLocations: string[];
+  results: ApiApplyResult[];
+  warnings: string[];
+}
+
+export type ApiTerminalType = 'project' | 'worktree';
+
+export interface ApiTerminalCreateRequest {
+  terminalType: ApiTerminalType;
+  worktreeId?: string | null;
+}
+
+export interface ApiTerminalSessionCreated {
+  sessionId: string;
+  terminalType: ApiTerminalType;
+  path: string;
+  worktreeId?: string | null;
+}
+
+export interface ApiWorktree {
+  id: string;
+  slug: string | null;
+  branch: string | null;
+  tool: string | null;
+  status: string | null;
+  path: string;
+  baseBranch: string | null;
+  head: string | null;
+  scope: string | null;
+  feature: string | null;
+  locked: boolean;
+  prunable: boolean;
+  sessionLabel: string | null;
+}
+
+export interface ApiWorktreeCreateRequest {
+  slug: string;
+  tool: string;
+  count: number;
+  base: string;
+  scope?: string | null;
+  feature?: string | null;
+  skipApply?: boolean | null;
+  allowUserScope?: boolean | null;
+}
+
+export interface ApiRegistryTaskWorktree {
+  worktreePath: string | null;
+  branch: string | null;
+  baseBranch: string | null;
+  lastCommit: string | null;
+  sessionId: string | null;
+}
+
+export interface ApiRegistryEvent {
+  eventId: string | null;
+  eventType: string;
+  ts: string | null;
+  status: string | null;
+  severity: string | null;
+  message: string | null;
+}
+
+export interface ApiRegistryTask {
+  id: string;
+  title: string | null;
+  priority: string | null;
+  state: string;
+  tool: string | null;
+  attempts: number | null;
+  heartbeat: string | null;
+  delayedUntil: string | null;
+  currentPhase: string | null;
+  lastError: string | null;
+  lastErrorCode: string | null;
+  description: string | null;
+  objective: string | null;
+  result: string | null;
+  dependencies: string[];
+  exclusiveResources: string[];
+  steps: string[];
+  notes: string | null;
+  assignee: JsonValue | null;
+  worktree: ApiRegistryTaskWorktree | null;
+  events: ApiRegistryEvent[];
+  updatedAt: string | null;
+}
+
+export type ApiRegistryTaskAction =
+  | {
+      kind: 'requeue';
+      justification?: string | null;
+    }
+  | {
+      kind: 'abandon';
+      justification?: string | null;
+    }
+  | {
+      kind: 'reassign';
+      tool: string;
+      justification: string;
+    };
+
+export interface ApiLogFile {
+  path: string;
+  size: number;
+  modified: string | null;
+}
+
+export interface ApiLogContent {
+  path: string;
+  lines: string[];
+  total: number;
+}
+
+export interface ApiDoctorIssue {
+  name: string;
+  toolId: string | null;
+  target: string;
+  severity: ApiCheckSeverity;
+  kind: ApiDoctorCheckKind;
+  status: string;
+  message: string | null;
+}
+
+export interface ApiDoctorReport {
+  healthScore: number;
+  issuesBySeverity: Record<string, number>;
+  issues: ApiDoctorIssue[];
+}
+
+export interface ApiBackup {
+  id: string;
+  timestamp: string;
+  files: number;
+  entries: ApiBackupFile[];
+  totalSize: number;
+  path: string;
+  userScope: boolean;
+}
+
+export interface ApiBackupFile {
+  path: string;
+  size: number;
+}
+
+export interface ApiRestoreRequest {
+  confirmed: boolean;
+}
+
+export interface ApiBackupRestoreResult {
+  status: string;
+  message: string;
+  backupId: string;
+  restoreBackupId: string;
+  restoredFiles: number;
+}
+
+export interface ApiActionResult {
+  status?: string;
+  message?: string;
+  [key: string]: JsonValue | undefined;
 }

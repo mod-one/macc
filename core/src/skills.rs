@@ -1,4 +1,4 @@
-pub const REQUIRED_SKILLS: [&str; 3] = ["macc-performer", "macc-code-reviewer", "macc-prd-planner"];
+pub const REQUIRED_SKILLS: [&str; 3] = ["macc-performer", "macc-reviewer", "macc-prd-planner"];
 
 pub fn required_skills() -> &'static [&'static str] {
     &REQUIRED_SKILLS

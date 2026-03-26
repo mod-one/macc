@@ -373,6 +373,7 @@ fn run_tool_health_checks(spec: &ToolSpec) -> Vec<ToolCheck> {
                 kind: check_spec.kind.clone(),
                 status: ToolStatus::Missing,
                 severity: check_spec.severity.clone(),
+                fix_hint: None,
             });
         }
     } else {
@@ -383,6 +384,7 @@ fn run_tool_health_checks(spec: &ToolSpec) -> Vec<ToolCheck> {
             kind: DoctorCheckKind::Which,
             status: ToolStatus::Missing,
             severity: crate::tool::CheckSeverity::Warning,
+            fix_hint: None,
         });
     }
     run_checks(&mut checks);

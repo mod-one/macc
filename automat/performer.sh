@@ -448,10 +448,19 @@ build_error_payload() {
 }
 
 heartbeat_start() {
+  local tool_runner_pid="${1:-}"
   [[ -n "$EVENT_FILE" || -n "$EVENT_IPC_ADDR" ]] || return 0
   heartbeat_stop
   (
     while true; do
+      # When tracking a tool runner PID, verify it is still alive.
+      # If the runner exited but the performer shell has not yet reaped it,
+      # emit a final "stale" heartbeat and stop — this lets the coordinator's
+      # stale-heartbeat policy detect the zombie state promptly.
+      if [[ -n "$tool_runner_pid" ]] && ! kill -0 "$tool_runner_pid" 2>/dev/null; then
+        soft_emit_performer_event "heartbeat" "$CURRENT_PHASE" "stale" '{"reason":"tool_runner_exited"}'
+        break
+      fi
       soft_emit_performer_event "heartbeat" "$CURRENT_PHASE" "running" '{}'
       sleep 2
     done
@@ -662,7 +671,7 @@ detect_rate_limit() {
   fi
   # E601: transient rate-limit / 429
   if echo "$combined" | grep -qE \
-      '429|resource_exhausted|rate[[:space:]]+limit(ed)?|too[[:space:]]+many[[:space:]]+requests|529|overloaded'; then
+      '429|resource_exhausted|model_capacity_exhausted|no[[:space:]]+capacity[[:space:]]+available|rate[[:space:]]+limit(ed)?|too[[:space:]]+many[[:space:]]+requests|529|overloaded'; then
     LAST_ERROR_CODE="E601"
     LAST_ERROR_ORIGIN="runner"
     LAST_ERROR_MESSAGE="rate limited"
@@ -697,6 +706,10 @@ run_tool() {
   set +e
   emit_performer_event "progress" "$CURRENT_PHASE" "running" "$(jq -nc --arg attempt "$attempt" --arg max "$max_attempts" '{attempt:($attempt|tonumber?), max_attempts:($max|tonumber?)}')"
   spinner_start "Running ${tool} (attempt ${attempt}/${max_attempts})"
+
+  # Run the tool runner in background so we can capture its PID and let the
+  # heartbeat loop verify liveness.  Output is written to the capture file
+  # and appended to the task log after the runner exits.
   "$script" \
     --prompt-file "$prompt_file" \
     --tool-json "$tool_json" \
@@ -704,8 +717,24 @@ run_tool() {
     --worktree "$worktree" \
     --task-id "$task_id" \
     --attempt "$attempt" \
-    --max-attempts "$max_attempts" 2>&1 | tee "$output_capture" >>"$task_log_file"
-  local status=${PIPESTATUS[0]}
+    --max-attempts "$max_attempts" >"$output_capture" 2>&1 &
+  local runner_pid=$!
+
+  # Restart heartbeat with runner PID tracking — stops emitting if the
+  # runner exits unexpectedly, so stale-heartbeat detection works.
+  heartbeat_stop
+  heartbeat_start "$runner_pid"
+
+  wait "$runner_pid"
+  local status=$?
+
+  # Append captured output to the task log (replaces the previous tee pipe).
+  cat "$output_capture" >>"$task_log_file" 2>/dev/null
+
+  # Restore plain heartbeat (no PID tracking) between tasks.
+  heartbeat_stop
+  heartbeat_start
+
   spinner_stop "Runner finished (${tool})"
   set -e
 

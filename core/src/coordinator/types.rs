@@ -34,4 +34,5 @@ pub struct CoordinatorEnvConfig {
     pub rate_limit_backoff_max_seconds: Option<u64>,
     pub rate_limit_fallback_enabled: Option<bool>,
     pub rate_limit_throttle_parallel: Option<bool>,
+    pub force_kill_grace_seconds: Option<u64>,
 }

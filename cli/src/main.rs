@@ -308,6 +308,9 @@ enum Commands {
         /// Maximum number of auto-retries for a task
         #[arg(long)]
         error_code_retry_max: Option<usize>,
+        /// Grace period (seconds) before force-killing a performer that signaled failure via IPC but did not exit
+        #[arg(long)]
+        force_kill_grace_seconds: Option<u64>,
         /// Extra args passed directly to coordinator.sh (use after --)
         #[arg(last = true)]
         extra_args: Vec<String>,
@@ -858,6 +861,7 @@ fn run_with_engine_provider(
             cutover_gate_max_stale_ratio,
             error_code_retry_list,
             error_code_retry_max,
+            force_kill_grace_seconds,
             extra_args,
         }) => commands::coordinator::CoordinatorCommand::new(
             app.clone(),
@@ -902,23 +906,21 @@ fn run_with_engine_provider(
                     rate_limit_backoff_max_seconds: None,
                     rate_limit_fallback_enabled: None,
                     rate_limit_throttle_parallel: None,
+                    force_kill_grace_seconds: *force_kill_grace_seconds,
                 },
                 extra_args: extra_args.clone(),
             },
         )
         .run(),
         None => {
-            let paths = engine.project_ensure_initialized_paths(&absolute_cwd)?;
-            std::env::set_current_dir(&paths.root).map_err(|e| MaccError::Io {
-                path: paths.root.to_string_lossy().into(),
-                action: "set current_dir for tui".into(),
-                source: e,
-            })?;
-            macc_tui::run_tui().map_err(|e| MaccError::Io {
-                path: "tui".into(),
-                action: "run_tui".into(),
-                source: std::io::Error::other(e.to_string()),
-            })
+            let _paths = app.ensure_initialized_paths()?;
+            commands::web::WebCommand::new(
+                app.clone(),
+                "0.0.0.0".to_string(),
+                cli.web_port,
+                None,
+            )
+            .run()
         }
     }
 }
@@ -2273,6 +2275,7 @@ fi
                     cutover_gate_max_stale_ratio: None,
                     error_code_retry_list: None,
                     error_code_retry_max: None,
+                    force_kill_grace_seconds: None,
                     extra_args: Vec::new(),
                 }),
             },

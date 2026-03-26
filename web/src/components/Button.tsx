@@ -1,5 +1,6 @@
 import React from 'react';
 import { Slot } from '@radix-ui/react-slot';
+import { cn } from './styles';
 
 interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   asChild?: boolean;
@@ -10,7 +11,10 @@ const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
     const Component = asChild ? Slot : 'button';
     return (
       <Component
-        className={`inline-flex items-center justify-center whitespace-nowrap rounded-md text-sm font-medium ring-offset-white transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-950 focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 hover:bg-gray-200 p-2 ${className || ''}`}
+        className={cn(
+          'inline-flex items-center justify-center whitespace-nowrap rounded-md border border-white/10 bg-white/5 px-3 py-2 text-sm font-medium text-[var(--text-primary)] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--bg-primary)] disabled:pointer-events-none disabled:opacity-50 hover:bg-white/10',
+          className,
+        )}
         ref={ref}
         {...props}
       />

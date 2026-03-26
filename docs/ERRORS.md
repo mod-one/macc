@@ -1,6 +1,7 @@
 # Error Catalog
 
-This catalog defines error code naming and the initial web/API codes.
+This catalog defines error code naming and the current web/API codes.
+Keep it synchronized with `cli/src/commands/web/errors.rs`.
 
 ## Naming
 
@@ -24,30 +25,42 @@ The API error envelope uses these categories:
 
 - `MACC-WEB-0000`: Unspecified web API failure (fallback when no specific mapping is available).
 
-### Validation
+### Validation (1000 range)
 
-- `MACC-WEB-0100`: Generic validation failure (`MaccError::Validation`).
-- `MACC-WEB-0101`: Tool specification validation failure (`MaccError::ToolSpec`).
-- `MACC-WEB-0102`: Secret scan validation failure (`MaccError::SecretDetected`).
-- `MACC-WEB-0103`: Configuration parse/validation failure (`MaccError::Config`).
-- `MACC-WEB-0104`: Catalog operation validation failure (`MaccError::Catalog`).
+- `MACC-WEB-1000`: Generic validation failure (`MaccError::Validation`).
+- `MACC-WEB-1001`: Operator confirmation required before destructive web actions.
+- `MACC-WEB-1002`: Secret scan validation failure (`MaccError::SecretDetected`).
+- `MACC-WEB-1003`: Configuration parse/validation failure (`MaccError::Config`).
+- `MACC-WEB-1004`: Catalog operation validation failure (`MaccError::Catalog`).
+- `MACC-WEB-1005`: Registry action payload or path validation failure.
+- `MACC-WEB-1006`: Tool specification validation failure (`MaccError::ToolSpec`).
+- `MACC-WEB-1007`: Log API path or query validation failure.
 
-### Auth
+### NotFound (2000 range)
 
-- `MACC-WEB-0200`: User-scope operation denied in current mode (`MaccError::UserScopeNotAllowed`).
+- `MACC-WEB-2000`: Project root cannot be resolved (`MaccError::ProjectRootNotFound`).
+- `MACC-WEB-2001`: User home directory cannot be resolved (`MaccError::HomeDirNotFound`).
+- `MACC-WEB-2002`: Registry task was not found for the requested operator action.
+- `MACC-WEB-2003`: Backup set was not found for the requested restore action.
+- `MACC-WEB-2004`: Worktree was not found for the requested web action.
+- `MACC-WEB-2005`: Requested log file was not found under `.macc/log/`.
+- `MACC-WEB-2006`: Terminal session was not found or is no longer available.
 
-### NotFound
+### Conflict / Auth (3000 range)
 
-- `MACC-WEB-0300`: Project root cannot be resolved (`MaccError::ProjectRootNotFound`).
-- `MACC-WEB-0301`: User home directory cannot be resolved (`MaccError::HomeDirNotFound`).
+- `MACC-WEB-3000`: User-scope operation denied in current mode (`MaccError::UserScopeNotAllowed`).
+- `MACC-WEB-3001`: Registry operator action conflicts with the task's current state/runtime.
+- `MACC-WEB-3002`: Worktree action conflicts with the current git/worktree state.
+- `MACC-WEB-3003`: Terminal action conflicts with the current terminal session state.
 
-### Dependency
+### Dependency / Engine (4000 range)
 
-- `MACC-WEB-0400`: Local I/O dependency failed (`MaccError::Io`).
-- `MACC-WEB-0401`: Remote fetch dependency failed (`MaccError::Fetch`).
+- `MACC-WEB-4000`: Local I/O dependency failed (`MaccError::Io`).
+- `MACC-WEB-4001`: Remote fetch dependency failed (`MaccError::Fetch`).
+- `MACC-WEB-4002`: Terminal session creation or PTY startup failed.
 
-### Internal
+### Internal (5000 range)
 
-- `MACC-WEB-0500`: Coordinator workflow failure (`MaccError::Coordinator`).
-- `MACC-WEB-0501`: Coordinator storage backend failure (`MaccError::Storage`).
-- `MACC-WEB-0502`: Git subsystem failure (`MaccError::Git`).
+- `MACC-WEB-5000`: Coordinator workflow failure (`MaccError::Coordinator`).
+- `MACC-WEB-5001`: Coordinator storage backend failure (`MaccError::Storage`).
+- `MACC-WEB-5002`: Git subsystem failure (`MaccError::Git`).

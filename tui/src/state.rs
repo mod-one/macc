@@ -207,7 +207,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    const AUTOMATION_FIELD_COUNT: usize = 30;
+    const AUTOMATION_FIELD_COUNT: usize = 31;
     const COORDINATOR_EVENTS_EWMA_ALPHA: f64 = 0.30;
     const COORDINATOR_PAUSE_REL_PATH: &'static str = ".macc/automation/task/coordinator.pause.json";
 
@@ -561,7 +561,7 @@ impl AppState {
                         .task_runtime
                         .extra
                         .get("throttle_state")
-                        .and_then(|v| {
+                        .map(|v| {
                             let bs = v
                                 .get("backoff_seconds")
                                 .and_then(|x| x.as_u64())
@@ -570,7 +570,7 @@ impl AppState {
                                 .get("consecutive_429_count")
                                 .and_then(|x| x.as_u64())
                                 .unwrap_or(0) as u32;
-                            Some((bs, cc))
+                            (bs, cc)
                         })
                         .unwrap_or((0, 0));
                     let entry = throttle_map.entry(tool_id.to_string()).or_insert_with(|| {
@@ -1063,7 +1063,7 @@ impl AppState {
     }
 
     pub fn stop_coordinator_command(&mut self) {
-        let Some(paths) = self.project_paths.as_ref() else {
+        let Some(paths) = self.project_paths.clone() else {
             self.set_status(
                 UiStatusLevel::Warning,
                 "No project loaded.",
@@ -1074,11 +1074,18 @@ impl AppState {
 
         let stop_result = self
             .engine
-            .coordinator_stop_managed_command_process(paths, false);
+            .coordinator_stop_managed_command_process(&paths, false);
 
         self.coordinator_pause_next_action = None;
         self.coordinator_running_command = None;
         self.coordinator_running_elapsed_secs = None;
+
+        // Reconcile registry so dead-PID tasks are transitioned out of in_progress.
+        let env_cfg = self.coordinator_env_cfg();
+        let _ = self
+            .engine
+            .coordinator_reconcile_workflow(&paths, &env_cfg, None, None);
+
         self.refresh_coordinator_snapshot();
         self.refresh_coordinator_events();
         match stop_result {
@@ -1936,6 +1943,7 @@ impl AppState {
             27 => "RL Backoff Max (s)",
             28 => "RL Fallback Enabled",
             29 => "RL Throttle Parallel",
+            30 => "Force-Kill Grace (s)",
             _ => "",
         }
     }
@@ -1972,6 +1980,7 @@ impl AppState {
             27 => "Maximum backoff delay cap in seconds for exponential growth (default: 3600).",
             28 => "When the primary tool is throttled, dispatch to the next tool in priority order.",
             29 => "Reduce effective_max_parallel by 1 on each E601; restore on recovery.",
+            30 => "Seconds to wait after a performer signals failure via IPC before force-killing it (default: 30).",
             _ => "",
         }
     }
@@ -2101,6 +2110,10 @@ impl AppState {
             29 => coordinator
                 .and_then(|c| c.rate_limit_throttle_parallel)
                 .unwrap_or(true)
+                .to_string(),
+            30 => coordinator
+                .and_then(|c| c.force_kill_grace_seconds)
+                .unwrap_or(30)
                 .to_string(),
             _ => String::new(),
         }
@@ -2300,7 +2313,7 @@ impl AppState {
                 }
                 Err(_) => Err("Invalid integer value.".to_string()),
             },
-            15 | 16 | 19 | 21 | 26 | 27 => match input.parse::<u64>() {
+            15 | 16 | 19 | 21 | 26 | 27 | 30 => match input.parse::<u64>() {
                 Ok(value) => {
                     self.set_automation_field_u64(idx, value);
                     Ok(())
@@ -2407,6 +2420,7 @@ impl AppState {
                 21 => coordinator.dispatch_cooldown_seconds = Some(value),
                 26 => coordinator.rate_limit_backoff_base_seconds = Some(value),
                 27 => coordinator.rate_limit_backoff_max_seconds = Some(value),
+                30 => coordinator.force_kill_grace_seconds = Some(value),
                 _ => {}
             }
         }
@@ -4006,6 +4020,7 @@ mod tests {
             CoordinatorEvent {
                 event_id: None,
                 run_id: Some("run-1".to_string()),
+                seq: 0,
                 event_type: "heartbeat".to_string(),
                 task_id: None,
                 phase: None,
@@ -4017,6 +4032,7 @@ mod tests {
             CoordinatorEvent {
                 event_id: None,
                 run_id: Some("run-2".to_string()),
+                seq: 1,
                 event_type: "phase_result".to_string(),
                 task_id: None,
                 phase: None,
@@ -4037,6 +4053,7 @@ mod tests {
         let with_run = CoordinatorEvent {
             event_id: None,
             run_id: Some("run-2".to_string()),
+            seq: 0,
             event_type: "heartbeat".to_string(),
             task_id: None,
             phase: None,
@@ -4048,6 +4065,7 @@ mod tests {
         let without_run = CoordinatorEvent {
             event_id: None,
             run_id: None,
+            seq: 0,
             event_type: "heartbeat".to_string(),
             task_id: None,
             phase: None,

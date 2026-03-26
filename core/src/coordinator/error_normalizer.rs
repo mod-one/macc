@@ -45,7 +45,7 @@ pub const E603_SESSION_CONFLICT: &str = "E603";
 /// Each adapter normalizer maps its native error patterns to one of these
 /// classes. The coordinator runtime only ever switches on `CanonicalClass`,
 /// never on raw provider strings or HTTP status codes.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
 pub enum CanonicalClass {
     /// Invalid or expired API key / token.
     Auth,
@@ -72,13 +72,8 @@ pub enum CanonicalClass {
     /// Provider internal error (HTTP 500).
     Internal,
     /// Cannot classify the error.
+    #[default]
     Unknown,
-}
-
-impl Default for CanonicalClass {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 impl std::fmt::Display for CanonicalClass {
@@ -223,8 +218,61 @@ pub fn truncate_raw_message(msg: &str) -> String {
         msg.to_string()
     } else {
         let mut s = msg[..500].to_string();
-        s.push_str("…");
+        s.push('…');
         s
+    }
+}
+
+// ── NormalizerRegistration & NormalizerRegistry ──────────────────────
+
+/// Registration entry for a per-adapter error normalizer.
+///
+/// Each adapter crate submits one via `inventory::submit!` at link time.
+/// The coordinator builds a [`NormalizerRegistry`] from all submitted
+/// entries at startup via [`NormalizerRegistry::from_inventory`].
+pub struct NormalizerRegistration {
+    /// Tool identifier this normalizer handles (e.g. `"claude"`).
+    pub tool_id: &'static str,
+    /// Factory that constructs a fresh normalizer instance on each call.
+    pub factory: fn() -> Box<dyn ErrorNormalizer>,
+}
+
+inventory::collect!(NormalizerRegistration);
+
+/// Maps tool identifiers to their per-adapter error normalizers.
+///
+/// Built at coordinator startup from all [`NormalizerRegistration`] entries
+/// submitted by adapter crates. The coordinator passes a reference to this
+/// registry through the job-completion path so that `macc-core` itself
+/// contains no tool-specific logic.
+pub struct NormalizerRegistry {
+    entries: std::collections::HashMap<String, fn() -> Box<dyn ErrorNormalizer>>,
+}
+
+impl NormalizerRegistry {
+    /// Build from all `NormalizerRegistration` entries collected by
+    /// `inventory`. Adapter crates must be linked into the binary for their
+    /// registrations to appear.
+    pub fn from_inventory() -> Self {
+        let entries = inventory::iter::<NormalizerRegistration>
+            .into_iter()
+            .map(|r| (r.tool_id.to_string(), r.factory))
+            .collect();
+        Self { entries }
+    }
+
+    /// Empty registry — no normalizers registered.
+    ///
+    /// Useful in tests or contexts where no adapter crates are linked.
+    pub fn empty() -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Instantiate the normalizer for `tool_id`, or `None` if unregistered.
+    pub fn get(&self, tool_id: &str) -> Option<Box<dyn ErrorNormalizer>> {
+        self.entries.get(tool_id).map(|f| f())
     }
 }
 

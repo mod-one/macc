@@ -38,6 +38,18 @@ pub trait Engine {
         allow_user_scope: bool,
     ) -> Result<ApplyReport>;
 
+    fn load_canonical_config(&self, paths: &ProjectPaths) -> Result<CanonicalConfig> {
+        crate::load_canonical_config(&paths.config_path)
+    }
+
+    fn save_canonical_config(
+        &self,
+        paths: &ProjectPaths,
+        config: &CanonicalConfig,
+    ) -> Result<crate::plan::ActionStatus> {
+        crate::save_canonical_config(paths, config)
+    }
+
     fn builtin_skills(&self) -> Vec<Skill>;
     fn builtin_agents(&self) -> Vec<Agent>;
 

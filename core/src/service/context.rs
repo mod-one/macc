@@ -259,7 +259,7 @@ fn build_context_prompt(
     prompt.push_str("Use repository-relative paths only (no absolute paths):\n");
     prompt.push_str("- planning -> `skills/macc-prd-planner/SKILL.md`\n");
     prompt.push_str("- execution -> `skills/macc-performer/SKILL.md`\n");
-    prompt.push_str("- review -> `skills/macc-code-reviewer/SKILL.md`\n");
+    prompt.push_str("- review -> `skills/macc-reviewer/SKILL.md`\n");
     prompt.push_str("Fallback rule (explicit and mandatory): if a required skill file is absent or inaccessible, stop and report the error.\n");
     prompt.push_str("Add a `## Path validation` subsection with a short checklist that verifies these files exist.\n");
     prompt.push_str("Add `## Architecture Source of Truth` with repository-relative references:\n");

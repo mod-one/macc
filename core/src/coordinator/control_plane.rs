@@ -5,6 +5,7 @@ use crate::coordinator::helpers::{
 };
 use crate::coordinator::ipc::{ensure_performer_ipc_listener, read_performer_ipc_addr};
 use crate::coordinator::model::{PrdInput, Task, TaskRegistry};
+use crate::coordinator::rate_limit::{RateLimitInfo, ToolThrottleState, E602_QUOTA_EXHAUSTED};
 use crate::coordinator::runtime::{
     CoordinatorJob, CoordinatorMergeJob, CoordinatorRunState, CoordinatorRuntimeEventKind,
 };
@@ -84,6 +85,194 @@ fn resolve_merge_timeout_seconds(
         .merge_job_timeout_seconds
         .or_else(|| coordinator.and_then(|c| c.merge_job_timeout_seconds))
         .unwrap_or(0)
+}
+
+/// Persist the volatile throttle registry to SQLite so cooldowns survive restart.
+fn persist_throttle_registry(
+    repo_root: &Path,
+    registry: &crate::coordinator::rate_limit::ToolThrottleRegistry,
+) {
+    let paths = crate::ProjectPaths::from_root(repo_root);
+    let storage_paths =
+        crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&paths);
+    let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
+    let _ = sqlite.save_throttle_registry(registry);
+}
+
+/// Detect E602 (quota exhaustion) in a phase failure reason string.
+///
+/// The phase executor returns a free-form error string. We look for known
+/// markers that indicate the underlying tool hit a hard quota limit:
+/// - The canonical E602 error code
+/// - Provider-specific `TerminalQuotaError`
+/// - Generic "quota" + "exhausted" patterns
+fn is_quota_exhaustion_in_reason(reason: &str) -> bool {
+    if reason.contains(E602_QUOTA_EXHAUSTED) {
+        return true;
+    }
+    let lower = reason.to_ascii_lowercase();
+    if lower.contains("terminalquotaerror") {
+        return true;
+    }
+    if lower.contains("quota") && (lower.contains("exhaust") || lower.contains("exceeded")) {
+        return true;
+    }
+    if lower.contains("exhausted your capacity") {
+        return true;
+    }
+    // Session daily-limit message: "You're out of extra usage · resets <time>"
+    if lower.contains("out of extra usage") {
+        return true;
+    }
+    false
+}
+
+/// Try to classify a phase failure reason via the per-adapter error normalizers.
+/// Returns the parsed `retry_after_seconds` if the error is E602.
+fn extract_quota_cooldown_from_reason(
+    reason: &str,
+    tool_id: &str,
+    normalizer_registry: &crate::coordinator::error_normalizer::NormalizerRegistry,
+) -> Option<u64> {
+    let normalizer = normalizer_registry.get(tool_id)?;
+    let te = normalizer.normalize(1, reason, reason)?;
+    if te.error_code == E602_QUOTA_EXHAUSTED {
+        // Return the provider's reset time, or a default of 1 hour.
+        Some(te.retry_after_seconds.unwrap_or(3600))
+    } else {
+        None
+    }
+}
+
+/// Reset a worktree to a known-good commit, discarding any uncommitted or
+/// partially committed changes made during a failed phase attempt.
+fn rollback_worktree_to_sha(worktree_path: &Path, target_sha: &str) -> bool {
+    let reset = crate::git::run_git_output_mapped(
+        worktree_path,
+        &["reset", "--hard", target_sha],
+        "rollback worktree to pre-phase SHA",
+    );
+    let clean = crate::git::run_git_output_mapped(
+        worktree_path,
+        &["clean", "-fd"],
+        "clean worktree after rollback",
+    );
+    reset.map(|o| o.status.success()).unwrap_or(false)
+        && clean.map(|o| o.status.success()).unwrap_or(false)
+}
+
+/// Part A: handle E602 (quota exhaustion) detected during a phase (review/fix/integrate).
+///
+/// 1. Roll back the worktree to the pre-phase HEAD so partial changes are discarded.
+/// 2. Register the tool in the throttle registry so `pick_tool()` skips it.
+/// 3. Re-queue the task (→ Todo) with a `delayed_until` cooldown instead of marking
+///    it as a phase failure.
+#[allow(clippy::too_many_arguments)]
+fn handle_phase_quota_exhaustion(
+    repo_root: &Path,
+    registry: &mut serde_json::Value,
+    state: &mut CoordinatorRunState,
+    task_snapshot: &Task,
+    task_id: &str,
+    phase: &str,
+    reason: &str,
+    pre_phase_sha: Option<&str>,
+    worktree_path_str: Option<&str>,
+    now: &str,
+    logger: Option<&dyn CoordinatorLog>,
+) -> Result<()> {
+    let tool_id = task_snapshot.tool.as_deref().unwrap_or("unknown");
+
+    // ── Step 1: roll back worktree ─────────────────────────────────────
+    let rolled_back = match (worktree_path_str, pre_phase_sha) {
+        (Some(wp), Some(sha)) => {
+            let ok = rollback_worktree_to_sha(Path::new(wp), sha);
+            if let Some(log) = logger {
+                let _ = log.note(format!(
+                    "- E602 rollback task={} worktree={} sha={} ok={}",
+                    task_id, wp, sha, ok
+                ));
+            }
+            ok
+        }
+        _ => {
+            if let Some(log) = logger {
+                let _ = log.note(format!(
+                    "- E602 rollback skipped task={} (no worktree/sha)",
+                    task_id
+                ));
+            }
+            false
+        }
+    };
+
+    // ── Step 2: compute cooldown and register tool throttle ────────────
+    let cooldown = extract_quota_cooldown_from_reason(reason, tool_id, &state.normalizer_registry)
+        .unwrap_or(3600);
+    let now_epoch = chrono::DateTime::parse_from_rfc3339(now)
+        .map(|dt| dt.timestamp() as u64)
+        .unwrap_or(0);
+    let throttled_until = now_epoch + cooldown;
+
+    let ts = ToolThrottleState {
+        tool_id: tool_id.to_string(),
+        throttled_until,
+        consecutive_429_count: 1,
+        backoff_seconds: cooldown,
+        last_rate_limit_info: Some(RateLimitInfo {
+            tool_id: tool_id.to_string(),
+            error_code: E602_QUOTA_EXHAUSTED.to_string(),
+            retry_after_seconds: Some(cooldown),
+            detected_at: now_epoch,
+            source_header: None,
+        }),
+    };
+    state.throttle_registry.insert(tool_id.to_string(), ts);
+    persist_throttle_registry(repo_root, &state.throttle_registry);
+
+    // ── Step 3: re-queue the task ──────────────────────────────────────
+    let delayed_until_str = chrono::DateTime::parse_from_rfc3339(now)
+        .ok()
+        .and_then(|dt| dt.checked_add_signed(chrono::Duration::seconds(cooldown as i64)))
+        .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .unwrap_or_default();
+
+    let mut typed = TaskRegistry::from_value(registry)?;
+    if let Some(task) = typed.find_task_mut(task_id) {
+        let runtime = task.ensure_runtime();
+        runtime.delayed_until = Some(delayed_until_str.clone());
+        runtime.set_status(crate::coordinator::RuntimeStatus::Idle);
+        runtime.current_phase = None;
+        runtime.completion_kind = None;
+        runtime.pid = None;
+        runtime.last_error = Some(format!(
+            "E602 during {} phase; rolled_back={}; cooldown {}s",
+            phase, rolled_back, cooldown
+        ));
+        task.set_workflow_state(crate::coordinator::WorkflowState::Todo);
+        task.touch_state_changed(now);
+    }
+    *registry = typed.to_value()?;
+
+    // ── Log event ──────────────────────────────────────────────────────
+    let msg = format!(
+        "phase_quota_exhaustion task={} phase={} tool={} cooldown={}s rolled_back={} delayed_until={}",
+        task_id, phase, tool_id, cooldown, rolled_back, delayed_until_str
+    );
+    let _ = append_coordinator_event_with_severity(
+        repo_root,
+        "phase_quota_exhaustion",
+        task_id,
+        phase,
+        "requeued",
+        &msg,
+        "warning",
+    );
+    if let Some(log) = logger {
+        let _ = log.note(format!("- {}", msg));
+    }
+
+    Ok(())
 }
 
 async fn sanitize_worktree_to_base(worktree_path: &Path, base_branch: &str) -> Result<bool> {
@@ -361,6 +550,31 @@ struct NativePhaseExecutor<'a> {
     logger: Option<&'a dyn CoordinatorLog>,
 }
 
+/// Append a line to the performer log file for this task.
+/// Mirrors the format used by performer.sh so all phases appear in the same log.
+fn append_performer_log(worktree: &Path, task_id: &str, line: &str) {
+    let safe: String = task_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+        .collect();
+    let file = if safe.is_empty() {
+        "task"
+    } else {
+        safe.as_str()
+    };
+    let log_dir = worktree.join(".macc/log/performer");
+    let log_path = log_dir.join(format!("{}.md", file));
+    let _ = std::fs::create_dir_all(&log_dir);
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .and_then(|mut f| {
+            use std::io::Write;
+            writeln!(f, "{}", line)
+        });
+}
+
 impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
     fn run_phase(
         &self,
@@ -441,14 +655,38 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
             )));
         }
         let attempts = max_attempts.max(1);
+        let phase_started_at = chrono::Utc::now();
         if let Some(log) = self.logger {
             let _ = log.note(format!(
-                "- Phase {} start task={} tool={} attempts={}",
-                mode, task_id, phase_tool, attempts
+                "- Phase {} start task={} tool={} attempts={} at={}",
+                mode,
+                task_id,
+                phase_tool,
+                attempts,
+                phase_started_at.format("%H:%M:%SZ"),
             ));
         }
+        // Log phase start to performer log so all phases appear in one file.
+        append_performer_log(
+            &worktree,
+            task_id,
+            &format!(
+                "## Phase: {} (tool={} attempts={})\n\n- Task ID: {}\n- Tool: {}\n- Started: {}\n",
+                mode,
+                phase_tool,
+                attempts,
+                task_id,
+                phase_tool,
+                chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ"),
+            ),
+        );
         let mut last_reason = String::new();
         for attempt in 1..=attempts {
+            append_performer_log(
+                &worktree,
+                task_id,
+                &format!("### Attempt {}/{}\n", attempt, attempts),
+            );
             let mut command = std::process::Command::new(&runner_path);
             command
                 .current_dir(&worktree)
@@ -491,6 +729,11 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                     mode,
                     runner_path.display()
                 );
+                append_performer_log(
+                    &worktree,
+                    task_id,
+                    "- Result: failed (runner could not be executed)\n",
+                );
                 continue;
             };
             let combined_output = format!(
@@ -498,12 +741,78 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                 String::from_utf8_lossy(&out.stdout),
                 String::from_utf8_lossy(&out.stderr)
             );
+            // Log the tool output and exit status to the performer log.
+            append_performer_log(
+                &worktree,
+                task_id,
+                &format!(
+                    "```text\n{}\n```\n\n- Exit status: {}\n",
+                    combined_output.trim(),
+                    out.status,
+                ),
+            );
             if out.status.success() {
+                // Auto-commit any uncommitted changes produced by the phase runner.
+                // The review phase explicitly must not commit; implement/dev commits
+                // are managed by performer.sh. Fix and integrate phases may leave
+                // uncommitted file changes that must be committed before merging.
+                if mode != "review" && crate::git::is_dirty(&worktree).unwrap_or(false) {
+                    let _ = crate::git::run_git_output_mapped(
+                        &worktree,
+                        &["add", "-A"],
+                        "stage all changes after phase",
+                    );
+                    let commit_type = if mode == "fix" {
+                        crate::commit_message::CommitType::Fix
+                    } else {
+                        crate::commit_message::CommitType::Feat
+                    };
+                    let commit_msg = crate::commit_message::task_commit(
+                        commit_type,
+                        task_id,
+                        task.title.as_deref(),
+                        Some(mode),
+                    )
+                    .with_tool(&phase_tool)
+                    .format();
+                    let commit_out = crate::git::run_git_output_mapped(
+                        &worktree,
+                        &["commit", "-m", &commit_msg],
+                        "auto-commit phase changes",
+                    );
+                    if let Some(log) = self.logger {
+                        match commit_out {
+                            Ok(ref o) if o.status.success() => {
+                                let _ = log.note(format!(
+                                    "- Phase {} auto-committed changes task={}",
+                                    mode, task_id
+                                ));
+                            }
+                            _ => {
+                                let _ = log.note(format!(
+                                    "- Phase {} auto-commit failed task={} (continuing)",
+                                    mode, task_id
+                                ));
+                            }
+                        }
+                    }
+                }
+                append_performer_log(
+                    &worktree,
+                    task_id,
+                    &format!(
+                        "- Result: **done** (phase={} attempt={}/{})\n",
+                        mode, attempt, attempts
+                    ),
+                );
+                let elapsed = chrono::Utc::now()
+                    .signed_duration_since(phase_started_at)
+                    .num_seconds();
                 let _ = std::fs::remove_file(&prompt_path);
                 if let Some(log) = self.logger {
                     let _ = log.note(format!(
-                        "- Phase {} done task={} attempt={}",
-                        mode, task_id, attempt
+                        "- Phase {} done task={} attempt={} elapsed={}s",
+                        mode, task_id, attempt, elapsed
                     ));
                 }
                 return Ok(Ok(combined_output));
@@ -518,14 +827,33 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                 coordinator_runtime::summarize_output(&String::from_utf8_lossy(&out.stdout)),
                 coordinator_runtime::summarize_output(&String::from_utf8_lossy(&out.stderr))
             );
+            append_performer_log(
+                &worktree,
+                task_id,
+                &format!(
+                    "- Result: **failed** (phase={} attempt={}/{})\n",
+                    mode, attempt, attempts
+                ),
+            );
         }
+        let elapsed = chrono::Utc::now()
+            .signed_duration_since(phase_started_at)
+            .num_seconds();
         let _ = std::fs::remove_file(&prompt_path);
         if let Some(log) = self.logger {
             let _ = log.note(format!(
-                "- Phase {} failed task={} reason={}",
-                mode, task_id, last_reason
+                "- Phase {} failed task={} elapsed={}s reason={}",
+                mode, task_id, elapsed, last_reason
             ));
         }
+        append_performer_log(
+            &worktree,
+            task_id,
+            &format!(
+                "- Phase {} exhausted all {} attempt(s): {}\n",
+                mode, attempts, last_reason
+            ),
+        );
         Ok(Err(last_reason))
     }
 }
@@ -603,14 +931,28 @@ pub async fn advance_tasks_native(
                                 task_id
                             ))
                         })?;
+
+                // ── Part A: snapshot HEAD before the phase so we can roll back
+                // if the tool hits quota exhaustion mid-phase. ──────────────────
+                let worktree_path_str = task_snapshot.worktree_path().map(|s| s.to_string());
+                let pre_phase_sha = worktree_path_str
+                    .as_deref()
+                    .and_then(|wp| crate::git::head_commit(Path::new(wp)).ok());
+
                 let executor = NativePhaseExecutor { repo_root, logger };
                 if mode == "review" {
-                    match coordinator_runtime::run_review_phase(
-                        &executor,
-                        &task_snapshot,
-                        coordinator_tool_override,
-                        phase_runner_max_attempts,
-                    )? {
+                    // block_in_place: the phase runner is synchronous blocking I/O (spawns
+                    // an external process and waits). Running it directly in the async
+                    // executor would seize the tokio thread for minutes, preventing heartbeat
+                    // monitoring, merge detection, and rate-limit timers from firing.
+                    match tokio::task::block_in_place(|| {
+                        coordinator_runtime::run_review_phase(
+                            &executor,
+                            &task_snapshot,
+                            coordinator_tool_override,
+                            phase_runner_max_attempts,
+                        )
+                    })? {
                         Ok(verdict) => {
                             let verdict_status = match verdict {
                                 coordinator_engine::ReviewVerdict::Ok => "ok",
@@ -636,24 +978,44 @@ pub async fn advance_tasks_native(
                                 &now,
                             )?
                         }
-                        Err(reason) => coordinator_engine::apply_phase_outcome_in_registry(
-                            &mut registry,
-                            &task_id,
-                            mode,
-                            transition,
-                            None,
-                            Some(&reason),
-                            &now,
-                        )?,
+                        Err(reason) => {
+                            if is_quota_exhaustion_in_reason(&reason) {
+                                handle_phase_quota_exhaustion(
+                                    repo_root,
+                                    &mut registry,
+                                    state,
+                                    &task_snapshot,
+                                    &task_id,
+                                    mode,
+                                    &reason,
+                                    pre_phase_sha.as_deref(),
+                                    worktree_path_str.as_deref(),
+                                    &now,
+                                    logger,
+                                )?;
+                            } else {
+                                coordinator_engine::apply_phase_outcome_in_registry(
+                                    &mut registry,
+                                    &task_id,
+                                    mode,
+                                    transition,
+                                    None,
+                                    Some(&reason),
+                                    &now,
+                                )?;
+                            }
+                        }
                     }
                 } else {
-                    match coordinator_runtime::run_phase(
-                        &executor,
-                        &task_snapshot,
-                        mode,
-                        coordinator_tool_override,
-                        phase_runner_max_attempts,
-                    )? {
+                    match tokio::task::block_in_place(|| {
+                        coordinator_runtime::run_phase(
+                            &executor,
+                            &task_snapshot,
+                            mode,
+                            coordinator_tool_override,
+                            phase_runner_max_attempts,
+                        )
+                    })? {
                         Ok(_) => coordinator_engine::apply_phase_outcome_in_registry(
                             &mut registry,
                             &task_id,
@@ -663,15 +1025,33 @@ pub async fn advance_tasks_native(
                             None,
                             &now,
                         )?,
-                        Err(reason) => coordinator_engine::apply_phase_outcome_in_registry(
-                            &mut registry,
-                            &task_id,
-                            mode,
-                            transition,
-                            None,
-                            Some(&reason),
-                            &now,
-                        )?,
+                        Err(reason) => {
+                            if is_quota_exhaustion_in_reason(&reason) {
+                                handle_phase_quota_exhaustion(
+                                    repo_root,
+                                    &mut registry,
+                                    state,
+                                    &task_snapshot,
+                                    &task_id,
+                                    mode,
+                                    &reason,
+                                    pre_phase_sha.as_deref(),
+                                    worktree_path_str.as_deref(),
+                                    &now,
+                                    logger,
+                                )?;
+                            } else {
+                                coordinator_engine::apply_phase_outcome_in_registry(
+                                    &mut registry,
+                                    &task_id,
+                                    mode,
+                                    transition,
+                                    None,
+                                    Some(&reason),
+                                    &now,
+                                )?;
+                            }
+                        }
                     }
                 }
                 progressed = true;
@@ -680,6 +1060,7 @@ pub async fn advance_tasks_native(
                 task_id,
                 branch,
                 base,
+                merge_context,
             } => {
                 if let Some(log) = logger {
                     let _ = log.note(format!(
@@ -713,6 +1094,7 @@ pub async fn advance_tasks_native(
                             &base_for_worker,
                             merge_ai_fix,
                             merge_hook_timeout,
+                            &merge_context,
                             |event_type, task_id, phase, status, message, severity| {
                                 let _ = append_coordinator_event_with_severity(
                                     &repo, event_type, task_id, phase, status, message, severity,
@@ -764,8 +1146,9 @@ pub async fn monitor_active_jobs_native(
 ) -> Result<()> {
     ensure_performer_ipc_listener(repo_root, state, logger).await?;
     consume_runtime_events(repo_root, state, logger)?;
-    apply_runtime_event_bus_updates(repo_root, state, logger)?;
+    apply_runtime_event_bus_updates(repo_root, env_cfg, coordinator, state, logger)?;
     apply_stale_heartbeat_policy(repo_root, env_cfg, coordinator, logger)?;
+    force_kill_stale_failures(repo_root, env_cfg, coordinator, state, logger);
     let retry_codes = resolve_error_code_retry_list(env_cfg, coordinator);
     let retry_max = resolve_error_code_retry_max(env_cfg, coordinator);
     loop {
@@ -785,6 +1168,24 @@ pub async fn monitor_active_jobs_native(
                     repo_root,
                     &BTreeMap::new(),
                 )?;
+                // On failure, read the performer task log from the worktree
+                // and feed it to the per-adapter error normalizer.  This
+                // populates normalizer_input so that the canonical error
+                // classification pipeline actually runs in production.
+                let normalizer_input = if !evt.success {
+                    crate::coordinator::runtime::read_performer_log_tail(
+                        &job.worktree_path,
+                        &evt.task_id,
+                        8192,
+                    )
+                    .map(|log_content| coordinator_engine::NormalizerInput {
+                        exit_code: 1,
+                        stderr: log_content.clone(),
+                        stdout: log_content,
+                    })
+                } else {
+                    None
+                };
                 let completion = coordinator_engine::apply_job_completion_in_registry(
                     &mut registry,
                     &evt.task_id,
@@ -810,8 +1211,9 @@ pub async fn monitor_active_jobs_native(
                             env_cfg,
                             coordinator,
                         ),
-                        normalizer_input: None,
+                        normalizer_input,
                     },
+                    &state.normalizer_registry,
                     &now_iso_coordinator(),
                 )?;
                 if let Some(log) = logger {
@@ -854,6 +1256,7 @@ pub async fn monitor_active_jobs_native(
                             >(ts_val.clone())
                             {
                                 state.throttle_registry.insert(job.tool.clone(), ts);
+                                persist_throttle_registry(repo_root, &state.throttle_registry);
                             }
                         }
                     }
@@ -890,6 +1293,7 @@ pub async fn monitor_active_jobs_native(
                     // re-enabled for future tasks.
                     if state.throttle_registry.contains_key(&job.tool) {
                         state.throttle_registry.remove(&job.tool);
+                        persist_throttle_registry(repo_root, &state.throttle_registry);
                         if resolve_rate_limit_throttle_parallel(env_cfg, coordinator) {
                             let new_val = state.restore_parallel();
                             let msg = format!(
@@ -972,6 +1376,7 @@ pub async fn monitor_active_jobs_native(
                             attempt: job.attempt + 1,
                             started_at: std::time::Instant::now(),
                             pid: retry_pid,
+                            failure_signaled_at: None,
                         },
                     );
                     if let Some(log) = logger {
@@ -1000,6 +1405,8 @@ pub async fn monitor_active_jobs_native(
 
 fn apply_runtime_event_bus_updates(
     repo_root: &Path,
+    env_cfg: &CoordinatorEnvConfig,
+    coordinator: Option<&crate::config::CoordinatorConfig>,
     state: &mut CoordinatorRunState,
     logger: Option<&dyn CoordinatorLog>,
 ) -> Result<usize> {
@@ -1009,6 +1416,8 @@ fn apply_runtime_event_bus_updates(
         status: Option<String>,
         phase: Option<String>,
         last_error: Option<String>,
+        /// True when a terminal failure IPC event was received for this task.
+        failure_signaled: bool,
     }
 
     let mut runtime_updates: HashMap<String, PendingRuntimeUpdate> = HashMap::new();
@@ -1055,6 +1464,9 @@ fn apply_runtime_event_bus_updates(
                                 event.task_id, event.source, status
                             ));
                         }
+                        if status == "failed" {
+                            update.failure_signaled = true;
+                        }
                         update.status = Some(status);
                         if let Some(phase) = phase {
                             update.phase = Some(phase);
@@ -1064,6 +1476,7 @@ fn apply_runtime_event_bus_updates(
                         }
                     }
                     CoordinatorRuntimeEventKind::Failed { phase, message } => {
+                        update.failure_signaled = true;
                         update.status = Some(
                             crate::coordinator::RuntimeStatus::Failed
                                 .as_str()
@@ -1133,6 +1546,25 @@ fn apply_runtime_event_bus_updates(
         &registry.to_value()?,
     )?;
 
+    // Mark active jobs that received a terminal failure IPC signal so the
+    // force-kill grace period timer starts.
+    let grace_seconds = resolve_force_kill_grace_seconds(env_cfg, coordinator);
+    for (task_id, update) in &runtime_updates {
+        if update.failure_signaled {
+            if let Some(job) = state.active_jobs.get_mut(task_id.as_str()) {
+                if job.failure_signaled_at.is_none() {
+                    job.failure_signaled_at = Some(std::time::Instant::now());
+                    if let Some(log) = logger {
+                        let _ = log.note(format!(
+                            "- Force-kill grace timer started task={} pid={:?} grace={}s",
+                            task_id, job.pid, grace_seconds,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
     if let Some(log) = logger {
         state.heartbeat_updates_since_log += updated;
         let should_log = state
@@ -1150,6 +1582,76 @@ fn apply_runtime_event_bus_updates(
     }
 
     Ok(updated)
+}
+
+/// Force-kill performer processes that signaled failure via IPC but did not
+/// exit within the grace period ([`FORCE_KILL_GRACE_SECONDS`]).  Sends
+/// SIGKILL via `kill(2)` using the stored PID.  The async wrapper in
+/// `spawn_performer_job` will observe the child exit and emit the normal
+/// `CoordinatorJobEvent`, so the regular state-transition path still fires.
+fn force_kill_stale_failures(
+    repo_root: &Path,
+    env_cfg: &CoordinatorEnvConfig,
+    coordinator: Option<&crate::config::CoordinatorConfig>,
+    state: &mut CoordinatorRunState,
+    logger: Option<&dyn CoordinatorLog>,
+) {
+    let grace_seconds = resolve_force_kill_grace_seconds(env_cfg, coordinator);
+    let grace = std::time::Duration::from_secs(grace_seconds);
+    let mut killed: Vec<String> = Vec::new();
+
+    for (task_id, job) in &state.active_jobs {
+        let Some(signaled_at) = job.failure_signaled_at else {
+            continue;
+        };
+        if signaled_at.elapsed() < grace {
+            continue;
+        }
+        if let Some(pid) = job.pid {
+            // Send SIGKILL to the performer process via the kill command.
+            #[cfg(unix)]
+            {
+                let _ = std::process::Command::new("kill")
+                    .args(["-9", &pid.to_string()])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+            if let Some(log) = logger {
+                let _ = log.note(format!(
+                    "- Force-killed performer task={} pid={} reason=failure_signaled_grace_expired elapsed={:.1}s",
+                    task_id,
+                    pid,
+                    signaled_at.elapsed().as_secs_f64(),
+                ));
+            }
+            let _ = append_coordinator_event_with_severity(
+                repo_root,
+                "force_kill",
+                task_id,
+                "dev",
+                "failed",
+                &format!(
+                    "Force-killed performer pid={} after failure IPC grace period ({}s) expired",
+                    pid, grace_seconds
+                ),
+                "warning",
+            );
+            killed.push(task_id.clone());
+        } else if let Some(log) = logger {
+            let _ = log.note(format!(
+                "- Force-kill requested but no PID for task={} (already exited?)",
+                task_id,
+            ));
+        }
+    }
+
+    // Clear the failure signal for killed processes so we don't re-kill.
+    for task_id in &killed {
+        if let Some(job) = state.active_jobs.get_mut(task_id.as_str()) {
+            job.failure_signaled_at = None;
+        }
+    }
 }
 
 pub fn consume_heartbeat_events(
@@ -1432,6 +1934,16 @@ fn resolve_rate_limit_throttle_parallel(
         .rate_limit_throttle_parallel
         .or_else(|| coordinator.and_then(|c| c.rate_limit_throttle_parallel))
         .unwrap_or(true)
+}
+
+fn resolve_force_kill_grace_seconds(
+    env_cfg: &CoordinatorEnvConfig,
+    coordinator: Option<&crate::config::CoordinatorConfig>,
+) -> u64 {
+    env_cfg
+        .force_kill_grace_seconds
+        .or_else(|| coordinator.and_then(|c| c.force_kill_grace_seconds))
+        .unwrap_or(crate::coordinator::runtime::FORCE_KILL_GRACE_SECONDS)
 }
 
 pub async fn monitor_merge_jobs_native(
@@ -2228,7 +2740,7 @@ pub async fn dispatch_ready_tasks_native(
         let phase_timeout_seconds = env_cfg
             .stale_in_progress_seconds
             .or_else(|| coordinator.and_then(|c| c.stale_in_progress_seconds))
-            .unwrap_or(0);
+            .unwrap_or(600);
         let current_exe = std::env::current_exe().map_err(|e| {
             MaccError::Validation(format!("Failed to resolve current executable path: {}", e))
         })?;
@@ -2379,6 +2891,7 @@ pub async fn dispatch_ready_tasks_native(
                 attempt: 1,
                 started_at: std::time::Instant::now(),
                 pid,
+                failure_signaled_at: None,
             },
         );
         if let Some(log) = logger {

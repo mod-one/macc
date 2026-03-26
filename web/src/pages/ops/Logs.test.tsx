@@ -1,5 +1,6 @@
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { MemoryRouter } from 'react-router-dom';
 import Logs from './Logs';
 
 type EventHandler = (event: MessageEvent<string> | Event) => void;
@@ -59,6 +60,16 @@ class MockEventSource {
   }
 }
 
+// Mock the API client
+vi.mock('../../api/client', async () => {
+  const actual = await vi.importActual('../../api/client');
+  return {
+    ...actual,
+    getLogs: vi.fn().mockResolvedValue([]),
+    getLogContent: vi.fn().mockResolvedValue({ path: '', lines: [], total: 0 }),
+  };
+});
+
 describe('Logs page', () => {
   const originalEventSource = globalThis.EventSource;
 
@@ -73,8 +84,23 @@ describe('Logs page', () => {
     globalThis.EventSource = originalEventSource;
   });
 
-  it('renders streamed events and filters by event type', async () => {
-    render(<Logs />);
+  it('renders tab navigation with three tabs', () => {
+    render(
+      <MemoryRouter initialEntries={['/ops/logs']}>
+        <Logs />
+      </MemoryRouter>,
+    );
+    expect(screen.getByText('Live Stream')).toBeInTheDocument();
+    expect(screen.getByText('File Browser')).toBeInTheDocument();
+    expect(screen.getByText('Structured Events')).toBeInTheDocument();
+  });
+
+  it('defaults to Live Stream tab and renders streamed events', async () => {
+    render(
+      <MemoryRouter initialEntries={['/ops/logs']}>
+        <Logs />
+      </MemoryRouter>,
+    );
 
     expect(screen.getByText(/waiting for the first event/i)).toBeInTheDocument();
     expect(MockEventSource.instances).toHaveLength(1);
@@ -131,9 +157,39 @@ describe('Logs page', () => {
     expect(screen.getAllByText('heartbeat').length).toBeGreaterThan(0);
   });
 
+  it('switches to File Browser tab', async () => {
+    render(
+      <MemoryRouter initialEntries={['/ops/logs']}>
+        <Logs />
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByText('File Browser'));
+
+    await waitFor(() => {
+      expect(screen.getByText('Log files')).toBeInTheDocument();
+    });
+  });
+
+  it('switches to Structured Events tab', async () => {
+    render(
+      <MemoryRouter initialEntries={['/ops/logs']}>
+        <Logs />
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByText('Structured Events'));
+
+    await waitFor(() => {
+      expect(screen.getByLabelText(/file/i)).toBeInTheDocument();
+    });
+  });
+
   it('reconnects with last_event_id after disconnects', async () => {
     vi.useFakeTimers();
-    render(<Logs />);
+    render(
+      <MemoryRouter initialEntries={['/ops/logs']}>
+        <Logs />
+      </MemoryRouter>,
+    );
 
     const source = MockEventSource.instances[0]!;
     act(() => {
@@ -167,7 +223,11 @@ describe('Logs page', () => {
 
   it('indicates when the resumed stream skips events after reconnect', async () => {
     vi.useFakeTimers();
-    render(<Logs />);
+    render(
+      <MemoryRouter initialEntries={['/ops/logs']}>
+        <Logs />
+      </MemoryRouter>,
+    );
 
     const source = MockEventSource.instances[0]!;
     act(() => {
@@ -211,5 +271,101 @@ describe('Logs page', () => {
 
     expect(screen.getByText(/stream resumed live without replay support/i)).toBeInTheDocument();
     vi.useRealTimers();
+  });
+
+  it('opens the selected log file from navigation state', async () => {
+    const { getLogContent } = await import('../../api/client');
+    vi.mocked(getLogContent).mockResolvedValue({
+      path: 'coordinator/events.jsonl',
+      lines: ['line one'],
+      total: 1,
+    });
+
+    render(
+      <MemoryRouter
+        initialEntries={[
+          {
+            pathname: '/ops/logs',
+            state: { selectedLogPath: 'coordinator/events.jsonl' },
+          },
+        ]}
+      >
+        <Logs />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(getLogContent).toHaveBeenCalledWith(
+        'coordinator/events.jsonl',
+        expect.objectContaining({ offset: 0 }),
+      );
+    });
+  });
+});
+
+describe('Logs page - File Browser tab', () => {
+  const originalEventSource = globalThis.EventSource;
+
+  beforeEach(() => {
+    MockEventSource.instances = [];
+    vi.stubGlobal('EventSource', MockEventSource);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    globalThis.EventSource = originalEventSource;
+  });
+
+  it('shows file list grouped by category when files are loaded', async () => {
+    const { getLogs } = await import('../../api/client');
+    vi.mocked(getLogs).mockResolvedValueOnce([
+      { path: 'coordinator/events.jsonl', size: 1024, modified: '2026-03-19T10:00:00Z' },
+      { path: 'performer/task-001.log', size: 512, modified: '2026-03-19T09:00:00Z' },
+    ]);
+
+    render(
+      <MemoryRouter initialEntries={['/ops/logs']}>
+        <Logs />
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByText('File Browser'));
+
+    await waitFor(() => {
+      expect(screen.getByText('coordinator')).toBeInTheDocument();
+      expect(screen.getByText('performer')).toBeInTheDocument();
+      expect(screen.getByText('events.jsonl')).toBeInTheDocument();
+      expect(screen.getByText('task-001.log')).toBeInTheDocument();
+    });
+  });
+
+  it('loads content when a file is selected', async () => {
+    const { getLogs, getLogContent } = await import('../../api/client');
+    vi.mocked(getLogs).mockResolvedValueOnce([
+      { path: 'coordinator/events.jsonl', size: 1024, modified: null },
+    ]);
+    vi.mocked(getLogContent).mockResolvedValueOnce({
+      path: 'coordinator/events.jsonl',
+      lines: ['line one', 'line two', 'line three'],
+      total: 3,
+    });
+
+    render(
+      <MemoryRouter initialEntries={['/ops/logs']}>
+        <Logs />
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByText('File Browser'));
+
+    await waitFor(() => {
+      expect(screen.getByText('events.jsonl')).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByText('events.jsonl'));
+
+    await waitFor(() => {
+      expect(screen.getByText('line one')).toBeInTheDocument();
+      expect(screen.getByText('line two')).toBeInTheDocument();
+      expect(screen.getByText('line three')).toBeInTheDocument();
+    });
   });
 });

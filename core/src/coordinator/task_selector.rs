@@ -276,14 +276,25 @@ fn pick_tool(
     let primary_tool = candidates.first().map(|(_, _, tool)| tool.clone());
 
     // RL-ROUTE-005: throttle filtering — skip throttled tools and fall back
-    // to the next available one.  Disabled for review/fix phases (idempotency
-    // guard: the task is mid-flight and must not switch tools).
+    // to the next available one.
+    //
+    // For review/fix phases the task is mid-flight and normally must not
+    // switch tools (idempotency guard).  However, when the task's *own*
+    // tool is throttled (e.g. E602 quota exhaustion), the worktree has
+    // already been rolled back to pre-phase state by the caller, so a
+    // tool switch is safe and necessary to make progress.
+    let in_mid_flight_phase = matches!(
+        task.task_runtime.current_phase.as_deref(),
+        Some("review") | Some("fix")
+    );
+    let own_tool_throttled = task
+        .tool
+        .as_deref()
+        .map(|t| is_tool_throttled(&config.throttle_registry, t, &config.now))
+        .unwrap_or(false);
     let apply_throttle_filter = config.rate_limit_fallback_enabled
         && !config.throttle_registry.is_empty()
-        && !matches!(
-            task.task_runtime.current_phase.as_deref(),
-            Some("review") | Some("fix")
-        );
+        && (!in_mid_flight_phase || own_tool_throttled);
 
     let selected = if apply_throttle_filter {
         candidates

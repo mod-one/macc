@@ -343,8 +343,18 @@ impl TaskRegistry {
     }
 
     pub fn can_reuse_worktree_slot(&self, worktree_path: &str) -> bool {
+        // A slot can be reused unless a task in an active/blocking state is assigned to it.
+        // Blocking states: claimed, in_progress, pr_open, changes_requested, queued.
+        // Non-blocking (safe to reset): merged, failed, abandoned, todo.
+        // This allows retried (auto_retry → todo) and failed tasks to release their slot.
+        const BLOCKING: &[&str] = &[
+            "claimed",
+            "in_progress",
+            "pr_open",
+            "changes_requested",
+            "queued",
+        ];
         let mut seen = false;
-        let mut all_merged = true;
         for task in &self.tasks {
             let Some(path) = task
                 .worktree
@@ -357,11 +367,23 @@ impl TaskRegistry {
                 continue;
             }
             seen = true;
-            if task.state != "merged" {
-                all_merged = false;
+            if BLOCKING.contains(&task.state.as_str()) {
+                return false;
             }
         }
-        seen && all_merged
+        seen
+    }
+
+    /// Returns `true` if the task assigned to `worktree_path` is in a terminal/stuck
+    /// state that will never self-resolve (blocked, failed, abandoned).
+    /// Used by the worktree reuse logic to decide whether to abandon an unmerged
+    /// branch and reset the slot rather than deadlocking.
+    pub fn task_on_worktree_is_permanently_stuck(&self, worktree_path: &str) -> bool {
+        const STUCK: &[&str] = &["blocked", "failed", "abandoned"];
+        self.tasks.iter().any(|task| {
+            task.worktree_path().is_some_and(|p| p == worktree_path)
+                && STUCK.contains(&task.state.as_str())
+        })
     }
 
     pub fn has_in_progress_or_queued_on_worktree(&self, worktree_path: &str) -> bool {
@@ -650,6 +672,76 @@ impl TaskRuntime {
         let next = self.retries_count().saturating_add(1);
         self.set_metric_i64("retries", next as i64);
         next
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn make_registry_with_task(state: &str, worktree_path: &str) -> TaskRegistry {
+        let v = json!({
+            "tasks": [{
+                "id": "T1",
+                "state": state,
+                "worktree": { "worktree_path": worktree_path }
+            }]
+        });
+        TaskRegistry::from_value(&v).unwrap()
+    }
+
+    #[test]
+    fn can_reuse_slot_merged_task() {
+        let r = make_registry_with_task("merged", "/wt/worker-01");
+        assert!(r.can_reuse_worktree_slot("/wt/worker-01"));
+    }
+
+    #[test]
+    fn can_reuse_slot_failed_task_unblocks_slot() {
+        // Regression: a failed task (e.g. commit failed on performer) must not
+        // permanently block its worktree slot from being reused.
+        let r = make_registry_with_task("failed", "/wt/worker-01");
+        assert!(r.can_reuse_worktree_slot("/wt/worker-01"));
+    }
+
+    #[test]
+    fn can_reuse_slot_todo_task_unblocks_slot() {
+        // Regression: an auto-retried task (state=todo) must not block its slot.
+        let r = make_registry_with_task("todo", "/wt/worker-01");
+        assert!(r.can_reuse_worktree_slot("/wt/worker-01"));
+    }
+
+    #[test]
+    fn can_reuse_slot_abandoned_task_unblocks_slot() {
+        let r = make_registry_with_task("abandoned", "/wt/worker-01");
+        assert!(r.can_reuse_worktree_slot("/wt/worker-01"));
+    }
+
+    #[test]
+    fn can_reuse_slot_in_progress_task_blocks_slot() {
+        let r = make_registry_with_task("in_progress", "/wt/worker-01");
+        assert!(!r.can_reuse_worktree_slot("/wt/worker-01"));
+    }
+
+    #[test]
+    fn can_reuse_slot_claimed_task_blocks_slot() {
+        let r = make_registry_with_task("claimed", "/wt/worker-01");
+        assert!(!r.can_reuse_worktree_slot("/wt/worker-01"));
+    }
+
+    #[test]
+    fn can_reuse_slot_no_tasks_returns_false() {
+        let v = json!({ "tasks": [] });
+        let r = TaskRegistry::from_value(&v).unwrap();
+        assert!(!r.can_reuse_worktree_slot("/wt/worker-01"));
+    }
+
+    #[test]
+    fn can_reuse_slot_different_worktree_ignored() {
+        let r = make_registry_with_task("in_progress", "/wt/worker-02");
+        // worker-01 has no tasks — returns false (seen=false)
+        assert!(!r.can_reuse_worktree_slot("/wt/worker-01"));
     }
 }
 
