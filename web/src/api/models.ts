@@ -279,6 +279,48 @@ export interface ApiConfigUpdateRequest {
   rateLimitThrottleParallel?: boolean | null;
 }
 
+export interface ApiToolInstallDescriptor {
+  confirmMessage: string;
+}
+
+export type ApiToolActionKind =
+  | { action: 'openMcp'; targetPointer: string }
+  | { action: 'openSkills'; targetPointer: string }
+  | { action: 'openAgents'; targetPointer: string }
+  | { action: 'custom'; target: string };
+
+export type ApiToolFieldKind =
+  | { type: 'bool' }
+  | { type: 'enum'; options: string[] }
+  | { type: 'text' }
+  | { type: 'number' }
+  | { type: 'array' }
+  | { type: 'action'; action: ApiToolActionKind };
+
+export type ApiToolFieldDefault =
+  | { type: 'bool'; value: boolean }
+  | { type: 'text'; value: string }
+  | { type: 'enum'; value: string }
+  | { type: 'number'; value: number }
+  | { type: 'array'; value: string[] };
+
+export interface ApiToolField {
+  id: string;
+  label: string;
+  help: string;
+  path: string;
+  kind: ApiToolFieldKind;
+  default?: ApiToolFieldDefault | null;
+}
+
+export interface ApiToolDescriptor {
+  id: string;
+  title: string;
+  description: string;
+  fields: ApiToolField[];
+  install?: ApiToolInstallDescriptor | null;
+}
+
 export interface ApiStandardsPreviewRequest {
   standardsPath: string | null;
   standardsInline: Record<string, string>;

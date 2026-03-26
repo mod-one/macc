@@ -142,6 +142,10 @@ fn build_web_router(state: WebState) -> Router {
             get(config::get_config_handler).put(config::update_config_handler),
         )
         .route(
+            "/api/v1/config/tool-descriptors",
+            get(config::get_tool_descriptors_handler),
+        )
+        .route(
             "/api/v1/config/standards-preview",
             post(config::standards_preview_handler),
         )

@@ -1,7 +1,7 @@
 use super::errors::ApiError;
 use super::types::{
     ApiConfigResponse, ApiConfigUpdateRequest, ApiStandardsPreviewCard, ApiStandardsPreviewRequest,
-    ApiStandardsPreviewResponse,
+    ApiStandardsPreviewResponse, ApiToolDescriptor,
 };
 use super::WebState;
 use axum::body::Bytes;
@@ -20,6 +20,18 @@ pub(super) async fn get_config_handler(
         .load_canonical_config(&state.paths)
         .map_err(ApiError::from)?;
     Ok(Json(ApiConfigResponse::from(canonical)))
+}
+
+pub(super) async fn get_tool_descriptors_handler(
+    State(state): State<WebState>,
+) -> std::result::Result<Json<Vec<ApiToolDescriptor>>, ApiError> {
+    let (descriptors, _diagnostics) = state.engine.list_tools(&state.paths);
+    Ok(Json(
+        descriptors
+            .into_iter()
+            .map(ApiToolDescriptor::from)
+            .collect(),
+    ))
 }
 
 pub(super) async fn update_config_handler(

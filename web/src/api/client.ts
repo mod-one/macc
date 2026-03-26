@@ -26,6 +26,7 @@ import type {
   ApiTerminalSessionCreated,
   ApiStandardsPreviewRequest,
   ApiStandardsPreviewResponse,
+  ApiToolDescriptor,
   ApiWorktree,
   ApiWorktreeCreateRequest,
   GitCommit,
@@ -268,6 +269,12 @@ export async function getConfig(
   options: ApiRequestOptions = {},
 ): Promise<ApiConfigResponse> {
   return sendJson<ApiConfigResponse>('/config', 'GET', options);
+}
+
+export async function getToolDescriptors(
+  options: ApiRequestOptions = {},
+): Promise<ApiToolDescriptor[]> {
+  return sendJson<ApiToolDescriptor[]>('/config/tool-descriptors', 'GET', options);
 }
 
 export async function updateConfig(

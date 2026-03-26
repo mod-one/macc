@@ -5,10 +5,12 @@ import type { ApiConfigResponse } from '../../api/models';
 import Tools from './Tools';
 
 const getConfigMock = vi.fn();
+const getToolDescriptorsMock = vi.fn();
 const updateConfigMock = vi.fn();
 
 vi.mock('../../api/client', () => ({
   getConfig: (...args: unknown[]) => getConfigMock(...args),
+  getToolDescriptors: (...args: unknown[]) => getToolDescriptorsMock(...args),
   updateConfig: (...args: unknown[]) => updateConfigMock(...args),
   ApiClientError: class ApiClientError extends Error {
     envelope = {
@@ -52,7 +54,31 @@ function renderPage(): void {
 describe('Tools page', () => {
   beforeEach(() => {
     getConfigMock.mockReset();
+    getToolDescriptorsMock.mockReset();
     updateConfigMock.mockReset();
+    getToolDescriptorsMock.mockResolvedValue([
+      {
+        id: 'codex',
+        title: 'Codex',
+        description: 'Codex tool settings.',
+        fields: [
+          {
+            id: 'model',
+            label: 'Model',
+            help: 'Choose the model for Codex.',
+            path: '/tools/config/codex/settings/model',
+            kind: {
+              type: 'enum',
+              options: ['gpt-5.4', 'gpt-5.4-mini'],
+            },
+            default: {
+              type: 'enum',
+              value: 'gpt-5.4',
+            },
+          },
+        ],
+      },
+    ]);
   });
 
   it('keeps raw JSON editor text while invalid JSON is being typed', async () => {
@@ -78,7 +104,7 @@ describe('Tools page', () => {
 
     await screen.findByText('Tools & Adapters');
     fireEvent.click(screen.getByRole('checkbox', { name: /enabled/i }));
-    fireEvent.click(screen.getByRole('button', { name: 'Check Updates' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh Schema' }));
 
     expect(confirmSpy).toHaveBeenCalledTimes(1);
     expect(getConfigMock).toHaveBeenCalledTimes(1);
@@ -97,5 +123,17 @@ describe('Tools page', () => {
 
     await screen.findByText('Tools & Adapters');
     expect(screen.getByRole('heading', { name: 'Codex' })).toBeInTheDocument();
+  });
+
+  it('renders descriptor-backed fields like model selection', async () => {
+    getConfigMock.mockResolvedValue(buildConfig());
+
+    renderPage();
+
+    await screen.findByText('Tools & Adapters');
+    fireEvent.click(screen.getByRole('heading', { name: 'Codex' }));
+
+    expect(await screen.findByLabelText('Model')).toBeInTheDocument();
+    expect(screen.getByText(/Choose the model for Codex/i)).toBeInTheDocument();
   });
 });

@@ -1,7 +1,14 @@
 import React from 'react';
-import { Link } from 'react-router-dom';
-import { getConfig, updateConfig, ApiClientError } from '../../api/client';
-import type { ApiConfigResponse, JsonValue } from '../../api/models';
+import { Link, useNavigate } from 'react-router-dom';
+import { ApiClientError, getConfig, getToolDescriptors, updateConfig } from '../../api/client';
+import type {
+  ApiConfigResponse,
+  ApiToolActionKind,
+  ApiToolDescriptor,
+  ApiToolField,
+  ApiToolFieldDefault,
+  JsonValue,
+} from '../../api/models';
 import { Button, RightDrawer, StatusBadge } from '../../components';
 import { CopyIcon, RefreshIcon, SearchIcon } from '../../components/icons';
 import { cn } from '../../components/styles';
@@ -10,11 +17,11 @@ type ToolFilter = 'all' | 'enabled' | 'installed';
 type ToolHealth = 'healthy' | 'degraded';
 type ToolActivity = 'idle' | 'active';
 type JsonObject = Record<string, JsonValue>;
-type FieldKind = 'string' | 'number' | 'boolean' | 'json';
 
 interface ToolViewModel {
   id: string;
   name: string;
+  description: string;
   version: string;
   category: string;
   capabilities: string[];
@@ -24,63 +31,11 @@ interface ToolViewModel {
   activity: ToolActivity;
 }
 
-interface SchemaField {
-  path: string;
-  label: string;
-  kind: FieldKind;
-  placeholder?: string;
-}
-
-interface SchemaSection {
+interface ToolFieldSection {
   id: string;
   title: string;
-  fields: SchemaField[];
+  fields: ApiToolField[];
 }
-
-const SCHEMA_SECTIONS: SchemaSection[] = [
-  {
-    id: 'container',
-    title: 'Container Settings',
-    fields: [
-      { path: 'container.image', label: 'Image', kind: 'string', placeholder: 'ghcr.io/org/tool:latest' },
-      { path: 'container.command', label: 'Command', kind: 'string', placeholder: 'tool-server' },
-      { path: 'container.args', label: 'Arguments', kind: 'json', placeholder: '["--stdio"]' },
-      { path: 'container.workingDir', label: 'Working Directory', kind: 'string', placeholder: '/workspace' },
-    ],
-  },
-  {
-    id: 'mounts',
-    title: 'Mounts',
-    fields: [
-      { path: 'mounts', label: 'Mount List', kind: 'json', placeholder: '[{"source":".","target":"/workspace"}]' },
-    ],
-  },
-  {
-    id: 'network',
-    title: 'Network Access',
-    fields: [
-      { path: 'network.enabled', label: 'Network Enabled', kind: 'boolean' },
-      { path: 'network.allowedHosts', label: 'Allowed Hosts', kind: 'json', placeholder: '["api.openai.com"]' },
-      { path: 'network.mode', label: 'Mode', kind: 'string', placeholder: 'restricted' },
-    ],
-  },
-  {
-    id: 'env',
-    title: 'Environment',
-    fields: [
-      { path: 'env', label: 'Environment Variables', kind: 'json', placeholder: '{"LOG_LEVEL":"debug"}' },
-    ],
-  },
-  {
-    id: 'timeouts',
-    title: 'Timeouts',
-    fields: [
-      { path: 'timeouts.startupSeconds', label: 'Startup Timeout (s)', kind: 'number' },
-      { path: 'timeouts.execSeconds', label: 'Execution Timeout (s)', kind: 'number' },
-      { path: 'timeouts.idleSeconds', label: 'Idle Timeout (s)', kind: 'number' },
-    ],
-  },
-];
 
 function isJsonObject(value: JsonValue | undefined): value is JsonObject {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -92,7 +47,15 @@ function cloneJson<T extends JsonValue>(value: T): T {
 
 function titleCaseToolId(value: string): string {
   return value
-    .split(/[-_\s]+/)
+    .split(/[-_\s/]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
+function titleCaseSection(value: string): string {
+  return value
+    .split(/[-_\s/]+/)
     .filter(Boolean)
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(' ');
@@ -123,16 +86,98 @@ function asStringArray(value: JsonValue | undefined): string[] {
   if (typeof value === 'string' && value.trim().length > 0) {
     return value
       .split(',')
-      .map((part) => part.trim())
+      .map((entry) => entry.trim())
       .filter(Boolean);
   }
   return [];
 }
 
-function getNestedValue(source: JsonObject, path: string): JsonValue | undefined {
-  const segments = path.split('.').filter(Boolean);
-  let current: JsonValue = source;
+function jsonEquals(left: JsonValue, right: JsonValue): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
 
+function ensureJsonRecord(value: unknown): Record<string, JsonValue> {
+  return isJsonObject(value as JsonValue | undefined) ? (value as Record<string, JsonValue>) : {};
+}
+
+function ensureStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string') : [];
+}
+
+function ensureToolFields(value: unknown): ApiToolField[] {
+  return Array.isArray(value) ? value.filter((entry): entry is ApiToolField => Boolean(entry) && typeof entry === 'object') : [];
+}
+
+function normalizeConfigResponse(config: ApiConfigResponse): ApiConfigResponse {
+  return {
+    ...config,
+    enabledTools: ensureStringArray(config.enabledTools),
+    toolConfig: ensureJsonRecord(config.toolConfig),
+    toolSettings: ensureJsonRecord(config.toolSettings),
+    toolPriority: ensureStringArray(config.toolPriority),
+  };
+}
+
+function normalizeToolDescriptors(value: unknown): ApiToolDescriptor[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .filter((entry): entry is ApiToolDescriptor => Boolean(entry) && typeof entry === 'object')
+    .map((descriptor) => ({
+      id: typeof descriptor.id === 'string' ? descriptor.id : '',
+      title:
+        typeof descriptor.title === 'string' && descriptor.title.trim().length > 0
+          ? descriptor.title
+          : titleCaseToolId(typeof descriptor.id === 'string' ? descriptor.id : ''),
+      description: typeof descriptor.description === 'string' ? descriptor.description : '',
+      fields: ensureToolFields(descriptor.fields),
+      install: descriptor.install ?? null,
+    }))
+    .filter((descriptor) => descriptor.id.trim().length > 0)
+    .sort((left, right) => left.id.localeCompare(right.id));
+}
+
+function decodePointerSegment(segment: string): string {
+  return segment.replace(/~1/g, '/').replace(/~0/g, '~');
+}
+
+function splitJsonPointer(pointer: string): string[] {
+  if (pointer === '' || pointer === '/') {
+    return [];
+  }
+
+  return pointer
+    .split('/')
+    .slice(1)
+    .map(decodePointerSegment)
+    .filter(Boolean);
+}
+
+function relativeToolPointer(toolId: string, pointer: string): string | null {
+  const configPrefix = `/tools/config/${toolId}`;
+  const legacyPrefix = `/tools/${toolId}`;
+
+  if (pointer === configPrefix || pointer === legacyPrefix) {
+    return '/';
+  }
+  if (pointer.startsWith(`${configPrefix}/`)) {
+    return pointer.slice(configPrefix.length);
+  }
+  if (pointer.startsWith(`${legacyPrefix}/`)) {
+    return pointer.slice(legacyPrefix.length);
+  }
+  return null;
+}
+
+function getValueAtPointer(source: JsonObject, pointer: string): JsonValue | undefined {
+  const segments = splitJsonPointer(pointer);
+  if (segments.length === 0) {
+    return source;
+  }
+
+  let current: JsonValue = source;
   for (const segment of segments) {
     if (!isJsonObject(current)) {
       return undefined;
@@ -146,14 +191,31 @@ function getNestedValue(source: JsonObject, path: string): JsonValue | undefined
   return current;
 }
 
-function setNestedValue(source: JsonObject, path: string, value: JsonValue): JsonObject {
-  const segments = path.split('.').filter(Boolean);
+function removeEmptyObjects(value: JsonValue | undefined): JsonValue | undefined {
+  if (!isJsonObject(value)) {
+    return value;
+  }
+
+  const nextEntries = Object.entries(value)
+    .map(([key, entry]) => [key, removeEmptyObjects(entry)] as const)
+    .filter(([, entry]) => typeof entry !== 'undefined');
+
+  if (nextEntries.length === 0) {
+    return undefined;
+  }
+
+  return Object.fromEntries(nextEntries) as JsonObject;
+}
+
+function setValueAtPointer(source: JsonObject, pointer: string, value: JsonValue | undefined): JsonObject {
+  const segments = splitJsonPointer(pointer);
   if (segments.length === 0) {
-    return source;
+    return value && isJsonObject(value) ? cloneJson(value) : {};
   }
 
   const draft = cloneJson(source);
   let cursor: JsonObject = draft;
+  const parents: Array<{ node: JsonObject; key: string }> = [];
 
   for (let index = 0; index < segments.length - 1; index += 1) {
     const segment = segments[index];
@@ -161,14 +223,52 @@ function setNestedValue(source: JsonObject, path: string, value: JsonValue): Jso
     if (!isJsonObject(next)) {
       cursor[segment] = {};
     }
+    parents.push({ node: cursor, key: segment });
     cursor = cursor[segment] as JsonObject;
   }
 
-  cursor[segments[segments.length - 1]] = value;
+  const finalKey = segments[segments.length - 1];
+  if (typeof value === 'undefined') {
+    delete cursor[finalKey];
+    for (let index = parents.length - 1; index >= 0; index -= 1) {
+      const { node, key } = parents[index];
+      const cleaned = removeEmptyObjects(node[key]);
+      if (typeof cleaned === 'undefined') {
+        delete node[key];
+      } else {
+        node[key] = cleaned;
+      }
+    }
+    return draft;
+  }
+
+  cursor[finalKey] = value;
   return draft;
 }
 
-function normalizeToolIds(config: ApiConfigResponse): string[] {
+function defaultValueForField(fieldDefault: ApiToolFieldDefault | null | undefined): JsonValue | undefined {
+  if (!fieldDefault) {
+    return undefined;
+  }
+
+  return fieldDefault.value as JsonValue;
+}
+
+function formatFieldDefault(fieldDefault: ApiToolFieldDefault | null | undefined): string | null {
+  const value = defaultValueForField(fieldDefault);
+  if (typeof value === 'undefined') {
+    return null;
+  }
+  if (Array.isArray(value)) {
+    return value.join(', ');
+  }
+  if (typeof value === 'object' && value !== null) {
+    return JSON.stringify(value);
+  }
+  return String(value);
+}
+
+function normalizeToolIds(config: ApiConfigResponse, descriptors: ApiToolDescriptor[]): string[] {
   const ids = new Set<string>();
   for (const id of config.enabledTools) {
     ids.add(id);
@@ -182,6 +282,9 @@ function normalizeToolIds(config: ApiConfigResponse): string[] {
   for (const id of config.toolPriority) {
     ids.add(id);
   }
+  for (const descriptor of descriptors) {
+    ids.add(descriptor.id);
+  }
   return Array.from(ids).sort((a, b) => a.localeCompare(b));
 }
 
@@ -190,6 +293,7 @@ function buildToolViewModel(
   enabledSet: Set<string>,
   toolConfig: Record<string, JsonValue>,
   toolSettings: Record<string, JsonValue>,
+  descriptor: ApiToolDescriptor | null,
 ): ToolViewModel {
   const config = isJsonObject(toolConfig[toolId]) ? (toolConfig[toolId] as JsonObject) : {};
   const settings = isJsonObject(toolSettings[toolId]) ? (toolSettings[toolId] as JsonObject) : {};
@@ -243,7 +347,8 @@ function buildToolViewModel(
 
   return {
     id: toolId,
-    name: titleCaseToolId(toolId),
+    name: descriptor?.title ?? titleCaseToolId(toolId),
+    description: descriptor?.description ?? 'Tool adapter configuration.',
     version,
     category,
     capabilities,
@@ -252,6 +357,40 @@ function buildToolViewModel(
     health,
     activity,
   };
+}
+
+function buildFieldSections(toolId: string, descriptor: ApiToolDescriptor | null): ToolFieldSection[] {
+  if (!descriptor) {
+    return [];
+  }
+
+  const sectionMap = new Map<string, ToolFieldSection>();
+
+  for (const field of descriptor.fields) {
+    if (field.kind.type === 'action') {
+      const current = sectionMap.get('actions');
+      if (current) {
+        current.fields.push(field);
+      } else {
+        sectionMap.set('actions', { id: 'actions', title: 'Connected Catalogs', fields: [field] });
+      }
+      continue;
+    }
+
+    const relativePointer = relativeToolPointer(toolId, field.path);
+    const firstSegment = relativePointer ? splitJsonPointer(relativePointer)[0] ?? 'general' : 'general';
+    const sectionId = firstSegment || 'general';
+    const sectionTitle = sectionId === 'general' ? 'General' : titleCaseSection(sectionId);
+    const current = sectionMap.get(sectionId);
+
+    if (current) {
+      current.fields.push(field);
+    } else {
+      sectionMap.set(sectionId, { id: sectionId, title: sectionTitle, fields: [field] });
+    }
+  }
+
+  return Array.from(sectionMap.values());
 }
 
 function formatApiError(error: unknown): string {
@@ -264,31 +403,26 @@ function formatApiError(error: unknown): string {
   return 'Unexpected tools configuration error.';
 }
 
-function jsonEquals(left: JsonValue, right: JsonValue): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
-}
-
-function ensureJsonRecord(value: unknown): Record<string, JsonValue> {
-  return isJsonObject(value as JsonValue | undefined) ? (value as Record<string, JsonValue>) : {};
-}
-
-function ensureStringArray(value: unknown): string[] {
-  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string') : [];
-}
-
-function normalizeConfigResponse(config: ApiConfigResponse): ApiConfigResponse {
-  return {
-    ...config,
-    enabledTools: ensureStringArray(config.enabledTools),
-    toolConfig: ensureJsonRecord(config.toolConfig),
-    toolSettings: ensureJsonRecord(config.toolSettings),
-    toolPriority: ensureStringArray(config.toolPriority),
-  };
+function actionTarget(action: ApiToolActionKind): { to: string; label: string } | null {
+  switch (action.action) {
+    case 'openSkills':
+      return { to: '/config/skills', label: 'Open Skills Catalog' };
+    case 'openAgents':
+      return { to: '/config/skills', label: 'Open Agents Catalog' };
+    case 'openMcp':
+      return { to: '/config/skills', label: 'Open MCP Catalog' };
+    case 'custom':
+      return action.target.startsWith('/') ? { to: action.target, label: 'Open Linked Settings' } : null;
+    default:
+      return null;
+  }
 }
 
 const Tools: React.FC = () => {
+  const navigate = useNavigate();
   const [config, setConfig] = React.useState<ApiConfigResponse | null>(null);
-  const [draftToolSettings, setDraftToolSettings] = React.useState<Record<string, JsonValue>>({});
+  const [toolDescriptors, setToolDescriptors] = React.useState<ApiToolDescriptor[]>([]);
+  const [draftToolConfig, setDraftToolConfig] = React.useState<Record<string, JsonValue>>({});
   const [draftEnabledTools, setDraftEnabledTools] = React.useState<Set<string>>(new Set());
   const [isLoading, setIsLoading] = React.useState(true);
   const [isRefreshing, setIsRefreshing] = React.useState(false);
@@ -304,8 +438,6 @@ const Tools: React.FC = () => {
   const [rawEditorText, setRawEditorText] = React.useState('');
   const [rawEditorError, setRawEditorError] = React.useState<string | null>(null);
   const [copyState, setCopyState] = React.useState<'idle' | 'copied' | 'failed'>('idle');
-  const [jsonFieldErrors, setJsonFieldErrors] = React.useState<Record<string, string>>({});
-  const [jsonFieldDrafts, setJsonFieldDrafts] = React.useState<Record<string, string>>({});
 
   const loadConfig = React.useCallback(async (silent = false): Promise<void> => {
     if (silent) {
@@ -316,12 +448,17 @@ const Tools: React.FC = () => {
     }
 
     try {
-      const nextConfig = normalizeConfigResponse(await getConfig());
-      setConfig(nextConfig);
-      setDraftToolSettings(cloneJson(nextConfig.toolSettings));
-      setDraftEnabledTools(new Set(nextConfig.enabledTools));
-      setJsonFieldErrors({});
-      setJsonFieldDrafts({});
+      const [nextConfig, nextDescriptors] = await Promise.all([
+        getConfig(),
+        getToolDescriptors(),
+      ]);
+      const normalizedConfig = normalizeConfigResponse(nextConfig);
+      const normalizedDescriptors = normalizeToolDescriptors(nextDescriptors);
+
+      setConfig(normalizedConfig);
+      setToolDescriptors(normalizedDescriptors);
+      setDraftToolConfig(cloneJson(normalizedConfig.toolConfig));
+      setDraftEnabledTools(new Set(normalizedConfig.enabledTools));
       setRawEditorError(null);
       setError(null);
     } catch (loadError) {
@@ -336,19 +473,27 @@ const Tools: React.FC = () => {
     void loadConfig(false);
   }, [loadConfig]);
 
+  const descriptorById = React.useMemo(
+    () => Object.fromEntries(toolDescriptors.map((descriptor) => [descriptor.id, descriptor])),
+    [toolDescriptors],
+  );
+
   const toolIds = React.useMemo(() => {
     if (!config) {
       return [];
     }
-    return normalizeToolIds(config);
-  }, [config]);
+    return normalizeToolIds(config, toolDescriptors);
+  }, [config, toolDescriptors]);
 
   const tools = React.useMemo(() => {
     if (!config) {
       return [];
     }
-    return toolIds.map((id) => buildToolViewModel(id, draftEnabledTools, config.toolConfig, draftToolSettings));
-  }, [config, toolIds, draftEnabledTools, draftToolSettings]);
+
+    return toolIds.map((id) =>
+      buildToolViewModel(id, draftEnabledTools, draftToolConfig, config.toolSettings, descriptorById[id] ?? null),
+    );
+  }, [config, toolIds, draftEnabledTools, draftToolConfig, descriptorById]);
 
   const filteredTools = React.useMemo(() => {
     const loweredSearch = searchTerm.trim().toLowerCase();
@@ -364,13 +509,7 @@ const Tools: React.FC = () => {
         return true;
       }
 
-      const haystack = [
-        tool.id,
-        tool.name,
-        tool.version,
-        tool.category,
-        ...tool.capabilities,
-      ]
+      const haystack = [tool.id, tool.name, tool.description, tool.version, tool.category, ...tool.capabilities]
         .join(' ')
         .toLowerCase();
 
@@ -383,17 +522,27 @@ const Tools: React.FC = () => {
     [tools, selectedToolId],
   );
 
-  const selectedSettings = React.useMemo<JsonObject>(() => {
+  const selectedDescriptor = React.useMemo(
+    () => (selectedToolId ? descriptorById[selectedToolId] ?? null : null),
+    [descriptorById, selectedToolId],
+  );
+
+  const selectedConfig = React.useMemo<JsonObject>(() => {
     if (!selectedToolId) {
       return {};
     }
-    const raw = draftToolSettings[selectedToolId];
+    const raw = draftToolConfig[selectedToolId];
     return isJsonObject(raw) ? raw : {};
-  }, [selectedToolId, draftToolSettings]);
+  }, [selectedToolId, draftToolConfig]);
 
   const selectedSettingsRaw = React.useMemo(
-    () => JSON.stringify(selectedSettings, null, 2),
-    [selectedSettings],
+    () => JSON.stringify(selectedConfig, null, 2),
+    [selectedConfig],
+  );
+
+  const fieldSections = React.useMemo(
+    () => (selectedToolId ? buildFieldSections(selectedToolId, selectedDescriptor) : []),
+    [selectedDescriptor, selectedToolId],
   );
 
   const hasSelectedUnsavedChanges = React.useMemo(() => {
@@ -401,13 +550,13 @@ const Tools: React.FC = () => {
       return false;
     }
 
-    const savedSettings = config.toolSettings[selectedToolId] ?? {};
-    const currentSettings = draftToolSettings[selectedToolId] ?? {};
+    const savedConfig = config.toolConfig[selectedToolId] ?? {};
+    const currentConfig = draftToolConfig[selectedToolId] ?? {};
     const enabledChanged =
       config.enabledTools.includes(selectedToolId) !== draftEnabledTools.has(selectedToolId);
 
-    return !jsonEquals(savedSettings, currentSettings) || enabledChanged;
-  }, [config, selectedToolId, draftEnabledTools, draftToolSettings]);
+    return !jsonEquals(savedConfig, currentConfig) || enabledChanged;
+  }, [config, selectedToolId, draftEnabledTools, draftToolConfig]);
 
   const hasAnyUnsavedChanges = React.useMemo(() => {
     if (!config) {
@@ -425,33 +574,31 @@ const Tools: React.FC = () => {
     }
 
     const allToolIds = new Set<string>([
-      ...Object.keys(config.toolSettings),
-      ...Object.keys(draftToolSettings),
+      ...Object.keys(config.toolConfig),
+      ...Object.keys(draftToolConfig),
     ]);
 
     for (const toolId of allToolIds) {
-      const saved = config.toolSettings[toolId] ?? {};
-      const draft = draftToolSettings[toolId] ?? {};
+      const saved = config.toolConfig[toolId] ?? {};
+      const draft = draftToolConfig[toolId] ?? {};
       if (!jsonEquals(saved, draft)) {
         return true;
       }
     }
 
     return false;
-  }, [config, draftEnabledTools, draftToolSettings]);
+  }, [config, draftEnabledTools, draftToolConfig]);
 
   const handleOpenTool = React.useCallback(
     (toolId: string) => {
-      const initialSettings = isJsonObject(draftToolSettings[toolId]) ? (draftToolSettings[toolId] as JsonObject) : {};
+      const initialConfig = isJsonObject(draftToolConfig[toolId]) ? (draftToolConfig[toolId] as JsonObject) : {};
       setSelectedToolId(toolId);
       setRawView(false);
-      setRawEditorText(JSON.stringify(initialSettings, null, 2));
+      setRawEditorText(JSON.stringify(initialConfig, null, 2));
       setRawEditorError(null);
-      setJsonFieldErrors({});
-      setJsonFieldDrafts({});
       setDrawerOpen(true);
     },
-    [draftToolSettings],
+    [draftToolConfig],
   );
 
   const handleDrawerOpenChange = React.useCallback(
@@ -480,16 +627,21 @@ const Tools: React.FC = () => {
   }, []);
 
   const handleFieldChange = React.useCallback(
-    (path: string, value: JsonValue) => {
+    (field: ApiToolField, nextValue: JsonValue | undefined) => {
       if (!selectedToolId) {
         return;
       }
 
-      setDraftToolSettings((previous) => {
-        const toolSettings = isJsonObject(previous[selectedToolId]) ? (previous[selectedToolId] as JsonObject) : {};
+      const relativePointer = relativeToolPointer(selectedToolId, field.path);
+      if (!relativePointer) {
+        return;
+      }
+
+      setDraftToolConfig((previous) => {
+        const toolConfig = isJsonObject(previous[selectedToolId]) ? (previous[selectedToolId] as JsonObject) : {};
         return {
           ...previous,
-          [selectedToolId]: setNestedValue(toolSettings, path, value),
+          [selectedToolId]: setValueAtPointer(toolConfig, relativePointer, nextValue),
         };
       });
     },
@@ -501,9 +653,9 @@ const Tools: React.FC = () => {
       return;
     }
 
-    setDraftToolSettings((previous) => ({
+    setDraftToolConfig((previous) => ({
       ...previous,
-      [selectedToolId]: cloneJson(config.toolSettings[selectedToolId] ?? {}),
+      [selectedToolId]: cloneJson(config.toolConfig[selectedToolId] ?? {}),
     }));
 
     setDraftEnabledTools((previous) => {
@@ -516,9 +668,7 @@ const Tools: React.FC = () => {
       return next;
     });
 
-    setJsonFieldErrors({});
-    setJsonFieldDrafts({});
-    setRawEditorText(JSON.stringify(config.toolSettings[selectedToolId] ?? {}, null, 2));
+    setRawEditorText(JSON.stringify(config.toolConfig[selectedToolId] ?? {}, null, 2));
     setRawEditorError(null);
   }, [config, selectedToolId]);
 
@@ -531,23 +681,23 @@ const Tools: React.FC = () => {
     setError(null);
 
     try {
-      const updated = normalizeConfigResponse(await updateConfig({
-        enabledTools: Array.from(draftEnabledTools).sort((a, b) => a.localeCompare(b)),
-        toolSettings: cloneJson(draftToolSettings),
-      }));
+      const updated = normalizeConfigResponse(
+        await updateConfig({
+          enabledTools: Array.from(draftEnabledTools).sort((a, b) => a.localeCompare(b)),
+          toolConfig: cloneJson(draftToolConfig),
+        }),
+      );
 
       setConfig(updated);
-      setDraftToolSettings(cloneJson(updated.toolSettings));
+      setDraftToolConfig(cloneJson(updated.toolConfig));
       setDraftEnabledTools(new Set(updated.enabledTools));
-      setJsonFieldErrors({});
-      setJsonFieldDrafts({});
       setRawEditorError(null);
     } catch (saveError) {
       setError(formatApiError(saveError));
     } finally {
       setIsSaving(false);
     }
-  }, [config, selectedToolId, draftEnabledTools, draftToolSettings]);
+  }, [config, selectedToolId, draftEnabledTools, draftToolConfig]);
 
   const handleRawCopy = React.useCallback(async (): Promise<void> => {
     try {
@@ -561,137 +711,202 @@ const Tools: React.FC = () => {
   }, [selectedSettingsRaw]);
 
   const renderField = React.useCallback(
-    (field: SchemaField) => {
+    (field: ApiToolField) => {
       if (!selectedToolId) {
         return null;
       }
 
-      const fieldKey = `${selectedToolId}:${field.path}`;
-      const value = getNestedValue(selectedSettings, field.path);
-      const jsonError = jsonFieldErrors[fieldKey];
+      if (field.kind.type === 'action') {
+        const target = actionTarget(field.kind.action);
+        const helperText = field.help.trim();
 
-      if (field.kind === 'boolean') {
-        const selectedValue = typeof value === 'boolean' ? String(value) : 'unset';
         return (
-          <div key={field.path} className="space-y-1.5">
-            <label className="text-xs font-semibold text-[var(--text-secondary)]">{field.label}</label>
-            <select
-              className="h-10 w-full rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)] px-3 text-sm text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/40"
-              value={selectedValue}
-              onChange={(event) => {
-                const raw = event.target.value;
-                if (raw === 'true') {
-                  handleFieldChange(field.path, true);
-                } else if (raw === 'false') {
-                  handleFieldChange(field.path, false);
-                } else {
-                  handleFieldChange(field.path, null);
-                }
-              }}
-            >
-              <option value="unset">Unset</option>
-              <option value="true">True</option>
-              <option value="false">False</option>
-            </select>
+          <div
+            key={field.id}
+            className="rounded-xl border border-[var(--border)] bg-[var(--bg-secondary)]/60 p-3"
+          >
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="space-y-1">
+                <p className="text-sm font-semibold text-[var(--text-primary)]">{field.label}</p>
+                {helperText && <p className="text-xs text-[var(--text-secondary)]">{helperText}</p>}
+              </div>
+              {target ? (
+                <Button
+                  className="border-[var(--border)] bg-[var(--bg-card)] text-xs"
+                  onClick={() => navigate(target.to)}
+                  type="button"
+                >
+                  {target.label}
+                </Button>
+              ) : (
+                <span className="text-xs text-[var(--text-muted)]">No linked destination yet.</span>
+              )}
+            </div>
           </div>
         );
       }
 
-      if (field.kind === 'number') {
-        const numberValue = typeof value === 'number' ? String(value) : '';
+      const relativePointer = relativeToolPointer(selectedToolId, field.path);
+      const currentValue = relativePointer ? getValueAtPointer(selectedConfig, relativePointer) : undefined;
+      const defaultValue = defaultValueForField(field.default);
+      const helperLines = [field.help.trim(), relativePointer ? `Config path: ${relativePointer}` : null]
+        .filter(Boolean)
+        .join(' ');
+      const defaultLabel = formatFieldDefault(field.default);
+
+      if (field.kind.type === 'bool') {
+        const selectValue =
+          typeof currentValue === 'boolean'
+            ? String(currentValue)
+            : typeof defaultValue === 'boolean'
+              ? '__default__'
+              : '__unset__';
+
         return (
-          <div key={field.path} className="space-y-1.5">
+          <div key={field.id} className="space-y-1.5">
+            <label className="text-xs font-semibold text-[var(--text-secondary)]">{field.label}</label>
+            <select
+              aria-label={field.label}
+              className="h-10 w-full rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)] px-3 text-sm text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/40"
+              value={selectValue}
+              onChange={(event) => {
+                const raw = event.target.value;
+                if (raw === 'true') {
+                  handleFieldChange(field, true);
+                } else if (raw === 'false') {
+                  handleFieldChange(field, false);
+                } else {
+                  handleFieldChange(field, undefined);
+                }
+              }}
+            >
+              {typeof defaultValue === 'boolean' ? (
+                <option value="__default__">Default ({defaultValue ? 'true' : 'false'})</option>
+              ) : (
+                <option value="__unset__">Unset</option>
+              )}
+              <option value="true">True</option>
+              <option value="false">False</option>
+            </select>
+            {helperLines && <p className="text-xs text-[var(--text-muted)]">{helperLines}</p>}
+          </div>
+        );
+      }
+
+      if (field.kind.type === 'enum') {
+        const options = field.kind.options;
+        const selectValue =
+          typeof currentValue === 'string'
+            ? currentValue
+            : typeof defaultValue === 'string'
+              ? '__default__'
+              : options[0] ?? '__unset__';
+
+        return (
+          <div key={field.id} className="space-y-1.5">
+            <label className="text-xs font-semibold text-[var(--text-secondary)]">{field.label}</label>
+            <select
+              aria-label={field.label}
+              className="h-10 w-full rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)] px-3 text-sm text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/40"
+              value={selectValue}
+              onChange={(event) => {
+                const raw = event.target.value;
+                if (raw === '__default__') {
+                  handleFieldChange(field, undefined);
+                  return;
+                }
+                handleFieldChange(field, raw);
+              }}
+            >
+              {typeof defaultValue === 'string' && (
+                <option value="__default__">Default ({defaultValue})</option>
+              )}
+              {options.map((option) => (
+                <option key={option} value={option}>
+                  {option}
+                </option>
+              ))}
+            </select>
+            {helperLines && <p className="text-xs text-[var(--text-muted)]">{helperLines}</p>}
+          </div>
+        );
+      }
+
+      if (field.kind.type === 'number') {
+        const displayValue = typeof currentValue === 'number' ? String(currentValue) : '';
+        return (
+          <div key={field.id} className="space-y-1.5">
             <label className="text-xs font-semibold text-[var(--text-secondary)]">{field.label}</label>
             <input
+              aria-label={field.label}
               className="h-10 w-full rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)] px-3 text-sm text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/40"
-              placeholder={field.placeholder}
+              placeholder={defaultLabel ?? 'Enter a number'}
               type="number"
-              value={numberValue}
+              value={displayValue}
               onChange={(event) => {
-                const next = event.target.value;
-                if (next.trim() === '') {
-                  handleFieldChange(field.path, null);
+                const next = event.target.value.trim();
+                if (next.length === 0) {
+                  handleFieldChange(field, undefined);
                   return;
                 }
                 const parsed = Number(next);
                 if (!Number.isNaN(parsed)) {
-                  handleFieldChange(field.path, parsed);
+                  handleFieldChange(field, parsed);
                 }
               }}
             />
+            {helperLines && <p className="text-xs text-[var(--text-muted)]">{helperLines}</p>}
           </div>
         );
       }
 
-      if (field.kind === 'json') {
-        const draftValue = jsonFieldDrafts[fieldKey] ?? JSON.stringify(value ?? null, null, 2);
+      if (field.kind.type === 'array') {
+        const displayValue = Array.isArray(currentValue)
+          ? currentValue.filter((entry): entry is string => typeof entry === 'string').join(', ')
+          : '';
         return (
-          <div key={field.path} className="space-y-1.5">
+          <div key={field.id} className="space-y-1.5">
             <label className="text-xs font-semibold text-[var(--text-secondary)]">{field.label}</label>
-            <textarea
-              className={cn(
-                'min-h-[92px] w-full rounded-lg border bg-[var(--bg-secondary)] px-3 py-2 font-mono text-xs text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/40',
-                jsonError ? 'border-[var(--error)]' : 'border-[var(--border)]',
-              )}
-              placeholder={field.placeholder}
-              value={draftValue}
+            <input
+              aria-label={field.label}
+              className="h-10 w-full rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)] px-3 text-sm text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/40"
+              placeholder={defaultLabel ?? 'item-a, item-b'}
+              value={displayValue}
               onChange={(event) => {
-                const nextText = event.target.value;
-                setJsonFieldDrafts((previous) => ({
-                  ...previous,
-                  [fieldKey]: nextText,
-                }));
-              }}
-              onBlur={(event) => {
-                const nextText = event.target.value.trim();
-                if (nextText.length === 0) {
-                  handleFieldChange(field.path, null);
-                  setJsonFieldErrors((previous) => {
-                    const next = { ...previous };
-                    delete next[fieldKey];
-                    return next;
-                  });
-                  return;
-                }
-
-                try {
-                  const parsed = JSON.parse(nextText) as JsonValue;
-                  handleFieldChange(field.path, parsed);
-                  setJsonFieldErrors((previous) => {
-                    const next = { ...previous };
-                    delete next[fieldKey];
-                    return next;
-                  });
-                } catch {
-                  setJsonFieldErrors((previous) => ({
-                    ...previous,
-                    [fieldKey]: 'Invalid JSON. Fix before applying.',
-                  }));
-                }
+                const next = event.target.value
+                  .split(',')
+                  .map((entry) => entry.trim())
+                  .filter(Boolean);
+                handleFieldChange(field, next.length > 0 ? next : undefined);
               }}
             />
-            {jsonError && <p className="text-xs text-[var(--error)]">{jsonError}</p>}
+            {helperLines && <p className="text-xs text-[var(--text-muted)]">{helperLines}</p>}
           </div>
         );
       }
 
-      const stringValue = typeof value === 'string' ? value : '';
+      const stringValue = typeof currentValue === 'string' ? currentValue : '';
       return (
-        <div key={field.path} className="space-y-1.5">
+        <div key={field.id} className="space-y-1.5">
           <label className="text-xs font-semibold text-[var(--text-secondary)]">{field.label}</label>
           <input
+            aria-label={field.label}
             className="h-10 w-full rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)] px-3 text-sm text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/40"
-            placeholder={field.placeholder}
+            placeholder={defaultLabel ?? 'Enter a value'}
             value={stringValue}
-            onChange={(event) => handleFieldChange(field.path, event.target.value)}
+            onChange={(event) => {
+              const next = event.target.value;
+              handleFieldChange(field, next.trim().length > 0 ? next : undefined);
+            }}
           />
+          {helperLines && <p className="text-xs text-[var(--text-muted)]">{helperLines}</p>}
         </div>
       );
     },
-    [selectedToolId, selectedSettings, jsonFieldErrors, jsonFieldDrafts, handleFieldChange],
+    [navigate, selectedToolId, selectedConfig, handleFieldChange],
   );
 
-  const hasBlockingEditorErrors = Object.keys(jsonFieldErrors).length > 0 || (rawView && rawEditorError !== null);
+  const hasBlockingEditorErrors = rawView && rawEditorError !== null;
 
   if (isLoading) {
     return (
@@ -708,7 +923,8 @@ const Tools: React.FC = () => {
           <div className="space-y-2">
             <h1 className="text-3xl font-semibold tracking-tight text-[var(--text-primary)]">Tools & Adapters</h1>
             <p className="max-w-3xl text-sm text-[var(--text-secondary)]">
-              Configure adapter settings, runtime state, capabilities, and health from one place.
+              Configure every descriptor-backed tool setting from the same schema the TUI uses, including model choices,
+              runtime toggles, catalog links, and raw JSON overrides.
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -729,7 +945,7 @@ const Tools: React.FC = () => {
               type="button"
             >
               <RefreshIcon className={cn('mr-2 h-4 w-4', isRefreshing && 'animate-spin')} />
-              Check Updates
+              Refresh Schema
             </Button>
           </div>
         </div>
@@ -739,7 +955,7 @@ const Tools: React.FC = () => {
             <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--text-muted)]" />
             <input
               className="h-10 w-full rounded-lg border border-[var(--border)] bg-[var(--bg-card)] pl-10 pr-3 text-sm text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/40"
-              placeholder="Search adapters, capabilities, category"
+              placeholder="Search tools, fields, capabilities, category"
               value={searchTerm}
               onChange={(event) => setSearchTerm(event.target.value)}
             />
@@ -790,11 +1006,12 @@ const Tools: React.FC = () => {
               onClick={() => handleOpenTool(tool.id)}
             >
               <div className="flex items-start justify-between gap-3">
-                <div>
+                <div className="space-y-1">
                   <h2 className="text-lg font-semibold text-[var(--text-primary)]">{tool.name}</h2>
                   <p className="text-xs uppercase tracking-wide text-[var(--text-muted)]">
                     {tool.id} · v{tool.version}
                   </p>
+                  <p className="line-clamp-2 text-sm text-[var(--text-secondary)]">{tool.description}</p>
                 </div>
                 <label
                   className="inline-flex items-center gap-2 rounded-full border border-[var(--border)] bg-[var(--bg-secondary)] px-2.5 py-1 text-xs"
@@ -888,17 +1105,19 @@ const Tools: React.FC = () => {
         onOpenChange={handleDrawerOpenChange}
         open={drawerOpen}
         title={selectedTool ? `${selectedTool.name} Settings` : 'Tool Settings'}
-        widthClassName="w-full max-w-2xl"
+        widthClassName="w-full max-w-3xl"
       >
         {!selectedTool ? (
           <p className="text-sm text-[var(--text-secondary)]">Select a tool card to inspect and edit settings.</p>
         ) : (
           <div className="space-y-5">
             <div className="rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-card)] p-4">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <p className="text-sm font-semibold text-[var(--text-primary)]">Adapter Runtime</p>
-                  <p className="text-xs text-[var(--text-secondary)]">Toggle runtime availability and inspect raw schema values.</p>
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="space-y-1">
+                  <p className="text-sm font-semibold text-[var(--text-primary)]">Schema-Driven Settings</p>
+                  <p className="text-xs text-[var(--text-secondary)]">
+                    {selectedDescriptor?.description ?? 'Edit descriptor-backed configuration fields for this adapter.'}
+                  </p>
                 </div>
                 <label className="inline-flex items-center gap-2 rounded-full border border-[var(--border)] bg-[var(--bg-secondary)] px-3 py-1.5 text-xs">
                   <input
@@ -909,6 +1128,25 @@ const Tools: React.FC = () => {
                   />
                   <span className="text-[var(--text-primary)]">Enabled</span>
                 </label>
+              </div>
+
+              <div className="mt-4 grid gap-3 rounded-xl border border-[var(--border)] bg-[var(--bg-secondary)]/60 p-3 sm:grid-cols-3">
+                <div>
+                  <p className="text-[11px] uppercase tracking-[0.2em] text-[var(--text-muted)]">Fields</p>
+                  <p className="mt-1 text-lg font-semibold text-[var(--text-primary)]">
+                    {selectedDescriptor?.fields.length ?? 0}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-[11px] uppercase tracking-[0.2em] text-[var(--text-muted)]">Sections</p>
+                  <p className="mt-1 text-lg font-semibold text-[var(--text-primary)]">{fieldSections.length}</p>
+                </div>
+                <div>
+                  <p className="text-[11px] uppercase tracking-[0.2em] text-[var(--text-muted)]">Unsaved</p>
+                  <p className="mt-1 text-lg font-semibold text-[var(--text-primary)]">
+                    {hasSelectedUnsavedChanges ? 'Yes' : 'No'}
+                  </p>
+                </div>
               </div>
 
               <div className="mt-4 flex flex-wrap items-center gap-2">
@@ -979,7 +1217,7 @@ const Tools: React.FC = () => {
                         return;
                       }
 
-                      setDraftToolSettings((previous) => ({
+                      setDraftToolConfig((previous) => ({
                         ...previous,
                         [selectedTool.id]: parsed,
                       }));
@@ -991,15 +1229,26 @@ const Tools: React.FC = () => {
                 />
                 {rawEditorError && <p className="mt-2 text-xs text-[var(--error)]">{rawEditorError}</p>}
               </>
+            ) : fieldSections.length === 0 ? (
+              <section className="rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-card)] p-5 text-sm text-[var(--text-secondary)]">
+                No schema-backed fields are defined for this tool yet. You can still edit the raw JSON config above.
+              </section>
             ) : (
               <div className="space-y-4">
-                {SCHEMA_SECTIONS.map((section) => (
+                {fieldSections.map((section) => (
                   <section
                     key={section.id}
                     className="rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-card)] p-4"
                   >
-                    <h3 className="mb-3 text-sm font-semibold text-[var(--text-primary)]">{section.title}</h3>
-                    <div className="grid gap-3 sm:grid-cols-2">{section.fields.map((field) => renderField(field))}</div>
+                    <div className="mb-3 flex items-center justify-between gap-3">
+                      <h3 className="text-sm font-semibold text-[var(--text-primary)]">{section.title}</h3>
+                      <span className="text-[11px] uppercase tracking-[0.18em] text-[var(--text-muted)]">
+                        {section.fields.length} field{section.fields.length === 1 ? '' : 's'}
+                      </span>
+                    </div>
+                    <div className={cn('grid gap-3', section.id === 'actions' ? 'grid-cols-1' : 'sm:grid-cols-2')}>
+                      {section.fields.map((field) => renderField(field))}
+                    </div>
                   </section>
                 ))}
               </div>

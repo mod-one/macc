@@ -1,6 +1,9 @@
 use macc_core::config::WebAssetsMode;
 use macc_core::plan::{PlannedOpKind, Scope};
 use macc_core::tool::spec::CheckSeverity;
+use macc_core::tool::{
+    ActionKind, FieldDefault, FieldKind, ToolDescriptor, ToolField, ToolInstallDescriptor,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -248,6 +251,136 @@ pub(crate) struct ApiConfigUpdateRequest {
     pub rate_limit_throttle_parallel: Option<bool>,
     /// Updated force-kill grace period.
     pub force_kill_grace_seconds: Option<u64>,
+}
+
+/// Tool descriptor payload used by the web tools configuration screen.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ApiToolDescriptor {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<ApiToolField>,
+    pub install: Option<ApiToolInstallDescriptor>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ApiToolInstallDescriptor {
+    pub confirm_message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ApiToolField {
+    pub id: String,
+    pub label: String,
+    pub help: String,
+    pub path: String,
+    pub kind: ApiToolFieldKind,
+    pub default: Option<ApiToolFieldDefault>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub(crate) enum ApiToolFieldKind {
+    Bool,
+    Enum { options: Vec<String> },
+    Text,
+    Number,
+    Array,
+    Action { action: ApiToolActionKind },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "action", rename_all = "camelCase")]
+pub(crate) enum ApiToolActionKind {
+    OpenMcp { target_pointer: String },
+    OpenSkills { target_pointer: String },
+    OpenAgents { target_pointer: String },
+    Custom { target: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", content = "value", rename_all = "camelCase")]
+pub(crate) enum ApiToolFieldDefault {
+    Bool(bool),
+    Text(String),
+    Enum(String),
+    Number(f64),
+    Array(Vec<String>),
+}
+
+impl From<ToolDescriptor> for ApiToolDescriptor {
+    fn from(value: ToolDescriptor) -> Self {
+        Self {
+            id: value.id,
+            title: value.title,
+            description: value.description,
+            fields: value.fields.into_iter().map(ApiToolField::from).collect(),
+            install: value.install.map(ApiToolInstallDescriptor::from),
+        }
+    }
+}
+
+impl From<ToolInstallDescriptor> for ApiToolInstallDescriptor {
+    fn from(value: ToolInstallDescriptor) -> Self {
+        Self {
+            confirm_message: value.confirm_message,
+        }
+    }
+}
+
+impl From<ToolField> for ApiToolField {
+    fn from(value: ToolField) -> Self {
+        Self {
+            id: value.id,
+            label: value.label,
+            help: value.help,
+            path: value.path,
+            kind: ApiToolFieldKind::from(value.kind),
+            default: value.default.map(ApiToolFieldDefault::from),
+        }
+    }
+}
+
+impl From<FieldKind> for ApiToolFieldKind {
+    fn from(value: FieldKind) -> Self {
+        match value {
+            FieldKind::Bool => Self::Bool,
+            FieldKind::Enum(options) => Self::Enum { options },
+            FieldKind::Text => Self::Text,
+            FieldKind::Number => Self::Number,
+            FieldKind::Array => Self::Array,
+            FieldKind::Action(action) => Self::Action {
+                action: ApiToolActionKind::from(action),
+            },
+        }
+    }
+}
+
+impl From<ActionKind> for ApiToolActionKind {
+    fn from(value: ActionKind) -> Self {
+        match value {
+            ActionKind::OpenMcp { target_pointer } => Self::OpenMcp { target_pointer },
+            ActionKind::OpenSkills { target_pointer } => Self::OpenSkills { target_pointer },
+            ActionKind::OpenAgents { target_pointer } => Self::OpenAgents { target_pointer },
+            ActionKind::Custom { target } => Self::Custom { target },
+        }
+    }
+}
+
+impl From<FieldDefault> for ApiToolFieldDefault {
+    fn from(value: FieldDefault) -> Self {
+        match value {
+            FieldDefault::Bool(value) => Self::Bool(value),
+            FieldDefault::Text(value) => Self::Text(value),
+            FieldDefault::Enum(value) => Self::Enum(value),
+            FieldDefault::Number(value) => Self::Number(value),
+            FieldDefault::Array(value) => Self::Array(value),
+        }
+    }
 }
 
 /// Standards preview request used by the standards configuration page.
