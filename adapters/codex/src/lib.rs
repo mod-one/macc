@@ -11,3 +11,10 @@ inventory::submit! {
         factory: || std::sync::Arc::new(CodexAdapter)
     }
 }
+
+inventory::submit! {
+    macc_core::coordinator::error_normalizer::NormalizerRegistration {
+        tool_id: "codex",
+        factory: || Box::new(crate::error_normalizer::CodexErrorNormalizer),
+    }
+}

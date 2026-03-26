@@ -12,3 +12,10 @@ inventory::submit! {
         factory: || std::sync::Arc::new(GeminiAdapter)
     }
 }
+
+inventory::submit! {
+    macc_core::coordinator::error_normalizer::NormalizerRegistration {
+        tool_id: "gemini",
+        factory: || Box::new(crate::error_normalizer::GeminiErrorNormalizer),
+    }
+}

@@ -93,6 +93,8 @@ pub struct CoordinatorRunState {
     pub performer_ipc_listener_alive: std::sync::Arc<std::sync::atomic::AtomicBool>,
     // RL-ROUTE-005: per-tool throttle state
     pub throttle_registry: ToolThrottleRegistry,
+    /// Per-adapter error normalizers, built from inventory at startup.
+    pub normalizer_registry: crate::coordinator::error_normalizer::NormalizerRegistry,
     // RL-THROTTLE-006: dynamic concurrency control
     pub effective_max_parallel: usize,
     pub original_max_parallel: usize,
@@ -136,6 +138,7 @@ impl CoordinatorRunState {
                 false,
             )),
             throttle_registry: ToolThrottleRegistry::default(),
+            normalizer_registry: crate::coordinator::error_normalizer::NormalizerRegistry::from_inventory(),
             effective_max_parallel: 0,
             original_max_parallel: 0,
         }

@@ -129,8 +129,12 @@ fn is_quota_exhaustion_in_reason(reason: &str) -> bool {
 
 /// Try to classify a phase failure reason via the per-adapter error normalizers.
 /// Returns the parsed `retry_after_seconds` if the error is E602.
-fn extract_quota_cooldown_from_reason(reason: &str, tool_id: &str) -> Option<u64> {
-    let normalizer = coordinator_engine::get_normalizer_for_tool(tool_id)?;
+fn extract_quota_cooldown_from_reason(
+    reason: &str,
+    tool_id: &str,
+    normalizer_registry: &crate::coordinator::error_normalizer::NormalizerRegistry,
+) -> Option<u64> {
+    let normalizer = normalizer_registry.get(tool_id)?;
     let te = normalizer.normalize(1, reason, reason)?;
     if te.error_code == E602_QUOTA_EXHAUSTED {
         // Return the provider's reset time, or a default of 1 hour.
@@ -203,7 +207,7 @@ fn handle_phase_quota_exhaustion(
     };
 
     // ── Step 2: compute cooldown and register tool throttle ────────────
-    let cooldown = extract_quota_cooldown_from_reason(reason, tool_id).unwrap_or(3600);
+    let cooldown = extract_quota_cooldown_from_reason(reason, tool_id, &state.normalizer_registry).unwrap_or(3600);
     let now_epoch = chrono::DateTime::parse_from_rfc3339(now)
         .map(|dt| dt.timestamp() as u64)
         .unwrap_or(0);
@@ -1189,6 +1193,7 @@ pub async fn monitor_active_jobs_native(
                         ),
                         normalizer_input: None,
                     },
+                    &state.normalizer_registry,
                     &now_iso_coordinator(),
                 )?;
                 if let Some(log) = logger {

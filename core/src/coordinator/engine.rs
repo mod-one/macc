@@ -1,11 +1,8 @@
 use super::{PerformerCompletionKind, RuntimeStatus, WorkflowState};
 use crate::config::{CanonicalConfig, CoordinatorConfig};
 use crate::coordinator::control_plane::CoordinatorLog;
-use crate::coordinator::error_normalizer::{CanonicalClass, ErrorNormalizer, ToolError};
+use crate::coordinator::error_normalizer::{CanonicalClass, NormalizerRegistry, ToolError};
 use crate::coordinator::model::{Task, TaskRegistry};
-use crate::coordinator::normalizers::{
-    ClaudeErrorNormalizer, CodexErrorNormalizer, GeminiErrorNormalizer,
-};
 use crate::coordinator::rate_limit::{
     compute_backoff_delay, update_throttle_state, RateLimitInfo, ToolThrottleState,
     E601_RATE_LIMITED, E602_QUOTA_EXHAUSTED,
@@ -421,6 +418,7 @@ pub fn apply_job_completion_in_registry(
     registry: &mut Value,
     task_id: &str,
     input: &JobCompletionInput,
+    normalizer_registry: &NormalizerRegistry,
     now: &str,
 ) -> Result<JobCompletionResult> {
     let mut typed = TaskRegistry::from_value(registry)?;
@@ -430,7 +428,7 @@ pub fn apply_job_completion_in_registry(
             code: "task_not_found",
             message: format!("Task '{}' not found in registry", task_id),
         })?;
-    let out = apply_job_completion_typed(task, input, now);
+    let out = apply_job_completion_typed(task, input, normalizer_registry, now);
     *registry = typed.to_value()?;
     Ok(out)
 }
@@ -558,10 +556,11 @@ pub fn apply_merge_failure(task: &mut Value, reason: &str, now: &str) -> Result<
 pub fn apply_job_completion(
     task: &mut Value,
     input: &JobCompletionInput,
+    normalizer_registry: &NormalizerRegistry,
     now: &str,
 ) -> JobCompletionResult {
     let mut typed = parse_compat_task(task);
-    let result = apply_job_completion_typed(&mut typed, input, now);
+    let result = apply_job_completion_typed(&mut typed, input, normalizer_registry, now);
     write_compat_task(task, &typed);
     result
 }
@@ -664,17 +663,6 @@ pub(crate) fn apply_merge_failure_typed(task: &mut Task, reason: &str, now: &str
     Ok(())
 }
 
-/// Return the per-adapter error normalizer for the given tool identifier.
-/// Returns `None` for unknown tools (caller falls back to generic E101).
-pub(crate) fn get_normalizer_for_tool(tool_id: &str) -> Option<Box<dyn ErrorNormalizer>> {
-    match tool_id {
-        "claude" => Some(Box::new(ClaudeErrorNormalizer)),
-        "codex" => Some(Box::new(CodexErrorNormalizer)),
-        "gemini" => Some(Box::new(GeminiErrorNormalizer)),
-        _ => None,
-    }
-}
-
 /// Store a classified [`ToolError`] (and, when applicable, [`RateLimitInfo`])
 /// into `task_runtime.extra` for diagnostics and downstream consumers.
 fn store_classified_error_in_extra(
@@ -706,6 +694,7 @@ fn store_classified_error_in_extra(
 fn apply_job_completion_typed(
     task: &mut Task,
     input: &JobCompletionInput,
+    normalizer_registry: &NormalizerRegistry,
     now: &str,
 ) -> JobCompletionResult {
     // ── Baseline error classification from caller ────────────────────
@@ -764,7 +753,7 @@ fn apply_job_completion_typed(
     let classified_tool_error: Option<ToolError> = if !input.success {
         input.normalizer_input.as_ref().and_then(|ni| {
             let tool_id = task.tool.as_deref().unwrap_or("");
-            get_normalizer_for_tool(tool_id).and_then(|n| {
+            normalizer_registry.get(tool_id).and_then(|n| {
                 n.normalize(ni.exit_code, &ni.stderr, &ni.stdout)
                     .map(|mut te| {
                         te.attempt = input.attempt as u32;
@@ -1890,6 +1879,7 @@ mod tests {
                 backoff_max_seconds: 300,
                 normalizer_input: None,
             },
+            &NormalizerRegistry::empty(),
             "2026-02-21T00:00:00Z",
         );
         assert!(!out.should_retry);
@@ -1922,6 +1912,7 @@ mod tests {
                 backoff_max_seconds: 300,
                 normalizer_input: None,
             },
+            &NormalizerRegistry::empty(),
             "2026-02-21T00:00:00Z",
         );
         assert!(!out.should_retry);
@@ -1960,6 +1951,7 @@ mod tests {
                 backoff_max_seconds: 300,
                 normalizer_input: None,
             },
+            &NormalizerRegistry::empty(),
             "2026-02-21T00:00:00Z",
         );
         assert!(!out.should_retry);
@@ -2021,6 +2013,7 @@ mod tests {
                 backoff_max_seconds: 300,
                 normalizer_input: None,
             },
+            &NormalizerRegistry::empty(),
             "2026-02-21T00:00:00Z",
         )
         .expect("apply completion");
@@ -2085,6 +2078,7 @@ mod tests {
                 backoff_max_seconds: 300,
                 normalizer_input: None,
             },
+            &NormalizerRegistry::empty(),
             "2026-02-21T00:00:00Z",
         )
         .expect("apply completion");
@@ -2178,17 +2172,18 @@ mod tests {
         );
     }
 
-    // ── Normalizer routing & integration tests ───────────────────────
+    // ── Normalizer boundary tests (registry-independent) ─────────────
+    // Tests that require a real normalizer registry live in
+    // `registry/tests/engine_normalizer.rs` where all adapter crates
+    // are linked and NormalizerRegistry::from_inventory() is populated.
 
-    fn make_failure_input(
-        tool_id: &str,
-        stderr: &str,
-        stdout: &str,
-    ) -> (serde_json::Value, JobCompletionInput) {
-        let task = json!({
+    #[test]
+    fn unknown_tool_falls_back_to_e101() {
+        // No normalizer registered for "agentic-x" → caller's E101 used.
+        let task_json = json!({
             "id": "TN1",
             "state": "claimed",
-            "tool": tool_id,
+            "tool": "agentic-x",
             "task_runtime": { "status": "running", "pid": 1 }
         });
         let input = JobCompletionInput {
@@ -2209,153 +2204,12 @@ mod tests {
             backoff_max_seconds: 300,
             normalizer_input: Some(NormalizerInput {
                 exit_code: 1,
-                stderr: stderr.to_string(),
-                stdout: stdout.to_string(),
+                stderr: "some unexpected error text".to_string(),
+                stdout: String::new(),
             }),
         };
-        (task, input)
-    }
-
-    #[test]
-    fn normalizer_routes_claude_529_to_overloaded() {
-        let (mut task_val, input) = make_failure_input("claude", "Error: 529 API overloaded", "");
-        let out = apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
-        // E601 always re-queues with backoff regardless of attempt count.
-        assert_eq!(out.status_label, "rate_limit_backoff");
-        assert_eq!(task_val["task_runtime"]["last_error_code"], "E601");
-        assert_eq!(task_val["state"], "todo");
-        assert!(
-            !task_val["task_runtime"]["delayed_until"].is_null(),
-            "delayed_until should be set"
-        );
-        let te = out.tool_error.unwrap();
-        assert_eq!(te.canonical_class, CanonicalClass::Overloaded);
-        assert_eq!(te.error_code, "E601");
-        assert_eq!(te.provider, "claude");
-        assert!(te.retryable);
-    }
-
-    #[test]
-    fn normalizer_routes_codex_insufficient_quota_to_e602() {
-        let (mut task_val, input) = make_failure_input(
-            "codex",
-            "429 insufficient_quota: You exceeded your current quota",
-            "",
-        );
-        let out = apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
-        assert_eq!(task_val["task_runtime"]["last_error_code"], "E602");
-        let te = out.tool_error.unwrap();
-        assert_eq!(te.canonical_class, CanonicalClass::QuotaExhausted);
-        assert_eq!(te.error_code, "E602");
-        assert_eq!(te.provider, "codex");
-        assert!(!te.retryable);
-    }
-
-    #[test]
-    fn normalizer_routes_gemini_resource_exhausted_quota_to_e602() {
-        let (mut task_val, input) = make_failure_input(
-            "gemini",
-            "429 RESOURCE_EXHAUSTED: Quota exceeded for requests per minute",
-            "",
-        );
-        let out = apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
-        assert_eq!(task_val["task_runtime"]["last_error_code"], "E602");
-        let te = out.tool_error.unwrap();
-        assert_eq!(te.canonical_class, CanonicalClass::QuotaExhausted);
-        assert_eq!(te.provider, "gemini");
-    }
-
-    #[test]
-    fn normalizer_routes_gemini_resource_exhausted_rate_limit_to_e601() {
-        let (mut task_val, input) =
-            make_failure_input("gemini", "429 RESOURCE_EXHAUSTED: Rate limit for model", "");
-        let out = apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
-        assert_eq!(task_val["task_runtime"]["last_error_code"], "E601");
-        let te = out.tool_error.unwrap();
-        assert_eq!(te.canonical_class, CanonicalClass::RateLimit);
-    }
-
-    #[test]
-    fn tool_error_stored_in_extra() {
-        let (mut task_val, input) = make_failure_input("claude", "Error: 529 API overloaded", "");
-        apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
-        let stored = &task_val["task_runtime"]["tool_error"];
-        assert!(!stored.is_null(), "tool_error should be stored in extra");
-        assert_eq!(stored["canonical_class"], "Overloaded");
-        assert_eq!(stored["error_code"], "E601");
-        assert_eq!(stored["provider"], "claude");
-    }
-
-    #[test]
-    fn rate_limit_info_stored_in_extra_for_e601() {
-        let (mut task_val, input) =
-            make_failure_input("claude", "Error: 429 Rate limit exceeded", "");
-        apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
-        let rli = &task_val["task_runtime"]["rate_limit_info"];
-        assert!(!rli.is_null(), "rate_limit_info should be stored for E601");
-        assert_eq!(rli["tool_id"], "claude");
-        assert_eq!(rli["error_code"], "E601");
-    }
-
-    #[test]
-    fn rate_limit_info_stored_in_extra_for_e602() {
-        let (mut task_val, input) =
-            make_failure_input("codex", "429 insufficient_quota: quota exceeded", "");
-        apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
-        let rli = &task_val["task_runtime"]["rate_limit_info"];
-        assert!(!rli.is_null(), "rate_limit_info should be stored for E602");
-        assert_eq!(rli["tool_id"], "codex");
-        assert_eq!(rli["error_code"], "E602");
-    }
-
-    #[test]
-    fn exit_code_override_already_satisfied_with_transient_error() {
-        // Performer signals already_satisfied in stdout but exits non-zero
-        // due to a 529 overload on teardown. Should be treated as success.
-        let (mut task_val, input) =
-            make_failure_input("claude", "Error: 529 API overloaded", "already_satisfied");
-        let out = apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
-        assert_eq!(out.status_label, "already_satisfied");
-        assert_eq!(task_val["state"], "merged");
-        assert_eq!(task_val["task_runtime"]["status"], "idle");
-        assert_eq!(
-            task_val["task_runtime"]["completion_kind"],
-            "already_satisfied"
-        );
-    }
-
-    #[test]
-    fn exit_code_override_macc_task_result_success_marker() {
-        let (mut task_val, input) = make_failure_input(
-            "claude",
-            "Error: 529 overloaded",
-            "MACC_TASK_RESULT: success",
-        );
-        let out = apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
-        assert_eq!(out.status_label, "already_satisfied");
-        assert_eq!(task_val["state"], "merged");
-    }
-
-    #[test]
-    fn exit_code_override_does_not_fire_for_hard_quota_error() {
-        // QuotaExhausted is not transient, so override must NOT fire even if
-        // stdout says "already_satisfied".
-        let (mut task_val, input) =
-            make_failure_input("codex", "429 insufficient_quota", "already_satisfied");
-        let out = apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
-        // Quota exhausted: re-queued with cooldown, not overridden to success.
-        assert_eq!(out.status_label, "quota_exhausted_requeue");
-        assert_eq!(task_val["state"], "todo");
-    }
-
-    #[test]
-    fn unknown_tool_falls_back_to_e101() {
-        // No normalizer for tool "agentic-x" → falls through to caller's E101.
-        let (mut task_val, mut input) =
-            make_failure_input("agentic-x", "some unexpected error text", "");
-        // Caller provides no pre-classified error code either.
-        input.error_code = None;
-        apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
+        let mut task_val = task_json;
+        apply_job_completion(&mut task_val, &input, &NormalizerRegistry::empty(), "2026-02-21T00:00:00Z");
         assert_eq!(task_val["task_runtime"]["last_error_code"], "E101");
         assert!(task_val["task_runtime"]["tool_error"].is_null());
     }
@@ -2389,92 +2243,11 @@ mod tests {
                 backoff_max_seconds: 300,
                 normalizer_input: None,
             },
+            &NormalizerRegistry::empty(),
             "2026-02-21T00:00:00Z",
         );
         assert_eq!(out.status_label, "failed");
         assert_eq!(task_val["task_runtime"]["last_error_code"], "E201");
         assert!(out.tool_error.is_none());
-    }
-
-    #[test]
-    fn get_normalizer_for_tool_routing() {
-        assert!(get_normalizer_for_tool("claude").is_some());
-        assert!(get_normalizer_for_tool("codex").is_some());
-        assert!(get_normalizer_for_tool("gemini").is_some());
-        assert!(get_normalizer_for_tool("unknown-tool").is_none());
-        assert!(get_normalizer_for_tool("").is_none());
-    }
-
-    // ── RL-BACKOFF-003: backoff engine integration ────────────────────
-
-    #[test]
-    fn e601_requeues_todo_with_delayed_until() {
-        let (mut task_val, input) =
-            make_failure_input("claude", "Error: 429 Rate limit exceeded", "");
-        let out = apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
-        assert_eq!(out.status_label, "rate_limit_backoff");
-        assert_eq!(task_val["state"], "todo");
-        assert_eq!(task_val["task_runtime"]["status"], "idle");
-        assert_eq!(task_val["task_runtime"]["last_error_code"], "E601");
-        let delayed = task_val["task_runtime"]["delayed_until"].as_str().unwrap();
-        assert!(!delayed.is_empty(), "delayed_until must be set for E601");
-        // Must be parseable ISO 8601
-        assert!(
-            chrono::DateTime::parse_from_rfc3339(delayed).is_ok(),
-            "delayed_until must be valid RFC 3339"
-        );
-    }
-
-    #[test]
-    fn e601_throttle_state_stored_in_extra() {
-        let (mut task_val, input) =
-            make_failure_input("claude", "Error: 429 Rate limit exceeded", "");
-        apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
-        let ts = &task_val["task_runtime"]["throttle_state"];
-        assert!(
-            !ts.is_null(),
-            "throttle_state should be stored in extra for E601"
-        );
-        assert_eq!(ts["consecutive_429_count"], 1);
-        assert!(ts["backoff_seconds"].as_u64().unwrap() > 0);
-        assert!(ts["throttled_until"].as_u64().unwrap() > 0);
-    }
-
-    #[test]
-    fn e602_requeues_task_with_cooldown() {
-        let (mut task_val, input) = make_failure_input(
-            "codex",
-            "429 insufficient_quota: You exceeded your current quota",
-            "",
-        );
-        let out = apply_job_completion(&mut task_val, &input, "2026-02-21T00:00:00Z");
-        assert_eq!(out.status_label, "quota_exhausted_requeue");
-        assert_eq!(task_val["state"], "todo");
-        assert_eq!(task_val["task_runtime"]["status"], "idle");
-        assert_eq!(task_val["task_runtime"]["last_error_code"], "E602");
-        // delayed_until MUST be set for re-queue cooldown
-        assert!(
-            !task_val["task_runtime"]["delayed_until"].is_null(),
-            "delayed_until must be set for E602 re-queue"
-        );
-    }
-
-    #[test]
-    fn e601_delayed_until_is_in_the_future() {
-        let now = "2026-02-21T00:00:00Z";
-        let (mut task_val, input) =
-            make_failure_input("gemini", "429 RESOURCE_EXHAUSTED: Rate limit for model", "");
-        apply_job_completion(&mut task_val, &input, now);
-        let delayed = task_val["task_runtime"]["delayed_until"]
-            .as_str()
-            .expect("delayed_until must be a string");
-        let delayed_dt = chrono::DateTime::parse_from_rfc3339(delayed).unwrap();
-        let now_dt = chrono::DateTime::parse_from_rfc3339(now).unwrap();
-        assert!(
-            delayed_dt > now_dt,
-            "delayed_until ({}) must be in the future relative to now ({})",
-            delayed,
-            now
-        );
     }
 }

@@ -3,12 +3,15 @@
 //! Covers: canonical error normalization → backoff → fallback dispatch →
 //! concurrency throttle → recovery, across all three adapter normalizers.
 //! All tests operate entirely in-memory — no filesystem or git required.
+//!
+//! Tests that require real adapter normalizers live here (not in `macc-core`)
+//! because `macc-core` is tool-agnostic and cannot import adapter crates.
 
+use macc_adapter_claude::error_normalizer::ClaudeErrorNormalizer;
+use macc_adapter_codex::error_normalizer::CodexErrorNormalizer;
+use macc_adapter_gemini::error_normalizer::GeminiErrorNormalizer;
 use macc_core::coordinator::error_normalizer::{CanonicalClass, ErrorNormalizer};
 use macc_core::coordinator::model::{Task, TaskRegistry};
-use macc_core::coordinator::normalizers::{
-    ClaudeErrorNormalizer, CodexErrorNormalizer, GeminiErrorNormalizer,
-};
 use macc_core::coordinator::rate_limit::{
     clear_throttle_state, compute_backoff_delay, is_task_delayed, is_tool_throttled,
     next_throttle_expiry, update_throttle_state, RateLimitInfo, ToolThrottleRegistry,
@@ -164,7 +167,7 @@ fn gemini_resource_exhausted_with_quota_keyword_produces_e602() {
 #[test]
 fn claude_session_conflict_produces_e603() {
     let normalizer = ClaudeErrorNormalizer;
-    let stderr = "Error: session already in use. Please start a new session.";
+    let stderr = "Error: Session ID b2784509-a8e7-4a3a-b5f5-7e4d7c8e9f12 is already in use by another client.";
     let result = normalizer.normalize(1, stderr, "");
 
     let err = result.expect("Session conflict should produce a ToolError");
@@ -190,16 +193,13 @@ fn backoff_increases_exponentially_and_is_capped() {
     let d3 = compute_backoff_delay(3, base, max, None);
     let d_large = compute_backoff_delay(20, base, max, None);
 
-    // Each step must be >= the previous (monotone with jitter).
     assert!(d2 >= d1, "backoff must grow: d2={} d1={}", d2, d1);
     assert!(d3 >= d2, "backoff must grow: d3={} d2={}", d3, d2);
-    // Large attempt must be capped (with 10% jitter the max is 3600 + 360 = 3960).
     assert!(
         d_large <= max + max / 10 + 1,
         "backoff must be capped, got {}",
         d_large
     );
-    // First attempt must be at least base.
     assert!(
         d1 >= base,
         "first backoff must be >= base ({} < {})",
@@ -242,7 +242,6 @@ fn update_throttle_state_increments_count_and_sets_delay() {
     assert_eq!(state.backoff_seconds, backoff);
     assert_eq!(state.throttled_until, now_ts + backoff);
 
-    // Second E601.
     update_throttle_state(&mut state, &info, 240, now_ts + 1);
     assert_eq!(state.consecutive_429_count, 2);
     assert_eq!(state.throttled_until, now_ts + 1 + 240);
@@ -308,7 +307,6 @@ fn fallback_dispatch_selects_next_tool_when_primary_throttled() {
     let selected = select_next_ready_task_typed(&registry, &cfg)
         .expect("fallback dispatch must select a task");
 
-    // When claude is throttled, the selector must fall back to codex.
     assert_eq!(
         selected.tool, "codex",
         "fallback tool must be codex when claude is throttled"
@@ -318,10 +316,6 @@ fn fallback_dispatch_selects_next_tool_when_primary_throttled() {
 
 #[test]
 fn fallback_disabled_does_not_filter_throttled_tools() {
-    // When rate_limit_fallback_enabled=false, the throttle registry is NOT
-    // used as a dispatch filter — the throttled tool is still selected.
-    // Protection against re-dispatch happens via task.task_runtime.delayed_until
-    // (is_task_delayed), not via the tool throttle registry alone.
     let registry = make_registry_with_tools(vec![make_todo_task("T1", "claude")]);
 
     let mut cfg = base_selector_config(vec!["claude"], 4);
@@ -329,8 +323,6 @@ fn fallback_disabled_does_not_filter_throttled_tools() {
     cfg.rate_limit_fallback_enabled = false;
 
     let selected = select_next_ready_task_typed(&registry, &cfg);
-    // The task IS dispatched (throttle filter bypassed); delayed_until on the
-    // task itself is the actual guard used by the coordinator control-plane.
     assert!(
         selected.is_some(),
         "throttle filter is bypassed when rate_limit_fallback_enabled=false"
@@ -345,14 +337,11 @@ fn fallback_disabled_does_not_filter_throttled_tools() {
 
 #[test]
 fn recovery_clears_throttle_and_tool_becomes_eligible_again() {
-    // Start with claude throttled.
     let mut throttle_reg = make_throttle_registry("claude", far_future_epoch(), 3);
 
-    // Simulate successful completion: clear throttle.
     let state = throttle_reg.get_mut("claude").unwrap();
     clear_throttle_state(state);
 
-    // Now claude should no longer be throttled.
     let now = "2026-03-18T12:00:00Z";
     assert!(
         !is_tool_throttled(&throttle_reg, "claude", now),
@@ -379,7 +368,6 @@ fn recovery_clears_throttle_and_tool_becomes_eligible_again() {
 #[test]
 fn task_with_future_delayed_until_is_skipped() {
     let mut task = make_todo_task("T1", "claude");
-    // ISO 8601 timestamp in the far future.
     task.task_runtime.delayed_until = Some("2099-01-01T00:00:00Z".to_string());
 
     let now = "2026-03-18T12:00:00Z";
@@ -413,7 +401,6 @@ fn task_without_delayed_until_is_always_eligible() {
 #[test]
 fn next_throttle_expiry_returns_earliest_non_zero_expiry() {
     let mut reg = ToolThrottleRegistry::default();
-    // epoch 2000-01-01T00:00:00Z = 946_684_800
     reg.insert(
         "claude".into(),
         ToolThrottleState {
@@ -422,7 +409,6 @@ fn next_throttle_expiry_returns_earliest_non_zero_expiry() {
             ..Default::default()
         },
     );
-    // epoch 2099-01-01T00:00:00Z = 4_070_908_800
     reg.insert(
         "codex".into(),
         ToolThrottleState {
@@ -433,7 +419,6 @@ fn next_throttle_expiry_returns_earliest_non_zero_expiry() {
     );
 
     let expiry = next_throttle_expiry(&reg).expect("must return earliest expiry");
-    // Earliest is claude's epoch
     assert!(
         expiry.contains("2000"),
         "earliest expiry must be 2000-01-01, got {}",

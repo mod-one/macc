@@ -12,7 +12,6 @@ pub mod helpers;
 pub mod ipc;
 pub mod logs;
 pub mod model;
-pub mod normalizers;
 pub mod prd_auditor;
 pub mod rate_limit;
 pub mod runtime;

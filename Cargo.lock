@@ -1276,10 +1276,12 @@ dependencies = [
 name = "macc-registry"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "macc-adapter-claude",
  "macc-adapter-codex",
  "macc-adapter-gemini",
  "macc-core",
+ "serde_json",
 ]
 
 [[package]]
