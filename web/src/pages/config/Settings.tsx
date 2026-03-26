@@ -22,6 +22,31 @@ function formatError(error: unknown): string {
   return 'Unexpected error.';
 }
 
+function ensureStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string') : [];
+}
+
+function ensureRecord<T>(value: unknown): Record<string, T> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, T>) : {};
+}
+
+function normalizeConfigResponse(config: ApiConfigResponse): ApiConfigResponse {
+  return {
+    ...config,
+    enabledTools: ensureStringArray(config.enabledTools),
+    selectedSkills: ensureStringArray(config.selectedSkills),
+    selectedAgents: ensureStringArray(config.selectedAgents),
+    selectedMcp: ensureStringArray(config.selectedMcp),
+    toolPriority: ensureStringArray(config.toolPriority),
+    managedEnvironmentWarnings: ensureStringArray(config.managedEnvironmentWarnings),
+    toolConfig: ensureRecord(config.toolConfig),
+    toolSettings: ensureRecord(config.toolSettings),
+    standardsInline: ensureRecord(config.standardsInline),
+    maxParallelPerTool: ensureRecord(config.maxParallelPerTool),
+    toolSpecializations: ensureRecord(config.toolSpecializations),
+  };
+}
+
 /* ------------------------------------------------------------------ */
 /*  Field helpers                                                      */
 /* ------------------------------------------------------------------ */
@@ -407,8 +432,9 @@ const Settings: React.FC = () => {
     getConfig()
       .then((res) => {
         if (cancelled) return;
-        setConfig(res);
-        setDraft(res);
+        const normalized = normalizeConfigResponse(res);
+        setConfig(normalized);
+        setDraft(normalized);
       })
       .catch((err) => {
         if (cancelled) return;
@@ -493,7 +519,7 @@ const Settings: React.FC = () => {
     if (!draft) return;
     setSaving(true);
     try {
-      const updated = await updateConfig(draft as ApiConfigUpdateRequest);
+      const updated = normalizeConfigResponse(await updateConfig(draft as ApiConfigUpdateRequest));
       setConfig(updated);
       setDraft(updated);
       setToast({ open: true, title: 'Settings saved', variant: 'success' });
@@ -513,7 +539,7 @@ const Settings: React.FC = () => {
   const handleApplyRaw = useCallback(
     (raw: string) => {
       try {
-        const parsed = JSON.parse(raw) as ApiConfigResponse;
+        const parsed = normalizeConfigResponse(JSON.parse(raw) as ApiConfigResponse);
         setDraft(parsed);
       } catch {
         /* validation handled in AdvancedTab */

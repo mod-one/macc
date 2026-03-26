@@ -10,6 +10,29 @@ import { Button } from '../../components/Button';
 import { EmptyState } from '../../components/EmptyState';
 import { KpiCard } from '../../components/KpiCard';
 
+function ensureDoctorIssues(value: unknown): ApiDoctorReport['issues'] {
+  return Array.isArray(value) ? value.filter((issue): issue is ApiDoctorReport['issues'][number] => Boolean(issue) && typeof issue === 'object') : [];
+}
+
+function ensureSeverityMap(value: unknown): Record<string, number> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(value).filter((entry): entry is [string, number] => typeof entry[1] === 'number'),
+  );
+}
+
+function normalizeDoctorReport(report: ApiDoctorReport): ApiDoctorReport {
+  return {
+    ...report,
+    healthScore: typeof report.healthScore === 'number' ? report.healthScore : 0,
+    issuesBySeverity: ensureSeverityMap(report.issuesBySeverity),
+    issues: ensureDoctorIssues(report.issues),
+  };
+}
+
 const Diagnostics: React.FC = () => {
   const [report, setReport] = useState<ApiDoctorReport | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
@@ -26,7 +49,7 @@ const Diagnostics: React.FC = () => {
     setError(null);
     setFixResult(null);
     try {
-      const data = await getDoctorReport();
+      const data = normalizeDoctorReport(await getDoctorReport());
       setReport(data);
     } catch (err) {
       setError(err instanceof Error ? err : new Error('Failed to fetch doctor report'));

@@ -216,6 +216,24 @@ describe('Settings page', () => {
     expect(screen.getByText('Server error')).toBeInTheDocument();
   });
 
+  it('renders when list fields are missing from the config payload', async () => {
+    getConfigMock.mockResolvedValue(
+      buildConfig({
+        enabledTools: null as unknown as ApiConfigResponse['enabledTools'],
+        selectedSkills: null as unknown as ApiConfigResponse['selectedSkills'],
+        selectedAgents: null as unknown as ApiConfigResponse['selectedAgents'],
+        selectedMcp: null as unknown as ApiConfigResponse['selectedMcp'],
+        toolPriority: null as unknown as ApiConfigResponse['toolPriority'],
+        managedEnvironmentWarnings: null as unknown as ApiConfigResponse['managedEnvironmentWarnings'],
+      }),
+    );
+    renderPage();
+
+    await screen.findByText('Settings');
+    fireEvent.click(screen.getByRole('button', { name: 'Coordinator' }));
+    expect(screen.getByPlaceholderText('claude, codex, gemini')).toBeInTheDocument();
+  });
+
   it('Advanced tab Apply JSON updates draft', async () => {
     getConfigMock.mockResolvedValue(buildConfig({ webPort: 3450 }));
     renderPage();
