@@ -9,6 +9,7 @@ import RouteLoadingSkeleton from './RouteLoadingSkeleton';
 import { StatusBadge } from './StatusBadge';
 import { useNotificationStore } from '../stores/notificationStore';
 import { useNotificationCenter } from '../hooks/useNotificationCenter';
+import { getHelpSectionForRoute } from '../pages/helpDocs';
 
 const navGroups = [
   {
@@ -54,6 +55,8 @@ const Layout: React.FC = () => {
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const mainRef = useRef<HTMLElement>(null);
   const location = useLocation();
+  const contextualHelpSection = getHelpSectionForRoute(location.pathname);
+  const contextualHelpHref = `/help?section=${encodeURIComponent(contextualHelpSection)}`;
   const showGitPanel = !location.pathname.startsWith('/ops/git');
   const { unreadCount, setIsOpen } = useNotificationStore();
   
@@ -168,6 +171,14 @@ const Layout: React.FC = () => {
           </div>
 
           <div className="flex items-center gap-3">
+            <Link
+              aria-label="Open contextual help"
+              className="flex h-9 w-9 items-center justify-center rounded-md border border-[var(--border)] bg-[var(--bg-secondary)] text-base font-semibold text-[var(--text-muted)] transition-colors hover:border-[var(--text-muted)] hover:text-[var(--text-primary)]"
+              title="Contextual help"
+              to={contextualHelpHref}
+            >
+              ?
+            </Link>
             <button 
               onClick={() => setIsOpen(true)}
               className="relative flex h-9 w-9 items-center justify-center rounded-md border border-[var(--border)] bg-[var(--bg-secondary)] text-[var(--text-muted)] transition-colors hover:border-[var(--text-muted)] hover:text-[var(--text-primary)]"
