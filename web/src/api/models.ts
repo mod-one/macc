@@ -123,6 +123,7 @@ export type ApiCoordinatorAction =
   | 'dispatch'
   | 'advance'
   | 'reconcile'
+  | 'unlock'
   | 'cleanup'
   | 'sync'
   | 'audit-prd';
@@ -465,6 +466,8 @@ export interface ApiRegistryTask {
   description: string | null;
   objective: string | null;
   result: string | null;
+  dependencies: string[];
+  exclusiveResources: string[];
   steps: string[];
   notes: string | null;
   assignee: JsonValue | null;
