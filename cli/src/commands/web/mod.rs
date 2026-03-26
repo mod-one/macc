@@ -11,6 +11,7 @@ mod logs;
 mod plan;
 mod prd;
 mod registry;
+mod terminal;
 mod sse;
 #[cfg(test)]
 mod tests;
@@ -48,6 +49,7 @@ struct WebState {
     paths: ProjectPaths,
     assets_mode: WebAssetsMode,
     tail_stream_limiter: logs::TailStreamLimiter,
+    terminal_sessions: terminal::TerminalSessionStore,
 }
 
 impl WebCommand {
@@ -93,6 +95,7 @@ impl Command for WebCommand {
             paths: self.app.project_paths()?,
             assets_mode: config.assets_mode,
             tail_stream_limiter: logs::TailStreamLimiter::default(),
+            terminal_sessions: terminal::TerminalSessionStore::default(),
         };
         let app = build_web_router(state);
 
@@ -171,6 +174,11 @@ fn build_web_router(state: WebState) -> Router {
             get(worktrees::worktree_logs_handler),
         )
         .route("/api/v1/events", get(sse::events_handler))
+        .route("/api/v1/terminal", post(terminal::create_terminal_handler))
+        .route(
+            "/api/v1/terminal/:session",
+            get(terminal::terminal_ws_handler),
+        )
         .route(
             "/api/v1/coordinator/run",
             post(coordinator::coordinator_run_handler),

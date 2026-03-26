@@ -40,12 +40,15 @@ pub(super) const WEB_ERR_REGISTRY_TASK_NOT_FOUND: &str = "MACC-WEB-2002";
 pub(super) const WEB_ERR_BACKUP_NOT_FOUND: &str = "MACC-WEB-2003";
 pub(super) const WEB_ERR_WORKTREE_NOT_FOUND: &str = "MACC-WEB-2004";
 pub(super) const WEB_ERR_LOG_NOT_FOUND: &str = "MACC-WEB-2005";
+pub(super) const WEB_ERR_TERMINAL_NOT_FOUND: &str = "MACC-WEB-2006";
 const WEB_ERR_IO: &str = "MACC-WEB-4000";
 const WEB_ERR_FETCH: &str = "MACC-WEB-4001";
 pub(super) const WEB_ERR_COORDINATOR: &str = "MACC-WEB-5000";
 pub(super) const WEB_ERR_STORAGE: &str = "MACC-WEB-5001";
 const WEB_ERR_GIT: &str = "MACC-WEB-5002";
+pub(super) const WEB_ERR_TERMINAL_CONFLICT: &str = "MACC-WEB-3003";
 
+#[derive(Debug)]
 pub(super) struct ApiError {
     status: StatusCode,
     body: ApiErrorEnvelope,
@@ -193,6 +196,22 @@ impl ApiError {
         )
     }
 
+    pub(super) fn terminal_not_found(
+        message: impl Into<String>,
+        context: Option<serde_json::Value>,
+    ) -> Self {
+        Self::new(
+            StatusCode::NOT_FOUND,
+            WEB_ERR_TERMINAL_NOT_FOUND,
+            "NotFound",
+            message.into(),
+            false,
+            Some("Create a new terminal session and retry".to_string()),
+            context,
+            None,
+        )
+    }
+
     pub(super) fn conflict(message: impl Into<String>, context: Option<serde_json::Value>) -> Self {
         Self::new(
             StatusCode::CONFLICT,
@@ -217,6 +236,22 @@ impl ApiError {
             message.into(),
             false,
             Some("Resolve the worktree state or repeat the request with force".to_string()),
+            context,
+            None,
+        )
+    }
+
+    pub(super) fn terminal_conflict(
+        message: impl Into<String>,
+        context: Option<serde_json::Value>,
+    ) -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            WEB_ERR_TERMINAL_CONFLICT,
+            "Conflict",
+            message.into(),
+            false,
+            Some("Wait for the existing terminal session to exit, then retry".to_string()),
             context,
             None,
         )
