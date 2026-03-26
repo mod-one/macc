@@ -71,6 +71,7 @@ export const WorktreeCard: React.FC<WorktreeCardProps> = ({
           <Button
             className="p-1 h-8 w-8 bg-transparent border-none hover:bg-white/10"
             onClick={() => onRun(worktree.id)}
+            aria-label={`Run worktree ${worktree.slug || worktree.id}`}
             title="Run"
           >
             <Icons.PlayIcon className="h-4 w-4" />
@@ -78,6 +79,7 @@ export const WorktreeCard: React.FC<WorktreeCardProps> = ({
           <Button
             className="p-1 h-8 w-8 bg-transparent border-none hover:bg-white/10 text-[var(--accent)]"
             onClick={() => onDoctor(worktree.id)}
+            aria-label={`Open diagnostics for worktree ${worktree.slug || worktree.id}`}
             title="Doctor"
           >
             <Icons.ActivityIcon className="h-4 w-4" />
@@ -85,6 +87,7 @@ export const WorktreeCard: React.FC<WorktreeCardProps> = ({
           <Button
             className="p-1 h-8 w-8 bg-transparent border-none hover:bg-white/10 text-rose-500 hover:text-rose-600"
             onClick={() => onRemove(worktree.id)}
+            aria-label={`Remove worktree ${worktree.slug || worktree.id}`}
             title="Remove"
           >
             <Icons.TrashIcon className="h-4 w-4" />
