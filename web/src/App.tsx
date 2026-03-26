@@ -1,6 +1,9 @@
 import React, { lazy } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { getStatus } from './api/client';
 import Layout from './components/Layout';
+import RouteLoadingSkeleton from './components/RouteLoadingSkeleton';
+import { shouldShowDashboard } from './pages/welcomeState';
 
 // Lazy load all pages for code splitting
 const Welcome = lazy(() => import('./pages/Welcome'));
@@ -27,18 +30,53 @@ const Git = lazy(() => import('./pages/ops/Git'));
 const Help = lazy(() => import('./pages/Help'));
 const About = lazy(() => import('./pages/About'));
 
+const RootRedirect: React.FC = () => {
+  const [target, setTarget] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    const abortController = new AbortController();
+    let isActive = true;
+
+    const load = async (): Promise<void> => {
+      try {
+        const status = await getStatus({ signal: abortController.signal });
+        if (isActive) {
+          setTarget(shouldShowDashboard(status) ? '/dashboard' : '/welcome');
+        }
+      } catch {
+        if (isActive) {
+          setTarget('/welcome');
+        }
+      }
+    };
+
+    void load();
+
+    return () => {
+      isActive = false;
+      abortController.abort();
+    };
+  }, []);
+
+  if (target) {
+    return <Navigate to={target} replace />;
+  }
+
+  return <RouteLoadingSkeleton />;
+};
+
 const App: React.FC = () => {
   return (
     <BrowserRouter>
       <Routes>
         <Route path="/" element={<Layout />}>
-          {/* Index route redirects to /dashboard */}
-          <Route index element={<Navigate to="/dashboard" replace />} />
-          
+          {/* Index route resolves by coordinator status. */}
+          <Route index element={<RootRedirect />} />
+
           <Route path="welcome" element={<Welcome />} />
           <Route path="init" element={<Init />} />
           <Route path="dashboard" element={<Dashboard />} />
-          
+
           {/* Config group */}
           <Route path="config">
             <Route path="tools" element={<Tools />} />
@@ -71,9 +109,9 @@ const App: React.FC = () => {
           {/* Utility / Info */}
           <Route path="help" element={<Help />} />
           <Route path="about" element={<About />} />
-          
-          {/* Catch-all route redirects back to /dashboard */}
-          <Route path="*" element={<Navigate to="/dashboard" replace />} />
+
+          {/* Catch-all route returns to the onboarding page */}
+          <Route path="*" element={<Navigate to="/welcome" replace />} />
         </Route>
       </Routes>
     </BrowserRouter>
