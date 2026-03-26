@@ -17,9 +17,9 @@ vi.mock('../api/client', () => ({
   getLogs: (...args: unknown[]) => getLogsMock(...args),
 }));
 
-function RouteProbe() {
+function RouteProbe({ testId = 'route-state' }: { testId?: string } = {}) {
   const location = useLocation();
-  return <div data-testid="route-state">{JSON.stringify(location.state)}</div>;
+  return <div data-testid={testId}>{JSON.stringify(location.state)}</div>;
 }
 
 describe('GlobalSearch', () => {
@@ -141,6 +141,72 @@ describe('GlobalSearch', () => {
 
     expect(screen.getByTestId('route-state')).toHaveTextContent(
       '"selectedWorktreeId":"wt-a"',
+    );
+  });
+
+  it('navigates to settings with the highlighted setting key', async () => {
+    const user = userEvent.setup();
+
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <Routes>
+          <Route path="/" element={<GlobalSearch />} />
+          <Route path="/config/settings" element={<RouteProbe testId="settings-route" />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    fireEvent.keyDown(window, { key: '/', ctrlKey: true });
+    await act(async () => {
+      fireEvent.change(screen.getByRole('combobox'), { target: { value: 'webPort' } });
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    });
+
+    await act(async () => {
+      await user.keyboard('{ArrowDown}');
+    });
+    await act(async () => {
+      await user.keyboard('{Enter}');
+    });
+
+    expect(screen.getByTestId('settings-route')).toHaveTextContent('"highlightSettingKey":"webPort"');
+  });
+
+  it('navigates to logs with the selected log path', async () => {
+    const user = userEvent.setup();
+
+    getLogsMock.mockResolvedValue([
+      {
+        path: 'coordinator/events.jsonl',
+        size: 2048,
+        modified: '2026-03-26T02:40:40Z',
+      },
+    ]);
+
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <Routes>
+          <Route path="/" element={<GlobalSearch />} />
+          <Route path="/ops/logs" element={<RouteProbe testId="logs-route" />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    fireEvent.keyDown(window, { key: '/', ctrlKey: true });
+    await act(async () => {
+      fireEvent.change(screen.getByRole('combobox'), { target: { value: 'events.jsonl' } });
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    });
+
+    await act(async () => {
+      await user.keyboard('{ArrowDown}');
+    });
+    await act(async () => {
+      await user.keyboard('{Enter}');
+    });
+
+    expect(screen.getByTestId('logs-route')).toHaveTextContent(
+      '"selectedLogPath":"coordinator/events.jsonl"',
     );
   });
 });

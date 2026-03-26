@@ -1,7 +1,7 @@
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useGlobalSearchStore } from '../stores/globalSearchStore';
-import type { ApiLogFile, ApiRegistryTask, ApiWorktree } from '../api/models';
+import type { ApiConfigResponse, ApiLogFile, ApiRegistryTask, ApiWorktree } from '../api/models';
 import { cn } from './styles';
 import { Icons } from './NavIcons';
 
@@ -439,7 +439,9 @@ const GlobalSearch: React.FC = () => {
           Search tasks, worktrees, settings, and logs
         </label>
         <div className="relative">
-          <Icons.Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--text-muted)]" />
+          <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--text-muted)]">
+            <Icons.Search />
+          </span>
           <input
             ref={inputRef}
             id="global-search-input"
