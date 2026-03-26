@@ -161,6 +161,15 @@ fi
 export MACC_BUILD_SHA="${BUILD_SHA}${BUILD_DIRTY}"
 
 if [[ "$BUILD_PROFILE" == "release" ]]; then
+  need_cmd npm
+  if [[ -d "$PROJECT_ROOT/web" ]]; then
+    echo "Building web assets..."
+    (
+      cd "$PROJECT_ROOT/web"
+      npm run build
+      cd "$PROJECT_ROOT"
+    )
+  fi
   echo "Building macc (release) [${MACC_BUILD_SHA}]..."
   cargo build --release
   BIN_PATH="$PROJECT_ROOT/target/release/macc"
