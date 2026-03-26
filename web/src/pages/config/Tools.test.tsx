@@ -84,4 +84,18 @@ describe('Tools page', () => {
     expect(getConfigMock).toHaveBeenCalledTimes(1);
     confirmSpy.mockRestore();
   });
+
+  it('renders when tool maps are missing from the config payload', async () => {
+    getConfigMock.mockResolvedValue({
+      enabledTools: ['codex'],
+      toolConfig: null,
+      toolSettings: null,
+      toolPriority: null,
+    });
+
+    renderPage();
+
+    await screen.findByText('Tools & Adapters');
+    expect(screen.getByRole('heading', { name: 'Codex' })).toBeInTheDocument();
+  });
 });

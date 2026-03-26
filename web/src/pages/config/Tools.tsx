@@ -268,6 +268,24 @@ function jsonEquals(left: JsonValue, right: JsonValue): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+function ensureJsonRecord(value: unknown): Record<string, JsonValue> {
+  return isJsonObject(value as JsonValue | undefined) ? (value as Record<string, JsonValue>) : {};
+}
+
+function ensureStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string') : [];
+}
+
+function normalizeConfigResponse(config: ApiConfigResponse): ApiConfigResponse {
+  return {
+    ...config,
+    enabledTools: ensureStringArray(config.enabledTools),
+    toolConfig: ensureJsonRecord(config.toolConfig),
+    toolSettings: ensureJsonRecord(config.toolSettings),
+    toolPriority: ensureStringArray(config.toolPriority),
+  };
+}
+
 const Tools: React.FC = () => {
   const [config, setConfig] = React.useState<ApiConfigResponse | null>(null);
   const [draftToolSettings, setDraftToolSettings] = React.useState<Record<string, JsonValue>>({});
@@ -298,7 +316,7 @@ const Tools: React.FC = () => {
     }
 
     try {
-      const nextConfig = await getConfig();
+      const nextConfig = normalizeConfigResponse(await getConfig());
       setConfig(nextConfig);
       setDraftToolSettings(cloneJson(nextConfig.toolSettings));
       setDraftEnabledTools(new Set(nextConfig.enabledTools));
@@ -513,10 +531,10 @@ const Tools: React.FC = () => {
     setError(null);
 
     try {
-      const updated = await updateConfig({
+      const updated = normalizeConfigResponse(await updateConfig({
         enabledTools: Array.from(draftEnabledTools).sort((a, b) => a.localeCompare(b)),
         toolSettings: cloneJson(draftToolSettings),
-      });
+      }));
 
       setConfig(updated);
       setDraftToolSettings(cloneJson(updated.toolSettings));
