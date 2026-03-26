@@ -19,7 +19,8 @@ import {
   WorktreeCard,
   ConfirmDialog,
   LoadingSpinner,
-  ErrorBanner
+  ErrorBanner,
+  WorktreeWizard,
 } from '../../components';
 import * as Icons from '../../components/icons';
 import { cn } from '../../components/styles';
@@ -37,6 +38,7 @@ const Worktrees: React.FC = () => {
   const [globalFilter, setGlobalFilter] = useState('');
   const [sorting, setSorting] = useState<SortingState>([]);
   const [worktreeToRemove, setWorktreeToRemove] = useState<string | null>(null);
+  const [wizardOpen, setWizardOpen] = useState(false);
 
   useEffect(() => {
     loadWorktrees();
@@ -186,7 +188,7 @@ const Worktrees: React.FC = () => {
               <Icons.DownloadIcon className="h-4 w-4" />
               Export
             </Button>
-            <Button onClick={() => navigate('/ops/worktrees/create')} className="gap-2 h-9">
+            <Button onClick={() => setWizardOpen(true)} className="gap-2 h-9">
               <Icons.PlusIcon className="h-4 w-4" />
               Create Worktree
             </Button>
@@ -304,6 +306,13 @@ const Worktrees: React.FC = () => {
         confirmLabel="Remove"
         intent="danger"
         onConfirm={handleConfirmRemove}
+      />
+
+      <WorktreeWizard
+        open={wizardOpen}
+        onOpenChange={setWizardOpen}
+        onComplete={loadWorktrees}
+        worktrees={worktrees}
       />
     </div>
   );
