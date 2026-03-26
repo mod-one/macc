@@ -1,9 +1,8 @@
-
 # MACC
 
 MACC (Multi-Agentic Coding Config) is a agentic coding tool configuration manager. It generates tool-specific files (Claude code, Codex, Gemini Cli, etc.) via adapters.
 
-It also integrates an autonomous AI agent loop that runs Installed agentic coding tool. 
+It also integrates an autonomous AI agent loop that runs Installed agentic coding tool.
 They can run on the same project in parallel (using worktrees) repeatedly until all assigned tasks are completed. All of this is managed by a coordinator and can be done autonomously or semi-autonomously.
 
 ## What MACC provides
@@ -110,6 +109,25 @@ macc apply --allow-user-scope
 The web UI lives in [`web/`](web) and talks to the MACC backend served by `macc web`.
 These commands assume `macc` is already available in `PATH` (for example via `./scripts/install.sh --release`).
 
+The web app now covers these areas:
+
+- `Welcome` and `Init`: first-run onboarding, environment checks, and project bootstrap.
+- `Dashboard`: coordinator health, worktree status, and live orchestration summary.
+- `Config / Tools`, `Config / Standards`, `Config / Skills`, and `Config / Settings`: tool selection, standards preview, skill selection, and global/web settings.
+- `PRD`, `Plan`, and `Apply`: PRD editing, plan previews, and apply execution.
+- `Ops / Console`: coordinator live controls and runtime state.
+- `Ops / Registry`: task registry inspection and task actions.
+- `Ops / Worktrees` and `Ops / Live`: worktree management, concurrent log tiles, and per-worktree terminal access.
+- `Ops / Worker Detail`: focused task/worktree drill-down.
+- `Ops / Locks`: task/worktree lock visualization.
+- `Ops / Logs`: coordinator event stream, log browser, and log tailing.
+- `Ops / Diagnostics`: doctor report and safe-fix workflow.
+- `Ops / Backups`: backup browsing and restore.
+- `Ops / Git`: repository graph view.
+- Global search and the notifications drawer: quick navigation, task discovery, and coordinator alerts.
+- Terminal drawer sessions: project-root and worktree PTY access over WebSocket.
+- `Help` and `About`: supporting information pages.
+
 Development workflow:
 
 ```bash
@@ -124,7 +142,9 @@ In a second terminal, start the backend from the repo root:
 macc web
 ```
 
-Open `http://localhost:5173`. The Vite dev server proxies `/api` requests to `http://localhost:3450`.
+Open `http://localhost:5173`. The Vite dev server proxies `/api` requests to `http://localhost:3450`, so the UI can hit the local MACC backend without any extra configuration.
+
+For frontend changes, run `npm run lint` and `npm test` before building.
 
 Production-like workflow (`web/dist` served by the backend):
 
@@ -267,7 +287,7 @@ MACC emits structured error codes when a performer or coordinator step fails. Th
   - `E502` Merge worker failed
 - `E600` Rate-limit / Provider throttle
   - `E601` Rate-limited / transient 429 or 529. Retryable with exponential backoff.
-  - `E602` Quota exhausted / hard limit. **Not retryable** — requires operator action.
+  - `E602` Quota exhausted / hard limit. **Not retryable** - requires operator action.
   - `E603` Session conflict. Retryable with a new session.
 - `E900` Unknown/Unexpected
   - `E901` Unknown fatal error
@@ -281,7 +301,7 @@ Coordinator can auto-retry failed tasks based on error code. This is configured 
 
 When a failed task has an error code in the allow-list and retries are below the max, the task is requeued to `todo` with an `auto_retry:<code>` reason.
 
-E602 (quota exhausted) is intentionally excluded — it requires operator action, not automatic retry.
+E602 (quota exhausted) is intentionally excluded - it requires operator action, not automatic retry.
 
 ### Rate-limit handling
 
@@ -293,7 +313,7 @@ MACC automatically handles provider rate-limits (HTTP 429/529) via:
 - **Concurrency reduction**: `effective_max_parallel` is reduced on each E601 and restored on recovery (if `rate_limit_throttle_parallel=true`).
 - **Quota hard stop**: E602 pauses the coordinator with a specific "quota exhausted" banner; resume with `macc coordinator resume` after fixing quota.
 
-Rate-limit controls in `.macc/macc.yaml` → `automation.coordinator`:
+Rate-limit controls in `.macc/macc.yaml` -> `automation.coordinator`:
 ```yaml
 rate_limit_backoff_base_seconds: 60
 rate_limit_backoff_max_seconds: 3600
@@ -375,7 +395,7 @@ All commands support these global flags:
 ### TUI and tools
 
 - `macc tui`: open interactive UI.
-- `macc tool install <tool_id> [-y|--yes]`: install local tool via ToolSpec install commands.
+- `macc tool install <tool_id> [-y|--yes]`: install local tool via ToolSpec-defined install workflow.
 - `macc tool update <tool_id> [--check] [-y|--yes] [--force] [--rollback-on-fail]`: update one installed tool.
 - `macc tool update --all [--only enabled|installed] [--check] [-y|--yes] [--force] [--rollback-on-fail]`: batch update tools.
 - `macc tool outdated [--only enabled|installed]`: show installed/current/latest status and outdated tools.
@@ -396,7 +416,7 @@ All commands support these global flags:
 `macc catalog import-url` now prints:
 - parsed source understanding (kind/url/ref/subpath),
 - immediate validation status (subpath/manifest when source can be materialized),
-- trust hints (pinned ref/checksum presence).  
+- trust hints (pinned ref/checksum presence).
 Hints are informational only and do not guarantee security.
 
 ### Worktrees
@@ -535,11 +555,11 @@ MACC enforces a unified commit message format across all performers and merge wo
 
 This convention enables two post-run features:
 
-### `sync-prd` — deterministic reconciliation
+### `sync-prd` - deterministic reconciliation
 
-`macc coordinator sync-prd` scans the reference branch for committed task IDs and transitions matching tasks to `merged`. No AI involved — pure pattern matching. Also runs automatically as part of `macc coordinator sync`.
+`macc coordinator sync-prd` scans the reference branch for committed task IDs and transitions matching tasks to `merged`. No AI involved - pure pattern matching. Also runs automatically as part of `macc coordinator sync`.
 
-### `audit-prd` — AI-powered PRD enrichment
+### `audit-prd` - AI-powered PRD enrichment
 
 `macc coordinator audit-prd -- --tool <tool_id>` gathers commit context for completed tasks and builds a structured prompt for an LLM to:
 - Update `notes` of completed tasks with what was actually delivered.

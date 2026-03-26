@@ -1,6 +1,7 @@
 # Error Catalog
 
-This catalog defines error code naming and the initial web/API codes.
+This catalog defines error code naming and the current web/API codes.
+Keep it synchronized with `cli/src/commands/web/errors.rs`.
 
 ## Naming
 
@@ -43,17 +44,20 @@ The API error envelope uses these categories:
 - `MACC-WEB-2003`: Backup set was not found for the requested restore action.
 - `MACC-WEB-2004`: Worktree was not found for the requested web action.
 - `MACC-WEB-2005`: Requested log file was not found under `.macc/log/`.
+- `MACC-WEB-2006`: Terminal session was not found or is no longer available.
 
 ### Conflict / Auth (3000 range)
 
 - `MACC-WEB-3000`: User-scope operation denied in current mode (`MaccError::UserScopeNotAllowed`).
 - `MACC-WEB-3001`: Registry operator action conflicts with the task's current state/runtime.
 - `MACC-WEB-3002`: Worktree action conflicts with the current git/worktree state.
+- `MACC-WEB-3003`: Terminal action conflicts with the current terminal session state.
 
 ### Dependency / Engine (4000 range)
 
 - `MACC-WEB-4000`: Local I/O dependency failed (`MaccError::Io`).
 - `MACC-WEB-4001`: Remote fetch dependency failed (`MaccError::Fetch`).
+- `MACC-WEB-4002`: Terminal session creation or PTY startup failed.
 
 ### Internal (5000 range)
 
