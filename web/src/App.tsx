@@ -31,8 +31,8 @@ const App: React.FC = () => {
     <BrowserRouter>
       <Routes>
         <Route path="/" element={<Layout />}>
-          {/* Index route redirects to /dashboard */}
-          <Route index element={<Navigate to="/dashboard" replace />} />
+          {/* Index route starts on the onboarding page */}
+          <Route index element={<Navigate to="/welcome" replace />} />
           
           <Route path="welcome" element={<Welcome />} />
           <Route path="init" element={<Init />} />
@@ -71,8 +71,8 @@ const App: React.FC = () => {
           <Route path="help" element={<Help />} />
           <Route path="about" element={<About />} />
           
-          {/* Catch-all route redirects back to /dashboard */}
-          <Route path="*" element={<Navigate to="/dashboard" replace />} />
+          {/* Catch-all route returns to the onboarding page */}
+          <Route path="*" element={<Navigate to="/welcome" replace />} />
         </Route>
       </Routes>
     </BrowserRouter>
