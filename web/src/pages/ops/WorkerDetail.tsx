@@ -1,10 +1,11 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
-import { useParams, useNavigate, Link } from 'react-router-dom';
+import { useParams, useNavigate } from 'react-router-dom';
 import { getWorktrees, buildUrl } from '../../api/client';
 import type { ApiWorktree } from '../../api/models';
 import { resolveApiBaseUrl } from '../../api/config';
 import { useEventSource } from '../../hooks/useEventSource';
 import { StatusBadge } from '../../components/StatusBadge';
+import { TerminalDrawer, type TerminalTarget } from '../../components/TerminalDrawer';
 
 const MAX_LOG_LINES = 1000;
 
@@ -13,6 +14,8 @@ const WorkerDetail: React.FC = () => {
   const navigate = useNavigate();
   const [worktree, setWorktree] = useState<ApiWorktree | null>(null);
   const [activeTab, setActiveTab] = useState<'logs' | 'events' | 'artifacts'>('logs');
+  const [terminalOpen, setTerminalOpen] = useState(false);
+  const [terminalTarget, setTerminalTarget] = useState<TerminalTarget | null>(null);
 
   // Logs state
   const [logs, setLogs] = useState<string[]>([]);
@@ -87,6 +90,15 @@ const WorkerDetail: React.FC = () => {
     navigator.clipboard.writeText(bundle).catch(console.error);
   }, [id, logs, worktreeEvents]);
 
+  const handleOpenTerminal = useCallback(() => {
+    setTerminalTarget({
+      terminalType: 'worktree',
+      worktreeId: id ?? undefined,
+      label: `Worktree: ${worktree?.slug || id}`,
+    });
+    setTerminalOpen(true);
+  }, [id, worktree?.slug]);
+
   const filteredLogs = logs.filter(l => l.toLowerCase().includes(searchQuery.toLowerCase()));
 
   if (!id) return <div className="p-8">No Worker ID provided</div>;
@@ -117,10 +129,10 @@ const WorkerDetail: React.FC = () => {
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
             <span>Restart Phase</span>
           </button>
-          <Link to={`/ops/worktrees/${encodeURIComponent(id)}`} className="flex items-center space-x-2 px-3 py-1.5 rounded bg-white/5 text-white hover:bg-white/10 transition-colors border border-white/10 text-sm font-medium">
+          <button onClick={handleOpenTerminal} className="flex items-center space-x-2 px-3 py-1.5 rounded bg-white/5 text-white hover:bg-white/10 transition-colors border border-white/10 text-sm font-medium">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>
             <span>Terminal</span>
-          </Link>
+          </button>
           <button onClick={handleCopyDiagnostics} className="flex items-center space-x-2 px-3 py-1.5 rounded bg-white/5 text-white hover:bg-white/10 transition-colors border border-white/10 text-sm font-medium">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
             <span>Diagnostics</span>
@@ -239,6 +251,13 @@ const WorkerDetail: React.FC = () => {
           </div>
         )}
       </main>
+
+      <TerminalDrawer
+        open={terminalOpen}
+        onOpenChange={setTerminalOpen}
+        defaultTarget={terminalTarget}
+        projectRootLabel="Project Root"
+      />
     </div>
   );
 };

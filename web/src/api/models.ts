@@ -407,6 +407,20 @@ export interface ApiApplyResponse {
   warnings: string[];
 }
 
+export type ApiTerminalType = 'project' | 'worktree';
+
+export interface ApiTerminalCreateRequest {
+  terminalType: ApiTerminalType;
+  worktreeId?: string | null;
+}
+
+export interface ApiTerminalSessionCreated {
+  sessionId: string;
+  terminalType: ApiTerminalType;
+  path: string;
+  worktreeId?: string | null;
+}
+
 export interface ApiWorktree {
   id: string;
   slug: string | null;

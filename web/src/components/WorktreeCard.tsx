@@ -3,6 +3,7 @@ import type { ApiWorktree } from '../api/models';
 import { Button } from './Button';
 import { StatusBadge, type StatusTone } from './StatusBadge';
 import * as Icons from './icons';
+import { Icons as NavIcons } from './NavIcons';
 import { cn, interactiveSurfaceClassName, surfaceClassName } from './styles';
 
 export interface WorktreeCardProps {
@@ -11,6 +12,7 @@ export interface WorktreeCardProps {
   onDoctor: (id: string) => void;
   onRemove: (id: string) => void;
   onOpen: (id: string) => void;
+  onOpenTerminal: (id: string) => void;
   highlighted?: boolean;
 }
 
@@ -20,6 +22,7 @@ export const WorktreeCard: React.FC<WorktreeCardProps> = ({
   onDoctor,
   onRemove,
   onOpen,
+  onOpenTerminal,
   highlighted = false,
 }) => {
   const getStatusTone = (status: string | null): StatusTone => {
@@ -100,6 +103,16 @@ export const WorktreeCard: React.FC<WorktreeCardProps> = ({
             title="Remove"
           >
             <Icons.TrashIcon className="h-4 w-4" />
+          </Button>
+          <Button
+            className="p-1 h-8 w-8 bg-transparent border-none hover:bg-white/10 text-[var(--text-secondary)]"
+            onClick={() => onOpenTerminal(worktree.id)}
+            aria-label={`Open terminal for worktree ${worktree.slug || worktree.id}`}
+            title="Open Terminal Here"
+          >
+            <span className="flex h-4 w-4 items-center justify-center">
+              <NavIcons.Terminal />
+            </span>
           </Button>
         </div>
         <Button onClick={() => onOpen(worktree.id)} className="gap-2 h-8">
