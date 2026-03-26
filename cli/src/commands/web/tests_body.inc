@@ -4531,3 +4531,215 @@ async fn worktree_log_stream_emits_heartbeat_records() {
     assert!(data.contains("\"type\":\"heartbeat\""), "{data}");
     assert!(data.contains("\"status\":\"ok\""), "{data}");
 }
+
+fn prepare_terminal_repo(root: &Path) {
+    init_git_repo(root);
+    commit_file(
+        root,
+        "README.md",
+        "terminal test\n",
+        "test: terminal repo",
+        "",
+        "2026-03-19T14:00:00Z",
+    );
+    write_test_config(root);
+}
+
+fn create_terminal_request(
+    terminal_type: terminal::TerminalTargetType,
+    worktree_id: Option<&str>,
+) -> Body {
+    Body::from(
+        serde_json::json!({
+            "terminalType": terminal_type,
+            "worktreeId": worktree_id,
+        })
+        .to_string(),
+    )
+}
+
+#[tokio::test]
+async fn terminal_create_session_for_project_root() {
+    let root = temp_root("terminal-root");
+    prepare_terminal_repo(&root);
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/terminal")
+                .method("POST")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(create_terminal_request(
+                    terminal::TerminalTargetType::Project,
+                    None,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::CREATED);
+    let payload = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&payload).expect("json");
+    assert!(json["sessionId"].as_str().expect("session id").starts_with("term-"));
+    assert_eq!(
+        PathBuf::from(json["path"].as_str().expect("path")),
+        root.canonicalize().expect("canonical root")
+    );
+    assert_eq!(json["terminalType"], "project");
+}
+
+#[tokio::test]
+async fn terminal_create_session_for_worktree() {
+    let root = temp_root("terminal-worktree");
+    prepare_terminal_repo(&root);
+    let worktree_path = root.join(".macc").join("worktree").join("demo-terminal");
+    run_git_ok(
+        &root,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "demo-terminal",
+            worktree_path.to_str().expect("worktree path"),
+        ],
+    );
+
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/terminal")
+                .method("POST")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(create_terminal_request(
+                    terminal::TerminalTargetType::Worktree,
+                    Some("demo-terminal"),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::CREATED);
+    let payload = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&payload).expect("json");
+    assert_eq!(
+        PathBuf::from(json["path"].as_str().expect("path")),
+        worktree_path.canonicalize().expect("canonical worktree")
+    );
+    assert_eq!(json["terminalType"], "worktree");
+    assert_eq!(json["worktreeId"], "demo-terminal");
+}
+
+#[tokio::test]
+async fn terminal_create_rejects_unknown_worktree() {
+    let root = temp_root("terminal-invalid-worktree");
+    prepare_terminal_repo(&root);
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/terminal")
+                .method("POST")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(create_terminal_request(
+                    terminal::TerminalTargetType::Worktree,
+                    Some("missing-worktree"),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+    let payload = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&payload).expect("json");
+    assert_eq!(json["error"]["code"], "MACC-WEB-2004");
+}
+
+#[tokio::test]
+async fn terminal_session_limit_is_enforced() {
+    let root = temp_root("terminal-limit");
+    prepare_terminal_repo(&root);
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+
+    for _ in 0..5 {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/terminal")
+                    .method("POST")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(create_terminal_request(
+                        terminal::TerminalTargetType::Project,
+                        None,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), axum::http::StatusCode::CREATED);
+    }
+
+    let rejected = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/terminal")
+                .method("POST")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(create_terminal_request(
+                    terminal::TerminalTargetType::Project,
+                    None,
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(rejected.status(), axum::http::StatusCode::CONFLICT);
+    let payload = rejected
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&payload).expect("json");
+    assert_eq!(json["error"]["code"], "MACC-WEB-3003");
+}

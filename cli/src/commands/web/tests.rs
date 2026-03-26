@@ -1,10 +1,7 @@
 use super::*;
 use crate::commands::AppContext;
 use crate::test_support::{run_git_ok, run_git_ok_with_env};
-use axum::body::Body;
-use axum::http::Request;
 use axum::response::IntoResponse;
-use http_body_util::BodyExt;
 use macc_core::config::CanonicalConfig;
 use macc_core::config::WebAssetsMode;
 use macc_core::coordinator::model::{Task, TaskRegistry, TaskWorktree};
@@ -28,11 +25,9 @@ use macc_core::{MaccError, ProjectPaths, Result};
 use std::fs;
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::Path;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tower::util::ServiceExt;
 
 fn temp_root(label: &str) -> std::path::PathBuf {
     let nanos = SystemTime::now()
@@ -189,6 +184,7 @@ fn test_web_state(
         paths: ProjectPaths::from_root(root),
         assets_mode,
         tail_stream_limiter: logs::TailStreamLimiter::default(),
+        terminal_sessions: terminal::TerminalSessionStore::default(),
     }
 }
 
@@ -671,7 +667,7 @@ mod tests {
     use super::*;
     use crate::commands::web::build_web_router;
     use crate::commands::web::errors;
-    use crate::commands::web::WebState;
+    use crate::commands::web::terminal;
     use axum::body::Body;
     use axum::extract::Request;
     use http_body_util::BodyExt;
