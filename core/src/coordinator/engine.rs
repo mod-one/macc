@@ -203,8 +203,8 @@ pub trait ControlPlaneBackend {
         dispatched: usize,
     ) -> Result<CoordinatorCounts>;
     async fn sleep_between_cycles(&mut self) -> Result<()>;
-    fn should_terminate_run(&self, _counts: &CoordinatorCounts) -> bool {
-        false
+    fn should_terminate_run(&self, _counts: &CoordinatorCounts) -> Option<String> {
+        None
     }
 }
 
@@ -1290,8 +1290,8 @@ async fn run_control_plane_cycle<B: ControlPlaneBackend + ?Sized>(
     }
 
     let counts = backend.on_cycle_end(cycle, &advance, dispatched).await?;
-    if backend.should_terminate_run(&counts) {
-        return Ok(ControlPlaneDecision::Complete);
+    if let Some(reason) = backend.should_terminate_run(&counts) {
+        return Err(MaccError::Validation(reason));
     }
     controller.on_cycle_counts(counts)
 }
@@ -1479,19 +1479,28 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
         Ok(())
     }
 
-    fn should_terminate_run(&self, counts: &CoordinatorCounts) -> bool {
+    fn should_terminate_run(&self, counts: &CoordinatorCounts) -> Option<String> {
         let max_dispatch_total = self
             .env_cfg
             .max_dispatch
             .or_else(|| self.coordinator.and_then(|c| c.max_dispatch))
-            .unwrap_or(10);
-        if max_dispatch_total == 0 {
-            return false;
-        }
-        self.run_state.dispatched_total_run >= max_dispatch_total
+            .unwrap_or(0);
+        if max_dispatch_total > 0
+            && self.run_state.dispatched_total_run >= max_dispatch_total
             && counts.active == 0
             && self.run_state.active_jobs.is_empty()
             && self.run_state.active_merge_jobs.is_empty()
+        {
+            return Some(format!(
+                "Coordinator stopped: dispatch limit reached (dispatched={}, max_dispatch={}). \
+                 Remaining: todo={}, merged={}. Restart the coordinator to continue.",
+                self.run_state.dispatched_total_run,
+                max_dispatch_total,
+                counts.todo,
+                counts.merged,
+            ));
+        }
+        None
     }
 }
 
