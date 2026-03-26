@@ -4,6 +4,7 @@ import { Icons } from './NavIcons';
 import GitGraphPanel from './GitGraphPanel';
 import CommandPalette from './CommandPalette';
 import { NotificationsDrawer } from './NotificationsDrawer';
+import RouteLoadingSkeleton from './RouteLoadingSkeleton';
 import { useNotificationStore } from '../stores/notificationStore';
 import { useNotificationCenter } from '../hooks/useNotificationCenter';
 
@@ -172,7 +173,7 @@ const Layout: React.FC = () => {
         {/* Page Content + Git Graph Side Panel */}
         <div className="flex min-h-0 flex-1">
           <main className="flex-1 overflow-auto bg-[var(--bg-primary)] p-6">
-            <React.Suspense fallback={<div className="flex items-center justify-center h-full text-[var(--text-muted)] animate-pulse">Loading...</div>}>
+            <React.Suspense fallback={<RouteLoadingSkeleton />}>
               <Outlet />
             </React.Suspense>
           </main>

@@ -5,6 +5,14 @@ import { buildUrl } from '../../api/client';
 import { useEventSource } from '../../hooks/useEventSource';
 import { LoadingSpinner } from '../../components/LoadingSpinner';
 import { cn } from '../../components/styles';
+import {
+  VirtualizedLogLines,
+  type VirtualizedLogLinesHandle,
+} from './virtualized/VirtualizedLogLines';
+import {
+  VirtualizedStructuredEventsTable,
+  type StructuredEventRecord,
+} from './virtualized/VirtualizedStructuredEventsTable';
 
 /* ------------------------------------------------------------------ */
 /*  Constants                                                          */
@@ -68,13 +76,7 @@ function categoryFromPath(path: string): string {
 /*  Structured event parsing for JSONL                                 */
 /* ------------------------------------------------------------------ */
 
-interface StructuredEvent {
-  line: number;
-  raw: string;
-  parsed: Record<string, unknown> | null;
-}
-
-function parseJsonlLines(lines: string[]): StructuredEvent[] {
+function parseJsonlLines(lines: string[]): StructuredEventRecord[] {
   return lines.map((raw, i) => {
     try {
       const parsed = JSON.parse(raw);
@@ -284,8 +286,9 @@ function FileBrowserTab() {
   const [timestampJump, setTimestampJump] = React.useState('');
   const [tailMode, setTailMode] = React.useState(false);
   const [offset, setOffset] = React.useState(0);
-  const contentRef = React.useRef<HTMLDivElement>(null);
+  const contentRef = React.useRef<VirtualizedLogLinesHandle>(null);
   const tailIntervalRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
+  const [highlightedLine, setHighlightedLine] = React.useState<number | null>(null);
   const contentTotalRef = React.useRef(0);
   React.useEffect(() => {
     contentTotalRef.current = content?.total ?? 0;
@@ -353,9 +356,7 @@ function FileBrowserTab() {
           .then((result) => {
             setContent(result);
             setOffset(tailOffset);
-            if (contentRef.current) {
-              contentRef.current.scrollTop = contentRef.current.scrollHeight;
-            }
+            requestAnimationFrame(() => contentRef.current?.scrollToBottom());
           })
           .catch(() => {
             /* silently retry on next interval */
@@ -391,17 +392,13 @@ function FileBrowserTab() {
 
   // Timestamp jump
   const handleTimestampJump = () => {
-    if (!content || !timestampJump) return;
+    if (!displayLines.length || !timestampJump) return;
     const target = timestampJump.toLowerCase();
-    const idx = content.lines.findIndex((line) => line.toLowerCase().includes(target));
-    if (idx >= 0 && contentRef.current) {
-      const lineElements = contentRef.current.querySelectorAll('[data-line-index]');
-      const el = lineElements[idx];
-      if (el) {
-        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        (el as HTMLElement).classList.add('bg-amber-900/40');
-        setTimeout(() => (el as HTMLElement).classList.remove('bg-amber-900/40'), 2000);
-      }
+    const idx = displayLines.findIndex((line) => line.toLowerCase().includes(target));
+    if (idx >= 0) {
+      contentRef.current?.scrollToLine(idx);
+      setHighlightedLine(idx);
+      setTimeout(() => setHighlightedLine(null), 2000);
     }
   };
 
@@ -421,12 +418,11 @@ function FileBrowserTab() {
   const currentPage = Math.floor(offset / LOG_PAGE_SIZE) + 1;
 
   // Filtered lines (client-side filtering for loaded content when no server search)
-  const displayLines = React.useMemo(() => {
-    if (!content) return [];
-    if (!searchTerm) return content.lines;
-    const lower = searchTerm.toLowerCase();
-    return content.lines.filter((line) => line.toLowerCase().includes(lower));
-  }, [content, searchTerm]);
+  const displayLines = !content
+    ? []
+    : !searchTerm
+      ? content.lines
+      : content.lines.filter((line) => line.toLowerCase().includes(searchTerm.toLowerCase()));
 
   return (
     <div className="flex gap-4" style={{ minHeight: '36rem' }}>
@@ -565,31 +561,12 @@ function FileBrowserTab() {
               </div>
             ) : content ? (
               <>
-                <div
+                <VirtualizedLogLines
                   ref={contentRef}
-                  className="flex-1 overflow-auto rounded-2xl border border-slate-200 bg-slate-950 p-0 font-mono text-xs leading-6 text-slate-200"
-                  style={{ maxHeight: '32rem' }}
-                >
-                  <table className="w-full border-collapse">
-                    <tbody>
-                      {displayLines.map((line, i) => {
-                        const lineNum = offset + i + 1;
-                        return (
-                          <tr
-                            key={lineNum}
-                            data-line-index={i}
-                            className="transition-colors hover:bg-slate-800/50"
-                          >
-                            <td className="select-none border-r border-slate-800 px-3 py-0 text-right text-slate-600">
-                              {lineNum}
-                            </td>
-                            <td className="whitespace-pre-wrap break-all px-3 py-0">{line}</td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
+                  lines={displayLines}
+                  offset={offset}
+                  highlightedIndex={highlightedLine}
+                />
 
                 {/* Pagination */}
                 {totalPages > 1 && (
@@ -632,7 +609,7 @@ function StructuredEventsTab() {
   const [files, setFiles] = React.useState<ApiLogFile[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [selectedFile, setSelectedFile] = React.useState<string | null>(null);
-  const [events, setEvents] = React.useState<StructuredEvent[]>([]);
+  const [events, setEvents] = React.useState<StructuredEventRecord[]>([]);
   const [eventsLoading, setEventsLoading] = React.useState(false);
   const [filters, setFilters] = React.useState<Record<string, string>>({});
 
@@ -791,79 +768,7 @@ function StructuredEventsTab() {
           {events.length === 0 ? 'No events found in this file.' : 'No events match the current filters.'}
         </div>
       ) : (
-        <div className="overflow-auto rounded-2xl border border-slate-200 bg-white shadow-sm" style={{ maxHeight: '36rem' }}>
-          <table className="w-full border-collapse text-xs">
-            <thead className="sticky top-0 bg-slate-50">
-              <tr>
-                <th className="border-b border-slate-200 px-3 py-2 text-left font-semibold uppercase tracking-[0.12em] text-slate-500">
-                  #
-                </th>
-                <th className="border-b border-slate-200 px-3 py-2 text-left font-semibold uppercase tracking-[0.12em] text-slate-500">
-                  Timestamp
-                </th>
-                <th className="border-b border-slate-200 px-3 py-2 text-left font-semibold uppercase tracking-[0.12em] text-slate-500">
-                  Type
-                </th>
-                <th className="border-b border-slate-200 px-3 py-2 text-left font-semibold uppercase tracking-[0.12em] text-slate-500">
-                  Status
-                </th>
-                <th className="border-b border-slate-200 px-3 py-2 text-left font-semibold uppercase tracking-[0.12em] text-slate-500">
-                  Source
-                </th>
-                <th className="border-b border-slate-200 px-3 py-2 text-left font-semibold uppercase tracking-[0.12em] text-slate-500">
-                  Task
-                </th>
-                <th className="border-b border-slate-200 px-3 py-2 text-left font-semibold uppercase tracking-[0.12em] text-slate-500">
-                  Phase
-                </th>
-                <th className="border-b border-slate-200 px-3 py-2 text-left font-semibold uppercase tracking-[0.12em] text-slate-500">
-                  Details
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map((ev) => {
-                if (!ev.parsed) {
-                  return (
-                    <tr key={ev.line} className="border-b border-slate-100 hover:bg-slate-50">
-                      <td className="px-3 py-1.5 text-slate-400">{ev.line}</td>
-                      <td colSpan={7} className="px-3 py-1.5 font-mono text-slate-500 truncate max-w-md">
-                        {ev.raw}
-                      </td>
-                    </tr>
-                  );
-                }
-                const p = ev.parsed;
-                return (
-                  <tr key={ev.line} className="border-b border-slate-100 hover:bg-slate-50">
-                    <td className="px-3 py-1.5 text-slate-400">{ev.line}</td>
-                    <td className="px-3 py-1.5 text-slate-600 whitespace-nowrap">
-                      {typeof p.ts === 'string' ? formatTimestamp(p.ts) : '-'}
-                    </td>
-                    <td className="px-3 py-1.5">
-                      <span className="inline-block rounded-full bg-sky-100 px-2 py-0.5 text-[10px] font-semibold uppercase text-sky-800">
-                        {String(p.type ?? '-')}
-                      </span>
-                    </td>
-                    <td className="px-3 py-1.5 text-slate-700">{String(p.status ?? '-')}</td>
-                    <td className="px-3 py-1.5 text-slate-600">{String(p.source ?? '-')}</td>
-                    <td className="px-3 py-1.5 text-slate-600 font-mono">
-                      {String(p.task_id ?? '-')}
-                    </td>
-                    <td className="px-3 py-1.5 text-slate-600">{String(p.phase ?? '-')}</td>
-                    <td className="px-3 py-1.5 text-slate-500 truncate max-w-xs" title={ev.raw}>
-                      {typeof p.msg === 'string'
-                        ? p.msg
-                        : typeof p.detail === 'string'
-                          ? p.detail
-                          : '-'}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+        <VirtualizedStructuredEventsTable events={filtered} formatTimestamp={formatTimestamp} />
       )}
     </div>
   );
