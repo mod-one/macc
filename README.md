@@ -124,6 +124,8 @@ The web app now covers these areas:
 - `Ops / Diagnostics`: doctor report and safe-fix workflow.
 - `Ops / Backups`: backup browsing and restore.
 - `Ops / Git`: repository graph view.
+- Global search and the notifications drawer: quick navigation, task discovery, and coordinator alerts.
+- Terminal drawer sessions: project-root and worktree PTY access over WebSocket.
 - `Help` and `About`: supporting information pages.
 
 Development workflow:

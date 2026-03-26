@@ -9,6 +9,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ### Added
 - Web UI coverage for `Welcome`, `Init`, `Dashboard`, config subpages, PRD/Plan/Apply, ops views, and the supporting `Help`/`About` pages.
+- Web UI coverage for notifications, global search, worktree terminal drawers, and terminal sessions for project and worktree PTYs.
 - Web UI contributor workflows in the top-level README for development, linting, testing, and production-like serving.
 - Web API contract documentation for the full `/api/v1` surface, including config, PRD, plan, apply, worktrees, registry, logs, doctor, backups, terminal, SSE, and coordinator actions.
 - Web error catalog entries for confirmation, not-found, conflict, dependency, and terminal handling.

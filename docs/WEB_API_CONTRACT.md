@@ -599,6 +599,10 @@ Response 201:
 }
 ```
 
+Notes:
+- Returns `MACC-WEB-3003` when the terminal session limit is reached or an existing session conflicts with the request.
+- Returns `MACC-WEB-4002` when the local PTY or shell startup fails.
+
 ### GET `/api/v1/terminal/{session}`
 
 Purpose: attach to a terminal session over WebSocket.
