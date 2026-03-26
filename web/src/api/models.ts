@@ -22,6 +22,7 @@ export interface ApiErrorEnvelope {
 
 export interface ApiHealthResponse {
   status: 'ok';
+  project_root?: string;
 }
 
 export interface ApiGitCommit {

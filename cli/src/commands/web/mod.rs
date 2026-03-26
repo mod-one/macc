@@ -239,8 +239,13 @@ fn build_web_router(state: WebState) -> Router {
         .with_state(state)
 }
 
-async fn health_handler() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "status": "ok" }))
+async fn health_handler(
+    axum::extract::State(state): axum::extract::State<WebState>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "status": "ok",
+        "project_root": state.paths.root.to_string_lossy()
+    }))
 }
 
 #[cfg(debug_assertions)]

@@ -10,6 +10,8 @@ import { StatusBadge } from './StatusBadge';
 import { useNotificationStore } from '../stores/notificationStore';
 import { useNotificationCenter } from '../hooks/useNotificationCenter';
 import { getHelpSectionForRoute } from '../pages/helpDocs';
+import { getHealth } from '../api/client';
+import { useCoordinatorStore } from '../store';
 
 const navGroups = [
   {
@@ -50,18 +52,40 @@ const navGroups = [
   }
 ];
 
+const LAYOUT_REFRESH_MS = 10_000;
+
 const Layout: React.FC = () => {
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
+  const [projectRoot, setProjectRoot] = useState<string | null>(null);
   const mainRef = useRef<HTMLElement>(null);
   const location = useLocation();
   const contextualHelpSection = getHelpSectionForRoute(location.pathname);
   const contextualHelpHref = `/help?section=${encodeURIComponent(contextualHelpSection)}`;
   const showGitPanel = !location.pathname.startsWith('/ops/git');
   const { unreadCount, setIsOpen } = useNotificationStore();
-  
+  const { status, loadStatus } = useCoordinatorStore();
+
   // Initialize global notification center
   useNotificationCenter();
+
+  // Fetch project root once from health endpoint
+  useEffect(() => {
+    getHealth().then((h) => {
+      if (h.project_root) setProjectRoot(h.project_root);
+    }).catch(() => null);
+  }, []);
+
+  // Poll coordinator status for the status strip
+  useEffect(() => {
+    const ac = new AbortController();
+    loadStatus(ac.signal);
+    const id = setInterval(() => loadStatus(ac.signal), LAYOUT_REFRESH_MS);
+    return () => {
+      ac.abort();
+      clearInterval(id);
+    };
+  }, [loadStatus]);
 
   React.useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -160,9 +184,11 @@ const Layout: React.FC = () => {
           <div className="flex items-center gap-3">
             <div className="flex items-center gap-2">
               <StatusBadge className="shrink-0 px-2 py-0.5 text-[11px]" status="Connected" tone="active" />
-              <span className="max-w-[400px] truncate font-mono text-sm text-[var(--text-secondary)]">
-                /home/brand/macc/.macc/worktree/worker-03
-              </span>
+              {projectRoot && (
+                <span className="max-w-[400px] truncate font-mono text-sm text-[var(--text-secondary)]">
+                  {projectRoot}
+                </span>
+              )}
             </div>
           </div>
           
@@ -227,17 +253,21 @@ const Layout: React.FC = () => {
           <div className="flex items-center gap-4">
             <div className="flex items-center gap-2">
               <span className="uppercase text-[var(--text-secondary)]">Coordinator:</span>
-              <StatusBadge className="px-2 py-0.5 text-[11px]" status="Idle" tone="todo" />
+              <StatusBadge
+                className="px-2 py-0.5 text-[11px]"
+                status={status ? (status.paused ? 'Paused' : status.active > 0 ? 'Running' : 'Idle') : 'Idle'}
+                tone={status ? (status.paused ? 'paused' : status.active > 0 ? 'active' : 'todo') : 'todo'}
+              />
             </div>
           </div>
           <div className="flex items-center gap-6">
             <div className="flex items-center gap-1.5">
               <span>Active Workers:</span>
-              <span className="text-[var(--text-primary)]">0</span>
+              <span className="text-[var(--text-primary)]">{status?.active ?? 0}</span>
             </div>
             <div className="flex items-center gap-1.5">
               <span>Throttled Tools:</span>
-              <span className="text-[var(--text-primary)]">0</span>
+              <span className="text-[var(--text-primary)]">{status?.throttled_tools?.length ?? 0}</span>
             </div>
           </div>
         </footer>

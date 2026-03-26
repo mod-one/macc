@@ -3,10 +3,7 @@ import {
   getBackups, 
   restoreBackup 
 } from '../../api/client';
-import { 
-  ApiBackup, 
-  ApiBackupRestoreResult 
-} from '../../api/models';
+import type { ApiBackup } from '../../api/models';
 import { 
   Button, 
   ConfirmDialog, 
@@ -15,15 +12,12 @@ import {
   LoadingSpinner, 
   Toast 
 } from '../../components';
-import { 
-  ClockIcon, 
-  RefreshIcon, 
-  ChevronDownIcon, 
-  ChevronUpIcon, 
+import {
+  ClockIcon,
+  RefreshIcon,
+  ChevronDownIcon,
+  ChevronUpIcon,
   AlertTriangleIcon,
-  CheckCircleIcon,
-  XCircleIcon,
-  FolderIcon
 } from '../../components/icons';
 import { Icons } from '../../components/NavIcons';
 import { cn } from '../../components/styles';
@@ -132,8 +126,7 @@ const Backups: React.FC = () => {
             </p>
           </div>
           
-          <Button 
-            variant="secondary" 
+          <Button
             onClick={fetchBackups}
             className="flex items-center gap-2"
           >
@@ -192,8 +185,6 @@ const Backups: React.FC = () => {
 
                 <div className="flex items-center gap-3">
                   <Button
-                    variant="secondary"
-                    size="sm"
                     onClick={() => setExpandedId(expandedId === backup.id ? null : backup.id)}
                     className="hidden sm:flex"
                   >
@@ -211,9 +202,8 @@ const Backups: React.FC = () => {
                   </Button>
                   
                   <Button
-                    variant="primary"
-                    size="sm"
                     onClick={() => setRestoreTarget(backup)}
+                    className="bg-[var(--accent)] text-white hover:opacity-90"
                   >
                     Restore
                   </Button>

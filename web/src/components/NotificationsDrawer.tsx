@@ -58,7 +58,6 @@ export const NotificationsDrawer: React.FC = () => {
           <div className="flex gap-3">
             <Button
               className="flex-1 gap-2"
-              variant="secondary"
               onClick={markAllAsRead}
             >
               <CheckCircleIcon className="h-4 w-4" />
@@ -66,7 +65,6 @@ export const NotificationsDrawer: React.FC = () => {
             </Button>
             <Button
               className="flex-1 gap-2 border-rose-500/30 text-rose-500 hover:bg-rose-500/10"
-              variant="secondary"
               onClick={dismissAll}
             >
               <TrashIcon className="h-4 w-4" />

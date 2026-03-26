@@ -32,8 +32,8 @@ const App: React.FC = () => {
     <BrowserRouter>
       <Routes>
         <Route path="/" element={<Layout />}>
-          {/* Index route redirects to /dashboard */}
-          <Route index element={<Navigate to="/dashboard" replace />} />
+          {/* Index route redirects to /welcome */}
+          <Route index element={<Navigate to="/welcome" replace />} />
           
           <Route path="welcome" element={<Welcome />} />
           <Route path="init" element={<Init />} />
