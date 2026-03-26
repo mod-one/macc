@@ -2325,6 +2325,38 @@ async fn coordinator_event_stream_emits_heartbeat_records() {
     assert!(data.contains("\"status\":\"ok\""), "{data}");
 }
 
+#[tokio::test]
+async fn coordinator_event_stream_waits_for_heartbeat_interval() {
+    let root = temp_root("events-heartbeat-interval");
+    fs::create_dir_all(&root).expect("create root");
+    let state = test_web_state(
+        &root,
+        Arc::new(WebTestEngine::with_event_snapshots(vec![Vec::new()])),
+        WebAssetsMode::Embedded,
+    );
+    let response = axum::response::sse::Sse::new(sse::coordinator_event_stream(
+        state,
+        Vec::new(),
+        None,
+        Duration::from_millis(10),
+        Duration::from_millis(120),
+    ))
+    .into_response();
+    let mut body = response.into_body();
+
+    let early = tokio::time::timeout(Duration::from_millis(60), body.frame()).await;
+    assert!(early.is_err(), "heartbeat arrived earlier than configured interval");
+
+    let frame = tokio::time::timeout(Duration::from_millis(120), body.frame())
+        .await
+        .expect("heartbeat timeout")
+        .expect("frame")
+        .expect("body frame");
+    let data = String::from_utf8(frame.into_data().expect("data frame").to_vec()).expect("utf8");
+
+    assert!(data.contains("event: heartbeat"), "{data}");
+}
+
 #[test]
 fn server_config_defaults_to_localhost_and_configured_port() {
     let root = temp_root("bind-default");
