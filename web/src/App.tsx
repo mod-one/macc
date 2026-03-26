@@ -20,6 +20,7 @@ const Locks = lazy(() => import('./pages/ops/Locks'));
 const Diagnostics = lazy(() => import('./pages/ops/Diagnostics'));
 const Logs = lazy(() => import('./pages/ops/Logs'));
 const Worktrees = lazy(() => import('./pages/ops/Worktrees'));
+const WorkerDetail = lazy(() => import('./pages/ops/WorkerDetail'));
 const Backups = lazy(() => import('./pages/ops/Backups'));
 const Git = lazy(() => import('./pages/ops/Git'));
 const Help = lazy(() => import('./pages/Help'));
@@ -57,6 +58,7 @@ const App: React.FC = () => {
             <Route path="worktrees" element={<Worktrees />} />
             <Route path="worktrees/create" element={<div className="p-10 text-center">Worktree Creation Wizard - Coming Soon</div>} />
             <Route path="worktrees/:id" element={<div className="p-10 text-center">Worktree Details & Terminal - Coming Soon</div>} />
+            <Route path="worker/:id" element={<WorkerDetail />} />
             <Route path="live" element={<Live />} />
             <Route path="locks" element={<Locks />} />
             <Route path="diagnostics" element={<Diagnostics />} />
