@@ -8,6 +8,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ## [Unreleased]
 
 ### Added
+- Web UI coverage for config, PRD, plan, apply, worktrees, registry, logs, doctor, backups, terminal, and live orchestration views.
+- Web API contract documentation for the full `/api/v1` surface, including config, PRD, plan, apply, worktrees, registry, logs, doctor, backups, terminal, and coordinator actions.
+- Web error catalog entries for terminal session and conflict handling.
 - Notifications center in the app shell for coordinator alerts and task status.
 - Real-time notification system using SSE event stream.
 - New notification store and hook for global notification management.
