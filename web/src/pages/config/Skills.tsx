@@ -32,6 +32,22 @@ function formatError(error: unknown): string {
   return 'Unexpected catalog error.';
 }
 
+function ensureStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string') : [];
+}
+
+function normalizeConfigResponse(config: ApiConfigResponse): ApiConfigResponse {
+  return {
+    ...config,
+    enabledTools: ensureStringArray(config.enabledTools),
+    selectedSkills: ensureStringArray(config.selectedSkills),
+    selectedAgents: ensureStringArray(config.selectedAgents),
+    selectedMcp: ensureStringArray(config.selectedMcp),
+    toolPriority: ensureStringArray(config.toolPriority),
+    managedEnvironmentWarnings: ensureStringArray(config.managedEnvironmentWarnings),
+  };
+}
+
 const Skills: React.FC = () => {
   const [config, setConfig] = React.useState<ApiConfigResponse | null>(null);
   const [customCatalog, setCustomCatalog] = React.useState<CatalogItem[]>([]);
@@ -52,7 +68,7 @@ const Skills: React.FC = () => {
     setIsLoading(true);
     setError(null);
     try {
-      const nextConfig = await getConfig();
+      const nextConfig = normalizeConfigResponse(await getConfig());
       setConfig(nextConfig);
       setCustomCatalog(readStoredCatalog());
       setCachedItemKeys(new Set(readStoredStringArray(CACHED_ITEMS_STORAGE_KEY)));
@@ -68,7 +84,7 @@ const Skills: React.FC = () => {
   }, [loadConfig]);
 
   const saveConfigSelection = React.useCallback(async (request: ApiConfigUpdateRequest) => {
-    const nextConfig = await updateConfig(request);
+    const nextConfig = normalizeConfigResponse(await updateConfig(request));
     setConfig(nextConfig);
     return nextConfig;
   }, []);

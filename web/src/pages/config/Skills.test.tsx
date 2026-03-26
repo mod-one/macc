@@ -158,4 +158,21 @@ describe('Skills page', () => {
     const payload = updateConfigMock.mock.calls[0][0] as Record<string, unknown>;
     expect(payload.selectedSkills).toEqual([]);
   });
+
+  it('renders when selected catalog arrays are missing from the config payload', async () => {
+    getConfigMock.mockResolvedValue(
+      buildConfig({
+        selectedSkills: null as unknown as ApiConfigResponse['selectedSkills'],
+        selectedAgents: null as unknown as ApiConfigResponse['selectedAgents'],
+        selectedMcp: null as unknown as ApiConfigResponse['selectedMcp'],
+        toolPriority: null as unknown as ApiConfigResponse['toolPriority'],
+        managedEnvironmentWarnings: null as unknown as ApiConfigResponse['managedEnvironmentWarnings'],
+      }),
+    );
+
+    render(<Skills />);
+
+    await screen.findByText('Skills & Catalog');
+    expect(screen.getByText('MACC Performer')).toBeInTheDocument();
+  });
 });
