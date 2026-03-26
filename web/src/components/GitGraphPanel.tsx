@@ -9,6 +9,7 @@ const PANEL_WIDTH_KEY = 'macc.gitGraphPanel.width';
 const MIN_PANEL_WIDTH = 280;
 const MAX_PANEL_WIDTH = 620;
 const DEFAULT_PANEL_WIDTH = 350;
+const RESIZE_STEP = 24;
 
 function readCollapsedState(): boolean {
   if (typeof window === 'undefined') {
@@ -37,6 +38,12 @@ const GitGraphPanel: React.FC = () => {
   const [resizing, setResizing] = useState(false);
   const dragStartX = useRef(0);
   const dragStartWidth = useRef(DEFAULT_PANEL_WIDTH);
+
+  const clampWidth = (value: number) => Math.max(MIN_PANEL_WIDTH, Math.min(MAX_PANEL_WIDTH, value));
+
+  const updatePanelWidth = (delta: number) => {
+    setPanelWidth((current) => clampWidth(current + delta));
+  };
 
   useEffect(() => {
     window.localStorage.setItem(PANEL_COLLAPSED_KEY, collapsed ? '1' : '0');
@@ -88,15 +95,37 @@ const GitGraphPanel: React.FC = () => {
       style={panelStyle}
     >
       {!collapsed && (
-        <button
-          type="button"
-          className="absolute left-0 top-0 h-full w-1 cursor-col-resize bg-transparent hover:bg-[var(--accent)]/30"
+        <div
           aria-label="Resize git graph panel"
+          aria-orientation="vertical"
+          aria-valuemax={MAX_PANEL_WIDTH}
+          aria-valuemin={MIN_PANEL_WIDTH}
+          aria-valuenow={panelWidth}
+          aria-valuetext={`${panelWidth} pixels`}
+          className="absolute left-0 top-0 h-full w-1 cursor-col-resize bg-transparent hover:bg-[var(--accent)]/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:ring-inset"
+          onKeyDown={(event) => {
+            if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') {
+              event.preventDefault();
+              updatePanelWidth(-RESIZE_STEP);
+            } else if (event.key === 'ArrowRight' || event.key === 'ArrowUp') {
+              event.preventDefault();
+              updatePanelWidth(RESIZE_STEP);
+            } else if (event.key === 'Home') {
+              event.preventDefault();
+              setPanelWidth(MIN_PANEL_WIDTH);
+            } else if (event.key === 'End') {
+              event.preventDefault();
+              setPanelWidth(MAX_PANEL_WIDTH);
+            }
+          }}
           onMouseDown={(event) => {
+            event.preventDefault();
             dragStartX.current = event.clientX;
             dragStartWidth.current = panelWidth;
             setResizing(true);
           }}
+          role="separator"
+          tabIndex={0}
         />
       )}
 
@@ -106,6 +135,7 @@ const GitGraphPanel: React.FC = () => {
             type="button"
             onClick={() => setCollapsed(false)}
             className="mx-auto rounded border border-[var(--border)] p-1 text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+            aria-label="Expand Git Graph panel"
             title="Expand Git Graph panel"
           >
             <Icons.ChevronLeft />
@@ -128,6 +158,7 @@ const GitGraphPanel: React.FC = () => {
                 type="button"
                 onClick={() => setCollapsed(true)}
                 className="rounded border border-[var(--border)] p-1 text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                aria-label="Collapse Git Graph panel"
                 title="Collapse Git Graph panel"
               >
                 <Icons.ChevronRight />

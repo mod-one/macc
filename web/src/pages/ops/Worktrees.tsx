@@ -125,13 +125,28 @@ const Worktrees: React.FC = () => {
       header: 'Actions',
       cell: info => (
         <div className="flex items-center gap-2">
-          <Button className="p-1 h-8 w-8 bg-transparent border-none hover:bg-white/10" onClick={() => runWorktree(info.row.original.id)} title="Run">
+          <Button
+            className="p-1 h-8 w-8 bg-transparent border-none hover:bg-white/10"
+            onClick={() => runWorktree(info.row.original.id)}
+            aria-label={`Run worktree ${info.row.original.slug || info.row.original.id}`}
+            title="Run"
+          >
             <Icons.PlayIcon className="h-4 w-4" />
           </Button>
-          <Button className="p-1 h-8 w-8 bg-transparent border-none hover:bg-white/10 text-[var(--accent)]" onClick={() => navigate('/ops/diagnostics')} title="Doctor">
+          <Button
+            className="p-1 h-8 w-8 bg-transparent border-none hover:bg-white/10 text-[var(--accent)]"
+            onClick={() => navigate('/ops/diagnostics')}
+            aria-label={`Open diagnostics for worktree ${info.row.original.slug || info.row.original.id}`}
+            title="Doctor"
+          >
             <Icons.ActivityIcon className="h-4 w-4" />
           </Button>
-          <Button className="p-1 h-8 w-8 bg-transparent border-none hover:bg-white/10 text-rose-500" onClick={() => setWorktreeToRemove(info.row.original.id)} title="Remove">
+          <Button
+            className="p-1 h-8 w-8 bg-transparent border-none hover:bg-white/10 text-rose-500"
+            onClick={() => setWorktreeToRemove(info.row.original.id)}
+            aria-label={`Remove worktree ${info.row.original.slug || info.row.original.id}`}
+            title="Remove"
+          >
             <Icons.TrashIcon className="h-4 w-4" />
           </Button>
         </div>

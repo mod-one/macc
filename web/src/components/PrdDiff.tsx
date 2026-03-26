@@ -207,6 +207,7 @@ const PrdDiff: React.FC<PrdDiffProps> = ({ currentTasks, currentMetadata, hasUns
             onClick={() => navigateToHunk(currentHunkIndex - 1)}
             disabled={currentHunkIndex <= 0 || totalHunks === 0}
             className="flex h-7 w-7 items-center justify-center rounded-md border border-[var(--border)] bg-[var(--bg-card)] text-[var(--text-muted)] transition-colors hover:bg-[var(--bg-hover)] disabled:opacity-30"
+            aria-label="Previous change"
             title="Previous change"
           >
             <Icons.ChevronUpIcon className="h-3.5 w-3.5" />
@@ -215,6 +216,7 @@ const PrdDiff: React.FC<PrdDiffProps> = ({ currentTasks, currentMetadata, hasUns
             onClick={() => navigateToHunk(currentHunkIndex + 1)}
             disabled={currentHunkIndex >= totalHunks - 1 || totalHunks === 0}
             className="flex h-7 w-7 items-center justify-center rounded-md border border-[var(--border)] bg-[var(--bg-card)] text-[var(--text-muted)] transition-colors hover:bg-[var(--bg-hover)] disabled:opacity-30"
+            aria-label="Next change"
             title="Next change"
           >
             <Icons.ChevronDownIcon className="h-3.5 w-3.5" />

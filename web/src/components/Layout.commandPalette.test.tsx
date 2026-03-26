@@ -7,6 +7,10 @@ vi.mock('./GitGraphPanel', () => ({
   default: () => null,
 }));
 
+vi.mock('../hooks/useNotificationCenter', () => ({
+  useNotificationCenter: vi.fn(),
+}));
+
 function RouteProbe() {
   const location = useLocation();
   return <div data-testid="route-probe">{location.pathname}</div>;

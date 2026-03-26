@@ -1,10 +1,11 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Link, Outlet, useLocation } from 'react-router-dom';
 import { Icons } from './NavIcons';
 import GitGraphPanel from './GitGraphPanel';
 import CommandPalette from './CommandPalette';
 import { NotificationsDrawer } from './NotificationsDrawer';
 import RouteLoadingSkeleton from './RouteLoadingSkeleton';
+import { StatusBadge } from './StatusBadge';
 import { useNotificationStore } from '../stores/notificationStore';
 import { useNotificationCenter } from '../hooks/useNotificationCenter';
 
@@ -50,6 +51,7 @@ const navGroups = [
 const Layout: React.FC = () => {
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
+  const mainRef = useRef<HTMLElement>(null);
   const location = useLocation();
   const showGitPanel = !location.pathname.startsWith('/ops/git');
   const { unreadCount, setIsOpen } = useNotificationStore();
@@ -69,67 +71,82 @@ const Layout: React.FC = () => {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
+  useEffect(() => {
+    mainRef.current?.focus();
+  }, [location.pathname]);
+
   return (
-    <div className="flex h-screen w-full bg-[var(--bg-primary)] text-[var(--text-primary)] overflow-hidden">
+    <div className="relative flex h-screen w-full overflow-hidden bg-[var(--bg-primary)] text-[var(--text-primary)]">
+      <a
+        href="#main-content"
+        className="fixed left-4 top-4 z-50 -translate-y-20 rounded-md bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-white shadow-lg transition-transform focus:translate-y-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-white/80"
+      >
+        Skip to content
+      </a>
+
       {/* Sidebar */}
-      <aside 
-        className={`flex flex-col bg-[var(--bg-secondary)] border-r border-[var(--border)] transition-all duration-300 ${
+      <aside
+        className={`flex flex-col border-r border-[var(--border)] bg-[var(--bg-secondary)] transition-all duration-300 ${
           isCollapsed ? 'w-[68px]' : 'w-[240px]'
         }`}
       >
-        <div className="h-12 flex items-center justify-between px-4 border-b border-[var(--border)]">
-          {!isCollapsed && <span className="font-bold text-sm tracking-wider uppercase text-[var(--text-secondary)]">MACC</span>}
-          <button 
-            onClick={() => setIsCollapsed(!isCollapsed)}
-            className={`p-1 rounded hover:bg-[var(--bg-card)] text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors ${isCollapsed ? 'mx-auto' : ''}`}
-            title={isCollapsed ? "Expand Sidebar" : "Collapse Sidebar"}
-          >
-            {isCollapsed ? <Icons.ChevronRight /> : <Icons.ChevronLeft />}
-          </button>
-        </div>
+        <nav aria-label="Primary navigation" className="flex h-full min-h-0 flex-col">
+          <div className="flex h-12 items-center justify-between border-b border-[var(--border)] px-4">
+            {!isCollapsed && <span className="text-sm font-bold uppercase tracking-wider text-[var(--text-secondary)]">MACC</span>}
+            <button
+              aria-label={isCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+              className={`rounded p-1 text-[var(--text-muted)] transition-colors hover:bg-[var(--bg-card)] hover:text-[var(--text-primary)] ${
+                isCollapsed ? 'mx-auto' : ''
+              }`}
+              onClick={() => setIsCollapsed(!isCollapsed)}
+              type="button"
+            >
+              {isCollapsed ? <Icons.ChevronRight /> : <Icons.ChevronLeft />}
+            </button>
+          </div>
 
-        <div className="flex-1 overflow-y-auto py-4 scrollbar-thin">
+          <div className="flex-1 overflow-y-auto py-4 scrollbar-thin">
           {navGroups.map((group, idx) => (
-            <div key={idx} className="mb-6">
-              {!isCollapsed && (
-                <div className="px-4 mb-2 text-xs font-semibold text-[var(--text-muted)] uppercase tracking-wider">
-                  {group.title}
-                </div>
-              )}
-              {isCollapsed && <div className="h-4" /> /* Spacer for collapsed state to maintain grouping visual rhythm */}
-              
-              <ul className="space-y-1 px-2">
-                {group.items.map(item => {
-                  const isActive = location.pathname.startsWith(item.path);
-                  const Icon = item.icon;
-                  
-                  return (
-                    <li key={item.path}>
-                      <Link
-                        to={item.path}
-                        title={isCollapsed ? item.label : undefined}
-                        className={`flex items-center gap-3 px-3 py-2 rounded-md transition-colors ${
-                          isActive 
-                            ? 'bg-[var(--bg-card)] text-[var(--accent)]' 
-                            : 'text-[var(--text-secondary)] hover:bg-[var(--bg-card)] hover:text-[var(--text-primary)]'
-                        } ${isCollapsed ? 'justify-center' : ''}`}
-                      >
-                        <div className={`flex-shrink-0 ${isActive ? 'text-[var(--accent)]' : ''}`}>
-                          <Icon />
-                        </div>
-                        {!isCollapsed && (
-                          <span className="text-sm font-medium whitespace-nowrap">
+              <div key={idx} className="mb-6">
+                {!isCollapsed && (
+                  <div className="mb-2 px-4 text-xs font-semibold uppercase tracking-wider text-[var(--text-muted)]">
+                    {group.title}
+                  </div>
+                )}
+                {isCollapsed && <div className="h-4" />}
+
+                <ul className="space-y-1 px-2">
+                  {group.items.map((item) => {
+                    const isActive = location.pathname.startsWith(item.path);
+                    const Icon = item.icon;
+
+                    return (
+                      <li key={item.path}>
+                        <Link
+                          aria-current={isActive ? 'page' : undefined}
+                          className={`flex items-center gap-3 rounded-md px-3 py-2 transition-colors ${
+                            isActive
+                              ? 'bg-[var(--bg-card)] text-[var(--accent)]'
+                              : 'text-[var(--text-secondary)] hover:bg-[var(--bg-card)] hover:text-[var(--text-primary)]'
+                          } ${isCollapsed ? 'justify-center' : ''}`}
+                          to={item.path}
+                          title={isCollapsed ? item.label : undefined}
+                        >
+                          <div className={`flex-shrink-0 ${isActive ? 'text-[var(--accent)]' : ''}`}>
+                            <Icon />
+                          </div>
+                          <span className={isCollapsed ? 'sr-only' : 'whitespace-nowrap text-sm font-medium'}>
                             {item.label}
                           </span>
-                        )}
-                      </Link>
-                    </li>
-                  );
-                })}
-              </ul>
-            </div>
-          ))}
-        </div>
+                        </Link>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            ))}
+          </div>
+        </nav>
       </aside>
 
       {/* Main Content Area */}
@@ -138,8 +155,8 @@ const Layout: React.FC = () => {
         <header className="h-12 bg-[var(--bg-primary)] border-b border-[var(--border)] flex items-center justify-between px-4 shrink-0">
           <div className="flex items-center gap-3">
             <div className="flex items-center gap-2">
-              <div className="w-2.5 h-2.5 rounded-full bg-[var(--success)] shadow-[0_0_8px_var(--success)]" title="Connected"></div>
-              <span className="text-sm font-mono text-[var(--text-secondary)] truncate max-w-[400px]">
+              <StatusBadge className="shrink-0 px-2 py-0.5 text-[11px]" status="Connected" tone="active" />
+              <span className="max-w-[400px] truncate font-mono text-sm text-[var(--text-secondary)]">
                 /home/brand/macc/.macc/worktree/worker-03
               </span>
             </div>
@@ -148,8 +165,10 @@ const Layout: React.FC = () => {
           <div className="flex items-center gap-3">
             <button 
               onClick={() => setIsOpen(true)}
-              className="relative flex items-center justify-center h-9 w-9 bg-[var(--bg-secondary)] border border-[var(--border)] rounded-md text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:border-[var(--text-muted)] transition-colors"
+              className="relative flex h-9 w-9 items-center justify-center rounded-md border border-[var(--border)] bg-[var(--bg-secondary)] text-[var(--text-muted)] transition-colors hover:border-[var(--text-muted)] hover:text-[var(--text-primary)]"
+              aria-label="Open notifications"
               title="Notifications"
+              type="button"
             >
               <Icons.Bell />
               {unreadCount > 0 && (
@@ -172,7 +191,12 @@ const Layout: React.FC = () => {
 
         {/* Page Content + Git Graph Side Panel */}
         <div className="flex min-h-0 flex-1">
-          <main className="flex-1 overflow-auto bg-[var(--bg-primary)] p-6">
+          <main
+            ref={mainRef}
+            id="main-content"
+            tabIndex={-1}
+            className="flex-1 overflow-auto bg-[var(--bg-primary)] p-6 focus:outline-none"
+          >
             <React.Suspense fallback={<RouteLoadingSkeleton />}>
               <Outlet />
             </React.Suspense>
@@ -183,9 +207,9 @@ const Layout: React.FC = () => {
         {/* Status Strip */}
         <footer className="h-8 bg-[var(--bg-secondary)] border-t border-[var(--border)] flex items-center px-4 text-xs font-mono text-[var(--text-muted)] shrink-0 justify-between">
           <div className="flex items-center gap-4">
-            <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-2">
               <span className="uppercase text-[var(--text-secondary)]">Coordinator:</span>
-              <span className="text-[var(--status-active)]">IDLE</span>
+              <StatusBadge className="px-2 py-0.5 text-[11px]" status="Idle" tone="todo" />
             </div>
           </div>
           <div className="flex items-center gap-6">
