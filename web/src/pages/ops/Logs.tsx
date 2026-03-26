@@ -1,4 +1,5 @@
 import React from 'react';
+import { useLocation } from 'react-router-dom';
 import type { ApiEventStreamMessage, ApiLogFile, ApiLogContent } from '../../api/models';
 import { getLogs, getLogContent } from '../../api/client';
 import { buildUrl } from '../../api/client';
@@ -290,6 +291,7 @@ function FileBrowserTab() {
   const tailIntervalRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
   const [highlightedLine, setHighlightedLine] = React.useState<number | null>(null);
   const contentTotalRef = React.useRef(0);
+  const location = useLocation();
   React.useEffect(() => {
     contentTotalRef.current = content?.total ?? 0;
   }, [content?.total]);
@@ -346,6 +348,13 @@ function FileBrowserTab() {
       setContent(null);
     }
   }, [selectedFile, fetchContent]);
+
+  React.useEffect(() => {
+    const state = location.state as { selectedLogPath?: string } | null;
+    if (state?.selectedLogPath) {
+      setSelectedFile(state.selectedLogPath);
+    }
+  }, [location.state]);
 
   // Tail mode: poll for latest content
   React.useEffect(() => {
@@ -612,6 +621,7 @@ function StructuredEventsTab() {
   const [events, setEvents] = React.useState<StructuredEventRecord[]>([]);
   const [eventsLoading, setEventsLoading] = React.useState(false);
   const [filters, setFilters] = React.useState<Record<string, string>>({});
+  const location = useLocation();
 
   // Load JSONL files (runs once on mount)
   const initialSelectedFile = React.useRef<string | null>(null);
@@ -642,6 +652,13 @@ function StructuredEventsTab() {
       cancelled = true;
     };
   }, []);
+
+  React.useEffect(() => {
+    const state = location.state as { selectedLogPath?: string } | null;
+    if (state?.selectedLogPath) {
+      setSelectedFile(state.selectedLogPath);
+    }
+  }, [location.state]);
 
   // Load file content and parse
   React.useEffect(() => {
@@ -780,6 +797,14 @@ function StructuredEventsTab() {
 
 const Logs: React.FC = () => {
   const [activeTab, setActiveTab] = React.useState<TabId>('stream');
+  const location = useLocation();
+
+  React.useEffect(() => {
+    const state = location.state as { selectedLogPath?: string } | null;
+    if (state?.selectedLogPath) {
+      setActiveTab('browser');
+    }
+  }, [location.state]);
 
   return (
     <section className="mx-auto flex w-full max-w-6xl flex-col gap-6 text-slate-700">

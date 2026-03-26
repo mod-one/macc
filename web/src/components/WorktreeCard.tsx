@@ -11,6 +11,7 @@ export interface WorktreeCardProps {
   onDoctor: (id: string) => void;
   onRemove: (id: string) => void;
   onOpen: (id: string) => void;
+  highlighted?: boolean;
 }
 
 export const WorktreeCard: React.FC<WorktreeCardProps> = ({
@@ -19,6 +20,7 @@ export const WorktreeCard: React.FC<WorktreeCardProps> = ({
   onDoctor,
   onRemove,
   onOpen,
+  highlighted = false,
 }) => {
   const getStatusTone = (status: string | null): StatusTone => {
     switch (status?.toLowerCase()) {
@@ -39,7 +41,14 @@ export const WorktreeCard: React.FC<WorktreeCardProps> = ({
   };
 
   return (
-    <article className={cn(surfaceClassName, interactiveSurfaceClassName, 'p-4 flex flex-col gap-4')}>
+    <article
+      className={cn(
+        surfaceClassName,
+        interactiveSurfaceClassName,
+        highlighted && 'ring-2 ring-inset ring-[var(--accent)]/50 bg-[var(--accent)]/5',
+        'p-4 flex flex-col gap-4',
+      )}
+    >
       <div className="flex items-start justify-between">
         <div className="flex flex-col gap-1 overflow-hidden">
           <h3 className="font-bold text-lg truncate" title={worktree.id}>

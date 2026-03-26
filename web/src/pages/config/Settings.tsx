@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { useLocation } from 'react-router-dom';
 import { getConfig, updateConfig, ApiClientError } from '../../api/client';
 import type { ApiConfigResponse, ApiConfigUpdateRequest } from '../../api/models';
 import { Button, ErrorBanner, LoadingSpinner, Toast } from '../../components';
@@ -392,7 +393,9 @@ const Settings: React.FC = () => {
   const [config, setConfig] = useState<ApiConfigResponse | null>(null);
   const [draft, setDraft] = useState<ApiConfigResponse | null>(null);
   const [activeTab, setActiveTab] = useState<SettingsTab>('general');
+  const [focusedSettingKey, setFocusedSettingKey] = useState<string | null>(null);
   const [toast, setToast] = useState<ToastState>({ open: false, title: '', variant: 'success' });
+  const location = useLocation();
 
   const isDirty = config !== null && draft !== null && JSON.stringify(config) !== JSON.stringify(draft);
 
@@ -418,6 +421,62 @@ const Settings: React.FC = () => {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    const state = location.state as { highlightSettingKey?: string } | null;
+    if (!state?.highlightSettingKey) {
+      return;
+    }
+
+    setFocusedSettingKey(state.highlightSettingKey);
+
+    const generalKeys = [
+      'webPort',
+      'offline',
+      'quiet',
+      'referenceBranch',
+      'prdFile',
+      'coordinatorTool',
+      'enabledTools',
+      'selectedSkills',
+      'selectedAgents',
+      'selectedMcp',
+      'toolConfig',
+      'toolSettings',
+      'standardsPath',
+      'standardsInline',
+      'toolPriority',
+    ];
+    const coordinatorKeys = [
+      'maxDispatch',
+      'maxParallel',
+      'timeoutSeconds',
+      'phaseRunnerMaxAttempts',
+      'dispatchCooldownSeconds',
+      'staleClaimedSeconds',
+      'staleInProgressSeconds',
+      'staleChangesRequestedSeconds',
+      'staleAction',
+      'errorCodeRetryList',
+      'errorCodeRetryMax',
+      'rateLimitBackoffBaseSeconds',
+      'rateLimitBackoffMaxSeconds',
+      'rateLimitFallbackEnabled',
+      'rateLimitThrottleParallel',
+    ];
+
+    if (generalKeys.some((prefix) => state.highlightSettingKey?.startsWith(prefix))) {
+      setActiveTab('general');
+      return;
+    }
+
+    if (coordinatorKeys.some((prefix) => state.highlightSettingKey?.startsWith(prefix))) {
+      setActiveTab('coordinator');
+      return;
+    }
+
+    setActiveTab('advanced');
+  }, [location.state]);
 
   /* Patch draft */
   const updateDraft = useCallback((patch: Partial<ApiConfigUpdateRequest>) => {
@@ -488,6 +547,11 @@ const Settings: React.FC = () => {
           <p className="mt-1 text-sm text-[var(--text-secondary)]">
             General, coordinator, and advanced configuration.
           </p>
+          {focusedSettingKey && (
+            <p className="mt-3 inline-flex rounded-full border border-[var(--accent)]/30 bg-[var(--accent)]/10 px-3 py-1 text-xs font-medium text-[var(--accent)]">
+              Focused key: {focusedSettingKey}
+            </p>
+          )}
         </div>
         <div className="flex items-center gap-2">
           {isDirty && (

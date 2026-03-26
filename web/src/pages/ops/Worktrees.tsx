@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { 
   useReactTable, 
   getCoreRowModel, 
@@ -39,6 +39,8 @@ const Worktrees: React.FC = () => {
   const [sorting, setSorting] = useState<SortingState>([]);
   const [worktreeToRemove, setWorktreeToRemove] = useState<string | null>(null);
   const [wizardOpen, setWizardOpen] = useState(false);
+  const [selectedWorktreeId, setSelectedWorktreeId] = useState<string | null>(null);
+  const location = useLocation();
 
   useEffect(() => {
     loadWorktrees();
@@ -49,6 +51,13 @@ const Worktrees: React.FC = () => {
   useEffect(() => {
     localStorage.setItem('macc-worktrees-view', viewMode);
   }, [viewMode]);
+
+  useEffect(() => {
+    const state = location.state as { selectedWorktreeId?: string } | null;
+    if (state?.selectedWorktreeId) {
+      setSelectedWorktreeId(state.selectedWorktreeId);
+    }
+  }, [location.state]);
 
   const kpis = useMemo(() => {
     const total = worktrees.length;
@@ -287,7 +296,13 @@ const Worktrees: React.FC = () => {
             </thead>
             <tbody>
               {table.getRowModel().rows.map(row => (
-                <tr key={row.id} className="border-b border-[var(--border)] last:border-0 hover:bg-[var(--bg-hover)] transition-colors group">
+                <tr
+                  key={row.id}
+                  className={cn(
+                    'border-b border-[var(--border)] last:border-0 transition-colors group hover:bg-[var(--bg-hover)]',
+                    selectedWorktreeId === row.original.id && 'bg-[var(--accent)]/10 ring-1 ring-inset ring-[var(--accent)]/40',
+                  )}
+                >
                   {row.getVisibleCells().map(cell => (
                     <td key={cell.id} className="px-6 py-4 align-middle">
                       {flexRender(cell.column.columnDef.cell, cell.getContext())}
@@ -308,6 +323,7 @@ const Worktrees: React.FC = () => {
               onDoctor={() => navigate('/ops/diagnostics')}
               onRemove={setWorktreeToRemove}
               onOpen={(id) => navigate(`/ops/worktrees/${id}`)}
+              highlighted={selectedWorktreeId === w.id}
             />
           ))}
         </div>
