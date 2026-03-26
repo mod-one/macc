@@ -74,6 +74,35 @@ function isJsonObject(value: JsonValue | undefined): value is Record<string, Jso
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
+function ensureJsonRecord(value: unknown): Record<string, JsonValue> {
+  return isJsonObject(value as JsonValue | undefined) ? (value as Record<string, JsonValue>) : {};
+}
+
+function ensureStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string') : [];
+}
+
+function normalizeConfigResponse(config: ApiConfigResponse): ApiConfigResponse {
+  return {
+    ...config,
+    enabledTools: ensureStringArray(config.enabledTools),
+    toolConfig: ensureJsonRecord(config.toolConfig),
+    toolSettings: ensureJsonRecord(config.toolSettings),
+    toolPriority: ensureStringArray(config.toolPriority),
+    standardsInline: isRecord(config.standardsInline)
+      ? Object.fromEntries(
+          Object.entries(config.standardsInline).filter(
+            (entry): entry is [string, string] => typeof entry[1] === 'string',
+          ),
+        )
+      : {},
+    selectedSkills: ensureStringArray(config.selectedSkills),
+    selectedAgents: ensureStringArray(config.selectedAgents),
+    selectedMcp: ensureStringArray(config.selectedMcp),
+    managedEnvironmentWarnings: ensureStringArray(config.managedEnvironmentWarnings),
+  };
+}
+
 function formatError(error: unknown): string {
   if (error instanceof ApiClientError) {
     return `${error.envelope.error.message} (${error.envelope.error.code})`;
@@ -303,7 +332,7 @@ const Init: React.FC = () => {
     void (async () => {
       setIsLoading(true);
       try {
-        const nextConfig = await getConfig();
+        const nextConfig = normalizeConfigResponse(await getConfig());
         if (cancelled) {
           return;
         }

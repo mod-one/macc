@@ -217,4 +217,26 @@ describe('Init page', () => {
     expect(updateConfigMock).not.toHaveBeenCalled();
     expect(navigateMock).not.toHaveBeenCalled();
   });
+
+  it('renders when tool maps are missing from the config payload', async () => {
+    getConfigMock.mockResolvedValueOnce(
+      buildConfig({
+        enabledTools: ['codex'],
+        toolConfig: null as unknown as ApiConfigResponse['toolConfig'],
+        toolSettings: null as unknown as ApiConfigResponse['toolSettings'],
+        toolPriority: null as unknown as ApiConfigResponse['toolPriority'],
+        standardsInline: null as unknown as ApiConfigResponse['standardsInline'],
+        selectedSkills: null as unknown as ApiConfigResponse['selectedSkills'],
+        selectedAgents: null as unknown as ApiConfigResponse['selectedAgents'],
+        selectedMcp: null as unknown as ApiConfigResponse['selectedMcp'],
+        managedEnvironmentWarnings: null as unknown as ApiConfigResponse['managedEnvironmentWarnings'],
+      }),
+    );
+
+    render(<Init />);
+
+    await screen.findByText('Project initialization wizard');
+    expect(screen.getByText('Step 1')).toBeInTheDocument();
+    expect(screen.getByLabelText('Project root')).toBeInTheDocument();
+  });
 });
