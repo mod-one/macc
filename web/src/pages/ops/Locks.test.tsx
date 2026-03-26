@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ApiRegistryTask, ApiWorktree } from '../../api/models';
 
@@ -7,15 +8,28 @@ const { fitViewMock, runActionMock } = vi.hoisted(() => ({
   runActionMock: vi.fn().mockResolvedValue({}),
 }));
 
+interface MockFlowNode {
+  id: string;
+  data?: {
+    title?: ReactNode;
+  };
+}
+
+interface ReactFlowMockProps {
+  children?: ReactNode;
+  nodes?: MockFlowNode[];
+  onNodeClick?: (event: unknown, node: MockFlowNode) => void;
+}
+
 vi.mock('@xyflow/react', async () => {
   const actual = await vi.importActual<typeof import('@xyflow/react')>('@xyflow/react');
 
-  function ReactFlowMock({ nodes, onNodeClick, children }: any) {
+  function ReactFlowMock({ nodes, onNodeClick, children }: ReactFlowMockProps) {
     return (
       <div data-testid="react-flow">
         {children}
         <div>
-          {nodes?.map((node: any) => (
+          {nodes?.map((node) => (
             <button
               key={node.id}
               data-testid={`node-${node.id}`}
@@ -52,14 +66,23 @@ vi.mock('../../api/client', async () => {
   };
 });
 
+interface CoordinatorStoreState {
+  status: null;
+  loadError: null;
+  isLoadingStatus: boolean;
+  pendingAction: null;
+  loadStatus: () => Promise<void>;
+  runAction: typeof runActionMock;
+}
+
 vi.mock('../../store', () => ({
-  useCoordinatorStore: (selector: any) =>
+  useCoordinatorStore: <T,>(selector: (state: CoordinatorStoreState) => T) =>
     selector({
       status: null,
       loadError: null,
       isLoadingStatus: false,
       pendingAction: null,
-      loadStatus: vi.fn(),
+      loadStatus: vi.fn().mockResolvedValue(undefined),
       runAction: runActionMock,
   }),
 }));
