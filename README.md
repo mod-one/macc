@@ -111,18 +111,19 @@ These commands assume `macc` is already available in `PATH` (for example via `./
 
 The web app now covers these areas:
 
+- `Welcome` and `Init`: first-run onboarding, environment checks, and project bootstrap.
 - `Dashboard`: coordinator health, worktree status, and live orchestration summary.
-- `Config`: tool selection, standards preview, skills, and global/web settings.
-- `PRD`, `Plan`, `Apply`: PRD editing, plan previews, and apply execution.
+- `Config / Tools`, `Config / Standards`, `Config / Skills`, and `Config / Settings`: tool selection, standards preview, skill selection, and global/web settings.
+- `PRD`, `Plan`, and `Apply`: PRD editing, plan previews, and apply execution.
 - `Ops / Console`: coordinator live controls and runtime state.
 - `Ops / Registry`: task registry inspection and task actions.
 - `Ops / Worktrees` and `Ops / Live`: worktree management, concurrent log tiles, and per-worktree terminal access.
+- `Ops / Worker Detail`: focused task/worktree drill-down.
+- `Ops / Locks`: task/worktree lock visualization.
 - `Ops / Logs`: coordinator event stream, log browser, and log tailing.
 - `Ops / Diagnostics`: doctor report and safe-fix workflow.
 - `Ops / Backups`: backup browsing and restore.
 - `Ops / Git`: repository graph view.
-- `Ops / Locks`: task/worktree lock visualization.
-- `Ops / Worker Detail`: focused task/worktree drill-down.
 - `Help` and `About`: supporting information pages.
 
 Development workflow:
@@ -140,6 +141,8 @@ macc web
 ```
 
 Open `http://localhost:5173`. The Vite dev server proxies `/api` requests to `http://localhost:3450`, so the UI can hit the local MACC backend without any extra configuration.
+
+For frontend changes, run `npm run lint` and `npm test` before building.
 
 Production-like workflow (`web/dist` served by the backend):
 

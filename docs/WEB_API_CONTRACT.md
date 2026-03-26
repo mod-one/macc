@@ -9,6 +9,7 @@ Scope: local, single-user, no auth.
 - Errors use a shared envelope.
 - `EventSource` endpoints use `text/event-stream`.
 - `GET /api/v1/prd` and `PUT /api/v1/prd` accept an optional `?path=` query string for worktree-specific PRDs.
+- The sections below cover the current local web surface end to end: config, PRD, plan, apply, worktrees, registry, logs, doctor, backups, terminal, and supporting coordinator endpoints.
 
 ### Error Envelope
 

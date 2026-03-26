@@ -1,6 +1,7 @@
 # Error Catalog
 
-This catalog defines error code naming and the initial web/API codes.
+This catalog defines error code naming and the current web/API codes.
+Keep it synchronized with `cli/src/commands/web/errors.rs`.
 
 ## Naming
 
