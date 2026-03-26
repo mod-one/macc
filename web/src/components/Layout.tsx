@@ -3,6 +3,7 @@ import { Link, Outlet, useLocation } from 'react-router-dom';
 import { Icons } from './NavIcons';
 import GitGraphPanel from './GitGraphPanel';
 import CommandPalette from './CommandPalette';
+import GlobalSearch from './GlobalSearch';
 import { NotificationsDrawer } from './NotificationsDrawer';
 import RouteLoadingSkeleton from './RouteLoadingSkeleton';
 import { StatusBadge } from './StatusBadge';
@@ -162,6 +163,10 @@ const Layout: React.FC = () => {
             </div>
           </div>
           
+          <div className="flex flex-1 items-center justify-center px-4">
+            <GlobalSearch />
+          </div>
+
           <div className="flex items-center gap-3">
             <button 
               onClick={() => setIsOpen(true)}
@@ -178,13 +183,15 @@ const Layout: React.FC = () => {
               )}
             </button>
             <button
-              className="flex items-center gap-2 px-3 py-1.5 bg-[var(--bg-secondary)] border border-[var(--border)] rounded-md text-sm text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:border-[var(--text-muted)] transition-colors"
+              className="flex items-center gap-2 rounded-md border border-[var(--border)] bg-[var(--bg-secondary)] px-3 py-1.5 text-sm text-[var(--text-muted)] transition-colors hover:border-[var(--text-muted)] hover:text-[var(--text-primary)]"
               onClick={() => setIsCommandPaletteOpen(true)}
               type="button"
             >
               <Icons.Search />
               <span>Search...</span>
-              <kbd className="ml-2 font-mono text-xs bg-[var(--bg-card)] px-1.5 py-0.5 rounded border border-[var(--border)]">Ctrl+K</kbd>
+              <kbd className="ml-2 rounded border border-[var(--border)] bg-[var(--bg-card)] px-1.5 py-0.5 font-mono text-xs">
+                Ctrl+K
+              </kbd>
             </button>
           </div>
         </header>

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { useLocation } from 'react-router-dom';
 import { 
   useReactTable, 
   getCoreRowModel, 
@@ -44,6 +45,7 @@ const Registry: React.FC = () => {
   const [showAbandonDialog, setShowAbandonDialog] = useState(false);
   const [reassignTool, setReassignTool] = useState('');
   const [reassignJustification, setReassignJustification] = useState('');
+  const location = useLocation();
 
   const tableContainerRef = useRef<HTMLDivElement>(null);
 
@@ -87,6 +89,13 @@ const Registry: React.FC = () => {
   const selectedTask = useMemo(() => 
     tasks.find(t => t.id === selectedTaskId) || null
   , [tasks, selectedTaskId]);
+
+  useEffect(() => {
+    const state = location.state as { selectedTaskId?: string } | null;
+    if (state?.selectedTaskId) {
+      setSelectedTaskId(state.selectedTaskId);
+    }
+  }, [location.state]);
 
   const columns = useMemo(() => [
     columnHelper.accessor('id', {
@@ -316,14 +325,14 @@ const Registry: React.FC = () => {
             {rowVirtualizer.getVirtualItems().map(virtualRow => {
               const row = rows[virtualRow.index];
               return (
-                <tr 
+                <tr
                   key={row.id}
                   data-index={virtualRow.index}
                   ref={rowVirtualizer.measureElement}
                   onClick={() => setSelectedTaskId(row.original.id)}
                   className={cn(
-                    "absolute w-full hover:bg-[var(--bg-secondary)]/50 cursor-pointer transition-colors border-b border-[var(--border)]/50",
-                    selectedTaskId === row.original.id && "bg-[var(--accent)]/10 ring-1 ring-inset ring-[var(--accent)]/50"
+                    'absolute w-full cursor-pointer border-b border-[var(--border)]/50 transition-colors hover:bg-[var(--bg-secondary)]/50',
+                    selectedTaskId === row.original.id && 'bg-[var(--accent)]/10 ring-1 ring-inset ring-[var(--accent)]/50',
                   )}
                   style={{ transform: `translateY(${virtualRow.start}px)` }}
                 >

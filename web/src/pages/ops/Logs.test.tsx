@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { MemoryRouter } from 'react-router-dom';
 import Logs from './Logs';
 
 type EventHandler = (event: MessageEvent<string> | Event) => void;
@@ -84,14 +85,22 @@ describe('Logs page', () => {
   });
 
   it('renders tab navigation with three tabs', () => {
-    render(<Logs />);
+    render(
+      <MemoryRouter initialEntries={['/ops/logs']}>
+        <Logs />
+      </MemoryRouter>,
+    );
     expect(screen.getByText('Live Stream')).toBeInTheDocument();
     expect(screen.getByText('File Browser')).toBeInTheDocument();
     expect(screen.getByText('Structured Events')).toBeInTheDocument();
   });
 
   it('defaults to Live Stream tab and renders streamed events', async () => {
-    render(<Logs />);
+    render(
+      <MemoryRouter initialEntries={['/ops/logs']}>
+        <Logs />
+      </MemoryRouter>,
+    );
 
     expect(screen.getByText(/waiting for the first event/i)).toBeInTheDocument();
     expect(MockEventSource.instances).toHaveLength(1);
@@ -149,7 +158,11 @@ describe('Logs page', () => {
   });
 
   it('switches to File Browser tab', async () => {
-    render(<Logs />);
+    render(
+      <MemoryRouter initialEntries={['/ops/logs']}>
+        <Logs />
+      </MemoryRouter>,
+    );
     fireEvent.click(screen.getByText('File Browser'));
 
     await waitFor(() => {
@@ -158,7 +171,11 @@ describe('Logs page', () => {
   });
 
   it('switches to Structured Events tab', async () => {
-    render(<Logs />);
+    render(
+      <MemoryRouter initialEntries={['/ops/logs']}>
+        <Logs />
+      </MemoryRouter>,
+    );
     fireEvent.click(screen.getByText('Structured Events'));
 
     await waitFor(() => {
@@ -168,7 +185,11 @@ describe('Logs page', () => {
 
   it('reconnects with last_event_id after disconnects', async () => {
     vi.useFakeTimers();
-    render(<Logs />);
+    render(
+      <MemoryRouter initialEntries={['/ops/logs']}>
+        <Logs />
+      </MemoryRouter>,
+    );
 
     const source = MockEventSource.instances[0]!;
     act(() => {
@@ -202,7 +223,11 @@ describe('Logs page', () => {
 
   it('indicates when the resumed stream skips events after reconnect', async () => {
     vi.useFakeTimers();
-    render(<Logs />);
+    render(
+      <MemoryRouter initialEntries={['/ops/logs']}>
+        <Logs />
+      </MemoryRouter>,
+    );
 
     const source = MockEventSource.instances[0]!;
     act(() => {
@@ -247,6 +272,35 @@ describe('Logs page', () => {
     expect(screen.getByText(/stream resumed live without replay support/i)).toBeInTheDocument();
     vi.useRealTimers();
   });
+
+  it('opens the selected log file from navigation state', async () => {
+    const { getLogContent } = await import('../../api/client');
+    vi.mocked(getLogContent).mockResolvedValue({
+      path: 'coordinator/events.jsonl',
+      lines: ['line one'],
+      total: 1,
+    });
+
+    render(
+      <MemoryRouter
+        initialEntries={[
+          {
+            pathname: '/ops/logs',
+            state: { selectedLogPath: 'coordinator/events.jsonl' },
+          },
+        ]}
+      >
+        <Logs />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(getLogContent).toHaveBeenCalledWith(
+        'coordinator/events.jsonl',
+        expect.objectContaining({ offset: 0 }),
+      );
+    });
+  });
 });
 
 describe('Logs page - File Browser tab', () => {
@@ -269,7 +323,11 @@ describe('Logs page - File Browser tab', () => {
       { path: 'performer/task-001.log', size: 512, modified: '2026-03-19T09:00:00Z' },
     ]);
 
-    render(<Logs />);
+    render(
+      <MemoryRouter initialEntries={['/ops/logs']}>
+        <Logs />
+      </MemoryRouter>,
+    );
     fireEvent.click(screen.getByText('File Browser'));
 
     await waitFor(() => {
@@ -291,7 +349,11 @@ describe('Logs page - File Browser tab', () => {
       total: 3,
     });
 
-    render(<Logs />);
+    render(
+      <MemoryRouter initialEntries={['/ops/logs']}>
+        <Logs />
+      </MemoryRouter>,
+    );
     fireEvent.click(screen.getByText('File Browser'));
 
     await waitFor(() => {

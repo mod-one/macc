@@ -7,6 +7,10 @@ vi.mock('./GitGraphPanel', () => ({
   default: () => null,
 }));
 
+vi.mock('./GlobalSearch', () => ({
+  default: () => null,
+}));
+
 vi.mock('../hooks/useNotificationCenter', () => ({
   useNotificationCenter: vi.fn(),
 }));

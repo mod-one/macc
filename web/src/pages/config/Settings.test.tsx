@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ApiConfigResponse } from '../../api/models';
+import { MemoryRouter } from 'react-router-dom';
 import Settings from './Settings';
 
 const getConfigMock = vi.fn();
@@ -80,7 +81,11 @@ function buildConfig(overrides: Partial<ApiConfigResponse> = {}): ApiConfigRespo
 }
 
 function renderPage(): void {
-  render(<Settings />);
+  render(
+    <MemoryRouter initialEntries={['/config/settings']}>
+      <Settings />
+    </MemoryRouter>,
+  );
 }
 
 describe('Settings page', () => {
@@ -119,6 +124,27 @@ describe('Settings page', () => {
     expect(screen.getByText('Timeout (seconds)')).toBeInTheDocument();
     expect(screen.getByText('Error Code Retry List')).toBeInTheDocument();
     expect(screen.getByText('Backoff Base (seconds)')).toBeInTheDocument();
+  });
+
+  it('opens the matching tab when navigated from global search', async () => {
+    getConfigMock.mockResolvedValue(buildConfig());
+
+    render(
+      <MemoryRouter
+        initialEntries={[
+          {
+            pathname: '/config/settings',
+            state: { highlightSettingKey: 'maxParallel' },
+          },
+        ]}
+      >
+        <Settings />
+      </MemoryRouter>,
+    );
+
+    await screen.findByText('Settings');
+    expect(screen.getByText('Focused key: maxParallel')).toBeInTheDocument();
+    expect(screen.getByText('Dispatch & Parallelism')).toBeInTheDocument();
   });
 
   it('switches to Advanced tab and shows raw JSON editor', async () => {
