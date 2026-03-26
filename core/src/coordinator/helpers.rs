@@ -216,9 +216,7 @@ pub fn find_reusable_worktree_native(
             // it will never merge autonomously. Force-checkout to base to reclaim the slot
             // rather than letting the coordinator deadlock.
             let stuck = TaskRegistry::from_value(registry)
-                .map(|r| {
-                    r.task_on_worktree_is_permanently_stuck(&entry.path.to_string_lossy())
-                })
+                .map(|r| r.task_on_worktree_is_permanently_stuck(&entry.path.to_string_lossy()))
                 .unwrap_or(false);
             if stuck {
                 // Abandon the unmerged branch by checking out base, then fall through

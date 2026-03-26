@@ -2209,7 +2209,12 @@ mod tests {
             }),
         };
         let mut task_val = task_json;
-        apply_job_completion(&mut task_val, &input, &NormalizerRegistry::empty(), "2026-02-21T00:00:00Z");
+        apply_job_completion(
+            &mut task_val,
+            &input,
+            &NormalizerRegistry::empty(),
+            "2026-02-21T00:00:00Z",
+        );
         assert_eq!(task_val["task_runtime"]["last_error_code"], "E101");
         assert!(task_val["task_runtime"]["tool_error"].is_null());
     }

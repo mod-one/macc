@@ -84,7 +84,10 @@ fn normalizer_routes_claude_529_to_overloaded() {
 #[test]
 fn normalizer_routes_codex_insufficient_quota_to_e602() {
     let mut task_val = make_failure_task("codex");
-    let input = make_failure_input("429 insufficient_quota: You exceeded your current quota", "");
+    let input = make_failure_input(
+        "429 insufficient_quota: You exceeded your current quota",
+        "",
+    );
     let out = apply_job_completion(&mut task_val, &input, &registry(), "2026-02-21T00:00:00Z");
     assert_eq!(task_val["task_runtime"]["last_error_code"], "E602");
     let te = out.tool_error.unwrap();
@@ -166,7 +169,10 @@ fn exit_code_override_already_satisfied_with_transient_error() {
     assert_eq!(out.status_label, "already_satisfied");
     assert_eq!(task_val["state"], "merged");
     assert_eq!(task_val["task_runtime"]["status"], "idle");
-    assert_eq!(task_val["task_runtime"]["completion_kind"], "already_satisfied");
+    assert_eq!(
+        task_val["task_runtime"]["completion_kind"],
+        "already_satisfied"
+    );
 }
 
 #[test]
@@ -223,7 +229,10 @@ fn e601_throttle_state_stored_in_extra() {
 #[test]
 fn e602_requeues_task_with_cooldown() {
     let mut task_val = make_failure_task("codex");
-    let input = make_failure_input("429 insufficient_quota: You exceeded your current quota", "");
+    let input = make_failure_input(
+        "429 insufficient_quota: You exceeded your current quota",
+        "",
+    );
     let out = apply_job_completion(&mut task_val, &input, &registry(), "2026-02-21T00:00:00Z");
     assert_eq!(out.status_label, "quota_exhausted_requeue");
     assert_eq!(task_val["state"], "todo");

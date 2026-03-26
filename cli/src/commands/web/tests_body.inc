@@ -3691,6 +3691,92 @@ async fn config_put_endpoint_creates_backup_before_write() {
 }
 
 #[tokio::test]
+async fn standards_preview_endpoint_uses_adapter_rendering() {
+    let root = temp_root("standards-preview");
+    fs::create_dir_all(&root).expect("create root");
+
+    let paths = ProjectPaths::from_root(&root);
+    fs::create_dir_all(paths.config_path.parent().expect("config dir")).expect("mkdir config");
+    let mut canonical = CanonicalConfig::default();
+    canonical.tools.config.insert(
+        "claude".to_string(),
+        serde_json::json!({
+            "model": "opus",
+            "language": "Spanish"
+        }),
+    );
+    canonical.tools.config.insert(
+        "codex".to_string(),
+        serde_json::json!({
+            "rules_enabled": false
+        }),
+    );
+    fs::write(
+        &paths.config_path,
+        canonical.to_yaml().expect("serialize config"),
+    )
+    .expect("write config");
+
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/config/standards-preview")
+                .method("POST")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "standardsPath": null,
+                        "standardsInline": {
+                            "language": "German",
+                            "package_manager": "pnpm"
+                        }
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+
+    assert_eq!(payload["cards"].as_array().expect("cards").len(), 3);
+    let claude = &payload["cards"][1]["content"];
+    assert!(
+        claude
+            .as_str()
+            .expect("claude preview")
+            .contains("- **Primary Model**: opus")
+    );
+    assert!(
+        claude
+            .as_str()
+            .expect("claude preview")
+            .contains("- **Language**: Spanish")
+    );
+    let codex = payload["cards"][0]["content"].as_str().expect("codex preview");
+    assert!(
+        codex.contains("AGENTS.md is not generated when codex.rules_enabled is false."),
+        "unexpected codex preview: {}",
+        codex
+    );
+}
+
+#[tokio::test]
 async fn backups_list_endpoint_returns_empty_array_when_no_backups_exist() {
     let root = temp_root("backups-list-empty");
     fs::create_dir_all(&root).expect("create root");

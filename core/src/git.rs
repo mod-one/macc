@@ -494,7 +494,9 @@ pub fn missing_git_identity_fields(repo_root: &Path) -> Vec<&'static str> {
             .current_dir(repo_root)
             .output()
             .ok()
-            .map(|out| out.status.success() && !String::from_utf8_lossy(&out.stdout).trim().is_empty())
+            .map(|out| {
+                out.status.success() && !String::from_utf8_lossy(&out.stdout).trim().is_empty()
+            })
             .unwrap_or(false);
         if !configured {
             missing.push(key);

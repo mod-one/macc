@@ -1,13 +1,19 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ApiConfigResponse } from '../../api/models';
+import type {
+  ApiConfigResponse,
+  ApiStandardsPreviewRequest,
+  ApiStandardsPreviewResponse,
+} from '../../api/models';
 import Standards from './Standards';
 
 const getConfigMock = vi.fn();
+const getStandardsPreviewMock = vi.fn();
 const updateConfigMock = vi.fn();
 
 vi.mock('../../api/client', () => ({
   getConfig: (...args: unknown[]) => getConfigMock(...args),
+  getStandardsPreview: (...args: unknown[]) => getStandardsPreviewMock(...args),
   updateConfig: (...args: unknown[]) => updateConfigMock(...args),
   ApiClientError: class ApiClientError extends Error {
     envelope = {
@@ -82,23 +88,64 @@ function buildConfig(overrides: Partial<ApiConfigResponse> = {}): ApiConfigRespo
   };
 }
 
+function buildStandardsPreview(
+  overrides: Partial<ApiStandardsPreviewResponse> = {},
+): ApiStandardsPreviewResponse {
+  return {
+    cards: [
+      {
+        id: 'codex',
+        title: 'Codex - AGENTS.md (rendered)',
+        content: '# Project Instructions (MACC)\n\n## Standards\n- language: English\n',
+      },
+      {
+        id: 'claude',
+        title: 'Claude - CLAUDE.md (rendered)',
+        content: '# Project Instructions (MACC)\n\n- **Primary Model**: opus\n- **Language**: English\n',
+      },
+      {
+        id: 'gemini',
+        title: 'Gemini - GEMINI.md (rendered)',
+        content: '# Project Instructions (MACC)\n\n## Standards (summary)\n- language: English\n',
+      },
+    ],
+    ...overrides,
+  };
+}
+
 describe('Standards page', () => {
   beforeEach(() => {
     getConfigMock.mockReset();
+    getStandardsPreviewMock.mockReset();
     updateConfigMock.mockReset();
+    getStandardsPreviewMock.mockResolvedValue(buildStandardsPreview());
   });
 
-  it('renders editor, diff, lint, and preview sections', async () => {
+  it('renders editor, diff, lint, and API-backed preview sections', async () => {
     getConfigMock.mockResolvedValue(buildConfig());
     render(<Standards />);
 
     await screen.findByText('Standards');
+    await waitFor(() => {
+      expect(getStandardsPreviewMock).toHaveBeenCalledTimes(1);
+    });
+
+    const previewRequest = getStandardsPreviewMock.mock.calls[0][0] as ApiStandardsPreviewRequest;
+    expect(previewRequest).toMatchObject({
+      standardsPath: null,
+      standardsInline: {
+        language: 'English',
+        package_manager: 'pnpm',
+      },
+    });
+
     expect(screen.getByLabelText('Standards preset')).toBeInTheDocument();
     expect(screen.getByText('Override editor')).toBeInTheDocument();
     expect(screen.getByText('Diff from preset')).toBeInTheDocument();
     expect(screen.getByText('Lint warnings')).toBeInTheDocument();
     expect(screen.getByText('Rendered output preview')).toBeInTheDocument();
-    expect(screen.getByText('Codex - AGENTS.md (standards excerpt)')).toBeInTheDocument();
+    expect(screen.getByText('Codex - AGENTS.md (rendered)')).toBeInTheDocument();
+    expect(screen.getByText(/Primary Model/)).toBeInTheDocument();
   });
 
   it('supports preset changes and override edits', async () => {

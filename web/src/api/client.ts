@@ -22,6 +22,8 @@ import type {
   ApiRegistryTask,
   ApiRegistryTaskAction,
   ApiRestoreRequest,
+  ApiStandardsPreviewRequest,
+  ApiStandardsPreviewResponse,
   ApiWorktree,
   ApiWorktreeCreateRequest,
   GitCommit,
@@ -258,6 +260,18 @@ export async function updateConfig(
   return sendJson<ApiConfigResponse, ApiConfigUpdateRequest>(
     '/config',
     'PUT',
+    options,
+    request,
+  );
+}
+
+export async function getStandardsPreview(
+  request: ApiStandardsPreviewRequest,
+  options: ApiRequestOptions = {},
+): Promise<ApiStandardsPreviewResponse> {
+  return sendJson<ApiStandardsPreviewResponse, ApiStandardsPreviewRequest>(
+    '/config/standards-preview',
+    'POST',
     options,
     request,
   );

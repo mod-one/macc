@@ -1,6 +1,6 @@
 import React from 'react';
-import { getConfig, updateConfig, ApiClientError } from '../../api/client';
-import type { ApiConfigResponse } from '../../api/models';
+import { getConfig, getStandardsPreview, updateConfig, ApiClientError } from '../../api/client';
+import type { ApiConfigResponse, ApiStandardsPreviewCard } from '../../api/models';
 import { Button, ErrorBanner, LoadingSpinner, Toast } from '../../components';
 import { cn } from '../../components/styles';
 
@@ -21,6 +21,8 @@ interface StandardsPreset {
   description: string;
   values: StandardsMap;
 }
+
+type PreviewCard = ApiStandardsPreviewCard;
 
 const PRESETS: StandardsPreset[] = [
   {
@@ -56,6 +58,24 @@ const PRESET_BY_ID: Record<PresetId, StandardsPreset> = {
   strict: PRESETS[1],
   none: PRESETS[2],
 };
+
+const EMPTY_PREVIEW_CARDS: PreviewCard[] = [
+  {
+    id: 'codex',
+    title: 'Codex - AGENTS.md (rendered)',
+    content: 'Loading preview...',
+  },
+  {
+    id: 'claude',
+    title: 'Claude - CLAUDE.md (rendered)',
+    content: 'Loading preview...',
+  },
+  {
+    id: 'gemini',
+    title: 'Gemini - GEMINI.md (rendered)',
+    content: 'Loading preview...',
+  },
+];
 
 function formatError(error: unknown): string {
   if (error instanceof ApiClientError) {
@@ -139,31 +159,6 @@ function pickClosestPreset(standardsInline: StandardsMap): PresetId {
   }
 
   return selected;
-}
-
-function renderStandardsLines(standardsInline: StandardsMap): string {
-  const entries = Object.entries(standardsInline).sort((left, right) => left[0].localeCompare(right[0]));
-  if (entries.length === 0) {
-    return '- No inline standards configured.';
-  }
-  return entries.map(([key, value]) => `- ${key}: ${value}`).join('\n');
-}
-
-function renderCodexPreview(standardsInline: StandardsMap, standardsPath: string | null): string {
-  const pathLine = standardsPath ? `\n\nSee additional standards in: ${standardsPath}` : '';
-  return `# Project Instructions (MACC)\n\n## Standards\n${renderStandardsLines(standardsInline)}${pathLine}`;
-}
-
-function renderClaudePreview(standardsInline: StandardsMap, standardsPath: string | null): string {
-  const language = standardsInline.language ?? 'English';
-  const standardsPathLine = standardsPath ? `\n\nSee additional standards in: ${standardsPath}` : '';
-  const contextLine = standardsPath ? `\n- @${standardsPath}` : '';
-  return `# Project Instructions (MACC)\n\n- **Language**: ${language}\n\n## Standards\n${renderStandardsLines(standardsInline)}${standardsPathLine}\n\n## Context imports\n- @README.md${contextLine}`;
-}
-
-function renderGeminiPreview(standardsInline: StandardsMap, standardsPath: string | null): string {
-  const extra = standardsPath ? `\n- Additional standards: \`${standardsPath}\`` : '';
-  return `# Project Instructions (MACC)\n\n## Standards (summary)\n${renderStandardsLines(standardsInline)}\n\n## Styleguide\n- See .gemini/styleguide.md for the full, structured rules.${extra}`;
 }
 
 function buildLintWarnings(
@@ -250,6 +245,9 @@ const Standards: React.FC = () => {
   const [overrides, setOverrides] = React.useState<StandardsMap>({});
   const [newOverrideKey, setNewOverrideKey] = React.useState('');
   const [newOverrideValue, setNewOverrideValue] = React.useState('');
+  const [isPreviewLoading, setIsPreviewLoading] = React.useState(false);
+  const [previewError, setPreviewError] = React.useState<string | null>(null);
+  const [previewCards, setPreviewCards] = React.useState<PreviewCard[]>(EMPTY_PREVIEW_CARDS);
   const [toast, setToast] = React.useState<ToastState>({
     open: false,
     title: '',
@@ -315,26 +313,51 @@ const Standards: React.FC = () => {
       .map((key) => classifyDiffEntry(key, presetValues[key], effectiveInline[key]));
   }, [effectiveInline, selectedPreset]);
 
-  const previewCards = React.useMemo(
-    () => [
-      {
-        id: 'codex',
-        title: 'Codex - AGENTS.md (standards excerpt)',
-        content: renderCodexPreview(effectiveInline, currentPath),
-      },
-      {
-        id: 'claude',
-        title: 'Claude - CLAUDE.md (standards excerpt)',
-        content: renderClaudePreview(effectiveInline, currentPath),
-      },
-      {
-        id: 'gemini',
-        title: 'Gemini - GEMINI.md (standards excerpt)',
-        content: renderGeminiPreview(effectiveInline, currentPath),
-      },
-    ],
-    [currentPath, effectiveInline],
-  );
+  React.useEffect(() => {
+    let active = true;
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      setIsPreviewLoading(true);
+      void getStandardsPreview(
+        {
+          standardsPath: currentPath,
+          standardsInline: effectiveInline,
+        },
+        { signal: controller.signal },
+      )
+        .then((response) => {
+          if (!active) {
+            return;
+          }
+          setPreviewCards(response.cards);
+          setPreviewError(null);
+        })
+        .catch((previewLoadError) => {
+          if (!active) {
+            return;
+          }
+          const message = formatError(previewLoadError);
+          setPreviewError(message);
+          setPreviewCards(
+            EMPTY_PREVIEW_CARDS.map((card) => ({
+              ...card,
+              content: 'Preview unavailable.',
+            })),
+          );
+        })
+        .finally(() => {
+          if (active) {
+            setIsPreviewLoading(false);
+          }
+        });
+    }, 120);
+
+    return () => {
+      active = false;
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [currentPath, effectiveInline]);
 
   const applyPreset = React.useCallback(
     (nextPreset: PresetId) => {
@@ -632,6 +655,14 @@ const Standards: React.FC = () => {
 
       <section className="rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-card)] p-6">
         <h2 className="text-lg font-semibold text-[var(--text-primary)]">Rendered output preview</h2>
+        {previewError && (
+          <p className="mt-2 text-xs text-amber-200">
+            Preview refresh failed: {previewError}
+          </p>
+        )}
+        {isPreviewLoading && (
+          <p className="mt-2 text-xs text-[var(--text-muted)]">Refreshing preview...</p>
+        )}
         <div className="mt-4 grid gap-4 xl:grid-cols-3">
           {previewCards.map((card) => (
             <article key={card.id} className="rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)] p-3">

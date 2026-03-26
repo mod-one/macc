@@ -246,6 +246,38 @@ pub(crate) struct ApiConfigUpdateRequest {
     pub rate_limit_throttle_parallel: Option<bool>,
 }
 
+/// Standards preview request used by the standards configuration page.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ApiStandardsPreviewRequest {
+    /// External standards file path to include in preview.
+    pub standards_path: Option<String>,
+    /// Inline standards values keyed by field name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub standards_inline: BTreeMap<String, String>,
+}
+
+/// Rendered standards preview response.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ApiStandardsPreviewResponse {
+    /// Rendered preview cards in UI display order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cards: Vec<ApiStandardsPreviewCard>,
+}
+
+/// A single rendered standards preview card.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ApiStandardsPreviewCard {
+    /// Stable card ID.
+    pub id: String,
+    /// Human-readable preview title.
+    pub title: String,
+    /// Rendered markdown content for the target tool file.
+    pub content: String,
+}
+
 /// PRD payload returned to the web UI.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
