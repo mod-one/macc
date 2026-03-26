@@ -2,6 +2,34 @@ import React, { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'rea
 import { Link, useLocation } from 'react-router-dom';
 import { Icons } from './NavIcons';
 
+class GitGraphErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { crashed: boolean; message: string }
+> {
+  constructor(props: { children: React.ReactNode }) {
+    super(props);
+    this.state = { crashed: false, message: '' };
+  }
+  static getDerivedStateFromError(error: unknown) {
+    return {
+      crashed: true,
+      message: error instanceof Error ? error.message : 'Unknown error',
+    };
+  }
+  render() {
+    if (this.state.crashed) {
+      return (
+        <div className="flex h-full items-center justify-center p-3 text-center text-xs text-[var(--text-muted)]">
+          Git graph unavailable
+          <br />
+          <span className="text-[var(--error)] mt-1 block font-mono">{this.state.message}</span>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 const GitGraphView = lazy(() => import('./GitGraphView'));
 
 const PANEL_COLLAPSED_KEY = 'macc.gitGraphPanel.collapsed';
@@ -170,15 +198,17 @@ const GitGraphPanel: React.FC = () => {
 
       {!collapsed && (
         <div className="min-h-0 flex-1 p-2">
-          <Suspense
-            fallback={
-              <div className="flex h-full items-center justify-center text-sm text-[var(--text-muted)]">
-                Loading git graph...
-              </div>
-            }
-          >
-            <GitGraphView mode="panel" />
-          </Suspense>
+          <GitGraphErrorBoundary>
+            <Suspense
+              fallback={
+                <div className="flex h-full items-center justify-center text-sm text-[var(--text-muted)]">
+                  Loading git graph...
+                </div>
+              }
+            >
+              <GitGraphView mode="panel" />
+            </Suspense>
+          </GitGraphErrorBoundary>
         </div>
       )}
     </aside>

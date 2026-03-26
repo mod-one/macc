@@ -223,8 +223,8 @@ function mapGitCommit(commit: ApiGitGraphResponse['commits'][number]): GitCommit
     subject: commit.subject,
     author: commit.author,
     timestamp: commit.timestamp,
-    parentShas: commit.parent_shas,
-    branchRefs: commit.branch_refs,
+    parentShas: commit.parent_shas ?? [],
+    branchRefs: commit.branch_refs ?? [],
     taskId: commit.task_id,
   };
 }

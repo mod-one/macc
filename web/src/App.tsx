@@ -1,6 +1,7 @@
 import React, { lazy } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import Layout from './components/Layout';
+import { AppErrorBoundary } from './components/AppErrorBoundary';
 
 // Lazy load all pages for code splitting
 const Welcome = lazy(() => import('./pages/Welcome'));
@@ -29,6 +30,7 @@ const About = lazy(() => import('./pages/About'));
 
 const App: React.FC = () => {
   return (
+    <AppErrorBoundary>
     <BrowserRouter>
       <Routes>
         <Route path="/" element={<Layout />}>
@@ -77,6 +79,7 @@ const App: React.FC = () => {
         </Route>
       </Routes>
     </BrowserRouter>
+    </AppErrorBoundary>
   );
 };
 

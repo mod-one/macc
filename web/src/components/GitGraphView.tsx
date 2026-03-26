@@ -1,11 +1,6 @@
-import React, { useEffect, useId, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import {
-  CommitGraph,
-  type Branch as GraphBranch,
-  type Commit as GraphCommit,
-  type CommitNode,
-} from 'commit-graph';
+import { GitLog, type Commit, type GitLogEntry } from '@tomplum/react-git-log';
 import type { GitCommit } from '../api/models';
 import {
   DEFAULT_PAGE_LIMIT,
@@ -19,54 +14,51 @@ interface GitGraphViewProps {
   mode: GitGraphViewMode;
 }
 
-const GRAPH_STYLE_BY_MODE = {
-  panel: {
-    commitSpacing: 60,
-    branchSpacing: 26,
-    nodeRadius: 3,
-    branchColors: ['#3b82f6', '#14b8a6', '#f59e0b', '#ef4444', '#8b5cf6', '#22c55e'],
-  },
-  page: {
-    commitSpacing: 72,
-    branchSpacing: 30,
-    nodeRadius: 3,
-    branchColors: ['#3b82f6', '#14b8a6', '#f59e0b', '#ef4444', '#8b5cf6', '#22c55e'],
-  },
-} as const;
+interface GitLogCommitMeta {
+  shortSha: string;
+  subject: string;
+  timestamp: number;
+  branchRefs: string[];
+  taskId?: string;
+}
+
+const GRAPH_COLOURS = ['#3b82f6', '#14b8a6', '#f59e0b', '#ef4444', '#8b5cf6', '#22c55e'] as const;
 
 function formatTimestamp(timestamp: number): string {
   return new Date(timestamp * 1000).toLocaleString();
 }
 
-function toGraphCommit(commit: GitCommit): GraphCommit {
-  return {
-    sha: commit.sha,
-    commit: {
-      author: {
-        name: commit.author,
-        date: new Date(commit.timestamp * 1000),
-      },
-      message: commit.taskId ? `${commit.subject} [${commit.taskId}]` : commit.subject,
-    },
-    parents: commit.parentShas.map((sha) => ({ sha })),
-  };
+function toIsoTimestamp(timestamp: number): string {
+  return new Date(timestamp * 1000).toISOString();
 }
 
-function toBranchHeads(commits: GitCommit[], branches: string[]): GraphBranch[] {
-  return branches
-    .map((name) => {
-      const first = commits.find((commit) => commit.branchRefs.includes(name));
-      if (!first) {
-        return null;
-      }
-      return {
-        name,
-        commit: {
-          sha: first.sha,
-        },
-      };
-    })
-    .filter((branch): branch is GraphBranch => branch !== null);
+function preferredBranch(commit: GitCommit, head: string): string {
+  if (commit.branchRefs.includes(head)) {
+    return head;
+  }
+
+  return commit.branchRefs[0] ?? head ?? 'detached';
+}
+
+function toGitLogEntry(commit: GitCommit, head: string): GitLogEntry<GitLogCommitMeta> {
+  const isoTimestamp = toIsoTimestamp(commit.timestamp);
+
+  return {
+    hash: commit.sha,
+    branch: preferredBranch(commit, head),
+    parents: commit.parentShas,
+    message: commit.subject,
+    author: {
+      name: commit.author,
+    },
+    authorDate: isoTimestamp,
+    committerDate: isoTimestamp,
+    shortSha: commit.shortSha,
+    subject: commit.subject,
+    timestamp: commit.timestamp,
+    branchRefs: commit.branchRefs,
+    taskId: commit.taskId,
+  };
 }
 
 const GitGraphView: React.FC<GitGraphViewProps> = ({ mode }) => {
@@ -82,7 +74,6 @@ const GitGraphView: React.FC<GitGraphViewProps> = ({ mode }) => {
   const refreshLatest = useGitGraphStore((state) => state.refreshLatest);
 
   const [selectedSha, setSelectedSha] = useState<string | null>(null);
-  const graphParentId = useId().replace(/[:]/g, '_');
   const initialLimit = mode === 'page' ? DEFAULT_PAGE_LIMIT : DEFAULT_PANEL_LIMIT;
 
   useEffect(() => {
@@ -101,8 +92,16 @@ const GitGraphView: React.FC<GitGraphViewProps> = ({ mode }) => {
     };
   }, [refreshLatest]);
 
-  const graphCommits = useMemo(() => commits.map(toGraphCommit), [commits]);
-  const branchHeads = useMemo(() => toBranchHeads(commits, branches), [branches, commits]);
+  useEffect(() => {
+    if (selectedSha && !commits.some((commit) => commit.sha === selectedSha)) {
+      setSelectedSha(null);
+    }
+  }, [commits, selectedSha]);
+
+  const entries = useMemo(
+    () => commits.map((commit) => toGitLogEntry(commit, head || 'detached')),
+    [commits, head],
+  );
   const selectedCommit = useMemo(
     () => (selectedSha ? commits.find((commit) => commit.sha === selectedSha) ?? null : null),
     [commits, selectedSha],
@@ -116,8 +115,8 @@ const GitGraphView: React.FC<GitGraphViewProps> = ({ mode }) => {
     void loadMore(initialLimit);
   };
 
-  const onCommitClick = (node: CommitNode) => {
-    setSelectedSha(node.hash);
+  const handleSelectCommit = (commit?: Commit<GitLogCommitMeta>) => {
+    setSelectedSha(commit?.hash ?? null);
   };
 
   return (
@@ -148,10 +147,7 @@ const GitGraphView: React.FC<GitGraphViewProps> = ({ mode }) => {
         </div>
       )}
 
-      <div
-        id={graphParentId}
-        className="min-h-0 flex-1 overflow-auto rounded border border-[var(--border)] bg-[var(--bg-secondary)] p-2"
-      >
+      <div className="min-h-0 flex-1 overflow-auto rounded border border-[var(--border)] bg-[var(--bg-secondary)] p-2">
         {isLoading && commits.length === 0 ? (
           <div className="flex h-full items-center justify-center text-sm text-[var(--text-muted)]">
             Loading git graph...
@@ -161,18 +157,42 @@ const GitGraphView: React.FC<GitGraphViewProps> = ({ mode }) => {
             No commits yet.
           </div>
         ) : (
-          <CommitGraph.WithInfiniteScroll
-            parentID={graphParentId}
-            commits={graphCommits}
-            branchHeads={branchHeads}
-            loadMore={handleLoadMore}
-            hasMore={hasMore}
-            currentBranch={head}
-            graphStyle={GRAPH_STYLE_BY_MODE[mode]}
-            fullSha={mode === 'page'}
-            onCommitClick={onCommitClick}
-            dateFormatFn={(value: string | number | Date) => new Date(value).toLocaleString()}
-          />
+          <div className="space-y-3">
+            <GitLog<GitLogCommitMeta>
+              entries={entries}
+              currentBranch={head || 'detached'}
+              colours={[...GRAPH_COLOURS]}
+              theme="dark"
+              showHeaders={mode === 'page'}
+              rowSpacing={mode === 'page' ? 2 : 0}
+              defaultGraphWidth={mode === 'page' ? 240 : 180}
+              onSelectCommit={handleSelectCommit}
+              enableSelectedCommitStyling
+              enablePreviewedCommitStyling
+            >
+              <GitLog.Tags />
+              <GitLog.GraphHTMLGrid
+                enableResize={mode === 'page'}
+                nodeTheme="plain"
+                showCommitNodeTooltips
+                showCommitNodeHashes={mode === 'page'}
+                nodeSize={mode === 'page' ? 14 : 12}
+                highlightedBackgroundHeight={mode === 'page' ? 56 : 48}
+              />
+              <GitLog.Table timestampFormat="YYYY-MM-DD HH:mm:ss" />
+            </GitLog>
+
+            {hasMore && (
+              <button
+                type="button"
+                onClick={handleLoadMore}
+                disabled={isLoadingMore}
+                className="w-full rounded border border-[var(--border)] bg-[var(--bg-card)] px-3 py-2 text-sm text-[var(--text-primary)] transition-colors hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {isLoadingMore ? 'Loading older commits...' : 'Load older commits'}
+              </button>
+            )}
+          </div>
         )}
       </div>
 
