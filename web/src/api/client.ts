@@ -22,6 +22,8 @@ import type {
   ApiRegistryTask,
   ApiRegistryTaskAction,
   ApiRestoreRequest,
+  ApiTerminalCreateRequest,
+  ApiTerminalSessionCreated,
   ApiStandardsPreviewRequest,
   ApiStandardsPreviewResponse,
   ApiWorktree,
@@ -76,6 +78,21 @@ export function buildUrl(path: string, baseUrl?: string): string {
     return `${API_PREFIX}${path}`;
   }
   return new URL(`${API_PREFIX}${path}`, resolvedBaseUrl).toString();
+}
+
+export function buildWebSocketUrl(path: string, baseUrl?: string): string {
+  const resolvedBaseUrl = resolveApiBaseUrl(baseUrl);
+  const origin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost';
+  const url = new URL(
+    resolvedBaseUrl ? `${API_PREFIX}${path}` : `${API_PREFIX}${path}`,
+    resolvedBaseUrl ?? origin,
+  );
+  if (url.protocol === 'https:') {
+    url.protocol = 'wss:';
+  } else if (url.protocol === 'http:') {
+    url.protocol = 'ws:';
+  }
+  return url.toString();
 }
 
 async function requestJson<T>(
@@ -323,6 +340,18 @@ export async function runApply(
 ): Promise<ApiApplyResponse> {
   return sendJson<ApiApplyResponse, ApiApplyRequest>(
     '/apply',
+    'POST',
+    options,
+    request,
+  );
+}
+
+export async function createTerminalSession(
+  request: ApiTerminalCreateRequest,
+  options: ApiRequestOptions = {},
+): Promise<ApiTerminalSessionCreated> {
+  return sendJson<ApiTerminalSessionCreated, ApiTerminalCreateRequest>(
+    '/terminal',
     'POST',
     options,
     request,

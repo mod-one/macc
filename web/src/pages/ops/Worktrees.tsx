@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { 
   useReactTable, 
@@ -11,6 +11,7 @@ import {
 } from '@tanstack/react-table';
 import { useWorktreeStore } from '../../stores/worktreeStore';
 import type { ApiWorktree } from '../../api/models';
+import { TerminalDrawer, type TerminalTarget } from '../../components/TerminalDrawer';
 import { 
   Button, 
   KpiCard, 
@@ -23,6 +24,7 @@ import {
   WorktreeWizard,
 } from '../../components';
 import * as Icons from '../../components/icons';
+import { Icons as NavIcons } from '../../components/NavIcons';
 import { cn } from '../../components/styles';
 
 const columnHelper = createColumnHelper<ApiWorktree>();
@@ -40,6 +42,8 @@ const Worktrees: React.FC = () => {
   const [worktreeToRemove, setWorktreeToRemove] = useState<string | null>(null);
   const [wizardOpen, setWizardOpen] = useState(false);
   const [selectedWorktreeId, setSelectedWorktreeId] = useState<string | null>(null);
+  const [terminalOpen, setTerminalOpen] = useState(false);
+  const [terminalTarget, setTerminalTarget] = useState<TerminalTarget | null>(null);
   const location = useLocation();
 
   useEffect(() => {
@@ -98,6 +102,11 @@ const Worktrees: React.FC = () => {
     }
   };
 
+  const openTerminal = useCallback((target: TerminalTarget) => {
+    setTerminalTarget(target);
+    setTerminalOpen(true);
+  }, []);
+
   const columns = useMemo(() => [
     columnHelper.accessor('slug', {
       header: 'Name',
@@ -151,6 +160,20 @@ const Worktrees: React.FC = () => {
             <Icons.ActivityIcon className="h-4 w-4" />
           </Button>
           <Button
+            className="p-1 h-8 w-8 bg-transparent border-none hover:bg-white/10 text-[var(--text-secondary)]"
+            onClick={() => openTerminal({
+              terminalType: 'worktree',
+              worktreeId: info.row.original.id,
+              label: `Worktree: ${info.row.original.slug || info.row.original.id}`,
+            })}
+            aria-label={`Open terminal for worktree ${info.row.original.slug || info.row.original.id}`}
+            title="Open Terminal Here"
+          >
+            <span className="flex h-4 w-4 items-center justify-center">
+              <NavIcons.Terminal />
+            </span>
+          </Button>
+          <Button
             className="p-1 h-8 w-8 bg-transparent border-none hover:bg-white/10 text-rose-500"
             onClick={() => setWorktreeToRemove(info.row.original.id)}
             aria-label={`Remove worktree ${info.row.original.slug || info.row.original.id}`}
@@ -162,7 +185,7 @@ const Worktrees: React.FC = () => {
       ),
       size: 120,
     }),
-  ], [runWorktree, navigate]);
+  ], [runWorktree, navigate, openTerminal]);
 
   const table = useReactTable({
     data: filteredWorktrees,
@@ -207,6 +230,15 @@ const Worktrees: React.FC = () => {
             <Button onClick={() => loadWorktrees()} className="gap-2 h-9 bg-transparent border-none hover:bg-white/10">
               <Icons.RefreshIcon className={cn("h-4 w-4", isLoading && "animate-spin")} />
               Refresh
+            </Button>
+            <Button
+              onClick={() => openTerminal({ terminalType: 'project', label: 'Project Root' })}
+              className="gap-2 h-9 bg-transparent border-none hover:bg-white/10"
+            >
+              <span className="flex h-4 w-4 items-center justify-center">
+                <NavIcons.Terminal />
+              </span>
+              Project Root Terminal
             </Button>
             <Button onClick={handleExport} className="gap-2 h-9 bg-transparent border-none hover:bg-white/10">
               <Icons.DownloadIcon className="h-4 w-4" />
@@ -323,6 +355,11 @@ const Worktrees: React.FC = () => {
               onDoctor={() => navigate('/ops/diagnostics')}
               onRemove={setWorktreeToRemove}
               onOpen={(id) => navigate(`/ops/worktrees/${id}`)}
+              onOpenTerminal={(id) => openTerminal({
+                terminalType: 'worktree',
+                worktreeId: id,
+                label: `Worktree: ${w.slug || w.id}`,
+              })}
               highlighted={selectedWorktreeId === w.id}
             />
           ))}
@@ -344,6 +381,13 @@ const Worktrees: React.FC = () => {
         onOpenChange={setWizardOpen}
         onComplete={loadWorktrees}
         worktrees={worktrees}
+      />
+
+      <TerminalDrawer
+        open={terminalOpen}
+        onOpenChange={setTerminalOpen}
+        defaultTarget={terminalTarget}
+        projectRootLabel="Project Root"
       />
     </div>
   );
