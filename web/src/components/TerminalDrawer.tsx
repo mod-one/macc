@@ -4,18 +4,12 @@ import { FitAddon } from 'xterm-addon-fit';
 import { Terminal } from 'xterm';
 import 'xterm/css/xterm.css';
 import { buildWebSocketUrl, createTerminalSession } from '../api/client';
-import type { ApiTerminalCreateRequest, ApiTerminalType } from '../api/models';
+import type { ApiTerminalCreateRequest } from '../api/models';
 import { Button } from './Button';
 import { XCircleIcon, RefreshIcon, PlusIcon, FolderIcon, ClockIcon, AlertTriangleIcon } from './icons';
+import type { TerminalSessionStatus, TerminalTarget } from './terminalStatus';
+import { isReconnectableTerminalStatus } from './terminalStatus';
 import { cn } from './styles';
-
-type TerminalTarget = {
-  terminalType: ApiTerminalType;
-  label: string;
-  worktreeId?: string;
-};
-
-type TerminalSessionStatus = 'connecting' | 'connected' | 'disconnected' | 'error';
 
 interface TerminalSessionRecord {
   id: string;
@@ -324,7 +318,6 @@ export function TerminalDrawer({
   );
   const [statusMessage, setStatusMessage] = React.useState<string | null>(null);
   const resizingRef = React.useRef(false);
-  const pendingCreateRef = React.useRef<string | null>(null);
 
   const targetFromDefault = React.useMemo<TerminalTarget | null>(() => {
     if (!defaultTarget) {
@@ -346,65 +339,6 @@ export function TerminalDrawer({
       );
     },
     [],
-  );
-
-  const ensureTerminal = React.useCallback(
-    async (target: TerminalTarget) => {
-      const targetKey = getTargetKey(target);
-      const existing = sessions.find((session) => getTargetKey(session.target) === targetKey);
-      if (existing) {
-        setActiveSessionId(existing.id);
-        if (existing.status !== 'connected' && existing.status !== 'connecting') {
-          pendingCreateRef.current = existing.id;
-        }
-        return existing.id;
-      }
-
-      if (sessions.length >= MAX_SESSIONS) {
-        setStatusMessage(`Terminal limit reached. Close a tab before opening another session.`);
-        return null;
-      }
-
-      const localId = makeSessionId();
-      const record: TerminalSessionRecord = {
-        id: localId,
-        target,
-        backendSessionId: null,
-        path: null,
-        status: 'connecting',
-        error: null,
-        createdAt: Date.now(),
-      };
-
-      setSessions((current) => [...current, record]);
-      setActiveSessionId(localId);
-      setStatusMessage(null);
-      pendingCreateRef.current = localId;
-
-      try {
-        const created = await createTerminalSession(getTerminalCreateRequest(target));
-        updateSession(localId, {
-          backendSessionId: created.sessionId,
-          path: created.path,
-          status: 'connecting',
-          error: null,
-        });
-        return localId;
-      } catch (error) {
-        const message = error instanceof Error ? error.message : 'Failed to create terminal session.';
-        updateSession(localId, {
-          status: 'error',
-          error: message,
-        });
-        setStatusMessage(message);
-        return null;
-      } finally {
-        if (pendingCreateRef.current === localId) {
-          pendingCreateRef.current = null;
-        }
-      }
-    },
-    [sessions, updateSession],
   );
 
   const handleReconnect = React.useCallback(
@@ -435,6 +369,60 @@ export function TerminalDrawer({
       }
     },
     [updateSession],
+  );
+
+  const ensureTerminal = React.useCallback(
+    async (target: TerminalTarget) => {
+      const targetKey = getTargetKey(target);
+      const existing = sessions.find((session) => getTargetKey(session.target) === targetKey);
+      if (existing) {
+        setActiveSessionId(existing.id);
+        if (isReconnectableTerminalStatus(existing.status)) {
+          void handleReconnect(existing);
+        }
+        return existing.id;
+      }
+
+      if (sessions.length >= MAX_SESSIONS) {
+        setStatusMessage(`Terminal limit reached. Close a tab before opening another session.`);
+        return null;
+      }
+
+      const localId = makeSessionId();
+      const record: TerminalSessionRecord = {
+        id: localId,
+        target,
+        backendSessionId: null,
+        path: null,
+        status: 'connecting',
+        error: null,
+        createdAt: Date.now(),
+      };
+
+      setSessions((current) => [...current, record]);
+      setActiveSessionId(localId);
+      setStatusMessage(null);
+
+      try {
+        const created = await createTerminalSession(getTerminalCreateRequest(target));
+        updateSession(localId, {
+          backendSessionId: created.sessionId,
+          path: created.path,
+          status: 'connecting',
+          error: null,
+        });
+        return localId;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Failed to create terminal session.';
+        updateSession(localId, {
+          status: 'error',
+          error: message,
+        });
+        setStatusMessage(message);
+        return null;
+      }
+    },
+    [sessions, updateSession, handleReconnect],
   );
 
   const handleStatusChange = React.useCallback(
