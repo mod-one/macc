@@ -74,6 +74,7 @@ function buildConfig(overrides: Partial<ApiConfigResponse> = {}): ApiConfigRespo
     rateLimitBackoffMaxSeconds: 3600,
     rateLimitFallbackEnabled: true,
     rateLimitThrottleParallel: true,
+    forceKillGraceSeconds: null,
     requirementsDetected: false,
     managedEnvironmentWarnings: [],
     ...overrides,
@@ -122,6 +123,13 @@ describe('Settings page', () => {
     expect(screen.getByText('Max Dispatch')).toBeInTheDocument();
     expect(screen.getByText('Max Parallel')).toBeInTheDocument();
     expect(screen.getByText('Timeout (seconds)')).toBeInTheDocument();
+    expect(screen.getByText('Max Parallel Per Tool')).toBeInTheDocument();
+    expect(screen.getByText('Tool Specializations')).toBeInTheDocument();
+    expect(screen.getByText('Log Flush Lines')).toBeInTheDocument();
+    expect(screen.getByText('Mirror JSON Debounce (ms)')).toBeInTheDocument();
+    expect(screen.getByText('Merge AI Fix')).toBeInTheDocument();
+    expect(screen.getByText('JSON Compatibility')).toBeInTheDocument();
+    expect(screen.getByText('Force-Kill Grace (seconds)')).toBeInTheDocument();
     expect(screen.getByText('Error Code Retry List')).toBeInTheDocument();
     expect(screen.getByText('Backoff Base (seconds)')).toBeInTheDocument();
   });
@@ -232,6 +240,24 @@ describe('Settings page', () => {
     await screen.findByText('Settings');
     fireEvent.click(screen.getByRole('button', { name: 'Coordinator' }));
     expect(screen.getByPlaceholderText('claude, codex, gemini')).toBeInTheDocument();
+  });
+
+  it('lets coordinator JSON object fields update the draft', async () => {
+    getConfigMock.mockResolvedValue(buildConfig());
+    renderPage();
+
+    await screen.findByText('Settings');
+    fireEvent.click(screen.getByRole('button', { name: 'Coordinator' }));
+
+    const fields = screen.getAllByRole('textbox');
+    const maxParallelPerToolEditor = fields.find((field) =>
+      (field as HTMLTextAreaElement).value.includes('{}'),
+    ) as HTMLTextAreaElement;
+    fireEvent.change(maxParallelPerToolEditor, {
+      target: { value: '{\n  "claude": 2,\n  "codex": 1\n}' },
+    });
+
+    expect(screen.getByText('You have unsaved changes.')).toBeInTheDocument();
   });
 
   it('Advanced tab Apply JSON updates draft', async () => {

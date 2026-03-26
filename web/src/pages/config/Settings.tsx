@@ -107,6 +107,72 @@ function TextField({
   );
 }
 
+function JsonObjectField({
+  label,
+  value,
+  onChange,
+  placeholder,
+  helpText,
+}: {
+  label: string;
+  value: Record<string, unknown>;
+  onChange: (value: Record<string, unknown>) => void;
+  placeholder?: string;
+  helpText?: string;
+}) {
+  const [rawText, setRawText] = useState(() => JSON.stringify(value, null, 2));
+  const [parseError, setParseError] = useState<string | null>(null);
+  const previousValueRef = useRef(value);
+
+  useEffect(() => {
+    if (previousValueRef.current === value) {
+      return;
+    }
+    previousValueRef.current = value;
+    setRawText(JSON.stringify(value, null, 2));
+    setParseError(null);
+  }, [value]);
+
+  return (
+    <label className="flex flex-col gap-1.5">
+      <span className="text-xs font-medium text-[var(--text-secondary)]">{label}</span>
+      <textarea
+        className={cn(
+          'min-h-[132px] rounded-lg border bg-[var(--bg-secondary)] px-3 py-2 font-mono text-xs text-[var(--text-primary)] outline-none focus:border-[var(--accent)]',
+          parseError ? 'border-[var(--error)]' : 'border-[var(--border)]',
+        )}
+        value={rawText}
+        placeholder={placeholder}
+        spellCheck={false}
+        onChange={(e) => {
+          const nextText = e.target.value;
+          setRawText(nextText);
+
+          if (nextText.trim() === '') {
+            setParseError(null);
+            onChange({});
+            return;
+          }
+
+          try {
+            const parsed = JSON.parse(nextText) as unknown;
+            if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+              setParseError('Value must be a JSON object.');
+              return;
+            }
+            setParseError(null);
+            onChange(parsed as Record<string, unknown>);
+          } catch (error) {
+            setParseError(error instanceof Error ? error.message : 'Invalid JSON');
+          }
+        }}
+      />
+      {helpText && <span className="text-[10px] text-[var(--text-muted)]">{helpText}</span>}
+      {parseError && <span className="text-[10px] text-[var(--error)]">{parseError}</span>}
+    </label>
+  );
+}
+
 function BooleanField({
   label,
   value,
@@ -216,6 +282,24 @@ function CoordinatorTab({
 }) {
   return (
     <div className="flex flex-col gap-6">
+      <SectionHeading>Coordinator Routing</SectionHeading>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <JsonObjectField
+          label="Max Parallel Per Tool"
+          value={draft.maxParallelPerTool}
+          onChange={(value) => update({ maxParallelPerTool: value as Record<string, number> })}
+          placeholder='{"claude": 2, "codex": 1}'
+          helpText="Per-tool concurrency caps as a JSON object."
+        />
+        <JsonObjectField
+          label="Tool Specializations"
+          value={draft.toolSpecializations}
+          onChange={(value) => update({ toolSpecializations: value as Record<string, string[]> })}
+          placeholder='{"frontend": ["claude", "codex"]}'
+          helpText="Category routing as a JSON object mapping category to tool lists."
+        />
+      </div>
+
       <SectionHeading>Dispatch &amp; Parallelism</SectionHeading>
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
         <NumberField
@@ -269,8 +353,72 @@ function CoordinatorTab({
           label="Stale Action"
           value={draft.staleAction}
           onChange={(v) => update({ staleAction: v })}
-          placeholder="retry"
-          helpText="Action on stale task: retry | block | requeue"
+          placeholder="abandon"
+          helpText="Action on stale task: abandon | todo | blocked"
+        />
+      </div>
+
+      <SectionHeading>Coordinator Runtime</SectionHeading>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <NumberField
+          label="Log Flush Lines"
+          value={draft.logFlushLines}
+          onChange={(v) => update({ logFlushLines: v })}
+          helpText="Flush coordinator logs every N lines. 0 uses runtime default."
+        />
+        <NumberField
+          label="Log Flush Milliseconds"
+          value={draft.logFlushMs}
+          onChange={(v) => update({ logFlushMs: v })}
+          helpText="Flush coordinator logs every N milliseconds. 0 uses runtime default."
+        />
+        <NumberField
+          label="Mirror JSON Debounce (ms)"
+          value={draft.mirrorJsonDebounceMs}
+          onChange={(v) => update({ mirrorJsonDebounceMs: v })}
+          helpText="Debounce SQLite-to-JSON compatibility export. 0 disables debounce."
+        />
+        <BooleanField
+          label="Merge AI Fix"
+          value={draft.mergeAiFix}
+          onChange={(v) => update({ mergeAiFix: v })}
+          helpText="Enable AI-driven resolution for merge conflicts."
+        />
+        <NumberField
+          label="Merge Job Timeout (seconds)"
+          value={draft.mergeJobTimeoutSeconds}
+          onChange={(v) => update({ mergeJobTimeoutSeconds: v })}
+          helpText="Timeout for git merge operations."
+        />
+        <NumberField
+          label="Merge Hook Timeout (seconds)"
+          value={draft.mergeHookTimeoutSeconds}
+          onChange={(v) => update({ mergeHookTimeoutSeconds: v })}
+          helpText="Timeout for the AI merge-fix hook."
+        />
+        <NumberField
+          label="Ghost Heartbeat Grace (seconds)"
+          value={draft.ghostHeartbeatGraceSeconds}
+          onChange={(v) => update({ ghostHeartbeatGraceSeconds: v })}
+          helpText="Grace period before a dead process is treated as a ghost."
+        />
+        <BooleanField
+          label="JSON Compatibility"
+          value={draft.jsonCompat}
+          onChange={(v) => update({ jsonCompat: v })}
+          helpText="Enable JSON snapshot export for external tool compatibility."
+        />
+        <BooleanField
+          label="Legacy JSON Fallback"
+          value={draft.legacyJsonFallback}
+          onChange={(v) => update({ legacyJsonFallback: v })}
+          helpText="Fallback to the JSON task registry if SQLite is missing or corrupted."
+        />
+        <NumberField
+          label="Force-Kill Grace (seconds)"
+          value={draft.forceKillGraceSeconds ?? null}
+          onChange={(v) => update({ forceKillGraceSeconds: v === null ? null : Math.max(0, v) })}
+          helpText="Wait after IPC failure before force-killing a performer."
         />
       </div>
 
@@ -474,21 +622,33 @@ const Settings: React.FC = () => {
       'toolPriority',
     ];
     const coordinatorKeys = [
+      'maxParallelPerTool',
+      'toolSpecializations',
       'maxDispatch',
       'maxParallel',
       'timeoutSeconds',
       'phaseRunnerMaxAttempts',
+      'logFlushLines',
+      'logFlushMs',
+      'mirrorJsonDebounceMs',
+      'mergeAiFix',
+      'mergeJobTimeoutSeconds',
+      'mergeHookTimeoutSeconds',
+      'ghostHeartbeatGraceSeconds',
       'dispatchCooldownSeconds',
       'staleClaimedSeconds',
       'staleInProgressSeconds',
       'staleChangesRequestedSeconds',
       'staleAction',
+      'jsonCompat',
+      'legacyJsonFallback',
       'errorCodeRetryList',
       'errorCodeRetryMax',
       'rateLimitBackoffBaseSeconds',
       'rateLimitBackoffMaxSeconds',
       'rateLimitFallbackEnabled',
       'rateLimitThrottleParallel',
+      'forceKillGraceSeconds',
     ];
 
     if (generalKeys.some((prefix) => state.highlightSettingKey?.startsWith(prefix))) {

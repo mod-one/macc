@@ -96,6 +96,7 @@ function buildConfig(overrides: Partial<ApiConfigResponse> = {}): ApiConfigRespo
     rateLimitBackoffMaxSeconds: null,
     rateLimitFallbackEnabled: null,
     rateLimitThrottleParallel: null,
+    forceKillGraceSeconds: null,
     requirementsDetected: true,
     managedEnvironmentWarnings: [],
     ...overrides,
