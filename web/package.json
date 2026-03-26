@@ -22,7 +22,9 @@
     "diff": "^8.0.4",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
+    "react-markdown": "^10.1.0",
     "react-router-dom": "^7.13.1",
+    "react-syntax-highlighter": "^16.1.1",
     "xterm": "^5.3.0",
     "xterm-addon-fit": "^0.8.0",
     "zustand": "^5.0.12"
@@ -37,6 +39,7 @@
     "@types/node": "^24.12.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
+    "@types/react-syntax-highlighter": "^15.5.13",
     "@vitejs/plugin-react": "^6.0.1",
     "autoprefixer": "^10.4.27",
     "axe-core": "^4.11.1",
