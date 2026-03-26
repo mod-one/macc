@@ -1557,9 +1557,7 @@ fn apply_runtime_event_bus_updates(
                     if let Some(log) = logger {
                         let _ = log.note(format!(
                             "- Force-kill grace timer started task={} pid={:?} grace={}s",
-                            task_id,
-                            job.pid,
-                            grace_seconds,
+                            task_id, job.pid, grace_seconds,
                         ));
                     }
                 }

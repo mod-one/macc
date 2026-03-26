@@ -62,15 +62,20 @@ impl TerminalSessionStore {
         terminal_dir: PathBuf,
         worktree_id: Option<String>,
     ) -> Result<TerminalSessionCreated, ApiError> {
-        let permit = self.inner.session_slots.clone().try_acquire_owned().map_err(|_| {
-            ApiError::terminal_conflict(
-                "Terminal session limit reached",
-                Some(json!({
-                    "limit": DEFAULT_MAX_SESSIONS,
-                    "requested": session_type.as_str(),
-                })),
-            )
-        })?;
+        let permit = self
+            .inner
+            .session_slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| {
+                ApiError::terminal_conflict(
+                    "Terminal session limit reached",
+                    Some(json!({
+                        "limit": DEFAULT_MAX_SESSIONS,
+                        "requested": session_type.as_str(),
+                    })),
+                )
+            })?;
 
         let session_id = self.next_session_id();
         let session = TerminalSession::spawn(
@@ -486,7 +491,9 @@ async fn handle_terminal_socket(
     });
 
     let result = terminal_socket_loop(&mut output_rx, socket, input_tx, session_for_writer).await;
-    state.terminal_sessions.remove(&session_id, "websocket detached");
+    state
+        .terminal_sessions
+        .remove(&session_id, "websocket detached");
     result
 }
 
@@ -611,10 +618,12 @@ fn validate_worktree_id(worktree_id: &str) -> std::result::Result<(), ApiError> 
     if trimmed.is_empty() {
         return Err(ApiError::validation("worktreeId cannot be empty"));
     }
-    if StdPath::new(trimmed)
-        .components()
-        .any(|component| matches!(component, Component::ParentDir | Component::RootDir | Component::Prefix(_)))
-    {
+    if StdPath::new(trimmed).components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
         return Err(ApiError::validation(
             "worktreeId must be a simple identifier without path separators",
         ));
@@ -644,7 +653,10 @@ mod tests {
             .expect("create session");
         let session = store.get(&created.session_id).expect("session present");
 
-        assert!(session.begin_attach().is_ok(), "first attach should succeed");
+        assert!(
+            session.begin_attach().is_ok(),
+            "first attach should succeed"
+        );
 
         let conflict = session.begin_attach();
         assert!(conflict.is_err(), "second attach should fail");

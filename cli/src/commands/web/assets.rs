@@ -48,9 +48,16 @@ pub(super) async fn spa_handler(State(state): State<WebState>, uri: Uri) -> Resp
         asset_path
     };
 
-    asset_response(&state, asset_path)
-        .or_else(|| asset_response(&state, "index.html"))
-        .unwrap_or_else(|| StatusCode::NOT_FOUND.into_response())
+    if let Some(response) = asset_response(&state, asset_path) {
+        return response;
+    }
+
+    if should_fallback_to_index(asset_path) {
+        return asset_response(&state, "index.html")
+            .unwrap_or_else(|| StatusCode::NOT_FOUND.into_response());
+    }
+
+    StatusCode::NOT_FOUND.into_response()
 }
 
 fn asset_response(state: &WebState, path: &str) -> Option<Response> {
@@ -73,6 +80,14 @@ fn asset_response(state: &WebState, path: &str) -> Option<Response> {
 
 fn dist_asset(path: &str, root: &Path) -> Option<Vec<u8>> {
     std::fs::read(root.join("web").join("dist").join(path)).ok()
+}
+
+fn should_fallback_to_index(path: &str) -> bool {
+    if path.is_empty() || path == "index.html" {
+        return true;
+    }
+
+    Path::new(path).extension().is_none()
 }
 
 fn cache_control_header(path: &str) -> &'static str {

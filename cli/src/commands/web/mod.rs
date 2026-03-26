@@ -11,8 +11,8 @@ mod logs;
 mod plan;
 mod prd;
 mod registry;
-mod terminal;
 mod sse;
+mod terminal;
 #[cfg(test)]
 mod tests;
 mod types;

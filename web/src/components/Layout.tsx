@@ -63,8 +63,10 @@ const Layout: React.FC = () => {
   const contextualHelpSection = getHelpSectionForRoute(location.pathname);
   const contextualHelpHref = `/help?section=${encodeURIComponent(contextualHelpSection)}`;
   const showGitPanel = !location.pathname.startsWith('/ops/git');
-  const { unreadCount, setIsOpen } = useNotificationStore();
-  const { status, loadStatus } = useCoordinatorStore();
+  const unreadCount = useNotificationStore((state) => state.unreadCount);
+  const setIsOpen = useNotificationStore((state) => state.setIsOpen);
+  const status = useCoordinatorStore((state) => state.status);
+  const loadStatus = useCoordinatorStore((state) => state.loadStatus);
 
   // Initialize global notification center
   useNotificationCenter();
@@ -78,11 +80,13 @@ const Layout: React.FC = () => {
 
   // Poll coordinator status for the status strip
   useEffect(() => {
-    const ac = new AbortController();
-    loadStatus(ac.signal);
-    const id = setInterval(() => loadStatus(ac.signal), LAYOUT_REFRESH_MS);
+    const abortController = new AbortController();
+    void loadStatus(abortController.signal).catch(() => undefined);
+    const id = setInterval(() => {
+      void loadStatus().catch(() => undefined);
+    }, LAYOUT_REFRESH_MS);
     return () => {
-      ac.abort();
+      abortController.abort();
       clearInterval(id);
     };
   }, [loadStatus]);

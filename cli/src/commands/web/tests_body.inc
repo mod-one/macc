@@ -175,6 +175,30 @@ async fn dist_asset_mode_falls_back_to_dist_index_for_client_routes() {
 }
 
 #[tokio::test]
+async fn dist_asset_mode_returns_not_found_for_missing_hashed_assets() {
+    let root = temp_root("dist-missing-asset");
+    write_test_dist_assets(&root);
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Dist,
+    );
+    let app = build_web_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/assets/missing-chunk.js")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn health_endpoint_returns_ok_status() {
     let root = temp_root("health");
     fs::create_dir_all(&root).expect("create root");
