@@ -479,12 +479,12 @@ run_default_call() {
   fi
 }
 
-# RL-PERFORMER-009: override exit code to 0 when the task reported success
+# RL-PERFORMER-009: override exit code to 0 when the task reported a result
 # via the MACC_TASK_RESULT marker, regardless of transient runner errors.
 override_rc_for_success_marker() {
   local rc="$1"
   [[ "$rc" -eq 0 ]] && { echo 0; return; }
-  if grep -qE 'MACC_TASK_RESULT:[[:space:]]*(success_with_changes|success_without_changes|already_satisfied)' \
+  if grep -qE 'MACC_TASK_RESULT:[[:space:]]*(success_with_changes|success_without_changes|already_satisfied|error_with_changes|error_without_changes)' \
       "$output_capture" 2>/dev/null; then
     echo 0
   else

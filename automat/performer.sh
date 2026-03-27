@@ -609,8 +609,11 @@ Instructions:
    - MACC_TASK_RESULT: success_with_changes
    - MACC_TASK_RESULT: success_without_changes
    - MACC_TASK_RESULT: already_satisfied
+   - MACC_TASK_RESULT: error_with_changes   (if you started work but cannot finish)
+   - MACC_TASK_RESULT: error_without_changes (if you could not start or make any progress)
 7) Use already_satisfied only when you verified the task is already done and can cite the evidence briefly.
-8) If you finish successfully but forget the marker, the runner will infer the result from repository state; still print the marker explicitly.
+8) Use error_with_changes or error_without_changes when you cannot complete the task (sandbox failures, environment issues, missing dependencies, permission errors, etc.). Include a brief explanation of why on the line before the marker.
+9) If you finish successfully but forget the marker, the runner will infer the result from repository state; still print the marker explicitly.
 
 Now implement the task.
 PROMPT
@@ -625,6 +628,8 @@ extract_task_result_marker() {
     success_with_changes) printf '%s' "success_with_changes" ;;
     success_without_changes) printf '%s' "success_without_changes" ;;
     already_satisfied|already_done|noop_success) printf '%s' "already_satisfied" ;;
+    error_with_changes) printf '%s' "error_with_changes" ;;
+    error_without_changes|error|failed) printf '%s' "error_without_changes" ;;
     *) printf '%s' "" ;;
   esac
 }

@@ -789,6 +789,33 @@ fn apply_job_completion_typed(
         let completion_kind = input
             .completion_kind
             .unwrap_or(PerformerCompletionKind::SuccessWithChanges);
+
+        // ── Tool-reported error: re-queue the task ──────────────────
+        // The tool ran but reported it could not complete the task
+        // (sandbox failure, env issue, etc.). Reset to Todo so the
+        // coordinator can retry with the same or a different tool.
+        if completion_kind.is_error() {
+            task.set_workflow_state(WorkflowState::Todo);
+            {
+                let runtime = task.ensure_runtime();
+                runtime.completion_kind = Some(completion_kind.as_str().to_string());
+                runtime.set_status(RuntimeStatus::Failed);
+                runtime.current_phase = None;
+                runtime.pid = None;
+                runtime.last_error = Some(input.status_text.clone());
+            }
+            task.tool = None;
+            task.assignee = None;
+            task.touch_state_changed(now);
+            return JobCompletionResult {
+                should_retry: false,
+                status_label: completion_kind.as_str(),
+                detail: input.status_text.clone(),
+                completion_kind: Some(completion_kind),
+                tool_error: None,
+            };
+        }
+
         let terminal_noop = completion_kind == PerformerCompletionKind::AlreadySatisfied
             || completion_kind == PerformerCompletionKind::SuccessWithoutChanges;
         task.set_workflow_state(if terminal_noop {
@@ -816,6 +843,9 @@ fn apply_job_completion_typed(
                 PerformerCompletionKind::SuccessWithChanges => "phase_done",
                 PerformerCompletionKind::SuccessWithoutChanges => "success_without_changes",
                 PerformerCompletionKind::AlreadySatisfied => "already_satisfied",
+                // Error kinds handled above; unreachable here.
+                PerformerCompletionKind::ErrorWithChanges => "error_with_changes",
+                PerformerCompletionKind::ErrorWithoutChanges => "error_without_changes",
             },
             detail: input.status_text.clone(),
             completion_kind: Some(completion_kind),
@@ -860,6 +890,39 @@ fn apply_job_completion_typed(
                 detail: "exit-code override: stdout indicates completion despite transient error"
                     .to_string(),
                 completion_kind: Some(PerformerCompletionKind::AlreadySatisfied),
+                tool_error: classified_tool_error,
+            };
+        }
+
+        // ── Tool-reported error with non-zero exit ──────────────────
+        // The tool exited non-zero but printed an explicit error marker.
+        // Re-queue the task so the coordinator retries with the same or
+        // a different tool.
+        let stdout_says_error = ni.stdout.contains("MACC_TASK_RESULT: error_with_changes")
+            || ni.stdout.contains("MACC_TASK_RESULT: error_without_changes");
+        if stdout_says_error {
+            let kind = if ni.stdout.contains("error_with_changes") {
+                PerformerCompletionKind::ErrorWithChanges
+            } else {
+                PerformerCompletionKind::ErrorWithoutChanges
+            };
+            task.set_workflow_state(WorkflowState::Todo);
+            {
+                let runtime = task.ensure_runtime();
+                runtime.completion_kind = Some(kind.as_str().to_string());
+                runtime.set_status(RuntimeStatus::Failed);
+                runtime.current_phase = None;
+                runtime.pid = None;
+                runtime.last_error = Some(input.status_text.clone());
+            }
+            task.tool = None;
+            task.assignee = None;
+            task.touch_state_changed(now);
+            return JobCompletionResult {
+                should_retry: false,
+                status_label: kind.as_str(),
+                detail: input.status_text.clone(),
+                completion_kind: Some(kind),
                 tool_error: classified_tool_error,
             };
         }

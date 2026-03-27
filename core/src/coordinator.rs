@@ -176,6 +176,10 @@ pub enum PerformerCompletionKind {
     SuccessWithChanges,
     SuccessWithoutChanges,
     AlreadySatisfied,
+    /// The tool failed but produced partial work (uncommitted changes).
+    ErrorWithChanges,
+    /// The tool failed and produced no changes (e.g. sandbox error, env issue).
+    ErrorWithoutChanges,
 }
 
 impl PerformerCompletionKind {
@@ -184,7 +188,18 @@ impl PerformerCompletionKind {
             PerformerCompletionKind::SuccessWithChanges => "success_with_changes",
             PerformerCompletionKind::SuccessWithoutChanges => "success_without_changes",
             PerformerCompletionKind::AlreadySatisfied => "already_satisfied",
+            PerformerCompletionKind::ErrorWithChanges => "error_with_changes",
+            PerformerCompletionKind::ErrorWithoutChanges => "error_without_changes",
         }
+    }
+
+    /// Returns `true` if this kind represents an error (task not completed).
+    pub fn is_error(self) -> bool {
+        matches!(
+            self,
+            PerformerCompletionKind::ErrorWithChanges
+                | PerformerCompletionKind::ErrorWithoutChanges
+        )
     }
 }
 
@@ -197,6 +212,10 @@ impl FromStr for PerformerCompletionKind {
             "success_without_changes" => Ok(PerformerCompletionKind::SuccessWithoutChanges),
             "already_satisfied" | "already_done" | "noop_success" => {
                 Ok(PerformerCompletionKind::AlreadySatisfied)
+            }
+            "error_with_changes" => Ok(PerformerCompletionKind::ErrorWithChanges),
+            "error_without_changes" | "error" | "failed" => {
+                Ok(PerformerCompletionKind::ErrorWithoutChanges)
             }
             other => Err(format!("unknown performer completion kind: {}", other)),
         }
