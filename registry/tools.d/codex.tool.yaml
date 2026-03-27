@@ -53,7 +53,7 @@ fields:
       options: [gpt-5.4, gpt-5.4-mini, gpt-5.3-codex, gpt-5.2-codex, gpt-5.2, gpt-5.1-codex-max, gpt-5.1-codex-mini, gpt-5.1-codex, gpt-5.1, gpt-5-codex, gpt-5-codex-mini, gpt-5]
     help: Codex model id (e.g., gpt-5.2).
     pointer: /tools/config/codex/model
-    default: "gpt-5.2-codex"
+    default: "gpt-5.3-codex"
   - id: model_reasoning_effort
     label: Reasoning Effort
     kind:
@@ -118,10 +118,10 @@ fields:
     label: Profile Deep Review Model
     kind:
       type: enum
-      options: [gpt-5.2-codex, gpt-5.2, gpt-5.1-codex-max, gpt-5.1-codex-mini, gpt-5.1-codex, gpt-5.1, gpt-5-codex, gpt-5-codex-mini, gpt-5]
+      options: [gpt-5.4, gpt-5.4-mini, gpt-5.3-codex, gpt-5.2-codex, gpt-5.2, gpt-5.1-codex-max, gpt-5.1-codex-mini, gpt-5.1-codex, gpt-5.1, gpt-5-codex, gpt-5-codex-mini, gpt-5]
     help: Model for the deep-review profile.
     pointer: /tools/config/codex/profiles/deep-review/model
-    default: "gpt-5.2-codex"
+    default: "gpt-5.3-codex"
   - id: profile_deep_review_model_reasoning_effort
     label: Profile Deep Review Reasoning
     kind:
