@@ -707,7 +707,7 @@ run_tool() {
   log_task_line "- Runner: \`${script}\`"
   log_task_line "- Started: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   log_task_line ""
-  log_task_line '```bash'
+  log_task_line '```text'
   set +e
   emit_performer_event "progress" "$CURRENT_PHASE" "running" "$(jq -nc --arg attempt "$attempt" --arg max "$max_attempts" '{attempt:($attempt|tonumber?), max_attempts:($max|tonumber?)}')"
   spinner_start "Running ${tool} (attempt ${attempt}/${max_attempts})"
@@ -873,7 +873,7 @@ for ((i=1; i<=PERFORMER_MAX_ITERATIONS; i++)); do
   build_prompt "$next_task_json" "$next_id" "$next_title" >"$prompt_file"
   log_task_line "### Prompt"
   log_task_line ""
-  log_task_line '```bash'
+  log_task_line '```text'
   cat "$prompt_file" >>"$task_log_file"
   log_task_line '```'
   log_task_line ""
