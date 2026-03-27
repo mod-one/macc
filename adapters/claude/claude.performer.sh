@@ -289,9 +289,7 @@ run_and_capture() {
   local output_file="$1"
   shift
   local rc=0
-  printf '```' >&2
   printf '[MACC] invoke: %s\n' "$*" >&2
-  printf '```' >&2
   "$@" 2>&1 | tee "$output_file"
   rc=${PIPESTATUS[0]}
   return "$rc"
@@ -309,26 +307,6 @@ expand_config_args() {
   for token in "${args[@]}"; do
     out_ref+=("${token//\{session_id\}/$current_sid}")
   done
-
-  # RL-PERFORMER-012: When running under the Coordinator (headless /
-  # non-interactive mode), inject --dangerously-skip-permissions so that
-  # Claude Code does not block on an interactive permission prompt that
-  # no human can answer.  The MACC_COORDINATOR_IPC_ADDR env var is only
-  # set by the Coordinator dispatch path (runtime.rs / task_runner.rs),
-  # so this guard ensures the flag is never added during manual /
-  # interactive runs.
-  if [[ -n "${MACC_COORDINATOR_IPC_ADDR:-}" ]]; then
-    local already_has_skip=false
-    for token in "${out_ref[@]}"; do
-      if [[ "$token" == "--dangerously-skip-permissions" ]]; then
-        already_has_skip=true
-        break
-      fi
-    done
-    if [[ "$already_has_skip" == false ]]; then
-      out_ref+=("--dangerously-skip-permissions")
-    fi
-  fi
 }
 
 run_resume_and_capture() {
@@ -476,10 +454,8 @@ run_default_call() {
     run_and_capture "$output_capture" "$command" "${final_call_args[@]}" "$prompt_arg" "$prompt_text"
   else
     local rc=0
-    printf '```' >&2
     printf '[MACC] invoke: %s' "$command" >&2
     printf ' %q' "${final_call_args[@]}" >&2
-    printf '```' >&2
     printf '\n' >&2
     printf "%s" "$prompt_text" | "$command" "${final_call_args[@]}" 2>&1 | tee "$output_capture"
     rc=${PIPESTATUS[1]}

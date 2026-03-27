@@ -8,7 +8,7 @@ gitignore:
 performer:
   runner: adapters/codex/codex.performer.sh
   command: codex
-  args: ["exec", "-"]
+  args: ["--model", "{model}", "exec", "-"]
   prompt:
     mode: stdin
   session:
@@ -18,7 +18,7 @@ performer:
     extract_regex: "session[[:space:]]+id:[[:space:]]*([[:alnum:]-]+)"
     resume:
       command: codex
-      args: ["--model", "{model}", "exec", "resume", "{session_id}"]
+      args: ["--model", "{model}", "exec", "resume", "{session_id}", "-"]
   retry:
     command: codex
     args: ["--model", "{model}", "exec", "resume", "{session_id}", "-"]
