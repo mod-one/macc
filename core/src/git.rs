@@ -483,6 +483,43 @@ pub fn merge_base_is_ancestor(
     .success())
 }
 
+/// Resolve a reference to its full SHA.  Returns `None` when the reference
+/// does not exist.
+pub fn resolve_ref(repo_or_worktree: &Path, reference: &str) -> Option<String> {
+    let output = run_git_output(
+        repo_or_worktree,
+        &["rev-parse", "--verify", "--quiet", reference],
+        "resolve git ref",
+    )
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if sha.is_empty() {
+        None
+    } else {
+        Some(sha)
+    }
+}
+
+/// Returns `true` when the worktree HEAD has at least one commit that is not
+/// reachable from `base_ref` (i.e. committed work exists ahead of the base).
+pub fn has_commits_ahead(repo_or_worktree: &Path, base_ref: &str) -> bool {
+    let output = run_git_output(
+        repo_or_worktree,
+        &["rev-list", "--count", &format!("{}..HEAD", base_ref)],
+        "count commits ahead of base",
+    );
+    match output {
+        Ok(out) if out.status.success() => {
+            let count_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            count_str.parse::<usize>().unwrap_or(0) > 0
+        }
+        _ => false,
+    }
+}
+
 /// Returns the list of git identity fields that are not configured.
 /// Checks `user.email` and `user.name` via `git config` (respects global, local, and system).
 /// An empty vec means all required fields are set.

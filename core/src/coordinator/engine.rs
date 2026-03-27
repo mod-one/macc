@@ -311,10 +311,16 @@ pub fn apply_dispatch_pid_in_registry(
 pub fn build_advance_actions(
     registry: &Value,
     active_merge_jobs: &HashSet<String>,
+    now: &str,
 ) -> Result<Vec<AdvanceTaskAction>> {
     let typed = TaskRegistry::from_value(registry)?;
     let mut actions = Vec::new();
     for task in &typed.tasks {
+        // Skip tasks that are delayed (e.g. waiting for a throttled tool to
+        // recover while preserving committed work on their worktree).
+        if crate::coordinator::rate_limit::is_task_delayed(task, now) {
+            continue;
+        }
         let task_id = task.id.clone();
         let workflow_state = task.workflow_state();
         match workflow_state
@@ -594,6 +600,7 @@ pub(crate) fn apply_phase_success_typed(
     runtime.set_status(RuntimeStatus::PhaseDone);
     runtime.current_phase = Some(transition.runtime_phase.to_string());
     runtime.pid = None;
+    runtime.delayed_until = None;
     task.touch_state_changed(now);
     Ok(())
 }
@@ -617,6 +624,7 @@ pub(crate) fn apply_review_phase_success_typed(
     runtime.set_status(RuntimeStatus::PhaseDone);
     runtime.current_phase = Some("review".to_string());
     runtime.pid = None;
+    runtime.delayed_until = None;
     task.touch_state_changed(now);
     Ok(to)
 }
@@ -2028,7 +2036,7 @@ mod tests {
         .expect("apply completion");
         assert_eq!(completion.status_label, "already_satisfied");
         assert_eq!(registry["tasks"][0]["state"], "merged");
-        let actions = build_advance_actions(&registry, &HashSet::new()).expect("advance actions");
+        let actions = build_advance_actions(&registry, &HashSet::new(), "").expect("advance actions");
         assert!(!actions.iter().any(|action| {
             matches!(
                 action,
@@ -2093,7 +2101,7 @@ mod tests {
         .expect("apply completion");
         assert_eq!(completion.status_label, "success_without_changes");
         assert_eq!(registry["tasks"][0]["state"], "merged");
-        let actions = build_advance_actions(&registry, &HashSet::new()).expect("advance actions");
+        let actions = build_advance_actions(&registry, &HashSet::new(), "").expect("advance actions");
         assert!(!actions.iter().any(|action| {
             matches!(
                 action,

@@ -99,18 +99,27 @@ fn persist_throttle_registry(
     let _ = sqlite.save_throttle_registry(registry);
 }
 
-/// Detect E602 (quota exhaustion) in a phase failure reason string.
+/// Detect transient tool unavailability in a phase failure reason string.
 ///
 /// The phase executor returns a free-form error string. We look for known
-/// markers that indicate the underlying tool hit a hard quota limit:
-/// - The canonical E602 error code
-/// - Provider-specific `TerminalQuotaError`
-/// - Generic "quota" + "exhausted" patterns
-fn is_quota_exhaustion_in_reason(reason: &str) -> bool {
+/// markers that indicate the tool is temporarily unavailable:
+/// - E602 quota exhaustion (hard quota limit)
+/// - E601 rate-limit / overloaded
+/// - E603 session conflict
+/// - E101 timeout / network errors
+/// - Provider-specific patterns (TerminalQuotaError, 429, 529, etc.)
+fn is_tool_unavailability_error(reason: &str) -> bool {
+    // Canonical error codes
     if reason.contains(E602_QUOTA_EXHAUSTED) {
         return true;
     }
+    for code in &["E601", "E603", "E101"] {
+        if reason.contains(code) {
+            return true;
+        }
+    }
     let lower = reason.to_ascii_lowercase();
+    // Quota exhaustion patterns
     if lower.contains("terminalquotaerror") {
         return true;
     }
@@ -124,21 +133,64 @@ fn is_quota_exhaustion_in_reason(reason: &str) -> bool {
     if lower.contains("out of extra usage") {
         return true;
     }
+    // Rate-limit / overloaded patterns
+    if lower.contains("rate limit") || lower.contains("rate_limit") || lower.contains("ratelimit")
+    {
+        return true;
+    }
+    if lower.contains("too many requests") || lower.contains("429") {
+        return true;
+    }
+    if lower.contains("overloaded") || lower.contains("529") {
+        return true;
+    }
+    // Session conflict patterns
+    if lower.contains("session conflict") || lower.contains("already in use") {
+        return true;
+    }
+    // Timeout / network patterns
+    if lower.contains("timed out") || lower.contains("timeout") {
+        return true;
+    }
+    if lower.contains("connection refused")
+        || lower.contains("connection reset")
+        || lower.contains("network error")
+    {
+        return true;
+    }
     false
 }
 
+/// Default cooldown (seconds) per error code when the provider doesn't specify
+/// a `retry_after_seconds` value.
+fn default_cooldown_for_code(error_code: &str) -> u64 {
+    match error_code {
+        "E602" => 3600, // Quota exhaustion: 1 hour
+        "E601" => 120,  // Rate-limit / overloaded: 2 minutes
+        "E603" => 60,   // Session conflict: 1 minute
+        "E101" => 30,   // Timeout / network: 30 seconds
+        _ => 120,       // Unknown transient: 2 minutes
+    }
+}
+
+/// Transient error codes that should trigger the tool-unavailability handler.
+const TRANSIENT_ERROR_CODES: &[&str] = &["E601", "E602", "E603", "E101"];
+
 /// Try to classify a phase failure reason via the per-adapter error normalizers.
-/// Returns the parsed `retry_after_seconds` if the error is E602.
-fn extract_quota_cooldown_from_reason(
+/// Returns `(error_code, cooldown_seconds)` if the error is a transient
+/// tool-unavailability error (E601, E602, E603, E101).
+fn extract_cooldown_from_reason(
     reason: &str,
     tool_id: &str,
     normalizer_registry: &crate::coordinator::error_normalizer::NormalizerRegistry,
-) -> Option<u64> {
+) -> Option<(String, u64)> {
     let normalizer = normalizer_registry.get(tool_id)?;
     let te = normalizer.normalize(1, reason, reason)?;
-    if te.error_code == E602_QUOTA_EXHAUSTED {
-        // Return the provider's reset time, or a default of 1 hour.
-        Some(te.retry_after_seconds.unwrap_or(3600))
+    if TRANSIENT_ERROR_CODES.contains(&te.error_code.as_str()) {
+        let cooldown = te
+            .retry_after_seconds
+            .unwrap_or_else(|| default_cooldown_for_code(&te.error_code));
+        Some((te.error_code, cooldown))
     } else {
         None
     }
@@ -161,14 +213,26 @@ fn rollback_worktree_to_sha(worktree_path: &Path, target_sha: &str) -> bool {
         && clean.map(|o| o.status.success()).unwrap_or(false)
 }
 
-/// Part A: handle E602 (quota exhaustion) detected during a phase (review/fix/integrate).
+/// Handle transient tool unavailability detected during a phase
+/// (review/fix/integrate).
 ///
-/// 1. Roll back the worktree to the pre-phase HEAD so partial changes are discarded.
-/// 2. Register the tool in the throttle registry so `pick_tool()` skips it.
-/// 3. Re-queue the task (→ Todo) with a `delayed_until` cooldown instead of marking
-///    it as a phase failure.
+/// Covers E601 (rate-limit), E602 (quota exhaustion), E603 (session conflict),
+/// E101 (timeout/network), and any other error that imposes a waiting period or
+/// partial/total tool unavailability.
+///
+/// **Worktree recycling**: when committed work exists on the worktree branch,
+/// it is preserved (it cost tokens) and the task is handed off to a fallback
+/// tool or kept waiting until the throttle expires.
+///
+/// Three cases:
+///
+/// | Committed work? | Fallback tool? | Action                                    |
+/// |-----------------|----------------|-------------------------------------------|
+/// | Yes             | Yes            | Recycle worktree → fallback tool, no delay |
+/// | Yes             | No             | Keep worktree, delay until throttle expires |
+/// | No              | —              | Detach worktree, re-queue as Todo          |
 #[allow(clippy::too_many_arguments)]
-fn handle_phase_quota_exhaustion(
+fn handle_phase_tool_unavailability(
     repo_root: &Path,
     registry: &mut serde_json::Value,
     state: &mut CoordinatorRunState,
@@ -179,17 +243,19 @@ fn handle_phase_quota_exhaustion(
     pre_phase_sha: Option<&str>,
     worktree_path_str: Option<&str>,
     now: &str,
+    enabled_tools: &[String],
     logger: Option<&dyn CoordinatorLog>,
 ) -> Result<()> {
     let tool_id = task_snapshot.tool.as_deref().unwrap_or("unknown");
+    let base_branch = task_snapshot.base_branch("master");
 
-    // ── Step 1: roll back worktree ─────────────────────────────────────
+    // ── Step 1: roll back worktree to pre-phase HEAD ───────────────────
     let rolled_back = match (worktree_path_str, pre_phase_sha) {
         (Some(wp), Some(sha)) => {
             let ok = rollback_worktree_to_sha(Path::new(wp), sha);
             if let Some(log) = logger {
                 let _ = log.note(format!(
-                    "- E602 rollback task={} worktree={} sha={} ok={}",
+                    "- tool-unavail rollback task={} worktree={} sha={} ok={}",
                     task_id, wp, sha, ok
                 ));
             }
@@ -198,7 +264,7 @@ fn handle_phase_quota_exhaustion(
         _ => {
             if let Some(log) = logger {
                 let _ = log.note(format!(
-                    "- E602 rollback skipped task={} (no worktree/sha)",
+                    "- tool-unavail rollback skipped task={} (no worktree/sha)",
                     task_id
                 ));
             }
@@ -207,8 +273,9 @@ fn handle_phase_quota_exhaustion(
     };
 
     // ── Step 2: compute cooldown and register tool throttle ────────────
-    let cooldown = extract_quota_cooldown_from_reason(reason, tool_id, &state.normalizer_registry)
-        .unwrap_or(3600);
+    let (detected_error_code, cooldown) =
+        extract_cooldown_from_reason(reason, tool_id, &state.normalizer_registry)
+            .unwrap_or_else(|| ("E602".to_string(), 3600));
     let now_epoch = chrono::DateTime::parse_from_rfc3339(now)
         .map(|dt| dt.timestamp() as u64)
         .unwrap_or(0);
@@ -221,7 +288,7 @@ fn handle_phase_quota_exhaustion(
         backoff_seconds: cooldown,
         last_rate_limit_info: Some(RateLimitInfo {
             tool_id: tool_id.to_string(),
-            error_code: E602_QUOTA_EXHAUSTED.to_string(),
+            error_code: detected_error_code,
             retry_after_seconds: Some(cooldown),
             detected_at: now_epoch,
             source_header: None,
@@ -230,41 +297,108 @@ fn handle_phase_quota_exhaustion(
     state.throttle_registry.insert(tool_id.to_string(), ts);
     persist_throttle_registry(repo_root, &state.throttle_registry);
 
-    // ── Step 3: re-queue the task ──────────────────────────────────────
+    // ── Step 3: check for committed work on the worktree ───────────────
+    let has_committed_work = worktree_path_str
+        .map(|wp| crate::git::has_commits_ahead(Path::new(wp), &base_branch))
+        .unwrap_or(false);
+
+    let has_fallback_tool = enabled_tools.iter().any(|t| {
+        t != tool_id
+            && !crate::coordinator::rate_limit::is_tool_throttled(
+                &state.throttle_registry,
+                t,
+                now,
+            )
+    });
+
+    // ── Step 4: apply the appropriate recycling strategy ───────────────
     let delayed_until_str = chrono::DateTime::parse_from_rfc3339(now)
         .ok()
         .and_then(|dt| dt.checked_add_signed(chrono::Duration::seconds(cooldown as i64)))
         .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
         .unwrap_or_default();
 
+    let strategy: &str;
+
     let mut typed = TaskRegistry::from_value(registry)?;
     if let Some(task) = typed.find_task_mut(task_id) {
-        let runtime = task.ensure_runtime();
-        runtime.delayed_until = Some(delayed_until_str.clone());
-        runtime.set_status(crate::coordinator::RuntimeStatus::Idle);
-        runtime.current_phase = None;
-        runtime.completion_kind = None;
-        runtime.pid = None;
-        runtime.last_error = Some(format!(
-            "E602 during {} phase; rolled_back={}; cooldown {}s",
-            phase, rolled_back, cooldown
-        ));
-        task.set_workflow_state(crate::coordinator::WorkflowState::Todo);
-        task.touch_state_changed(now);
+        // First pass: write all runtime fields while borrow is active.
+        {
+            let runtime = task.ensure_runtime();
+            runtime.pid = None;
+            runtime.completion_kind = None;
+            runtime.last_error = Some(format!(
+                "Tool unavailable during {} phase; rolled_back={}; cooldown {}s",
+                phase, rolled_back, cooldown
+            ));
+
+            if has_committed_work && has_fallback_tool {
+                runtime.delayed_until = None;
+                runtime.set_status(crate::coordinator::RuntimeStatus::PhaseDone);
+            } else if has_committed_work {
+                runtime.delayed_until = Some(delayed_until_str.clone());
+            } else {
+                runtime.delayed_until = if has_fallback_tool {
+                    None
+                } else {
+                    Some(delayed_until_str.clone())
+                };
+                runtime.set_status(crate::coordinator::RuntimeStatus::Idle);
+                runtime.current_phase = None;
+            }
+        }
+        // Second pass: write direct task fields (borrow on runtime dropped).
+        if has_committed_work && has_fallback_tool {
+            // ── Case 1: recycle worktree → fallback tool ────────────
+            strategy = "recycle_to_fallback";
+            let fallback = enabled_tools
+                .iter()
+                .find(|t| {
+                    t.as_str() != tool_id
+                        && !crate::coordinator::rate_limit::is_tool_throttled(
+                            &state.throttle_registry,
+                            t,
+                            now,
+                        )
+                })
+                .cloned()
+                .unwrap_or_default();
+            task.tool = Some(fallback);
+            task.touch_state_changed(now);
+        } else if has_committed_work {
+            // ── Case 2: wait for throttle to expire ────────────────
+            strategy = "wait_for_throttle";
+            task.touch_state_changed(now);
+        } else {
+            // ── Case 3: no committed work → re-queue ───────────────
+            strategy = "requeue_fresh";
+            task.worktree = None;
+            task.assignee = None;
+            task.tool = None;
+            task.set_workflow_state(crate::coordinator::WorkflowState::Todo);
+            task.touch_state_changed(now);
+        }
+    } else {
+        strategy = "task_not_found";
     }
     *registry = typed.to_value()?;
 
     // ── Log event ──────────────────────────────────────────────────────
     let msg = format!(
-        "phase_quota_exhaustion task={} phase={} tool={} cooldown={}s rolled_back={} delayed_until={}",
-        task_id, phase, tool_id, cooldown, rolled_back, delayed_until_str
+        "phase_tool_unavailability task={} phase={} tool={} cooldown={}s rolled_back={} \
+         has_committed_work={} strategy={}",
+        task_id, phase, tool_id, cooldown, rolled_back, has_committed_work, strategy,
     );
     let _ = append_coordinator_event_with_severity(
         repo_root,
-        "phase_quota_exhaustion",
+        "phase_tool_unavailability",
         task_id,
         phase,
-        "requeued",
+        match strategy {
+            "recycle_to_fallback" => "recycled",
+            "wait_for_throttle" => "waiting",
+            _ => "requeued",
+        },
         &msg,
         "warning",
     );
@@ -903,12 +1037,16 @@ pub async fn advance_tasks_native(
     let blocked_merge: Option<(String, String)> = None;
     let now = now_iso_coordinator();
     let merge_timeout = resolve_merge_timeout_seconds(env_cfg, coordinator);
+    // Derive enabled tools for fallback routing in E602 handling.
+    let enabled_tools: Vec<String> = coordinator
+        .map(|c| c.tool_priority.clone())
+        .unwrap_or_default();
     let active_merge_ids = state
         .active_merge_jobs
         .keys()
         .cloned()
         .collect::<HashSet<_>>();
-    let actions = coordinator_engine::build_advance_actions(&registry, &active_merge_ids)?;
+    let actions = coordinator_engine::build_advance_actions(&registry, &active_merge_ids, &now)?;
     if !actions.is_empty() {
         if let Some(log) = logger {
             let _ = log.note(format!("- Advance started (actions={})", actions.len()));
@@ -979,8 +1117,8 @@ pub async fn advance_tasks_native(
                             )?
                         }
                         Err(reason) => {
-                            if is_quota_exhaustion_in_reason(&reason) {
-                                handle_phase_quota_exhaustion(
+                            if is_tool_unavailability_error(&reason) {
+                                handle_phase_tool_unavailability(
                                     repo_root,
                                     &mut registry,
                                     state,
@@ -991,6 +1129,7 @@ pub async fn advance_tasks_native(
                                     pre_phase_sha.as_deref(),
                                     worktree_path_str.as_deref(),
                                     &now,
+                                    &enabled_tools,
                                     logger,
                                 )?;
                             } else {
@@ -1026,8 +1165,8 @@ pub async fn advance_tasks_native(
                             &now,
                         )?,
                         Err(reason) => {
-                            if is_quota_exhaustion_in_reason(&reason) {
-                                handle_phase_quota_exhaustion(
+                            if is_tool_unavailability_error(&reason) {
+                                handle_phase_tool_unavailability(
                                     repo_root,
                                     &mut registry,
                                     state,
@@ -1038,6 +1177,7 @@ pub async fn advance_tasks_native(
                                     pre_phase_sha.as_deref(),
                                     worktree_path_str.as_deref(),
                                     &now,
+                                    &enabled_tools,
                                     logger,
                                 )?;
                             } else {

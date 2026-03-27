@@ -253,6 +253,7 @@ struct WebTestEngine {
     plan_result:
         std::sync::Mutex<Option<std::result::Result<macc_core::plan::ActionPlan, MaccError>>>,
     run_result: std::sync::Mutex<Option<std::result::Result<CoordinatorCommandResult, MaccError>>>,
+    managed_run_result: std::sync::Mutex<Option<std::result::Result<(), MaccError>>>,
     worktree_run_result: std::sync::Mutex<Option<std::result::Result<(), MaccError>>>,
     worktree_run_calls: std::sync::Mutex<Vec<String>>,
     cleanup_result: std::sync::Mutex<Option<std::result::Result<(), MaccError>>>,
@@ -271,6 +272,7 @@ impl WebTestEngine {
             real_tool_cooldown_commands: false,
             plan_result: std::sync::Mutex::new(None),
             run_result: std::sync::Mutex::new(Some(result)),
+            managed_run_result: std::sync::Mutex::new(None),
             worktree_run_result: std::sync::Mutex::new(Some(Ok(()))),
             worktree_run_calls: std::sync::Mutex::new(Vec::new()),
             cleanup_result: std::sync::Mutex::new(Some(Ok(()))),
@@ -289,6 +291,7 @@ impl WebTestEngine {
             real_tool_cooldown_commands: false,
             plan_result: std::sync::Mutex::new(None),
             run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
+            managed_run_result: std::sync::Mutex::new(None),
             worktree_run_result: std::sync::Mutex::new(Some(Ok(()))),
             worktree_run_calls: std::sync::Mutex::new(Vec::new()),
             cleanup_result: std::sync::Mutex::new(Some(result)),
@@ -307,6 +310,7 @@ impl WebTestEngine {
             real_tool_cooldown_commands: false,
             plan_result: std::sync::Mutex::new(None),
             run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
+            managed_run_result: std::sync::Mutex::new(None),
             worktree_run_result: std::sync::Mutex::new(Some(Ok(()))),
             worktree_run_calls: std::sync::Mutex::new(Vec::new()),
             cleanup_result: std::sync::Mutex::new(Some(Ok(()))),
@@ -325,6 +329,7 @@ impl WebTestEngine {
             real_tool_cooldown_commands: false,
             plan_result: std::sync::Mutex::new(None),
             run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
+            managed_run_result: std::sync::Mutex::new(None),
             worktree_run_result: std::sync::Mutex::new(Some(Ok(()))),
             worktree_run_calls: std::sync::Mutex::new(Vec::new()),
             cleanup_result: std::sync::Mutex::new(Some(Ok(()))),
@@ -343,6 +348,7 @@ impl WebTestEngine {
             real_tool_cooldown_commands: false,
             plan_result: std::sync::Mutex::new(None),
             run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
+            managed_run_result: std::sync::Mutex::new(None),
             worktree_run_result: std::sync::Mutex::new(Some(Ok(()))),
             worktree_run_calls: std::sync::Mutex::new(Vec::new()),
             cleanup_result: std::sync::Mutex::new(Some(Ok(()))),
@@ -364,6 +370,7 @@ impl WebTestEngine {
             real_tool_cooldown_commands: false,
             plan_result: std::sync::Mutex::new(None),
             run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
+            managed_run_result: std::sync::Mutex::new(None),
             worktree_run_result: std::sync::Mutex::new(Some(Ok(()))),
             worktree_run_calls: std::sync::Mutex::new(Vec::new()),
             cleanup_result: std::sync::Mutex::new(Some(Ok(()))),
@@ -382,6 +389,7 @@ impl WebTestEngine {
             real_tool_cooldown_commands: false,
             plan_result: std::sync::Mutex::new(Some(plan)),
             run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
+            managed_run_result: std::sync::Mutex::new(None),
             worktree_run_result: std::sync::Mutex::new(Some(Ok(()))),
             worktree_run_calls: std::sync::Mutex::new(Vec::new()),
             cleanup_result: std::sync::Mutex::new(Some(Ok(()))),
@@ -400,6 +408,7 @@ impl WebTestEngine {
             real_tool_cooldown_commands: false,
             plan_result: std::sync::Mutex::new(None),
             run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
+            managed_run_result: std::sync::Mutex::new(None),
             worktree_run_result: std::sync::Mutex::new(Some(Ok(()))),
             worktree_run_calls: std::sync::Mutex::new(Vec::new()),
             cleanup_result: std::sync::Mutex::new(Some(Ok(()))),
@@ -418,6 +427,7 @@ impl WebTestEngine {
             real_tool_cooldown_commands: false,
             plan_result: std::sync::Mutex::new(None),
             run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
+            managed_run_result: std::sync::Mutex::new(None),
             worktree_run_result: std::sync::Mutex::new(Some(result)),
             worktree_run_calls: std::sync::Mutex::new(Vec::new()),
             cleanup_result: std::sync::Mutex::new(Some(Ok(()))),
@@ -436,6 +446,7 @@ impl WebTestEngine {
             real_tool_cooldown_commands: true,
             plan_result: std::sync::Mutex::new(None),
             run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
+            managed_run_result: std::sync::Mutex::new(None),
             worktree_run_result: std::sync::Mutex::new(Some(Ok(()))),
             worktree_run_calls: std::sync::Mutex::new(Vec::new()),
             cleanup_result: std::sync::Mutex::new(Some(Ok(()))),
@@ -444,6 +455,13 @@ impl WebTestEngine {
             doctor_snapshots: std::sync::Mutex::new(None),
             doctor_fix_result: std::sync::Mutex::new(None),
             coordinator_events: std::sync::Mutex::new(vec![Vec::new()]),
+        }
+    }
+
+    fn with_managed_run_result(result: std::result::Result<(), MaccError>) -> Self {
+        Self {
+            managed_run_result: std::sync::Mutex::new(Some(result)),
+            ..Self::new(Ok(CoordinatorCommandResult::default()))
         }
     }
 
@@ -553,6 +571,19 @@ impl macc_core::engine::Engine for WebTestEngine {
             .expect("lock")
             .take()
             .unwrap_or_else(|| Ok(CoordinatorCommandResult::default()))
+    }
+
+    fn coordinator_start_managed_command_process(
+        &self,
+        _paths: &ProjectPaths,
+        _command: &macc_core::service::coordinator_workflow::CoordinatorCommand,
+        _cfg: Option<&macc_core::config::CoordinatorConfig>,
+    ) -> Result<()> {
+        self.managed_run_result
+            .lock()
+            .expect("lock")
+            .take()
+            .unwrap_or_else(|| Ok(()))
     }
 
     fn coordinator_stop(&self, _repo_root: &std::path::Path, _reason: &str) -> Result<()> {
