@@ -1241,6 +1241,19 @@ pub async fn advance_tasks_native(
                 base,
                 merge_context,
             } => {
+                // Only one merge at a time — all merges operate on the same
+                // repo_root so concurrent merges cause races (dirty worktree,
+                // git lock conflicts, lost merge results).  Remaining merges
+                // will be picked up in the next advance cycle.
+                if !state.active_merge_jobs.is_empty() {
+                    if let Some(log) = logger {
+                        let _ = log.note(format!(
+                            "- Merge deferred task={} reason=another_merge_active",
+                            task_id
+                        ));
+                    }
+                    continue;
+                }
                 if let Some(log) = logger {
                     let _ = log.note(format!(
                         "- Merge start task={} branch={} base={}",
