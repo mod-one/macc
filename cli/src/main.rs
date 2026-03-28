@@ -913,14 +913,17 @@ fn run_with_engine_provider(
         )
         .run(),
         None => {
-            let _paths = app.ensure_initialized_paths()?;
-            commands::web::WebCommand::new(
-                app.clone(),
-                "0.0.0.0".to_string(),
-                cli.web_port,
-                None,
-            )
-            .run()
+            let paths = engine.project_ensure_initialized_paths(&absolute_cwd)?;
+            std::env::set_current_dir(&paths.root).map_err(|e| MaccError::Io {
+                path: paths.root.to_string_lossy().into(),
+                action: "set current_dir for tui".into(),
+                source: e,
+            })?;
+            macc_tui::run_tui().map_err(|e| MaccError::Io {
+                path: "tui".into(),
+                action: "run_tui".into(),
+                source: std::io::Error::other(e.to_string()),
+            })
         }
     }
 }
