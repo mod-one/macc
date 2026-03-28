@@ -1226,6 +1226,7 @@ dependencies = [
 name = "macc-adapter-claude"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "inventory",
  "macc-adapter-shared",
  "macc-core",
