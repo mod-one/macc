@@ -291,7 +291,7 @@ run_and_capture() {
   local output_file="$1"
   shift
   local rc=0
-  printf '[MACC] invoke: %s\n' "$*" >&2
+  printf '[MACC] invoke (gemini 1): %s\n' "$*" >&2
   "$@" 2>&1 | tee "$output_file"
   rc=${PIPESTATUS[0]}
   return "$rc"
@@ -456,7 +456,7 @@ run_default_call() {
     run_and_capture "$output_capture" "$command" "${final_call_args[@]}" "$prompt_arg" "$prompt_text"
   else
     local rc=0
-    printf '[MACC] invoke: %s' "$command" >&2
+    printf '[MACC] invoke (gemini 2): %s' "$command" >&2
     printf ' %q' "${final_call_args[@]}" >&2
     printf '\n' >&2
     printf "%s" "$prompt_text" | "$command" "${final_call_args[@]}" 2>&1 | tee "$output_capture"

@@ -688,6 +688,33 @@ struct NativePhaseExecutor<'a> {
 /// Mirrors the format used by performer.sh so all phases appear in the same log.
 /// Read the active session ID for a tool + worktree from tool-sessions.json.
 /// Returns `None` if no session exists or the file is missing/unreadable.
+/// Read the tool ID currently stored in a worktree's `.macc/tool.json`.
+fn read_tool_id_from_tool_json(worktree: &std::path::Path) -> Option<String> {
+    let tool_json = worktree.join(".macc").join("tool.json");
+    let raw = std::fs::read_to_string(&tool_json).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    value
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(|id| id.to_string())
+}
+
+/// Ensure the worktree's `.macc/tool.json` matches the desired tool.
+/// If the current tool.json is missing or for a different tool, regenerate it.
+fn ensure_tool_json_for_tool(
+    repo_root: &std::path::Path,
+    worktree: &std::path::Path,
+    desired_tool: &str,
+) -> Result<()> {
+    let current_tool = read_tool_id_from_tool_json(worktree);
+    if current_tool.as_deref() == Some(desired_tool) {
+        return Ok(());
+    }
+    crate::worktree::write_tool_json(repo_root, worktree, desired_tool)?;
+    Ok(())
+}
+
 fn read_session_id_from_state(
     repo_root: &Path,
     tool_id: &str,
@@ -771,6 +798,17 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
         }
         let worktree = std::path::PathBuf::from(worktree_path);
         let tool_json = worktree.join(".macc").join("tool.json");
+        // Ensure tool.json exists and matches the phase tool.  When the
+        // coordinator falls back to a different tool after quota exhaustion,
+        // the worktree still carries the original tool's tool.json.
+        // Regenerating it here guarantees the performer script invokes the
+        // correct command and uses the correct session config.
+        if let Err(err) = ensure_tool_json_for_tool(self.repo_root, &worktree, &phase_tool) {
+            return Ok(Err(format!(
+                "phase '{}' cannot run for task {}: failed to ensure tool.json for '{}': {}",
+                mode, task_id, phase_tool, err
+            )));
+        }
         if !tool_json.exists() {
             return Ok(Err(format!(
                 "phase '{}' cannot run for task {}: missing {}",
@@ -2737,44 +2775,45 @@ pub async fn dispatch_ready_tasks_native(
             dispatch_failed_this_cycle.insert(selected.id.clone());
             break;
         }
-        let tool_json_path = worktree_path.join(".macc").join("tool.json");
-        if !tool_json_path.exists() {
-            if let Err(err) =
-                crate::worktree::write_tool_json(repo_root, &worktree_path, &selected.tool)
-            {
-                let msg = format!(
-                    "dispatch failed for task {}: ensure tool.json failed ({})",
-                    selected.id, err
-                );
-                let _ = append_coordinator_event_with_severity(
-                    repo_root,
-                    "dispatch_failed",
-                    &selected.id,
-                    "dev",
-                    "failed",
-                    &msg,
-                    "warning",
-                );
-                emit_dispatch_skipped(
-                    repo_root,
-                    logger,
-                    &selected.id,
-                    "ensure_tool_json_failed",
-                    &err.to_string(),
-                );
-                let _ = rollback_claim(&msg);
-                if let Some(log) = logger {
-                    let _ = log.note(format!("- {}", msg));
-                }
-                if cooldown_seconds > 0 {
-                    state.dispatch_retry_not_before.insert(
-                        selected.id.clone(),
-                        Instant::now() + Duration::from_secs(cooldown_seconds),
-                    );
-                }
-                dispatch_failed_this_cycle.insert(selected.id.clone());
-                break;
+        // Always ensure tool.json matches the selected tool.  When a worktree
+        // is recycled from a previous task that used a different tool, the old
+        // tool.json would otherwise persist and cause the performer to invoke
+        // the wrong command.
+        if let Err(err) =
+            ensure_tool_json_for_tool(repo_root, &worktree_path, &selected.tool)
+        {
+            let msg = format!(
+                "dispatch failed for task {}: ensure tool.json failed ({})",
+                selected.id, err
+            );
+            let _ = append_coordinator_event_with_severity(
+                repo_root,
+                "dispatch_failed",
+                &selected.id,
+                "dev",
+                "failed",
+                &msg,
+                "warning",
+            );
+            emit_dispatch_skipped(
+                repo_root,
+                logger,
+                &selected.id,
+                "ensure_tool_json_failed",
+                &err.to_string(),
+            );
+            let _ = rollback_claim(&msg);
+            if let Some(log) = logger {
+                let _ = log.note(format!("- {}", msg));
             }
+            if cooldown_seconds > 0 {
+                state.dispatch_retry_not_before.insert(
+                    selected.id.clone(),
+                    Instant::now() + Duration::from_secs(cooldown_seconds),
+                );
+            }
+            dispatch_failed_this_cycle.insert(selected.id.clone());
+            break;
         }
         let worktree_paths = crate::ProjectPaths::from_root(&worktree_path);
         if let Err(err) = crate::init(&worktree_paths, false) {

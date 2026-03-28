@@ -1676,6 +1676,7 @@ mod tests {
             command: Some(Commands::Init {
                 force: false,
                 wizard: false,
+                profile: None,
             }),
         };
 
@@ -1706,6 +1707,7 @@ mod tests {
             command: Some(Commands::Init {
                 force: false,
                 wizard: false,
+                profile: None,
             }),
         };
         run_with_engine(cli, TestEngine::with_fixtures())?;
@@ -1729,6 +1731,7 @@ mod tests {
             command: Some(Commands::Init {
                 force: false,
                 wizard: false,
+                profile: None,
             }),
         };
         run_with_engine(cli_idempotent, TestEngine::with_fixtures())?;
@@ -1749,6 +1752,7 @@ mod tests {
             command: Some(Commands::Init {
                 force: true,
                 wizard: false,
+                profile: None,
             }),
         };
         run_with_engine(cli_force, TestEngine::with_fixtures())?;
@@ -1792,6 +1796,7 @@ mod tests {
                 command: Some(Commands::Init {
                     force: false,
                     wizard: false,
+                    profile: None,
                 }),
             },
             fixture_engine(&ids),
@@ -2276,6 +2281,7 @@ fi
                 command: Some(Commands::Init {
                     force: false,
                     wizard: false,
+                    profile: None,
                 }),
             },
             fixture_engine(&ids),
@@ -2403,6 +2409,7 @@ fi
                 command: Some(Commands::Init {
                     force: false,
                     wizard: false,
+                    profile: None,
                 }),
             },
             fixture_engine(&ids),
@@ -2456,6 +2463,7 @@ fi
                 command: Some(Commands::Init {
                     force: false,
                     wizard: false,
+                    profile: None,
                 }),
             },
             TestEngine::with_fixtures(),
@@ -2507,6 +2515,7 @@ fi
                 command: Some(Commands::Init {
                     force: false,
                     wizard: false,
+                    profile: None,
                 }),
             },
             TestEngine::with_fixtures(),
@@ -2621,6 +2630,7 @@ fi
                 command: Some(Commands::Init {
                     force: false,
                     wizard: false,
+                    profile: None,
                 }),
             },
             TestEngine::with_fixtures(),
@@ -2738,6 +2748,7 @@ fi
                 command: Some(Commands::Init {
                     force: false,
                     wizard: false,
+                    profile: None,
                 }),
             },
             fixture_engine(&ids),
@@ -2845,6 +2856,7 @@ fi
                 command: Some(Commands::Init {
                     force: false,
                     wizard: false,
+                    profile: None,
                 }),
             },
             TestEngine::with_fixtures(),
@@ -2956,6 +2968,7 @@ fi
                 command: Some(Commands::Init {
                     force: false,
                     wizard: false,
+                    profile: None,
                 }),
             },
             TestEngine::with_fixtures(),
@@ -3097,6 +3110,7 @@ fi
                 command: Some(Commands::Init {
                     force: false,
                     wizard: false,
+                    profile: None,
                 }),
             },
             TestEngine::with_fixtures(),
@@ -3232,6 +3246,7 @@ fi
                 command: Some(Commands::Init {
                     force: false,
                     wizard: false,
+                    profile: None,
                 }),
             },
             fixture_engine(&ids),
@@ -3379,6 +3394,7 @@ fi
                 command: Some(Commands::Init {
                     force: false,
                     wizard: false,
+                    profile: None,
                 }),
             },
             fixture_engine(&ids),
@@ -3585,6 +3601,7 @@ fi
                 command: Some(Commands::Init {
                     force: false,
                     wizard: false,
+                    profile: None,
                 }),
             },
             fixture_engine(&ids),
