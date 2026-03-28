@@ -1335,6 +1335,8 @@ pub fn coordinator_sync<E: crate::engine::Engine + ?Sized>(
     engine.coordinator_sync_registry_from_prd_with_logger(&paths.root, &prd_file, logger)?;
     // Reconcile task states from commit history on the reference branch.
     coordinator_sync_prd(paths, coordinator_cfg, env_cfg, logger)?;
+    // Reconcile runtime state: reset ghost/orphan tasks whose performer is dead.
+    coordinator_reconcile(paths, env_cfg, coordinator_cfg, logger)?;
     let json_compat = env_cfg
         .json_compat
         .or_else(|| coordinator_cfg.and_then(|c| c.json_compat))
