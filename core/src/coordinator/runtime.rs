@@ -28,6 +28,63 @@ pub struct CoordinatorJob {
 /// force-killing the performer process.
 pub const FORCE_KILL_GRACE_SECONDS: u64 = 30;
 
+/// Grace period between SIGTERM and SIGKILL when killing a timed-out
+/// performer process group.
+const TIMEOUT_KILL_GRACE_SECONDS: u64 = 10;
+
+/// Kill the entire process group rooted at the performer child.
+///
+/// Because we spawn with `process_group(0)`, the child is the process group
+/// leader and all its descendants share the same PGID.  We send SIGTERM to
+/// the negative PGID first (graceful), wait up to [`TIMEOUT_KILL_GRACE_SECONDS`],
+/// then send SIGKILL to ensure nothing survives.
+///
+/// Falls back to `child.kill()` if we don't have a PID (shouldn't happen).
+async fn kill_process_tree(pid: Option<i64>, child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    if let Some(pid) = pid {
+        let pgid = pid; // child is process group leader, so PGID == PID
+        // SIGTERM the entire process group
+        let _ = std::process::Command::new("kill")
+            .args(["-TERM", "--", &format!("-{}", pgid)])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+
+        // Give processes time to shut down gracefully
+        let grace = std::time::Duration::from_secs(TIMEOUT_KILL_GRACE_SECONDS);
+        match tokio::time::timeout(grace, child.wait()).await {
+            Ok(_) => return, // exited within grace period
+            Err(_) => {}     // still alive, escalate to SIGKILL
+        }
+
+        // SIGKILL the entire process group
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", "--", &format!("-{}", pgid)])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        let _ = child.wait().await; // reap the zombie
+        return;
+    }
+    // Fallback: no PID available (shouldn't happen), just kill the direct child
+    let _ = child.kill().await;
+}
+
+/// Kill a performer process group by PGID.  Used by [`force_kill_stale_failures`]
+/// in control_plane.rs when a failure-signaled process exceeds the grace period.
+pub fn kill_process_group_sync(pid: i64) {
+    #[cfg(unix)]
+    {
+        // SIGKILL the entire process group (PGID == PID because of process_group(0))
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", "--", &format!("-{}", pid)])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CoordinatorMergeJob {
     pub started_at: std::time::Instant,
@@ -495,6 +552,10 @@ pub fn spawn_performer_job(
         ));
     }
     let mut run_cmd = tokio::process::Command::new(executable_path);
+    // Create a new process group so we can kill the entire subprocess tree on
+    // timeout by sending signals to the negative PGID.
+    #[cfg(unix)]
+    run_cmd.process_group(0);
     let event_source = format!(
         "coordinator-worktree:{}:{}",
         task_id,
@@ -545,7 +606,10 @@ pub fn spawn_performer_job(
                 Ok(Ok(status)) => (status.success(), status.to_string(), false),
                 Ok(Err(err)) => (false, err.to_string(), false),
                 Err(_) => {
-                    let _ = child.kill().await;
+                    // Kill the entire process group (SIGTERM then SIGKILL)
+                    // so orphan tool processes don't keep running on the
+                    // worktree after it gets recycled.
+                    kill_process_tree(pid, &mut child).await;
                     (false, "timeout".to_string(), true)
                 }
             }

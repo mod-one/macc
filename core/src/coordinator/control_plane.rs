@@ -1748,15 +1748,10 @@ fn force_kill_stale_failures(
             continue;
         }
         if let Some(pid) = job.pid {
-            // Send SIGKILL to the performer process via the kill command.
-            #[cfg(unix)]
-            {
-                let _ = std::process::Command::new("kill")
-                    .args(["-9", &pid.to_string()])
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status();
-            }
+            // Kill the entire process group (PGID == PID because we spawn
+            // with process_group(0)).  This ensures orphaned tool subprocesses
+            // are also killed, not just the shell wrapper.
+            super::runtime::kill_process_group_sync(pid);
             if let Some(log) = logger {
                 let _ = log.note(format!(
                     "- Force-killed performer task={} pid={} reason=failure_signaled_grace_expired elapsed={:.1}s",
