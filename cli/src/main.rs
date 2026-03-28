@@ -65,6 +65,14 @@ enum Commands {
         /// Run interactive setup wizard (3 questions)
         #[arg(long)]
         wizard: bool,
+        /// Restore a saved profile after initialization
+        #[arg(long)]
+        profile: Option<String>,
+    },
+    /// Manage saved configuration profiles
+    Config {
+        #[command(subcommand)]
+        config_command: ConfigCommands,
     },
     /// Zero-friction setup: check environment, init, then open TUI or run plan+apply
     Quickstart {
@@ -640,6 +648,36 @@ pub enum BackupsCommands {
     },
 }
 
+#[derive(Subcommand)]
+pub enum ConfigCommands {
+    /// Save current project config as a user-level profile
+    Save {
+        /// Profile name
+        name: String,
+        /// Optional description
+        #[arg(long)]
+        description: Option<String>,
+        /// Save only specific sections (comma-separated: tools,standards,selections,automation,settings,mcp_templates)
+        #[arg(long)]
+        only: Option<String>,
+    },
+    /// Restore a saved profile into the current project
+    Restore {
+        /// Profile name
+        name: String,
+        /// Restore only specific sections (comma-separated)
+        #[arg(long)]
+        only: Option<String>,
+    },
+    /// List all saved profiles
+    List,
+    /// Delete a saved profile
+    Delete {
+        /// Profile name
+        name: String,
+    },
+}
+
 fn main() {
     let cli = Cli::parse();
     init_tracing(cli.verbose);
@@ -726,8 +764,56 @@ fn run_with_engine_provider(
     );
 
     match &cli.command {
-        Some(Commands::Init { force, wizard }) => {
-            commands::init::InitCommand::new(app.clone(), *force, *wizard).run()
+        Some(Commands::Init {
+            force,
+            wizard,
+            profile,
+        }) => {
+            commands::init::InitCommand::new(app.clone(), *force, *wizard).run()?;
+            if let Some(profile_name) = profile {
+                let config_cmd = commands::config::ConfigCommand::new(
+                    app.clone(),
+                    commands::config::ConfigAction::Restore {
+                        name: profile_name,
+                        only: None,
+                    },
+                );
+                config_cmd.run()?;
+            }
+            Ok(())
+        }
+        Some(Commands::Config { config_command }) => match config_command {
+            ConfigCommands::Save {
+                name,
+                description,
+                only,
+            } => commands::config::ConfigCommand::new(
+                app.clone(),
+                commands::config::ConfigAction::Save {
+                    name,
+                    description: description.as_deref(),
+                    only: only.as_deref(),
+                },
+            )
+            .run(),
+            ConfigCommands::Restore { name, only } => commands::config::ConfigCommand::new(
+                app.clone(),
+                commands::config::ConfigAction::Restore {
+                    name,
+                    only: only.as_deref(),
+                },
+            )
+            .run(),
+            ConfigCommands::List => commands::config::ConfigCommand::new(
+                app.clone(),
+                commands::config::ConfigAction::List,
+            )
+            .run(),
+            ConfigCommands::Delete { name } => commands::config::ConfigCommand::new(
+                app.clone(),
+                commands::config::ConfigAction::Delete { name },
+            )
+            .run(),
         }
         Some(Commands::Quickstart { yes, apply, no_tui }) => {
             commands::quickstart::QuickstartCommand::new(app.clone(), *yes, *apply, *no_tui).run()

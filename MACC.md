@@ -76,6 +76,44 @@ In a target repo:
 - `macc backups list/open` + `macc restore --latest`: inspect and restore backup sets (project or user-level).
 - `macc clear`: asks confirmation, force-removes non-root worktrees, then removes MACC-managed project files (safe cleanup mode).
 
+### 3.2.1 Configuration profiles
+
+MACC supports **user-level configuration profiles** that let users save a project's
+configuration and restore it in another repository. Profiles are stored under
+`~/.macc/profiles/<name>.yaml`.
+
+#### Commands
+
+| Command | Description |
+|---|---|
+| `macc config save <name>` | Save current project config as a named profile |
+| `macc config save <name> --only tools,settings` | Save only specific sections |
+| `macc config save <name> --description "My defaults"` | Save with a description |
+| `macc config restore <name>` | Restore a full profile into the current project |
+| `macc config restore <name> --only tools,automation` | Restore only specific sections |
+| `macc config list` | List all saved profiles |
+| `macc config delete <name>` | Delete a saved profile |
+| `macc init --profile <name>` | Initialize and immediately restore a profile |
+
+#### Sections
+
+The `--only` flag accepts a comma-separated list of section names:
+`tools`, `standards`, `selections`, `automation`, `settings`, `mcp_templates`.
+
+When `--only` is used with `save`, only the listed sections are captured (others
+get default values). When used with `restore`, only the listed sections are
+overwritten in the target project config.
+
+#### Design principles
+
+- **Automatic coverage**: profiles serialize the full `CanonicalConfig` via serde.
+  New config fields added in the future are automatically included without code changes.
+- **Portability**: absolute paths (e.g. `standards.path`, `coordinator.prd_file`)
+  are stripped to filenames on save, so profiles work across machines and repos.
+- **Profile names**: alphanumeric characters, hyphens, underscores, and dots only.
+- **Selective merge**: `--only` provides fine-grained control; a full restore
+  replaces everything except the `version` field.
+
 ### 3.3 TUI (Text-based UI) — Rust + Ratatui
 **Implementation requirement (v1)**: the TUI must be implemented in **Rust** using **Ratatui** (crate `ratatui`).
 
