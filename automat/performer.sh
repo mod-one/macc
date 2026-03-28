@@ -715,6 +715,10 @@ run_tool() {
   # Run the tool runner in background so we can capture its PID and let the
   # heartbeat loop verify liveness.  Output is written to the capture file
   # and appended to the task log after the runner exits.
+  local session_args=()
+  if [[ -n "$performer_session_id" ]]; then
+    session_args=("--session-id" "$performer_session_id")
+  fi
   "$script" \
     --prompt-file "$prompt_file" \
     --tool-json "$tool_json" \
@@ -722,7 +726,8 @@ run_tool() {
     --worktree "$worktree" \
     --task-id "$task_id" \
     --attempt "$attempt" \
-    --max-attempts "$max_attempts" >"$output_capture" 2>&1 &
+    --max-attempts "$max_attempts" \
+    "${session_args[@]}" >"$output_capture" 2>&1 &
   local runner_pid=$!
 
   # Restart heartbeat with runner PID tracking — stops emitting if the
@@ -773,6 +778,21 @@ run_tool() {
   log_task_line "- Exit status: ${status}"
   log_task_line ""
   rm -f "$output_capture"
+
+  # Refresh session ID from tool-sessions.json so subsequent iterations and
+  # attempts reuse the session established by the tool runner.
+  if [[ "$performer_session_enabled" == "true" ]]; then
+    local new_sid
+    new_sid="$(performer_read_session_id)"
+    if [[ -n "$new_sid" && "$new_sid" != "$performer_session_id" ]]; then
+      performer_session_id="$new_sid"
+      log_task_line "- Session ID updated: ${performer_session_id}"
+    elif [[ -z "$performer_session_id" && -n "$new_sid" ]]; then
+      performer_session_id="$new_sid"
+      log_task_line "- Session ID acquired: ${performer_session_id}"
+    fi
+  fi
+
   return "$status"
 }
 
@@ -829,6 +849,43 @@ commit_changes() {
     echo "No changes to commit."
   fi
 }
+
+# ---------------------------------------------------------------------------
+# Session tracking — the coordinator performer reads and passes session IDs
+# to the tool runner, just like the tool runner itself manages sessions for
+# the underlying tool.
+# ---------------------------------------------------------------------------
+performer_session_id=""
+performer_session_state_file="${repo}/.macc/state/tool-sessions.json"
+performer_session_enabled="$(jq -r '.performer.session.enabled // false' "$tool_json")"
+performer_session_scope="$(jq -r '.performer.session.scope // "worktree"' "$tool_json")"
+performer_session_id_strategy="$(jq -r '.performer.session.id_strategy // "discovered"' "$tool_json")"
+
+performer_session_key() {
+  if [[ "$performer_session_scope" == "project" ]]; then
+    echo "project"
+  else
+    echo "$worktree"
+  fi
+}
+
+# Read the current session ID from tool-sessions.json for this worktree/tool.
+performer_read_session_id() {
+  local key
+  key="$(performer_session_key)"
+  [[ -f "$performer_session_state_file" ]] || { echo ""; return 0; }
+  jq -r --arg tool "$tool" --arg key "$key" '
+    .tools[$tool].sessions[$key].session_id // empty
+  ' "$performer_session_state_file" 2>/dev/null || echo ""
+}
+
+# Initialise performer_session_id from tool-sessions.json.
+if [[ "$performer_session_enabled" == "true" ]]; then
+  performer_session_id="$(performer_read_session_id)"
+  if [[ -n "$performer_session_id" ]]; then
+    echo "Performer: reusing session ${performer_session_id}" >&2
+  fi
+fi
 
 last_id=""
 last_title=""

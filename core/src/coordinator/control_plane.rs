@@ -686,6 +686,37 @@ struct NativePhaseExecutor<'a> {
 
 /// Append a line to the performer log file for this task.
 /// Mirrors the format used by performer.sh so all phases appear in the same log.
+/// Read the active session ID for a tool + worktree from tool-sessions.json.
+/// Returns `None` if no session exists or the file is missing/unreadable.
+fn read_session_id_from_state(
+    repo_root: &Path,
+    tool_id: &str,
+    worktree_path: &Path,
+) -> Option<String> {
+    let path = repo_root.join(".macc/state/tool-sessions.json");
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let root: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let sessions = root
+        .get("tools")?
+        .get(tool_id)?
+        .get("sessions")?
+        .as_object()?;
+    // Try both as-is and canonicalized worktree path as lookup keys.
+    let key_plain = worktree_path.to_string_lossy().to_string();
+    let key_canon = std::fs::canonicalize(worktree_path)
+        .ok()
+        .map(|p| p.to_string_lossy().to_string());
+    for key in std::iter::once(&key_plain).chain(key_canon.iter()) {
+        if let Some(entry) = sessions.get(key.as_str()) {
+            let sid = entry.get("session_id")?.as_str().unwrap_or_default();
+            if !sid.is_empty() {
+                return Some(sid.to_string());
+            }
+        }
+    }
+    None
+}
+
 fn append_performer_log(worktree: &Path, task_id: &str, line: &str) {
     let safe: String = task_id
         .chars()
@@ -814,6 +845,9 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                 chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ"),
             ),
         );
+        // Read existing session ID from tool-sessions.json so we can inject it
+        // into the tool runner command, just like the performer.sh wrapper does.
+        let mut session_id = read_session_id_from_state(self.repo_root, &phase_tool, &worktree);
         let mut last_reason = String::new();
         for attempt in 1..=attempts {
             append_performer_log(
@@ -850,6 +884,9 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                 .arg(attempt.to_string())
                 .arg("--max-attempts")
                 .arg(attempts.to_string());
+            if let Some(sid) = session_id.as_deref() {
+                command.arg("--session-id").arg(sid);
+            }
             if let Some(ipc_addr) = performer_ipc_addr
                 .as_deref()
                 .filter(|value| !value.trim().is_empty())
@@ -969,6 +1006,8 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                     mode, attempt, attempts
                 ),
             );
+            // Refresh session ID so the next attempt can resume.
+            session_id = read_session_id_from_state(self.repo_root, &phase_tool, &worktree);
         }
         let elapsed = chrono::Utc::now()
             .signed_duration_since(phase_started_at)
