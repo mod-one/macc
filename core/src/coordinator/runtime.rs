@@ -370,6 +370,14 @@ pub fn run_review_phase<E: PhaseExecutor>(
         Ok(out) => out,
         Err(reason) => return Ok(Err(reason)),
     };
+    // Clean up untracked artefacts the review tool may have left behind
+    // (e.g. __pycache__, .pyc, node_modules, build dirs).  The review phase
+    // is read-only so any new untracked files are transient side-effects.
+    let _ = git::run_git_output_mapped(
+        &worktree,
+        &["clean", "-fd"],
+        "clean untracked files after review",
+    );
     let clean_after = git_status_clean(&worktree)?;
     if !clean_after {
         return Ok(Err(format!(
