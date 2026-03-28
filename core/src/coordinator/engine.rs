@@ -203,8 +203,8 @@ pub trait ControlPlaneBackend {
         dispatched: usize,
     ) -> Result<CoordinatorCounts>;
     async fn sleep_between_cycles(&mut self) -> Result<()>;
-    fn should_terminate_run(&self, _counts: &CoordinatorCounts) -> bool {
-        false
+    fn should_terminate_run(&self, _counts: &CoordinatorCounts) -> Option<String> {
+        None
     }
 }
 
@@ -311,10 +311,16 @@ pub fn apply_dispatch_pid_in_registry(
 pub fn build_advance_actions(
     registry: &Value,
     active_merge_jobs: &HashSet<String>,
+    now: &str,
 ) -> Result<Vec<AdvanceTaskAction>> {
     let typed = TaskRegistry::from_value(registry)?;
     let mut actions = Vec::new();
     for task in &typed.tasks {
+        // Skip tasks that are delayed (e.g. waiting for a throttled tool to
+        // recover while preserving committed work on their worktree).
+        if crate::coordinator::rate_limit::is_task_delayed(task, now) {
+            continue;
+        }
         let task_id = task.id.clone();
         let workflow_state = task.workflow_state();
         match workflow_state
@@ -594,6 +600,7 @@ pub(crate) fn apply_phase_success_typed(
     runtime.set_status(RuntimeStatus::PhaseDone);
     runtime.current_phase = Some(transition.runtime_phase.to_string());
     runtime.pid = None;
+    runtime.delayed_until = None;
     task.touch_state_changed(now);
     Ok(())
 }
@@ -617,6 +624,7 @@ pub(crate) fn apply_review_phase_success_typed(
     runtime.set_status(RuntimeStatus::PhaseDone);
     runtime.current_phase = Some("review".to_string());
     runtime.pid = None;
+    runtime.delayed_until = None;
     task.touch_state_changed(now);
     Ok(to)
 }
@@ -781,6 +789,33 @@ fn apply_job_completion_typed(
         let completion_kind = input
             .completion_kind
             .unwrap_or(PerformerCompletionKind::SuccessWithChanges);
+
+        // ── Tool-reported error: re-queue the task ──────────────────
+        // The tool ran but reported it could not complete the task
+        // (sandbox failure, env issue, etc.). Reset to Todo so the
+        // coordinator can retry with the same or a different tool.
+        if completion_kind.is_error() {
+            task.set_workflow_state(WorkflowState::Todo);
+            {
+                let runtime = task.ensure_runtime();
+                runtime.completion_kind = Some(completion_kind.as_str().to_string());
+                runtime.set_status(RuntimeStatus::Failed);
+                runtime.current_phase = None;
+                runtime.pid = None;
+                runtime.last_error = Some(input.status_text.clone());
+            }
+            task.tool = None;
+            task.assignee = None;
+            task.touch_state_changed(now);
+            return JobCompletionResult {
+                should_retry: false,
+                status_label: completion_kind.as_str(),
+                detail: input.status_text.clone(),
+                completion_kind: Some(completion_kind),
+                tool_error: None,
+            };
+        }
+
         let terminal_noop = completion_kind == PerformerCompletionKind::AlreadySatisfied
             || completion_kind == PerformerCompletionKind::SuccessWithoutChanges;
         task.set_workflow_state(if terminal_noop {
@@ -808,6 +843,9 @@ fn apply_job_completion_typed(
                 PerformerCompletionKind::SuccessWithChanges => "phase_done",
                 PerformerCompletionKind::SuccessWithoutChanges => "success_without_changes",
                 PerformerCompletionKind::AlreadySatisfied => "already_satisfied",
+                // Error kinds handled above; unreachable here.
+                PerformerCompletionKind::ErrorWithChanges => "error_with_changes",
+                PerformerCompletionKind::ErrorWithoutChanges => "error_without_changes",
             },
             detail: input.status_text.clone(),
             completion_kind: Some(completion_kind),
@@ -852,6 +890,39 @@ fn apply_job_completion_typed(
                 detail: "exit-code override: stdout indicates completion despite transient error"
                     .to_string(),
                 completion_kind: Some(PerformerCompletionKind::AlreadySatisfied),
+                tool_error: classified_tool_error,
+            };
+        }
+
+        // ── Tool-reported error with non-zero exit ──────────────────
+        // The tool exited non-zero but printed an explicit error marker.
+        // Re-queue the task so the coordinator retries with the same or
+        // a different tool.
+        let stdout_says_error = ni.stdout.contains("MACC_TASK_RESULT: error_with_changes")
+            || ni.stdout.contains("MACC_TASK_RESULT: error_without_changes");
+        if stdout_says_error {
+            let kind = if ni.stdout.contains("error_with_changes") {
+                PerformerCompletionKind::ErrorWithChanges
+            } else {
+                PerformerCompletionKind::ErrorWithoutChanges
+            };
+            task.set_workflow_state(WorkflowState::Todo);
+            {
+                let runtime = task.ensure_runtime();
+                runtime.completion_kind = Some(kind.as_str().to_string());
+                runtime.set_status(RuntimeStatus::Failed);
+                runtime.current_phase = None;
+                runtime.pid = None;
+                runtime.last_error = Some(input.status_text.clone());
+            }
+            task.tool = None;
+            task.assignee = None;
+            task.touch_state_changed(now);
+            return JobCompletionResult {
+                should_retry: false,
+                status_label: kind.as_str(),
+                detail: input.status_text.clone(),
+                completion_kind: Some(kind),
                 tool_error: classified_tool_error,
             };
         }
@@ -1290,8 +1361,8 @@ async fn run_control_plane_cycle<B: ControlPlaneBackend + ?Sized>(
     }
 
     let counts = backend.on_cycle_end(cycle, &advance, dispatched).await?;
-    if backend.should_terminate_run(&counts) {
-        return Ok(ControlPlaneDecision::Complete);
+    if let Some(reason) = backend.should_terminate_run(&counts) {
+        return Err(MaccError::Validation(reason));
     }
     controller.on_cycle_counts(counts)
 }
@@ -1479,19 +1550,28 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
         Ok(())
     }
 
-    fn should_terminate_run(&self, counts: &CoordinatorCounts) -> bool {
+    fn should_terminate_run(&self, counts: &CoordinatorCounts) -> Option<String> {
         let max_dispatch_total = self
             .env_cfg
             .max_dispatch
             .or_else(|| self.coordinator.and_then(|c| c.max_dispatch))
-            .unwrap_or(10);
-        if max_dispatch_total == 0 {
-            return false;
-        }
-        self.run_state.dispatched_total_run >= max_dispatch_total
+            .unwrap_or(0);
+        if max_dispatch_total > 0
+            && self.run_state.dispatched_total_run >= max_dispatch_total
             && counts.active == 0
             && self.run_state.active_jobs.is_empty()
             && self.run_state.active_merge_jobs.is_empty()
+        {
+            return Some(format!(
+                "Coordinator stopped: dispatch limit reached (dispatched={}, max_dispatch={}). \
+                 Remaining: todo={}, merged={}. Restart the coordinator to continue.",
+                self.run_state.dispatched_total_run,
+                max_dispatch_total,
+                counts.todo,
+                counts.merged,
+            ));
+        }
+        None
     }
 }
 
@@ -2019,7 +2099,7 @@ mod tests {
         .expect("apply completion");
         assert_eq!(completion.status_label, "already_satisfied");
         assert_eq!(registry["tasks"][0]["state"], "merged");
-        let actions = build_advance_actions(&registry, &HashSet::new()).expect("advance actions");
+        let actions = build_advance_actions(&registry, &HashSet::new(), "").expect("advance actions");
         assert!(!actions.iter().any(|action| {
             matches!(
                 action,
@@ -2084,7 +2164,7 @@ mod tests {
         .expect("apply completion");
         assert_eq!(completion.status_label, "success_without_changes");
         assert_eq!(registry["tasks"][0]["state"], "merged");
-        let actions = build_advance_actions(&registry, &HashSet::new()).expect("advance actions");
+        let actions = build_advance_actions(&registry, &HashSet::new(), "").expect("advance actions");
         assert!(!actions.iter().any(|action| {
             matches!(
                 action,

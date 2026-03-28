@@ -2589,7 +2589,7 @@ async fn coordinator_run_endpoint_maps_errors() {
     fs::create_dir_all(&root).expect("create root");
     let state = test_web_state(
         &root,
-        Arc::new(WebTestEngine::new(Err(MaccError::Validation(
+        Arc::new(WebTestEngine::with_managed_run_result(Err(MaccError::Validation(
             "coordinator failed".to_string(),
         )))),
         WebAssetsMode::Embedded,
@@ -2628,7 +2628,7 @@ async fn coordinator_run_endpoint_maps_internal_coordinator_error_code() {
     fs::create_dir_all(&root).expect("create root");
     let state = test_web_state(
         &root,
-        Arc::new(WebTestEngine::new(Err(MaccError::Coordinator {
+        Arc::new(WebTestEngine::with_managed_run_result(Err(MaccError::Coordinator {
             code: "E901",
             message: "coordinator crashed".to_string(),
         }))),

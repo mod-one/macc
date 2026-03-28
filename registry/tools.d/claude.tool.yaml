@@ -8,7 +8,7 @@ gitignore:
 performer:
   runner: adapters/claude/claude.performer.sh
   command: claude
-  args: ["--output-format", "text"]
+  args: ["--model", "{model}", "--output-format", "text", "--dangerously-skip-permissions"]
   prompt:
     mode: arg
     arg: "-p"
@@ -19,10 +19,10 @@ performer:
     id_strategy: generated
     resume:
       command: claude
-      args: ["--model", "{model}", "--session-id", "{session_id}", "--output-format", "text"]
+      args: ["--model", "{model}", "--session-id", "{session_id}", "--output-format", "text", "--dangerously-skip-permissions"]
   retry:
     command: claude
-    args: ["--model", "{model}", "--session-id", "{session_id}", "--output-format", "text"]
+    args: ["--model", "{model}", "--session-id", "{session_id}", "--output-format", "text", "--dangerously-skip-permissions"]
 defaults:
   model: sonnet
 install:

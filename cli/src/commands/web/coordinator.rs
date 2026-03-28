@@ -189,41 +189,42 @@ fn map_failure_kind(kind: &FailureKind) -> &'static str {
 pub(super) async fn status_handler(
     State(state): State<WebState>,
 ) -> std::result::Result<Json<ApiCoordinatorStatus>, ApiError> {
-    let status = state
-        .engine
-        .get_coordinator_status(&state.paths)
-        .map_err(ApiError::from)?;
+    let paths = state.paths.clone();
+    let engine = state.engine.clone();
+    let status = tokio::task::spawn_blocking(move || engine.get_coordinator_status(&paths))
+        .await
+        .map_err(|e| ApiError::validation(e.to_string()))??;
     Ok(Json(ApiCoordinatorStatus::from(status)))
 }
 
 pub(super) async fn coordinator_run_handler(
     State(state): State<WebState>,
 ) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
-    let env_cfg = CoordinatorEnvConfig::default();
     let _ = state.engine.project_ensure_coordinator_run_id();
-    let result = state
-        .engine
-        .coordinator_execute_command(
-            &state.paths,
-            CoordinatorCommand::Run,
-            CoordinatorCommandRequest {
-                canonical: None,
-                coordinator_cfg: None,
-                env_cfg: &env_cfg,
-                logger: None,
-            },
-        )
-        .map_err(ApiError::from)?;
-    Ok(Json(ApiCoordinatorCommandResult::from(result)))
+    let paths = state.paths.clone();
+    let engine = state.engine.clone();
+    // Start the coordinator subprocess and return immediately.
+    // The coordinator is a long-running process; callers monitor progress via SSE.
+    tokio::task::spawn_blocking(move || {
+        engine.coordinator_start_managed_command_process(&paths, &CoordinatorCommand::Run, None)
+    })
+    .await
+    .map_err(|e| ApiError::validation(e.to_string()))??;
+    Ok(Json(ApiCoordinatorCommandResult::from(
+        CoordinatorCommandResult::default(),
+    )))
 }
 
 pub(super) async fn coordinator_stop_handler(
     State(state): State<WebState>,
 ) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
-    state
-        .engine
-        .coordinator_stop(&state.paths.root, "web api stop")
-        .map_err(ApiError::from)?;
+    let paths = state.paths.clone();
+    let engine = state.engine.clone();
+    tokio::task::spawn_blocking(move || {
+        engine.coordinator_stop(&paths.root, "web api stop")
+    })
+    .await
+    .map_err(|e| ApiError::validation(e.to_string()))??;
     Ok(Json(ApiCoordinatorCommandResult::from(
         CoordinatorCommandResult::default(),
     )))
@@ -232,10 +233,11 @@ pub(super) async fn coordinator_stop_handler(
 pub(super) async fn coordinator_cleanup_handler(
     State(state): State<WebState>,
 ) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
-    state
-        .engine
-        .coordinator_cleanup(&state.paths)
-        .map_err(ApiError::from)?;
+    let paths = state.paths.clone();
+    let engine = state.engine.clone();
+    tokio::task::spawn_blocking(move || engine.coordinator_cleanup(&paths))
+        .await
+        .map_err(|e| ApiError::validation(e.to_string()))??;
     Ok(Json(ApiCoordinatorCommandResult::from(
         CoordinatorCommandResult::default(),
     )))
@@ -244,12 +246,13 @@ pub(super) async fn coordinator_cleanup_handler(
 pub(super) async fn coordinator_dispatch_handler(
     State(state): State<WebState>,
 ) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
-    let canonical = load_canonical_config(&state.paths.config_path).map_err(ApiError::from)?;
-    let env_cfg = CoordinatorEnvConfig::default();
-    let result = state
-        .engine
-        .coordinator_execute_command(
-            &state.paths,
+    let paths = state.paths.clone();
+    let engine = state.engine.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let canonical = load_canonical_config(&paths.config_path)?;
+        let env_cfg = CoordinatorEnvConfig::default();
+        engine.coordinator_execute_command(
+            &paths,
             CoordinatorCommand::DispatchReadyTasks,
             CoordinatorCommandRequest {
                 canonical: Some(&canonical),
@@ -258,18 +261,21 @@ pub(super) async fn coordinator_dispatch_handler(
                 logger: None,
             },
         )
-        .map_err(ApiError::from)?;
+    })
+    .await
+    .map_err(|e| ApiError::validation(e.to_string()))??;
     Ok(Json(ApiCoordinatorCommandResult::from(result)))
 }
 
 pub(super) async fn coordinator_advance_handler(
     State(state): State<WebState>,
 ) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
-    let env_cfg = CoordinatorEnvConfig::default();
-    let result = state
-        .engine
-        .coordinator_execute_command(
-            &state.paths,
+    let paths = state.paths.clone();
+    let engine = state.engine.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let env_cfg = CoordinatorEnvConfig::default();
+        engine.coordinator_execute_command(
+            &paths,
             CoordinatorCommand::AdvanceTasks,
             CoordinatorCommandRequest {
                 canonical: None,
@@ -278,18 +284,21 @@ pub(super) async fn coordinator_advance_handler(
                 logger: None,
             },
         )
-        .map_err(ApiError::from)?;
+    })
+    .await
+    .map_err(|e| ApiError::validation(e.to_string()))??;
     Ok(Json(ApiCoordinatorCommandResult::from(result)))
 }
 
 pub(super) async fn coordinator_reconcile_handler(
     State(state): State<WebState>,
 ) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
-    let env_cfg = CoordinatorEnvConfig::default();
-    let result = state
-        .engine
-        .coordinator_execute_command(
-            &state.paths,
+    let paths = state.paths.clone();
+    let engine = state.engine.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let env_cfg = CoordinatorEnvConfig::default();
+        engine.coordinator_execute_command(
+            &paths,
             CoordinatorCommand::ReconcileRuntime,
             CoordinatorCommandRequest {
                 canonical: None,
@@ -298,37 +307,41 @@ pub(super) async fn coordinator_reconcile_handler(
                 logger: None,
             },
         )
-        .map_err(ApiError::from)?;
+    })
+    .await
+    .map_err(|e| ApiError::validation(e.to_string()))??;
     Ok(Json(ApiCoordinatorCommandResult::from(result)))
 }
 
 pub(super) async fn coordinator_resume_handler(
     State(state): State<WebState>,
 ) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
-    let was_paused =
-        macc_core::coordinator::state_runtime::read_coordinator_pause_file(&state.paths.root)
-            .map_err(ApiError::from)?
-            .is_some();
-    state
-        .engine
-        .coordinator_resume(&state.paths.root)
-        .map_err(ApiError::from)?;
-    Ok(Json(ApiCoordinatorCommandResult::from(
-        CoordinatorCommandResult {
+    let paths = state.paths.clone();
+    let engine = state.engine.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let was_paused =
+            macc_core::coordinator::state_runtime::read_coordinator_pause_file(&paths.root)?
+                .is_some();
+        engine.coordinator_resume(&paths.root)?;
+        Ok::<_, macc_core::MaccError>(CoordinatorCommandResult {
             resumed: Some(was_paused),
             ..CoordinatorCommandResult::default()
-        },
-    )))
+        })
+    })
+    .await
+    .map_err(|e| ApiError::validation(e.to_string()))??;
+    Ok(Json(ApiCoordinatorCommandResult::from(result)))
 }
 
 pub(super) async fn coordinator_sync_handler(
     State(state): State<WebState>,
 ) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
-    let env_cfg = CoordinatorEnvConfig::default();
-    let result = state
-        .engine
-        .coordinator_execute_command(
-            &state.paths,
+    let paths = state.paths.clone();
+    let engine = state.engine.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let env_cfg = CoordinatorEnvConfig::default();
+        engine.coordinator_execute_command(
+            &paths,
             CoordinatorCommand::SyncRegistry,
             CoordinatorCommandRequest {
                 canonical: None,
@@ -337,18 +350,21 @@ pub(super) async fn coordinator_sync_handler(
                 logger: None,
             },
         )
-        .map_err(ApiError::from)?;
+    })
+    .await
+    .map_err(|e| ApiError::validation(e.to_string()))??;
     Ok(Json(ApiCoordinatorCommandResult::from(result)))
 }
 
 pub(super) async fn coordinator_audit_prd_handler(
     State(state): State<WebState>,
 ) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
-    let env_cfg = CoordinatorEnvConfig::default();
-    let result = state
-        .engine
-        .coordinator_execute_command(
-            &state.paths,
+    let paths = state.paths.clone();
+    let engine = state.engine.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let env_cfg = CoordinatorEnvConfig::default();
+        engine.coordinator_execute_command(
+            &paths,
             CoordinatorCommand::AuditPrd {
                 tool: None,
                 dry_run: false,
@@ -360,17 +376,21 @@ pub(super) async fn coordinator_audit_prd_handler(
                 logger: None,
             },
         )
-        .map_err(ApiError::from)?;
+    })
+    .await
+    .map_err(|e| ApiError::validation(e.to_string()))??;
     Ok(Json(ApiCoordinatorCommandResult::from(result)))
 }
+
 pub(super) async fn get_tool_cooldowns_handler(
     State(state): State<WebState>,
 ) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
-    let env_cfg = CoordinatorEnvConfig::default();
-    let result = state
-        .engine
-        .coordinator_execute_command(
-            &state.paths,
+    let paths = state.paths.clone();
+    let engine = state.engine.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let env_cfg = CoordinatorEnvConfig::default();
+        engine.coordinator_execute_command(
+            &paths,
             CoordinatorCommand::ToolCooldownList,
             CoordinatorCommandRequest {
                 canonical: None,
@@ -379,7 +399,9 @@ pub(super) async fn get_tool_cooldowns_handler(
                 logger: None,
             },
         )
-        .map_err(ApiError::from)?;
+    })
+    .await
+    .map_err(|e| ApiError::validation(e.to_string()))??;
     Ok(Json(ApiCoordinatorCommandResult::from(result)))
 }
 

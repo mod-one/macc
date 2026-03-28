@@ -9,7 +9,7 @@ gitignore:
 performer:
   runner: adapters/gemini/gemini.performer.sh
   command: gemini
-  args: ["--sandbox", "false", "--approval-mode", "yolo"]
+  args: ["--model", "{model}", "--sandbox", "false", "--approval-mode", "yolo"]
   prompt:
     mode: arg
     arg: "--prompt"
