@@ -271,7 +271,8 @@ fn transition_workflow_state(from: WorkflowState, event: WorkflowEvent) -> Resul
         | (WorkflowState::ChangesRequested, WorkflowEvent::PhaseFailed("fix"))
         | (WorkflowState::PrOpen, WorkflowEvent::MergeFailed)
         | (WorkflowState::Queued, WorkflowEvent::MergeFailed) => WorkflowState::Blocked,
-        (WorkflowState::Queued, WorkflowEvent::MergeSucceeded) => WorkflowState::Merged,
+        (WorkflowState::PrOpen, WorkflowEvent::MergeSucceeded)
+        | (WorkflowState::Queued, WorkflowEvent::MergeSucceeded) => WorkflowState::Merged,
         _ => {
             return Err(MaccError::Coordinator {
                 code: "invalid_transition",
