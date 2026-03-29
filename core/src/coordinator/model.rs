@@ -144,6 +144,9 @@ pub struct TaskRuntime {
     /// Cleared on successful dispatch or when the timestamp is in the past.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delayed_until: Option<String>,
+    /// Number of review cycles completed for this task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_cycles: Option<usize>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }

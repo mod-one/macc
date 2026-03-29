@@ -207,7 +207,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    const AUTOMATION_FIELD_COUNT: usize = 31;
+    const AUTOMATION_FIELD_COUNT: usize = 32;
     const COORDINATOR_EVENTS_EWMA_ALPHA: f64 = 0.30;
     const COORDINATOR_PAUSE_REL_PATH: &'static str = ".macc/automation/task/coordinator.pause.json";
 
@@ -1944,6 +1944,7 @@ impl AppState {
             28 => "RL Fallback Enabled",
             29 => "RL Throttle Parallel",
             30 => "Force-Kill Grace (s)",
+            31 => "Max Review Cycles",
             _ => "",
         }
     }
@@ -1981,6 +1982,7 @@ impl AppState {
             28 => "When the primary tool is throttled, dispatch to the next tool in priority order.",
             29 => "Reduce effective_max_parallel by 1 on each E601; restore on recovery.",
             30 => "Seconds to wait after a performer signals failure via IPC before force-killing it (default: 30).",
+            31 => "Max review cycles per task. 0=skip review, 1=one review+fix (no loopback), N=N loops. Empty=unlimited.",
             _ => "",
         }
     }
@@ -2115,6 +2117,10 @@ impl AppState {
                 .and_then(|c| c.force_kill_grace_seconds)
                 .unwrap_or(30)
                 .to_string(),
+            31 => coordinator
+                .and_then(|c| c.max_review_cycles)
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
             _ => String::new(),
         }
     }
@@ -2306,7 +2312,7 @@ impl AppState {
             }
             4 => self.set_automation_field_tool_caps(input),
             5 => self.set_automation_field_tool_specializations(input),
-            6..=12 | 14 | 18 | 24 => match input.parse::<usize>() {
+            6..=12 | 14 | 18 | 24 | 31 => match input.parse::<usize>() {
                 Ok(value) => {
                     self.set_automation_field_usize(idx, value);
                     Ok(())
@@ -2405,6 +2411,7 @@ impl AppState {
                 14 => coordinator.log_flush_lines = Some(value),
                 18 => coordinator.merge_job_timeout_seconds = Some(value),
                 24 => coordinator.error_code_retry_max = Some(value),
+                31 => coordinator.max_review_cycles = Some(value),
                 _ => {}
             }
         }

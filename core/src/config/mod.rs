@@ -169,6 +169,11 @@ pub struct CoordinatorConfig {
     /// and force-killing the performer process.  Default: 30.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub force_kill_grace_seconds: Option<u64>,
+    /// Maximum number of review cycles allowed per task.
+    /// 0 = skip review entirely, 1 = one review + one fix (no loopback),
+    /// N = up to N review→fix→review loops.  Default: None (unlimited).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_review_cycles: Option<usize>,
 }
 
 fn default_true() -> bool {

@@ -1123,7 +1123,11 @@ pub async fn advance_tasks_native(
         .keys()
         .cloned()
         .collect::<HashSet<_>>();
-    let actions = coordinator_engine::build_advance_actions(&registry, &active_merge_ids, &now)?;
+    let max_review_cycles = env_cfg
+        .max_review_cycles
+        .or_else(|| coordinator.and_then(|c| c.max_review_cycles));
+    let actions =
+        coordinator_engine::build_advance_actions(&registry, &active_merge_ids, &now, max_review_cycles)?;
     if !actions.is_empty() {
         if let Some(log) = logger {
             let _ = log.note(format!("- Advance started (actions={})", actions.len()));

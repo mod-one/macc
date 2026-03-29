@@ -208,20 +208,49 @@ pub trait ControlPlaneBackend {
     }
 }
 
-pub fn plan_advance(state: WorkflowState) -> AdvancePlan {
+/// Plan the next advance action for a task.
+///
+/// `max_review_cycles` controls the review→fix loop budget:
+///   - `None`  → unlimited loops (default)
+///   - `Some(0)` → skip review entirely; go straight to merge
+///   - `Some(1)` → one review + one fix if changes requested, no loopback
+///   - `Some(n)` → up to n review→fix→review loops
+///
+/// `review_cycles` is the number of review cycles already completed for
+/// this task (stored in `task_runtime.review_cycles`).
+pub fn plan_advance(
+    state: WorkflowState,
+    max_review_cycles: Option<usize>,
+    review_cycles: usize,
+) -> AdvancePlan {
     match state {
-        WorkflowState::InProgress => AdvancePlan::RunPhase(PhaseTransition {
-            mode: "review",
-            next_state: WorkflowState::PrOpen,
-            runtime_phase: "review",
-        }),
-        // Review approved → go straight to merge queue (no integrate phase).
+        WorkflowState::InProgress => {
+            if max_review_cycles == Some(0) {
+                // No review at all — go straight to merge.
+                return AdvancePlan::Merge;
+            }
+            AdvancePlan::RunPhase(PhaseTransition {
+                mode: "review",
+                next_state: WorkflowState::PrOpen,
+                runtime_phase: "review",
+            })
+        }
+        // Review approved → merge.
         WorkflowState::PrOpen => AdvancePlan::Merge,
-        WorkflowState::ChangesRequested => AdvancePlan::RunPhase(PhaseTransition {
-            mode: "fix",
-            next_state: WorkflowState::PrOpen,
-            runtime_phase: "fix",
-        }),
+        WorkflowState::ChangesRequested => {
+            // If we've exhausted the review cycle budget, skip the fix→review
+            // loop and go straight to merge with whatever we have.
+            if let Some(max) = max_review_cycles {
+                if review_cycles >= max {
+                    return AdvancePlan::Merge;
+                }
+            }
+            AdvancePlan::RunPhase(PhaseTransition {
+                mode: "fix",
+                next_state: WorkflowState::PrOpen,
+                runtime_phase: "fix",
+            })
+        }
         WorkflowState::Queued => AdvancePlan::Merge,
         _ => AdvancePlan::Noop,
     }
@@ -306,6 +335,7 @@ pub fn build_advance_actions(
     registry: &Value,
     active_merge_jobs: &HashSet<String>,
     now: &str,
+    max_review_cycles: Option<usize>,
 ) -> Result<Vec<AdvanceTaskAction>> {
     let typed = TaskRegistry::from_value(registry)?;
     let mut actions = Vec::new();
@@ -316,9 +346,10 @@ pub fn build_advance_actions(
             continue;
         }
         let task_id = task.id.clone();
+        let review_cycles = task.task_runtime.review_cycles.unwrap_or(0);
         let workflow_state = task.workflow_state();
         match workflow_state
-            .map(plan_advance)
+            .map(|s| plan_advance(s, max_review_cycles, review_cycles))
             .unwrap_or(AdvancePlan::Noop)
         {
             AdvancePlan::RunPhase(transition) => {
@@ -619,6 +650,9 @@ pub(crate) fn apply_review_phase_success_typed(
     runtime.current_phase = Some("review".to_string());
     runtime.pid = None;
     runtime.delayed_until = None;
+    // Track the number of completed review cycles for max_review_cycles enforcement.
+    let cycles = runtime.review_cycles.unwrap_or(0) + 1;
+    runtime.review_cycles = Some(cycles);
     task.touch_state_changed(now);
     Ok(to)
 }
@@ -1371,6 +1405,7 @@ struct NativeControlPlaneBackend<'a> {
     run_state: CoordinatorRunState,
     phase_runner_max_attempts: usize,
     coordinator_tool_override: Option<String>,
+    max_review_cycles: Option<usize>,
     phase_timeout_seconds: usize,
     ghost_heartbeat_grace_seconds: i64,
     last_logged_counts: Option<CoordinatorCounts>,
@@ -1702,6 +1737,20 @@ pub async fn run_native_control_plane(
             let _ = log.note(format!("- Coordinator tool: {}", tool));
         }
     }
+    let max_review_cycles = env_cfg
+        .max_review_cycles
+        .or_else(|| coordinator.and_then(|c| c.max_review_cycles));
+    if let Some(log) = logger {
+        match max_review_cycles {
+            Some(n) => {
+                let _ = log.note(format!("- Max review cycles: {}", n));
+            }
+            None => {
+                let _ = log.note("- Max review cycles: unlimited".to_string());
+            }
+        }
+    }
+
     let phase_timeout_seconds = env_cfg
         .stale_in_progress_seconds
         .or_else(|| coordinator.and_then(|c| c.stale_in_progress_seconds))
@@ -1785,6 +1834,7 @@ pub async fn run_native_control_plane(
         run_state,
         phase_runner_max_attempts,
         coordinator_tool_override,
+        max_review_cycles,
         phase_timeout_seconds,
         ghost_heartbeat_grace_seconds,
         last_logged_counts: None,
@@ -1907,25 +1957,73 @@ mod tests {
 
     #[test]
     fn plan_advance_maps_states() {
+        // Default (unlimited review cycles)
         assert!(matches!(
-            plan_advance(WorkflowState::InProgress),
+            plan_advance(WorkflowState::InProgress, None, 0),
             AdvancePlan::RunPhase(PhaseTransition { mode: "review", .. })
         ));
         assert!(matches!(
-            plan_advance(WorkflowState::PrOpen),
+            plan_advance(WorkflowState::PrOpen, None, 0),
             AdvancePlan::Merge
         ));
         assert!(matches!(
-            plan_advance(WorkflowState::ChangesRequested),
+            plan_advance(WorkflowState::ChangesRequested, None, 0),
             AdvancePlan::RunPhase(PhaseTransition { mode: "fix", .. })
         ));
         assert!(matches!(
-            plan_advance(WorkflowState::Queued),
+            plan_advance(WorkflowState::Queued, None, 0),
             AdvancePlan::Merge
         ));
         assert!(matches!(
-            plan_advance(WorkflowState::Todo),
+            plan_advance(WorkflowState::Todo, None, 0),
             AdvancePlan::Noop
+        ));
+    }
+
+    #[test]
+    fn plan_advance_max_review_cycles_zero_skips_review() {
+        // max_review_cycles=0 → skip review entirely
+        assert!(matches!(
+            plan_advance(WorkflowState::InProgress, Some(0), 0),
+            AdvancePlan::Merge
+        ));
+        // ChangesRequested with 0 cycles used but max=0 → merge directly
+        assert!(matches!(
+            plan_advance(WorkflowState::ChangesRequested, Some(0), 0),
+            AdvancePlan::Merge
+        ));
+    }
+
+    #[test]
+    fn plan_advance_max_review_cycles_one_allows_single_fix() {
+        // max=1, 0 cycles done → allow fix
+        assert!(matches!(
+            plan_advance(WorkflowState::ChangesRequested, Some(1), 0),
+            AdvancePlan::RunPhase(PhaseTransition { mode: "fix", .. })
+        ));
+        // max=1, 1 cycle done → exhausted, merge directly
+        assert!(matches!(
+            plan_advance(WorkflowState::ChangesRequested, Some(1), 1),
+            AdvancePlan::Merge
+        ));
+    }
+
+    #[test]
+    fn plan_advance_max_review_cycles_n_caps_loops() {
+        // max=3, 2 done → allow another
+        assert!(matches!(
+            plan_advance(WorkflowState::ChangesRequested, Some(3), 2),
+            AdvancePlan::RunPhase(PhaseTransition { mode: "fix", .. })
+        ));
+        // max=3, 3 done → exhausted, merge
+        assert!(matches!(
+            plan_advance(WorkflowState::ChangesRequested, Some(3), 3),
+            AdvancePlan::Merge
+        ));
+        // max=3, 5 done → way past, merge
+        assert!(matches!(
+            plan_advance(WorkflowState::ChangesRequested, Some(3), 5),
+            AdvancePlan::Merge
         ));
     }
 
@@ -2123,7 +2221,7 @@ mod tests {
         .expect("apply completion");
         assert_eq!(completion.status_label, "already_satisfied");
         assert_eq!(registry["tasks"][0]["state"], "merged");
-        let actions = build_advance_actions(&registry, &HashSet::new(), "").expect("advance actions");
+        let actions = build_advance_actions(&registry, &HashSet::new(), "", None).expect("advance actions");
         assert!(!actions.iter().any(|action| {
             matches!(
                 action,
@@ -2188,7 +2286,7 @@ mod tests {
         .expect("apply completion");
         assert_eq!(completion.status_label, "success_without_changes");
         assert_eq!(registry["tasks"][0]["state"], "merged");
-        let actions = build_advance_actions(&registry, &HashSet::new(), "").expect("advance actions");
+        let actions = build_advance_actions(&registry, &HashSet::new(), "", None).expect("advance actions");
         assert!(!actions.iter().any(|action| {
             matches!(
                 action,

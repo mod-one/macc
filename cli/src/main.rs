@@ -319,6 +319,9 @@ enum Commands {
         /// Grace period (seconds) before force-killing a performer that signaled failure via IPC but did not exit
         #[arg(long)]
         force_kill_grace_seconds: Option<u64>,
+        /// Max review cycles per task (0=skip review, 1=one review+fix, N=N loops). Default: unlimited.
+        #[arg(long)]
+        max_review_cycles: Option<usize>,
         /// Extra args passed directly to coordinator.sh (use after --)
         #[arg(last = true)]
         extra_args: Vec<String>,
@@ -948,6 +951,7 @@ fn run_with_engine_provider(
             error_code_retry_list,
             error_code_retry_max,
             force_kill_grace_seconds,
+            max_review_cycles,
             extra_args,
         }) => commands::coordinator::CoordinatorCommand::new(
             app.clone(),
@@ -993,6 +997,7 @@ fn run_with_engine_provider(
                     rate_limit_fallback_enabled: None,
                     rate_limit_throttle_parallel: None,
                     force_kill_grace_seconds: *force_kill_grace_seconds,
+                    max_review_cycles: *max_review_cycles,
                 },
                 extra_args: extra_args.clone(),
             },
@@ -2371,6 +2376,7 @@ fi
                     error_code_retry_list: None,
                     error_code_retry_max: None,
                     force_kill_grace_seconds: None,
+                    max_review_cycles: None,
                     extra_args: Vec::new(),
                 }),
             },
