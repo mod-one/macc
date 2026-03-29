@@ -12,7 +12,7 @@ use crate::coordinator::runtime::{
 };
 use crate::coordinator::state_runtime::{
     cleanup_dead_runtime_tasks, clear_coordinator_pause_file, coordinator_pause_file_path,
-    resume_paused_task_integrate, set_task_paused_for_integrate, write_coordinator_pause_file,
+    resume_paused_task_merge, set_task_paused_for_merge, write_coordinator_pause_file,
 };
 use crate::coordinator_storage::{
     coordinator_storage_bootstrap_sqlite_from_json, coordinator_storage_export_sqlite_to_json,
@@ -215,11 +215,8 @@ pub fn plan_advance(state: WorkflowState) -> AdvancePlan {
             next_state: WorkflowState::PrOpen,
             runtime_phase: "review",
         }),
-        WorkflowState::PrOpen => AdvancePlan::RunPhase(PhaseTransition {
-            mode: "integrate",
-            next_state: WorkflowState::Queued,
-            runtime_phase: "integrate",
-        }),
+        // Review approved → go straight to merge queue (no integrate phase).
+        WorkflowState::PrOpen => AdvancePlan::Merge,
         WorkflowState::ChangesRequested => AdvancePlan::RunPhase(PhaseTransition {
             mode: "fix",
             next_state: WorkflowState::PrOpen,
@@ -238,15 +235,12 @@ fn transition_workflow_state(from: WorkflowState, event: WorkflowEvent) -> Resul
         (WorkflowState::InProgress, WorkflowEvent::ReviewChangesRequested) => {
             WorkflowState::ChangesRequested
         }
-        (WorkflowState::PrOpen, WorkflowEvent::PhaseSucceeded("integrate")) => {
-            WorkflowState::Queued
-        }
         (WorkflowState::ChangesRequested, WorkflowEvent::PhaseSucceeded("fix")) => {
             WorkflowState::PrOpen
         }
         (WorkflowState::InProgress, WorkflowEvent::PhaseFailed("review"))
-        | (WorkflowState::PrOpen, WorkflowEvent::PhaseFailed("integrate"))
         | (WorkflowState::ChangesRequested, WorkflowEvent::PhaseFailed("fix"))
+        | (WorkflowState::PrOpen, WorkflowEvent::MergeFailed)
         | (WorkflowState::Queued, WorkflowEvent::MergeFailed) => WorkflowState::Blocked,
         (WorkflowState::Queued, WorkflowEvent::MergeSucceeded) => WorkflowState::Merged,
         _ => {
@@ -664,7 +658,7 @@ pub(crate) fn apply_merge_failure_typed(task: &mut Task, reason: &str, now: &str
     task.set_workflow_state(to);
     let runtime = task.ensure_runtime();
     runtime.set_status(RuntimeStatus::Paused);
-    runtime.current_phase = Some("integrate".to_string());
+    runtime.current_phase = Some("merge".to_string());
     runtime.last_error = Some(reason.to_string());
     runtime.pid = None;
     task.touch_state_changed(now);
@@ -1469,11 +1463,11 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
         }
         self.run_state.merge_join_set.abort_all();
         self.run_state.active_merge_jobs.clear();
-        set_task_paused_for_integrate(self.repo_root, task_id, reason)?;
-        write_coordinator_pause_file(self.repo_root, task_id, "integrate", reason)?;
+        set_task_paused_for_merge(self.repo_root, task_id, reason)?;
+        write_coordinator_pause_file(self.repo_root, task_id, "merge", reason)?;
         if let Some(log) = self.logger {
             let _ = log.note(format!(
-                "- Run paused task={} phase=integrate reason={}",
+                "- Run paused task={} phase=merge reason={}",
                 task_id, reason
             ));
         }
@@ -1486,7 +1480,7 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
-        resume_paused_task_integrate(self.repo_root, task_id)?;
+        resume_paused_task_merge(self.repo_root, task_id)?;
         let _ = clear_coordinator_pause_file(self.repo_root)?;
         Ok(())
     }
@@ -1678,7 +1672,7 @@ pub async fn run_native_control_plane(
         .or_else(|| {
             // Auto-resolve: pick the first enabled tool from tool_priority,
             // or fall back to the first enabled tool overall.  This ensures a
-            // single coordinator performer tool for all review/fix/integrate
+            // single coordinator performer tool for all review/fix
             // phases, preventing different tasks from using different tools.
             let enabled = &canonical.tools.enabled;
             // CLI --tool-priority or config tool_priority
@@ -1919,10 +1913,7 @@ mod tests {
         ));
         assert!(matches!(
             plan_advance(WorkflowState::PrOpen),
-            AdvancePlan::RunPhase(PhaseTransition {
-                mode: "integrate",
-                ..
-            })
+            AdvancePlan::Merge
         ));
         assert!(matches!(
             plan_advance(WorkflowState::ChangesRequested),
@@ -2266,13 +2257,15 @@ mod tests {
 
     #[test]
     fn fsm_rejects_skipping_review_phase() {
+        // Applying a fix transition on an in_progress task should fail
+        // because fix is only valid from changes_requested state.
         let mut task = json!({"id":"T5","state":"in_progress","task_runtime":{"status":"running"}});
         let err = apply_phase_success(
             &mut task,
             PhaseTransition {
-                mode: "integrate",
-                next_state: WorkflowState::Queued,
-                runtime_phase: "integrate",
+                mode: "fix",
+                next_state: WorkflowState::PrOpen,
+                runtime_phase: "fix",
             },
             "2026-02-21T00:00:00Z",
         )

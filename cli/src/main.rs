@@ -229,7 +229,7 @@ enum Commands {
         /// Override PRD file path
         #[arg(long)]
         prd: Option<String>,
-        /// Fixed tool for coordinator phase hooks (review/fix/integrate)
+        /// Fixed tool for coordinator phase hooks (review/fix)
         #[arg(long)]
         coordinator_tool: Option<String>,
         /// Default reference/base branch when task.base_branch is not provided
@@ -2219,7 +2219,7 @@ if [[ "$action" == "retry-phase" ]]; then
     esac
   done
   [[ "$task" == "TASK-R" ]] || exit 2
-  [[ "$phase" == "integrate" ]] || exit 3
+  [[ "$phase" == "fix" ]] || exit 3
   tmp="$(mktemp)"
   jq '.tasks |= map(if .id=="TASK-R" then .state="queued" else . end)' "$TASK_REGISTRY_FILE" >"$tmp"
   mv "$tmp" "$TASK_REGISTRY_FILE"
@@ -2240,7 +2240,7 @@ fi
                 "--retry-task".to_string(),
                 "TASK-R".to_string(),
                 "--retry-phase".to_string(),
-                "integrate".to_string(),
+                "fix".to_string(),
             ],
             &canonical,
             None,
@@ -2252,7 +2252,7 @@ fi
         assert_eq!(
             value["tasks"][0]["state"].as_str(),
             Some("queued"),
-            "retry-phase integrate should update blocked task to queued in this test harness"
+            "retry-phase fix should update blocked task to queued in this test harness"
         );
 
         std::fs::remove_dir_all(&root).ok();

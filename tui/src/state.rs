@@ -1950,7 +1950,7 @@ impl AppState {
 
     pub fn automation_field_help(&self, index: usize) -> &'static str {
         match index {
-            0 => "Fixed tool for coordinator phase hooks (review/fix/integrate). Empty means task/default tool.",
+            0 => "Fixed tool for coordinator phase hooks (review/fix). Empty means task/default tool.",
             1 => "Default git branch used when task.base_branch is not set (default: main).",
             2 => "Path to PRD JSON used by coordinator.sh (default: prd.json).",
             3 => "Tool priority order as comma-separated values, e.g. tool-a,tool-b,tool-c.",

@@ -352,7 +352,7 @@ flowchart TD
     H --> I["Write worktree.prd.json + sync context files + tool.json"]
     I --> J["Spawn performer (phase=dev)"]
     J --> K["Stream events (heartbeat/progress/phase_result/commit_created)"]
-    K --> L["Advance FSM: dev -> review -> fix (optional) -> integrate -> merge"]
+    K --> L["Advance FSM: dev -> review -> fix (optional) -> merge"]
     L --> M{"Local merge success?"}
     M -- Yes --> N["Task -> merged"]
     M -- No --> O["AI merge-fix policy"]
@@ -388,7 +388,6 @@ sequenceDiagram
         C->>P: Launch fix phase
         P-->>C: phase_result(done)
     end
-    C->>C: integrate phase
     C->>G: Merge task branch into base
     alt merge conflict
         C->>G: AI merge-fix attempt
@@ -864,7 +863,7 @@ Supported types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`, `macc`.
 
 **Trailers** (in commit body, one per line):
 - `[macc:task <TASK-ID>]` — required, links the commit to a task
-- `[macc:phase <phase>]` — optional, records the coordinator phase (dev/review/fix/integrate)
+- `[macc:phase <phase>]` — optional, records the coordinator phase (dev/review/fix/merge)
 - `[macc:tool <tool>]` — optional, records which AI tool produced the commit
 - `[macc:merge true]` — marks a merge commit
 

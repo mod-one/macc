@@ -90,7 +90,7 @@
     },
     "phase": {
       "type": "string",
-      "enum": ["dev", "review", "fix", "integrate", "merge"]
+      "enum": ["dev", "review", "fix", "merge"]
     },
     "status": {
       "type": "string",

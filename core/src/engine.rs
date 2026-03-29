@@ -820,8 +820,8 @@ pub trait Engine {
         if let Some(pause) = coordinator::state_runtime::read_coordinator_pause_file(repo_root)? {
             let task_id = pause.task_id.as_str();
             let phase = pause.phase.as_str();
-            if !task_id.is_empty() && phase == "integrate" {
-                coordinator::state_runtime::resume_paused_task_integrate(repo_root, task_id)?;
+            if !task_id.is_empty() && phase == "merge" {
+                coordinator::state_runtime::resume_paused_task_merge(repo_root, task_id)?;
             }
         }
         let _ = coordinator::state_runtime::clear_coordinator_pause_file(repo_root)?;

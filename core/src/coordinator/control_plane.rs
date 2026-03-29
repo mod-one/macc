@@ -214,7 +214,7 @@ fn rollback_worktree_to_sha(worktree_path: &Path, target_sha: &str) -> bool {
 }
 
 /// Handle transient tool unavailability detected during a phase
-/// (review/fix/integrate).
+/// (review/fix).
 ///
 /// Covers E601 (rate-limit), E602 (quota exhaustion), E603 (session conflict),
 /// E101 (timeout/network), and any other error that imposes a waiting period or
@@ -503,7 +503,7 @@ async fn switch_worktree_to_base_after_merge(
             repo_root,
             "worktree_switch",
             task_id,
-            "integrate",
+            "merge",
             "failed",
             &msg,
             "warning",
@@ -526,7 +526,7 @@ async fn switch_worktree_to_base_after_merge(
             repo_root,
             "worktree_switch",
             task_id,
-            "integrate",
+            "merge",
             "warning",
             &msg,
             "warning",
@@ -545,7 +545,7 @@ async fn switch_worktree_to_base_after_merge(
             repo_root,
             "worktree_switch",
             task_id,
-            "integrate",
+            "merge",
             "warning",
             &msg,
             "warning",
@@ -563,7 +563,7 @@ async fn switch_worktree_to_base_after_merge(
         repo_root,
         "worktree_switch",
         task_id,
-        "integrate",
+        "merge",
         "success",
         &msg,
         "info",
@@ -963,7 +963,7 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
             if out.status.success() {
                 // Auto-commit any uncommitted changes produced by the phase runner.
                 // The review phase explicitly must not commit; implement/dev commits
-                // are managed by performer.sh. Fix and integrate phases may leave
+                // are managed by performer.sh. Fix phases may leave
                 // uncommitted file changes that must be committed before merging.
                 if mode != "review" && crate::git::is_dirty(&worktree).unwrap_or(false) {
                     let _ = crate::git::run_git_output_mapped(
@@ -2217,7 +2217,7 @@ pub async fn monitor_merge_jobs_native(
                                 coordinator_runtime::report_branch_cleanup_outcome(
                                     repo_root,
                                     Some(&evt.task_id),
-                                    "integrate",
+                                    "merge",
                                     branch,
                                     &base,
                                     "merge_success_post_switch",

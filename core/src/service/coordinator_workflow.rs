@@ -1267,10 +1267,10 @@ pub fn coordinator_advance<E: crate::engine::Engine + ?Sized>(
             .await
     })?;
     if let Some((task_id, reason)) = advance.blocked_merge {
-        state_runtime::set_task_paused_for_integrate(&paths.root, &task_id, &reason)?;
-        state_runtime::write_coordinator_pause_file(&paths.root, &task_id, "integrate", &reason)?;
+        state_runtime::set_task_paused_for_merge(&paths.root, &task_id, &reason)?;
+        state_runtime::write_coordinator_pause_file(&paths.root, &task_id, "merge", &reason)?;
         return Err(MaccError::Validation(format!(
-            "Coordinator paused on task {} (integrate). Resolve the merge issue, then run `macc coordinator resume`. Reason: {}",
+            "Coordinator paused on task {} (merge). Resolve the merge issue, then run `macc coordinator resume`. Reason: {}",
             task_id, reason
         )));
     }
@@ -1791,7 +1791,7 @@ pub fn coordinator_retry_phase<E: crate::engine::Engine + ?Sized>(
             task_id.as_str(),
             logger,
         )?,
-        "review" | "fix" | "integrate" => retry_tool_phase(
+        "review" | "fix" => retry_tool_phase(
             engine,
             paths,
             canonical,
@@ -2040,11 +2040,6 @@ fn retry_tool_phase<E: crate::engine::Engine + ?Sized>(
                     next_state: WorkflowState::PrOpen,
                     runtime_phase: "fix",
                 },
-                "integrate" => coordinator_engine::PhaseTransition {
-                    mode: "integrate",
-                    next_state: WorkflowState::Queued,
-                    runtime_phase: "integrate",
-                },
                 _ => return Ok(()),
             };
             coordinator_engine::apply_phase_success_typed(
@@ -2057,7 +2052,6 @@ fn retry_tool_phase<E: crate::engine::Engine + ?Sized>(
             let phase_static = match phase {
                 "review" => "review",
                 "fix" => "fix",
-                "integrate" => "integrate",
                 _ => {
                     return Err(MaccError::Validation(format!(
                         "unsupported retry phase '{}'",
@@ -2538,7 +2532,7 @@ mod tests {
                 "--retry-task".to_string(),
                 "TASK-123".to_string(),
                 "--retry-phase".to_string(),
-                "integrate".to_string(),
+                "fix".to_string(),
                 "--skip".to_string(),
             ],
             false,
@@ -2550,7 +2544,7 @@ mod tests {
             command,
             CoordinatorCommand::RetryTaskPhase {
                 task_id: "TASK-123".to_string(),
-                phase: "integrate".to_string(),
+                phase: "fix".to_string(),
                 skip: true,
             }
         );

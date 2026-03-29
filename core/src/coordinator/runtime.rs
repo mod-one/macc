@@ -522,7 +522,7 @@ pub fn build_phase_prompt(mode: &str, task_id: &str, tool: &str, task: &Task) ->
     })?;
     if mode == "review" {
         return Ok(format!(
-            "You are the assigned {} performer running inside a MACC worktree.\n\nMode: {}\nTask ID: {}\n\nTask registry entry (JSON):\n{}\n\nInstructions:\n1) Execute the review phase only.\n2) Review the already committed task changes and produce a verdict.\n3) Do not modify files, do not create commits, and do not modify task registry state.\n4) Return exactly one final verdict line at the end of your response:\n   - REVIEW_VERDICT: OK\n   - REVIEW_VERDICT: CHANGES_REQUESTED\n",
+            "You are the assigned {} performer running inside a MACC worktree.\n\nMode: {}\nTask ID: {}\n\nTask registry entry (JSON):\n{}\n\nInstructions:\n1) Execute the review phase only.\n2) Review the already committed task changes and produce a verdict.\n3) Before approving, run `git merge-tree $(git merge-base HEAD {{base}}) HEAD {{base}}` (where {{base}} is the task's base branch, usually `main` or `master`) to check for merge conflicts. If the merge-tree output shows conflicts, return CHANGES_REQUESTED with a description of the conflicting files and what needs to be resolved.\n4) Do not modify files, do not create commits, and do not modify task registry state.\n5) Return exactly one final verdict line at the end of your response:\n   - REVIEW_VERDICT: OK\n   - REVIEW_VERDICT: CHANGES_REQUESTED\n",
             tool, mode, task_id, task_payload
         ));
     }
@@ -1317,7 +1317,7 @@ where
         emit_event(
             "merge_hook",
             task_id,
-            "integrate",
+            "merge",
             "started",
             &format!(
                 "merge-fix hook started task={} timeout_s={}",
@@ -1342,7 +1342,7 @@ where
                 emit_event(
                     "merge_hook",
                     task_id,
-                    "integrate",
+                    "merge",
                     if timed_out { "timeout" } else { "done" },
                     &format!(
                         "merge-fix hook completed task={} elapsed={}s timeout={}",
@@ -1356,7 +1356,7 @@ where
                 emit_event(
                     "merge_hook",
                     task_id,
-                    "integrate",
+                    "merge",
                     "failed",
                     &format!(
                         "merge-fix hook failed task={} elapsed={}s error={}",

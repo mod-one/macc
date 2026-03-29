@@ -154,7 +154,7 @@ Controls Ralph loop script generation/behavior (`scripts/Ralph/ralph.sh`).
 
 ### `automation.coordinator`
 Controls coordinator runtime defaults for `.macc/automation/coordinator.sh`.
-- `coordinator_tool`: fixed tool for coordinator phase hooks (`review`/`fix`/`integrate`).
+- `coordinator_tool`: fixed tool for coordinator phase hooks (`review`/`fix`).
 - `reference_branch`: default git base/reference branch used when a task does not define `base_branch`.
 - `prd_file`: PRD source path (default commonly `prd.json`).
 - Task registry path is fixed to `.macc/automation/task/task_registry.json`.
