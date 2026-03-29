@@ -1674,7 +1674,40 @@ pub async fn run_native_control_plane(
     let coordinator_tool_override = env_cfg
         .coordinator_tool
         .clone()
-        .or_else(|| coordinator.and_then(|c| c.coordinator_tool.clone()));
+        .or_else(|| coordinator.and_then(|c| c.coordinator_tool.clone()))
+        .or_else(|| {
+            // Auto-resolve: pick the first enabled tool from tool_priority,
+            // or fall back to the first enabled tool overall.  This ensures a
+            // single coordinator performer tool for all review/fix/integrate
+            // phases, preventing different tasks from using different tools.
+            let enabled = &canonical.tools.enabled;
+            // CLI --tool-priority or config tool_priority
+            let priority: Vec<String> = env_cfg
+                .tool_priority
+                .as_ref()
+                .map(|csv| {
+                    csv.split(',')
+                        .map(|v| v.trim().to_string())
+                        .filter(|v| !v.is_empty())
+                        .collect()
+                })
+                .or_else(|| {
+                    coordinator
+                        .map(|c| c.tool_priority.clone())
+                        .filter(|v| !v.is_empty())
+                })
+                .unwrap_or_default();
+            priority
+                .iter()
+                .find(|t| enabled.contains(t))
+                .cloned()
+                .or_else(|| enabled.first().cloned())
+        });
+    if let Some(log) = logger {
+        if let Some(ref tool) = coordinator_tool_override {
+            let _ = log.note(format!("- Coordinator tool: {}", tool));
+        }
+    }
     let phase_timeout_seconds = env_cfg
         .stale_in_progress_seconds
         .or_else(|| coordinator.and_then(|c| c.stale_in_progress_seconds))
