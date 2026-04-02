@@ -148,8 +148,7 @@ fn build_heartbeat_sse_event(source_seq_cursor: i64) -> Event {
     Event::default()
         .id(payload["event_id"]
             .as_str()
-            .expect("heartbeat id")
-            .to_string())
+            .expect("heartbeat id"))
         .event("heartbeat")
         .json_data(payload)
         .expect("serialize heartbeat payload")

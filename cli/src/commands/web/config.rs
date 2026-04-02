@@ -281,10 +281,10 @@ fn apply_update(config: &mut CanonicalConfig, request: &ApiConfigUpdateRequest) 
     if let Some(standards_inline) = &request.standards_inline {
         config.standards.inline = standards_inline.clone();
     }
-    apply_selection_update(config, &request);
-    apply_settings_update(config, &request);
-    apply_ralph_update(config, &request);
-    apply_coordinator_update(config, &request);
+    apply_selection_update(config, request);
+    apply_settings_update(config, request);
+    apply_ralph_update(config, request);
+    apply_coordinator_update(config, request);
 }
 
 fn apply_selection_update(config: &mut CanonicalConfig, request: &ApiConfigUpdateRequest) {

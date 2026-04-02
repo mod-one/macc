@@ -236,7 +236,7 @@ fn collect_logs_recursive(
             action: "canonicalize web log file".into(),
             source: err,
         })?;
-        if !canonical_path.starts_with(&canonical_root) {
+        if !canonical_path.starts_with(canonical_root) {
             continue;
         }
 
