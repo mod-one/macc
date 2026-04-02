@@ -936,7 +936,9 @@ fn apply_job_completion_typed(
         // Re-queue the task so the coordinator retries with the same or
         // a different tool.
         let stdout_says_error = ni.stdout.contains("MACC_TASK_RESULT: error_with_changes")
-            || ni.stdout.contains("MACC_TASK_RESULT: error_without_changes");
+            || ni
+                .stdout
+                .contains("MACC_TASK_RESULT: error_without_changes");
         if stdout_says_error {
             let kind = if ni.stdout.contains("error_with_changes") {
                 PerformerCompletionKind::ErrorWithChanges
@@ -1617,10 +1619,7 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
             return Some(format!(
                 "Coordinator stopped: dispatch limit reached (dispatched={}, max_dispatch={}). \
                  Remaining: todo={}, merged={}. Restart the coordinator to continue.",
-                self.run_state.dispatched_total_run,
-                max_dispatch_total,
-                counts.todo,
-                counts.merged,
+                self.run_state.dispatched_total_run, max_dispatch_total, counts.todo, counts.merged,
             ));
         }
         None
@@ -2247,7 +2246,8 @@ mod tests {
         .expect("apply completion");
         assert_eq!(completion.status_label, "already_satisfied");
         assert_eq!(registry["tasks"][0]["state"], "merged");
-        let actions = build_advance_actions(&registry, &HashSet::new(), "", None).expect("advance actions");
+        let actions =
+            build_advance_actions(&registry, &HashSet::new(), "", None).expect("advance actions");
         assert!(!actions.iter().any(|action| {
             matches!(
                 action,
@@ -2312,7 +2312,8 @@ mod tests {
         .expect("apply completion");
         assert_eq!(completion.status_label, "success_without_changes");
         assert_eq!(registry["tasks"][0]["state"], "merged");
-        let actions = build_advance_actions(&registry, &HashSet::new(), "", None).expect("advance actions");
+        let actions =
+            build_advance_actions(&registry, &HashSet::new(), "", None).expect("advance actions");
         assert!(!actions.iter().any(|action| {
             matches!(
                 action,

@@ -817,7 +817,7 @@ fn run_with_engine_provider(
                 commands::config::ConfigAction::Delete { name },
             )
             .run(),
-        }
+        },
         Some(Commands::Quickstart { yes, apply, no_tui }) => {
             commands::quickstart::QuickstartCommand::new(app.clone(), *yes, *apply, *no_tui).run()
         }

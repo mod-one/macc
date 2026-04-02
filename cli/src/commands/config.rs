@@ -68,7 +68,11 @@ impl<'a> Command for ConfigCommand<'a> {
                         source: e,
                     }
                 })?;
-                println!("Profile '{}' restored to {}.", name, paths.config_path.display());
+                println!(
+                    "Profile '{}' restored to {}.",
+                    name,
+                    paths.config_path.display()
+                );
                 Ok(())
             }
             ConfigAction::List => {

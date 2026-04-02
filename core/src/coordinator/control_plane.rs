@@ -134,8 +134,7 @@ fn is_tool_unavailability_error(reason: &str) -> bool {
         return true;
     }
     // Rate-limit / overloaded patterns
-    if lower.contains("rate limit") || lower.contains("rate_limit") || lower.contains("ratelimit")
-    {
+    if lower.contains("rate limit") || lower.contains("rate_limit") || lower.contains("ratelimit") {
         return true;
     }
     if lower.contains("too many requests") || lower.contains("429") {
@@ -304,11 +303,7 @@ fn handle_phase_tool_unavailability(
 
     let has_fallback_tool = enabled_tools.iter().any(|t| {
         t != tool_id
-            && !crate::coordinator::rate_limit::is_tool_throttled(
-                &state.throttle_registry,
-                t,
-                now,
-            )
+            && !crate::coordinator::rate_limit::is_tool_throttled(&state.throttle_registry, t, now)
     });
 
     // ── Step 4: apply the appropriate recycling strategy ───────────────
@@ -1132,8 +1127,12 @@ pub async fn advance_tasks_native(
     let max_review_cycles = env_cfg
         .max_review_cycles
         .or_else(|| coordinator.and_then(|c| c.max_review_cycles));
-    let actions =
-        coordinator_engine::build_advance_actions(&registry, &active_merge_ids, &now, max_review_cycles)?;
+    let actions = coordinator_engine::build_advance_actions(
+        &registry,
+        &active_merge_ids,
+        &now,
+        max_review_cycles,
+    )?;
     if !actions.is_empty() {
         if let Some(log) = logger {
             let _ = log.note(format!("- Advance started (actions={})", actions.len()));
@@ -2595,7 +2594,8 @@ pub async fn dispatch_ready_tasks_native(
             if let Some(failed_step) =
                 sanitize_worktree_to_base(&created.path, &selected.base_branch).await?
             {
-                let msg = format!(
+                let msg =
+                    format!(
                     "dispatch failed for task {}: sanitize new worktree failed at step '{}' ({})",
                     selected.id, failed_step, created.path.display()
                 );
@@ -2790,9 +2790,7 @@ pub async fn dispatch_ready_tasks_native(
         // is recycled from a previous task that used a different tool, the old
         // tool.json would otherwise persist and cause the performer to invoke
         // the wrong command.
-        if let Err(err) =
-            ensure_tool_json_for_tool(repo_root, &worktree_path, &selected.tool)
-        {
+        if let Err(err) = ensure_tool_json_for_tool(repo_root, &worktree_path, &selected.tool) {
             let msg = format!(
                 "dispatch failed for task {}: ensure tool.json failed ({})",
                 selected.id, err

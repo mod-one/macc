@@ -62,9 +62,7 @@ pub fn parse_sections(csv: &str) -> Result<Vec<ProfileSection>> {
         }
     }
     if out.is_empty() {
-        return Err(MaccError::Validation(
-            "No valid sections specified".into(),
-        ));
+        return Err(MaccError::Validation("No valid sections specified".into()));
     }
     Ok(out)
 }
@@ -175,12 +173,10 @@ impl ProfileManager {
                     let name = stem.to_string();
                     // Try to read metadata
                     let (description, created_at) = match std::fs::read_to_string(&path) {
-                        Ok(content) => {
-                            match serde_yaml::from_str::<ProfileWrapper>(&content) {
-                                Ok(w) => (w.description, Some(w.created_at)),
-                                Err(_) => (None, None),
-                            }
-                        }
+                        Ok(content) => match serde_yaml::from_str::<ProfileWrapper>(&content) {
+                            Ok(w) => (w.description, Some(w.created_at)),
+                            Err(_) => (None, None),
+                        },
                         Err(_) => (None, None),
                     };
                     profiles.push(ProfileInfo {
@@ -234,9 +230,7 @@ pub struct ProfileInfo {
 
 fn validate_profile_name(name: &str) -> Result<()> {
     if name.is_empty() {
-        return Err(MaccError::Validation(
-            "Profile name cannot be empty".into(),
-        ));
+        return Err(MaccError::Validation("Profile name cannot be empty".into()));
     }
     if name.contains('/') || name.contains('\\') || name.contains("..") {
         return Err(MaccError::Validation(format!(
@@ -518,10 +512,7 @@ mod tests {
         config.standards.path = Some("/home/user/project/standards.md".to_string());
 
         let sanitized = sanitize_paths(config);
-        assert_eq!(
-            sanitized.standards.path,
-            Some("standards.md".to_string())
-        );
+        assert_eq!(sanitized.standards.path, Some("standards.md".to_string()));
     }
 
     #[test]

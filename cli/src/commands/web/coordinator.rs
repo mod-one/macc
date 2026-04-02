@@ -220,11 +220,9 @@ pub(super) async fn coordinator_stop_handler(
 ) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
     let paths = state.paths.clone();
     let engine = state.engine.clone();
-    tokio::task::spawn_blocking(move || {
-        engine.coordinator_stop(&paths.root, "web api stop")
-    })
-    .await
-    .map_err(|e| ApiError::validation(e.to_string()))??;
+    tokio::task::spawn_blocking(move || engine.coordinator_stop(&paths.root, "web api stop"))
+        .await
+        .map_err(|e| ApiError::validation(e.to_string()))??;
     Ok(Json(ApiCoordinatorCommandResult::from(
         CoordinatorCommandResult::default(),
     )))

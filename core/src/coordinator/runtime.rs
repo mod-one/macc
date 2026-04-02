@@ -44,7 +44,7 @@ async fn kill_process_tree(pid: Option<i64>, child: &mut tokio::process::Child) 
     #[cfg(unix)]
     if let Some(pid) = pid {
         let pgid = pid; // child is process group leader, so PGID == PID
-        // SIGTERM the entire process group
+                        // SIGTERM the entire process group
         let _ = std::process::Command::new("kill")
             .args(["-TERM", "--", &format!("-{}", pgid)])
             .stdout(std::process::Stdio::null())

@@ -255,9 +255,7 @@ impl From<CanonicalConfig> for ApiConfigResponse {
             force_kill_grace_seconds: coordinator
                 .as_ref()
                 .and_then(|cfg| cfg.force_kill_grace_seconds),
-            max_review_cycles: coordinator
-                .as_ref()
-                .and_then(|cfg| cfg.max_review_cycles),
+            max_review_cycles: coordinator.as_ref().and_then(|cfg| cfg.max_review_cycles),
             requirements_detected: false,
             managed_environment_warnings: Vec::new(),
         }

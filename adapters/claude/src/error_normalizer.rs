@@ -137,9 +137,7 @@ fn parse_reset_time_as_seconds(text: &str) -> Option<u64> {
     };
 
     let now = chrono::Utc::now();
-    let today_reset = now
-        .date_naive()
-        .and_hms_opt(hour_24, 0, 0)?;
+    let today_reset = now.date_naive().and_hms_opt(hour_24, 0, 0)?;
     let today_reset_utc = today_reset.and_utc();
 
     // If reset time is in the past, it means tomorrow.
@@ -150,7 +148,11 @@ fn parse_reset_time_as_seconds(text: &str) -> Option<u64> {
     };
 
     let diff = (reset - now).num_seconds();
-    if diff > 0 { Some(diff as u64) } else { None }
+    if diff > 0 {
+        Some(diff as u64)
+    } else {
+        None
+    }
 }
 
 impl ErrorNormalizer for ClaudeErrorNormalizer {
