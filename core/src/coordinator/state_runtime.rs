@@ -103,27 +103,27 @@ pub fn read_coordinator_pause_file(repo_root: &Path) -> Result<Option<Coordinato
     Ok(Some(value))
 }
 
-pub fn set_task_paused_for_integrate(repo_root: &Path, task_id: &str, reason: &str) -> Result<()> {
+pub fn set_task_paused_for_merge(repo_root: &Path, task_id: &str, reason: &str) -> Result<()> {
     let mut args = BTreeMap::new();
     args.insert("task-id".to_string(), task_id.to_string());
     args.insert("runtime-status".to_string(), "paused".to_string());
-    args.insert("phase".to_string(), "integrate".to_string());
+    args.insert("phase".to_string(), "merge".to_string());
     args.insert("last-error".to_string(), reason.to_string());
     args.insert("pid".to_string(), "".to_string());
     crate::coordinator::state::coordinator_state_set_runtime(repo_root, &args)
 }
 
-pub fn resume_paused_task_integrate(repo_root: &Path, task_id: &str) -> Result<()> {
+pub fn resume_paused_task_merge(repo_root: &Path, task_id: &str) -> Result<()> {
     let mut transition_args = BTreeMap::new();
     transition_args.insert("task-id".to_string(), task_id.to_string());
     transition_args.insert("state".to_string(), "queued".to_string());
-    transition_args.insert("reason".to_string(), "resume:integrate_pause".to_string());
+    transition_args.insert("reason".to_string(), "resume:merge_pause".to_string());
     crate::coordinator::state::coordinator_state_apply_transition(repo_root, &transition_args)?;
 
     let mut runtime_args = BTreeMap::new();
     runtime_args.insert("task-id".to_string(), task_id.to_string());
     runtime_args.insert("runtime-status".to_string(), "phase_done".to_string());
-    runtime_args.insert("phase".to_string(), "integrate".to_string());
+    runtime_args.insert("phase".to_string(), "merge".to_string());
     runtime_args.insert("pid".to_string(), "".to_string());
     crate::coordinator::state::coordinator_state_set_runtime(repo_root, &runtime_args)
 }

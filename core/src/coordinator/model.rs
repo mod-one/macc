@@ -144,6 +144,9 @@ pub struct TaskRuntime {
     /// Cleared on successful dispatch or when the timestamp is in the past.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delayed_until: Option<String>,
+    /// Number of review cycles completed for this task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_cycles: Option<usize>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -346,7 +349,8 @@ impl TaskRegistry {
         // A slot can be reused unless a task in an active/blocking state is assigned to it.
         // Blocking states: claimed, in_progress, pr_open, changes_requested, queued.
         // Non-blocking (safe to reset): merged, failed, abandoned, todo.
-        // This allows retried (auto_retry → todo) and failed tasks to release their slot.
+        // Orphaned worktrees (no task references at all) are also safe to reuse —
+        // their previous tasks either completed, failed, or had worktree metadata cleared.
         const BLOCKING: &[&str] = &[
             "claimed",
             "in_progress",
@@ -354,7 +358,6 @@ impl TaskRegistry {
             "changes_requested",
             "queued",
         ];
-        let mut seen = false;
         for task in &self.tasks {
             let Some(path) = task
                 .worktree
@@ -366,12 +369,11 @@ impl TaskRegistry {
             if path != worktree_path {
                 continue;
             }
-            seen = true;
             if BLOCKING.contains(&task.state.as_str()) {
                 return false;
             }
         }
-        seen
+        true
     }
 
     /// Returns `true` if the task assigned to `worktree_path` is in a terminal/stuck
@@ -731,17 +733,18 @@ mod tests {
     }
 
     #[test]
-    fn can_reuse_slot_no_tasks_returns_false() {
+    fn can_reuse_slot_no_tasks_returns_true() {
+        // Orphaned worktrees (no task references) are safe to reuse.
         let v = json!({ "tasks": [] });
         let r = TaskRegistry::from_value(&v).unwrap();
-        assert!(!r.can_reuse_worktree_slot("/wt/worker-01"));
+        assert!(r.can_reuse_worktree_slot("/wt/worker-01"));
     }
 
     #[test]
-    fn can_reuse_slot_different_worktree_ignored() {
+    fn can_reuse_slot_different_worktree_not_blocked() {
         let r = make_registry_with_task("in_progress", "/wt/worker-02");
-        // worker-01 has no tasks — returns false (seen=false)
-        assert!(!r.can_reuse_worktree_slot("/wt/worker-01"));
+        // worker-01 has no task references — orphaned, safe to reuse.
+        assert!(r.can_reuse_worktree_slot("/wt/worker-01"));
     }
 }
 

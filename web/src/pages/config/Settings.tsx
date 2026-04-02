@@ -306,29 +306,36 @@ function CoordinatorTab({
           label="Max Dispatch"
           value={draft.maxDispatch}
           onChange={(v) => update({ maxDispatch: v })}
-          helpText="Maximum tasks dispatched per cycle."
+          placeholder="10"
+          helpText="Maximum tasks dispatched per run. Empty uses default 10. 0 means no cap."
         />
         <NumberField
           label="Max Parallel"
           value={draft.maxParallel}
           onChange={(v) => update({ maxParallel: v })}
-          helpText="Maximum concurrent workers."
+          placeholder="3"
+          helpText="Maximum concurrent workers. Empty uses default 3."
         />
         <NumberField
           label="Timeout (seconds)"
           value={draft.timeoutSeconds}
           onChange={(v) => update({ timeoutSeconds: v })}
-          helpText="Task execution timeout."
+          placeholder="0"
+          helpText="Task execution timeout. 0 disables timeout."
         />
         <NumberField
           label="Phase Runner Max Attempts"
           value={draft.phaseRunnerMaxAttempts}
           onChange={(v) => update({ phaseRunnerMaxAttempts: v })}
+          placeholder="1"
+          helpText="Max attempts for phase runner fallback. Empty uses default 1."
         />
         <NumberField
           label="Dispatch Cooldown (seconds)"
           value={draft.dispatchCooldownSeconds}
           onChange={(v) => update({ dispatchCooldownSeconds: v })}
+          placeholder="2"
+          helpText="Wait between dispatch cycles. Empty uses default 2."
         />
       </div>
 
@@ -353,8 +360,8 @@ function CoordinatorTab({
           label="Stale Action"
           value={draft.staleAction}
           onChange={(v) => update({ staleAction: v })}
-          placeholder="abandon"
-          helpText="Action on stale task: abandon | todo | blocked"
+          placeholder="block"
+          helpText="Action on stale task: block | retry | requeue"
         />
       </div>
 
@@ -394,13 +401,15 @@ function CoordinatorTab({
           label="Merge Hook Timeout (seconds)"
           value={draft.mergeHookTimeoutSeconds}
           onChange={(v) => update({ mergeHookTimeoutSeconds: v })}
-          helpText="Timeout for the AI merge-fix hook."
+          placeholder="90"
+          helpText="Timeout for the AI merge-fix hook. Empty uses default 90."
         />
         <NumberField
           label="Ghost Heartbeat Grace (seconds)"
           value={draft.ghostHeartbeatGraceSeconds}
           onChange={(v) => update({ ghostHeartbeatGraceSeconds: v })}
-          helpText="Grace period before a dead process is treated as a ghost."
+          placeholder="30"
+          helpText="Grace period before a dead process is treated as a ghost. Empty uses default 30."
         />
         <BooleanField
           label="JSON Compatibility"
@@ -435,7 +444,8 @@ function CoordinatorTab({
           label="Error Code Retry Max"
           value={draft.errorCodeRetryMax}
           onChange={(v) => update({ errorCodeRetryMax: v })}
-          helpText="Maximum retry attempts per task."
+          placeholder="2"
+          helpText="Maximum retry attempts per task. Empty uses default 2."
         />
       </div>
 
@@ -445,13 +455,15 @@ function CoordinatorTab({
           label="Backoff Base (seconds)"
           value={draft.rateLimitBackoffBaseSeconds}
           onChange={(v) => update({ rateLimitBackoffBaseSeconds: v })}
-          placeholder="60"
+          placeholder="30"
+          helpText="Initial E601 backoff delay. Empty uses default 30."
         />
         <NumberField
           label="Backoff Max (seconds)"
           value={draft.rateLimitBackoffMaxSeconds}
           onChange={(v) => update({ rateLimitBackoffMaxSeconds: v })}
-          placeholder="3600"
+          placeholder="300"
+          helpText="Backoff cap for E601 exponential growth. Empty uses default 300."
         />
         <BooleanField
           label="Fallback Enabled"

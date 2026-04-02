@@ -65,6 +65,14 @@ enum Commands {
         /// Run interactive setup wizard (3 questions)
         #[arg(long)]
         wizard: bool,
+        /// Restore a saved profile after initialization
+        #[arg(long)]
+        profile: Option<String>,
+    },
+    /// Manage saved configuration profiles
+    Config {
+        #[command(subcommand)]
+        config_command: ConfigCommands,
     },
     /// Zero-friction setup: check environment, init, then open TUI or run plan+apply
     Quickstart {
@@ -221,7 +229,7 @@ enum Commands {
         /// Override PRD file path
         #[arg(long)]
         prd: Option<String>,
-        /// Fixed tool for coordinator phase hooks (review/fix/integrate)
+        /// Fixed tool for coordinator phase hooks (review/fix)
         #[arg(long)]
         coordinator_tool: Option<String>,
         /// Default reference/base branch when task.base_branch is not provided
@@ -311,6 +319,9 @@ enum Commands {
         /// Grace period (seconds) before force-killing a performer that signaled failure via IPC but did not exit
         #[arg(long)]
         force_kill_grace_seconds: Option<u64>,
+        /// Max review cycles per task (0=skip review, 1=one review+fix, N=N loops). Default: unlimited.
+        #[arg(long)]
+        max_review_cycles: Option<usize>,
         /// Extra args passed directly to coordinator.sh (use after --)
         #[arg(last = true)]
         extra_args: Vec<String>,
@@ -640,6 +651,36 @@ pub enum BackupsCommands {
     },
 }
 
+#[derive(Subcommand)]
+pub enum ConfigCommands {
+    /// Save current project config as a user-level profile
+    Save {
+        /// Profile name
+        name: String,
+        /// Optional description
+        #[arg(long)]
+        description: Option<String>,
+        /// Save only specific sections (comma-separated: tools,standards,selections,automation,settings,mcp_templates)
+        #[arg(long)]
+        only: Option<String>,
+    },
+    /// Restore a saved profile into the current project
+    Restore {
+        /// Profile name
+        name: String,
+        /// Restore only specific sections (comma-separated)
+        #[arg(long)]
+        only: Option<String>,
+    },
+    /// List all saved profiles
+    List,
+    /// Delete a saved profile
+    Delete {
+        /// Profile name
+        name: String,
+    },
+}
+
 fn main() {
     let cli = Cli::parse();
     init_tracing(cli.verbose);
@@ -726,8 +767,56 @@ fn run_with_engine_provider(
     );
 
     match &cli.command {
-        Some(Commands::Init { force, wizard }) => {
-            commands::init::InitCommand::new(app.clone(), *force, *wizard).run()
+        Some(Commands::Init {
+            force,
+            wizard,
+            profile,
+        }) => {
+            commands::init::InitCommand::new(app.clone(), *force, *wizard).run()?;
+            if let Some(profile_name) = profile {
+                let config_cmd = commands::config::ConfigCommand::new(
+                    app.clone(),
+                    commands::config::ConfigAction::Restore {
+                        name: profile_name,
+                        only: None,
+                    },
+                );
+                config_cmd.run()?;
+            }
+            Ok(())
+        }
+        Some(Commands::Config { config_command }) => match config_command {
+            ConfigCommands::Save {
+                name,
+                description,
+                only,
+            } => commands::config::ConfigCommand::new(
+                app.clone(),
+                commands::config::ConfigAction::Save {
+                    name,
+                    description: description.as_deref(),
+                    only: only.as_deref(),
+                },
+            )
+            .run(),
+            ConfigCommands::Restore { name, only } => commands::config::ConfigCommand::new(
+                app.clone(),
+                commands::config::ConfigAction::Restore {
+                    name,
+                    only: only.as_deref(),
+                },
+            )
+            .run(),
+            ConfigCommands::List => commands::config::ConfigCommand::new(
+                app.clone(),
+                commands::config::ConfigAction::List,
+            )
+            .run(),
+            ConfigCommands::Delete { name } => commands::config::ConfigCommand::new(
+                app.clone(),
+                commands::config::ConfigAction::Delete { name },
+            )
+            .run(),
         }
         Some(Commands::Quickstart { yes, apply, no_tui }) => {
             commands::quickstart::QuickstartCommand::new(app.clone(), *yes, *apply, *no_tui).run()
@@ -862,6 +951,7 @@ fn run_with_engine_provider(
             error_code_retry_list,
             error_code_retry_max,
             force_kill_grace_seconds,
+            max_review_cycles,
             extra_args,
         }) => commands::coordinator::CoordinatorCommand::new(
             app.clone(),
@@ -907,6 +997,7 @@ fn run_with_engine_provider(
                     rate_limit_fallback_enabled: None,
                     rate_limit_throttle_parallel: None,
                     force_kill_grace_seconds: *force_kill_grace_seconds,
+                    max_review_cycles: *max_review_cycles,
                 },
                 extra_args: extra_args.clone(),
             },
@@ -1590,6 +1681,7 @@ mod tests {
             command: Some(Commands::Init {
                 force: false,
                 wizard: false,
+                profile: None,
             }),
         };
 
@@ -1620,6 +1712,7 @@ mod tests {
             command: Some(Commands::Init {
                 force: false,
                 wizard: false,
+                profile: None,
             }),
         };
         run_with_engine(cli, TestEngine::with_fixtures())?;
@@ -1643,6 +1736,7 @@ mod tests {
             command: Some(Commands::Init {
                 force: false,
                 wizard: false,
+                profile: None,
             }),
         };
         run_with_engine(cli_idempotent, TestEngine::with_fixtures())?;
@@ -1663,6 +1757,7 @@ mod tests {
             command: Some(Commands::Init {
                 force: true,
                 wizard: false,
+                profile: None,
             }),
         };
         run_with_engine(cli_force, TestEngine::with_fixtures())?;
@@ -1706,6 +1801,7 @@ mod tests {
                 command: Some(Commands::Init {
                     force: false,
                     wizard: false,
+                    profile: None,
                 }),
             },
             fixture_engine(&ids),
@@ -2128,7 +2224,7 @@ if [[ "$action" == "retry-phase" ]]; then
     esac
   done
   [[ "$task" == "TASK-R" ]] || exit 2
-  [[ "$phase" == "integrate" ]] || exit 3
+  [[ "$phase" == "fix" ]] || exit 3
   tmp="$(mktemp)"
   jq '.tasks |= map(if .id=="TASK-R" then .state="queued" else . end)' "$TASK_REGISTRY_FILE" >"$tmp"
   mv "$tmp" "$TASK_REGISTRY_FILE"
@@ -2149,7 +2245,7 @@ fi
                 "--retry-task".to_string(),
                 "TASK-R".to_string(),
                 "--retry-phase".to_string(),
-                "integrate".to_string(),
+                "fix".to_string(),
             ],
             &canonical,
             None,
@@ -2161,7 +2257,7 @@ fi
         assert_eq!(
             value["tasks"][0]["state"].as_str(),
             Some("queued"),
-            "retry-phase integrate should update blocked task to queued in this test harness"
+            "retry-phase fix should update blocked task to queued in this test harness"
         );
 
         std::fs::remove_dir_all(&root).ok();
@@ -2190,6 +2286,7 @@ fi
                 command: Some(Commands::Init {
                     force: false,
                     wizard: false,
+                    profile: None,
                 }),
             },
             fixture_engine(&ids),
@@ -2279,6 +2376,7 @@ fi
                     error_code_retry_list: None,
                     error_code_retry_max: None,
                     force_kill_grace_seconds: None,
+                    max_review_cycles: None,
                     extra_args: Vec::new(),
                 }),
             },
@@ -2317,6 +2415,7 @@ fi
                 command: Some(Commands::Init {
                     force: false,
                     wizard: false,
+                    profile: None,
                 }),
             },
             fixture_engine(&ids),
@@ -2370,6 +2469,7 @@ fi
                 command: Some(Commands::Init {
                     force: false,
                     wizard: false,
+                    profile: None,
                 }),
             },
             TestEngine::with_fixtures(),
@@ -2421,6 +2521,7 @@ fi
                 command: Some(Commands::Init {
                     force: false,
                     wizard: false,
+                    profile: None,
                 }),
             },
             TestEngine::with_fixtures(),
@@ -2535,6 +2636,7 @@ fi
                 command: Some(Commands::Init {
                     force: false,
                     wizard: false,
+                    profile: None,
                 }),
             },
             TestEngine::with_fixtures(),
@@ -2652,6 +2754,7 @@ fi
                 command: Some(Commands::Init {
                     force: false,
                     wizard: false,
+                    profile: None,
                 }),
             },
             fixture_engine(&ids),
@@ -2759,6 +2862,7 @@ fi
                 command: Some(Commands::Init {
                     force: false,
                     wizard: false,
+                    profile: None,
                 }),
             },
             TestEngine::with_fixtures(),
@@ -2870,6 +2974,7 @@ fi
                 command: Some(Commands::Init {
                     force: false,
                     wizard: false,
+                    profile: None,
                 }),
             },
             TestEngine::with_fixtures(),
@@ -3011,6 +3116,7 @@ fi
                 command: Some(Commands::Init {
                     force: false,
                     wizard: false,
+                    profile: None,
                 }),
             },
             TestEngine::with_fixtures(),
@@ -3146,6 +3252,7 @@ fi
                 command: Some(Commands::Init {
                     force: false,
                     wizard: false,
+                    profile: None,
                 }),
             },
             fixture_engine(&ids),
@@ -3293,6 +3400,7 @@ fi
                 command: Some(Commands::Init {
                     force: false,
                     wizard: false,
+                    profile: None,
                 }),
             },
             fixture_engine(&ids),
@@ -3499,6 +3607,7 @@ fi
                 command: Some(Commands::Init {
                     force: false,
                     wizard: false,
+                    profile: None,
                 }),
             },
             fixture_engine(&ids),

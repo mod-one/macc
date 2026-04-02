@@ -381,7 +381,7 @@ All commands support these global flags:
 
 ### Project lifecycle
 
-- `macc init [--force] [--wizard]`: create/update `.macc/` layout and default config (`--wizard` asks 3 setup questions).
+- `macc init [--force] [--wizard] [--profile <name>]`: create/update `.macc/` layout and default config (`--wizard` asks 3 setup questions, `--profile` restores a saved profile after init).
 - `macc quickstart [-y|--yes] [--apply] [--no-tui]`: zero-friction happy path (checks prerequisites, initializes, seeds defaults, opens TUI or runs plan+apply).
 - `macc plan [--tools tool1,tool2] [--json] [--explain]`: build preview only (no writes), with machine-readable JSON/explanations when needed.
 - `macc apply [--tools ...] [--dry-run] [--allow-user-scope] [--json] [--explain]`: apply planned writes (`--dry-run` behaves as plan with same preview modes).
@@ -391,6 +391,22 @@ All commands support these global flags:
 - `macc clear`: asks confirmation, removes all non-root worktrees with force, then removes MACC-managed files/directories in the current project.
 - `macc migrate [--apply]`: migrate legacy config to current format.
 - `macc doctor [--fix]`: actionable diagnostics (tools, paths/permissions, worktrees/sessions, cache health). `--fix` applies safe fixes only (create missing dirs, add `.macc/cache/` to `.gitignore`, repair session state file when corrupt).
+
+### Configuration profiles
+
+Save and reuse project configurations across repositories. Profiles are stored
+under `~/.macc/profiles/` and serialize the full `CanonicalConfig`, so new config
+fields added in the future are automatically included without code changes.
+
+- `macc config save <name> [--description "..."] [--only sections]`: save current config as a profile.
+- `macc config restore <name> [--only sections]`: restore a profile into the current project.
+- `macc config list`: list saved profiles.
+- `macc config delete <name>`: delete a profile.
+
+The `--only` flag accepts a comma-separated list of sections:
+`tools`, `standards`, `selections`, `automation`, `settings`, `mcp_templates`.
+
+Absolute paths are automatically stripped to filenames on save for portability.
 
 ### TUI and tools
 

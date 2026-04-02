@@ -15,6 +15,7 @@ worktree=""
 task_id=""
 attempt="1"
 max_attempts="1"
+caller_session_id=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -25,6 +26,7 @@ while [[ $# -gt 0 ]]; do
     --task-id) task_id="$2"; shift 2 ;;
     --attempt) attempt="$2"; shift 2 ;;
     --max-attempts) max_attempts="$2"; shift 2 ;;
+    --session-id) caller_session_id="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; usage; exit 1 ;;
   esac
@@ -289,7 +291,7 @@ run_and_capture() {
   local output_file="$1"
   shift
   local rc=0
-  printf '[MACC] invoke: %s\n' "$*" >&2
+  printf '[MACC] invoke (codex 1): %s\n' "$*" >&2
   "$@" 2>&1 | tee "$output_file"
   rc=${PIPESTATUS[0]}
   return "$rc"
@@ -454,7 +456,7 @@ run_default_call() {
     run_and_capture "$output_capture" "$command" "${final_call_args[@]}" "$prompt_arg" "$prompt_text"
   else
     local rc=0
-    printf '[MACC] invoke: %s' "$command" >&2
+    printf '[MACC] invoke (codex 2): %s' "$command" >&2
     printf ' %q' "${final_call_args[@]}" >&2
     printf '\n' >&2
     printf "%s" "$prompt_text" | "$command" "${final_call_args[@]}" 2>&1 | tee "$output_capture"
@@ -480,16 +482,29 @@ if [[ "$session_enabled" == "true" && -n "$session_resume_command" ]]; then
   sid=""
   rc=0
 
-  if acquire_session_lock; then
-    sid="$(read_session_id)"
-    if session_occupied_by_other "$sid"; then
-      sid=""
-    fi
-    if [[ -n "$sid" ]]; then
+  # When the caller (coordinator performer) already provides a session ID,
+  # use it directly instead of reading from tool-sessions.json.  This keeps
+  # session authority at the coordinator level while still allowing the tool
+  # runner to manage leases.
+  if [[ -n "$caller_session_id" ]]; then
+    sid="$caller_session_id"
+    if acquire_session_lock; then
       write_active_lease "$sid"
       active_session_id="$sid"
+      release_session_lock
     fi
-    release_session_lock
+  else
+    if acquire_session_lock; then
+      sid="$(read_session_id)"
+      if session_occupied_by_other "$sid"; then
+        sid=""
+      fi
+      if [[ -n "$sid" ]]; then
+        write_active_lease "$sid"
+        active_session_id="$sid"
+      fi
+      release_session_lock
+    fi
   fi
 
   if [[ -z "$sid" && "$session_id_strategy" == "generated" ]]; then

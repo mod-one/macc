@@ -12,7 +12,7 @@ use crate::coordinator::runtime::{
 };
 use crate::coordinator::state_runtime::{
     cleanup_dead_runtime_tasks, clear_coordinator_pause_file, coordinator_pause_file_path,
-    resume_paused_task_integrate, set_task_paused_for_integrate, write_coordinator_pause_file,
+    resume_paused_task_merge, set_task_paused_for_merge, write_coordinator_pause_file,
 };
 use crate::coordinator_storage::{
     coordinator_storage_bootstrap_sqlite_from_json, coordinator_storage_export_sqlite_to_json,
@@ -206,25 +206,54 @@ pub trait ControlPlaneBackend {
     fn should_terminate_run(&self, _counts: &CoordinatorCounts) -> Option<String> {
         None
     }
+    fn last_dispatch_failure(&self) -> Option<String> {
+        None
+    }
 }
 
-pub fn plan_advance(state: WorkflowState) -> AdvancePlan {
+/// Plan the next advance action for a task.
+///
+/// `max_review_cycles` controls the review→fix loop budget:
+///   - `None`  → unlimited loops (default)
+///   - `Some(0)` → skip review entirely; go straight to merge
+///   - `Some(1)` → one review + one fix if changes requested, no loopback
+///   - `Some(n)` → up to n review→fix→review loops
+///
+/// `review_cycles` is the number of review cycles already completed for
+/// this task (stored in `task_runtime.review_cycles`).
+pub fn plan_advance(
+    state: WorkflowState,
+    max_review_cycles: Option<usize>,
+    review_cycles: usize,
+) -> AdvancePlan {
     match state {
-        WorkflowState::InProgress => AdvancePlan::RunPhase(PhaseTransition {
-            mode: "review",
-            next_state: WorkflowState::PrOpen,
-            runtime_phase: "review",
-        }),
-        WorkflowState::PrOpen => AdvancePlan::RunPhase(PhaseTransition {
-            mode: "integrate",
-            next_state: WorkflowState::Queued,
-            runtime_phase: "integrate",
-        }),
-        WorkflowState::ChangesRequested => AdvancePlan::RunPhase(PhaseTransition {
-            mode: "fix",
-            next_state: WorkflowState::PrOpen,
-            runtime_phase: "fix",
-        }),
+        WorkflowState::InProgress => {
+            if max_review_cycles == Some(0) {
+                // No review at all — go straight to merge.
+                return AdvancePlan::Merge;
+            }
+            AdvancePlan::RunPhase(PhaseTransition {
+                mode: "review",
+                next_state: WorkflowState::PrOpen,
+                runtime_phase: "review",
+            })
+        }
+        // Review approved → merge.
+        WorkflowState::PrOpen => AdvancePlan::Merge,
+        WorkflowState::ChangesRequested => {
+            // If we've exhausted the review cycle budget, skip the fix→review
+            // loop and go straight to merge with whatever we have.
+            if let Some(max) = max_review_cycles {
+                if review_cycles >= max {
+                    return AdvancePlan::Merge;
+                }
+            }
+            AdvancePlan::RunPhase(PhaseTransition {
+                mode: "fix",
+                next_state: WorkflowState::PrOpen,
+                runtime_phase: "fix",
+            })
+        }
         WorkflowState::Queued => AdvancePlan::Merge,
         _ => AdvancePlan::Noop,
     }
@@ -238,17 +267,19 @@ fn transition_workflow_state(from: WorkflowState, event: WorkflowEvent) -> Resul
         (WorkflowState::InProgress, WorkflowEvent::ReviewChangesRequested) => {
             WorkflowState::ChangesRequested
         }
-        (WorkflowState::PrOpen, WorkflowEvent::PhaseSucceeded("integrate")) => {
-            WorkflowState::Queued
-        }
         (WorkflowState::ChangesRequested, WorkflowEvent::PhaseSucceeded("fix")) => {
             WorkflowState::PrOpen
         }
         (WorkflowState::InProgress, WorkflowEvent::PhaseFailed("review"))
-        | (WorkflowState::PrOpen, WorkflowEvent::PhaseFailed("integrate"))
         | (WorkflowState::ChangesRequested, WorkflowEvent::PhaseFailed("fix"))
+        | (WorkflowState::InProgress, WorkflowEvent::MergeFailed)
+        | (WorkflowState::PrOpen, WorkflowEvent::MergeFailed)
+        | (WorkflowState::ChangesRequested, WorkflowEvent::MergeFailed)
         | (WorkflowState::Queued, WorkflowEvent::MergeFailed) => WorkflowState::Blocked,
-        (WorkflowState::Queued, WorkflowEvent::MergeSucceeded) => WorkflowState::Merged,
+        (WorkflowState::InProgress, WorkflowEvent::MergeSucceeded)
+        | (WorkflowState::PrOpen, WorkflowEvent::MergeSucceeded)
+        | (WorkflowState::ChangesRequested, WorkflowEvent::MergeSucceeded)
+        | (WorkflowState::Queued, WorkflowEvent::MergeSucceeded) => WorkflowState::Merged,
         _ => {
             return Err(MaccError::Coordinator {
                 code: "invalid_transition",
@@ -312,6 +343,7 @@ pub fn build_advance_actions(
     registry: &Value,
     active_merge_jobs: &HashSet<String>,
     now: &str,
+    max_review_cycles: Option<usize>,
 ) -> Result<Vec<AdvanceTaskAction>> {
     let typed = TaskRegistry::from_value(registry)?;
     let mut actions = Vec::new();
@@ -322,9 +354,10 @@ pub fn build_advance_actions(
             continue;
         }
         let task_id = task.id.clone();
+        let review_cycles = task.task_runtime.review_cycles.unwrap_or(0);
         let workflow_state = task.workflow_state();
         match workflow_state
-            .map(plan_advance)
+            .map(|s| plan_advance(s, max_review_cycles, review_cycles))
             .unwrap_or(AdvancePlan::Noop)
         {
             AdvancePlan::RunPhase(transition) => {
@@ -625,6 +658,9 @@ pub(crate) fn apply_review_phase_success_typed(
     runtime.current_phase = Some("review".to_string());
     runtime.pid = None;
     runtime.delayed_until = None;
+    // Track the number of completed review cycles for max_review_cycles enforcement.
+    let cycles = runtime.review_cycles.unwrap_or(0) + 1;
+    runtime.review_cycles = Some(cycles);
     task.touch_state_changed(now);
     Ok(to)
 }
@@ -664,7 +700,7 @@ pub(crate) fn apply_merge_failure_typed(task: &mut Task, reason: &str, now: &str
     task.set_workflow_state(to);
     let runtime = task.ensure_runtime();
     runtime.set_status(RuntimeStatus::Paused);
-    runtime.current_phase = Some("integrate".to_string());
+    runtime.current_phase = Some("merge".to_string());
     runtime.last_error = Some(reason.to_string());
     runtime.pid = None;
     task.touch_state_changed(now);
@@ -796,6 +832,7 @@ fn apply_job_completion_typed(
         // coordinator can retry with the same or a different tool.
         if completion_kind.is_error() {
             task.set_workflow_state(WorkflowState::Todo);
+            task.worktree = None;
             {
                 let runtime = task.ensure_runtime();
                 runtime.completion_kind = Some(completion_kind.as_str().to_string());
@@ -907,6 +944,7 @@ fn apply_job_completion_typed(
                 PerformerCompletionKind::ErrorWithoutChanges
             };
             task.set_workflow_state(WorkflowState::Todo);
+            task.worktree = None;
             {
                 let runtime = task.ensure_runtime();
                 runtime.completion_kind = Some(kind.as_str().to_string());
@@ -984,6 +1022,7 @@ fn apply_job_completion_typed(
         );
         runtime.last_error = Some(format!("rate-limited; backoff {}s", backoff));
         store_classified_error_in_extra(runtime, &classified_tool_error, now_ts);
+        task.worktree = None;
         task.set_workflow_state(WorkflowState::Todo);
         task.touch_state_changed(now);
         return JobCompletionResult {
@@ -1052,6 +1091,7 @@ fn apply_job_completion_typed(
         // Re-queue the task as Todo so the dispatch loop can route it to a
         // fallback tool.  The per-tool throttle entry ensures the exhausted
         // tool is skipped during pick_tool().
+        task.worktree = None;
         task.set_workflow_state(WorkflowState::Todo);
         task.touch_state_changed(now);
         return JobCompletionResult {
@@ -1122,6 +1162,9 @@ fn apply_job_completion_typed(
         retries_total,
     ) {
         task.set_workflow_state(WorkflowState::Todo);
+        // Clear stale worktree metadata so the task selector treats
+        // this task as unassigned and eligible for re-dispatch.
+        task.worktree = None;
         let runtime = task.ensure_runtime();
         runtime.increment_retries();
         runtime.set_status(RuntimeStatus::Idle);
@@ -1257,7 +1300,11 @@ impl CoordinatorRunController {
         }
     }
 
-    pub fn on_cycle_counts(&mut self, counts: CoordinatorCounts) -> Result<ControlPlaneDecision> {
+    pub fn on_cycle_counts(
+        &mut self,
+        counts: CoordinatorCounts,
+        last_dispatch_failure: Option<&str>,
+    ) -> Result<ControlPlaneDecision> {
         if counts.todo == 0 && counts.active == 0 {
             if counts.blocked > 0 {
                 return Err(MaccError::Validation(format!(
@@ -1278,9 +1325,13 @@ impl CoordinatorRunController {
         self.previous_counts = Some(counts);
 
         if self.no_progress_cycles >= self.cfg.max_no_progress_cycles {
+            let hint = match last_dispatch_failure {
+                Some(msg) => format!(" Last dispatch failure: {}", msg),
+                None => String::new(),
+            };
             return Err(MaccError::Validation(format!(
-                "Coordinator made no progress for {} cycles (todo={}, active={}, blocked={}). Run `macc coordinator status`, then `macc coordinator unlock --all`, and inspect logs with `macc logs tail --component coordinator`.",
-                self.no_progress_cycles, counts.todo, counts.active, counts.blocked
+                "Coordinator made no progress for {} cycles (todo={}, active={}, blocked={}).{} Run `macc coordinator status`, then `macc coordinator unlock --all`, and inspect logs with `macc logs tail --component coordinator`.",
+                self.no_progress_cycles, counts.todo, counts.active, counts.blocked, hint
             )));
         }
 
@@ -1364,7 +1415,8 @@ async fn run_control_plane_cycle<B: ControlPlaneBackend + ?Sized>(
     if let Some(reason) = backend.should_terminate_run(&counts) {
         return Err(MaccError::Validation(reason));
     }
-    controller.on_cycle_counts(counts)
+    let last_fail = backend.last_dispatch_failure();
+    controller.on_cycle_counts(counts, last_fail.as_deref())
 }
 
 struct NativeControlPlaneBackend<'a> {
@@ -1377,6 +1429,7 @@ struct NativeControlPlaneBackend<'a> {
     run_state: CoordinatorRunState,
     phase_runner_max_attempts: usize,
     coordinator_tool_override: Option<String>,
+    max_review_cycles: Option<usize>,
     phase_timeout_seconds: usize,
     ghost_heartbeat_grace_seconds: i64,
     last_logged_counts: Option<CoordinatorCounts>,
@@ -1469,11 +1522,11 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
         }
         self.run_state.merge_join_set.abort_all();
         self.run_state.active_merge_jobs.clear();
-        set_task_paused_for_integrate(self.repo_root, task_id, reason)?;
-        write_coordinator_pause_file(self.repo_root, task_id, "integrate", reason)?;
+        set_task_paused_for_merge(self.repo_root, task_id, reason)?;
+        write_coordinator_pause_file(self.repo_root, task_id, "merge", reason)?;
         if let Some(log) = self.logger {
             let _ = log.note(format!(
-                "- Run paused task={} phase=integrate reason={}",
+                "- Run paused task={} phase=merge reason={}",
                 task_id, reason
             ));
         }
@@ -1486,7 +1539,7 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
-        resume_paused_task_integrate(self.repo_root, task_id)?;
+        resume_paused_task_merge(self.repo_root, task_id)?;
         let _ = clear_coordinator_pause_file(self.repo_root)?;
         Ok(())
     }
@@ -1572,6 +1625,10 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
             ));
         }
         None
+    }
+
+    fn last_dispatch_failure(&self) -> Option<String> {
+        self.run_state.last_dispatch_failure.clone()
     }
 }
 
@@ -1674,7 +1731,54 @@ pub async fn run_native_control_plane(
     let coordinator_tool_override = env_cfg
         .coordinator_tool
         .clone()
-        .or_else(|| coordinator.and_then(|c| c.coordinator_tool.clone()));
+        .or_else(|| coordinator.and_then(|c| c.coordinator_tool.clone()))
+        .or_else(|| {
+            // Auto-resolve: pick the first enabled tool from tool_priority,
+            // or fall back to the first enabled tool overall.  This ensures a
+            // single coordinator performer tool for all review/fix
+            // phases, preventing different tasks from using different tools.
+            let enabled = &canonical.tools.enabled;
+            // CLI --tool-priority or config tool_priority
+            let priority: Vec<String> = env_cfg
+                .tool_priority
+                .as_ref()
+                .map(|csv| {
+                    csv.split(',')
+                        .map(|v| v.trim().to_string())
+                        .filter(|v| !v.is_empty())
+                        .collect()
+                })
+                .or_else(|| {
+                    coordinator
+                        .map(|c| c.tool_priority.clone())
+                        .filter(|v| !v.is_empty())
+                })
+                .unwrap_or_default();
+            priority
+                .iter()
+                .find(|t| enabled.contains(t))
+                .cloned()
+                .or_else(|| enabled.first().cloned())
+        });
+    if let Some(log) = logger {
+        if let Some(ref tool) = coordinator_tool_override {
+            let _ = log.note(format!("- Coordinator tool: {}", tool));
+        }
+    }
+    let max_review_cycles = env_cfg
+        .max_review_cycles
+        .or_else(|| coordinator.and_then(|c| c.max_review_cycles));
+    if let Some(log) = logger {
+        match max_review_cycles {
+            Some(n) => {
+                let _ = log.note(format!("- Max review cycles: {}", n));
+            }
+            None => {
+                let _ = log.note("- Max review cycles: unlimited".to_string());
+            }
+        }
+    }
+
     let phase_timeout_seconds = env_cfg
         .stale_in_progress_seconds
         .or_else(|| coordinator.and_then(|c| c.stale_in_progress_seconds))
@@ -1758,6 +1862,7 @@ pub async fn run_native_control_plane(
         run_state,
         phase_runner_max_attempts,
         coordinator_tool_override,
+        max_review_cycles,
         phase_timeout_seconds,
         ghost_heartbeat_grace_seconds,
         last_logged_counts: None,
@@ -1880,28 +1985,73 @@ mod tests {
 
     #[test]
     fn plan_advance_maps_states() {
+        // Default (unlimited review cycles)
         assert!(matches!(
-            plan_advance(WorkflowState::InProgress),
+            plan_advance(WorkflowState::InProgress, None, 0),
             AdvancePlan::RunPhase(PhaseTransition { mode: "review", .. })
         ));
         assert!(matches!(
-            plan_advance(WorkflowState::PrOpen),
-            AdvancePlan::RunPhase(PhaseTransition {
-                mode: "integrate",
-                ..
-            })
-        ));
-        assert!(matches!(
-            plan_advance(WorkflowState::ChangesRequested),
-            AdvancePlan::RunPhase(PhaseTransition { mode: "fix", .. })
-        ));
-        assert!(matches!(
-            plan_advance(WorkflowState::Queued),
+            plan_advance(WorkflowState::PrOpen, None, 0),
             AdvancePlan::Merge
         ));
         assert!(matches!(
-            plan_advance(WorkflowState::Todo),
+            plan_advance(WorkflowState::ChangesRequested, None, 0),
+            AdvancePlan::RunPhase(PhaseTransition { mode: "fix", .. })
+        ));
+        assert!(matches!(
+            plan_advance(WorkflowState::Queued, None, 0),
+            AdvancePlan::Merge
+        ));
+        assert!(matches!(
+            plan_advance(WorkflowState::Todo, None, 0),
             AdvancePlan::Noop
+        ));
+    }
+
+    #[test]
+    fn plan_advance_max_review_cycles_zero_skips_review() {
+        // max_review_cycles=0 → skip review entirely
+        assert!(matches!(
+            plan_advance(WorkflowState::InProgress, Some(0), 0),
+            AdvancePlan::Merge
+        ));
+        // ChangesRequested with 0 cycles used but max=0 → merge directly
+        assert!(matches!(
+            plan_advance(WorkflowState::ChangesRequested, Some(0), 0),
+            AdvancePlan::Merge
+        ));
+    }
+
+    #[test]
+    fn plan_advance_max_review_cycles_one_allows_single_fix() {
+        // max=1, 0 cycles done → allow fix
+        assert!(matches!(
+            plan_advance(WorkflowState::ChangesRequested, Some(1), 0),
+            AdvancePlan::RunPhase(PhaseTransition { mode: "fix", .. })
+        ));
+        // max=1, 1 cycle done → exhausted, merge directly
+        assert!(matches!(
+            plan_advance(WorkflowState::ChangesRequested, Some(1), 1),
+            AdvancePlan::Merge
+        ));
+    }
+
+    #[test]
+    fn plan_advance_max_review_cycles_n_caps_loops() {
+        // max=3, 2 done → allow another
+        assert!(matches!(
+            plan_advance(WorkflowState::ChangesRequested, Some(3), 2),
+            AdvancePlan::RunPhase(PhaseTransition { mode: "fix", .. })
+        ));
+        // max=3, 3 done → exhausted, merge
+        assert!(matches!(
+            plan_advance(WorkflowState::ChangesRequested, Some(3), 3),
+            AdvancePlan::Merge
+        ));
+        // max=3, 5 done → way past, merge
+        assert!(matches!(
+            plan_advance(WorkflowState::ChangesRequested, Some(3), 5),
+            AdvancePlan::Merge
         ));
     }
 
@@ -2099,7 +2249,7 @@ mod tests {
         .expect("apply completion");
         assert_eq!(completion.status_label, "already_satisfied");
         assert_eq!(registry["tasks"][0]["state"], "merged");
-        let actions = build_advance_actions(&registry, &HashSet::new(), "").expect("advance actions");
+        let actions = build_advance_actions(&registry, &HashSet::new(), "", None).expect("advance actions");
         assert!(!actions.iter().any(|action| {
             matches!(
                 action,
@@ -2164,7 +2314,7 @@ mod tests {
         .expect("apply completion");
         assert_eq!(completion.status_label, "success_without_changes");
         assert_eq!(registry["tasks"][0]["state"], "merged");
-        let actions = build_advance_actions(&registry, &HashSet::new(), "").expect("advance actions");
+        let actions = build_advance_actions(&registry, &HashSet::new(), "", None).expect("advance actions");
         assert!(!actions.iter().any(|action| {
             matches!(
                 action,
@@ -2233,13 +2383,15 @@ mod tests {
 
     #[test]
     fn fsm_rejects_skipping_review_phase() {
+        // Applying a fix transition on an in_progress task should fail
+        // because fix is only valid from changes_requested state.
         let mut task = json!({"id":"T5","state":"in_progress","task_runtime":{"status":"running"}});
         let err = apply_phase_success(
             &mut task,
             PhaseTransition {
-                mode: "integrate",
-                next_state: WorkflowState::Queued,
-                runtime_phase: "integrate",
+                mode: "fix",
+                next_state: WorkflowState::PrOpen,
+                runtime_phase: "fix",
             },
             "2026-02-21T00:00:00Z",
         )

@@ -35,4 +35,5 @@ pub struct CoordinatorEnvConfig {
     pub rate_limit_fallback_enabled: Option<bool>,
     pub rate_limit_throttle_parallel: Option<bool>,
     pub force_kill_grace_seconds: Option<u64>,
+    pub max_review_cycles: Option<usize>,
 }

@@ -48,7 +48,7 @@ Envelope fields:
 - `source` (`coordinator` | `performer:<tool>`, required)
 - `task_id` (string, required for task events)
 - `type` (required): `lifecycle`, `phase`, `progress`, `artifact`, `error`, `heartbeat`
-- `phase` (optional): `dev`, `review`, `integrate`, `merge`
+- `phase` (optional): `dev`, `review`, `fix`, `merge`
 - `status` (required): `started`, `running`, `done`, `failed`, `paused`
 - `payload` (object, optional)
 
@@ -113,7 +113,7 @@ Resume behavior:
 
 Coordinator Live becomes event-first:
 
-- Timeline per task: `dispatch -> running -> review -> integrate -> merge`
+- Timeline per task: `dispatch -> running -> review -> merge`
 - Instant fields:
   - `current_phase`
   - `% progress` (if emitted)

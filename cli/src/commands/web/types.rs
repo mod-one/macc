@@ -134,6 +134,8 @@ pub(crate) struct ApiConfigResponse {
     pub rate_limit_throttle_parallel: Option<bool>,
     /// Grace period before force-killing a performer that signaled failure via IPC.
     pub force_kill_grace_seconds: Option<u64>,
+    /// Max review cycles per task (0=skip, 1=one review+fix, N=N loops, None=unlimited).
+    pub max_review_cycles: Option<usize>,
     /// Whether managed environment constraints were detected.
     pub requirements_detected: bool,
     /// Managed-environment warnings surfaced to the UI.
@@ -251,6 +253,8 @@ pub(crate) struct ApiConfigUpdateRequest {
     pub rate_limit_throttle_parallel: Option<bool>,
     /// Updated force-kill grace period.
     pub force_kill_grace_seconds: Option<u64>,
+    /// Updated max review cycles.
+    pub max_review_cycles: Option<usize>,
 }
 
 /// Tool descriptor payload used by the web tools configuration screen.

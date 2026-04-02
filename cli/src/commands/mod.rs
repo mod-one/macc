@@ -8,6 +8,7 @@ pub mod backups;
 pub mod catalog;
 pub mod catalog_support;
 pub mod clear;
+pub mod config;
 pub mod context;
 pub mod coordinator;
 pub mod doctor;

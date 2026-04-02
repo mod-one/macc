@@ -214,7 +214,7 @@ fn rollback_worktree_to_sha(worktree_path: &Path, target_sha: &str) -> bool {
 }
 
 /// Handle transient tool unavailability detected during a phase
-/// (review/fix/integrate).
+/// (review/fix).
 ///
 /// Covers E601 (rate-limit), E602 (quota exhaustion), E603 (session conflict),
 /// E101 (timeout/network), and any other error that imposes a waiting period or
@@ -409,31 +409,37 @@ fn handle_phase_tool_unavailability(
     Ok(())
 }
 
-async fn sanitize_worktree_to_base(worktree_path: &Path, base_branch: &str) -> Result<bool> {
+/// Sanitize a worktree back to the base branch.
+/// Returns `Ok(None)` on success, `Ok(Some(step_name))` when a specific step
+/// fails, allowing the caller to include the failed step in diagnostics.
+async fn sanitize_worktree_to_base(
+    worktree_path: &Path,
+    base_branch: &str,
+) -> Result<Option<&'static str>> {
     if !crate::git::reset_hard_async(worktree_path, "HEAD").await? {
-        return Ok(false);
+        return Ok(Some("reset_hard_head"));
     }
     if !crate::git::clean_fd_async(worktree_path).await? {
-        return Ok(false);
+        return Ok(Some("clean_fd"));
     }
     if !crate::git::checkout_async(worktree_path, base_branch, false).await?
         && !crate::git::checkout_reset_branch_async(worktree_path, base_branch, false).await?
     {
-        return Ok(false);
+        return Ok(Some("checkout_base_branch"));
     }
     if !crate::git::fetch_async(worktree_path, "origin").await? {
-        return Ok(false);
+        return Ok(Some("fetch_origin"));
     }
     if !crate::git::reset_hard_async(worktree_path, base_branch).await? {
-        return Ok(false);
+        return Ok(Some("reset_hard_base_branch"));
     }
     if !crate::git::reset_hard_async(worktree_path, "HEAD").await? {
-        return Ok(false);
+        return Ok(Some("reset_hard_head_final"));
     }
     if !crate::git::clean_fd_async(worktree_path).await? {
-        return Ok(false);
+        return Ok(Some("clean_fd_final"));
     }
-    Ok(true)
+    Ok(None)
 }
 
 fn ensure_expected_worktree_branch(worktree_path: &Path, expected_branch: &str) -> Result<bool> {
@@ -503,7 +509,7 @@ async fn switch_worktree_to_base_after_merge(
             repo_root,
             "worktree_switch",
             task_id,
-            "integrate",
+            "merge",
             "failed",
             &msg,
             "warning",
@@ -526,7 +532,7 @@ async fn switch_worktree_to_base_after_merge(
             repo_root,
             "worktree_switch",
             task_id,
-            "integrate",
+            "merge",
             "warning",
             &msg,
             "warning",
@@ -545,7 +551,7 @@ async fn switch_worktree_to_base_after_merge(
             repo_root,
             "worktree_switch",
             task_id,
-            "integrate",
+            "merge",
             "warning",
             &msg,
             "warning",
@@ -563,7 +569,7 @@ async fn switch_worktree_to_base_after_merge(
         repo_root,
         "worktree_switch",
         task_id,
-        "integrate",
+        "merge",
         "success",
         &msg,
         "info",
@@ -686,6 +692,64 @@ struct NativePhaseExecutor<'a> {
 
 /// Append a line to the performer log file for this task.
 /// Mirrors the format used by performer.sh so all phases appear in the same log.
+/// Read the active session ID for a tool + worktree from tool-sessions.json.
+/// Returns `None` if no session exists or the file is missing/unreadable.
+/// Read the tool ID currently stored in a worktree's `.macc/tool.json`.
+fn read_tool_id_from_tool_json(worktree: &std::path::Path) -> Option<String> {
+    let tool_json = worktree.join(".macc").join("tool.json");
+    let raw = std::fs::read_to_string(&tool_json).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    value
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(|id| id.to_string())
+}
+
+/// Ensure the worktree's `.macc/tool.json` matches the desired tool.
+/// If the current tool.json is missing or for a different tool, regenerate it.
+fn ensure_tool_json_for_tool(
+    repo_root: &std::path::Path,
+    worktree: &std::path::Path,
+    desired_tool: &str,
+) -> Result<()> {
+    let current_tool = read_tool_id_from_tool_json(worktree);
+    if current_tool.as_deref() == Some(desired_tool) {
+        return Ok(());
+    }
+    crate::worktree::write_tool_json(repo_root, worktree, desired_tool)?;
+    Ok(())
+}
+
+fn read_session_id_from_state(
+    repo_root: &Path,
+    tool_id: &str,
+    worktree_path: &Path,
+) -> Option<String> {
+    let path = repo_root.join(".macc/state/tool-sessions.json");
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let root: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let sessions = root
+        .get("tools")?
+        .get(tool_id)?
+        .get("sessions")?
+        .as_object()?;
+    // Try both as-is and canonicalized worktree path as lookup keys.
+    let key_plain = worktree_path.to_string_lossy().to_string();
+    let key_canon = std::fs::canonicalize(worktree_path)
+        .ok()
+        .map(|p| p.to_string_lossy().to_string());
+    for key in std::iter::once(&key_plain).chain(key_canon.iter()) {
+        if let Some(entry) = sessions.get(key.as_str()) {
+            let sid = entry.get("session_id")?.as_str().unwrap_or_default();
+            if !sid.is_empty() {
+                return Some(sid.to_string());
+            }
+        }
+    }
+    None
+}
+
 fn append_performer_log(worktree: &Path, task_id: &str, line: &str) {
     let safe: String = task_id
         .chars()
@@ -740,6 +804,17 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
         }
         let worktree = std::path::PathBuf::from(worktree_path);
         let tool_json = worktree.join(".macc").join("tool.json");
+        // Ensure tool.json exists and matches the phase tool.  When the
+        // coordinator falls back to a different tool after quota exhaustion,
+        // the worktree still carries the original tool's tool.json.
+        // Regenerating it here guarantees the performer script invokes the
+        // correct command and uses the correct session config.
+        if let Err(err) = ensure_tool_json_for_tool(self.repo_root, &worktree, &phase_tool) {
+            return Ok(Err(format!(
+                "phase '{}' cannot run for task {}: failed to ensure tool.json for '{}': {}",
+                mode, task_id, phase_tool, err
+            )));
+        }
         if !tool_json.exists() {
             return Ok(Err(format!(
                 "phase '{}' cannot run for task {}: missing {}",
@@ -814,6 +889,9 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                 chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ"),
             ),
         );
+        // Read existing session ID from tool-sessions.json so we can inject it
+        // into the tool runner command, just like the performer.sh wrapper does.
+        let mut session_id = read_session_id_from_state(self.repo_root, &phase_tool, &worktree);
         let mut last_reason = String::new();
         for attempt in 1..=attempts {
             append_performer_log(
@@ -850,6 +928,9 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                 .arg(attempt.to_string())
                 .arg("--max-attempts")
                 .arg(attempts.to_string());
+            if let Some(sid) = session_id.as_deref() {
+                command.arg("--session-id").arg(sid);
+            }
             if let Some(ipc_addr) = performer_ipc_addr
                 .as_deref()
                 .filter(|value| !value.trim().is_empty())
@@ -888,7 +969,7 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
             if out.status.success() {
                 // Auto-commit any uncommitted changes produced by the phase runner.
                 // The review phase explicitly must not commit; implement/dev commits
-                // are managed by performer.sh. Fix and integrate phases may leave
+                // are managed by performer.sh. Fix phases may leave
                 // uncommitted file changes that must be committed before merging.
                 if mode != "review" && crate::git::is_dirty(&worktree).unwrap_or(false) {
                     let _ = crate::git::run_git_output_mapped(
@@ -969,6 +1050,8 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                     mode, attempt, attempts
                 ),
             );
+            // Refresh session ID so the next attempt can resume.
+            session_id = read_session_id_from_state(self.repo_root, &phase_tool, &worktree);
         }
         let elapsed = chrono::Utc::now()
             .signed_duration_since(phase_started_at)
@@ -1046,7 +1129,11 @@ pub async fn advance_tasks_native(
         .keys()
         .cloned()
         .collect::<HashSet<_>>();
-    let actions = coordinator_engine::build_advance_actions(&registry, &active_merge_ids, &now)?;
+    let max_review_cycles = env_cfg
+        .max_review_cycles
+        .or_else(|| coordinator.and_then(|c| c.max_review_cycles));
+    let actions =
+        coordinator_engine::build_advance_actions(&registry, &active_merge_ids, &now, max_review_cycles)?;
     if !actions.is_empty() {
         if let Some(log) = logger {
             let _ = log.note(format!("- Advance started (actions={})", actions.len()));
@@ -1202,6 +1289,19 @@ pub async fn advance_tasks_native(
                 base,
                 merge_context,
             } => {
+                // Only one merge at a time — all merges operate on the same
+                // repo_root so concurrent merges cause races (dirty worktree,
+                // git lock conflicts, lost merge results).  Remaining merges
+                // will be picked up in the next advance cycle.
+                if !state.active_merge_jobs.is_empty() {
+                    if let Some(log) = logger {
+                        let _ = log.note(format!(
+                            "- Merge deferred task={} reason=another_merge_active",
+                            task_id
+                        ));
+                    }
+                    continue;
+                }
                 if let Some(log) = logger {
                     let _ = log.note(format!(
                         "- Merge start task={} branch={} base={}",
@@ -2127,7 +2227,7 @@ pub async fn monitor_merge_jobs_native(
                                 coordinator_runtime::report_branch_cleanup_outcome(
                                     repo_root,
                                     Some(&evt.task_id),
-                                    "integrate",
+                                    "merge",
                                     branch,
                                     &base,
                                     "merge_success_post_switch",
@@ -2492,11 +2592,12 @@ pub async fn dispatch_ready_tasks_native(
                 .pop()
                 .ok_or_else(|| MaccError::Validation("No worktree created".into()))?;
             let sanitize_started = Instant::now();
-            if !sanitize_worktree_to_base(&created.path, &selected.base_branch).await? {
+            if let Some(failed_step) =
+                sanitize_worktree_to_base(&created.path, &selected.base_branch).await?
+            {
                 let msg = format!(
-                    "dispatch failed for task {}: sanitize new worktree failed ({})",
-                    selected.id,
-                    created.path.display()
+                    "dispatch failed for task {}: sanitize new worktree failed at step '{}' ({})",
+                    selected.id, failed_step, created.path.display()
                 );
                 let _ = append_coordinator_event_with_severity(
                     repo_root,
@@ -2505,7 +2606,7 @@ pub async fn dispatch_ready_tasks_native(
                     "dev",
                     "failed",
                     &msg,
-                    "warning",
+                    "error",
                 );
                 if let Some(log) = logger {
                     let _ = log.note(format!("- {}", msg));
@@ -2685,44 +2786,45 @@ pub async fn dispatch_ready_tasks_native(
             dispatch_failed_this_cycle.insert(selected.id.clone());
             break;
         }
-        let tool_json_path = worktree_path.join(".macc").join("tool.json");
-        if !tool_json_path.exists() {
-            if let Err(err) =
-                crate::worktree::write_tool_json(repo_root, &worktree_path, &selected.tool)
-            {
-                let msg = format!(
-                    "dispatch failed for task {}: ensure tool.json failed ({})",
-                    selected.id, err
-                );
-                let _ = append_coordinator_event_with_severity(
-                    repo_root,
-                    "dispatch_failed",
-                    &selected.id,
-                    "dev",
-                    "failed",
-                    &msg,
-                    "warning",
-                );
-                emit_dispatch_skipped(
-                    repo_root,
-                    logger,
-                    &selected.id,
-                    "ensure_tool_json_failed",
-                    &err.to_string(),
-                );
-                let _ = rollback_claim(&msg);
-                if let Some(log) = logger {
-                    let _ = log.note(format!("- {}", msg));
-                }
-                if cooldown_seconds > 0 {
-                    state.dispatch_retry_not_before.insert(
-                        selected.id.clone(),
-                        Instant::now() + Duration::from_secs(cooldown_seconds),
-                    );
-                }
-                dispatch_failed_this_cycle.insert(selected.id.clone());
-                break;
+        // Always ensure tool.json matches the selected tool.  When a worktree
+        // is recycled from a previous task that used a different tool, the old
+        // tool.json would otherwise persist and cause the performer to invoke
+        // the wrong command.
+        if let Err(err) =
+            ensure_tool_json_for_tool(repo_root, &worktree_path, &selected.tool)
+        {
+            let msg = format!(
+                "dispatch failed for task {}: ensure tool.json failed ({})",
+                selected.id, err
+            );
+            let _ = append_coordinator_event_with_severity(
+                repo_root,
+                "dispatch_failed",
+                &selected.id,
+                "dev",
+                "failed",
+                &msg,
+                "warning",
+            );
+            emit_dispatch_skipped(
+                repo_root,
+                logger,
+                &selected.id,
+                "ensure_tool_json_failed",
+                &err.to_string(),
+            );
+            let _ = rollback_claim(&msg);
+            if let Some(log) = logger {
+                let _ = log.note(format!("- {}", msg));
             }
+            if cooldown_seconds > 0 {
+                state.dispatch_retry_not_before.insert(
+                    selected.id.clone(),
+                    Instant::now() + Duration::from_secs(cooldown_seconds),
+                );
+            }
+            dispatch_failed_this_cycle.insert(selected.id.clone());
+            break;
         }
         let worktree_paths = crate::ProjectPaths::from_root(&worktree_path);
         if let Err(err) = crate::init(&worktree_paths, false) {
@@ -3062,6 +3164,14 @@ pub async fn dispatch_ready_tasks_native(
             }
             break;
         }
+    }
+    if !dispatch_failed_this_cycle.is_empty() {
+        let failed_ids: Vec<&String> = dispatch_failed_this_cycle.iter().take(3).collect();
+        state.last_dispatch_failure = Some(format!(
+            "dispatch failed for {} task(s): {:?}. Check coordinator logs for details.",
+            dispatch_failed_this_cycle.len(),
+            failed_ids,
+        ));
     }
     Ok(dispatched)
 }

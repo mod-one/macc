@@ -127,7 +127,7 @@ fn report_from_logs(logs: &str) -> Option<FailureReport> {
             return Some(build_failure_report(
                 message,
                 task_id,
-                Some("integrate".to_string()),
+                Some("merge".to_string()),
                 "log",
                 true,
                 Some("local_merge_failed".to_string()),
@@ -214,7 +214,7 @@ fn infer_phase_from_status(status: &str) -> Option<String> {
         "claimed" | "in_progress" => Some("dev".to_string()),
         "pr_open" => Some("review".to_string()),
         "changes_requested" => Some("fix".to_string()),
-        "queued" => Some("integrate".to_string()),
+        "queued" => Some("merge".to_string()),
         _ => None,
     }
 }

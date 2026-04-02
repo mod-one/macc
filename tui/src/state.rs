@@ -207,7 +207,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    const AUTOMATION_FIELD_COUNT: usize = 31;
+    const AUTOMATION_FIELD_COUNT: usize = 32;
     const COORDINATOR_EVENTS_EWMA_ALPHA: f64 = 0.30;
     const COORDINATOR_PAUSE_REL_PATH: &'static str = ".macc/automation/task/coordinator.pause.json";
 
@@ -1944,26 +1944,27 @@ impl AppState {
             28 => "RL Fallback Enabled",
             29 => "RL Throttle Parallel",
             30 => "Force-Kill Grace (s)",
+            31 => "Max Review Cycles",
             _ => "",
         }
     }
 
     pub fn automation_field_help(&self, index: usize) -> &'static str {
         match index {
-            0 => "Fixed tool for coordinator phase hooks (review/fix/integrate). Empty means task/default tool.",
+            0 => "Fixed tool for coordinator phase hooks (review/fix). Empty means task/default tool.",
             1 => "Default git branch used when task.base_branch is not set (default: main).",
             2 => "Path to PRD JSON used by coordinator.sh (default: prd.json).",
             3 => "Tool priority order as comma-separated values, e.g. tool-a,tool-b,tool-c.",
             4 => "Per-tool concurrency caps as JSON object, e.g. {\"tool-a\":3,\"tool-b\":2}.",
             5 => "Category routing as JSON object, e.g. {\"frontend\":[\"tool-b\",\"tool-c\"]}.",
-            6 => "Total tasks to dispatch per run, 0 means no cap.",
+            6 => "Total tasks to dispatch per run, 0 means no cap, unset uses default 10.",
             7 => "Maximum concurrent performer runs.",
             8 => "Lock wait timeout in seconds, 0 disables timeout.",
             9 => "Max attempts for phase runner fallback.",
             10 => "Auto-stale timeout for claimed tasks in seconds, 0 disables.",
             11 => "Auto-stale timeout for in_progress tasks in seconds, 0 disables.",
             12 => "Auto-stale timeout for changes_requested tasks in seconds, 0 disables.",
-            13 => "Action for stale tasks: abandon, todo, blocked.",
+            13 => "Action for stale tasks: block, retry, requeue.",
             14 => "Flush coordinator logs every N lines (0 uses runtime default).",
             15 => "Flush coordinator logs every N milliseconds (0 uses runtime default).",
             16 => "Debounce SQLite -> JSON compatibility export in ms (0 disables debounce).",
@@ -1976,11 +1977,12 @@ impl AppState {
             23 => "Comma-separated list of error codes that trigger an automatic task retry.",
             24 => "Maximum number of automatic retries for a failed task.",
             25 => "Allow falling back to JSON task registry if SQLite is corrupted or missing.",
-            26 => "Minimum backoff delay in seconds on first E601 rate-limit (default: 60).",
-            27 => "Maximum backoff delay cap in seconds for exponential growth (default: 3600).",
+            26 => "Minimum backoff delay in seconds on first E601 rate-limit (default: 30).",
+            27 => "Maximum backoff delay cap in seconds for exponential growth (default: 300).",
             28 => "When the primary tool is throttled, dispatch to the next tool in priority order.",
             29 => "Reduce effective_max_parallel by 1 on each E601; restore on recovery.",
             30 => "Seconds to wait after a performer signals failure via IPC before force-killing it (default: 30).",
+            31 => "Max review cycles per task. 0=skip review, 1=one review+fix (no loopback), N=N loops. Empty=unlimited.",
             _ => "",
         }
     }
@@ -2017,11 +2019,11 @@ impl AppState {
                 .unwrap_or_else(|| "{}".to_string()),
             6 => coordinator
                 .and_then(|c| c.max_dispatch)
-                .unwrap_or(0)
+                .unwrap_or(10)
                 .to_string(),
             7 => coordinator
                 .and_then(|c| c.max_parallel)
-                .unwrap_or(1)
+                .unwrap_or(3)
                 .to_string(),
             8 => coordinator
                 .and_then(|c| c.timeout_seconds)
@@ -2045,7 +2047,7 @@ impl AppState {
                 .to_string(),
             13 => coordinator
                 .and_then(|c| c.stale_action.clone())
-                .unwrap_or_else(|| "abandon".to_string()),
+                .unwrap_or_else(|| "block".to_string()),
             14 => coordinator
                 .and_then(|c| c.log_flush_lines)
                 .unwrap_or(0)
@@ -2082,13 +2084,11 @@ impl AppState {
                 .and_then(|c| c.json_compat)
                 .unwrap_or(false)
                 .to_string(),
-            23 => self
-                .coordinator_env_cfg()
-                .error_code_retry_list
+            23 => coordinator
+                .and_then(|c| c.error_code_retry_list.clone())
                 .unwrap_or_else(|| "E101,E102,E103,E301,E302,E303,E601,E603".to_string()),
-            24 => self
-                .coordinator_env_cfg()
-                .error_code_retry_max
+            24 => coordinator
+                .and_then(|c| c.error_code_retry_max)
                 .unwrap_or(2)
                 .to_string(),
             25 => coordinator
@@ -2097,11 +2097,11 @@ impl AppState {
                 .to_string(),
             26 => coordinator
                 .and_then(|c| c.rate_limit_backoff_base_seconds)
-                .unwrap_or(60)
+                .unwrap_or(30)
                 .to_string(),
             27 => coordinator
                 .and_then(|c| c.rate_limit_backoff_max_seconds)
-                .unwrap_or(3600)
+                .unwrap_or(300)
                 .to_string(),
             28 => coordinator
                 .and_then(|c| c.rate_limit_fallback_enabled)
@@ -2115,6 +2115,10 @@ impl AppState {
                 .and_then(|c| c.force_kill_grace_seconds)
                 .unwrap_or(30)
                 .to_string(),
+            31 => coordinator
+                .and_then(|c| c.max_review_cycles)
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
             _ => String::new(),
         }
     }
@@ -2269,9 +2273,9 @@ impl AppState {
         if self.automation_field_index == 13 {
             let current = self.automation_field_display_value(13);
             let next = match current.as_str() {
-                "abandon" => "todo",
-                "todo" => "blocked",
-                _ => "abandon",
+                "block" => "retry",
+                "retry" => "requeue",
+                _ => "block",
             };
             self.set_automation_field_string(13, next.to_string());
             return;
@@ -2306,7 +2310,7 @@ impl AppState {
             }
             4 => self.set_automation_field_tool_caps(input),
             5 => self.set_automation_field_tool_specializations(input),
-            6..=12 | 14 | 18 | 24 => match input.parse::<usize>() {
+            6..=12 | 14 | 18 | 24 | 31 => match input.parse::<usize>() {
                 Ok(value) => {
                     self.set_automation_field_usize(idx, value);
                     Ok(())
@@ -2329,8 +2333,8 @@ impl AppState {
             },
             13 => {
                 let value = input.to_lowercase();
-                if !matches!(value.as_str(), "abandon" | "todo" | "blocked") {
-                    Err("stale_action must be one of: abandon, todo, blocked.".to_string())
+                if !matches!(value.as_str(), "block" | "retry" | "requeue") {
+                    Err("stale_action must be one of: block, retry, requeue.".to_string())
                 } else {
                     self.set_automation_field_string(13, value);
                     Ok(())
@@ -2405,6 +2409,7 @@ impl AppState {
                 14 => coordinator.log_flush_lines = Some(value),
                 18 => coordinator.merge_job_timeout_seconds = Some(value),
                 24 => coordinator.error_code_retry_max = Some(value),
+                31 => coordinator.max_review_cycles = Some(value),
                 _ => {}
             }
         }
@@ -3601,8 +3606,8 @@ impl AppState {
             }
             13 => {
                 let value = input.to_lowercase();
-                if !matches!(value.as_str(), "abandon" | "todo" | "blocked") {
-                    Some("Allowed: abandon | todo | blocked".to_string())
+                if !matches!(value.as_str(), "block" | "retry" | "requeue") {
+                    Some("Allowed: block | retry | requeue".to_string())
                 } else {
                     None
                 }

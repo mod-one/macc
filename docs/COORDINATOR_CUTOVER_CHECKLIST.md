@@ -110,7 +110,7 @@ This checklist defines a safe migration path from shell-driven coordinator logic
 - [ ] blocked ratio
 - [ ] stale ratio
 - [ ] merge success ratio
-- [ ] p50/p95 phase durations (`dev`, `review`, `integrate`, `wait`)
+- [ ] p50/p95 phase durations (`dev`, `review`, `fix`, `merge`, `wait`)
 - [ ] event throughput and consumer lag (`events/sec`, `last_event_age`)
 - [ ] storage mismatch count
 - [ ] cursor rollback/replay anomaly count
