@@ -53,10 +53,10 @@ async fn kill_process_tree(pid: Option<i64>, child: &mut tokio::process::Child) 
 
         // Give processes time to shut down gracefully
         let grace = std::time::Duration::from_secs(TIMEOUT_KILL_GRACE_SECONDS);
-        match tokio::time::timeout(grace, child.wait()).await {
-            Ok(_) => return, // exited within grace period
-            Err(_) => {}     // still alive, escalate to SIGKILL
+        if tokio::time::timeout(grace, child.wait()).await.is_ok() {
+            return; // exited within grace period
         }
+        // still alive, escalate to SIGKILL
 
         // SIGKILL the entire process group
         let _ = std::process::Command::new("kill")

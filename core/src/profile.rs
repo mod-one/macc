@@ -26,7 +26,7 @@ pub enum ProfileSection {
 }
 
 impl ProfileSection {
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "tools" => Some(Self::Tools),
             "standards" => Some(Self::Standards),
@@ -50,7 +50,7 @@ pub fn parse_sections(csv: &str) -> Result<Vec<ProfileSection>> {
         if tok.is_empty() {
             continue;
         }
-        match ProfileSection::from_str(tok) {
+        match ProfileSection::parse(tok) {
             Some(s) => out.push(s),
             None => {
                 return Err(MaccError::Validation(format!(
