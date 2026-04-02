@@ -157,6 +157,8 @@ pub struct CoordinatorRunState {
     pub performer_ipc_addr: Option<String>,
     pub performer_ipc_listener_started: bool,
     pub performer_ipc_listener_alive: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Last dispatch failure message (shown in no-progress diagnostics).
+    pub last_dispatch_failure: Option<String>,
     // RL-ROUTE-005: per-tool throttle state
     pub throttle_registry: ToolThrottleRegistry,
     /// Per-adapter error normalizers, built from inventory at startup.
@@ -203,6 +205,7 @@ impl CoordinatorRunState {
             performer_ipc_listener_alive: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
                 false,
             )),
+            last_dispatch_failure: None,
             throttle_registry: ToolThrottleRegistry::default(),
             normalizer_registry:
                 crate::coordinator::error_normalizer::NormalizerRegistry::from_inventory(),

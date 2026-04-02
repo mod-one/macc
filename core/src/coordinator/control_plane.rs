@@ -409,31 +409,37 @@ fn handle_phase_tool_unavailability(
     Ok(())
 }
 
-async fn sanitize_worktree_to_base(worktree_path: &Path, base_branch: &str) -> Result<bool> {
+/// Sanitize a worktree back to the base branch.
+/// Returns `Ok(None)` on success, `Ok(Some(step_name))` when a specific step
+/// fails, allowing the caller to include the failed step in diagnostics.
+async fn sanitize_worktree_to_base(
+    worktree_path: &Path,
+    base_branch: &str,
+) -> Result<Option<&'static str>> {
     if !crate::git::reset_hard_async(worktree_path, "HEAD").await? {
-        return Ok(false);
+        return Ok(Some("reset_hard_head"));
     }
     if !crate::git::clean_fd_async(worktree_path).await? {
-        return Ok(false);
+        return Ok(Some("clean_fd"));
     }
     if !crate::git::checkout_async(worktree_path, base_branch, false).await?
         && !crate::git::checkout_reset_branch_async(worktree_path, base_branch, false).await?
     {
-        return Ok(false);
+        return Ok(Some("checkout_base_branch"));
     }
     if !crate::git::fetch_async(worktree_path, "origin").await? {
-        return Ok(false);
+        return Ok(Some("fetch_origin"));
     }
     if !crate::git::reset_hard_async(worktree_path, base_branch).await? {
-        return Ok(false);
+        return Ok(Some("reset_hard_base_branch"));
     }
     if !crate::git::reset_hard_async(worktree_path, "HEAD").await? {
-        return Ok(false);
+        return Ok(Some("reset_hard_head_final"));
     }
     if !crate::git::clean_fd_async(worktree_path).await? {
-        return Ok(false);
+        return Ok(Some("clean_fd_final"));
     }
-    Ok(true)
+    Ok(None)
 }
 
 fn ensure_expected_worktree_branch(worktree_path: &Path, expected_branch: &str) -> Result<bool> {
@@ -2586,11 +2592,12 @@ pub async fn dispatch_ready_tasks_native(
                 .pop()
                 .ok_or_else(|| MaccError::Validation("No worktree created".into()))?;
             let sanitize_started = Instant::now();
-            if !sanitize_worktree_to_base(&created.path, &selected.base_branch).await? {
+            if let Some(failed_step) =
+                sanitize_worktree_to_base(&created.path, &selected.base_branch).await?
+            {
                 let msg = format!(
-                    "dispatch failed for task {}: sanitize new worktree failed ({})",
-                    selected.id,
-                    created.path.display()
+                    "dispatch failed for task {}: sanitize new worktree failed at step '{}' ({})",
+                    selected.id, failed_step, created.path.display()
                 );
                 let _ = append_coordinator_event_with_severity(
                     repo_root,
@@ -2599,7 +2606,7 @@ pub async fn dispatch_ready_tasks_native(
                     "dev",
                     "failed",
                     &msg,
-                    "warning",
+                    "error",
                 );
                 if let Some(log) = logger {
                     let _ = log.note(format!("- {}", msg));
@@ -3157,6 +3164,14 @@ pub async fn dispatch_ready_tasks_native(
             }
             break;
         }
+    }
+    if !dispatch_failed_this_cycle.is_empty() {
+        let failed_ids: Vec<&String> = dispatch_failed_this_cycle.iter().take(3).collect();
+        state.last_dispatch_failure = Some(format!(
+            "dispatch failed for {} task(s): {:?}. Check coordinator logs for details.",
+            dispatch_failed_this_cycle.len(),
+            failed_ids,
+        ));
     }
     Ok(dispatched)
 }

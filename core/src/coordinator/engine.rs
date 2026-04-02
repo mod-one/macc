@@ -206,6 +206,9 @@ pub trait ControlPlaneBackend {
     fn should_terminate_run(&self, _counts: &CoordinatorCounts) -> Option<String> {
         None
     }
+    fn last_dispatch_failure(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Plan the next advance action for a task.
@@ -269,9 +272,13 @@ fn transition_workflow_state(from: WorkflowState, event: WorkflowEvent) -> Resul
         }
         (WorkflowState::InProgress, WorkflowEvent::PhaseFailed("review"))
         | (WorkflowState::ChangesRequested, WorkflowEvent::PhaseFailed("fix"))
+        | (WorkflowState::InProgress, WorkflowEvent::MergeFailed)
         | (WorkflowState::PrOpen, WorkflowEvent::MergeFailed)
+        | (WorkflowState::ChangesRequested, WorkflowEvent::MergeFailed)
         | (WorkflowState::Queued, WorkflowEvent::MergeFailed) => WorkflowState::Blocked,
-        (WorkflowState::PrOpen, WorkflowEvent::MergeSucceeded)
+        (WorkflowState::InProgress, WorkflowEvent::MergeSucceeded)
+        | (WorkflowState::PrOpen, WorkflowEvent::MergeSucceeded)
+        | (WorkflowState::ChangesRequested, WorkflowEvent::MergeSucceeded)
         | (WorkflowState::Queued, WorkflowEvent::MergeSucceeded) => WorkflowState::Merged,
         _ => {
             return Err(MaccError::Coordinator {
@@ -825,6 +832,7 @@ fn apply_job_completion_typed(
         // coordinator can retry with the same or a different tool.
         if completion_kind.is_error() {
             task.set_workflow_state(WorkflowState::Todo);
+            task.worktree = None;
             {
                 let runtime = task.ensure_runtime();
                 runtime.completion_kind = Some(completion_kind.as_str().to_string());
@@ -936,6 +944,7 @@ fn apply_job_completion_typed(
                 PerformerCompletionKind::ErrorWithoutChanges
             };
             task.set_workflow_state(WorkflowState::Todo);
+            task.worktree = None;
             {
                 let runtime = task.ensure_runtime();
                 runtime.completion_kind = Some(kind.as_str().to_string());
@@ -1013,6 +1022,7 @@ fn apply_job_completion_typed(
         );
         runtime.last_error = Some(format!("rate-limited; backoff {}s", backoff));
         store_classified_error_in_extra(runtime, &classified_tool_error, now_ts);
+        task.worktree = None;
         task.set_workflow_state(WorkflowState::Todo);
         task.touch_state_changed(now);
         return JobCompletionResult {
@@ -1081,6 +1091,7 @@ fn apply_job_completion_typed(
         // Re-queue the task as Todo so the dispatch loop can route it to a
         // fallback tool.  The per-tool throttle entry ensures the exhausted
         // tool is skipped during pick_tool().
+        task.worktree = None;
         task.set_workflow_state(WorkflowState::Todo);
         task.touch_state_changed(now);
         return JobCompletionResult {
@@ -1151,6 +1162,9 @@ fn apply_job_completion_typed(
         retries_total,
     ) {
         task.set_workflow_state(WorkflowState::Todo);
+        // Clear stale worktree metadata so the task selector treats
+        // this task as unassigned and eligible for re-dispatch.
+        task.worktree = None;
         let runtime = task.ensure_runtime();
         runtime.increment_retries();
         runtime.set_status(RuntimeStatus::Idle);
@@ -1286,7 +1300,11 @@ impl CoordinatorRunController {
         }
     }
 
-    pub fn on_cycle_counts(&mut self, counts: CoordinatorCounts) -> Result<ControlPlaneDecision> {
+    pub fn on_cycle_counts(
+        &mut self,
+        counts: CoordinatorCounts,
+        last_dispatch_failure: Option<&str>,
+    ) -> Result<ControlPlaneDecision> {
         if counts.todo == 0 && counts.active == 0 {
             if counts.blocked > 0 {
                 return Err(MaccError::Validation(format!(
@@ -1307,9 +1325,13 @@ impl CoordinatorRunController {
         self.previous_counts = Some(counts);
 
         if self.no_progress_cycles >= self.cfg.max_no_progress_cycles {
+            let hint = match last_dispatch_failure {
+                Some(msg) => format!(" Last dispatch failure: {}", msg),
+                None => String::new(),
+            };
             return Err(MaccError::Validation(format!(
-                "Coordinator made no progress for {} cycles (todo={}, active={}, blocked={}). Run `macc coordinator status`, then `macc coordinator unlock --all`, and inspect logs with `macc logs tail --component coordinator`.",
-                self.no_progress_cycles, counts.todo, counts.active, counts.blocked
+                "Coordinator made no progress for {} cycles (todo={}, active={}, blocked={}).{} Run `macc coordinator status`, then `macc coordinator unlock --all`, and inspect logs with `macc logs tail --component coordinator`.",
+                self.no_progress_cycles, counts.todo, counts.active, counts.blocked, hint
             )));
         }
 
@@ -1393,7 +1415,8 @@ async fn run_control_plane_cycle<B: ControlPlaneBackend + ?Sized>(
     if let Some(reason) = backend.should_terminate_run(&counts) {
         return Err(MaccError::Validation(reason));
     }
-    controller.on_cycle_counts(counts)
+    let last_fail = backend.last_dispatch_failure();
+    controller.on_cycle_counts(counts, last_fail.as_deref())
 }
 
 struct NativeControlPlaneBackend<'a> {
@@ -1602,6 +1625,10 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
             ));
         }
         None
+    }
+
+    fn last_dispatch_failure(&self) -> Option<String> {
+        self.run_state.last_dispatch_failure.clone()
     }
 }
 
