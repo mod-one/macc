@@ -76,6 +76,12 @@ pub fn handle(
     engine: &crate::services::engine_provider::SharedEngine,
     input: CoordinatorCommandInput,
 ) -> Result<()> {
+    // Intercept "sessions" subcommand before normal coordinator dispatch.
+    if input.command_name == "sessions" {
+        let context = ProjectContext::load(absolute_cwd, engine)?;
+        return handle_sessions_command(&context.paths.root, &input.extra_args);
+    }
+
     let context = ProjectContext::load(absolute_cwd, engine)?;
     let paths = &context.paths;
     let canonical = &context.canonical;
@@ -260,7 +266,98 @@ Performers cannot commit without it. Fix this first:\n\
             }
         }
     }
+
+    // Auto-save sessions on graceful stop so they can be restored in future runs.
+    if matches!(command, CoordinatorCommand::Stop { graceful: true, .. }) {
+        match macc_core::coordinator::session_manager::save_sessions(&paths.root, None) {
+            Ok(meta) => {
+                println!(
+                    "Sessions auto-saved as '{}' ({} active, {} archived).",
+                    meta.name, meta.active_session_count, meta.archived_session_count
+                );
+            }
+            Err(e) => {
+                eprintln!("Warning: could not auto-save sessions: {}", e);
+            }
+        }
+    }
+
     Ok(())
+}
+
+fn handle_sessions_command(repo_root: &Path, extra_args: &[String]) -> Result<()> {
+    use macc_core::coordinator::session_manager;
+
+    let action = extra_args.first().map(|s| s.as_str()).unwrap_or("list");
+
+    match action {
+        "save" => {
+            let name = extra_args.get(1).map(|s| s.as_str());
+            let meta = session_manager::save_sessions(repo_root, name)?;
+            println!("Session snapshot saved:");
+            println!("  Name:             {}", meta.name);
+            println!("  Saved at:         {}", meta.saved_at);
+            println!("  Tools:            {}", meta.tool_count);
+            println!("  Active sessions:  {}", meta.active_session_count);
+            println!("  Archived sessions:{}", meta.archived_session_count);
+            Ok(())
+        }
+        "restore" => {
+            let name = extra_args.get(1).ok_or_else(|| {
+                MaccError::Validation(
+                    "Usage: macc coordinator sessions restore <name> [--dry-run]".into(),
+                )
+            })?;
+            let dry_run = extra_args.iter().any(|a| a == "--dry-run");
+            let meta = session_manager::restore_sessions(repo_root, name, dry_run)?;
+            if dry_run {
+                println!("Dry-run: would restore from snapshot '{}':", meta.name);
+            } else {
+                println!("Sessions restored from snapshot '{}':", meta.name);
+            }
+            println!("  Saved at:         {}", meta.saved_at);
+            println!("  Tools:            {}", meta.tool_count);
+            println!("  Active sessions:  {}", meta.active_session_count);
+            println!("  Archived sessions:{}", meta.archived_session_count);
+            Ok(())
+        }
+        "list" => {
+            let snapshots = session_manager::list_saved_sessions(repo_root)?;
+            if snapshots.is_empty() {
+                println!("No saved session snapshots for this project.");
+            } else {
+                println!(
+                    "{:<30} {:<24} {:>6} {:>8} {:>10}",
+                    "NAME", "SAVED_AT", "TOOLS", "ACTIVE", "ARCHIVED"
+                );
+                for snap in &snapshots {
+                    println!(
+                        "{:<30} {:<24} {:>6} {:>8} {:>10}",
+                        snap.name,
+                        snap.saved_at,
+                        snap.tool_count,
+                        snap.active_session_count,
+                        snap.archived_session_count,
+                    );
+                }
+            }
+            Ok(())
+        }
+        "delete" => {
+            let name = extra_args.get(1).ok_or_else(|| {
+                MaccError::Validation(
+                    "Usage: macc coordinator sessions delete <name>".into(),
+                )
+            })?;
+            session_manager::delete_saved_session(repo_root, name)?;
+            println!("Deleted session snapshot '{}'.", name);
+            Ok(())
+        }
+        other => Err(MaccError::Validation(format!(
+            "Unknown sessions action '{}'. Available: save, restore, list, delete",
+            other
+        ))),
+    }
 }
 
 fn format_duration_human(secs: u64) -> String {

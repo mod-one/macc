@@ -820,11 +820,52 @@ Important behavior:
 - Session IDs are reused in serial runs for the same worktree/scope.
 - Worktree pool reuse keeps session continuity because the scope key (worktree path) remains stable.
 
+### 12.5 Session save / restore
+
+Tool sessions can be saved to user-level storage and restored across coordinator runs, preserving AI tool context continuity.
+
+**Storage location**: `~/.macc/sessions/<project-slug>/<name>.json`
+
+**Commands**:
+- `macc coordinator sessions list` — list all saved session snapshots for the current project.
+- `macc coordinator sessions save [<name>]` — snapshot the current `tool-sessions.json` (active sessions, leases, and archived entries) to user-level storage. If no name is provided, an auto-generated timestamp name is used.
+- `macc coordinator sessions restore <name> [--dry-run]` — merge a saved snapshot back into the current `tool-sessions.json`. Existing entries are preserved (snapshot fills gaps, does not overwrite). Restored leases are reset to `available` status so performers can claim them. `--dry-run` previews the merge without writing.
+- `macc coordinator sessions delete <name>` — remove a saved snapshot.
+
+**Auto-save**: when the coordinator is stopped gracefully (`macc coordinator stop --graceful`), a session snapshot is automatically saved. This is best-effort; failure to save does not block the stop.
+
+**Snapshot format**:
+```json
+{
+  "saved_at": "<ISO-8601>",
+  "project_root": "<absolute-path>",
+  "name": "<snapshot-name>",
+  "tools": {
+    "<tool_id>": {
+      "sessions": { "<scope-key>": { "session_id": "...", ... } },
+      "leases": { "<session_id>": { "status": "...", ... } },
+      "archived": { "<archive-key>": { ... } }
+    }
+  }
+}
+```
+
+**Restore merge rules**:
+- Active sessions: snapshot entries are added only if the scope key does not already exist in the current file.
+- Leases: snapshot entries are added only if the session ID is not already present. Status is reset to `available` and a `restored_at` timestamp is added.
+- Archived entries are not merged (they are informational in the snapshot).
+
+**Typical workflow**:
+1. Coordinator run completes or is stopped gracefully (auto-save happens).
+2. Worktrees are removed / new run is started.
+3. `macc coordinator sessions restore <name>` injects saved session IDs into the fresh `tool-sessions.json`.
+4. Performers on the new run pick up restored sessions and resume AI tool conversations with prior context.
+
 ### 12.3 Coordinator command
 
 - `macc coordinator` runs full-cycle mode by default (`run`).
 - Full-cycle loop: `sync -> dispatch -> advance -> reconcile -> cleanup` until convergence.
-- `macc coordinator [run|dispatch|advance|resume|sync|sync-prd|audit-prd|status|reconcile|unlock|cleanup]`
+- `macc coordinator [run|dispatch|advance|resume|sync|sync-prd|audit-prd|status|reconcile|unlock|cleanup|sessions]`
 - `run`, `dispatch`, `advance`, `reconcile`, and `cleanup` are handled natively in Rust.
 - Worktrees are reused as worker slots (not task-coupled names): once a task is merged, the slot is reset to reference, moved to a fresh branch, refreshed for the new task, then relaunched.
 - New worker worktrees are created only when no reusable slot is available; pool size is bounded by `max_parallel`.

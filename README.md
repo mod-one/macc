@@ -458,9 +458,10 @@ Coordinator orchestrates the end-to-end automation cycle: it reads the task regi
 
 - `macc coordinator` (default full cycle: sync -> dispatch -> advance -> reconcile -> cleanup in loop until convergence)
 - `macc coordinator` opens the TUI `Coordinator Live` screen and starts coordinator run.
-- `macc coordinator [run|dispatch|advance|sync|sync-prd|audit-prd|status|reconcile|unlock|cleanup|stop]`
+- `macc coordinator [run|dispatch|advance|sync|sync-prd|audit-prd|status|reconcile|unlock|cleanup|stop|sessions]`
 - `macc coordinator run --no-tui` keeps the previous headless CLI behavior.
 - `macc coordinator stop [--graceful] [--remove-worktrees] [--remove-branches]`
+- `macc coordinator sessions [save|restore|list|delete]`: manage tool session snapshots at user level (`~/.macc/sessions/<project>/`). `save` captures active + archived sessions; `restore` merges saved sessions back into `tool-sessions.json` without overwriting existing entries; `list` shows all snapshots; `delete` removes one. Graceful stop (`--graceful`) auto-saves a snapshot.
 - Coordinator options can override config at runtime:
   - `--prd`, `--coordinator-tool`
   - `--tool-priority`, `--max-parallel-per-tool-json`, `--tool-specializations-json`
@@ -593,6 +594,7 @@ Performer session management is project-level, tool-aware, and lease-based:
 - Sessions are reused in serial execution when available and not leased by active work.
 - If all known sessions are occupied (or none exist), a new session is created.
 - Lease release happens on performer exit, so closed worktrees can donate reusable sessions.
+- Session snapshots can be saved to user-level storage (`~/.macc/sessions/`) and restored across coordinator runs via `macc coordinator sessions save|restore`. Graceful stop auto-saves a snapshot.
 
 ## Safety guarantees
 
