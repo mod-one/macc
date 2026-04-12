@@ -26,7 +26,10 @@
     "Existing tests (312+ core tests) must continue passing after each task.",
     "The supervisor agent is a new binary/process that runs alongside the coordinator, not embedded inside it.",
     "Git operations go through core/src/git.rs; new git helpers (tag, log inspection) follow existing patterns.",
-    "The PRD reconciliation flow (sync-prd, audit-prd) uses commit message conventions with [macc:task TASK-ID] tags."
+    "The PRD reconciliation flow (sync-prd, audit-prd) uses commit message conventions with [macc:task TASK-ID] tags.",
+    "Tool session IDs are managed per-worktree in .macc/state/tool-sessions.json with lease-based isolation.",
+    "AI tool prompt caches have a TTL (~5 minutes for Claude); session reuse within TTL avoids cold-start token waste.",
+    "Performer scripts already support --session-id passthrough and {session_id} placeholder substitution in resume args."
   ],
   "tasks": [
     {
@@ -336,7 +339,7 @@
       "id": "L4-DOC-001",
       "title": "Update README and MACC.md with reliability features documentation",
       "category": "documentation",
-      "description": "Problem/Goal: The new reliability features (salvage, retry-on-same-worktree, merge-gate, abandonment tagging, sync-unmerged, granular error codes) need user-facing documentation.\nKey actions: Update README.md error code table with new sub-codes. Add a 'Coordinator Recovery & Reliability' section to MACC.md describing salvage, merge-gate, and abandonment behaviors. Update the auto-retry policy section with new retry strategies. Document new config keys.\nOut of scope: Writing developer/contributor docs for implementation internals. Updating TUI help text.\nSuccess criteria: A user reading the docs understands the new recovery behaviors, can configure them, and knows what the new error codes mean.",
+      "description": "Problem/Goal: The new reliability features (salvage, retry-on-same-worktree, merge-gate, abandonment tagging, sync-unmerged, granular error codes) and session optimization features need user-facing documentation.\nKey actions: Update README.md error code table with new sub-codes. Add a 'Coordinator Recovery & Reliability' section to MACC.md describing salvage, merge-gate, and abandonment behaviors. Update the auto-retry policy section with new retry strategies. Document new config keys. Add a 'Session Optimization' section documenting session-aware dispatch, TTL-aware scheduling, and session preservation across retries.\nOut of scope: Writing developer/contributor docs for implementation internals. Updating TUI help text.\nSuccess criteria: A user reading the docs understands the new recovery behaviors and session optimizations, can configure them, and knows what the new error codes mean.",
       "objective": "Document all new reliability features for users and operators.",
       "result": "README.md and MACC.md have updated sections covering new error codes, recovery features, and configuration keys.",
       "steps": [
@@ -347,12 +350,14 @@
         "Document merge-gate-on-dispatch behavior.",
         "Document branch-aware abandonment and tag naming convention.",
         "Document sync-unmerged-branches during sync phase.",
+        "Add 'Session Optimization' section to MACC.md covering session-aware dispatch, TTL scheduling, and retry session preservation.",
+        "Document session_cache_ttl_seconds config key and its effect on dispatch.",
         "Update auto-retry policy section in README.md.",
         "Document new config keys in docs/CONFIG.md."
       ],
       "notes": "Should be done after the implementation tasks are complete so documentation matches actual behavior.",
       "exclusive_resources": ["README.md", "MACC.md"],
-      "dependencies": ["L4-IPC-002", "L4-ERR-001", "L4-SALVAGE-001", "L4-RETRY-001", "L4-ABANDON-001", "L4-MERGE-001", "L4-SYNC-001"],
+      "dependencies": ["L4-IPC-002", "L4-ERR-001", "L4-SALVAGE-001", "L4-RETRY-001", "L4-ABANDON-001", "L4-MERGE-001", "L4-SYNC-001", "L4-SES-002"],
       "priority": 2,
       "routing_hints": {
         "execution_mode": "micro",
@@ -539,10 +544,145 @@
       }
     },
     {
+      "id": "L4-SES-001",
+      "title": "Preserve tool session ID in TaskRuntime across retries",
+      "category": "session-optimization",
+      "description": "Problem/Goal: When a task fails with error_with_changes, the coordinator clears task.worktree = None, orphaning the worktree-scoped session mapping in tool-sessions.json. The retry starts a brand new AI tool session, cold-reading the entire codebase — the single most expensive token waste pattern.\nKey actions: Add last_session_id: Option<String> and last_session_tool: Option<String> to TaskRuntime. Before clearing task.worktree on error, read the current tool session ID from tool-sessions.json and save it into task_runtime.last_session_id. In the phase runner (control_plane.rs ~line 892), when read_session_id_from_state() returns None, fall back to task_runtime.last_session_id if the tool matches. Pass it to the performer via --session-id.\nOut of scope: Changing the session lease/lock mechanism. Modifying performer scripts. Changing session scope (worktree vs project).\nSuccess criteria: A retried task reuses its previous tool session ID when available. Token consumption on retries is measurably reduced (tool resumes with cached context instead of cold-starting). Existing session lease semantics are preserved.",
+      "objective": "Eliminate cold-start token waste on task retries by preserving session continuity in TaskRuntime.",
+      "result": "TaskRuntime has last_session_id and last_session_tool fields. Phase runner falls back to task runtime session ID. Retries pass --session-id to performers.",
+      "steps": [
+        "Add last_session_id: Option<String> and last_session_tool: Option<String> to TaskRuntime struct in model.rs.",
+        "In engine.rs error_with_changes handler (~line 833), before clearing task.worktree, call read_session_id_from_state() and store result in task_runtime.last_session_id.",
+        "In control_plane.rs phase runner (~line 892), when read_session_id_from_state() returns None, check task_runtime.last_session_id as fallback (only if last_session_tool matches current phase tool).",
+        "Write unit test: error_with_changes preserves session ID in runtime.",
+        "Write unit test: phase runner uses fallback session ID when worktree state has none.",
+        "Write unit test: fallback is skipped when tool doesn't match last_session_tool."
+      ],
+      "notes": "This is the highest-impact, lowest-effort session optimization. It directly pairs with L4-RETRY-001 (retry-on-same-worktree) — when the same worktree is reused, the session ID is already in tool-sessions.json; when a new worktree is used, this fallback kicks in.",
+      "exclusive_resources": ["core/src/coordinator/model.rs"],
+      "dependencies": [],
+      "priority": 1,
+      "routing_hints": {
+        "execution_mode": "micro",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "low",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L4-SES-002",
+      "title": "Tie session ID to task lifecycle in dispatch and completion",
+      "category": "session-optimization",
+      "description": "Problem/Goal: The coordinator generates a coordinator-level session_id (coordinator-{task-id}-{timestamp}) for registry tracking, but this has no relationship to the actual AI tool session ID used by the performer. The tool session ID should be tracked as part of the task lifecycle — recorded at dispatch, updated after performer completes, and carried through retries.\nKey actions: At dispatch time, read the worktree's existing tool session ID and store it in task_runtime.active_session_id. After performer completion, update task_runtime.active_session_id from tool-sessions.json (the performer may have discovered/created a new session). On task state transitions (error, retry, phase change), preserve the session chain. Add session_id to coordinator events for observability.\nOut of scope: Changing the coordinator-level session_id used for registry claims. Modifying session lease semantics.\nSuccess criteria: task_runtime.active_session_id always reflects the current AI tool session. Session ID is visible in coordinator events. Session continuity is maintained across phase transitions within the same task.",
+      "objective": "Make AI tool session identity a first-class part of the task lifecycle for continuity and observability.",
+      "result": "TaskRuntime tracks active_session_id throughout task lifecycle. Coordinator events include session ID. Dispatch and completion paths update session tracking.",
+      "steps": [
+        "Add active_session_id: Option<String> to TaskRuntime (or reuse last_session_id from L4-SES-001 if sufficient).",
+        "At dispatch time in control_plane.rs (~line 2697), read tool session ID from tool-sessions.json for the target worktree and store in task_runtime.",
+        "After performer completion in control_plane.rs (~line 1052), refresh task_runtime.active_session_id from tool-sessions.json.",
+        "Include session_id in DispatchClaimUpdate so it's persisted in registry.",
+        "Add session_id field to relevant CoordinatorRuntimeEventKind variants (task_dispatched, task_completed).",
+        "Write tests: session ID tracked from dispatch through completion, session ID updated after performer discovers new session."
+      ],
+      "notes": "This builds on L4-SES-001. Together they ensure session continuity is tracked both as a fallback (last_session_id) and as active state (active_session_id).",
+      "exclusive_resources": [],
+      "dependencies": ["L4-SES-001"],
+      "priority": 2,
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "medium",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L4-SES-003",
+      "title": "Session-aware worktree selection in dispatch",
+      "category": "session-optimization",
+      "description": "Problem/Goal: When dispatching a task, the coordinator picks any available worktree slot. It doesn't consider whether a slot has a warm session for the target tool. Picking a slot with a recent session for the same tool means the AI starts with cached context — saving thousands of tokens per dispatch.\nKey actions: In the worktree selection logic (helpers.rs or control_plane.rs dispatch), add a scoring factor when choosing among available slots: (1) slot has active session for the target tool in tool-sessions.json, (2) session's updated_at is within cache TTL (configurable, default 300s). Prefer slots with warm sessions. Fall back to any available slot if no warm session exists.\nOut of scope: Changing worktree pool size or creation logic. Modifying session scope. Adding new session discovery mechanisms.\nSuccess criteria: Dispatcher prefers worktree slots with warm sessions for the target tool. Configurable cache TTL threshold. No impact on dispatch when no warm sessions are available.",
+      "objective": "Reduce token consumption by preferring worktree slots with warm AI tool session caches.",
+      "result": "Worktree selection scores slots by session warmth. Configurable session_cache_ttl_seconds in CoordinatorConfig. Dispatch prefers warm slots.",
+      "steps": [
+        "Add session_cache_ttl_seconds: Option<u64> to CoordinatorConfig (default 300).",
+        "Implement score_worktree_session_warmth(worktree_path, tool_id, ttl) → SessionWarmth { Warm(age_secs), Cold }.",
+        "Read tool-sessions.json to find session entry for the worktree+tool combination and check updated_at age.",
+        "In dispatch worktree selection, sort available slots by session warmth (warm first, then by age ascending).",
+        "Fall back to existing selection logic when all slots are cold.",
+        "Write tests: warm slot preferred over cold, expired session treated as cold, no sessions falls back correctly."
+      ],
+      "notes": "The 300s default matches Claude's prompt cache TTL. Other tools may have different TTLs — making it configurable allows tuning per deployment.",
+      "exclusive_resources": [],
+      "dependencies": ["L4-SES-002", "L4-CFG-001"],
+      "priority": 2,
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "medium",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L4-SES-004",
+      "title": "TTL-aware dispatch scheduling for session cache reuse",
+      "category": "session-optimization",
+      "description": "Problem/Goal: After a task completes on a worktree, the session cache is still warm for several minutes. If the coordinator waits too long before dispatching the next task to that slot, the cache expires and the next performer cold-starts. The scheduler should be aware of session cache TTLs when ordering dispatch.\nKey actions: Track last_session_activity_at per worktree slot (timestamp of last performer completion). In the dispatch scheduling loop, when multiple tasks are ready and multiple slots are available, prefer pairing tasks with slots where now - last_activity < cache_ttl. Add a lightweight dispatch priority boost for warm slots without delaying other tasks.\nOut of scope: Adding artificial delays to wait for warm slots. Changing task priority ordering. Implementing slot reservation.\nSuccess criteria: Tasks are dispatched to recently-active slots when possible. No dispatch delay introduced — this is a preference, not a requirement. Warm slot reuse is logged in coordinator events.",
+      "objective": "Maximize session cache hits by scheduling dispatches to recently-active worktree slots.",
+      "result": "Dispatch scheduler considers session recency when pairing tasks to worktree slots. last_session_activity_at tracked per slot.",
+      "steps": [
+        "Track last_session_activity_at per worktree slot in coordinator runtime state.",
+        "Update last_session_activity_at when a performer completes (success or error) on a slot.",
+        "In dispatch loop, when selecting among available slots, score by: (1) session warmth for target tool, (2) recency of last activity.",
+        "Apply as a tiebreaker — never delay dispatch or skip a cold slot if it's the only one available.",
+        "Log warm-slot dispatch hits in coordinator events for observability.",
+        "Write tests: warm slot preferred in multi-slot scenario, cold-only scenario dispatches normally, timing edge cases around TTL boundary."
+      ],
+      "notes": "This complements L4-SES-003 (session-aware selection) with timing awareness. Together they form a complete session-efficient dispatch strategy.",
+      "exclusive_resources": [],
+      "dependencies": ["L4-SES-003"],
+      "priority": 2,
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "low",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L4-SES-005",
+      "title": "Fast-track dispatch to just-merged worktree slots",
+      "category": "session-optimization",
+      "description": "Problem/Goal: When a task merges successfully, the worktree slot is sanitized and returned to the pool. The session cache is still warm but will expire if the slot sits idle. If there are queued tasks for the same tool, dispatching immediately to the just-merged slot preserves the cache.\nKey actions: In the advance/merge completion path (engine.rs or control_plane.rs), after a successful merge and worktree sanitization, check if there are READY tasks for the same tool. If yes, signal the dispatch loop to prioritize the just-freed slot for the next dispatch cycle. This is a hint, not a hard constraint — if no matching task is ready, the slot returns to the normal pool.\nOut of scope: Reserving slots for specific tools. Changing merge or sanitization logic. Adding dispatch delays.\nSuccess criteria: Just-merged slots are preferentially reused for same-tool tasks when available. No impact on dispatch when no matching tasks are queued. Fast-track events logged for observability.",
+      "objective": "Minimize session cache waste by immediately reusing just-merged worktree slots.",
+      "result": "Merge completion path signals dispatch preference for the freed slot. Same-tool tasks dispatched to warm slots when available.",
+      "steps": [
+        "After successful merge and sanitization, record the slot as 'recently_freed' with tool_id and timestamp in runtime state.",
+        "In the next dispatch cycle, check recently_freed slots first when matching tasks to slots.",
+        "If a READY task matches the freed slot's tool, dispatch to that slot preferentially.",
+        "Clear the recently_freed hint after one dispatch cycle (used or expired).",
+        "Log fast-track dispatch events.",
+        "Write tests: fast-track dispatch when matching task available, no fast-track when no match, hint expires after one cycle."
+      ],
+      "notes": "This is the lowest-effort session optimization. It's purely a scheduling hint that avoids wasting warm caches after successful merges.",
+      "exclusive_resources": [],
+      "dependencies": ["L4-SES-003"],
+      "priority": 4,
+      "routing_hints": {
+        "execution_mode": "micro",
+        "reasoning_depth": "light",
+        "context_scope": "local",
+        "risk_level": "low",
+        "validation_profile": "light"
+      }
+    },
+    {
       "id": "L4-INT-001",
       "title": "End-to-end integration test for coordinator reliability features",
       "category": "testing",
-      "description": "Problem/Goal: The individual reliability features need an integration test that validates the full coordinator cycle with the new behaviors.\nKey actions: Create an integration test scenario that exercises: (1) IPC phase_done with non-zero exit → phase_done (not error), (2) error_with_changes → retry on same worktree, (3) abandoned branch gets tagged before recycling, (4) orphaned branch discovered during sync and merged, (5) merge-gate prevents duplicate dispatch. Use mock performers and a test git repository.\nOut of scope: Testing the supervisor agent (separate test suite). Performance benchmarks.\nSuccess criteria: A single integration test validates the complete reliability improvement chain. Test runs in CI.",
+      "description": "Problem/Goal: The individual reliability and session optimization features need an integration test that validates the full coordinator cycle with the new behaviors.\nKey actions: Create integration test scenarios that exercise: (1) IPC phase_done with non-zero exit → phase_done (not error), (2) error_with_changes → retry on same worktree, (3) abandoned branch gets tagged before recycling, (4) orphaned branch discovered during sync and merged, (5) merge-gate prevents duplicate dispatch, (6) session ID preserved across retries, (7) warm worktree slot preferred for dispatch. Use mock performers and a test git repository.\nOut of scope: Testing the supervisor agent (separate test suite). Performance benchmarks.\nSuccess criteria: A single integration test validates the complete reliability and session optimization chain. Test runs in CI.",
       "objective": "Validate that all coordinator reliability features work together correctly.",
       "result": "Integration test in tests/ that exercises the full reliability feature chain with mock performers and test git repos.",
       "steps": [
@@ -552,12 +692,14 @@
         "Test scenario 3: worktree recycled with commits → verify abandoned tag created.",
         "Test scenario 4: orphaned branch with task commits → verify sync discovers and merges.",
         "Test scenario 5: retried task with mergeable previous branch → verify merge-gate prevents dispatch.",
+        "Test scenario 6: task retried after error_with_changes → verify session ID preserved and passed to next performer.",
+        "Test scenario 7: two available slots, one with warm session for target tool → verify warm slot selected.",
         "Ensure all scenarios run independently and clean up after themselves.",
         "Add to CI test suite."
       ],
       "notes": "This is the validation capstone for the reliability improvements. Should be the last implementation task before documentation.",
       "exclusive_resources": [],
-      "dependencies": ["L4-IPC-002", "L4-SALVAGE-001", "L4-RETRY-001", "L4-ABANDON-001", "L4-MERGE-001", "L4-SYNC-001"],
+      "dependencies": ["L4-IPC-002", "L4-SALVAGE-001", "L4-RETRY-001", "L4-ABANDON-001", "L4-MERGE-001", "L4-SYNC-001", "L4-SES-003"],
       "priority": 2,
       "routing_hints": {
         "execution_mode": "standard",
