@@ -26,7 +26,9 @@
 //! | ToolNotFound     | E102     | No         | Yes          |
 //! | OutputMalformed  | E103     | No         | No           |
 //! | Network          | E101     | Yes        | No           |
+//! | GitConflict      | E304     | Conditional| No           |
 //! | PolicyViolation  | E201     | No         | Yes          |
+//! | PostCommitFailure| E504     | Conditional| No           |
 //! | Internal         | E901     | Yes        | No           |
 //! | Unknown          | E901     | No         | No           |
 
@@ -37,6 +39,30 @@ use serde::{Deserialize, Serialize};
 /// Session conflict — the tool reported a session ID collision or reuse
 /// error. Retryable with a fresh session.
 pub const E603_SESSION_CONFLICT: &str = "E603";
+/// Performer failed after writing partial work.
+/// Retry policy: conditional (safe same-worktree salvage or explicit operator retry).
+pub const E104_PERFORMER_PARTIAL_CHANGES: &str = "E104";
+/// Performer completed output but exited non-zero.
+/// Retry policy: conditional (re-validate completion state before retrying).
+pub const E105_PERFORMER_EXIT_NON_ZERO: &str = "E105";
+/// Worktree branch conflict during setup/switch.
+/// Retry policy: conditional (depends on branch state and conflict resolution).
+pub const E304_WORKTREE_BRANCH_CONFLICT: &str = "E304";
+/// Worktree checkout command failed.
+/// Retry policy: conditional (transient git failure may succeed on retry).
+pub const E305_WORKTREE_CHECKOUT_FAILURE: &str = "E305";
+/// Worktree reset command failed.
+/// Retry policy: conditional (depends on local git index/worktree state).
+pub const E306_WORKTREE_RESET_FAILURE: &str = "E306";
+/// Coordinator detected conflicting task state mutation.
+/// Retry policy: retryable (reconcile + retry can converge).
+pub const E403_TASK_STATE_CONFLICT: &str = "E403";
+/// Merge was blocked by repository policy (branch rule / gate).
+/// Retry policy: not retryable (requires operator or policy change).
+pub const E503_MERGE_BLOCKED_BY_POLICY: &str = "E503";
+/// Post-merge validation failed after commit/merge step.
+/// Retry policy: conditional (depends on validation root cause).
+pub const E504_POST_MERGE_VALIDATION_FAILED: &str = "E504";
 
 // ── CanonicalClass ──────────────────────────────────────────────────
 
@@ -67,8 +93,12 @@ pub enum CanonicalClass {
     OutputMalformed,
     /// DNS, TLS, or connection-level failure.
     Network,
+    /// Git/worktree branch conflict while preparing or merging a task.
+    GitConflict,
     /// Content or safety policy violation.
     PolicyViolation,
+    /// Failure surfaced after merge/commit, typically in validation or reconciliation.
+    PostCommitFailure,
     /// Provider internal error (HTTP 500).
     Internal,
     /// Cannot classify the error.
@@ -89,7 +119,9 @@ impl std::fmt::Display for CanonicalClass {
             Self::ToolNotFound => "tool_not_found",
             Self::OutputMalformed => "output_malformed",
             Self::Network => "network",
+            Self::GitConflict => "git_conflict",
             Self::PolicyViolation => "policy_violation",
+            Self::PostCommitFailure => "post_commit_failure",
             Self::Internal => "internal",
             Self::Unknown => "unknown",
         };
@@ -179,9 +211,86 @@ pub fn canonical_to_error_code(class: &CanonicalClass) -> &'static str {
         CanonicalClass::ToolNotFound => "E102",
         CanonicalClass::OutputMalformed => "E103",
         CanonicalClass::Network => "E101",
+        CanonicalClass::GitConflict => E304_WORKTREE_BRANCH_CONFLICT,
         CanonicalClass::PolicyViolation => "E201",
+        CanonicalClass::PostCommitFailure => E504_POST_MERGE_VALIDATION_FAILED,
         CanonicalClass::Internal => "E901",
         CanonicalClass::Unknown => "E901",
+    }
+}
+
+/// Retry policy for a concrete E-series error code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryPolicy {
+    /// Safe to retry automatically.
+    Retryable,
+    /// Should not be retried automatically.
+    NotRetryable,
+    /// May be retried only after additional state/context checks.
+    Conditional,
+}
+
+/// Map a concrete MACC E-series error code to a canonical class.
+///
+/// This reverse map is intentionally code-first: granular sub-codes preserve
+/// source semantics, while canonical class keeps downstream handling consistent.
+pub fn error_code_to_canonical_class(code: &str) -> CanonicalClass {
+    match code.trim() {
+        "E101" => CanonicalClass::Timeout,
+        "E102" => CanonicalClass::ToolNotFound,
+        "E103" => CanonicalClass::OutputMalformed,
+        E104_PERFORMER_PARTIAL_CHANGES => CanonicalClass::Internal,
+        E105_PERFORMER_EXIT_NON_ZERO => CanonicalClass::Internal,
+        "E201" => CanonicalClass::Auth,
+        "E202" => CanonicalClass::PolicyViolation,
+        "E301" => CanonicalClass::Internal,
+        "E302" => CanonicalClass::Internal,
+        "E303" => CanonicalClass::Internal,
+        E304_WORKTREE_BRANCH_CONFLICT => CanonicalClass::GitConflict,
+        E305_WORKTREE_CHECKOUT_FAILURE => CanonicalClass::Internal,
+        E306_WORKTREE_RESET_FAILURE => CanonicalClass::Internal,
+        "E401" => CanonicalClass::Internal,
+        "E402" => CanonicalClass::SessionConflict,
+        E403_TASK_STATE_CONFLICT => CanonicalClass::SessionConflict,
+        "E501" => CanonicalClass::GitConflict,
+        "E502" => CanonicalClass::Internal,
+        E503_MERGE_BLOCKED_BY_POLICY => CanonicalClass::PolicyViolation,
+        E504_POST_MERGE_VALIDATION_FAILED => CanonicalClass::PostCommitFailure,
+        "E601" => CanonicalClass::RateLimit,
+        "E602" => CanonicalClass::QuotaExhausted,
+        E603_SESSION_CONFLICT => CanonicalClass::SessionConflict,
+        "E901" => CanonicalClass::Unknown,
+        _ => CanonicalClass::Unknown,
+    }
+}
+
+/// Return retry policy guidance for MACC E-series codes.
+pub fn retry_policy_for_error_code(code: &str) -> RetryPolicy {
+    match code.trim() {
+        "E101" | "E601" | E603_SESSION_CONFLICT | E403_TASK_STATE_CONFLICT => {
+            RetryPolicy::Retryable
+        }
+        "E102"
+        | "E103"
+        | "E201"
+        | "E202"
+        | E503_MERGE_BLOCKED_BY_POLICY
+        | "E602"
+        | "E901" => RetryPolicy::NotRetryable,
+        E104_PERFORMER_PARTIAL_CHANGES
+        | E105_PERFORMER_EXIT_NON_ZERO
+        | "E301"
+        | "E302"
+        | "E303"
+        | E304_WORKTREE_BRANCH_CONFLICT
+        | E305_WORKTREE_CHECKOUT_FAILURE
+        | E306_WORKTREE_RESET_FAILURE
+        | "E401"
+        | "E402"
+        | "E501"
+        | "E502"
+        | E504_POST_MERGE_VALIDATION_FAILED => RetryPolicy::Conditional,
+        _ => RetryPolicy::NotRetryable,
     }
 }
 
@@ -307,8 +416,16 @@ mod tests {
         );
         assert_eq!(canonical_to_error_code(&CanonicalClass::Network), "E101");
         assert_eq!(
+            canonical_to_error_code(&CanonicalClass::GitConflict),
+            E304_WORKTREE_BRANCH_CONFLICT
+        );
+        assert_eq!(
             canonical_to_error_code(&CanonicalClass::PolicyViolation),
             "E201"
+        );
+        assert_eq!(
+            canonical_to_error_code(&CanonicalClass::PostCommitFailure),
+            E504_POST_MERGE_VALIDATION_FAILED
         );
         assert_eq!(canonical_to_error_code(&CanonicalClass::Internal), "E901");
         assert_eq!(canonical_to_error_code(&CanonicalClass::Unknown), "E901");
@@ -330,7 +447,9 @@ mod tests {
         assert!(!is_retryable(&CanonicalClass::QuotaExhausted));
         assert!(!is_retryable(&CanonicalClass::ToolNotFound));
         assert!(!is_retryable(&CanonicalClass::OutputMalformed));
+        assert!(!is_retryable(&CanonicalClass::GitConflict));
         assert!(!is_retryable(&CanonicalClass::PolicyViolation));
+        assert!(!is_retryable(&CanonicalClass::PostCommitFailure));
         assert!(!is_retryable(&CanonicalClass::Unknown));
     }
 
@@ -349,7 +468,9 @@ mod tests {
         assert!(!is_user_action_required(&CanonicalClass::Timeout));
         assert!(!is_user_action_required(&CanonicalClass::SessionConflict));
         assert!(!is_user_action_required(&CanonicalClass::Network));
+        assert!(!is_user_action_required(&CanonicalClass::GitConflict));
         assert!(!is_user_action_required(&CanonicalClass::Internal));
+        assert!(!is_user_action_required(&CanonicalClass::PostCommitFailure));
         assert!(!is_user_action_required(&CanonicalClass::Unknown));
         assert!(!is_user_action_required(&CanonicalClass::OutputMalformed));
     }
@@ -430,6 +551,11 @@ mod tests {
             CanonicalClass::SessionConflict.to_string(),
             "session_conflict"
         );
+        assert_eq!(CanonicalClass::GitConflict.to_string(), "git_conflict");
+        assert_eq!(
+            CanonicalClass::PostCommitFailure.to_string(),
+            "post_commit_failure"
+        );
         assert_eq!(CanonicalClass::Unknown.to_string(), "unknown");
     }
 
@@ -448,8 +574,88 @@ mod tests {
     }
 
     #[test]
-    fn e603_constant() {
+    fn error_code_constants() {
+        assert_eq!(E104_PERFORMER_PARTIAL_CHANGES, "E104");
+        assert_eq!(E105_PERFORMER_EXIT_NON_ZERO, "E105");
+        assert_eq!(E304_WORKTREE_BRANCH_CONFLICT, "E304");
+        assert_eq!(E305_WORKTREE_CHECKOUT_FAILURE, "E305");
+        assert_eq!(E306_WORKTREE_RESET_FAILURE, "E306");
+        assert_eq!(E403_TASK_STATE_CONFLICT, "E403");
+        assert_eq!(E503_MERGE_BLOCKED_BY_POLICY, "E503");
+        assert_eq!(E504_POST_MERGE_VALIDATION_FAILED, "E504");
         assert_eq!(E603_SESSION_CONFLICT, "E603");
+    }
+
+    #[test]
+    fn new_subcodes_map_to_expected_canonical_class() {
+        assert_eq!(
+            error_code_to_canonical_class(E104_PERFORMER_PARTIAL_CHANGES),
+            CanonicalClass::Internal
+        );
+        assert_eq!(
+            error_code_to_canonical_class(E105_PERFORMER_EXIT_NON_ZERO),
+            CanonicalClass::Internal
+        );
+        assert_eq!(
+            error_code_to_canonical_class(E304_WORKTREE_BRANCH_CONFLICT),
+            CanonicalClass::GitConflict
+        );
+        assert_eq!(
+            error_code_to_canonical_class(E305_WORKTREE_CHECKOUT_FAILURE),
+            CanonicalClass::Internal
+        );
+        assert_eq!(
+            error_code_to_canonical_class(E306_WORKTREE_RESET_FAILURE),
+            CanonicalClass::Internal
+        );
+        assert_eq!(
+            error_code_to_canonical_class(E403_TASK_STATE_CONFLICT),
+            CanonicalClass::SessionConflict
+        );
+        assert_eq!(
+            error_code_to_canonical_class(E503_MERGE_BLOCKED_BY_POLICY),
+            CanonicalClass::PolicyViolation
+        );
+        assert_eq!(
+            error_code_to_canonical_class(E504_POST_MERGE_VALIDATION_FAILED),
+            CanonicalClass::PostCommitFailure
+        );
+    }
+
+    #[test]
+    fn new_subcodes_retry_policy() {
+        assert_eq!(
+            retry_policy_for_error_code(E104_PERFORMER_PARTIAL_CHANGES),
+            RetryPolicy::Conditional
+        );
+        assert_eq!(
+            retry_policy_for_error_code(E105_PERFORMER_EXIT_NON_ZERO),
+            RetryPolicy::Conditional
+        );
+        assert_eq!(
+            retry_policy_for_error_code(E304_WORKTREE_BRANCH_CONFLICT),
+            RetryPolicy::Conditional
+        );
+        assert_eq!(
+            retry_policy_for_error_code(E305_WORKTREE_CHECKOUT_FAILURE),
+            RetryPolicy::Conditional
+        );
+        assert_eq!(
+            retry_policy_for_error_code(E306_WORKTREE_RESET_FAILURE),
+            RetryPolicy::Conditional
+        );
+        assert_eq!(
+            retry_policy_for_error_code(E403_TASK_STATE_CONFLICT),
+            RetryPolicy::Retryable
+        );
+        assert_eq!(
+            retry_policy_for_error_code(E503_MERGE_BLOCKED_BY_POLICY),
+            RetryPolicy::NotRetryable
+        );
+        assert_eq!(
+            retry_policy_for_error_code(E504_POST_MERGE_VALIDATION_FAILED),
+            RetryPolicy::Conditional
+        );
     }
 
     #[test]
