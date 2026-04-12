@@ -890,6 +890,19 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
         // Read existing session ID from tool-sessions.json so we can inject it
         // into the tool runner command, just like the performer.sh wrapper does.
         let mut session_id = read_session_id_from_state(self.repo_root, &phase_tool, &worktree);
+        // Fallback: if no session in state file, use the preserved session from
+        // the prior run (saved in task_runtime on error_with_changes / error_without_changes)
+        // so retries resume with cached context rather than cold-starting.
+        if session_id.is_none() {
+            let rt = &task.task_runtime;
+            if rt.last_session_tool.as_deref() == Some(phase_tool.as_str()) {
+                if let Some(ref sid) = rt.last_session_id {
+                    if !sid.is_empty() {
+                        session_id = Some(sid.clone());
+                    }
+                }
+            }
+        }
         let mut last_reason = String::new();
         for attempt in 1..=attempts {
             append_performer_log(
