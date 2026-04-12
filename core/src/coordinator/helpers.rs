@@ -110,7 +110,149 @@ fn git_current_branch_name(worktree_path: &Path) -> Option<String> {
     crate::git::current_branch(worktree_path).ok()
 }
 
-fn prepare_reused_worktree_base(worktree_path: &Path, base_branch: &str) -> Result<(bool, bool)> {
+fn task_id_for_worktree(registry: &serde_json::Value, worktree_path: &Path) -> Option<String> {
+    let key = worktree_path.to_string_lossy();
+    TaskRegistry::from_value(registry)
+        .ok()
+        .and_then(|typed| {
+            typed
+                .tasks
+                .iter()
+                .find(|task| task.worktree_path().is_some_and(|path| path == key))
+                .map(|task| task.id.clone())
+        })
+        .filter(|id| !id.trim().is_empty())
+}
+
+fn extract_task_id_from_text(input: &str) -> Option<String> {
+    let mut best = String::new();
+    let mut current = String::new();
+    for ch in input.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' {
+            current.push(ch);
+        } else {
+            if current.matches('-').count() >= 2
+                && current.chars().any(|c| c.is_ascii_alphabetic())
+                && current.chars().any(|c| c.is_ascii_digit())
+                && current.len() > best.len()
+            {
+                best = current.clone();
+            }
+            current.clear();
+        }
+    }
+    if current.matches('-').count() >= 2
+        && current.chars().any(|c| c.is_ascii_alphabetic())
+        && current.chars().any(|c| c.is_ascii_digit())
+        && current.len() > best.len()
+    {
+        best = current;
+    }
+    if best.is_empty() {
+        None
+    } else {
+        Some(best)
+    }
+}
+
+fn sanitize_tag_component(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
+            out.push(ch);
+        } else {
+            out.push('-');
+        }
+    }
+    while out.contains("--") {
+        out = out.replace("--", "-");
+    }
+    out.trim_matches('-').trim_matches('.').to_string()
+}
+
+fn resolve_abandon_task_id(
+    worktree_path: &Path,
+    branch_hint: Option<&str>,
+    task_id_hint: Option<&str>,
+) -> String {
+    if let Some(id) = task_id_hint {
+        let trimmed = id.trim();
+        if !trimmed.is_empty() {
+            return sanitize_tag_component(trimmed);
+        }
+    }
+    if let Some(branch) = branch_hint {
+        if let Some(id) = extract_task_id_from_text(branch) {
+            return sanitize_tag_component(&id);
+        }
+    }
+    if let Some(branch) = git_current_branch_name(worktree_path) {
+        if let Some(id) = extract_task_id_from_text(&branch) {
+            return sanitize_tag_component(&id);
+        }
+    }
+    if let Ok(Some(metadata)) = crate::read_worktree_metadata(worktree_path) {
+        if let Some(id) = extract_task_id_from_text(&metadata.branch) {
+            return sanitize_tag_component(&id);
+        }
+    }
+    "unknown-task".to_string()
+}
+
+fn create_abandonment_tag_if_needed(
+    repo_root: &Path,
+    worktree_path: &Path,
+    base_branch: &str,
+    branch_hint: Option<&str>,
+    task_id_hint: Option<&str>,
+) -> Result<Option<String>> {
+    let commits = crate::git::commits_ahead_of_base(worktree_path, base_branch)?;
+    if commits.is_empty() {
+        return Ok(None);
+    }
+
+    let task_id = resolve_abandon_task_id(worktree_path, branch_hint, task_id_hint);
+    let head = crate::git::head_commit(worktree_path)?;
+    let timestamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+    let base_tag = format!("macc/abandoned/{}-{}", task_id, timestamp);
+    let mut tag = base_tag.clone();
+    let mut index = 0usize;
+    while crate::git::rev_parse_verify(repo_root, &format!("refs/tags/{}", tag)).unwrap_or(false) {
+        index += 1;
+        tag = format!("{}-{}", base_tag, index);
+    }
+    crate::git::create_tag(repo_root, &tag, &head)?;
+
+    let branch_for_log = branch_hint
+        .map(|s| s.to_string())
+        .or_else(|| git_current_branch_name(worktree_path))
+        .unwrap_or_else(|| "<detached>".to_string());
+    let message = format!(
+        "created abandonment tag {} for branch {} at {}",
+        tag, branch_for_log, head
+    );
+    if let Err(err) = append_coordinator_event_with_severity(
+        repo_root, "progress", &task_id, "dispatch", "ok", &message, "info",
+    ) {
+        tracing::warn!("failed to append abandonment tag event: {}", err);
+    }
+    Ok(Some(tag))
+}
+
+fn prepare_reused_worktree_base(
+    repo_root: &Path,
+    worktree_path: &Path,
+    base_branch: &str,
+    branch_hint: Option<&str>,
+    task_id_hint: Option<&str>,
+) -> Result<(bool, bool)> {
+    let _ = create_abandonment_tag_if_needed(
+        repo_root,
+        worktree_path,
+        base_branch,
+        branch_hint,
+        task_id_hint,
+    )?;
     if !crate::git::reset_hard(worktree_path, "HEAD")? {
         return Ok((false, false));
     }
@@ -215,6 +357,7 @@ pub fn find_reusable_worktree_native(
         }
 
         let previous_branch = git_current_branch_name(&entry.path).unwrap_or_default();
+        let task_id_hint = task_id_for_worktree(registry, &entry.path);
         if !is_branch_merged_into_base(&entry.path, &previous_branch, base_branch) {
             // If the task that owns this branch is permanently stuck (blocked/failed/abandoned),
             // it will never merge autonomously. Force-checkout to base to reclaim the slot
@@ -223,6 +366,13 @@ pub fn find_reusable_worktree_native(
                 .map(|r| r.task_on_worktree_is_permanently_stuck(&entry.path.to_string_lossy()))
                 .unwrap_or(false);
             if stuck {
+                let _ = create_abandonment_tag_if_needed(
+                    repo_root,
+                    &entry.path,
+                    base_branch,
+                    Some(&previous_branch),
+                    task_id_hint.as_deref(),
+                )?;
                 // Abandon the unmerged branch. We cannot `git checkout <base>` directly
                 // because git forbids checking out a branch that is already used by
                 // another worktree (the main repo). Instead we detach HEAD first, then
@@ -257,7 +407,13 @@ pub fn find_reusable_worktree_native(
             }
         }
 
-        let (prepared, skipped_reset) = prepare_reused_worktree_base(&entry.path, base_branch)?;
+        let (prepared, skipped_reset) = prepare_reused_worktree_base(
+            repo_root,
+            &entry.path,
+            base_branch,
+            Some(&previous_branch),
+            task_id_hint.as_deref(),
+        )?;
         if !prepared {
             last_prepare_error = Some((
                 "sanitize_failed".to_string(),
