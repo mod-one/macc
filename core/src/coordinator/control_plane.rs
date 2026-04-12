@@ -420,7 +420,10 @@ async fn sanitize_worktree_to_base(
     if !crate::git::checkout_async(worktree_path, base_branch, false).await?
         && !crate::git::checkout_reset_branch_async(worktree_path, base_branch, false).await?
     {
-        return Ok(Some("checkout_base_branch"));
+        // Base branch may be checked out in the main worktree; detach HEAD as fallback.
+        if !crate::git::checkout_detach_async(worktree_path).await? {
+            return Ok(Some("checkout_base_branch"));
+        }
     }
     if !crate::git::fetch_async(worktree_path, "origin").await? {
         return Ok(Some("fetch_origin"));

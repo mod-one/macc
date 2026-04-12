@@ -283,6 +283,27 @@ pub async fn checkout_reset_branch_async(
     )
 }
 
+/// Detach HEAD in a worktree. This avoids the "branch already checked out"
+/// error that occurs when two worktrees share the same branch name.
+pub fn checkout_detach(repo_or_worktree: &Path) -> Result<bool> {
+    Ok(
+        run_git_status(repo_or_worktree, &["checkout", "--detach"], "run git checkout --detach")?
+            .success(),
+    )
+}
+
+pub async fn checkout_detach_async(repo_or_worktree: &Path) -> Result<bool> {
+    Ok(
+        run_git_status_async(
+            repo_or_worktree,
+            &["checkout", "--detach"],
+            "run git checkout --detach",
+        )
+        .await?
+        .success(),
+    )
+}
+
 pub fn fetch(repo_or_worktree: &Path, remote: &str) -> Result<bool> {
     Ok(run_git_status(repo_or_worktree, &["fetch", remote], "run git fetch")?.success())
 }

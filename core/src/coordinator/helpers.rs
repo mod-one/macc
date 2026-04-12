@@ -117,8 +117,12 @@ fn prepare_reused_worktree_base(worktree_path: &Path, base_branch: &str) -> Resu
     if !crate::git::clean_fd(worktree_path)? {
         return Ok((false, false));
     }
+    // Try checkout base_branch directly first. If that fails (e.g. because
+    // the branch is already checked out in another worktree), detach HEAD
+    // and reset to the base commit instead.
     if !crate::git::checkout(worktree_path, base_branch, false)?
         && !crate::git::checkout_reset_branch(worktree_path, base_branch, false)?
+        && !crate::git::checkout_detach(worktree_path)?
     {
         return Ok((false, false));
     }
@@ -219,18 +223,22 @@ pub fn find_reusable_worktree_native(
                 .map(|r| r.task_on_worktree_is_permanently_stuck(&entry.path.to_string_lossy()))
                 .unwrap_or(false);
             if stuck {
-                // Abandon the unmerged branch by checking out base, then fall through
-                // to prepare_reused_worktree_base which will reset and clean.
-                if crate::git::checkout(&entry.path, base_branch, true).unwrap_or(false) {
-                    // Fall through — prepare_reused_worktree_base will reset HEAD.
+                // Abandon the unmerged branch. We cannot `git checkout <base>` directly
+                // because git forbids checking out a branch that is already used by
+                // another worktree (the main repo). Instead we detach HEAD first, then
+                // reset to the base branch commit. prepare_reused_worktree_base will
+                // also handle the checkout-to-base via the same detach+reset pattern.
+                let detached = crate::git::checkout_detach(&entry.path).unwrap_or(false);
+                if detached {
+                    let _ = crate::git::reset_hard(&entry.path, base_branch);
+                    // Fall through — prepare_reused_worktree_base will finish the reset.
                 } else {
                     last_prepare_error = Some((
                         "stuck_branch_checkout_failed".to_string(),
                         format!(
-                            "worktree {} stuck branch {} could not be abandoned (checkout to {} failed)",
+                            "worktree {} stuck branch {} could not be abandoned (detach failed)",
                             entry.path.display(),
                             previous_branch,
-                            base_branch
                         ),
                     ));
                     continue;
