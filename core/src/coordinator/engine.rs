@@ -11,7 +11,8 @@ use crate::coordinator::rate_limit::{
     E601_RATE_LIMITED, E602_QUOTA_EXHAUSTED,
 };
 use crate::coordinator::runtime::{
-    process_branch_cleanup_queue, terminate_active_jobs, CoordinatorRunState,
+    merge_task_with_policy_native, process_branch_cleanup_queue, terminate_active_jobs,
+    CoordinatorRunState,
 };
 use crate::coordinator::state_runtime::{
     cleanup_dead_runtime_tasks, clear_coordinator_pause_file, coordinator_pause_file_path,
@@ -135,6 +136,13 @@ pub struct JobCompletionResult {
     /// Canonical error classification produced by the per-adapter normalizer.
     /// `None` when the job succeeded or the normalizer was not invoked.
     pub tool_error: Option<ToolError>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SalvageResult {
+    Merged,
+    ConflictProceedRetry,
+    NoCommitsProceedRetry,
 }
 
 #[derive(Debug, Clone)]
@@ -498,6 +506,37 @@ pub fn apply_merge_result_in_registry(
     Ok(())
 }
 
+pub fn salvage_check_in_registry<FE>(
+    registry: &mut Value,
+    task_id: &str,
+    repo_root: &Path,
+    merge_ai_fix: bool,
+    merge_hook_timeout: Option<u64>,
+    now: &str,
+    mut emit_event: FE,
+) -> Result<SalvageResult>
+where
+    FE: FnMut(&str, &str, &str, &str, &str, &str),
+{
+    let mut typed = TaskRegistry::from_value(registry)?;
+    let task = typed
+        .find_task_mut(task_id)
+        .ok_or_else(|| MaccError::Coordinator {
+            code: "task_not_found",
+            message: format!("Task '{}' not found in registry", task_id),
+        })?;
+    let out = salvage_check_typed(
+        task,
+        repo_root,
+        merge_ai_fix,
+        merge_hook_timeout,
+        now,
+        &mut emit_event,
+    )?;
+    *registry = typed.to_value()?;
+    Ok(out)
+}
+
 pub fn ensure_runtime_object(task: &mut Value) {
     if !task
         .get("task_runtime")
@@ -738,6 +777,120 @@ fn store_classified_error_in_extra(
     }
 }
 
+fn capture_last_assignment_before_clear(task: &mut Task) {
+    let (last_worktree_path, last_branch) = match task.worktree.as_ref() {
+        Some(worktree) => (
+            worktree
+                .worktree_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+            worktree
+                .branch
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+        ),
+        None => (None, None),
+    };
+    let runtime = task.ensure_runtime();
+    if let Some(path) = last_worktree_path {
+        runtime.last_worktree_path = Some(path);
+    }
+    if let Some(branch) = last_branch {
+        runtime.last_branch = Some(branch);
+    }
+}
+
+fn salvage_check_typed<FE>(
+    task: &mut Task,
+    repo_root: &Path,
+    merge_ai_fix: bool,
+    merge_hook_timeout: Option<u64>,
+    now: &str,
+    emit_event: &mut FE,
+) -> Result<SalvageResult>
+where
+    FE: FnMut(&str, &str, &str, &str, &str, &str),
+{
+    let runtime = &task.task_runtime;
+    let worktree_path = runtime
+        .last_worktree_path
+        .as_deref()
+        .or_else(|| task.worktree_path())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let branch = runtime
+        .last_branch
+        .as_deref()
+        .or_else(|| task.branch())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let Some(worktree_path) = worktree_path else {
+        return Ok(SalvageResult::NoCommitsProceedRetry);
+    };
+    let Some(branch) = branch else {
+        return Ok(SalvageResult::NoCommitsProceedRetry);
+    };
+    let base_branch = task.base_branch("master").to_string();
+    let commits = match crate::git::commits_containing_pattern(
+        Path::new(&worktree_path),
+        &base_branch,
+        &task.id,
+    ) {
+        Ok(commits) => commits,
+        Err(_) => return Ok(SalvageResult::NoCommitsProceedRetry),
+    };
+    if commits.is_empty() {
+        return Ok(SalvageResult::NoCommitsProceedRetry);
+    }
+
+    let description = task
+        .extra
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let objective = task
+        .extra
+        .get("objective")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let merge_context = MergeTaskContext {
+        tool: task.tool.clone().unwrap_or_default(),
+        worktree_path,
+        title: task.title.clone().unwrap_or_default(),
+        description,
+        objective,
+    };
+    match merge_task_with_policy_native(
+        repo_root,
+        task.id.as_str(),
+        &branch,
+        &base_branch,
+        merge_ai_fix,
+        merge_hook_timeout,
+        &merge_context,
+        emit_event,
+    ) {
+        Ok(Ok(())) => {
+            task.set_workflow_state(WorkflowState::Merged);
+            let runtime = task.ensure_runtime();
+            runtime.set_status(RuntimeStatus::Idle);
+            runtime.current_phase = None;
+            runtime.pid = None;
+            task.touch_state_changed(now);
+            Ok(SalvageResult::Merged)
+        }
+        Ok(Err(_)) | Err(_) => Ok(SalvageResult::ConflictProceedRetry),
+    }
+}
+
 fn apply_job_completion_typed(
     task: &mut Task,
     input: &JobCompletionInput,
@@ -864,6 +1017,7 @@ fn apply_job_completion_typed(
             let preserved_session_id = task.session_id().map(|s| s.to_string());
             let preserved_session_tool = task.tool.clone();
             task.set_workflow_state(WorkflowState::Todo);
+            capture_last_assignment_before_clear(task);
             task.worktree = None;
             {
                 let runtime = task.ensure_runtime();
@@ -982,6 +1136,7 @@ fn apply_job_completion_typed(
                 PerformerCompletionKind::ErrorWithoutChanges
             };
             task.set_workflow_state(WorkflowState::Todo);
+            capture_last_assignment_before_clear(task);
             task.worktree = None;
             {
                 let runtime = task.ensure_runtime();
@@ -1060,6 +1215,7 @@ fn apply_job_completion_typed(
         );
         runtime.last_error = Some(format!("rate-limited; backoff {}s", backoff));
         store_classified_error_in_extra(runtime, &classified_tool_error, now_ts);
+        capture_last_assignment_before_clear(task);
         task.worktree = None;
         task.set_workflow_state(WorkflowState::Todo);
         task.touch_state_changed(now);
@@ -1129,6 +1285,7 @@ fn apply_job_completion_typed(
         // Re-queue the task as Todo so the dispatch loop can route it to a
         // fallback tool.  The per-tool throttle entry ensures the exhausted
         // tool is skipped during pick_tool().
+        capture_last_assignment_before_clear(task);
         task.worktree = None;
         task.set_workflow_state(WorkflowState::Todo);
         task.touch_state_changed(now);
@@ -1202,6 +1359,7 @@ fn apply_job_completion_typed(
         task.set_workflow_state(WorkflowState::Todo);
         // Clear stale worktree metadata so the task selector treats
         // this task as unassigned and eligible for re-dispatch.
+        capture_last_assignment_before_clear(task);
         task.worktree = None;
         let runtime = task.ensure_runtime();
         runtime.increment_retries();
@@ -2079,6 +2237,110 @@ mod tests {
         repo
     }
 
+    fn make_salvage_repo(
+        base_branch: &str,
+        task_id: &str,
+        conflict: bool,
+    ) -> (PathBuf, String, PathBuf) {
+        let mut repo = std::env::temp_dir();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        repo.push(format!("macc-engine-salvage-{}", nanos));
+        fs::create_dir_all(&repo).expect("create temp repo");
+
+        run_git(&repo, &["init"]);
+        run_git(&repo, &["checkout", "-b", base_branch]);
+        fs::write(repo.join("fixture.txt"), "base\n").expect("write base fixture");
+        run_git(&repo, &["add", "fixture.txt"]);
+        run_git(
+            &repo,
+            &[
+                "-c",
+                "user.name=MACC Test",
+                "-c",
+                "user.email=macc-test@example.com",
+                "commit",
+                "-m",
+                "base commit",
+            ],
+        );
+
+        let task_branch = format!("task/{}", task_id.to_ascii_lowercase());
+        run_git(&repo, &["checkout", "-b", &task_branch]);
+        fs::write(
+            repo.join("task.txt"),
+            format!("task {}\ncommitted work\n", task_id),
+        )
+        .expect("write task fixture");
+        run_git(&repo, &["add", "task.txt"]);
+        run_git(
+            &repo,
+            &[
+                "-c",
+                "user.name=MACC Test",
+                "-c",
+                "user.email=macc-test@example.com",
+                "commit",
+                "-m",
+                &format!("macc: {} - salvage candidate", task_id),
+            ],
+        );
+        if conflict {
+            fs::write(repo.join("fixture.txt"), "task-side-change\n").expect("write task change");
+            run_git(&repo, &["add", "fixture.txt"]);
+            run_git(
+                &repo,
+                &[
+                    "-c",
+                    "user.name=MACC Test",
+                    "-c",
+                    "user.email=macc-test@example.com",
+                    "commit",
+                    "-m",
+                    &format!("macc: {} - conflicting change", task_id),
+                ],
+            );
+        }
+
+        run_git(&repo, &["checkout", base_branch]);
+        if conflict {
+            fs::write(repo.join("fixture.txt"), "base-side-change\n").expect("write base change");
+            run_git(&repo, &["add", "fixture.txt"]);
+            run_git(
+                &repo,
+                &[
+                    "-c",
+                    "user.name=MACC Test",
+                    "-c",
+                    "user.email=macc-test@example.com",
+                    "commit",
+                    "-m",
+                    "base conflicting change",
+                ],
+            );
+        }
+
+        let mut worktree = std::env::temp_dir();
+        let wt_nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        worktree.push(format!("macc-engine-salvage-wt-{}", wt_nanos));
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                worktree.to_string_lossy().as_ref(),
+                &task_branch,
+            ],
+        );
+
+        (repo, task_branch, worktree)
+    }
+
     #[test]
     fn plan_advance_maps_states() {
         // Default (unlimited review cycles)
@@ -2777,5 +3039,154 @@ mod tests {
             "claude-session-prev"
         );
         assert_eq!(task_val["task_runtime"]["last_session_tool"], "claude");
+    }
+
+    #[test]
+    fn salvage_check_merged_marks_task_merged_and_skips_retry() {
+        let task_id = "SALVAGE-MERGED-001";
+        let (repo, branch, worktree) = make_salvage_repo("main", task_id, false);
+        let mut registry = json!({
+            "tasks": [{
+                "id": task_id,
+                "state": "claimed",
+                "base_branch": "main",
+                "task_runtime": {
+                    "status": "running",
+                    "last_worktree_path": worktree.to_string_lossy().to_string(),
+                    "last_branch": branch
+                }
+            }],
+            "resource_locks": {}
+        });
+
+        let result = salvage_check_in_registry(
+            &mut registry,
+            task_id,
+            &repo,
+            false,
+            None,
+            "2026-03-01T00:00:00Z",
+            |_, _, _, _, _, _| {},
+        )
+        .expect("salvage check");
+
+        assert_eq!(result, SalvageResult::Merged);
+        assert_eq!(registry["tasks"][0]["state"], "merged");
+        assert_eq!(registry["tasks"][0]["task_runtime"]["status"], "idle");
+        let _ = fs::remove_dir_all(&worktree);
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn salvage_check_conflict_proceeds_retry() {
+        let task_id = "SALVAGE-CONFLICT-001";
+        let (repo, branch, worktree) = make_salvage_repo("main", task_id, true);
+        let mut registry = json!({
+            "tasks": [{
+                "id": task_id,
+                "state": "claimed",
+                "base_branch": "main",
+                "task_runtime": {
+                    "status": "running",
+                    "last_worktree_path": worktree.to_string_lossy().to_string(),
+                    "last_branch": branch
+                }
+            }],
+            "resource_locks": {}
+        });
+
+        let result = salvage_check_in_registry(
+            &mut registry,
+            task_id,
+            &repo,
+            false,
+            None,
+            "2026-03-01T00:00:00Z",
+            |_, _, _, _, _, _| {},
+        )
+        .expect("salvage check");
+
+        assert_eq!(result, SalvageResult::ConflictProceedRetry);
+        assert_eq!(registry["tasks"][0]["state"], "claimed");
+        let _ = fs::remove_dir_all(&worktree);
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn salvage_check_no_commits_proceeds_retry() {
+        let repo = make_repo_with_commit_ahead("main");
+        let mut registry = json!({
+            "tasks": [{
+                "id": "SALVAGE-NOCOMMITS-001",
+                "state": "claimed",
+                "base_branch": "main",
+                "task_runtime": {
+                    "status": "running",
+                    "last_worktree_path": repo.to_string_lossy().to_string(),
+                    "last_branch": "task/ipc-override"
+                }
+            }],
+            "resource_locks": {}
+        });
+
+        let result = salvage_check_in_registry(
+            &mut registry,
+            "SALVAGE-NOCOMMITS-001",
+            &repo,
+            false,
+            None,
+            "2026-03-01T00:00:00Z",
+            |_, _, _, _, _, _| {},
+        )
+        .expect("salvage check");
+
+        assert_eq!(result, SalvageResult::NoCommitsProceedRetry);
+        assert_eq!(registry["tasks"][0]["state"], "claimed");
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn apply_job_completion_error_preserves_last_worktree_metadata_before_clear() {
+        let mut task = json!({
+            "id":"T-LAST-WT",
+            "state":"claimed",
+            "worktree":{
+                "worktree_path":"/tmp/salvage-wt",
+                "branch":"task/T-LAST-WT",
+                "base_branch":"main"
+            },
+            "task_runtime":{"status":"running","pid":123}
+        });
+        let out = apply_job_completion(
+            &mut task,
+            &JobCompletionInput {
+                success: true,
+                attempt: 1,
+                max_attempts: 1,
+                timed_out: false,
+                phase_timeout_seconds: 0,
+                elapsed_seconds: 1,
+                status_text: "performer reported error".to_string(),
+                completion_kind: Some(PerformerCompletionKind::ErrorWithoutChanges),
+                error_code: None,
+                error_origin: None,
+                error_message: None,
+                auto_retry_error_codes: Vec::new(),
+                auto_retry_max: 0,
+                backoff_base_seconds: 30,
+                backoff_max_seconds: 300,
+                normalizer_input: None,
+            },
+            &NormalizerRegistry::empty(),
+            "2026-03-01T00:00:00Z",
+        );
+
+        assert_eq!(out.status_label, "error_without_changes");
+        assert!(task["worktree"].is_null());
+        assert_eq!(
+            task["task_runtime"]["last_worktree_path"],
+            "/tmp/salvage-wt"
+        );
+        assert_eq!(task["task_runtime"]["last_branch"], "task/T-LAST-WT");
     }
 }

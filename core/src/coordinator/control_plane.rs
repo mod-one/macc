@@ -1606,6 +1606,101 @@ pub async fn monitor_active_jobs_native(
                         ));
                     }
                 } else if completion.should_retry {
+                    let salvage_attempt_msg = format!(
+                        "pre-retry salvage check started task={} attempt={} status={}",
+                        evt.task_id, job.attempt, completion.status_label
+                    );
+                    let _ = append_coordinator_event_with_severity(
+                        repo_root,
+                        "salvage_attempt",
+                        &evt.task_id,
+                        "dev",
+                        "started",
+                        &salvage_attempt_msg,
+                        "info",
+                    );
+                    let salvage_result = coordinator_engine::salvage_check_in_registry(
+                        &mut registry,
+                        &evt.task_id,
+                        repo_root,
+                        env_cfg
+                            .merge_ai_fix
+                            .or_else(|| coordinator.and_then(|c| c.merge_ai_fix))
+                            .unwrap_or(false),
+                        env_cfg
+                            .merge_hook_timeout_seconds
+                            .or_else(|| coordinator.and_then(|c| c.merge_hook_timeout_seconds)),
+                        &now_iso_coordinator(),
+                        |event_type, task_id, phase, status, detail, severity| {
+                            let _ = append_coordinator_event_with_severity(
+                                repo_root, event_type, task_id, phase, status, detail, severity,
+                            );
+                        },
+                    )?;
+                    match salvage_result {
+                        coordinator_engine::SalvageResult::Merged => {
+                            let msg = format!(
+                                "pre-retry salvage merged committed work task={} base={}",
+                                evt.task_id, job.base_branch
+                            );
+                            let _ = append_coordinator_event_with_severity(
+                                repo_root,
+                                "salvage_success",
+                                &evt.task_id,
+                                "dev",
+                                "done",
+                                &msg,
+                                "info",
+                            );
+                            recompute_resource_locks_from_tasks(&mut registry);
+                            set_registry_updated_at(&mut registry);
+                            crate::coordinator::state::coordinator_state_registry_save(
+                                repo_root,
+                                &BTreeMap::new(),
+                                &registry,
+                            )?;
+                            if let Some(log) = logger {
+                                let _ = log.note(format!("- {}", msg));
+                            }
+                            continue;
+                        }
+                        coordinator_engine::SalvageResult::ConflictProceedRetry => {
+                            let msg = format!(
+                                "pre-retry salvage found commits but merge conflicted task={}; proceeding with retry",
+                                evt.task_id
+                            );
+                            let _ = append_coordinator_event_with_severity(
+                                repo_root,
+                                "salvage_conflict",
+                                &evt.task_id,
+                                "dev",
+                                "warning",
+                                &msg,
+                                "warning",
+                            );
+                            if let Some(log) = logger {
+                                let _ = log.note(format!("- {}", msg));
+                            }
+                        }
+                        coordinator_engine::SalvageResult::NoCommitsProceedRetry => {
+                            let msg = format!(
+                                "pre-retry salvage found no task commits task={}; proceeding with retry",
+                                evt.task_id
+                            );
+                            let _ = append_coordinator_event_with_severity(
+                                repo_root,
+                                "salvage_no_commits",
+                                &evt.task_id,
+                                "dev",
+                                "done",
+                                &msg,
+                                "info",
+                            );
+                            if let Some(log) = logger {
+                                let _ = log.note(format!("- {}", msg));
+                            }
+                        }
+                    }
                     let task_id = evt.task_id.clone();
                     let current_exe = std::env::current_exe().map_err(|e| {
                         MaccError::Validation(format!(

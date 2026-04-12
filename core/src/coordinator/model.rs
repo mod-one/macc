@@ -154,6 +154,14 @@ pub struct TaskRuntime {
     /// Tool that owned `last_session_id`; used to validate the fallback before injecting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_session_tool: Option<String>,
+    /// Last known worktree path retained when the active worktree attachment
+    /// is cleared after a failure, so retry salvage can inspect prior commits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_worktree_path: Option<String>,
+    /// Last known branch retained when the active worktree attachment is
+    /// cleared after a failure, so retry salvage can attempt recovery merge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_branch: Option<String>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }

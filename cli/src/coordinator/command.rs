@@ -345,9 +345,7 @@ fn handle_sessions_command(repo_root: &Path, extra_args: &[String]) -> Result<()
         }
         "delete" => {
             let name = extra_args.get(1).ok_or_else(|| {
-                MaccError::Validation(
-                    "Usage: macc coordinator sessions delete <name>".into(),
-                )
+                MaccError::Validation("Usage: macc coordinator sessions delete <name>".into())
             })?;
             session_manager::delete_saved_session(repo_root, name)?;
             println!("Deleted session snapshot '{}'.", name);
