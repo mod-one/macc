@@ -48,7 +48,7 @@
       "notes": "This is the contracts-first task for Recommendation 1. The actual classifier integration depends on this.",
       "exclusive_resources": [],
       "dependencies": [],
-      "priority": 1,
+      "priority": "1",
       "routing_hints": {
         "execution_mode": "standard",
         "reasoning_depth": "standard",
@@ -74,7 +74,7 @@
       "notes": "This is the most impactful single fix. It directly prevents the 'committed work abandoned and redone' failure mode.",
       "exclusive_resources": ["core/src/coordinator/engine.rs"],
       "dependencies": ["L4-IPC-001"],
-      "priority": 1,
+      "priority": "1",
       "routing_hints": {
         "execution_mode": "standard",
         "reasoning_depth": "deep",
@@ -103,7 +103,7 @@
       "notes": "This task is a contracts-first dependency for salvage, retry-on-same-worktree, and merge-gate tasks. Keep backward compatibility — existing codes must not change meaning.",
       "exclusive_resources": ["core/src/coordinator/error_normalizer.rs"],
       "dependencies": [],
-      "priority": 1,
+      "priority": "1",
       "routing_hints": {
         "execution_mode": "standard",
         "reasoning_depth": "standard",
@@ -130,7 +130,7 @@
       "notes": "CommitInfo struct should include hash, subject, author_date at minimum. Keep it simple — these are plumbing functions.",
       "exclusive_resources": ["core/src/git.rs"],
       "dependencies": [],
-      "priority": 1,
+      "priority": "1",
       "routing_hints": {
         "execution_mode": "standard",
         "reasoning_depth": "standard",
@@ -159,7 +159,7 @@
       "notes": "This is Recommendation 2. Depends on git helpers for branch inspection and the error code taxonomy for classifying salvage-specific failures.",
       "exclusive_resources": ["core/src/coordinator/engine.rs"],
       "dependencies": ["L4-GIT-001", "L4-ERR-001"],
-      "priority": 1,
+      "priority": "1",
       "routing_hints": {
         "execution_mode": "structural",
         "reasoning_depth": "deep",
@@ -187,7 +187,7 @@
       "notes": "This is Recommendation 3. Must coordinate with salvage (L4-SALVAGE-001) for the fallback path when worktree is gone.",
       "exclusive_resources": ["core/src/coordinator/engine.rs"],
       "dependencies": ["L4-SALVAGE-001"],
-      "priority": 1,
+      "priority": "1",
       "routing_hints": {
         "execution_mode": "standard",
         "reasoning_depth": "deep",
@@ -215,7 +215,7 @@
       "notes": "This is Recommendation 5. Uses git helpers from L4-GIT-001. Simple and high-value safety net.",
       "exclusive_resources": ["core/src/coordinator/helpers.rs"],
       "dependencies": ["L4-GIT-001"],
-      "priority": 1,
+      "priority": "1",
       "routing_hints": {
         "execution_mode": "micro",
         "reasoning_depth": "standard",
@@ -243,7 +243,7 @@
       "notes": "This is Recommendation 6. Works as a safety net complementing salvage (L4-SALVAGE-001). Lightweight check that prevents the most visible failure mode.",
       "exclusive_resources": ["core/src/coordinator/control_plane.rs"],
       "dependencies": ["L4-GIT-001", "L4-SALVAGE-001"],
-      "priority": 2,
+      "priority": "2",
       "routing_hints": {
         "execution_mode": "standard",
         "reasoning_depth": "standard",
@@ -273,7 +273,7 @@
       "notes": "This is Recommendation 7. Complements sync-prd which only scans the reference branch. Together they form a complete reconciliation pipeline.",
       "exclusive_resources": ["core/src/coordinator/commit_reconciler.rs"],
       "dependencies": ["L4-GIT-001"],
-      "priority": 2,
+      "priority": "2",
       "routing_hints": {
         "execution_mode": "standard",
         "reasoning_depth": "standard",
@@ -300,7 +300,7 @@
       "notes": "This is a cross-cutting config task. Keep it focused on adding fields — the features themselves are in separate tasks.",
       "exclusive_resources": ["core/src/config/mod.rs"],
       "dependencies": [],
-      "priority": 2,
+      "priority": "2",
       "routing_hints": {
         "execution_mode": "micro",
         "reasoning_depth": "light",
@@ -326,7 +326,7 @@
       "notes": "This is a preparatory task that other tasks depend on for event emission. Keep the event definitions stable.",
       "exclusive_resources": ["core/src/coordinator/runtime.rs"],
       "dependencies": [],
-      "priority": 2,
+      "priority": "2",
       "routing_hints": {
         "execution_mode": "micro",
         "reasoning_depth": "light",
@@ -358,7 +358,7 @@
       "notes": "Should be done after the implementation tasks are complete so documentation matches actual behavior.",
       "exclusive_resources": ["README.md", "MACC.md"],
       "dependencies": ["L4-IPC-002", "L4-ERR-001", "L4-SALVAGE-001", "L4-RETRY-001", "L4-ABANDON-001", "L4-MERGE-001", "L4-SYNC-001", "L4-SES-002"],
-      "priority": 2,
+      "priority": "2",
       "routing_hints": {
         "execution_mode": "micro",
         "reasoning_depth": "light",
@@ -389,7 +389,7 @@
       "notes": "This is the contracts-first task for Recommendation 8 (Supervisor Agent). All supervisor implementation tasks depend on this. The report format must be detailed enough to generate actionable MACC source code changes.",
       "exclusive_resources": [],
       "dependencies": [],
-      "priority": 2,
+      "priority": "2",
       "routing_hints": {
         "execution_mode": "structural",
         "reasoning_depth": "deep",
@@ -416,7 +416,7 @@
       "notes": "Mode A runs continuously as a background loop. It's the foundation for Modes B and C. Keep it lightweight — no AI calls in this mode.",
       "exclusive_resources": [],
       "dependencies": ["L4-SUP-001"],
-      "priority": 2,
+      "priority": "2",
       "routing_hints": {
         "execution_mode": "standard",
         "reasoning_depth": "standard",
@@ -445,7 +445,7 @@
       "notes": "Mode B is the first AI-powered supervisor mode. It runs in parallel with the coordinator. Critical constraint: it must not modify coordinator state directly — only worktree-level recovery is safe.",
       "exclusive_resources": [],
       "dependencies": ["L4-SUP-002"],
-      "priority": 4,
+      "priority": "4",
       "routing_hints": {
         "execution_mode": "structural",
         "reasoning_depth": "deep",
@@ -476,7 +476,7 @@
       "notes": "Mode C is the most critical supervisor capability. It makes the coordinator self-healing for crash scenarios. Keep the restart logic simple and deterministic — no AI in the restart path itself.",
       "exclusive_resources": [],
       "dependencies": ["L4-SUP-002"],
-      "priority": 4,
+      "priority": "4",
       "routing_hints": {
         "execution_mode": "structural",
         "reasoning_depth": "deep",
@@ -505,7 +505,7 @@
       "notes": "This is the feedback loop that closes the supervisor cycle. Reports should be structured enough to be consumed by both humans and potentially by an AI code modification tool.",
       "exclusive_resources": [],
       "dependencies": ["L4-SUP-003", "L4-SUP-004"],
-      "priority": 4,
+      "priority": "4",
       "routing_hints": {
         "execution_mode": "standard",
         "reasoning_depth": "standard",
@@ -534,7 +534,7 @@
       "notes": "This is the user-facing integration task. Depends on the supervisor contracts being defined first.",
       "exclusive_resources": ["cli/src/main.rs"],
       "dependencies": ["L4-SUP-001"],
-      "priority": 4,
+      "priority": "4",
       "routing_hints": {
         "execution_mode": "standard",
         "reasoning_depth": "standard",
@@ -561,7 +561,7 @@
       "notes": "This is the highest-impact, lowest-effort session optimization. It directly pairs with L4-RETRY-001 (retry-on-same-worktree) — when the same worktree is reused, the session ID is already in tool-sessions.json; when a new worktree is used, this fallback kicks in.",
       "exclusive_resources": ["core/src/coordinator/model.rs"],
       "dependencies": [],
-      "priority": 1,
+      "priority": "1",
       "routing_hints": {
         "execution_mode": "micro",
         "reasoning_depth": "standard",
@@ -588,7 +588,7 @@
       "notes": "This builds on L4-SES-001. Together they ensure session continuity is tracked both as a fallback (last_session_id) and as active state (active_session_id).",
       "exclusive_resources": [],
       "dependencies": ["L4-SES-001"],
-      "priority": 2,
+      "priority": "2",
       "routing_hints": {
         "execution_mode": "standard",
         "reasoning_depth": "standard",
@@ -615,7 +615,7 @@
       "notes": "The 300s default matches Claude's prompt cache TTL. Other tools may have different TTLs — making it configurable allows tuning per deployment.",
       "exclusive_resources": [],
       "dependencies": ["L4-SES-002", "L4-CFG-001"],
-      "priority": 2,
+      "priority": "2",
       "routing_hints": {
         "execution_mode": "standard",
         "reasoning_depth": "standard",
@@ -642,7 +642,7 @@
       "notes": "This complements L4-SES-003 (session-aware selection) with timing awareness. Together they form a complete session-efficient dispatch strategy.",
       "exclusive_resources": [],
       "dependencies": ["L4-SES-003"],
-      "priority": 2,
+      "priority": "2",
       "routing_hints": {
         "execution_mode": "standard",
         "reasoning_depth": "standard",
@@ -669,7 +669,7 @@
       "notes": "This is the lowest-effort session optimization. It's purely a scheduling hint that avoids wasting warm caches after successful merges.",
       "exclusive_resources": [],
       "dependencies": ["L4-SES-003"],
-      "priority": 4,
+      "priority": "4",
       "routing_hints": {
         "execution_mode": "micro",
         "reasoning_depth": "light",
@@ -700,7 +700,7 @@
       "notes": "This is the validation capstone for the reliability improvements. Should be the last implementation task before documentation.",
       "exclusive_resources": [],
       "dependencies": ["L4-IPC-002", "L4-SALVAGE-001", "L4-RETRY-001", "L4-ABANDON-001", "L4-MERGE-001", "L4-SYNC-001", "L4-SES-003"],
-      "priority": 2,
+      "priority": "2",
       "routing_hints": {
         "execution_mode": "standard",
         "reasoning_depth": "standard",
