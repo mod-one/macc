@@ -169,6 +169,15 @@ Controls coordinator runtime defaults for `.macc/automation/coordinator.sh`.
 - `stale_*_seconds`: stale thresholds for task states (`0` disables each threshold).
 - `stale_action`: stale policy (`abandon`, `todo`, `blocked`).
 
+**Reliability feature toggles** (all default to enabled):
+- `salvage_before_retry` (bool, default `true`): attempt to salvage partial work before retrying a failed task.
+- `retry_on_same_worktree` (bool, default `true`): retry a failed task on the same worktree slot when possible.
+- `merge_gate_on_dispatch` (bool, default `true`): gate dispatch behind a merge-health check to prevent cascading failures.
+- `tag_abandoned_branches` (bool, default `true`): tag branches for abandoned tasks so they are discoverable after cleanup.
+- `sync_unmerged_branches` (bool, default `true`): scan unmerged branches during sync to recover partially-complete work.
+- `salvage_merge_timeout_seconds` (u64, default `120`): timeout in seconds for the salvage-merge operation.
+- `max_salvage_attempts_per_task` (u32, default `1`): maximum number of salvage attempts allowed per task before giving up.
+
 These values are used by `macc coordinator` as defaults and can be overridden via CLI flags or environment variables.
 
 ## MCP Templates

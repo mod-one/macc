@@ -92,7 +92,7 @@ pub struct RalphConfig {
     pub stop_on_failure: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct CoordinatorConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -174,10 +174,67 @@ pub struct CoordinatorConfig {
     /// N = up to N review→fix→review loops.  Default: None (unlimited).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_review_cycles: Option<usize>,
+
+    // ── Reliability feature toggles ──────────────────────────────────────────
+
+    /// Attempt to salvage partial work before retrying a failed task.
+    /// Default: true.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub salvage_before_retry: bool,
+
+    /// Retry a failed task on the same worktree slot when possible.
+    /// Default: true.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub retry_on_same_worktree: bool,
+
+    /// Gate dispatch behind a merge-health check to prevent cascading failures.
+    /// Default: true.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub merge_gate_on_dispatch: bool,
+
+    /// Tag branches for abandoned tasks so they are discoverable after cleanup.
+    /// Default: true.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub tag_abandoned_branches: bool,
+
+    /// Scan unmerged branches during sync to recover partially-complete work.
+    /// Default: true.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub sync_unmerged_branches: bool,
+
+    /// Timeout in seconds for the salvage-merge operation.
+    /// Default: 120.
+    #[serde(default = "default_salvage_merge_timeout", skip_serializing_if = "is_default_salvage_merge_timeout")]
+    pub salvage_merge_timeout_seconds: u64,
+
+    /// Maximum number of salvage attempts allowed per task before giving up.
+    /// Default: 1.
+    #[serde(default = "default_max_salvage_attempts", skip_serializing_if = "is_default_max_salvage_attempts")]
+    pub max_salvage_attempts_per_task: u32,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn is_true(v: &bool) -> bool {
+    *v
+}
+
+fn default_salvage_merge_timeout() -> u64 {
+    120
+}
+
+fn is_default_salvage_merge_timeout(v: &u64) -> bool {
+    *v == 120
+}
+
+fn default_max_salvage_attempts() -> u32 {
+    1
+}
+
+fn is_default_max_salvage_attempts(v: &u32) -> bool {
+    *v == 1
 }
 
 fn default_ralph_iterations() -> usize {
@@ -227,6 +284,57 @@ pub fn load_canonical_config<P: AsRef<Path>>(path: P) -> crate::Result<Canonical
 
     config.validate()?;
     Ok(config)
+}
+
+impl Default for CoordinatorConfig {
+    fn default() -> Self {
+        Self {
+            coordinator_tool: None,
+            reference_branch: None,
+            prd_file: None,
+            task_registry_file: None,
+            tool_priority: Vec::new(),
+            max_parallel_per_tool: BTreeMap::new(),
+            tool_specializations: BTreeMap::new(),
+            max_dispatch: None,
+            max_parallel: None,
+            timeout_seconds: None,
+            phase_runner_max_attempts: None,
+            log_flush_lines: None,
+            log_flush_ms: None,
+            mirror_json_debounce_ms: None,
+            stale_claimed_seconds: None,
+            stale_in_progress_seconds: None,
+            stale_changes_requested_seconds: None,
+            stale_action: None,
+            storage_mode: None,
+            merge_ai_fix: None,
+            merge_job_timeout_seconds: None,
+            merge_hook_timeout_seconds: None,
+            ghost_heartbeat_grace_seconds: None,
+            dispatch_cooldown_seconds: None,
+            json_compat: None,
+            legacy_json_fallback: None,
+            error_code_retry_list: None,
+            error_code_retry_max: None,
+            cutover_gate_window_events: None,
+            cutover_gate_max_blocked_ratio: None,
+            cutover_gate_max_stale_ratio: None,
+            rate_limit_backoff_base_seconds: None,
+            rate_limit_backoff_max_seconds: None,
+            rate_limit_fallback_enabled: None,
+            rate_limit_throttle_parallel: None,
+            force_kill_grace_seconds: None,
+            max_review_cycles: None,
+            salvage_before_retry: true,
+            retry_on_same_worktree: true,
+            merge_gate_on_dispatch: true,
+            tag_abandoned_branches: true,
+            sync_unmerged_branches: true,
+            salvage_merge_timeout_seconds: 120,
+            max_salvage_attempts_per_task: 1,
+        }
+    }
 }
 
 impl CanonicalConfig {
@@ -583,6 +691,52 @@ automation:
         assert_eq!(coordinator.stale_changes_requested_seconds, Some(1800));
         assert_eq!(coordinator.stale_action.as_deref(), Some("blocked"));
         assert_eq!(coordinator.storage_mode.as_deref(), Some("dual-write"));
+
+        let reserialized = config.to_yaml().expect("Should serialize back to yaml");
+        let config2 =
+            CanonicalConfig::from_yaml(&reserialized).expect("Should parse reserialized yaml");
+        assert_eq!(config, config2);
+    }
+
+    #[test]
+    fn test_coordinator_config_reliability_defaults() {
+        let config = CoordinatorConfig::default();
+        assert!(config.salvage_before_retry, "salvage_before_retry should default to true");
+        assert!(config.retry_on_same_worktree, "retry_on_same_worktree should default to true");
+        assert!(config.merge_gate_on_dispatch, "merge_gate_on_dispatch should default to true");
+        assert!(config.tag_abandoned_branches, "tag_abandoned_branches should default to true");
+        assert!(config.sync_unmerged_branches, "sync_unmerged_branches should default to true");
+        assert_eq!(config.salvage_merge_timeout_seconds, 120, "salvage_merge_timeout_seconds should default to 120");
+        assert_eq!(config.max_salvage_attempts_per_task, 1, "max_salvage_attempts_per_task should default to 1");
+    }
+
+    #[test]
+    fn test_coordinator_config_reliability_yaml_overrides() {
+        let yaml = r#"tools:
+  enabled: []
+automation:
+  coordinator:
+    salvage_before_retry: false
+    retry_on_same_worktree: false
+    merge_gate_on_dispatch: false
+    tag_abandoned_branches: false
+    sync_unmerged_branches: false
+    salvage_merge_timeout_seconds: 60
+    max_salvage_attempts_per_task: 3
+"#;
+        let config = CanonicalConfig::from_yaml(yaml).expect("Should parse reliability config");
+        let coordinator = config
+            .automation
+            .coordinator
+            .as_ref()
+            .expect("coordinator config present");
+        assert!(!coordinator.salvage_before_retry);
+        assert!(!coordinator.retry_on_same_worktree);
+        assert!(!coordinator.merge_gate_on_dispatch);
+        assert!(!coordinator.tag_abandoned_branches);
+        assert!(!coordinator.sync_unmerged_branches);
+        assert_eq!(coordinator.salvage_merge_timeout_seconds, 60);
+        assert_eq!(coordinator.max_salvage_attempts_per_task, 3);
 
         let reserialized = config.to_yaml().expect("Should serialize back to yaml");
         let config2 =
