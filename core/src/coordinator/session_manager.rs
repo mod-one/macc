@@ -297,7 +297,10 @@ pub fn save_sessions(repo_root: &Path, name: Option<&str>) -> Result<SavedSessio
         .map(|n| n.to_string())
         .unwrap_or_else(|| format!("auto-{}", now.replace(':', "")));
 
-    let tools_obj = root.get("tools").cloned().unwrap_or(Value::Object(Map::new()));
+    let tools_obj = root
+        .get("tools")
+        .cloned()
+        .unwrap_or(Value::Object(Map::new()));
 
     // Count sessions
     let (mut active_count, mut archived_count, mut tool_count) = (0usize, 0usize, 0usize);
@@ -502,9 +505,7 @@ pub fn restore_sessions(repo_root: &Path, name: &str, dry_run: bool) -> Result<S
                             obj.insert(
                                 "restored_at".to_string(),
                                 Value::String(
-                                    chrono::Utc::now()
-                                        .format("%Y-%m-%dT%H:%M:%SZ")
-                                        .to_string(),
+                                    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
                                 ),
                             );
                         }
@@ -749,7 +750,13 @@ mod tests {
         let raw = fs::read_to_string(&snap).unwrap();
         let parsed: SessionSnapshot = serde_json::from_str(&raw).unwrap();
         assert_eq!(parsed.name, "test-snap");
-        assert!(parsed.tools["claude"]["sessions"].as_object().unwrap().len() == 2);
+        assert!(
+            parsed.tools["claude"]["sessions"]
+                .as_object()
+                .unwrap()
+                .len()
+                == 2
+        );
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -842,8 +849,7 @@ mod tests {
         let restored: Value =
             serde_json::from_str(&fs::read_to_string(&sessions_path).unwrap()).unwrap();
         assert_eq!(
-            restored["tools"]["claude"]["sessions"]["/tmp/worker-01"]["session_id"]
-                .as_str(),
+            restored["tools"]["claude"]["sessions"]["/tmp/worker-01"]["session_id"].as_str(),
             Some("claude-s1")
         );
 
@@ -870,8 +876,7 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(&sessions_path).unwrap()).unwrap();
         // Should keep the NEW value, not overwrite with snapshot
         assert_eq!(
-            after["tools"]["claude"]["sessions"]["/tmp/worker-01"]["session_id"]
-                .as_str(),
+            after["tools"]["claude"]["sessions"]["/tmp/worker-01"]["session_id"].as_str(),
             Some("claude-s1-NEW"),
             "existing session should not be overwritten by restore"
         );

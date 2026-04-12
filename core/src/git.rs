@@ -293,22 +293,22 @@ pub async fn checkout_reset_branch_async(
 /// Detach HEAD in a worktree. This avoids the "branch already checked out"
 /// error that occurs when two worktrees share the same branch name.
 pub fn checkout_detach(repo_or_worktree: &Path) -> Result<bool> {
-    Ok(
-        run_git_status(repo_or_worktree, &["checkout", "--detach"], "run git checkout --detach")?
-            .success(),
-    )
+    Ok(run_git_status(
+        repo_or_worktree,
+        &["checkout", "--detach"],
+        "run git checkout --detach",
+    )?
+    .success())
 }
 
 pub async fn checkout_detach_async(repo_or_worktree: &Path) -> Result<bool> {
-    Ok(
-        run_git_status_async(
-            repo_or_worktree,
-            &["checkout", "--detach"],
-            "run git checkout --detach",
-        )
-        .await?
-        .success(),
+    Ok(run_git_status_async(
+        repo_or_worktree,
+        &["checkout", "--detach"],
+        "run git checkout --detach",
     )
+    .await?
+    .success())
 }
 
 pub fn fetch(repo_or_worktree: &Path, remote: &str) -> Result<bool> {
@@ -548,7 +548,10 @@ pub fn has_commits_ahead(repo_or_worktree: &Path, base_ref: &str) -> bool {
     }
 }
 
-pub fn commits_ahead_of_base(repo_or_worktree: &Path, base_branch: &str) -> Result<Vec<CommitInfo>> {
+pub fn commits_ahead_of_base(
+    repo_or_worktree: &Path,
+    base_branch: &str,
+) -> Result<Vec<CommitInfo>> {
     let range = format!("{base_branch}..HEAD");
     let output = run_git_output(
         repo_or_worktree,
@@ -668,8 +671,8 @@ pub fn create_tag(repo_root: &Path, tag_name: &str, commit_ref: &str) -> Result<
 }
 
 pub async fn create_tag_async(repo_root: &Path, tag_name: &str, commit_ref: &str) -> Result<()> {
-    let output = run_git_output_async(repo_root, &["tag", tag_name, commit_ref], "create git tag")
-        .await?;
+    let output =
+        run_git_output_async(repo_root, &["tag", tag_name, commit_ref], "create git tag").await?;
     if !output.status.success() {
         return Err(MaccError::Git {
             operation: "tag".to_string(),
@@ -944,11 +947,14 @@ mod tests {
         assert_eq!(commits.len(), 2);
         assert!(!commits[0].hash.is_empty());
         assert!(!commits[0].author_date.is_empty());
-        assert!(commits.iter().any(|commit| commit.subject == "feat: add one"));
-        assert!(commits.iter().any(|commit| commit.subject == "fix: add two"));
+        assert!(commits
+            .iter()
+            .any(|commit| commit.subject == "feat: add one"));
+        assert!(commits
+            .iter()
+            .any(|commit| commit.subject == "fix: add two"));
 
-        let filtered =
-            commits_containing_pattern(&repo, "main", "feat").expect("filtered commits");
+        let filtered = commits_containing_pattern(&repo, "main", "feat").expect("filtered commits");
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].subject, "feat: add one");
     }
@@ -964,7 +970,9 @@ mod tests {
             .await
             .expect("commits ahead");
         assert_eq!(commits.len(), 2);
-        assert!(commits.iter().any(|commit| commit.subject == "feat: add one"));
+        assert!(commits
+            .iter()
+            .any(|commit| commit.subject == "feat: add one"));
 
         let filtered = commits_containing_pattern_async(&repo, "main", "feat")
             .await

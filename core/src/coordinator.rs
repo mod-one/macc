@@ -980,7 +980,13 @@ mod tests {
                 false,
             ),
             (None, true, false, CompletionAuthority::Fallback, false),
-            (None, true, true, CompletionAuthority::ExitCodeHeuristic, false),
+            (
+                None,
+                true,
+                true,
+                CompletionAuthority::ExitCodeHeuristic,
+                false,
+            ),
             (
                 Some(PerformerCompletionKind::AlreadySatisfied),
                 false,

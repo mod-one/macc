@@ -270,13 +270,9 @@ pub fn retry_policy_for_error_code(code: &str) -> RetryPolicy {
         "E101" | "E601" | E603_SESSION_CONFLICT | E403_TASK_STATE_CONFLICT => {
             RetryPolicy::Retryable
         }
-        "E102"
-        | "E103"
-        | "E201"
-        | "E202"
-        | E503_MERGE_BLOCKED_BY_POLICY
-        | "E602"
-        | "E901" => RetryPolicy::NotRetryable,
+        "E102" | "E103" | "E201" | "E202" | E503_MERGE_BLOCKED_BY_POLICY | "E602" | "E901" => {
+            RetryPolicy::NotRetryable
+        }
         E104_PERFORMER_PARTIAL_CHANGES
         | E105_PERFORMER_EXIT_NON_ZERO
         | "E301"
