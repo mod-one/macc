@@ -147,6 +147,13 @@ pub struct TaskRuntime {
     /// Number of review cycles completed for this task.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_cycles: Option<usize>,
+    /// Session ID from the most recent run, preserved on error so retries can resume
+    /// with cached context instead of cold-starting a new session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_session_id: Option<String>,
+    /// Tool that owned `last_session_id`; used to validate the fallback before injecting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_session_tool: Option<String>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }

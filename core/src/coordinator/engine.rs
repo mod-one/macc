@@ -859,6 +859,10 @@ fn apply_job_completion_typed(
         // (sandbox failure, env issue, etc.). Reset to Todo so the
         // coordinator can retry with the same or a different tool.
         if completion_kind.is_error() {
+            // Capture session info before clearing worktree and tool so retries
+            // can resume with cached context instead of cold-starting a new session.
+            let preserved_session_id = task.session_id().map(|s| s.to_string());
+            let preserved_session_tool = task.tool.clone();
             task.set_workflow_state(WorkflowState::Todo);
             task.worktree = None;
             {
@@ -868,6 +872,10 @@ fn apply_job_completion_typed(
                 runtime.current_phase = None;
                 runtime.pid = None;
                 runtime.last_error = Some(input.status_text.clone());
+                if preserved_session_id.is_some() {
+                    runtime.last_session_id = preserved_session_id;
+                    runtime.last_session_tool = preserved_session_tool;
+                }
             }
             task.tool = None;
             task.assignee = None;
@@ -2657,5 +2665,117 @@ mod tests {
         assert_eq!(out.status_label, "failed");
         assert_eq!(task_val["task_runtime"]["last_error_code"], "E201");
         assert!(out.tool_error.is_none());
+    }
+
+    // ── L4-SES-001: session preservation on error ──────────────────────
+
+    fn make_error_completion_input(kind: PerformerCompletionKind) -> JobCompletionInput {
+        JobCompletionInput {
+            success: true,
+            attempt: 1,
+            max_attempts: 1,
+            timed_out: false,
+            phase_timeout_seconds: 300,
+            elapsed_seconds: 5,
+            status_text: "performer reported error".to_string(),
+            completion_kind: Some(kind),
+            error_code: None,
+            error_origin: None,
+            error_message: None,
+            auto_retry_error_codes: Vec::new(),
+            auto_retry_max: 0,
+            backoff_base_seconds: 30,
+            backoff_max_seconds: 300,
+            normalizer_input: None,
+        }
+    }
+
+    #[test]
+    fn error_with_changes_preserves_session_id_in_runtime() {
+        // When a task fails with error_with_changes and the worktree carries a
+        // session_id, the session must be saved into task_runtime so the next
+        // retry can resume with cached context rather than cold-starting.
+        let mut task_val = json!({
+            "id": "SES1",
+            "state": "claimed",
+            "tool": "claude",
+            "worktree": {
+                "worktree_path": "/tmp/wt-ses1",
+                "session_id": "claude-session-abc"
+            },
+            "task_runtime": { "status": "running", "pid": 42 }
+        });
+        let out = apply_job_completion(
+            &mut task_val,
+            &make_error_completion_input(PerformerCompletionKind::ErrorWithChanges),
+            &NormalizerRegistry::empty(),
+            "2026-04-12T00:00:00Z",
+        );
+        assert_eq!(out.status_label, "error_with_changes");
+        // Worktree must be cleared.
+        assert!(task_val["worktree"].is_null());
+        // Task reset to todo for retry.
+        assert_eq!(task_val["state"], "todo");
+        // Session preserved in runtime.
+        assert_eq!(
+            task_val["task_runtime"]["last_session_id"],
+            "claude-session-abc"
+        );
+        assert_eq!(task_val["task_runtime"]["last_session_tool"], "claude");
+    }
+
+    #[test]
+    fn error_without_changes_preserves_session_id_in_runtime() {
+        // Same guarantee for error_without_changes.
+        let mut task_val = json!({
+            "id": "SES2",
+            "state": "claimed",
+            "tool": "codex",
+            "worktree": {
+                "worktree_path": "/tmp/wt-ses2",
+                "session_id": "codex-session-xyz"
+            },
+            "task_runtime": { "status": "running" }
+        });
+        apply_job_completion(
+            &mut task_val,
+            &make_error_completion_input(PerformerCompletionKind::ErrorWithoutChanges),
+            &NormalizerRegistry::empty(),
+            "2026-04-12T00:00:00Z",
+        );
+        assert_eq!(
+            task_val["task_runtime"]["last_session_id"],
+            "codex-session-xyz"
+        );
+        assert_eq!(task_val["task_runtime"]["last_session_tool"], "codex");
+    }
+
+    #[test]
+    fn error_with_changes_no_session_does_not_overwrite_prior_preserved() {
+        // When the worktree has no session_id (e.g. was never set), the existing
+        // last_session_id in the runtime must not be cleared.
+        let mut task_val = json!({
+            "id": "SES3",
+            "state": "claimed",
+            "tool": "claude",
+            "worktree": { "worktree_path": "/tmp/wt-ses3" },
+            "task_runtime": {
+                "status": "running",
+                "last_session_id": "claude-session-prev",
+                "last_session_tool": "claude"
+            }
+        });
+        apply_job_completion(
+            &mut task_val,
+            &make_error_completion_input(PerformerCompletionKind::ErrorWithChanges),
+            &NormalizerRegistry::empty(),
+            "2026-04-12T00:00:00Z",
+        );
+        // No new session to preserve; prior value must remain unchanged.
+        assert_eq!(
+            task_val["task_runtime"]["last_session_id"],
+            "claude-session-prev"
+        );
+        assert_eq!(task_val["task_runtime"]["last_session_tool"], "claude");
     }
 }
