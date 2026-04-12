@@ -1,0 +1,571 @@
+{
+  "lot": "Lot 4 - Coordinator Reliability, Recovery & Supervisor Agent",
+  "version": "1.0",
+  "generated_at": "2026-04-12",
+  "timezone": "Europe/Paris",
+  "priority_mapping": {
+    "0": "P0 / Not parallel-safe — must run alone",
+    "1": "P1 / Must-have for reliability",
+    "2": "P2 / Should-have for robustness",
+    "4": "P3 / Nice-to-have or preparatory",
+    "5": "P4 / Lowest priority"
+  },
+  "routing_hints_mapping": {
+    "execution_mode": "micro | standard | structural",
+    "reasoning_depth": "light | standard | deep",
+    "context_scope": "local | module | cross-cutting",
+    "risk_level": "low | medium | high",
+    "validation_profile": "light | standard | heavy"
+  },
+  "assumptions": [
+    "The coordinator codebase is Rust and follows the existing module layout under core/src/coordinator/.",
+    "Error codes E100-E900 already exist and new sub-codes must stay within this taxonomy.",
+    "The worker pool model (reusable worktree slots) is unchanged; improvements refine how slots are reused and retried.",
+    "IPC between coordinator and performers uses the existing events.jsonl + phase_result mechanism.",
+    "The PerformerCompletionKind enum (5 variants) and CanonicalClass enum (13 variants) are the extension points for error granularity.",
+    "Existing tests (312+ core tests) must continue passing after each task.",
+    "The supervisor agent is a new binary/process that runs alongside the coordinator, not embedded inside it.",
+    "Git operations go through core/src/git.rs; new git helpers (tag, log inspection) follow existing patterns.",
+    "The PRD reconciliation flow (sync-prd, audit-prd) uses commit message conventions with [macc:task TASK-ID] tags."
+  ],
+  "tasks": [
+    {
+      "id": "L4-IPC-001",
+      "title": "Define IPC-over-exit-code priority contract and types",
+      "category": "coordinator-contracts",
+      "description": "Problem/Goal: The completion classifier in engine.rs allows exit-code heuristics to override IPC phase_done signals, causing tasks with committed work to be wrongly marked as errors.\nKey actions: Define a CompletionAuthority enum (IpcSignal, ExitCodeHeuristic, Fallback). Add a resolution function that returns IPC result when IPC reported phase_done AND worktree has commits ahead of base, regardless of exit code. Document the priority inversion contract.\nOut of scope: Changing the IPC transport itself. Modifying performer scripts.\nSuccess criteria: A clear type and resolution function exist that encode the rule: IPC + commits = phase_done, period. Unit tests cover all authority combinations.",
+      "objective": "Establish the type contract for IPC-over-exit-code priority so downstream classifier changes are safe and testable.",
+      "result": "New CompletionAuthority enum and resolve_completion_authority() function in coordinator module with full unit test coverage.",
+      "steps": [
+        "Create CompletionAuthority enum with variants: IpcSignal, ExitCodeHeuristic, Fallback.",
+        "Implement resolve_completion_authority() that checks: (1) IPC phase_result present, (2) commits ahead of base, (3) exit code.",
+        "Write unit tests for all combinations: IPC+commits, IPC+no-commits, no-IPC+exit-success, no-IPC+exit-failure.",
+        "Document the priority inversion contract in code comments."
+      ],
+      "notes": "This is the contracts-first task for Recommendation 1. The actual classifier integration depends on this.",
+      "exclusive_resources": [],
+      "dependencies": [],
+      "priority": 1,
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "medium",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L4-IPC-002",
+      "title": "Integrate IPC-over-exit-code priority into completion classifier",
+      "category": "coordinator-engine",
+      "description": "Problem/Goal: The completion classifier in engine.rs (lines 823-960) must use the new CompletionAuthority resolution instead of allowing exit-code to override IPC signals.\nKey actions: Refactor the success/error classification paths in engine.rs to call resolve_completion_authority() first. When authority is IpcSignal and IPC reported phase_done with commits, set completion to phase_done regardless of input.success flag. Preserve existing behavior when no IPC signal was received.\nOut of scope: Changing how IPC signals are collected. Modifying the PerformerCompletionKind enum.\nSuccess criteria: A task that reports phase_done via IPC with commits ahead of base is classified as phase_done even if the process exit code is non-zero. Existing tests pass. New integration tests cover the override scenario.",
+      "objective": "Eliminate the priority inversion where exit-code heuristics override IPC phase_done signals.",
+      "result": "engine.rs completion classifier uses resolve_completion_authority(). Tasks with IPC phase_done + commits are never downgraded to error_with_changes.",
+      "steps": [
+        "In engine.rs, replace the direct input.success check with resolve_completion_authority() call.",
+        "When authority is IpcSignal and completion_kind is phase_done, skip the exit-code error path entirely.",
+        "Add a git::commits_ahead_of_base() helper if not already present (or reuse existing branch inspection).",
+        "Write integration test: simulate IPC phase_done + non-zero exit + commits ahead → verify phase_done outcome.",
+        "Write regression test: no IPC signal + non-zero exit → verify error classification preserved."
+      ],
+      "notes": "This is the most impactful single fix. It directly prevents the 'committed work abandoned and redone' failure mode.",
+      "exclusive_resources": ["core/src/coordinator/engine.rs"],
+      "dependencies": ["L4-IPC-001"],
+      "priority": 1,
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "deep",
+        "context_scope": "module",
+        "risk_level": "high",
+        "validation_profile": "heavy"
+      }
+    },
+    {
+      "id": "L4-ERR-001",
+      "title": "Extend error code taxonomy with granular sub-codes",
+      "category": "coordinator-contracts",
+      "description": "Problem/Goal: Current error codes (E101-E901) don't distinguish error source and severity well enough. A git failure, a performer tool crash, and a post-commit error all need different retry strategies.\nKey actions: Add new sub-codes within existing ranges: E104 (performer partial changes), E105 (performer complete but exit non-zero), E304 (worktree branch conflict), E305 (worktree checkout failure), E306 (worktree reset failure), E403 (task state conflict), E503 (merge blocked by policy), E504 (post-merge validation failed). Extend CanonicalClass if needed. Update error_normalizer.rs mapping table.\nOut of scope: Changing the error normalization pipeline architecture. Adding new E-ranges.\nSuccess criteria: Each new code has a clear definition, maps to a CanonicalClass, and has a documented retry policy (retryable/not-retryable/conditional).",
+      "objective": "Provide error granularity that enables differentiated retry and recovery strategies.",
+      "result": "error_normalizer.rs has new sub-codes with mappings. Documentation in code comments describes each code's semantics and retry policy.",
+      "steps": [
+        "Add E104, E105 to E100 range in error code constants.",
+        "Add E304, E305, E306 to E300 range.",
+        "Add E403 to E400 range.",
+        "Add E503, E504 to E500 range.",
+        "Update the error code → CanonicalClass mapping table.",
+        "Add GitConflict and PostCommitFailure to CanonicalClass if not already represented.",
+        "Update README.md error code documentation section.",
+        "Write unit tests verifying each new code maps to the correct class."
+      ],
+      "notes": "This task is a contracts-first dependency for salvage, retry-on-same-worktree, and merge-gate tasks. Keep backward compatibility — existing codes must not change meaning.",
+      "exclusive_resources": ["core/src/coordinator/error_normalizer.rs"],
+      "dependencies": [],
+      "priority": 1,
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "medium",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L4-GIT-001",
+      "title": "Add git helpers for branch inspection and tagging",
+      "category": "git-operations",
+      "description": "Problem/Goal: Salvage, merge-gate, and branch-aware abandonment all need git operations not yet in git.rs: checking commits ahead of base with message filtering, creating lightweight tags, listing branches by pattern.\nKey actions: Add commits_ahead_of_base(worktree, base_branch) → Vec<CommitInfo>. Add commits_containing_pattern(worktree, base_branch, pattern) → Vec<CommitInfo>. Add create_tag(repo, tag_name, commit_ref). Add list_branches_by_prefix(repo, prefix). Add async variants for all.\nOut of scope: Changing existing git.rs functions. Adding libgit2 dependency.\nSuccess criteria: All new helpers have unit tests. Async variants exist for coordinator use. Functions follow existing git.rs patterns (run_git_status / Command::new).",
+      "objective": "Provide the git building blocks needed by salvage, merge-gate, abandonment, and sync-unmerged tasks.",
+      "result": "git.rs has new functions: commits_ahead_of_base, commits_containing_pattern, create_tag, create_tag_async, list_branches_by_prefix, list_branches_by_prefix_async with tests.",
+      "steps": [
+        "Implement commits_ahead_of_base() using git log base..HEAD --oneline.",
+        "Implement commits_containing_pattern() using git log --grep=<pattern> base..HEAD.",
+        "Implement create_tag() using git tag <name> <ref>.",
+        "Implement list_branches_by_prefix() using git branch --list <prefix>*.",
+        "Add async variants using tokio::process::Command following existing patterns.",
+        "Write unit tests using temporary git repos (follow existing test patterns in git.rs)."
+      ],
+      "notes": "CommitInfo struct should include hash, subject, author_date at minimum. Keep it simple — these are plumbing functions.",
+      "exclusive_resources": ["core/src/git.rs"],
+      "dependencies": [],
+      "priority": 1,
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "local",
+        "risk_level": "low",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L4-SALVAGE-001",
+      "title": "Implement pre-retry salvage check in coordinator",
+      "category": "coordinator-engine",
+      "description": "Problem/Goal: Before retrying a failed task, the coordinator should check if the previous worktree/branch has mergeable committed work. If so, attempt merge instead of wasting a retry.\nKey actions: Add salvage_check() function that: (1) resolves the task's previous worktree/branch from registry metadata, (2) calls commits_containing_pattern() to find task-ID commits ahead of base, (3) if found, attempts merge of the branch, (4) if merge succeeds → mark task merged and skip retry, (5) if merge fails (conflicts) → proceed with retry, (6) if no relevant commits → proceed with retry normally.\nOut of scope: Modifying the merge worker itself. Handling multi-phase task salvage.\nSuccess criteria: Tasks with committed work on orphaned branches are salvaged before retry. Salvage attempts are logged in coordinator events. Failed salvage proceeds to normal retry without blocking.",
+      "objective": "Recover committed work from failed tasks instead of redoing work from scratch.",
+      "result": "New salvage_check() function integrated into the retry path in engine.rs. Coordinator events log salvage attempts and outcomes.",
+      "steps": [
+        "Add task_runtime metadata field: last_worktree_path and last_branch (populated before clearing task.worktree on error).",
+        "Implement salvage_check(task, registry, config) → SalvageResult { Merged, ConflictProceedRetry, NoCommitsProceedRetry }.",
+        "In the retry path of engine.rs, call salvage_check() before dispatching a new performer.",
+        "If SalvageResult::Merged, transition task to merged and emit salvage_success event.",
+        "If SalvageResult::ConflictProceedRetry or NoCommitsProceedRetry, continue with normal retry.",
+        "Emit coordinator events for all salvage outcomes.",
+        "Write unit tests for each SalvageResult path.",
+        "Write integration test: task with commits on orphaned branch → salvage merges → task done."
+      ],
+      "notes": "This is Recommendation 2. Depends on git helpers for branch inspection and the error code taxonomy for classifying salvage-specific failures.",
+      "exclusive_resources": ["core/src/coordinator/engine.rs"],
+      "dependencies": ["L4-GIT-001", "L4-ERR-001"],
+      "priority": 1,
+      "routing_hints": {
+        "execution_mode": "structural",
+        "reasoning_depth": "deep",
+        "context_scope": "module",
+        "risk_level": "high",
+        "validation_profile": "heavy"
+      }
+    },
+    {
+      "id": "L4-RETRY-001",
+      "title": "Implement retry-on-same-worktree strategy",
+      "category": "coordinator-engine",
+      "description": "Problem/Goal: When a task fails with committed changes (error_with_changes), the current behavior clears task.worktree = None and retries on a fresh worker, losing all committed progress. The retry should prefer the same worktree when the task has committed work.\nKey actions: Refactor the error_with_changes handling path in engine.rs (lines 833-854) to: (1) check if original worktree is still available and healthy, (2) if yes AND task has commits → keep task.worktree, reset to todo for retry on same worktree, (3) if original worktree gone/occupied → fall back to new worktree + salvage attempt, (4) error_no_changes → clear task.worktree = None (preserve current behavior).\nOut of scope: Changing the worktree pool allocation logic. Modifying performer behavior.\nSuccess criteria: Tasks with error_with_changes retry on the same worktree preserving commits. Tasks with error_no_changes get a fresh worktree. Worktree health check prevents retrying on a corrupt slot.",
+      "objective": "Preserve committed progress by retrying on the same worktree when possible.",
+      "result": "engine.rs error_with_changes path checks worktree availability and preserves task.worktree when commits exist. New worktree health check function.",
+      "steps": [
+        "Add is_worktree_healthy(path) check: exists, is git worktree, no lock files, no rebase/merge in progress.",
+        "In error_with_changes handler, check is_worktree_healthy(task.worktree).",
+        "If healthy + commits ahead → keep task.worktree, set task state to todo with retry reason.",
+        "If unhealthy or no commits → clear task.worktree = None (existing behavior), trigger salvage path.",
+        "Ensure the dispatch phase recognizes a task with pre-assigned worktree and skips pool allocation.",
+        "Write tests for: healthy worktree retained, unhealthy worktree cleared, no-changes worktree cleared.",
+        "Write integration test: error_with_changes + healthy worktree → same slot reused on retry."
+      ],
+      "notes": "This is Recommendation 3. Must coordinate with salvage (L4-SALVAGE-001) for the fallback path when worktree is gone.",
+      "exclusive_resources": ["core/src/coordinator/engine.rs"],
+      "dependencies": ["L4-SALVAGE-001"],
+      "priority": 1,
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "deep",
+        "context_scope": "module",
+        "risk_level": "high",
+        "validation_profile": "heavy"
+      }
+    },
+    {
+      "id": "L4-ABANDON-001",
+      "title": "Implement branch-aware abandonment with tagging",
+      "category": "coordinator-helpers",
+      "description": "Problem/Goal: When a worktree slot is recycled, committed work on the old branch is silently lost. Before abandoning a branch, the coordinator should preserve the work with a tag.\nKey actions: Before resetting a worktree slot (in helpers.rs prepare_reused_worktree_base and stuck-branch abandon path): (1) check if the current branch has commits ahead of base, (2) if yes, create a lightweight tag: macc/abandoned/TASK-ID-<timestamp>, (3) log the tag creation in coordinator events, (4) then proceed with branch reset/detach.\nOut of scope: Automatic cleanup of old tags. Adding tag-based recovery to the CLI.\nSuccess criteria: No committed work is silently lost. Tags are created before branch reset. Tags follow a consistent naming convention searchable by task ID.",
+      "objective": "Ensure committed work is never silently destroyed when worktree slots are recycled.",
+      "result": "helpers.rs abandon paths create macc/abandoned/ tags before resetting. Coordinator events log tag creation.",
+      "steps": [
+        "In helpers.rs, before the branch reset in prepare_reused_worktree_base(), check commits_ahead_of_base().",
+        "If commits exist, resolve the task ID from the branch name or worktree metadata.",
+        "Create tag: macc/abandoned/<task-id>-<YYYYMMDD-HHMMSS> pointing to current HEAD.",
+        "Log tag creation as a coordinator event.",
+        "Repeat for the stuck-branch abandon path (~line 221 in helpers.rs).",
+        "Write unit test: worktree with commits → tag created before reset.",
+        "Write unit test: worktree with no commits → no tag created, normal reset."
+      ],
+      "notes": "This is Recommendation 5. Uses git helpers from L4-GIT-001. Simple and high-value safety net.",
+      "exclusive_resources": ["core/src/coordinator/helpers.rs"],
+      "dependencies": ["L4-GIT-001"],
+      "priority": 1,
+      "routing_hints": {
+        "execution_mode": "micro",
+        "reasoning_depth": "standard",
+        "context_scope": "local",
+        "risk_level": "medium",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L4-MERGE-001",
+      "title": "Implement merge-gate before retry dispatch",
+      "category": "coordinator-engine",
+      "description": "Problem/Goal: Even with salvage, there's a window where a task gets dispatched for retry while its previous branch has mergeable work. A merge-gate check at dispatch time prevents double-work.\nKey actions: In the dispatch phase (control_plane.rs), before launching a performer for a retried task: (1) check if any branch matching the task ID pattern exists, (2) if found and has commits ahead of base, attempt a fast-forward or clean merge, (3) if merge succeeds → cancel dispatch, mark task merged, (4) if merge fails → proceed with dispatch.\nOut of scope: Changing the merge worker conflict resolution. Adding merge policies.\nSuccess criteria: No task is dispatched for retry if its previous branch can be cleanly merged. Merge-gate attempts are logged.",
+      "objective": "Last-chance check before retry dispatch to prevent redoing already-committed work.",
+      "result": "control_plane.rs dispatch phase includes merge_gate_check() for retried tasks. Successful merge-gate cancels dispatch.",
+      "steps": [
+        "Implement merge_gate_check(task_id, base_branch, repo_path) → MergeGateResult { Merged, ConflictProceed, NoBranchProceed }.",
+        "Use list_branches_by_prefix() to find branches matching the task ID.",
+        "For each matching branch, check commits_ahead_of_base().",
+        "Attempt git merge --ff-only or git merge --no-edit for clean merges.",
+        "In dispatch phase, call merge_gate_check() when task.retry_count > 0.",
+        "If Merged → transition task to merged, emit event, skip dispatch.",
+        "Write tests for each MergeGateResult path."
+      ],
+      "notes": "This is Recommendation 6. Works as a safety net complementing salvage (L4-SALVAGE-001). Lightweight check that prevents the most visible failure mode.",
+      "exclusive_resources": ["core/src/coordinator/control_plane.rs"],
+      "dependencies": ["L4-GIT-001", "L4-SALVAGE-001"],
+      "priority": 2,
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "medium",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L4-SYNC-001",
+      "title": "Reconcile unmerged task branches during sync phase",
+      "category": "coordinator-sync",
+      "description": "Problem/Goal: The sync phase (sync-prd) only looks at the reference branch for merged commits. Unmerged branches with completed work are invisible, causing tasks to be retried unnecessarily.\nKey actions: Add a sync_unmerged_branches() step to the sync phase that: (1) lists all branches matching macc/worker-* or task ID patterns, (2) for each, checks if commits contain [macc:task TASK-ID] tags, (3) for tasks still in todo/error state, attempt merge, (4) if merge succeeds → transition to merged, (5) if merge fails → log and skip (operator can resolve later).\nOut of scope: Changing the existing sync-prd commit scanning logic. Handling complex merge conflicts.\nSuccess criteria: The sync phase discovers and merges orphaned task branches. Tasks with mergeable orphaned branches are transitioned to merged during sync.",
+      "objective": "Make the sync phase aware of unmerged task branches so completed work is not invisible.",
+      "result": "Sync phase includes sync_unmerged_branches() that discovers and merges orphaned task branches. New coordinator events for branch discovery and merge outcomes.",
+      "steps": [
+        "Implement sync_unmerged_branches(registry, repo_path, base_branch) → Vec<SyncBranchResult>.",
+        "List branches matching known patterns (macc/worker-*, task ID prefixes).",
+        "For each branch, scan commit messages for [macc:task TASK-ID] tags.",
+        "Cross-reference found task IDs with registry — filter to tasks in todo/error states.",
+        "Attempt merge for each candidate branch.",
+        "On success: transition task to merged, emit event.",
+        "On failure: log conflict, emit event, skip.",
+        "Integrate into the sync phase pipeline after existing sync-prd step.",
+        "Write tests covering: orphaned branch found and merged, orphaned branch with conflicts skipped, no orphaned branches."
+      ],
+      "notes": "This is Recommendation 7. Complements sync-prd which only scans the reference branch. Together they form a complete reconciliation pipeline.",
+      "exclusive_resources": ["core/src/coordinator/commit_reconciler.rs"],
+      "dependencies": ["L4-GIT-001"],
+      "priority": 2,
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "medium",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L4-CFG-001",
+      "title": "Add coordinator config fields for new reliability features",
+      "category": "coordinator-config",
+      "description": "Problem/Goal: The new salvage, retry-on-same-worktree, merge-gate, and abandonment features need configuration toggles and thresholds in CoordinatorConfig.\nKey actions: Add fields to CoordinatorConfig in config/mod.rs: salvage_before_retry (bool, default true), retry_on_same_worktree (bool, default true), merge_gate_on_dispatch (bool, default true), tag_abandoned_branches (bool, default true), sync_unmerged_branches (bool, default true), salvage_merge_timeout_seconds (u64, default 120), max_salvage_attempts_per_task (u32, default 1). Add corresponding YAML keys under automation.coordinator.\nOut of scope: Adding TUI screens for these settings. Changing existing config fields.\nSuccess criteria: New config fields are loaded from macc.yaml, have sensible defaults, and are accessible by coordinator engine/helpers.",
+      "objective": "Expose configuration for all new reliability features with safe defaults.",
+      "result": "CoordinatorConfig has new fields. macc.yaml supports new keys under automation.coordinator. Default values enable all reliability features.",
+      "steps": [
+        "Add fields to CoordinatorConfig struct in config/mod.rs.",
+        "Set default values using Default trait implementation.",
+        "Add YAML deserialization support for new keys.",
+        "Write test: default config has all features enabled.",
+        "Write test: config from YAML with overrides is correctly loaded.",
+        "Update config documentation in docs/CONFIG.md."
+      ],
+      "notes": "This is a cross-cutting config task. Keep it focused on adding fields — the features themselves are in separate tasks.",
+      "exclusive_resources": ["core/src/config/mod.rs"],
+      "dependencies": [],
+      "priority": 2,
+      "routing_hints": {
+        "execution_mode": "micro",
+        "reasoning_depth": "light",
+        "context_scope": "module",
+        "risk_level": "low",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L4-EVENTS-001",
+      "title": "Add coordinator event kinds for salvage, merge-gate, and abandonment",
+      "category": "coordinator-runtime",
+      "description": "Problem/Goal: New reliability features need observable events in the coordinator event bus for monitoring, debugging, and TUI live display.\nKey actions: Add event kinds to CoordinatorRuntimeEventKind: SalvageAttempted, SalvageMerged, SalvageFailed, MergeGateChecked, MergeGateMerged, BranchTaggedAbandoned, SyncUnmergedBranchFound, SyncUnmergedBranchMerged, WorktreeHealthCheckFailed. Ensure each event carries relevant metadata (task_id, branch, worktree_path, outcome).\nOut of scope: Changing the event bus transport. Modifying TUI event rendering (separate task).\nSuccess criteria: All new features emit structured events. Events are written to events.jsonl. Event kinds are documented.",
+      "objective": "Make all new reliability operations observable through the coordinator event bus.",
+      "result": "CoordinatorRuntimeEventKind has new variants. Events are emitted by salvage, merge-gate, abandonment, and sync-unmerged features.",
+      "steps": [
+        "Add new variants to CoordinatorRuntimeEventKind enum in runtime.rs.",
+        "Define metadata fields for each event kind.",
+        "Ensure serialization to events.jsonl works for new variants.",
+        "Write unit tests verifying event serialization roundtrip.",
+        "Document event kinds in code comments."
+      ],
+      "notes": "This is a preparatory task that other tasks depend on for event emission. Keep the event definitions stable.",
+      "exclusive_resources": ["core/src/coordinator/runtime.rs"],
+      "dependencies": [],
+      "priority": 2,
+      "routing_hints": {
+        "execution_mode": "micro",
+        "reasoning_depth": "light",
+        "context_scope": "local",
+        "risk_level": "low",
+        "validation_profile": "light"
+      }
+    },
+    {
+      "id": "L4-DOC-001",
+      "title": "Update README and MACC.md with reliability features documentation",
+      "category": "documentation",
+      "description": "Problem/Goal: The new reliability features (salvage, retry-on-same-worktree, merge-gate, abandonment tagging, sync-unmerged, granular error codes) need user-facing documentation.\nKey actions: Update README.md error code table with new sub-codes. Add a 'Coordinator Recovery & Reliability' section to MACC.md describing salvage, merge-gate, and abandonment behaviors. Update the auto-retry policy section with new retry strategies. Document new config keys.\nOut of scope: Writing developer/contributor docs for implementation internals. Updating TUI help text.\nSuccess criteria: A user reading the docs understands the new recovery behaviors, can configure them, and knows what the new error codes mean.",
+      "objective": "Document all new reliability features for users and operators.",
+      "result": "README.md and MACC.md have updated sections covering new error codes, recovery features, and configuration keys.",
+      "steps": [
+        "Add new error sub-codes (E104, E105, E304-E306, E403, E503-E504) to README.md error code table.",
+        "Add 'Coordinator Recovery & Reliability' section to MACC.md.",
+        "Document salvage-before-retry behavior and its config toggle.",
+        "Document retry-on-same-worktree behavior.",
+        "Document merge-gate-on-dispatch behavior.",
+        "Document branch-aware abandonment and tag naming convention.",
+        "Document sync-unmerged-branches during sync phase.",
+        "Update auto-retry policy section in README.md.",
+        "Document new config keys in docs/CONFIG.md."
+      ],
+      "notes": "Should be done after the implementation tasks are complete so documentation matches actual behavior.",
+      "exclusive_resources": ["README.md", "MACC.md"],
+      "dependencies": ["L4-IPC-002", "L4-ERR-001", "L4-SALVAGE-001", "L4-RETRY-001", "L4-ABANDON-001", "L4-MERGE-001", "L4-SYNC-001"],
+      "priority": 2,
+      "routing_hints": {
+        "execution_mode": "micro",
+        "reasoning_depth": "light",
+        "context_scope": "cross-cutting",
+        "risk_level": "low",
+        "validation_profile": "light"
+      }
+    },
+    {
+      "id": "L4-SUP-001",
+      "title": "Define supervisor agent contract and communication protocol",
+      "category": "supervisor-contracts",
+      "description": "Problem/Goal: The supervisor agent needs a clear contract for how it communicates with and monitors the coordinator. This includes: process lifecycle management, health check protocol, event consumption, and report format.\nKey actions: Define SupervisorConfig struct (watchdog interval, max_restart_attempts, log_analysis_window, report_output_path). Define HealthCheckResult enum (Healthy, Degraded, Unresponsive, Crashed). Define SupervisorReport struct (timestamp, findings, recommendations, actions_taken, suggested_code_changes). Define the coordinator process management interface (start, stop, health-check, pid tracking). Define event consumption interface (tail events.jsonl, parse known event kinds).\nOut of scope: Implementing the AI analysis logic. Building the full supervisor binary.\nSuccess criteria: Clear types and traits exist for supervisor-coordinator communication. Report format is structured and machine-readable. Health check protocol is specified.",
+      "objective": "Establish the foundational types and contracts for the supervisor agent.",
+      "result": "New module core/src/supervisor/ with types: SupervisorConfig, HealthCheckResult, SupervisorReport, SupervisorAction, ProcessManager trait.",
+      "steps": [
+        "Create core/src/supervisor/mod.rs with module structure.",
+        "Define SupervisorConfig with all configuration fields and defaults.",
+        "Define HealthCheckResult enum: Healthy, Degraded(reasons), Unresponsive, Crashed(exit_code).",
+        "Define SupervisorReport struct with: timestamp, analysis_window, findings (Vec<Finding>), recommendations (Vec<Recommendation>), actions_taken (Vec<Action>), suggested_code_changes (Vec<CodeChange>).",
+        "Define Finding struct: severity, category, description, evidence (log excerpts, event data).",
+        "Define Recommendation struct: priority, description, rationale, affected_files, implementation_hint.",
+        "Define CodeChange struct: file_path, description, before_context, suggested_change.",
+        "Define ProcessManager trait: start_coordinator(), stop_coordinator(), health_check(), coordinator_pid().",
+        "Write unit tests for type serialization/deserialization.",
+        "Document the communication protocol in code comments."
+      ],
+      "notes": "This is the contracts-first task for Recommendation 8 (Supervisor Agent). All supervisor implementation tasks depend on this. The report format must be detailed enough to generate actionable MACC source code changes.",
+      "exclusive_resources": [],
+      "dependencies": [],
+      "priority": 2,
+      "routing_hints": {
+        "execution_mode": "structural",
+        "reasoning_depth": "deep",
+        "context_scope": "cross-cutting",
+        "risk_level": "medium",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L4-SUP-002",
+      "title": "Implement supervisor Mode A: watchdog and health monitoring",
+      "category": "supervisor-runtime",
+      "description": "Problem/Goal: The supervisor needs to detect when the coordinator is unhealthy, stuck, or has crashed. Mode A is the always-on watchdog layer.\nKey actions: Implement coordinator process monitoring (pid file tracking, process liveness check). Implement event stream monitoring (tail events.jsonl, detect stalled event emission). Implement health check logic: no events for N seconds = Degraded, process gone = Crashed, repeated error events = Degraded. Implement basic alerting (log warnings, write health status file).\nOut of scope: AI-powered analysis (Mode B/C). Automatic restart (Mode C). Report generation.\nSuccess criteria: Supervisor detects coordinator crash within watchdog interval. Supervisor detects stalled coordinator (no events) within configured threshold. Health status is written to a file readable by CLI/TUI.",
+      "objective": "Provide continuous health monitoring of the coordinator process.",
+      "result": "Supervisor watchdog loop monitors coordinator process and event stream. Health status written to .macc/state/supervisor-health.json.",
+      "steps": [
+        "Implement ProcessManager for coordinator: start/stop/health via pid file and process signals.",
+        "Implement event stream tailer: follow events.jsonl, parse last event timestamp.",
+        "Implement health evaluation: compare last event time to watchdog interval, check process liveness.",
+        "Write health status to .macc/state/supervisor-health.json on each check cycle.",
+        "Implement configurable watchdog interval (default 30s).",
+        "Write tests: healthy coordinator detected, stalled coordinator detected, crashed coordinator detected."
+      ],
+      "notes": "Mode A runs continuously as a background loop. It's the foundation for Modes B and C. Keep it lightweight — no AI calls in this mode.",
+      "exclusive_resources": [],
+      "dependencies": ["L4-SUP-001"],
+      "priority": 2,
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "medium",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L4-SUP-003",
+      "title": "Implement supervisor Mode B: worktree recovery with AI analysis",
+      "category": "supervisor-runtime",
+      "description": "Problem/Goal: When a worktree is stuck or a task has failed in an unexpected way, the supervisor should use an AI performer to analyze logs and attempt recovery while the coordinator continues running.\nKey actions: Implement log collection for a failed/stuck worktree (performer logs, coordinator events for that task, git status, branch state). Build a structured prompt for AI analysis that includes: collected evidence, known error patterns, expected outcome format. Dispatch AI performer to a dedicated supervisor worktree for analysis. Parse AI response into SupervisorReport. If the report includes a recovery action (e.g., resolve conflict, reset state), execute it. Write the report to .macc/log/supervisor/.\nOut of scope: Modifying the coordinator's running state directly. Implementing Mode C (coordinator restart). Complex multi-step recovery chains.\nSuccess criteria: Supervisor can analyze a stuck worktree using an AI performer. AI report is structured and actionable. Recovery actions are attempted when safe. All actions are logged.",
+      "objective": "Enable AI-powered analysis and recovery of stuck worktrees without stopping the coordinator.",
+      "result": "Supervisor Mode B collects evidence, dispatches AI analysis, parses reports, and attempts safe recovery actions. Reports written to .macc/log/supervisor/.",
+      "steps": [
+        "Implement evidence_collector: gather performer logs, coordinator events, git status, branch diff for a target worktree.",
+        "Build structured AI prompt template with: evidence, known error patterns, expected response format (JSON matching SupervisorReport).",
+        "Implement AI performer dispatch using existing performer infrastructure (reuse performer.sh + tool runner).",
+        "Parse AI response into SupervisorReport struct.",
+        "Implement safe recovery actions: git reset, branch cleanup, task state reset (only actions that don't affect other tasks).",
+        "Write report to .macc/log/supervisor/<task-id>-<timestamp>.json.",
+        "Add guard rails: max one recovery attempt per task per supervisor cycle, timeout on AI analysis.",
+        "Write tests: evidence collection, prompt construction, report parsing, safe action execution."
+      ],
+      "notes": "Mode B is the first AI-powered supervisor mode. It runs in parallel with the coordinator. Critical constraint: it must not modify coordinator state directly — only worktree-level recovery is safe.",
+      "exclusive_resources": [],
+      "dependencies": ["L4-SUP-002"],
+      "priority": 4,
+      "routing_hints": {
+        "execution_mode": "structural",
+        "reasoning_depth": "deep",
+        "context_scope": "cross-cutting",
+        "risk_level": "high",
+        "validation_profile": "heavy"
+      }
+    },
+    {
+      "id": "L4-SUP-004",
+      "title": "Implement supervisor Mode C: coordinator restart and recovery",
+      "category": "supervisor-runtime",
+      "description": "Problem/Goal: When the coordinator itself crashes or exits unexpectedly, the supervisor must be able to restart it and ensure the task registry is consistent before resumption.\nKey actions: Detect coordinator exit via watchdog (Mode A). Before restart: (1) collect crash evidence (last events, exit code, stderr), (2) validate task registry consistency (no tasks stuck in claimed/in_progress without active performers), (3) reset stuck tasks to todo, (4) save session snapshot, (5) restart coordinator process. After restart: verify coordinator is healthy via watchdog. Generate a crash recovery report.\nOut of scope: AI-powered crash root cause analysis (can be added later by combining with Mode B). Automatic code fixes.\nSuccess criteria: Supervisor restarts coordinator after crash within configured max_restart_attempts. Task registry is cleaned up before restart. No tasks are permanently stuck due to coordinator crash. Crash recovery report is generated.",
+      "objective": "Enable automatic coordinator recovery after crashes with clean state restoration.",
+      "result": "Supervisor Mode C detects coordinator exit, cleans registry, restarts coordinator, and generates crash recovery report.",
+      "steps": [
+        "In watchdog loop, detect coordinator process exit (Crashed health check result).",
+        "Implement pre-restart cleanup: scan registry for tasks in claimed/in_progress, check if their performer processes are still running.",
+        "Reset orphaned tasks (claimed/in_progress with no active performer) to todo state.",
+        "Call session save before restart (preserve session continuity).",
+        "Restart coordinator via ProcessManager::start_coordinator().",
+        "After restart, run health checks for N cycles to confirm recovery.",
+        "If restart fails max_restart_attempts times, write critical alert and stop.",
+        "Generate crash recovery report with: crash evidence, cleanup actions, restart outcome.",
+        "Write report to .macc/log/supervisor/crash-recovery-<timestamp>.json.",
+        "Write tests: crash detected and restarted, registry cleanup before restart, max restarts exceeded."
+      ],
+      "notes": "Mode C is the most critical supervisor capability. It makes the coordinator self-healing for crash scenarios. Keep the restart logic simple and deterministic — no AI in the restart path itself.",
+      "exclusive_resources": [],
+      "dependencies": ["L4-SUP-002"],
+      "priority": 4,
+      "routing_hints": {
+        "execution_mode": "structural",
+        "reasoning_depth": "deep",
+        "context_scope": "cross-cutting",
+        "risk_level": "high",
+        "validation_profile": "heavy"
+      }
+    },
+    {
+      "id": "L4-SUP-005",
+      "title": "Implement supervisor feedback loop and actionable report generation",
+      "category": "supervisor-reports",
+      "description": "Problem/Goal: Supervisor reports must be developer-actionable — clear enough that a developer can use them to modify MACC source code to handle the observed failure permanently. The feedback loop aggregates patterns across runs.\nKey actions: Implement report aggregation: collect individual reports from Mode B/C, identify recurring patterns (same error, same file, same worktree symptom). Generate aggregated reports with: pattern frequency, affected code paths, concrete suggested changes (file, function, before/after). Store aggregated reports in .macc/log/supervisor/aggregated/. Implement a CLI command to view supervisor reports: macc supervisor report [--latest|--list|--id <id>].\nOut of scope: Automatically applying code changes. Integrating with CI/CD.\nSuccess criteria: Aggregated reports identify recurring failure patterns. Each pattern includes actionable code change suggestions with file paths and function names. CLI command provides easy access to reports.",
+      "objective": "Turn supervisor observations into actionable developer insights for permanent MACC improvements.",
+      "result": "Aggregated supervisor reports with code change suggestions. CLI command for report access. Reports stored in .macc/log/supervisor/aggregated/.",
+      "steps": [
+        "Implement report aggregation: scan .macc/log/supervisor/ for individual reports.",
+        "Group findings by error pattern (error code, affected file, symptom description).",
+        "For each recurring pattern, generate a CodeChange suggestion with: file_path, function_name, description, implementation_hint.",
+        "Write aggregated report to .macc/log/supervisor/aggregated/<timestamp>.json.",
+        "Add CLI command: macc supervisor report --latest (show latest aggregated report).",
+        "Add CLI command: macc supervisor report --list (list all reports).",
+        "Add CLI command: macc supervisor report --id <id> (show specific report).",
+        "Write tests: aggregation logic, pattern grouping, CLI command routing."
+      ],
+      "notes": "This is the feedback loop that closes the supervisor cycle. Reports should be structured enough to be consumed by both humans and potentially by an AI code modification tool.",
+      "exclusive_resources": [],
+      "dependencies": ["L4-SUP-003", "L4-SUP-004"],
+      "priority": 4,
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "medium",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L4-SUP-006",
+      "title": "Add supervisor CLI commands and config integration",
+      "category": "supervisor-cli",
+      "description": "Problem/Goal: The supervisor agent needs CLI entry points for starting, stopping, and configuring it. It also needs integration with macc.yaml for persistent configuration.\nKey actions: Add CLI commands: macc supervisor start [--daemon], macc supervisor stop, macc supervisor status, macc supervisor report. Add SupervisorConfig to macc.yaml under automation.supervisor. Add supervisor config fields to CoordinatorConfig or create a sibling config section. Wire CLI commands to supervisor process management.\nOut of scope: TUI integration for supervisor. Web UI supervisor dashboard.\nSuccess criteria: Supervisor can be started/stopped via CLI. Configuration is loaded from macc.yaml. Status command shows supervisor health and coordinator health.",
+      "objective": "Provide CLI and configuration entry points for the supervisor agent.",
+      "result": "CLI commands for supervisor lifecycle. macc.yaml section for supervisor config. Status output shows both supervisor and coordinator health.",
+      "steps": [
+        "Add 'supervisor' subcommand to CLI with sub-actions: start, stop, status, report.",
+        "Add SupervisorConfig section to macc.yaml schema under automation.supervisor.",
+        "Implement start: launch supervisor process (foreground or daemon mode).",
+        "Implement stop: send shutdown signal to supervisor process.",
+        "Implement status: read .macc/state/supervisor-health.json and display.",
+        "Wire config loading from macc.yaml into supervisor initialization.",
+        "Update CLI help text and command documentation.",
+        "Write tests: CLI command parsing, config loading."
+      ],
+      "notes": "This is the user-facing integration task. Depends on the supervisor contracts being defined first.",
+      "exclusive_resources": ["cli/src/main.rs"],
+      "dependencies": ["L4-SUP-001"],
+      "priority": 4,
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "medium",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L4-INT-001",
+      "title": "End-to-end integration test for coordinator reliability features",
+      "category": "testing",
+      "description": "Problem/Goal: The individual reliability features need an integration test that validates the full coordinator cycle with the new behaviors.\nKey actions: Create an integration test scenario that exercises: (1) IPC phase_done with non-zero exit → phase_done (not error), (2) error_with_changes → retry on same worktree, (3) abandoned branch gets tagged before recycling, (4) orphaned branch discovered during sync and merged, (5) merge-gate prevents duplicate dispatch. Use mock performers and a test git repository.\nOut of scope: Testing the supervisor agent (separate test suite). Performance benchmarks.\nSuccess criteria: A single integration test validates the complete reliability improvement chain. Test runs in CI.",
+      "objective": "Validate that all coordinator reliability features work together correctly.",
+      "result": "Integration test in tests/ that exercises the full reliability feature chain with mock performers and test git repos.",
+      "steps": [
+        "Set up test harness: temporary git repo, test task registry, mock performer that simulates IPC + exit codes.",
+        "Test scenario 1: performer reports phase_done via IPC, exits non-zero → verify task transitions to phase_done.",
+        "Test scenario 2: performer fails with committed changes → verify retry on same worktree.",
+        "Test scenario 3: worktree recycled with commits → verify abandoned tag created.",
+        "Test scenario 4: orphaned branch with task commits → verify sync discovers and merges.",
+        "Test scenario 5: retried task with mergeable previous branch → verify merge-gate prevents dispatch.",
+        "Ensure all scenarios run independently and clean up after themselves.",
+        "Add to CI test suite."
+      ],
+      "notes": "This is the validation capstone for the reliability improvements. Should be the last implementation task before documentation.",
+      "exclusive_resources": [],
+      "dependencies": ["L4-IPC-002", "L4-SALVAGE-001", "L4-RETRY-001", "L4-ABANDON-001", "L4-MERGE-001", "L4-SYNC-001"],
+      "priority": 2,
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "cross-cutting",
+        "risk_level": "low",
+        "validation_profile": "heavy"
+      }
+    }
+  ]
+}
