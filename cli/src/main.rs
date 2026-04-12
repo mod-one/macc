@@ -210,6 +210,7 @@ enum Commands {
         logs_command: LogsCommands,
     },
     /// Run the project coordinator automation script
+    #[command(trailing_var_arg = true)]
     Coordinator {
         /// Coordinator command (run, control-plane-run, dispatch, advance, resume, sync, sync-prd, audit-prd, status, reconcile, unlock, cleanup, retry-phase, cutover-gate, stop, sessions, validate-transition, validate-runtime-transition, runtime-status-from-event, storage-import, storage-export, events-export, storage-verify, storage-sync, select-ready-task, state-apply-transition, state-set-runtime, state-task-field, state-task-exists, state-counts, state-locks, state-set-merge-pending, state-set-merge-processed, state-increment-retries, state-upsert-slo-warning, state-slo-metric)
         #[arg(default_value = "run")]
@@ -322,8 +323,8 @@ enum Commands {
         /// Max review cycles per task (0=skip review, 1=one review+fix, N=N loops). Default: unlimited.
         #[arg(long)]
         max_review_cycles: Option<usize>,
-        /// Extra args passed directly to coordinator.sh (use after --)
-        #[arg(last = true)]
+        /// Extra args passed to coordinator subcommands (positional or after --)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         extra_args: Vec<String>,
     },
 }
