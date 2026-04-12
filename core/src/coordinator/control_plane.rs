@@ -1604,6 +1604,7 @@ pub async fn monitor_active_jobs_native(
                         &current_exe,
                         repo_root,
                         &task_id,
+                        &job.base_branch,
                         &job.worktree_path,
                         &state.event_tx,
                         &mut state.join_set,
@@ -1614,6 +1615,7 @@ pub async fn monitor_active_jobs_native(
                         task_id,
                         CoordinatorJob {
                             tool: job.tool,
+                            base_branch: job.base_branch,
                             worktree_path: job.worktree_path,
                             attempt: job.attempt + 1,
                             started_at: std::time::Instant::now(),
@@ -3059,6 +3061,7 @@ pub async fn dispatch_ready_tasks_native(
             &current_exe,
             repo_root,
             &selected.id,
+            &selected.base_branch,
             &worktree_path,
             &state.event_tx,
             &mut state.join_set,
@@ -3125,6 +3128,7 @@ pub async fn dispatch_ready_tasks_native(
             selected.id.clone(),
             CoordinatorJob {
                 tool: selected.tool,
+                base_branch: selected.base_branch,
                 worktree_path,
                 attempt: 1,
                 started_at: std::time::Instant::now(),

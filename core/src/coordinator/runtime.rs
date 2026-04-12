@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone)]
 pub struct CoordinatorJob {
     pub tool: String,
+    pub base_branch: String,
     pub worktree_path: PathBuf,
     pub attempt: usize,
     pub started_at: std::time::Instant,
@@ -540,6 +541,7 @@ pub fn spawn_performer_job(
     executable_path: &Path,
     repo_root: &Path,
     task_id: &str,
+    base_branch: &str,
     worktree_path: &Path,
     event_tx: &tokio::sync::mpsc::UnboundedSender<CoordinatorJobEvent>,
     join_set: &mut tokio::task::JoinSet<()>,
@@ -595,6 +597,7 @@ pub fn spawn_performer_job(
     let pid = child.id().map(|v| v as i64);
     let repo_root_owned = repo_root.to_path_buf();
     let task_id_owned = task_id.to_string();
+    let base_branch_owned = base_branch.to_string();
     let worktree_path_owned = worktree_path.to_path_buf();
     let event_source_owned = event_source.clone();
     let tx = event_tx.clone();
@@ -637,13 +640,25 @@ pub fn spawn_performer_job(
                 (None, None)
             }
         } else {
-            (None, None)
+            if let Some(details) =
+                read_last_completion_details(&repo_root_owned, &task_id_owned, &event_source_owned)
+            {
+                (Some(details), Some("sqlite".to_string()))
+            } else {
+                (None, None)
+            }
         };
-        let success = if reported_success {
-            completion_details.is_some()
-        } else {
-            false
-        };
+        let ipc_completion_kind = completion_details
+            .as_ref()
+            .and_then(|details| details.result_kind);
+        let has_commits_ahead_of_base =
+            crate::git::has_commits_ahead(&worktree_path_owned, &base_branch_owned);
+        let completion_resolution = crate::coordinator::resolve_completion_authority(
+            ipc_completion_kind,
+            has_commits_ahead_of_base,
+            reported_success,
+        );
+        let success = completion_resolution.success;
         let status_text = if reported_success && completion_details.is_none() {
             "performer exited successfully but no phase_result event was persisted via coordinator IPC"
                 .to_string()
@@ -677,7 +692,7 @@ pub fn spawn_performer_job(
                 .filter(|message| !message.trim().is_empty())
                 .unwrap_or(status_text),
             timed_out,
-            completion_kind: completion_details.and_then(|details| details.result_kind),
+            completion_kind: completion_resolution.completion_kind,
             completion_details_source,
             error_code,
             error_origin,
