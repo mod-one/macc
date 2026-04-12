@@ -1,4 +1,7 @@
-use super::{PerformerCompletionKind, RuntimeStatus, WorkflowState};
+use super::{
+    resolve_completion_authority, CompletionAuthority, PerformerCompletionKind, RuntimeStatus,
+    WorkflowState,
+};
 use crate::config::{CanonicalConfig, CoordinatorConfig};
 use crate::coordinator::control_plane::CoordinatorLog;
 use crate::coordinator::error_normalizer::{CanonicalClass, NormalizerRegistry, ToolError};
@@ -741,6 +744,32 @@ fn apply_job_completion_typed(
     normalizer_registry: &NormalizerRegistry,
     now: &str,
 ) -> JobCompletionResult {
+    let has_commits_ahead_of_base = task
+        .worktree_path()
+        .map(|worktree_path| {
+            let base_branch = task.base_branch("master");
+            crate::git::has_commits_ahead(Path::new(worktree_path), &base_branch)
+        })
+        .unwrap_or(false);
+    let completion_resolution = resolve_completion_authority(
+        input.completion_kind,
+        has_commits_ahead_of_base,
+        input.success,
+    );
+    let ipc_phase_done_override = completion_resolution.authority == CompletionAuthority::IpcSignal
+        && completion_resolution.completion_kind
+            == Some(PerformerCompletionKind::SuccessWithChanges);
+    let completion_success = if ipc_phase_done_override {
+        true
+    } else {
+        input.success
+    };
+    let resolved_completion_kind = if ipc_phase_done_override {
+        Some(PerformerCompletionKind::SuccessWithChanges)
+    } else {
+        input.completion_kind
+    };
+
     // ── Baseline error classification from caller ────────────────────
     let raw_error_code = input
         .error_code
@@ -821,10 +850,9 @@ fn apply_job_completion_typed(
         .unwrap_or(raw_error_message);
 
     // ── Success ──────────────────────────────────────────────────────
-    if input.success {
-        let completion_kind = input
-            .completion_kind
-            .unwrap_or(PerformerCompletionKind::SuccessWithChanges);
+    if completion_success {
+        let completion_kind =
+            resolved_completion_kind.unwrap_or(PerformerCompletionKind::SuccessWithChanges);
 
         // ── Tool-reported error: re-queue the task ──────────────────
         // The tool ran but reported it could not complete the task
@@ -1979,6 +2007,69 @@ pub async fn run_native_control_plane(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn run_git(dir: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("run git command");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn make_repo_with_commit_ahead(base_branch: &str) -> PathBuf {
+        let mut repo = std::env::temp_dir();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        repo.push(format!("macc-engine-ipc-{}", nanos));
+        fs::create_dir_all(&repo).expect("create temp repo");
+
+        run_git(&repo, &["init"]);
+        run_git(&repo, &["checkout", "-b", base_branch]);
+        fs::write(repo.join("fixture.txt"), "base\n").expect("write base fixture");
+        run_git(&repo, &["add", "fixture.txt"]);
+        run_git(
+            &repo,
+            &[
+                "-c",
+                "user.name=MACC Test",
+                "-c",
+                "user.email=macc-test@example.com",
+                "commit",
+                "-m",
+                "base commit",
+            ],
+        );
+
+        run_git(&repo, &["checkout", "-b", "task/ipc-override"]);
+        fs::write(repo.join("fixture.txt"), "base\nahead\n").expect("write ahead fixture");
+        run_git(&repo, &["add", "fixture.txt"]);
+        run_git(
+            &repo,
+            &[
+                "-c",
+                "user.name=MACC Test",
+                "-c",
+                "user.email=macc-test@example.com",
+                "commit",
+                "-m",
+                "ahead commit",
+            ],
+        );
+
+        repo
+    }
 
     #[test]
     fn plan_advance_maps_states() {
@@ -2190,6 +2281,87 @@ mod tests {
             "success_without_changes"
         );
         assert!(task["task_runtime"]["current_phase"].is_null());
+    }
+
+    #[test]
+    fn apply_job_completion_ipc_phase_done_with_commits_ahead_overrides_failed_exit() {
+        let repo = make_repo_with_commit_ahead("main");
+        let mut task = json!({
+            "id":"T3d",
+            "state":"claimed",
+            "base_branch":"main",
+            "worktree":{"worktree_path": repo.to_string_lossy().to_string()},
+            "task_runtime":{"status":"running","pid":123}
+        });
+        let out = apply_job_completion(
+            &mut task,
+            &JobCompletionInput {
+                success: false,
+                attempt: 1,
+                max_attempts: 1,
+                timed_out: false,
+                phase_timeout_seconds: 0,
+                elapsed_seconds: 1,
+                status_text: "exit status: 1".to_string(),
+                completion_kind: Some(PerformerCompletionKind::SuccessWithChanges),
+                error_code: Some("E101".to_string()),
+                error_origin: Some("runner".to_string()),
+                error_message: Some("non-zero exit".to_string()),
+                auto_retry_error_codes: Vec::new(),
+                auto_retry_max: 0,
+                backoff_base_seconds: 30,
+                backoff_max_seconds: 300,
+                normalizer_input: None,
+            },
+            &NormalizerRegistry::empty(),
+            "2026-02-21T00:00:00Z",
+        );
+
+        assert!(!out.should_retry);
+        assert_eq!(out.status_label, "phase_done");
+        assert_eq!(
+            out.completion_kind,
+            Some(PerformerCompletionKind::SuccessWithChanges)
+        );
+        assert_eq!(task["state"], "in_progress");
+        assert_eq!(task["task_runtime"]["status"], "phase_done");
+
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn apply_job_completion_no_ipc_signal_keeps_failed_exit_classification() {
+        let mut task = json!({
+            "id":"T3e",
+            "state":"claimed",
+            "task_runtime":{"status":"running","pid":123}
+        });
+        let out = apply_job_completion(
+            &mut task,
+            &JobCompletionInput {
+                success: false,
+                attempt: 1,
+                max_attempts: 1,
+                timed_out: false,
+                phase_timeout_seconds: 300,
+                elapsed_seconds: 5,
+                status_text: "performer failed".to_string(),
+                completion_kind: None,
+                error_code: Some("E201".to_string()),
+                error_origin: Some("runner".to_string()),
+                error_message: Some("auth error".to_string()),
+                auto_retry_error_codes: Vec::new(),
+                auto_retry_max: 0,
+                backoff_base_seconds: 30,
+                backoff_max_seconds: 300,
+                normalizer_input: None,
+            },
+            &NormalizerRegistry::empty(),
+            "2026-02-21T00:00:00Z",
+        );
+
+        assert_eq!(out.status_label, "failed");
+        assert_eq!(task["task_runtime"]["last_error_code"], "E201");
     }
 
     #[test]
