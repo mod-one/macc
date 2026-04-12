@@ -1932,6 +1932,7 @@ fn retry_dev_phase<E: crate::engine::Engine + ?Sized>(
         &current_exe,
         &paths.root,
         task_id,
+        &task.base_branch("master"),
         &worktree,
         &state.event_tx,
         &mut state.join_set,
@@ -1942,6 +1943,7 @@ fn retry_dev_phase<E: crate::engine::Engine + ?Sized>(
         task_id.to_string(),
         coordinator_runtime::CoordinatorJob {
             tool: task.task_tool().unwrap_or_default().to_string(),
+            base_branch: task.base_branch("master"),
             worktree_path: worktree.clone(),
             attempt: 1,
             started_at: std::time::Instant::now(),

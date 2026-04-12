@@ -222,6 +222,58 @@ impl FromStr for PerformerCompletionKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionAuthority {
+    IpcSignal,
+    ExitCodeHeuristic,
+    Fallback,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompletionAuthorityResolution {
+    pub authority: CompletionAuthority,
+    pub success: bool,
+    pub completion_kind: Option<PerformerCompletionKind>,
+}
+
+/// Resolve completion classification precedence between IPC terminal signals
+/// and process-exit heuristics.
+///
+/// Priority-inversion contract:
+/// - If IPC emitted a successful `phase_result` **and** the worktree has at
+///   least one commit ahead of base, IPC is authoritative and the completion
+///   is treated as successful, regardless of exit code.
+/// - Otherwise, exit-code heuristics decide whether completion can be trusted.
+pub fn resolve_completion_authority(
+    ipc_completion_kind: Option<PerformerCompletionKind>,
+    has_commits_ahead_of_base: bool,
+    exit_code_success: bool,
+) -> CompletionAuthorityResolution {
+    if has_commits_ahead_of_base {
+        if let Some(kind) = ipc_completion_kind {
+            return CompletionAuthorityResolution {
+                authority: CompletionAuthority::IpcSignal,
+                success: true,
+                completion_kind: Some(kind),
+            };
+        }
+    }
+
+    if exit_code_success {
+        return CompletionAuthorityResolution {
+            authority: CompletionAuthority::ExitCodeHeuristic,
+            success: ipc_completion_kind.is_some(),
+            completion_kind: ipc_completion_kind,
+        };
+    }
+
+    CompletionAuthorityResolution {
+        authority: CompletionAuthority::Fallback,
+        success: false,
+        completion_kind: None,
+    }
+}
+
 pub fn is_valid_workflow_transition(from: WorkflowState, to: WorkflowState) -> bool {
     matches!(
         (from, to),
@@ -868,6 +920,102 @@ mod tests {
             runtime_status_from_event("unknown", ""),
             RuntimeStatus::Running
         );
+    }
+
+    #[test]
+    fn resolve_completion_authority_prefers_ipc_when_commits_are_ahead() {
+        let resolved = resolve_completion_authority(
+            Some(PerformerCompletionKind::SuccessWithChanges),
+            true,
+            false,
+        );
+        assert_eq!(resolved.authority, CompletionAuthority::IpcSignal);
+        assert!(resolved.success);
+        assert_eq!(
+            resolved.completion_kind,
+            Some(PerformerCompletionKind::SuccessWithChanges)
+        );
+    }
+
+    #[test]
+    fn resolve_completion_authority_ipc_without_commits_uses_exit_heuristic() {
+        let resolved = resolve_completion_authority(
+            Some(PerformerCompletionKind::SuccessWithChanges),
+            false,
+            true,
+        );
+        assert_eq!(resolved.authority, CompletionAuthority::ExitCodeHeuristic);
+        assert!(resolved.success);
+        assert_eq!(
+            resolved.completion_kind,
+            Some(PerformerCompletionKind::SuccessWithChanges)
+        );
+    }
+
+    #[test]
+    fn resolve_completion_authority_no_ipc_exit_success_uses_exit_heuristic() {
+        let resolved = resolve_completion_authority(None, false, true);
+        assert_eq!(resolved.authority, CompletionAuthority::ExitCodeHeuristic);
+        assert!(!resolved.success);
+        assert!(resolved.completion_kind.is_none());
+    }
+
+    #[test]
+    fn resolve_completion_authority_no_ipc_exit_failure_falls_back() {
+        let resolved = resolve_completion_authority(None, false, false);
+        assert_eq!(resolved.authority, CompletionAuthority::Fallback);
+        assert!(!resolved.success);
+        assert!(resolved.completion_kind.is_none());
+    }
+
+    #[test]
+    fn resolve_completion_authority_matrix_covers_all_input_combinations() {
+        let combos = [
+            (None, false, false, CompletionAuthority::Fallback, false),
+            (
+                None,
+                false,
+                true,
+                CompletionAuthority::ExitCodeHeuristic,
+                false,
+            ),
+            (None, true, false, CompletionAuthority::Fallback, false),
+            (None, true, true, CompletionAuthority::ExitCodeHeuristic, false),
+            (
+                Some(PerformerCompletionKind::AlreadySatisfied),
+                false,
+                false,
+                CompletionAuthority::Fallback,
+                false,
+            ),
+            (
+                Some(PerformerCompletionKind::AlreadySatisfied),
+                false,
+                true,
+                CompletionAuthority::ExitCodeHeuristic,
+                true,
+            ),
+            (
+                Some(PerformerCompletionKind::AlreadySatisfied),
+                true,
+                false,
+                CompletionAuthority::IpcSignal,
+                true,
+            ),
+            (
+                Some(PerformerCompletionKind::AlreadySatisfied),
+                true,
+                true,
+                CompletionAuthority::IpcSignal,
+                true,
+            ),
+        ];
+
+        for (ipc, commits_ahead, exit_ok, expected_authority, expected_success) in combos {
+            let resolved = resolve_completion_authority(ipc, commits_ahead, exit_ok);
+            assert_eq!(resolved.authority, expected_authority);
+            assert_eq!(resolved.success, expected_success);
+        }
     }
 
     #[test]
