@@ -272,6 +272,8 @@ MACC emits structured error codes when a performer or coordinator step fails. Th
   - `E101` Runner exited non-zero
   - `E102` Tool runner not found / not executable
   - `E103` Tool output malformed / parsing failed
+  - `E104` Performer produced partial changes before failure. Conditional retry (prefer same-worktree salvage).
+  - `E105` Performer completed output but exited non-zero. Conditional retry (verify completion state first).
 - `E200` Capability/Contract
   - `E201` Requested unavailable tool
   - `E202` Capability guard triggered
@@ -279,12 +281,18 @@ MACC emits structured error codes when a performer or coordinator step fails. Th
   - `E301` Worktree missing
   - `E302` PRD missing
   - `E303` tool.json missing
+  - `E304` Worktree branch conflict. Conditional retry (after conflict resolution or branch refresh).
+  - `E305` Worktree checkout failure. Conditional retry (transient git failures may clear).
+  - `E306` Worktree reset failure. Conditional retry (depends on index/worktree state).
 - `E400` Coordinator/Registry
   - `E401` Task registry read/write failure
   - `E402` Task state transition invalid
+  - `E403` Task state conflict. Retryable (reconcile + retry usually converges).
 - `E500` Merge
   - `E501` Merge conflict
   - `E502` Merge worker failed
+  - `E503` Merge blocked by policy. **Not retryable** - requires operator or policy change.
+  - `E504` Post-merge validation failed. Conditional retry (depends on validation failure root cause).
 - `E600` Rate-limit / Provider throttle
   - `E601` Rate-limited / transient 429 or 529. Retryable with exponential backoff.
   - `E602` Quota exhausted / hard limit. **Not retryable** - requires operator action.
