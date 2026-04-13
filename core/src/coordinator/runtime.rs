@@ -128,6 +128,59 @@ pub enum CoordinatorRuntimeEventKind {
         phase: Option<String>,
         message: Option<String>,
     },
+    /// A pre-retry salvage check was attempted for a task worktree.
+    /// Emitted before the coordinator decides whether to retry on the same
+    /// worktree or abandon the slot.
+    SalvageAttempted {
+        branch: String,
+        worktree_path: String,
+        outcome: String,
+    },
+    /// Salvage succeeded: the worktree branch was merged into the reference
+    /// branch and the task state was preserved.
+    SalvageMerged {
+        branch: String,
+        worktree_path: String,
+        outcome: String,
+    },
+    /// Salvage failed: the worktree could not be merged or the partial state
+    /// was not recoverable.
+    SalvageFailed {
+        branch: String,
+        worktree_path: String,
+        outcome: String,
+    },
+    /// A merge-gate check was performed for a branch before merge was allowed.
+    MergeGateChecked {
+        branch: String,
+        outcome: String,
+    },
+    /// A branch passed the merge-gate and was merged.
+    MergeGateMerged {
+        branch: String,
+        outcome: String,
+    },
+    /// A branch was tagged as abandoned (task exceeded retry budget or was
+    /// explicitly abandoned by the coordinator).
+    BranchTaggedAbandoned {
+        branch: String,
+        outcome: String,
+    },
+    /// An unmerged branch was found during `sync-prd` scan.
+    SyncUnmergedBranchFound {
+        branch: String,
+    },
+    /// An unmerged branch found during `sync-prd` was successfully merged.
+    SyncUnmergedBranchMerged {
+        branch: String,
+        outcome: String,
+    },
+    /// A worktree health check detected a problem that prevents normal use
+    /// of the worktree slot.
+    WorktreeHealthCheckFailed {
+        worktree_path: String,
+        outcome: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -289,6 +342,212 @@ mod tests {
         s.effective_max_parallel = 0;
         assert_eq!(s.restore_parallel(), 0);
     }
+
+    // ---- L4-EVENTS-001: reliability event kind roundtrip tests ----
+
+    fn make_record(event_type: &str, payload: serde_json::Value) -> CoordinatorEventRecord {
+        CoordinatorEventRecord {
+            schema_version: crate::coordinator::COORDINATOR_EVENT_SCHEMA_VERSION.to_string(),
+            event_id: "evt-test".to_string(),
+            ts: "2026-04-13T00:00:00Z".to_string(),
+            source: "coordinator".to_string(),
+            task_id: Some("TEST-001".to_string()),
+            event_type: event_type.to_string(),
+            status: "ok".to_string(),
+            payload,
+            ..CoordinatorEventRecord::default()
+        }
+    }
+
+    #[test]
+    fn salvage_attempted_event_roundtrip() {
+        let record = make_record(
+            "salvage_attempted",
+            serde_json::json!({
+                "branch": "ai/worker-01/task-1",
+                "worktree_path": "/tmp/wt/worker-01",
+                "outcome": "check_passed"
+            }),
+        );
+        let ev = raw_event_to_runtime_event(&record).expect("should parse");
+        assert_eq!(
+            ev.kind,
+            CoordinatorRuntimeEventKind::SalvageAttempted {
+                branch: "ai/worker-01/task-1".to_string(),
+                worktree_path: "/tmp/wt/worker-01".to_string(),
+                outcome: "check_passed".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn salvage_merged_event_roundtrip() {
+        let record = make_record(
+            "salvage_merged",
+            serde_json::json!({
+                "branch": "ai/worker-01/task-1",
+                "worktree_path": "/tmp/wt/worker-01",
+                "outcome": "merged"
+            }),
+        );
+        let ev = raw_event_to_runtime_event(&record).expect("should parse");
+        assert_eq!(
+            ev.kind,
+            CoordinatorRuntimeEventKind::SalvageMerged {
+                branch: "ai/worker-01/task-1".to_string(),
+                worktree_path: "/tmp/wt/worker-01".to_string(),
+                outcome: "merged".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn salvage_failed_event_roundtrip() {
+        let record = make_record(
+            "salvage_failed",
+            serde_json::json!({
+                "branch": "ai/worker-01/task-1",
+                "worktree_path": "/tmp/wt/worker-01",
+                "outcome": "merge_conflict"
+            }),
+        );
+        let ev = raw_event_to_runtime_event(&record).expect("should parse");
+        assert_eq!(
+            ev.kind,
+            CoordinatorRuntimeEventKind::SalvageFailed {
+                branch: "ai/worker-01/task-1".to_string(),
+                worktree_path: "/tmp/wt/worker-01".to_string(),
+                outcome: "merge_conflict".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn merge_gate_checked_event_roundtrip() {
+        let record = make_record(
+            "merge_gate_checked",
+            serde_json::json!({
+                "branch": "ai/worker-01/task-1",
+                "outcome": "passed"
+            }),
+        );
+        let ev = raw_event_to_runtime_event(&record).expect("should parse");
+        assert_eq!(
+            ev.kind,
+            CoordinatorRuntimeEventKind::MergeGateChecked {
+                branch: "ai/worker-01/task-1".to_string(),
+                outcome: "passed".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn merge_gate_merged_event_roundtrip() {
+        let record = make_record(
+            "merge_gate_merged",
+            serde_json::json!({
+                "branch": "ai/worker-01/task-1",
+                "outcome": "merged"
+            }),
+        );
+        let ev = raw_event_to_runtime_event(&record).expect("should parse");
+        assert_eq!(
+            ev.kind,
+            CoordinatorRuntimeEventKind::MergeGateMerged {
+                branch: "ai/worker-01/task-1".to_string(),
+                outcome: "merged".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn branch_tagged_abandoned_event_roundtrip() {
+        let record = make_record(
+            "branch_tagged_abandoned",
+            serde_json::json!({
+                "branch": "ai/worker-01/task-1",
+                "outcome": "retry_budget_exceeded"
+            }),
+        );
+        let ev = raw_event_to_runtime_event(&record).expect("should parse");
+        assert_eq!(
+            ev.kind,
+            CoordinatorRuntimeEventKind::BranchTaggedAbandoned {
+                branch: "ai/worker-01/task-1".to_string(),
+                outcome: "retry_budget_exceeded".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn sync_unmerged_branch_found_event_roundtrip() {
+        let record = make_record(
+            "sync_unmerged_branch_found",
+            serde_json::json!({
+                "branch": "ai/worker-01/task-2"
+            }),
+        );
+        let ev = raw_event_to_runtime_event(&record).expect("should parse");
+        assert_eq!(
+            ev.kind,
+            CoordinatorRuntimeEventKind::SyncUnmergedBranchFound {
+                branch: "ai/worker-01/task-2".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn sync_unmerged_branch_merged_event_roundtrip() {
+        let record = make_record(
+            "sync_unmerged_branch_merged",
+            serde_json::json!({
+                "branch": "ai/worker-01/task-2",
+                "outcome": "merged_successfully"
+            }),
+        );
+        let ev = raw_event_to_runtime_event(&record).expect("should parse");
+        assert_eq!(
+            ev.kind,
+            CoordinatorRuntimeEventKind::SyncUnmergedBranchMerged {
+                branch: "ai/worker-01/task-2".to_string(),
+                outcome: "merged_successfully".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn worktree_health_check_failed_event_roundtrip() {
+        let record = make_record(
+            "worktree_health_check_failed",
+            serde_json::json!({
+                "worktree_path": "/tmp/wt/worker-02",
+                "outcome": "dirty_index"
+            }),
+        );
+        let ev = raw_event_to_runtime_event(&record).expect("should parse");
+        assert_eq!(
+            ev.kind,
+            CoordinatorRuntimeEventKind::WorktreeHealthCheckFailed {
+                worktree_path: "/tmp/wt/worker-02".to_string(),
+                outcome: "dirty_index".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn reliability_events_with_missing_payload_fields_degrade_gracefully() {
+        // payload_str returns "" for missing keys — events still parse
+        let record = make_record("salvage_attempted", serde_json::json!({}));
+        let ev = raw_event_to_runtime_event(&record).expect("should parse even with empty payload");
+        assert_eq!(
+            ev.kind,
+            CoordinatorRuntimeEventKind::SalvageAttempted {
+                branch: String::new(),
+                worktree_path: String::new(),
+                outcome: String::new(),
+            }
+        );
+    }
 }
 
 pub fn raw_event_identity(event: &CoordinatorEventRecord) -> Option<(String, String, String)> {
@@ -300,6 +559,16 @@ pub fn raw_event_identity(event: &CoordinatorEventRecord) -> Option<(String, Str
     } else {
         Some((task_id, ts, source))
     }
+}
+
+/// Extract a string value from a JSON payload object, returning an empty
+/// string when the key is absent or the value is not a string.
+fn payload_str(payload: &serde_json::Value, key: &str) -> String {
+    payload
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_string()
 }
 
 pub fn raw_event_to_runtime_event(
@@ -330,6 +599,46 @@ pub fn raw_event_to_runtime_event(
         "failed" => CoordinatorRuntimeEventKind::Failed {
             phase: event_phase,
             message: event_message,
+        },
+        // L4-EVENTS-001: reliability observability event kinds
+        // Metadata is read from the flat payload object.
+        "salvage_attempted" => CoordinatorRuntimeEventKind::SalvageAttempted {
+            branch: payload_str(&event.payload, "branch"),
+            worktree_path: payload_str(&event.payload, "worktree_path"),
+            outcome: payload_str(&event.payload, "outcome"),
+        },
+        "salvage_merged" => CoordinatorRuntimeEventKind::SalvageMerged {
+            branch: payload_str(&event.payload, "branch"),
+            worktree_path: payload_str(&event.payload, "worktree_path"),
+            outcome: payload_str(&event.payload, "outcome"),
+        },
+        "salvage_failed" => CoordinatorRuntimeEventKind::SalvageFailed {
+            branch: payload_str(&event.payload, "branch"),
+            worktree_path: payload_str(&event.payload, "worktree_path"),
+            outcome: payload_str(&event.payload, "outcome"),
+        },
+        "merge_gate_checked" => CoordinatorRuntimeEventKind::MergeGateChecked {
+            branch: payload_str(&event.payload, "branch"),
+            outcome: payload_str(&event.payload, "outcome"),
+        },
+        "merge_gate_merged" => CoordinatorRuntimeEventKind::MergeGateMerged {
+            branch: payload_str(&event.payload, "branch"),
+            outcome: payload_str(&event.payload, "outcome"),
+        },
+        "branch_tagged_abandoned" => CoordinatorRuntimeEventKind::BranchTaggedAbandoned {
+            branch: payload_str(&event.payload, "branch"),
+            outcome: payload_str(&event.payload, "outcome"),
+        },
+        "sync_unmerged_branch_found" => CoordinatorRuntimeEventKind::SyncUnmergedBranchFound {
+            branch: payload_str(&event.payload, "branch"),
+        },
+        "sync_unmerged_branch_merged" => CoordinatorRuntimeEventKind::SyncUnmergedBranchMerged {
+            branch: payload_str(&event.payload, "branch"),
+            outcome: payload_str(&event.payload, "outcome"),
+        },
+        "worktree_health_check_failed" => CoordinatorRuntimeEventKind::WorktreeHealthCheckFailed {
+            worktree_path: payload_str(&event.payload, "worktree_path"),
+            outcome: payload_str(&event.payload, "outcome"),
         },
         _ => return None,
     };

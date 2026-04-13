@@ -85,7 +85,16 @@
         "dispatch_limit_reached",
         "dispatch_skipped",
         "sanitize_done",
-        "dispatch_failed"
+        "dispatch_failed",
+        "salvage_attempted",
+        "salvage_merged",
+        "salvage_failed",
+        "merge_gate_checked",
+        "merge_gate_merged",
+        "branch_tagged_abandoned",
+        "sync_unmerged_branch_found",
+        "sync_unmerged_branch_merged",
+        "worktree_health_check_failed"
       ]
     },
     "phase": {

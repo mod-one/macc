@@ -1910,6 +1910,31 @@ fn apply_runtime_event_bus_updates(
                         CoordinatorRuntimeEventKind::Progress { .. } => "progress",
                         CoordinatorRuntimeEventKind::PhaseResult { .. } => "phase_result",
                         CoordinatorRuntimeEventKind::Failed { .. } => "failed",
+                        // L4-EVENTS-001: reliability observability events are
+                        // informational; no runtime state update is needed.
+                        CoordinatorRuntimeEventKind::SalvageAttempted { .. } => {
+                            "salvage_attempted"
+                        }
+                        CoordinatorRuntimeEventKind::SalvageMerged { .. } => "salvage_merged",
+                        CoordinatorRuntimeEventKind::SalvageFailed { .. } => "salvage_failed",
+                        CoordinatorRuntimeEventKind::MergeGateChecked { .. } => {
+                            "merge_gate_checked"
+                        }
+                        CoordinatorRuntimeEventKind::MergeGateMerged { .. } => {
+                            "merge_gate_merged"
+                        }
+                        CoordinatorRuntimeEventKind::BranchTaggedAbandoned { .. } => {
+                            "branch_tagged_abandoned"
+                        }
+                        CoordinatorRuntimeEventKind::SyncUnmergedBranchFound { .. } => {
+                            "sync_unmerged_branch_found"
+                        }
+                        CoordinatorRuntimeEventKind::SyncUnmergedBranchMerged { .. } => {
+                            "sync_unmerged_branch_merged"
+                        }
+                        CoordinatorRuntimeEventKind::WorktreeHealthCheckFailed { .. } => {
+                            "worktree_health_check_failed"
+                        }
                     };
                     let _ = log.note(format!(
                         "- performer event received task={} type={} source={}",
@@ -1969,6 +1994,17 @@ fn apply_runtime_event_bus_updates(
                             update.last_error = Some(message);
                         }
                     }
+                    // L4-EVENTS-001: reliability observability events — no
+                    // runtime state update required; they are informational.
+                    CoordinatorRuntimeEventKind::SalvageAttempted { .. }
+                    | CoordinatorRuntimeEventKind::SalvageMerged { .. }
+                    | CoordinatorRuntimeEventKind::SalvageFailed { .. }
+                    | CoordinatorRuntimeEventKind::MergeGateChecked { .. }
+                    | CoordinatorRuntimeEventKind::MergeGateMerged { .. }
+                    | CoordinatorRuntimeEventKind::BranchTaggedAbandoned { .. }
+                    | CoordinatorRuntimeEventKind::SyncUnmergedBranchFound { .. }
+                    | CoordinatorRuntimeEventKind::SyncUnmergedBranchMerged { .. }
+                    | CoordinatorRuntimeEventKind::WorktreeHealthCheckFailed { .. } => {}
                 }
             }
             Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
