@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 pub mod mode_a;
+pub mod mode_b;
 
 // ── Configuration ────────────────────────────────────────────────────────────
 
@@ -222,6 +223,39 @@ pub enum SupervisorAction {
 
     /// Supervisor took no automatic action (report only).
     NoAction { reason: String },
+
+    // ── Mode B: worktree-level recovery actions ───────────────────────────
+
+    /// Supervisor ran `git reset --hard HEAD` in the target worktree.
+    WorktreeGitReset {
+        worktree_path: String,
+        /// Whether the reset command succeeded.
+        succeeded: bool,
+    },
+
+    /// Supervisor ran `git clean -fd` in the target worktree.
+    WorktreeGitClean {
+        worktree_path: String,
+        succeeded: bool,
+    },
+
+    /// AI analysis was dispatched for a stuck or failed worktree.
+    AiAnalysisDispatched {
+        task_id: String,
+        worktree_path: String,
+    },
+
+    /// AI analysis completed and the report was written to disk.
+    AiAnalysisCompleted {
+        task_id: String,
+        report_path: String,
+    },
+
+    /// AI analysis was skipped because the recovery attempt limit was reached.
+    RecoveryAttemptLimitReached {
+        task_id: String,
+        limit: u32,
+    },
 }
 
 // ── Report ───────────────────────────────────────────────────────────────────
