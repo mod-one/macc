@@ -92,6 +92,30 @@ fn run_git_status(current_dir: &Path, args: &[&str], action: &str) -> Result<Exi
         })
 }
 
+/// Generates paired sync/async git status helpers for simple operations where
+/// both variants only differ by awaiting `run_git_status_async`.
+macro_rules! git_command {
+    (
+        $sync_name:ident,
+        $async_name:ident,
+        ($($param:ident : $param_ty:ty),* $(,)?),
+        [$($arg:expr),+ $(,)?],
+        $action:expr
+    ) => {
+        pub fn $sync_name(repo_or_worktree: &Path, $($param: $param_ty),*) -> Result<bool> {
+            Ok(run_git_status(repo_or_worktree, &[$($arg),+], $action)?.success())
+        }
+
+        pub async fn $async_name(repo_or_worktree: &Path, $($param: $param_ty),*) -> Result<bool> {
+            Ok(
+                run_git_status_async(repo_or_worktree, &[$($arg),+], $action)
+                    .await?
+                    .success(),
+            )
+        }
+    };
+}
+
 pub fn run_git_output_mapped(current_dir: &Path, args: &[&str], action: &str) -> Result<Output> {
     run_git_output(current_dir, args, action)
 }
@@ -230,17 +254,13 @@ pub async fn reset_hard_async(repo_or_worktree: &Path, target: &str) -> Result<b
     .success())
 }
 
-pub fn clean_fd(repo_or_worktree: &Path) -> Result<bool> {
-    Ok(run_git_status(repo_or_worktree, &["clean", "-fd"], "run git clean -fd")?.success())
-}
-
-pub async fn clean_fd_async(repo_or_worktree: &Path) -> Result<bool> {
-    Ok(
-        run_git_status_async(repo_or_worktree, &["clean", "-fd"], "run git clean -fd")
-            .await?
-            .success(),
-    )
-}
+git_command!(
+    clean_fd,
+    clean_fd_async,
+    (),
+    ["clean", "-fd"],
+    "run git clean -fd"
+);
 
 pub fn checkout(repo_or_worktree: &Path, branch: &str, force: bool) -> Result<bool> {
     let args = if force {
