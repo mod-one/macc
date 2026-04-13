@@ -23,6 +23,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+pub mod mode_a;
+
 // ── Configuration ────────────────────────────────────────────────────────────
 
 /// Configuration for the supervisor watchdog process.
