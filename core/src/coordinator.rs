@@ -73,6 +73,16 @@ pub const COORDINATOR_EVENT_TYPES_V1: &[&str] = &[
     "dispatch_skipped",
     "sanitize_done",
     "dispatch_failed",
+    // L4-EVENTS-001: reliability observability event kinds
+    "salvage_attempted",
+    "salvage_merged",
+    "salvage_failed",
+    "merge_gate_checked",
+    "merge_gate_merged",
+    "branch_tagged_abandoned",
+    "sync_unmerged_branch_found",
+    "sync_unmerged_branch_merged",
+    "worktree_health_check_failed",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
