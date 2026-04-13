@@ -470,6 +470,10 @@ Coordinator orchestrates the end-to-end automation cycle: it reads the task regi
 - `macc coordinator run --no-tui` keeps the previous headless CLI behavior.
 - `macc coordinator stop [--graceful] [--remove-worktrees] [--remove-branches]`
 - `macc coordinator sessions [save|restore|list|delete]`: manage tool session snapshots at user level (`~/.macc/sessions/<project>/`). `save` captures active + archived sessions; `restore` merges saved sessions back into `tool-sessions.json` without overwriting existing entries; `list` shows all snapshots; `delete` removes one. Graceful stop (`--graceful`) auto-saves a snapshot.
+- `macc supervisor start [--daemon]`
+- `macc supervisor stop`
+- `macc supervisor status`
+- `macc supervisor report`
 - Coordinator options can override config at runtime:
   - `--prd`, `--coordinator-tool`
   - `--tool-priority`, `--max-parallel-per-tool-json`, `--tool-specializations-json`
