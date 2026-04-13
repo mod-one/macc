@@ -1,4 +1,5 @@
 use macc_core::coordinator::helpers::find_reusable_worktree_native;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -131,8 +132,9 @@ fn reused_stuck_worktree_with_commits_creates_abandonment_tag() {
     let ahead_head = run_git_capture(&worktree, &["rev-parse", "HEAD"]);
 
     let registry = abandoned_registry(task_id, &worktree);
+    let activity = HashMap::new();
     let (reused, prep_error) =
-        find_reusable_worktree_native(&repo, &registry, "codex", "main", 300)
+        find_reusable_worktree_native(&repo, &registry, "codex", "main", 300, &activity)
             .expect("reuse result");
 
     assert!(
@@ -165,8 +167,9 @@ fn reused_worktree_without_commits_does_not_create_abandonment_tag() {
     let worktree = make_pool_worktree(&repo, task_id);
 
     let registry = abandoned_registry(task_id, &worktree);
+    let activity = HashMap::new();
     let (reused, prep_error) =
-        find_reusable_worktree_native(&repo, &registry, "codex", "main", 300)
+        find_reusable_worktree_native(&repo, &registry, "codex", "main", 300, &activity)
             .expect("reuse result");
 
     assert!(
