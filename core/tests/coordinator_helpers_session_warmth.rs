@@ -1,4 +1,5 @@
 use macc_core::coordinator::helpers::find_reusable_worktree_native;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -129,8 +130,9 @@ fn warm_slot_is_preferred_over_cold_slot() {
     write_tool_sessions(&repo, "codex", &wt2, "sid-warm", &fresh);
 
     let registry = serde_json::json!({ "tasks": [] });
+    let activity = HashMap::new();
     let (reused, prep_error) =
-        find_reusable_worktree_native(&repo, &registry, "codex", "main", 300)
+        find_reusable_worktree_native(&repo, &registry, "codex", "main", 300, &activity)
             .expect("reuse result");
 
     assert!(
@@ -154,8 +156,9 @@ fn expired_session_is_treated_as_cold() {
     write_tool_sessions(&repo, "codex", &wt2, "sid-expired", &expired);
 
     let registry = serde_json::json!({ "tasks": [] });
+    let activity = HashMap::new();
     let (reused, prep_error) =
-        find_reusable_worktree_native(&repo, &registry, "codex", "main", 300)
+        find_reusable_worktree_native(&repo, &registry, "codex", "main", 300, &activity)
             .expect("reuse result");
 
     assert!(
@@ -172,9 +175,10 @@ fn no_sessions_file_falls_back_to_default_slot_order() {
     let wt1 = add_pool_worktree(&repo, "worker-01", "L4-SES-NOSESS-001");
     let _wt2 = add_pool_worktree(&repo, "worker-02", "L4-SES-NOSESS-002");
     let registry = serde_json::json!({ "tasks": [] });
+    let activity = HashMap::new();
 
     let (reused, prep_error) =
-        find_reusable_worktree_native(&repo, &registry, "codex", "main", 300)
+        find_reusable_worktree_native(&repo, &registry, "codex", "main", 300, &activity)
             .expect("reuse result");
 
     assert!(
@@ -183,4 +187,66 @@ fn no_sessions_file_falls_back_to_default_slot_order() {
     );
     let (picked, _, _, _, _) = reused.expect("expected reusable worktree");
     assert_eq!(picked, wt1, "without sessions, selection should fallback");
+}
+
+#[test]
+fn recent_activity_breaks_tie_for_cold_slots() {
+    let (repo, _base) = make_clone_with_origin();
+    let wt1 = add_pool_worktree(&repo, "worker-01", "L4-SES-RECENT-001");
+    let wt2 = add_pool_worktree(&repo, "worker-02", "L4-SES-RECENT-002");
+    let now_epoch = chrono::Utc::now().timestamp();
+    let mut activity = HashMap::new();
+    activity.insert(wt2.to_string_lossy().to_string(), now_epoch - 60);
+    let registry = serde_json::json!({ "tasks": [] });
+
+    let (reused, prep_error) =
+        find_reusable_worktree_native(&repo, &registry, "codex", "main", 300, &activity)
+            .expect("reuse result");
+
+    assert!(
+        prep_error.is_none(),
+        "unexpected prep error: {prep_error:?}"
+    );
+    let (picked, _, _, _, _) = reused.expect("expected reusable worktree");
+    assert_eq!(picked, wt2, "recently active slot should be preferred");
+    assert_ne!(picked, wt1);
+}
+
+#[test]
+fn activity_ttl_boundary_recent_inclusive_then_stale() {
+    let (repo, _base) = make_clone_with_origin();
+    let wt1 = add_pool_worktree(&repo, "worker-01", "L4-SES-TTL-001");
+    let wt2 = add_pool_worktree(&repo, "worker-02", "L4-SES-TTL-002");
+    let registry = serde_json::json!({ "tasks": [] });
+    let now_epoch = chrono::Utc::now().timestamp();
+
+    let mut at_boundary = HashMap::new();
+    at_boundary.insert(wt2.to_string_lossy().to_string(), now_epoch - 300);
+    let (reused_boundary, prep_error_boundary) =
+        find_reusable_worktree_native(&repo, &registry, "codex", "main", 300, &at_boundary)
+            .expect("reuse result boundary");
+    assert!(
+        prep_error_boundary.is_none(),
+        "unexpected prep error: {prep_error_boundary:?}"
+    );
+    let (picked_boundary, _, _, _, _) = reused_boundary.expect("expected reusable boundary");
+    assert_eq!(
+        picked_boundary, wt2,
+        "ttl boundary should still count as recent"
+    );
+
+    let mut stale = HashMap::new();
+    stale.insert(wt2.to_string_lossy().to_string(), now_epoch - 301);
+    let (reused_stale, prep_error_stale) =
+        find_reusable_worktree_native(&repo, &registry, "codex", "main", 300, &stale)
+            .expect("reuse result stale");
+    assert!(
+        prep_error_stale.is_none(),
+        "unexpected prep error: {prep_error_stale:?}"
+    );
+    let (picked_stale, _, _, _, _) = reused_stale.expect("expected reusable stale");
+    assert_eq!(
+        picked_stale, wt1,
+        "stale slot should not get recency preference"
+    );
 }

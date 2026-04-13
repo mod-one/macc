@@ -1,7 +1,8 @@
 use crate::coordinator::helpers::{
     append_coordinator_event, append_coordinator_event_with_severity, build_non_task_worker_slug,
-    count_pool_worktrees, find_reusable_worktree_native, now_iso_coordinator,
-    recompute_resource_locks_from_tasks, set_registry_updated_at, write_worktree_prd_for_task,
+    count_pool_worktrees, find_reusable_worktree_native, is_worktree_activity_recent,
+    now_iso_coordinator, recompute_resource_locks_from_tasks, score_worktree_session_warmth,
+    set_registry_updated_at, write_worktree_prd_for_task,
 };
 use crate::coordinator::ipc::{ensure_performer_ipc_listener, read_performer_ipc_addr};
 use crate::coordinator::model::{PrdInput, Task, TaskRegistry};
@@ -1623,6 +1624,10 @@ pub async fn monitor_active_jobs_native(
                 let Some(job) = maybe_job else {
                     continue;
                 };
+                state.last_session_activity_at.insert(
+                    job.worktree_path.to_string_lossy().to_string(),
+                    chrono::Utc::now().timestamp(),
+                );
                 let mut registry = crate::coordinator::state::coordinator_state_registry_load(
                     repo_root,
                     &BTreeMap::new(),
@@ -2957,11 +2962,45 @@ pub async fn dispatch_ready_tasks_native(
             &selected.tool,
             &selected.base_branch,
             session_cache_ttl_seconds,
+            &state.last_session_activity_at,
         )?;
         let reuse_scan_elapsed_ms = reuse_scan_started.elapsed().as_millis();
 
         let (worktree_path, branch, last_commit) = if let Some(reused) = reusable {
             let (path, branch, last_commit, skipped_reset, dirty_before) = reused;
+            let warm_by_session = matches!(
+                score_worktree_session_warmth(
+                    repo_root,
+                    &path,
+                    &selected.tool,
+                    session_cache_ttl_seconds
+                ),
+                crate::coordinator::helpers::SessionWarmth::Warm(_)
+            );
+            let warm_by_activity = is_worktree_activity_recent(
+                &state.last_session_activity_at,
+                &path,
+                session_cache_ttl_seconds,
+            );
+            if warm_by_session || warm_by_activity {
+                let warm_msg = format!(
+                    "warm_slot_reuse task={} tool={} path={} warm_session={} warm_recent_activity={}",
+                    selected.id,
+                    selected.tool,
+                    path.display(),
+                    warm_by_session,
+                    warm_by_activity
+                );
+                let _ = append_coordinator_event_with_severity(
+                    repo_root,
+                    "warm_slot_reuse",
+                    &selected.id,
+                    "dev",
+                    "info",
+                    &warm_msg,
+                    "info",
+                );
+            }
             let sanitize_msg = format!(
                 "sanitize done task={} mode=reused path={} duration_ms={} dirty_before={} skipped_reset={}",
                 selected.id,

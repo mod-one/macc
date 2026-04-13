@@ -2,7 +2,7 @@ use crate::coordinator::model::{PrdInput, TaskRegistry};
 use crate::coordinator::runtime as coordinator_runtime;
 use crate::coordinator_storage::append_event_sqlite;
 use crate::{MaccError, Result};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 pub fn now_iso_coordinator() -> String {
@@ -67,6 +67,21 @@ impl SessionWarmth {
         match self {
             SessionWarmth::Warm(age_secs) => (0, age_secs),
             SessionWarmth::Cold => (1, u64::MAX),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SlotActivityRecency {
+    Recent(u64),
+    Stale,
+}
+
+impl SlotActivityRecency {
+    fn sort_key(self) -> (u8, u64) {
+        match self {
+            SlotActivityRecency::Recent(age_secs) => (0, age_secs),
+            SlotActivityRecency::Stale => (1, u64::MAX),
         }
     }
 }
@@ -163,6 +178,50 @@ pub fn score_worktree_session_warmth(
         tool_id,
         ttl_seconds,
         now_epoch,
+    )
+}
+
+fn score_worktree_activity_recency_from_state(
+    last_session_activity_at: &HashMap<String, i64>,
+    worktree_path: &Path,
+    ttl_seconds: u64,
+    now_epoch: i64,
+) -> SlotActivityRecency {
+    let key_plain = worktree_path.to_string_lossy().to_string();
+    let key_canon = std::fs::canonicalize(worktree_path)
+        .ok()
+        .map(|p| p.to_string_lossy().to_string());
+    let updated_epoch = std::iter::once(key_plain.as_str())
+        .chain(key_canon.as_deref())
+        .find_map(|key| last_session_activity_at.get(key).copied());
+    let Some(updated_epoch) = updated_epoch else {
+        return SlotActivityRecency::Stale;
+    };
+    if updated_epoch > now_epoch {
+        return SlotActivityRecency::Recent(0);
+    }
+    let age_secs = now_epoch.saturating_sub(updated_epoch) as u64;
+    if age_secs <= ttl_seconds {
+        SlotActivityRecency::Recent(age_secs)
+    } else {
+        SlotActivityRecency::Stale
+    }
+}
+
+pub fn is_worktree_activity_recent(
+    last_session_activity_at: &HashMap<String, i64>,
+    worktree_path: &Path,
+    ttl_seconds: u64,
+) -> bool {
+    let now_epoch = chrono::Utc::now().timestamp();
+    matches!(
+        score_worktree_activity_recency_from_state(
+            last_session_activity_at,
+            worktree_path,
+            ttl_seconds,
+            now_epoch
+        ),
+        SlotActivityRecency::Recent(_)
     )
 }
 
@@ -413,6 +472,7 @@ pub fn find_reusable_worktree_native(
     tool: &str,
     base_branch: &str,
     session_cache_ttl_seconds: u64,
+    last_session_activity_at: &HashMap<String, i64>,
 ) -> Result<(
     Option<ReusableWorktree>,
     Option<ReusableWorktreePrepareError>,
@@ -434,16 +494,23 @@ pub fn find_reusable_worktree_native(
                 session_cache_ttl_seconds,
                 now_epoch,
             );
-            (idx, entry, warmth)
+            let recency = score_worktree_activity_recency_from_state(
+                last_session_activity_at,
+                &entry.path,
+                session_cache_ttl_seconds,
+                now_epoch,
+            );
+            (idx, entry, warmth, recency)
         })
         .collect::<Vec<_>>();
     ranked_entries.sort_by(|a, b| {
         a.2.sort_key()
             .cmp(&b.2.sort_key())
+            .then_with(|| a.3.sort_key().cmp(&b.3.sort_key()))
             .then_with(|| a.0.cmp(&b.0))
     });
     let mut last_prepare_error: Option<(String, String)> = None;
-    for (_, entry, _) in ranked_entries {
+    for (_, entry, _, _) in ranked_entries {
         let key = entry.path.to_string_lossy().to_string();
         if active_paths.contains(&key) {
             continue;
@@ -643,8 +710,12 @@ pub fn find_reusable_worktree_native(
 
 #[cfg(test)]
 mod tests {
-    use super::{score_worktree_session_warmth_from_state, SessionWarmth};
+    use super::{
+        score_worktree_activity_recency_from_state, score_worktree_session_warmth_from_state,
+        SessionWarmth, SlotActivityRecency,
+    };
     use serde_json::json;
+    use std::collections::HashMap;
     use std::path::Path;
 
     #[test]
@@ -731,6 +802,32 @@ mod tests {
             1_744_505_100,
         );
         assert_eq!(warmth, SessionWarmth::Cold);
+    }
+
+    #[test]
+    fn recent_activity_scored_within_ttl() {
+        let mut activity = HashMap::new();
+        activity.insert("/tmp/wt-1".to_string(), 1_744_505_100);
+        let recency = score_worktree_activity_recency_from_state(
+            &activity,
+            Path::new("/tmp/wt-1"),
+            300,
+            1_744_505_400,
+        );
+        assert_eq!(recency, SlotActivityRecency::Recent(300));
+    }
+
+    #[test]
+    fn stale_activity_scored_outside_ttl() {
+        let mut activity = HashMap::new();
+        activity.insert("/tmp/wt-1".to_string(), 1_744_505_100);
+        let recency = score_worktree_activity_recency_from_state(
+            &activity,
+            Path::new("/tmp/wt-1"),
+            300,
+            1_744_505_401,
+        );
+        assert_eq!(recency, SlotActivityRecency::Stale);
     }
 }
 

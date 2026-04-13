@@ -215,6 +215,9 @@ pub struct CoordinatorRunState {
     pub last_priority_zero_dispatch_block_task_id: Option<String>,
     pub dispatched_total_run: usize,
     pub dispatch_limit_event_emitted: bool,
+    /// Last performer completion activity per worktree slot path (unix epoch
+    /// seconds). Used as a dispatch preference signal for warm cache reuse.
+    pub last_session_activity_at: HashMap<String, i64>,
     pub performer_ipc_addr: Option<String>,
     pub performer_ipc_listener_started: bool,
     pub performer_ipc_listener_alive: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -261,6 +264,7 @@ impl CoordinatorRunState {
             last_priority_zero_dispatch_block_task_id: None,
             dispatched_total_run: 0,
             dispatch_limit_event_emitted: false,
+            last_session_activity_at: HashMap::new(),
             performer_ipc_addr: None,
             performer_ipc_listener_started: false,
             performer_ipc_listener_alive: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
