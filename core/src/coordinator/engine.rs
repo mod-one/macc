@@ -804,6 +804,69 @@ fn capture_last_assignment_before_clear(task: &mut Task) {
     }
 }
 
+fn git_path_for(worktree_path: &Path, relative_path: &str) -> Option<PathBuf> {
+    let output = crate::git::run_git_output_mapped(
+        worktree_path,
+        &["rev-parse", "--git-path", relative_path],
+        "resolve git path",
+    )
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let resolved = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if resolved.is_empty() {
+        return None;
+    }
+    let git_path = PathBuf::from(resolved);
+    Some(if git_path.is_absolute() {
+        git_path
+    } else {
+        worktree_path.join(git_path)
+    })
+}
+
+pub fn is_worktree_healthy(worktree_path: &Path) -> bool {
+    if !worktree_path.exists() || !worktree_path.is_dir() {
+        return false;
+    }
+
+    let inside_worktree = crate::git::run_git_output_mapped(
+        worktree_path,
+        &["rev-parse", "--is-inside-work-tree"],
+        "check git worktree",
+    )
+    .ok()
+    .map(|output| {
+        output.status.success()
+            && String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .eq_ignore_ascii_case("true")
+    })
+    .unwrap_or(false);
+    if !inside_worktree {
+        return false;
+    }
+
+    // Any lock file indicates concurrent git mutation; avoid reusing this slot.
+    let has_lock = ["index.lock", "HEAD.lock", "packed-refs.lock"]
+        .iter()
+        .any(|path| git_path_for(worktree_path, path).is_some_and(|p| p.exists()));
+    if has_lock {
+        return false;
+    }
+
+    // Active merge/rebase state is unsafe for a retry-on-same-worktree run.
+    let has_rebase_or_merge = ["MERGE_HEAD", "rebase-apply", "rebase-merge"]
+        .iter()
+        .any(|path| git_path_for(worktree_path, path).is_some_and(|p| p.exists()));
+    if has_rebase_or_merge {
+        return false;
+    }
+
+    true
+}
+
 fn salvage_check_typed<FE>(
     task: &mut Task,
     repo_root: &Path,
@@ -897,12 +960,17 @@ fn apply_job_completion_typed(
     normalizer_registry: &NormalizerRegistry,
     now: &str,
 ) -> JobCompletionResult {
-    let has_commits_ahead_of_base = task
-        .worktree_path()
+    let worktree_path = task.worktree_path().map(str::to_string);
+    let has_commits_ahead_of_base = worktree_path
+        .as_deref()
         .map(|worktree_path| {
             let base_branch = task.base_branch("master");
             crate::git::has_commits_ahead(Path::new(worktree_path), &base_branch)
         })
+        .unwrap_or(false);
+    let is_healthy_worktree = worktree_path
+        .as_deref()
+        .map(|path| is_worktree_healthy(Path::new(path)))
         .unwrap_or(false);
     let completion_resolution = resolve_completion_authority(
         input.completion_kind,
@@ -1016,9 +1084,14 @@ fn apply_job_completion_typed(
             // can resume with cached context instead of cold-starting a new session.
             let preserved_session_id = task.session_id().map(|s| s.to_string());
             let preserved_session_tool = task.tool.clone();
+            let retain_worktree_for_retry = completion_kind == PerformerCompletionKind::ErrorWithChanges
+                && has_commits_ahead_of_base
+                && is_healthy_worktree;
             task.set_workflow_state(WorkflowState::Todo);
             capture_last_assignment_before_clear(task);
-            task.worktree = None;
+            if !retain_worktree_for_retry {
+                task.worktree = None;
+            }
             {
                 let runtime = task.ensure_runtime();
                 runtime.completion_kind = Some(completion_kind.as_str().to_string());
@@ -1135,9 +1208,14 @@ fn apply_job_completion_typed(
             } else {
                 PerformerCompletionKind::ErrorWithoutChanges
             };
+            let retain_worktree_for_retry = kind == PerformerCompletionKind::ErrorWithChanges
+                && has_commits_ahead_of_base
+                && is_healthy_worktree;
             task.set_workflow_state(WorkflowState::Todo);
             capture_last_assignment_before_clear(task);
-            task.worktree = None;
+            if !retain_worktree_for_retry {
+                task.worktree = None;
+            }
             {
                 let runtime = task.ensure_runtime();
                 runtime.completion_kind = Some(kind.as_str().to_string());
@@ -2954,15 +3032,17 @@ mod tests {
 
     #[test]
     fn error_with_changes_preserves_session_id_in_runtime() {
-        // When a task fails with error_with_changes and the worktree carries a
-        // session_id, the session must be saved into task_runtime so the next
-        // retry can resume with cached context rather than cold-starting.
+        // Healthy worktree + committed progress should keep the same worktree
+        // attached so the retry can continue from existing commits.
+        let repo = make_repo_with_commit_ahead("main");
+        let wt = repo.to_string_lossy().to_string();
         let mut task_val = json!({
             "id": "SES1",
             "state": "claimed",
             "tool": "claude",
             "worktree": {
-                "worktree_path": "/tmp/wt-ses1",
+                "worktree_path": wt,
+                "base_branch": "main",
                 "session_id": "claude-session-abc"
             },
             "task_runtime": { "status": "running", "pid": 42 }
@@ -2974,8 +3054,10 @@ mod tests {
             "2026-04-12T00:00:00Z",
         );
         assert_eq!(out.status_label, "error_with_changes");
-        // Worktree must be cleared.
-        assert!(task_val["worktree"].is_null());
+        assert_eq!(
+            task_val["worktree"]["worktree_path"],
+            repo.to_string_lossy().to_string()
+        );
         // Task reset to todo for retry.
         assert_eq!(task_val["state"], "todo");
         // Session preserved in runtime.
@@ -2984,6 +3066,7 @@ mod tests {
             "claude-session-abc"
         );
         assert_eq!(task_val["task_runtime"]["last_session_tool"], "claude");
+        let _ = fs::remove_dir_all(&repo);
     }
 
     #[test]
@@ -3005,6 +3088,7 @@ mod tests {
             &NormalizerRegistry::empty(),
             "2026-04-12T00:00:00Z",
         );
+        assert!(task_val["worktree"].is_null());
         assert_eq!(
             task_val["task_runtime"]["last_session_id"],
             "codex-session-xyz"
@@ -3039,6 +3123,80 @@ mod tests {
             "claude-session-prev"
         );
         assert_eq!(task_val["task_runtime"]["last_session_tool"], "claude");
+    }
+
+    #[test]
+    fn error_with_changes_unhealthy_worktree_is_cleared() {
+        let repo = make_repo_with_commit_ahead("main");
+        fs::write(repo.join(".git/index.lock"), "").expect("write index lock");
+        let mut task_val = json!({
+            "id": "SES4",
+            "state": "claimed",
+            "tool": "claude",
+            "worktree": {
+                "worktree_path": repo.to_string_lossy().to_string(),
+                "base_branch": "main",
+                "session_id": "claude-session-unhealthy"
+            },
+            "task_runtime": { "status": "running" }
+        });
+
+        apply_job_completion(
+            &mut task_val,
+            &make_error_completion_input(PerformerCompletionKind::ErrorWithChanges),
+            &NormalizerRegistry::empty(),
+            "2026-04-12T00:00:00Z",
+        );
+        assert!(task_val["worktree"].is_null());
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn error_with_changes_stdout_marker_preserves_healthy_worktree() {
+        let repo = make_repo_with_commit_ahead("main");
+        let mut task_val = json!({
+            "id": "SES5",
+            "state": "claimed",
+            "tool": "claude",
+            "worktree": {
+                "worktree_path": repo.to_string_lossy().to_string(),
+                "base_branch": "main"
+            },
+            "task_runtime": { "status": "running" }
+        });
+        let out = apply_job_completion(
+            &mut task_val,
+            &JobCompletionInput {
+                success: false,
+                attempt: 1,
+                max_attempts: 1,
+                timed_out: false,
+                phase_timeout_seconds: 300,
+                elapsed_seconds: 5,
+                status_text: "performer failed".to_string(),
+                completion_kind: None,
+                error_code: None,
+                error_origin: None,
+                error_message: None,
+                auto_retry_error_codes: Vec::new(),
+                auto_retry_max: 0,
+                backoff_base_seconds: 30,
+                backoff_max_seconds: 300,
+                normalizer_input: Some(NormalizerInput {
+                    exit_code: 1,
+                    stderr: String::new(),
+                    stdout: "MACC_TASK_RESULT: error_with_changes".to_string(),
+                }),
+            },
+            &NormalizerRegistry::empty(),
+            "2026-04-12T00:00:00Z",
+        );
+        assert_eq!(out.status_label, "error_with_changes");
+        assert_eq!(
+            task_val["worktree"]["worktree_path"],
+            repo.to_string_lossy().to_string()
+        );
+        let _ = fs::remove_dir_all(&repo);
     }
 
     #[test]
