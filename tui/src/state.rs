@@ -482,7 +482,7 @@ impl AppState {
             return;
         };
 
-        match macc_core::list_worktrees(&paths.root) {
+        match self.engine.list_worktrees(&paths.root) {
             Ok(entries) => {
                 let current = macc_core::current_worktree(&paths.root, &entries);
                 self.worktree_status = Some(WorktreeStatus {
@@ -1142,7 +1142,7 @@ impl AppState {
                 self.refresh_worktree_status();
                 self.refresh_coordinator_snapshot();
                 self.refresh_coordinator_events();
-                match macc_core::config::load_canonical_config(&paths.config_path) {
+                match self.engine.load_canonical_config(&paths) {
                     Ok(config) => {
                         self.config = Some(config.clone());
                         self.working_copy = Some(config);

@@ -19,7 +19,26 @@ use std::pin::Pin;
 type MonitorMergeJobsFuture<'a> =
     Pin<Box<dyn Future<Output = Result<Option<(String, String)>>> + 'a>>;
 
-/// The interface for UI (CLI/TUI) to interact with MACC core logic.
+/// Shared execution contract for all UI surfaces (CLI, TUI, and Web handlers).
+///
+/// Required methods (must be implemented by every engine):
+/// - `list_tools`
+/// - `doctor`
+/// - `plan`
+/// - `plan_operations`
+/// - `apply`
+/// - `builtin_skills`
+/// - `builtin_agents`
+///
+/// Default methods:
+/// - Every other method on this trait has a default implementation that delegates
+///   to `macc_core` service/domain modules.
+///
+/// UI contract:
+/// - UI layers should call `Engine` methods for core operations whenever an
+///   equivalent method exists, rather than calling core internals directly.
+/// - `Engine` implementations used by tests may stub behavior, but stubs should
+///   be explicit and limited to the behavior under test.
 pub trait Engine {
     fn list_tools(&self, paths: &ProjectPaths) -> (Vec<ToolDescriptor>, Vec<ToolDiagnostic>);
     fn doctor(&self, paths: &ProjectPaths) -> Vec<ToolCheck>;
@@ -1673,6 +1692,47 @@ fields: []
         assert!(descriptors.iter().any(|d| d.id == "my-tool"));
 
         fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn engine_trait_method_count_guard() {
+        const EXPECTED_METHOD_COUNT: usize = 110;
+        let source = include_str!("engine.rs");
+        let trait_start = source
+            .find("pub trait Engine {")
+            .expect("Engine trait declaration must exist");
+        let trait_source = &source[trait_start..];
+        let body_start = trait_source.find('{').expect("Engine trait body must open");
+
+        let mut depth = 0usize;
+        let mut body_end = None;
+        for (idx, ch) in trait_source[body_start..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        body_end = Some(body_start + idx);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let body_end = body_end.expect("Engine trait body must close");
+        let body = &trait_source[(body_start + 1)..body_end];
+
+        let method_count = body
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim_start();
+                trimmed.starts_with("fn ")
+            })
+            .count();
+        assert_eq!(
+            method_count, EXPECTED_METHOD_COUNT,
+            "Engine trait method surface changed; update docs/guard intentionally"
+        );
     }
 
     #[test]
