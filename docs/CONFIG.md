@@ -177,6 +177,7 @@ Controls coordinator runtime defaults for `.macc/automation/coordinator.sh`.
 - `sync_unmerged_branches` (bool, default `true`): scan unmerged branches during sync to recover partially-complete work.
 - `salvage_merge_timeout_seconds` (u64, default `120`): timeout in seconds for the salvage-merge operation.
 - `max_salvage_attempts_per_task` (u32, default `1`): maximum number of salvage attempts allowed per task before giving up.
+- `session_cache_ttl_seconds` (u64, default `300`): warm-session TTL used by dispatch preference logic; recent activity inside this window gets higher reuse priority.
 
 These values are used by `macc coordinator` as defaults and can be overridden via CLI flags or environment variables.
 
