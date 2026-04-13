@@ -114,6 +114,13 @@ pub struct CoordinatorMergeEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoordinatorRuntimeEventKind {
     Heartbeat,
+    TaskDispatched {
+        session_id: Option<String>,
+    },
+    TaskCompleted {
+        status: String,
+        session_id: Option<String>,
+    },
     Progress {
         status: String,
         phase: Option<String>,
@@ -360,6 +367,42 @@ mod tests {
     }
 
     #[test]
+    fn task_dispatched_event_roundtrip_with_session_id() {
+        let record = make_record(
+            "task_dispatched",
+            serde_json::json!({
+                "session_id": "tool-session-123"
+            }),
+        );
+        let ev = raw_event_to_runtime_event(&record).expect("should parse");
+        assert_eq!(
+            ev.kind,
+            CoordinatorRuntimeEventKind::TaskDispatched {
+                session_id: Some("tool-session-123".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn task_completed_event_roundtrip_with_session_id() {
+        let mut record = make_record(
+            "task_completed",
+            serde_json::json!({
+                "session_id": "tool-session-456"
+            }),
+        );
+        record.status = "success_without_changes".to_string();
+        let ev = raw_event_to_runtime_event(&record).expect("should parse");
+        assert_eq!(
+            ev.kind,
+            CoordinatorRuntimeEventKind::TaskCompleted {
+                status: "phase_done".to_string(),
+                session_id: Some("tool-session-456".to_string()),
+            }
+        );
+    }
+
+    #[test]
     fn salvage_attempted_event_roundtrip() {
         let record = make_record(
             "salvage_attempted",
@@ -584,6 +627,21 @@ pub fn raw_event_to_runtime_event(
         .to_string();
     let kind = match event_type {
         "heartbeat" => CoordinatorRuntimeEventKind::Heartbeat,
+        "task_dispatched" => CoordinatorRuntimeEventKind::TaskDispatched {
+            session_id: event
+                .payload
+                .get("session_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+        },
+        "task_completed" => CoordinatorRuntimeEventKind::TaskCompleted {
+            status: runtime_status,
+            session_id: event
+                .payload
+                .get("session_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+        },
         "progress" => CoordinatorRuntimeEventKind::Progress {
             status: runtime_status,
             phase: event_phase,

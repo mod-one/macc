@@ -400,10 +400,7 @@ pub trait EventConsumer: Send + Sync {
     ///
     /// - `since_rfc3339`: RFC-3339 string; include only events at or after this timestamp.
     /// - Returns raw JSON strings (one per event line) in arrival order.
-    async fn events_since(
-        &self,
-        since_rfc3339: &str,
-    ) -> Result<Vec<String>, EventConsumerError>;
+    async fn events_since(&self, since_rfc3339: &str) -> Result<Vec<String>, EventConsumerError>;
 }
 
 /// Errors from `EventConsumer` operations.
@@ -504,10 +501,7 @@ mod tests {
     #[test]
     fn health_check_is_running_semantics() {
         assert!(HealthCheckResult::Healthy.is_running());
-        assert!(HealthCheckResult::Degraded {
-            reasons: vec![]
-        }
-        .is_running());
+        assert!(HealthCheckResult::Degraded { reasons: vec![] }.is_running());
         assert!(!HealthCheckResult::Unresponsive.is_running());
         assert!(!HealthCheckResult::Crashed { exit_code: None }.is_running());
     }
@@ -516,7 +510,10 @@ mod tests {
     fn health_check_requires_restart_semantics() {
         assert!(!HealthCheckResult::Healthy.requires_restart());
         assert!(HealthCheckResult::Unresponsive.requires_restart());
-        assert!(HealthCheckResult::Crashed { exit_code: Some(137) }.requires_restart());
+        assert!(HealthCheckResult::Crashed {
+            exit_code: Some(137)
+        }
+        .requires_restart());
     }
 
     #[test]

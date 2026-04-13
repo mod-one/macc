@@ -82,6 +82,7 @@ pub struct DispatchClaimUpdate {
     pub base_branch: String,
     pub last_commit: String,
     pub session_id: String,
+    pub active_session_id: Option<String>,
     pub pid: Option<i64>,
     pub phase: String,
     pub now: String,
@@ -582,6 +583,9 @@ fn apply_dispatch_claim_typed(task: &mut Task, update: &DispatchClaimUpdate) {
     runtime.set_status(RuntimeStatus::Running);
     runtime.current_phase = Some(update.phase.clone());
     runtime.started_at = Some(update.now.clone());
+    if let Some(active_session_id) = update.active_session_id.as_ref() {
+        runtime.active_session_id = Some(active_session_id.clone());
+    }
     runtime.pid = update.pid;
     task.touch_state_changed(&update.now);
 }
@@ -801,6 +805,28 @@ fn capture_last_assignment_before_clear(task: &mut Task) {
     }
     if let Some(branch) = last_branch {
         runtime.last_branch = Some(branch);
+    }
+}
+
+fn preserve_active_session_chain(task: &mut Task) {
+    let tool = task.tool.clone();
+    let active_session = task
+        .task_runtime
+        .active_session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            task.session_id()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        });
+    if let Some(session_id) = active_session {
+        let runtime = task.ensure_runtime();
+        runtime.last_session_id = Some(session_id);
+        runtime.last_session_tool = tool;
     }
 }
 
@@ -1080,14 +1106,14 @@ fn apply_job_completion_typed(
         // (sandbox failure, env issue, etc.). Reset to Todo so the
         // coordinator can retry with the same or a different tool.
         if completion_kind.is_error() {
-            // Capture session info before clearing worktree and tool so retries
-            // can resume with cached context instead of cold-starting a new session.
-            let preserved_session_id = task.session_id().map(|s| s.to_string());
-            let preserved_session_tool = task.tool.clone();
-            let retain_worktree_for_retry = completion_kind == PerformerCompletionKind::ErrorWithChanges
+            let retain_worktree_for_retry = completion_kind
+                == PerformerCompletionKind::ErrorWithChanges
                 && has_commits_ahead_of_base
                 && is_healthy_worktree;
             task.set_workflow_state(WorkflowState::Todo);
+            // Capture session info before clearing worktree and tool so retries
+            // can resume with cached context instead of cold-starting a new session.
+            preserve_active_session_chain(task);
             capture_last_assignment_before_clear(task);
             if !retain_worktree_for_retry {
                 task.worktree = None;
@@ -1099,10 +1125,6 @@ fn apply_job_completion_typed(
                 runtime.current_phase = None;
                 runtime.pid = None;
                 runtime.last_error = Some(input.status_text.clone());
-                if preserved_session_id.is_some() {
-                    runtime.last_session_id = preserved_session_id;
-                    runtime.last_session_tool = preserved_session_tool;
-                }
             }
             task.tool = None;
             task.assignee = None;
@@ -1212,6 +1234,7 @@ fn apply_job_completion_typed(
                 && has_commits_ahead_of_base
                 && is_healthy_worktree;
             task.set_workflow_state(WorkflowState::Todo);
+            preserve_active_session_chain(task);
             capture_last_assignment_before_clear(task);
             if !retain_worktree_for_retry {
                 task.worktree = None;
@@ -2511,6 +2534,7 @@ mod tests {
             base_branch: "main".to_string(),
             last_commit: "abc".to_string(),
             session_id: "s-1".to_string(),
+            active_session_id: Some("tool-session-1".to_string()),
             pid: Some(123),
             phase: "dev".to_string(),
             now: "2026-02-20T00:00:00Z".to_string(),
@@ -2518,6 +2542,7 @@ mod tests {
         apply_dispatch_claim(&mut task, &update);
         assert_eq!(task["state"], "claimed");
         assert_eq!(task["task_runtime"]["status"], "running");
+        assert_eq!(task["task_runtime"]["active_session_id"], "tool-session-1");
         assert_eq!(task["task_runtime"]["pid"], 123);
     }
 
@@ -3067,6 +3092,34 @@ mod tests {
         );
         assert_eq!(task_val["task_runtime"]["last_session_tool"], "claude");
         let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn error_with_changes_prefers_active_session_chain_over_claim_session() {
+        let mut task_val = json!({
+            "id": "SES1B",
+            "state": "claimed",
+            "tool": "codex",
+            "worktree": {
+                "worktree_path": "/tmp/wt-ses1b",
+                "session_id": "coordinator-L4-SES-002-2026"
+            },
+            "task_runtime": {
+                "status": "running",
+                "active_session_id": "codex-session-real"
+            }
+        });
+        apply_job_completion(
+            &mut task_val,
+            &make_error_completion_input(PerformerCompletionKind::ErrorWithChanges),
+            &NormalizerRegistry::empty(),
+            "2026-04-12T00:00:00Z",
+        );
+        assert_eq!(
+            task_val["task_runtime"]["last_session_id"],
+            "codex-session-real"
+        );
+        assert_eq!(task_val["task_runtime"]["last_session_tool"], "codex");
     }
 
     #[test]

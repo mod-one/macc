@@ -876,6 +876,74 @@ fn read_session_id_from_state(
     None
 }
 
+fn task_active_session_id_from_registry(
+    registry: &serde_json::Value,
+    task_id: &str,
+) -> Option<String> {
+    let typed = TaskRegistry::from_value(registry).ok()?;
+    typed
+        .tasks
+        .into_iter()
+        .find(|task| task.id == task_id)
+        .and_then(|task| task.task_runtime.active_session_id)
+        .filter(|sid| !sid.is_empty())
+}
+
+fn refresh_task_active_session_id_in_registry(
+    registry: &mut serde_json::Value,
+    repo_root: &Path,
+    task_id: &str,
+    tool_id: &str,
+    worktree_path: &Path,
+) -> Result<Option<String>> {
+    let Some(session_id) = read_session_id_from_state(repo_root, tool_id, worktree_path) else {
+        return Ok(None);
+    };
+    let mut typed = TaskRegistry::from_value(registry)?;
+    if let Some(task) = typed.find_task_mut(task_id) {
+        let runtime = task.ensure_runtime();
+        runtime.active_session_id = Some(session_id.clone());
+        runtime.last_session_id = Some(session_id.clone());
+        runtime.last_session_tool = Some(tool_id.to_string());
+    }
+    *registry = typed.to_value()?;
+    Ok(Some(session_id))
+}
+
+fn append_task_lifecycle_event_with_session(
+    repo_root: &Path,
+    event_type: &str,
+    task_id: &str,
+    phase: &str,
+    status: &str,
+    message: &str,
+    session_id: Option<&str>,
+) -> Result<()> {
+    let run_id = crate::coordinator::helpers::ensure_coordinator_run_id();
+    let now = now_iso_coordinator();
+    let seq = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default() as u64;
+    let payload = serde_json::json!({
+        "schema_version":"1",
+        "event_id": format!("evt-{}-{}-{}", event_type, task_id, seq),
+        "run_id": run_id,
+        "seq": seq,
+        "ts": now,
+        "source": "coordinator:native",
+        "task_id": task_id,
+        "type": event_type,
+        "phase": phase,
+        "status": status,
+        "severity": if status.eq_ignore_ascii_case("failed") || status.eq_ignore_ascii_case("error") { "blocking" } else { "info" },
+        "payload": {
+            "message": message,
+            "session_id": session_id
+        }
+    });
+    let project_paths = crate::ProjectPaths::from_root(repo_root);
+    let _ = crate::coordinator_storage::append_event_sqlite(&project_paths, &payload)?;
+    Ok(())
+}
+
 fn append_performer_log(worktree: &Path, task_id: &str, line: &str) {
     let safe: String = task_id
         .chars()
@@ -1615,6 +1683,15 @@ pub async fn monitor_active_jobs_native(
                         evt.task_id, completion.status_label, completion.should_retry
                     ));
                 }
+                let refreshed_session_id = refresh_task_active_session_id_in_registry(
+                    &mut registry,
+                    repo_root,
+                    &evt.task_id,
+                    &job.tool,
+                    &job.worktree_path,
+                )?;
+                let active_session_id = refreshed_session_id
+                    .or_else(|| task_active_session_id_from_registry(&registry, &evt.task_id));
                 recompute_resource_locks_from_tasks(&mut registry);
                 set_registry_updated_at(&mut registry);
                 crate::coordinator::state::coordinator_state_registry_save(
@@ -1622,6 +1699,19 @@ pub async fn monitor_active_jobs_native(
                     &BTreeMap::new(),
                     &registry,
                 )?;
+                let completion_event_message = format!(
+                    "task {} completed status={} attempt={} detail={}",
+                    evt.task_id, completion.status_label, job.attempt, evt.status_text
+                );
+                let _ = append_task_lifecycle_event_with_session(
+                    repo_root,
+                    "task_completed",
+                    &evt.task_id,
+                    "dev",
+                    completion.status_label,
+                    &completion_event_message,
+                    active_session_id.as_deref(),
+                );
                 aggregate_performer_logs_after_completion(repo_root, &evt.task_id, logger);
                 // RL-ROUTE-005 / RL-THROTTLE-006: maintain throttle registry and
                 // adjust effective concurrency based on rate-limit signals.
@@ -1907,22 +1997,20 @@ fn apply_runtime_event_bus_updates(
                 if let Some(log) = logger {
                     let event_type = match &event.kind {
                         CoordinatorRuntimeEventKind::Heartbeat => "heartbeat",
+                        CoordinatorRuntimeEventKind::TaskDispatched { .. } => "task_dispatched",
+                        CoordinatorRuntimeEventKind::TaskCompleted { .. } => "task_completed",
                         CoordinatorRuntimeEventKind::Progress { .. } => "progress",
                         CoordinatorRuntimeEventKind::PhaseResult { .. } => "phase_result",
                         CoordinatorRuntimeEventKind::Failed { .. } => "failed",
                         // L4-EVENTS-001: reliability observability events are
                         // informational; no runtime state update is needed.
-                        CoordinatorRuntimeEventKind::SalvageAttempted { .. } => {
-                            "salvage_attempted"
-                        }
+                        CoordinatorRuntimeEventKind::SalvageAttempted { .. } => "salvage_attempted",
                         CoordinatorRuntimeEventKind::SalvageMerged { .. } => "salvage_merged",
                         CoordinatorRuntimeEventKind::SalvageFailed { .. } => "salvage_failed",
                         CoordinatorRuntimeEventKind::MergeGateChecked { .. } => {
                             "merge_gate_checked"
                         }
-                        CoordinatorRuntimeEventKind::MergeGateMerged { .. } => {
-                            "merge_gate_merged"
-                        }
+                        CoordinatorRuntimeEventKind::MergeGateMerged { .. } => "merge_gate_merged",
                         CoordinatorRuntimeEventKind::BranchTaggedAbandoned { .. } => {
                             "branch_tagged_abandoned"
                         }
@@ -1945,6 +2033,8 @@ fn apply_runtime_event_bus_updates(
                 update.last_heartbeat = Some(event.ts.clone());
                 match event.kind {
                     CoordinatorRuntimeEventKind::Heartbeat => {}
+                    CoordinatorRuntimeEventKind::TaskDispatched { .. }
+                    | CoordinatorRuntimeEventKind::TaskCompleted { .. } => {}
                     CoordinatorRuntimeEventKind::Progress {
                         status,
                         phase,
@@ -3052,6 +3142,8 @@ pub async fn dispatch_ready_tasks_native(
             }
             (created.path, created.branch, last_commit)
         };
+        let active_session_id =
+            read_session_id_from_state(repo_root, &selected.tool, &worktree_path);
         let dispatch_now = now_iso_coordinator();
         let dispatch_session_id = format!("coordinator-{}-{}", selected.id, dispatch_now);
         let claim_update = coordinator_engine::DispatchClaimUpdate {
@@ -3062,6 +3154,7 @@ pub async fn dispatch_ready_tasks_native(
             base_branch: selected.base_branch.clone(),
             last_commit: last_commit.clone(),
             session_id: dispatch_session_id.clone(),
+            active_session_id: active_session_id.clone(),
             pid: None,
             phase: "dev".to_string(),
             now: dispatch_now.clone(),
@@ -3480,6 +3573,23 @@ pub async fn dispatch_ready_tasks_native(
                     .unwrap_or_else(|| "unknown".to_string())
             ));
         }
+        let dispatch_event_message = format!(
+            "task {} dispatched tool={} worktree={} pid={}",
+            selected.id,
+            selected.tool,
+            worktree_path.display(),
+            pid.map(|v| v.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        );
+        let _ = append_task_lifecycle_event_with_session(
+            repo_root,
+            "task_dispatched",
+            &selected.id,
+            "dev",
+            "started",
+            &dispatch_event_message,
+            active_session_id.as_deref(),
+        );
 
         state.active_jobs.insert(
             selected.id.clone(),
@@ -3540,7 +3650,10 @@ pub async fn dispatch_ready_tasks_native(
 
 #[cfg(test)]
 mod tests {
-    use super::{merge_gate_check, should_emit_priority_zero_dispatch_skip, MergeGateResult};
+    use super::{
+        merge_gate_check, refresh_task_active_session_id_in_registry,
+        should_emit_priority_zero_dispatch_skip, MergeGateResult,
+    };
     use crate::coordinator::runtime::CoordinatorRunState;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -3669,6 +3782,67 @@ mod tests {
         assert!(
             String::from_utf8_lossy(&status.stdout).trim().is_empty(),
             "merge gate should abort conflict and leave clean tree"
+        );
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn refresh_task_active_session_id_updates_runtime_from_state_file() {
+        let repo = make_test_repo();
+        let worktree = repo.join(".macc/worktree/worker-01");
+        fs::create_dir_all(&worktree).expect("create worktree directory");
+        let state_dir = repo.join(".macc/state");
+        fs::create_dir_all(&state_dir).expect("create state directory");
+
+        let mut sessions = serde_json::Map::new();
+        sessions.insert(
+            worktree.to_string_lossy().to_string(),
+            serde_json::json!({ "session_id": "codex-session-new" }),
+        );
+        let state_payload = serde_json::json!({
+            "tools": {
+                "codex": {
+                    "sessions": sessions
+                }
+            }
+        });
+        fs::write(
+            state_dir.join("tool-sessions.json"),
+            serde_json::to_string_pretty(&state_payload).expect("serialize state payload"),
+        )
+        .expect("write tool-sessions.json");
+
+        let mut registry = serde_json::json!({
+            "tasks": [{
+                "id": "L4-SES-002",
+                "state": "claimed",
+                "task_runtime": {
+                    "active_session_id": "codex-session-old",
+                    "last_session_id": "codex-session-old",
+                    "last_session_tool": "codex"
+                }
+            }]
+        });
+        let refreshed = refresh_task_active_session_id_in_registry(
+            &mut registry,
+            &repo,
+            "L4-SES-002",
+            "codex",
+            &worktree,
+        )
+        .expect("refresh session id");
+        assert_eq!(refreshed.as_deref(), Some("codex-session-new"));
+        assert_eq!(
+            registry["tasks"][0]["task_runtime"]["active_session_id"],
+            "codex-session-new"
+        );
+        assert_eq!(
+            registry["tasks"][0]["task_runtime"]["last_session_id"],
+            "codex-session-new"
+        );
+        assert_eq!(
+            registry["tasks"][0]["task_runtime"]["last_session_tool"],
+            "codex"
         );
         let _ = fs::remove_dir_all(&repo);
     }
