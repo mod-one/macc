@@ -176,7 +176,6 @@ pub struct CoordinatorConfig {
     pub max_review_cycles: Option<usize>,
 
     // ── Reliability feature toggles ──────────────────────────────────────────
-
     /// Attempt to salvage partial work before retrying a failed task.
     /// Default: true.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
@@ -204,12 +203,18 @@ pub struct CoordinatorConfig {
 
     /// Timeout in seconds for the salvage-merge operation.
     /// Default: 120.
-    #[serde(default = "default_salvage_merge_timeout", skip_serializing_if = "is_default_salvage_merge_timeout")]
+    #[serde(
+        default = "default_salvage_merge_timeout",
+        skip_serializing_if = "is_default_salvage_merge_timeout"
+    )]
     pub salvage_merge_timeout_seconds: u64,
 
     /// Maximum number of salvage attempts allowed per task before giving up.
     /// Default: 1.
-    #[serde(default = "default_max_salvage_attempts", skip_serializing_if = "is_default_max_salvage_attempts")]
+    #[serde(
+        default = "default_max_salvage_attempts",
+        skip_serializing_if = "is_default_max_salvage_attempts"
+    )]
     pub max_salvage_attempts_per_task: u32,
 }
 
@@ -701,13 +706,34 @@ automation:
     #[test]
     fn test_coordinator_config_reliability_defaults() {
         let config = CoordinatorConfig::default();
-        assert!(config.salvage_before_retry, "salvage_before_retry should default to true");
-        assert!(config.retry_on_same_worktree, "retry_on_same_worktree should default to true");
-        assert!(config.merge_gate_on_dispatch, "merge_gate_on_dispatch should default to true");
-        assert!(config.tag_abandoned_branches, "tag_abandoned_branches should default to true");
-        assert!(config.sync_unmerged_branches, "sync_unmerged_branches should default to true");
-        assert_eq!(config.salvage_merge_timeout_seconds, 120, "salvage_merge_timeout_seconds should default to 120");
-        assert_eq!(config.max_salvage_attempts_per_task, 1, "max_salvage_attempts_per_task should default to 1");
+        assert!(
+            config.salvage_before_retry,
+            "salvage_before_retry should default to true"
+        );
+        assert!(
+            config.retry_on_same_worktree,
+            "retry_on_same_worktree should default to true"
+        );
+        assert!(
+            config.merge_gate_on_dispatch,
+            "merge_gate_on_dispatch should default to true"
+        );
+        assert!(
+            config.tag_abandoned_branches,
+            "tag_abandoned_branches should default to true"
+        );
+        assert!(
+            config.sync_unmerged_branches,
+            "sync_unmerged_branches should default to true"
+        );
+        assert_eq!(
+            config.salvage_merge_timeout_seconds, 120,
+            "salvage_merge_timeout_seconds should default to 120"
+        );
+        assert_eq!(
+            config.max_salvage_attempts_per_task, 1,
+            "max_salvage_attempts_per_task should default to 1"
+        );
     }
 
     #[test]
