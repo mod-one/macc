@@ -25,6 +25,7 @@ use std::path::PathBuf;
 
 pub mod mode_a;
 pub mod mode_b;
+pub mod mode_c;
 
 // ── Configuration ────────────────────────────────────────────────────────────
 
@@ -255,6 +256,48 @@ pub enum SupervisorAction {
     RecoveryAttemptLimitReached {
         task_id: String,
         limit: u32,
+    },
+
+    // ── Mode C: coordinator crash recovery actions ────────────────────────
+
+    /// Task registry was scanned and orphaned tasks were found before restart.
+    RegistryScanned {
+        /// Total tasks in claimed/in_progress state at time of scan.
+        total_active: usize,
+        /// Tasks reset to todo because their performer process was not running.
+        orphaned_reset: usize,
+    },
+
+    /// A specific task was reset to todo during pre-restart cleanup.
+    OrphanedTaskReset {
+        task_id: String,
+        previous_state: String,
+    },
+
+    /// Session snapshot was saved before coordinator restart.
+    SessionSnapshotSaved {
+        snapshot_name: String,
+    },
+
+    /// Coordinator was restarted after a crash.
+    CoordinatorRestarted {
+        attempt: u32,
+        max_attempts: u32,
+    },
+
+    /// Post-restart health verification confirmed coordinator is running.
+    PostRestartHealthVerified {
+        healthy_checks: u32,
+    },
+
+    /// Maximum restart attempts exceeded; supervisor gave up.
+    MaxRestartsExceeded {
+        max_attempts: u32,
+    },
+
+    /// Crash recovery report was written to disk.
+    CrashRecoveryReportWritten {
+        report_path: String,
     },
 }
 
