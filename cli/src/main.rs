@@ -209,6 +209,11 @@ enum Commands {
         #[command(subcommand)]
         logs_command: LogsCommands,
     },
+    /// Supervisor watchdog controls
+    Supervisor {
+        #[command(subcommand)]
+        supervisor_command: SupervisorCommands,
+    },
     /// Run the project coordinator automation script
     #[command(trailing_var_arg = true)]
     Coordinator {
@@ -511,6 +516,22 @@ pub enum CatalogSubCommands {
         #[arg(long)]
         id: String,
     },
+}
+
+#[derive(Subcommand)]
+pub enum SupervisorCommands {
+    /// Start the supervisor watchdog
+    Start {
+        /// Run in background as a daemon process
+        #[arg(long)]
+        daemon: bool,
+    },
+    /// Stop the supervisor watchdog
+    Stop,
+    /// Show supervisor and coordinator health
+    Status,
+    /// Show the latest supervisor report summary
+    Report,
 }
 
 #[derive(Subcommand)]
@@ -914,6 +935,9 @@ fn run_with_engine_provider(
         }
         Some(Commands::Logs { logs_command }) => {
             commands::logs::LogsCommand::new(app.clone(), logs_command).run()
+        }
+        Some(Commands::Supervisor { supervisor_command }) => {
+            commands::supervisor::SupervisorCommand::new(app.clone(), supervisor_command).run()
         }
         Some(Commands::Coordinator {
             command_name,
@@ -3733,6 +3757,20 @@ fi
                 assert_eq!(assets, None);
             }
             other => panic!("unexpected command: {:?}", other.map(|_| "non-web")),
+        }
+    }
+
+    #[test]
+    fn test_supervisor_start_daemon_command_parsing() {
+        let cli = Cli::try_parse_from(["macc", "supervisor", "start", "--daemon"])
+            .expect("parse supervisor start command");
+
+        match cli.command {
+            Some(Commands::Supervisor { supervisor_command }) => match supervisor_command {
+                SupervisorCommands::Start { daemon } => assert!(daemon),
+                _ => panic!("unexpected supervisor subcommand"),
+            },
+            _ => panic!("unexpected command"),
         }
     }
 }

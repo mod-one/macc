@@ -77,6 +77,8 @@ pub struct AutomationConfig {
     pub ralph: Option<RalphConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub coordinator: Option<CoordinatorConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub supervisor: Option<crate::supervisor::SupervisorConfig>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
@@ -763,6 +765,43 @@ automation:
         assert!(!coordinator.sync_unmerged_branches);
         assert_eq!(coordinator.salvage_merge_timeout_seconds, 60);
         assert_eq!(coordinator.max_salvage_attempts_per_task, 3);
+
+        let reserialized = config.to_yaml().expect("Should serialize back to yaml");
+        let config2 =
+            CanonicalConfig::from_yaml(&reserialized).expect("Should parse reserialized yaml");
+        assert_eq!(config, config2);
+    }
+
+    #[test]
+    fn test_supervisor_automation_roundtrip() {
+        let yaml = r#"tools:
+  enabled: []
+automation:
+  supervisor:
+    watchdog_interval_seconds: 15
+    max_restart_attempts: 4
+    log_analysis_window_seconds: 120
+    report_output_path: .macc/log/supervisor/custom-report.json
+    events_log_path: .macc/log/coordinator/events.jsonl
+"#;
+
+        let config = CanonicalConfig::from_yaml(yaml).expect("Should parse supervisor config");
+        let supervisor = config
+            .automation
+            .supervisor
+            .as_ref()
+            .expect("supervisor config present");
+        assert_eq!(supervisor.watchdog_interval_seconds, 15);
+        assert_eq!(supervisor.max_restart_attempts, 4);
+        assert_eq!(supervisor.log_analysis_window_seconds, 120);
+        assert_eq!(
+            supervisor.report_output_path,
+            std::path::PathBuf::from(".macc/log/supervisor/custom-report.json")
+        );
+        assert_eq!(
+            supervisor.events_log_path,
+            std::path::PathBuf::from(".macc/log/coordinator/events.jsonl")
+        );
 
         let reserialized = config.to_yaml().expect("Should serialize back to yaml");
         let config2 =
