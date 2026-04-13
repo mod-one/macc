@@ -92,26 +92,52 @@ fn run_git_status(current_dir: &Path, args: &[&str], action: &str) -> Result<Exi
         })
 }
 
-/// Generates paired sync/async git status helpers for simple operations where
-/// both variants only differ by awaiting `run_git_status_async`.
+/// Generates paired sync/async git helpers for operations where both variants
+/// share the same command and result mapping.
 macro_rules! git_command {
     (
         $sync_name:ident,
         $async_name:ident,
         ($($param:ident : $param_ty:ty),* $(,)?),
-        [$($arg:expr),+ $(,)?],
+        $args:expr,
         $action:expr
     ) => {
         pub fn $sync_name(repo_or_worktree: &Path, $($param: $param_ty),*) -> Result<bool> {
-            Ok(run_git_status(repo_or_worktree, &[$($arg),+], $action)?.success())
+            let args = $args;
+            Ok(run_git_status(repo_or_worktree, &args, $action)?.success())
         }
 
         pub async fn $async_name(repo_or_worktree: &Path, $($param: $param_ty),*) -> Result<bool> {
+            let args = $args;
             Ok(
-                run_git_status_async(repo_or_worktree, &[$($arg),+], $action)
+                run_git_status_async(repo_or_worktree, &args, $action)
                     .await?
                     .success(),
             )
+        }
+    };
+    (
+        output,
+        $sync_name:ident,
+        $async_name:ident,
+        ($($param:ident : $param_ty:ty),* $(,)?),
+        -> $ret:ty,
+        $args:expr,
+        $action:expr,
+        |$repo:ident, $output:ident| $body:block
+    ) => {
+        pub fn $sync_name(repo_root: &Path, $($param: $param_ty),*) -> Result<$ret> {
+            let args = $args;
+            let $output = run_git_output(repo_root, &args, $action)?;
+            let $repo = repo_root;
+            $body
+        }
+
+        pub async fn $async_name(repo_root: &Path, $($param: $param_ty),*) -> Result<$ret> {
+            let args = $args;
+            let $output = run_git_output_async(repo_root, &args, $action).await?;
+            let $repo = repo_root;
+            $body
         }
     };
 }
@@ -235,24 +261,13 @@ pub async fn is_dirty_async(repo_or_worktree: &Path) -> Result<bool> {
     Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
 }
 
-pub fn reset_hard(repo_or_worktree: &Path, target: &str) -> Result<bool> {
-    Ok(run_git_status(
-        repo_or_worktree,
-        &["reset", "--hard", target],
-        "run git reset --hard",
-    )?
-    .success())
-}
-
-pub async fn reset_hard_async(repo_or_worktree: &Path, target: &str) -> Result<bool> {
-    Ok(run_git_status_async(
-        repo_or_worktree,
-        &["reset", "--hard", target],
-        "run git reset --hard",
-    )
-    .await?
-    .success())
-}
+git_command!(
+    reset_hard,
+    reset_hard_async,
+    (target: &str),
+    ["reset", "--hard", target],
+    "run git reset --hard"
+);
 
 git_command!(
     clean_fd,
@@ -262,86 +277,47 @@ git_command!(
     "run git clean -fd"
 );
 
-pub fn checkout(repo_or_worktree: &Path, branch: &str, force: bool) -> Result<bool> {
-    let args = if force {
+git_command!(
+    checkout,
+    checkout_async,
+    (branch: &str, force: bool),
+    if force {
         vec!["checkout", "-f", branch]
     } else {
         vec!["checkout", branch]
-    };
-    Ok(run_git_status(repo_or_worktree, &args, "run git checkout")?.success())
-}
+    },
+    "run git checkout"
+);
 
-pub async fn checkout_async(repo_or_worktree: &Path, branch: &str, force: bool) -> Result<bool> {
-    let args = if force {
-        vec!["checkout", "-f", branch]
-    } else {
-        vec!["checkout", branch]
-    };
-    Ok(
-        run_git_status_async(repo_or_worktree, &args, "run git checkout")
-            .await?
-            .success(),
-    )
-}
-
-pub fn checkout_reset_branch(repo_or_worktree: &Path, branch: &str, force: bool) -> Result<bool> {
-    let args = if force {
+git_command!(
+    checkout_reset_branch,
+    checkout_reset_branch_async,
+    (branch: &str, force: bool),
+    if force {
         vec!["checkout", "-f", "-B", branch, branch]
     } else {
         vec!["checkout", "-B", branch, branch]
-    };
-    Ok(run_git_status(repo_or_worktree, &args, "run git checkout -B")?.success())
-}
+    },
+    "run git checkout -B"
+);
 
-pub async fn checkout_reset_branch_async(
-    repo_or_worktree: &Path,
-    branch: &str,
-    force: bool,
-) -> Result<bool> {
-    let args = if force {
-        vec!["checkout", "-f", "-B", branch, branch]
-    } else {
-        vec!["checkout", "-B", branch, branch]
-    };
-    Ok(
-        run_git_status_async(repo_or_worktree, &args, "run git checkout -B")
-            .await?
-            .success(),
-    )
-}
+// Detach HEAD in a worktree. This avoids the "branch already checked out"
+// error that occurs when two worktrees share the same branch name.
+git_command!(
+    checkout_detach,
+    checkout_detach_async,
+    (),
+    ["checkout", "--detach"],
+    "run git checkout --detach"
+);
 
-/// Detach HEAD in a worktree. This avoids the "branch already checked out"
-/// error that occurs when two worktrees share the same branch name.
-pub fn checkout_detach(repo_or_worktree: &Path) -> Result<bool> {
-    Ok(run_git_status(
-        repo_or_worktree,
-        &["checkout", "--detach"],
-        "run git checkout --detach",
-    )?
-    .success())
-}
-
-pub async fn checkout_detach_async(repo_or_worktree: &Path) -> Result<bool> {
-    Ok(run_git_status_async(
-        repo_or_worktree,
-        &["checkout", "--detach"],
-        "run git checkout --detach",
-    )
-    .await?
-    .success())
-}
-
-pub fn fetch(repo_or_worktree: &Path, remote: &str) -> Result<bool> {
-    Ok(run_git_status(repo_or_worktree, &["fetch", remote], "run git fetch")?.success())
-}
-
-pub async fn fetch_async(repo_or_worktree: &Path, remote: &str) -> Result<bool> {
-    Ok(
-        run_git_status_async(repo_or_worktree, &["fetch", remote], "run git fetch")
-            .await?
-            .success(),
-    )
-}
+git_command!(
+    fetch,
+    fetch_async,
+    (remote: &str),
+    ["fetch", remote],
+    "run git fetch"
+);
 
 pub fn git_remote_exists(repo_or_worktree: &Path, remote: &str) -> Result<bool> {
     Ok(run_git_status(
@@ -693,93 +669,60 @@ pub async fn commits_containing_pattern_async(
     )))
 }
 
-pub fn create_tag(repo_root: &Path, tag_name: &str, commit_ref: &str) -> Result<()> {
-    let output = run_git_output(repo_root, &["tag", tag_name, commit_ref], "create git tag")?;
-    if !output.status.success() {
-        return Err(MaccError::Git {
-            operation: "tag".to_string(),
-            message: format!(
-                "Failed to create tag {} at {}: {}",
-                tag_name,
-                commit_ref,
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-        });
+git_command!(
+    output,
+    create_tag,
+    create_tag_async,
+    (tag_name: &str, commit_ref: &str),
+    -> (),
+    ["tag", tag_name, commit_ref],
+    "create git tag",
+    |_repo_root, output| {
+        if !output.status.success() {
+            return Err(MaccError::Git {
+                operation: "tag".to_string(),
+                message: format!(
+                    "Failed to create tag {} at {}: {}",
+                    tag_name,
+                    commit_ref,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+            });
+        }
+        Ok(())
     }
-    Ok(())
-}
+);
 
-pub async fn create_tag_async(repo_root: &Path, tag_name: &str, commit_ref: &str) -> Result<()> {
-    let output =
-        run_git_output_async(repo_root, &["tag", tag_name, commit_ref], "create git tag").await?;
-    if !output.status.success() {
-        return Err(MaccError::Git {
-            operation: "tag".to_string(),
-            message: format!(
-                "Failed to create tag {} at {}: {}",
-                tag_name,
-                commit_ref,
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-        });
+git_command!(
+    output,
+    list_branches_by_prefix,
+    list_branches_by_prefix_async,
+    (prefix: &str),
+    -> Vec<String>,
+    ["branch", "--list"],
+    "list branches by prefix",
+    |repo_root, output| {
+        if !output.status.success() {
+            return Err(MaccError::Git {
+                operation: "branch_list".to_string(),
+                message: format!(
+                    "Failed to list branches by prefix in {}: {}",
+                    repo_root.display(),
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+            });
+        }
+
+        let branches = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .map(|line| line.trim_start_matches("* ").to_string())
+            .filter(|line| line.starts_with(prefix))
+            .filter(|line| !line.is_empty())
+            .collect();
+        Ok(branches)
     }
-    Ok(())
-}
-
-pub fn list_branches_by_prefix(repo_root: &Path, prefix: &str) -> Result<Vec<String>> {
-    let branch_glob = format!("{prefix}*");
-    let output = run_git_output(
-        repo_root,
-        &["branch", "--list", &branch_glob],
-        "list branches by prefix",
-    )?;
-    if !output.status.success() {
-        return Err(MaccError::Git {
-            operation: "branch_list".to_string(),
-            message: format!(
-                "Failed to list branches by prefix in {}: {}",
-                repo_root.display(),
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-        });
-    }
-
-    let branches = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .map(|line| line.trim_start_matches("* ").to_string())
-        .filter(|line| !line.is_empty())
-        .collect();
-    Ok(branches)
-}
-
-pub async fn list_branches_by_prefix_async(repo_root: &Path, prefix: &str) -> Result<Vec<String>> {
-    let branch_glob = format!("{prefix}*");
-    let output = run_git_output_async(
-        repo_root,
-        &["branch", "--list", &branch_glob],
-        "list branches by prefix",
-    )
-    .await?;
-    if !output.status.success() {
-        return Err(MaccError::Git {
-            operation: "branch_list".to_string(),
-            message: format!(
-                "Failed to list branches by prefix in {}: {}",
-                repo_root.display(),
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-        });
-    }
-
-    let branches = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .map(|line| line.trim_start_matches("* ").to_string())
-        .filter(|line| !line.is_empty())
-        .collect();
-    Ok(branches)
-}
+);
 
 fn parse_commit_info_records(raw: &str) -> Vec<CommitInfo> {
     raw.lines().filter_map(parse_commit_info_line).collect()
