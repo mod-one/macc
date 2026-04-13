@@ -145,6 +145,10 @@ pub struct CoordinatorConfig {
     pub ghost_heartbeat_grace_seconds: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dispatch_cooldown_seconds: Option<u64>,
+    /// Session cache TTL in seconds used by dispatch when preferring warm
+    /// worktree sessions. Default behavior when unset: 300 seconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_cache_ttl_seconds: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub json_compat: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -320,6 +324,7 @@ impl Default for CoordinatorConfig {
             merge_hook_timeout_seconds: None,
             ghost_heartbeat_grace_seconds: None,
             dispatch_cooldown_seconds: None,
+            session_cache_ttl_seconds: None,
             json_compat: None,
             legacy_json_fallback: None,
             error_code_retry_list: None,
