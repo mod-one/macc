@@ -2,7 +2,9 @@ use super::{
     resolve_completion_authority, CompletionAuthority, PerformerCompletionKind, RuntimeStatus,
     WorkflowState,
 };
-use crate::config::{CanonicalConfig, CoordinatorConfig};
+use crate::config::{
+    CanonicalConfig, CoordinatorConfig, CoordinatorConfigResolved as CanonicalCoordinatorConfigResolved,
+};
 use crate::coordinator::control_plane::CoordinatorLog;
 use crate::coordinator::error_normalizer::{
     error_code_to_canonical_class, CanonicalClass, ErrorNormalizer, NormalizerRegistry, ToolError,
@@ -2133,11 +2135,8 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
     }
 
     fn should_terminate_run(&self, counts: &CoordinatorCounts) -> Option<String> {
-        let max_dispatch_total = self
-            .env_cfg
-            .max_dispatch
-            .or_else(|| self.coordinator.and_then(|c| c.max_dispatch))
-            .unwrap_or(0);
+        let cfg = CanonicalCoordinatorConfigResolved::resolve(self.coordinator);
+        let max_dispatch_total = self.env_cfg.max_dispatch.unwrap_or(cfg.max_dispatch);
         if max_dispatch_total > 0
             && self.run_state.dispatched_total_run >= max_dispatch_total
             && counts.active == 0
@@ -2162,11 +2161,11 @@ pub fn resolve_storage_mode(
     env_cfg: &super::types::CoordinatorEnvConfig,
     coordinator: Option<&CoordinatorConfig>,
 ) -> Result<CoordinatorStorageMode> {
+    let cfg = CanonicalCoordinatorConfigResolved::resolve(coordinator);
     let raw = env_cfg
         .storage_mode
         .clone()
-        .or_else(|| coordinator.and_then(|c| c.storage_mode.clone()))
-        .unwrap_or_else(|| "sqlite".to_string());
+        .unwrap_or_else(|| cfg.storage_mode.clone());
     raw.parse::<CoordinatorStorageMode>()
         .map_err(MaccError::Validation)
 }
@@ -2199,6 +2198,7 @@ pub async fn run_native_control_plane(
     env_cfg: &super::types::CoordinatorEnvConfig,
     logger: Option<&dyn CoordinatorLog>,
 ) -> Result<()> {
+    let cfg = CanonicalCoordinatorConfigResolved::resolve(coordinator);
     let run_id = if let Ok(existing) = std::env::var("COORDINATOR_RUN_ID") {
         let trimmed = existing.trim();
         if trimmed.is_empty() {
@@ -2236,11 +2236,7 @@ pub async fn run_native_control_plane(
         .prd
         .as_ref()
         .map(PathBuf::from)
-        .or_else(|| {
-            coordinator
-                .and_then(|c| c.prd_file.clone())
-                .map(PathBuf::from)
-        })
+        .or_else(|| cfg.prd_file.clone().map(PathBuf::from))
         .unwrap_or_else(|| repo_root.join("prd.json"));
     if !prd_file.exists() {
         return Err(MaccError::Validation(format!(
@@ -2251,13 +2247,12 @@ pub async fn run_native_control_plane(
 
     let phase_runner_max_attempts = env_cfg
         .phase_runner_max_attempts
-        .or_else(|| coordinator.and_then(|c| c.phase_runner_max_attempts))
-        .unwrap_or(1)
+        .unwrap_or(cfg.phase_runner_max_attempts)
         .max(1);
     let coordinator_tool_override = env_cfg
         .coordinator_tool
         .clone()
-        .or_else(|| coordinator.and_then(|c| c.coordinator_tool.clone()))
+        .or_else(|| cfg.coordinator_tool.clone())
         .or_else(|| {
             // Auto-resolve: pick the first enabled tool from tool_priority,
             // or fall back to the first enabled tool overall.  This ensures a
@@ -2275,9 +2270,11 @@ pub async fn run_native_control_plane(
                         .collect()
                 })
                 .or_else(|| {
-                    coordinator
-                        .map(|c| c.tool_priority.clone())
-                        .filter(|v| !v.is_empty())
+                    if cfg.tool_priority.is_empty() {
+                        None
+                    } else {
+                        Some(cfg.tool_priority.clone())
+                    }
                 })
                 .unwrap_or_default();
             priority
@@ -2293,7 +2290,7 @@ pub async fn run_native_control_plane(
     }
     let max_review_cycles = env_cfg
         .max_review_cycles
-        .or_else(|| coordinator.and_then(|c| c.max_review_cycles));
+        .or(cfg.max_review_cycles);
     if let Some(log) = logger {
         match max_review_cycles {
             Some(n) => {
@@ -2307,17 +2304,14 @@ pub async fn run_native_control_plane(
 
     let phase_timeout_seconds = env_cfg
         .stale_in_progress_seconds
-        .or_else(|| coordinator.and_then(|c| c.stale_in_progress_seconds))
-        .unwrap_or(0);
+        .unwrap_or(cfg.stale_in_progress_seconds);
     let ghost_heartbeat_grace_seconds = env_cfg
         .ghost_heartbeat_grace_seconds
-        .or_else(|| coordinator.and_then(|c| c.ghost_heartbeat_grace_seconds))
-        .unwrap_or(30);
+        .unwrap_or(cfg.ghost_heartbeat_grace_seconds);
 
     let json_compat = env_cfg
         .json_compat
-        .or_else(|| coordinator.and_then(|c| c.json_compat))
-        .unwrap_or(false);
+        .unwrap_or(cfg.json_compat);
 
     let storage_mode = resolve_storage_mode(env_cfg, coordinator)?;
     let storage_paths = crate::ProjectPaths::from_root(repo_root);
@@ -2396,8 +2390,7 @@ pub async fn run_native_control_plane(
 
     let timeout_seconds = env_cfg
         .timeout_seconds
-        .or_else(|| coordinator.and_then(|c| c.timeout_seconds))
-        .unwrap_or(0);
+        .unwrap_or(cfg.timeout_seconds);
     let loop_cfg = ControlPlaneLoopConfig {
         timeout: if timeout_seconds > 0 {
             Some(Duration::from_secs(timeout_seconds as u64))
