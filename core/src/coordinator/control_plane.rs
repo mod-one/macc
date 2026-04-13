@@ -77,6 +77,14 @@ fn resolve_dispatch_cooldown_seconds(
         .unwrap_or(2)
 }
 
+fn resolve_session_cache_ttl_seconds(
+    coordinator: Option<&crate::config::CoordinatorConfig>,
+) -> u64 {
+    coordinator
+        .and_then(|c| c.session_cache_ttl_seconds)
+        .unwrap_or(300)
+}
+
 fn resolve_merge_timeout_seconds(
     env_cfg: &CoordinatorEnvConfig,
     coordinator: Option<&crate::config::CoordinatorConfig>,
@@ -2942,11 +2950,13 @@ pub async fn dispatch_ready_tasks_native(
         }
 
         let reuse_scan_started = Instant::now();
+        let session_cache_ttl_seconds = resolve_session_cache_ttl_seconds(coordinator);
         let (reusable, reuse_prepare_error) = find_reusable_worktree_native(
             repo_root,
             &registry,
             &selected.tool,
             &selected.base_branch,
+            session_cache_ttl_seconds,
         )?;
         let reuse_scan_elapsed_ms = reuse_scan_started.elapsed().as_millis();
 

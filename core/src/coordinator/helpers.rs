@@ -56,6 +56,116 @@ fn can_reuse_worktree_slot(registry: &serde_json::Value, worktree_path: &Path) -
         .unwrap_or(false)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionWarmth {
+    Warm(u64),
+    Cold,
+}
+
+impl SessionWarmth {
+    fn sort_key(self) -> (u8, u64) {
+        match self {
+            SessionWarmth::Warm(age_secs) => (0, age_secs),
+            SessionWarmth::Cold => (1, u64::MAX),
+        }
+    }
+}
+
+fn load_tool_sessions_state(repo_root: &Path) -> Option<serde_json::Value> {
+    let path = repo_root.join(".macc/state/tool-sessions.json");
+    let raw = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn session_id_is_active(tool_node: &serde_json::Value, session_id: &str) -> bool {
+    let Some(leases) = tool_node
+        .get("leases")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return true;
+    };
+    leases
+        .get(session_id)
+        .and_then(|lease| lease.get("status"))
+        .and_then(serde_json::Value::as_str)
+        == Some("active")
+}
+
+fn score_worktree_session_warmth_from_state(
+    state: Option<&serde_json::Value>,
+    worktree_path: &Path,
+    tool_id: &str,
+    ttl_seconds: u64,
+    now_epoch: i64,
+) -> SessionWarmth {
+    let Some(root) = state else {
+        return SessionWarmth::Cold;
+    };
+    let Some(tool_node) = root.get("tools").and_then(|v| v.get(tool_id)) else {
+        return SessionWarmth::Cold;
+    };
+    let Some(sessions) = tool_node
+        .get("sessions")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return SessionWarmth::Cold;
+    };
+    let key_plain = worktree_path.to_string_lossy().to_string();
+    let key_canon = std::fs::canonicalize(worktree_path)
+        .ok()
+        .map(|p| p.to_string_lossy().to_string());
+    let entry = std::iter::once(key_plain.as_str())
+        .chain(key_canon.as_deref())
+        .find_map(|key| sessions.get(key));
+    let Some(entry) = entry else {
+        return SessionWarmth::Cold;
+    };
+    let Some(session_id) = entry
+        .get("session_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|sid| !sid.is_empty())
+    else {
+        return SessionWarmth::Cold;
+    };
+    if !session_id_is_active(tool_node, session_id) {
+        return SessionWarmth::Cold;
+    }
+    let Some(updated_at) = entry.get("updated_at").and_then(serde_json::Value::as_str) else {
+        return SessionWarmth::Cold;
+    };
+    let Ok(updated_at_epoch) = chrono::DateTime::parse_from_rfc3339(updated_at)
+        .map(|ts| ts.with_timezone(&chrono::Utc).timestamp())
+    else {
+        return SessionWarmth::Cold;
+    };
+    if updated_at_epoch > now_epoch {
+        return SessionWarmth::Warm(0);
+    }
+    let age_secs = now_epoch.saturating_sub(updated_at_epoch) as u64;
+    if age_secs <= ttl_seconds {
+        SessionWarmth::Warm(age_secs)
+    } else {
+        SessionWarmth::Cold
+    }
+}
+
+pub fn score_worktree_session_warmth(
+    repo_root: &Path,
+    worktree_path: &Path,
+    tool_id: &str,
+    ttl_seconds: u64,
+) -> SessionWarmth {
+    let state = load_tool_sessions_state(repo_root);
+    let now_epoch = chrono::Utc::now().timestamp();
+    score_worktree_session_warmth_from_state(
+        state.as_ref(),
+        worktree_path,
+        tool_id,
+        ttl_seconds,
+        now_epoch,
+    )
+}
+
 fn has_in_progress_or_queued_on_worktree(
     registry: &serde_json::Value,
     worktree_path: &Path,
@@ -302,6 +412,7 @@ pub fn find_reusable_worktree_native(
     registry: &serde_json::Value,
     tool: &str,
     base_branch: &str,
+    session_cache_ttl_seconds: u64,
 ) -> Result<(
     Option<ReusableWorktree>,
     Option<ReusableWorktreePrepareError>,
@@ -309,11 +420,30 @@ pub fn find_reusable_worktree_native(
     let active_paths = active_task_worktree_paths(registry);
     let pool_root = repo_root.join(".macc").join("worktree");
     let entries = crate::list_worktrees(repo_root)?;
+    let sessions_state = load_tool_sessions_state(repo_root);
+    let now_epoch = chrono::Utc::now().timestamp();
+    let mut ranked_entries = entries
+        .into_iter()
+        .enumerate()
+        .filter(|(_, entry)| entry.path.starts_with(&pool_root))
+        .map(|(idx, entry)| {
+            let warmth = score_worktree_session_warmth_from_state(
+                sessions_state.as_ref(),
+                &entry.path,
+                tool,
+                session_cache_ttl_seconds,
+                now_epoch,
+            );
+            (idx, entry, warmth)
+        })
+        .collect::<Vec<_>>();
+    ranked_entries.sort_by(|a, b| {
+        a.2.sort_key()
+            .cmp(&b.2.sort_key())
+            .then_with(|| a.0.cmp(&b.0))
+    });
     let mut last_prepare_error: Option<(String, String)> = None;
-    for entry in entries {
-        if !entry.path.starts_with(&pool_root) {
-            continue;
-        }
+    for (_, entry, _) in ranked_entries {
         let key = entry.path.to_string_lossy().to_string();
         if active_paths.contains(&key) {
             continue;
@@ -509,6 +639,99 @@ pub fn find_reusable_worktree_native(
         ));
     }
     Ok((None, last_prepare_error))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{score_worktree_session_warmth_from_state, SessionWarmth};
+    use serde_json::json;
+    use std::path::Path;
+
+    #[test]
+    fn warm_session_scored_when_within_ttl() {
+        let updated_at = "2026-04-13T00:00:00Z";
+        let now_epoch = chrono::DateTime::parse_from_rfc3339(updated_at)
+            .expect("valid ts")
+            .with_timezone(&chrono::Utc)
+            .timestamp()
+            + 300;
+        let state = json!({
+            "tools": {
+                "codex": {
+                    "sessions": {
+                        "/tmp/wt-1": {
+                            "session_id": "sid-1",
+                            "updated_at": updated_at
+                        }
+                    },
+                    "leases": {
+                        "sid-1": { "status": "active" }
+                    }
+                }
+            }
+        });
+        let warmth = score_worktree_session_warmth_from_state(
+            Some(&state),
+            Path::new("/tmp/wt-1"),
+            "codex",
+            300,
+            now_epoch,
+        );
+        assert_eq!(warmth, SessionWarmth::Warm(300));
+    }
+
+    #[test]
+    fn expired_session_scored_cold() {
+        let updated_at = "2026-04-13T00:00:00Z";
+        let now_epoch = chrono::DateTime::parse_from_rfc3339(updated_at)
+            .expect("valid ts")
+            .with_timezone(&chrono::Utc)
+            .timestamp()
+            + 301;
+        let state = json!({
+            "tools": {
+                "codex": {
+                    "sessions": {
+                        "/tmp/wt-1": {
+                            "session_id": "sid-1",
+                            "updated_at": updated_at
+                        }
+                    },
+                    "leases": {
+                        "sid-1": { "status": "active" }
+                    }
+                }
+            }
+        });
+        let warmth = score_worktree_session_warmth_from_state(
+            Some(&state),
+            Path::new("/tmp/wt-1"),
+            "codex",
+            300,
+            now_epoch,
+        );
+        assert_eq!(warmth, SessionWarmth::Cold);
+    }
+
+    #[test]
+    fn missing_session_scored_cold() {
+        let state = json!({
+            "tools": {
+                "codex": {
+                    "sessions": {},
+                    "leases": {}
+                }
+            }
+        });
+        let warmth = score_worktree_session_warmth_from_state(
+            Some(&state),
+            Path::new("/tmp/wt-1"),
+            "codex",
+            300,
+            1_744_505_100,
+        );
+        assert_eq!(warmth, SessionWarmth::Cold);
+    }
 }
 
 pub fn count_pool_worktrees(repo_root: &Path) -> Result<usize> {

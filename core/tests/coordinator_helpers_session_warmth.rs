@@ -21,21 +21,6 @@ fn run_git(repo: &Path, args: &[&str]) {
     );
 }
 
-fn run_git_capture(repo: &Path, args: &[&str]) -> String {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(repo)
-        .output()
-        .expect("run git command");
-    assert!(
-        output.status.success(),
-        "git {:?} failed: {}",
-        args,
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8_lossy(&output.stdout).trim().to_string()
-}
-
 fn create_commit(repo: &Path, file: &str, content: &str, message: &str) {
     fs::write(repo.join(file), content).expect("write file");
     run_git(repo, &["add", file]);
@@ -49,7 +34,7 @@ fn make_clone_with_origin() -> (PathBuf, PathBuf) {
         .expect("time")
         .as_nanos();
     let base = std::env::temp_dir().join(format!(
-        "macc-coordinator-abandon-tests-{}-{}-{}",
+        "macc-coordinator-session-tests-{}-{}-{}",
         std::process::id(),
         nanos,
         suffix
@@ -80,10 +65,10 @@ fn make_clone_with_origin() -> (PathBuf, PathBuf) {
     (repo, base)
 }
 
-fn make_pool_worktree(repo: &Path, task_id: &str) -> PathBuf {
+fn add_pool_worktree(repo: &Path, slot: &str, task_id: &str) -> PathBuf {
     let pool_root = repo.join(".macc").join("worktree");
     fs::create_dir_all(&pool_root).expect("create pool root");
-    let worktree = pool_root.join("worker-01");
+    let worktree = pool_root.join(slot);
     let branch = format!("task/{task_id}");
     run_git(
         repo,
@@ -96,41 +81,54 @@ fn make_pool_worktree(repo: &Path, task_id: &str) -> PathBuf {
             "main",
         ],
     );
-
     run_git(&worktree, &["config", "user.email", "tests@example.com"]);
     run_git(&worktree, &["config", "user.name", "MACC Tests"]);
     worktree
 }
 
-fn abandoned_registry(task_id: &str, worktree_path: &Path) -> serde_json::Value {
-    serde_json::json!({
-        "tasks": [
-            {
-                "id": task_id,
-                "state": "abandoned",
-                "worktree": {
-                    "worktree_path": worktree_path.to_string_lossy().to_string()
+fn write_tool_sessions(
+    repo: &Path,
+    tool_id: &str,
+    worktree_path: &Path,
+    session_id: &str,
+    updated_at: &str,
+) {
+    let state_dir = repo.join(".macc/state");
+    fs::create_dir_all(&state_dir).expect("create state dir");
+    let payload = serde_json::json!({
+        "tools": {
+            tool_id: {
+                "sessions": {
+                    worktree_path.to_string_lossy().to_string(): {
+                        "session_id": session_id,
+                        "updated_at": updated_at
+                    }
+                },
+                "leases": {
+                    session_id: { "status": "active" }
                 }
             }
-        ]
-    })
+        }
+    });
+    fs::write(
+        state_dir.join("tool-sessions.json"),
+        serde_json::to_string_pretty(&payload).expect("serialize"),
+    )
+    .expect("write tool sessions");
 }
 
 #[test]
-fn reused_stuck_worktree_with_commits_creates_abandonment_tag() {
+fn warm_slot_is_preferred_over_cold_slot() {
     let (repo, _base) = make_clone_with_origin();
-    let task_id = "L4-ABANDON-001";
-    let worktree = make_pool_worktree(&repo, task_id);
+    let wt1 = add_pool_worktree(&repo, "worker-01", "L4-SES-WARM-001");
+    let wt2 = add_pool_worktree(&repo, "worker-02", "L4-SES-WARM-002");
+    let fresh = chrono::Utc::now()
+        .checked_sub_signed(chrono::TimeDelta::seconds(30))
+        .expect("fresh ts")
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    write_tool_sessions(&repo, "codex", &wt2, "sid-warm", &fresh);
 
-    create_commit(
-        &worktree,
-        "ahead.txt",
-        "ahead\n",
-        "feat: work that must be preserved",
-    );
-    let ahead_head = run_git_capture(&worktree, &["rev-parse", "HEAD"]);
-
-    let registry = abandoned_registry(task_id, &worktree);
+    let registry = serde_json::json!({ "tasks": [] });
     let (reused, prep_error) =
         find_reusable_worktree_native(&repo, &registry, "codex", "main", 300)
             .expect("reuse result");
@@ -139,32 +137,23 @@ fn reused_stuck_worktree_with_commits_creates_abandonment_tag() {
         prep_error.is_none(),
         "unexpected prep error: {prep_error:?}"
     );
-    assert!(reused.is_some(), "expected reusable worktree");
-
-    let tags = run_git_capture(
-        &repo,
-        &["tag", "--list", &format!("macc/abandoned/{task_id}-*")],
-    );
-    let matching: Vec<&str> = tags
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .collect();
-    assert_eq!(matching.len(), 1, "expected exactly one abandonment tag");
-
-    let tagged_head = run_git_capture(&repo, &["rev-parse", &format!("refs/tags/{}", matching[0])]);
-    assert_eq!(
-        tagged_head, ahead_head,
-        "tag should preserve pre-reset HEAD"
-    );
+    let (picked, _, _, _, _) = reused.expect("expected reusable worktree");
+    assert_eq!(picked, wt2, "warm worktree should be selected first");
+    assert_ne!(picked, wt1);
 }
 
 #[test]
-fn reused_worktree_without_commits_does_not_create_abandonment_tag() {
+fn expired_session_is_treated_as_cold() {
     let (repo, _base) = make_clone_with_origin();
-    let task_id = "L4-ABANDON-002";
-    let worktree = make_pool_worktree(&repo, task_id);
+    let wt1 = add_pool_worktree(&repo, "worker-01", "L4-SES-COLD-001");
+    let wt2 = add_pool_worktree(&repo, "worker-02", "L4-SES-COLD-002");
+    let expired = chrono::Utc::now()
+        .checked_sub_signed(chrono::TimeDelta::seconds(3600))
+        .expect("expired ts")
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    write_tool_sessions(&repo, "codex", &wt2, "sid-expired", &expired);
 
-    let registry = abandoned_registry(task_id, &worktree);
+    let registry = serde_json::json!({ "tasks": [] });
     let (reused, prep_error) =
         find_reusable_worktree_native(&repo, &registry, "codex", "main", 300)
             .expect("reuse result");
@@ -173,14 +162,25 @@ fn reused_worktree_without_commits_does_not_create_abandonment_tag() {
         prep_error.is_none(),
         "unexpected prep error: {prep_error:?}"
     );
-    assert!(reused.is_some(), "expected reusable worktree");
+    let (picked, _, _, _, _) = reused.expect("expected reusable worktree");
+    assert_eq!(picked, wt1, "expired session must not be treated as warm");
+}
 
-    let tags = run_git_capture(
-        &repo,
-        &["tag", "--list", &format!("macc/abandoned/{task_id}-*")],
-    );
+#[test]
+fn no_sessions_file_falls_back_to_default_slot_order() {
+    let (repo, _base) = make_clone_with_origin();
+    let wt1 = add_pool_worktree(&repo, "worker-01", "L4-SES-NOSESS-001");
+    let _wt2 = add_pool_worktree(&repo, "worker-02", "L4-SES-NOSESS-002");
+    let registry = serde_json::json!({ "tasks": [] });
+
+    let (reused, prep_error) =
+        find_reusable_worktree_native(&repo, &registry, "codex", "main", 300)
+            .expect("reuse result");
+
     assert!(
-        tags.trim().is_empty(),
-        "no abandonment tag should be created"
+        prep_error.is_none(),
+        "unexpected prep error: {prep_error:?}"
     );
+    let (picked, _, _, _, _) = reused.expect("expected reusable worktree");
+    assert_eq!(picked, wt1, "without sessions, selection should fallback");
 }
