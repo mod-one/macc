@@ -87,6 +87,134 @@ fn resolve_merge_timeout_seconds(
         .unwrap_or(0)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MergeGateResult {
+    Merged,
+    ConflictProceed,
+    NoBranchProceed,
+}
+
+fn merge_gate_check(task_id: &str, base_branch: &str, repo_root: &Path) -> MergeGateResult {
+    let mut branch_candidates = Vec::new();
+    let prefixes = [
+        format!("task/{}", task_id.to_ascii_lowercase()),
+        format!("task/{}", task_id),
+    ];
+    for prefix in prefixes {
+        if let Ok(branches) = crate::git::list_branches_by_prefix(repo_root, &prefix) {
+            branch_candidates.extend(branches);
+        }
+    }
+    branch_candidates.sort();
+    branch_candidates.dedup();
+    if branch_candidates.is_empty() {
+        return MergeGateResult::NoBranchProceed;
+    }
+
+    let original_branch = crate::git::current_branch_name(repo_root).ok();
+    let mut attempted_merge = false;
+    let mut conflict_or_error = false;
+    let mut merged = false;
+
+    for branch in branch_candidates {
+        if branch == base_branch {
+            continue;
+        }
+        if !crate::git::checkout(repo_root, &branch, false).unwrap_or(false) {
+            conflict_or_error = true;
+            continue;
+        }
+        let commits_ahead = match crate::git::commits_ahead_of_base(repo_root, base_branch) {
+            Ok(commits) => commits,
+            Err(_) => {
+                conflict_or_error = true;
+                continue;
+            }
+        };
+        if commits_ahead.is_empty() {
+            continue;
+        }
+        attempted_merge = true;
+        if !crate::git::checkout(repo_root, base_branch, false).unwrap_or(false) {
+            conflict_or_error = true;
+            continue;
+        }
+        if crate::git::merge_ff_only(repo_root, &branch).unwrap_or(false) {
+            merged = true;
+            break;
+        }
+        let merge_no_edit = crate::git::run_git_output_mapped(
+            repo_root,
+            &["merge", "--no-edit", &branch],
+            "run git merge --no-edit",
+        );
+        if merge_no_edit
+            .map(|out| out.status.success())
+            .unwrap_or(false)
+        {
+            merged = true;
+            break;
+        }
+        let _ = crate::git::run_git_output_mapped(
+            repo_root,
+            &["merge", "--abort"],
+            "abort merge gate conflict",
+        );
+        conflict_or_error = true;
+    }
+
+    if let Some(branch) = original_branch {
+        let _ = crate::git::checkout(repo_root, &branch, false);
+    }
+
+    if merged {
+        return MergeGateResult::Merged;
+    }
+    if attempted_merge || conflict_or_error {
+        MergeGateResult::ConflictProceed
+    } else {
+        MergeGateResult::NoBranchProceed
+    }
+}
+
+fn retry_count_for_task(registry: &serde_json::Value, task_id: &str) -> usize {
+    crate::coordinator::model::TaskRegistry::from_value(registry)
+        .ok()
+        .and_then(|typed| {
+            typed
+                .find_task(task_id)
+                .map(|task| task.task_runtime.retries_count())
+        })
+        .unwrap_or(0)
+}
+
+fn mark_task_merged_from_merge_gate(
+    registry: &mut serde_json::Value,
+    task_id: &str,
+    now: &str,
+) -> Result<()> {
+    let mut typed = TaskRegistry::from_value(registry)?;
+    let task = typed
+        .find_task_mut(task_id)
+        .ok_or_else(|| MaccError::Coordinator {
+            code: "task_not_found",
+            message: format!("Task '{}' not found in registry", task_id),
+        })?;
+    task.set_workflow_state(crate::coordinator::WorkflowState::Merged);
+    task.clear_assignment();
+    let runtime = task.ensure_runtime();
+    runtime.status = Some("idle".to_string());
+    runtime.pid = None;
+    runtime.started_at = None;
+    runtime.current_phase = None;
+    runtime.merge_result_pending = Some(false);
+    task.touch_state_changed(now);
+    typed.recompute_resource_locks(now);
+    typed.set_updated_at(now.to_string());
+    *registry = typed.to_value()?;
+    Ok(())
+}
+
 /// Persist the volatile throttle registry to SQLite so cooldowns survive restart.
 fn persist_throttle_registry(
     repo_root: &Path,
@@ -2601,6 +2729,91 @@ pub async fn dispatch_ready_tasks_native(
                 selected.id, selected.tool, selected.base_branch
             ));
         }
+        let merge_gate_enabled = coordinator
+            .map(|cfg| cfg.merge_gate_on_dispatch)
+            .unwrap_or(true);
+        if merge_gate_enabled && retry_count_for_task(&registry, &selected.id) > 0 {
+            let attempt_msg = format!(
+                "merge-gate check started task={} base={}",
+                selected.id, selected.base_branch
+            );
+            let _ = append_coordinator_event_with_severity(
+                repo_root,
+                "merge_gate_attempt",
+                &selected.id,
+                "dev",
+                "started",
+                &attempt_msg,
+                "info",
+            );
+            if let Some(log) = logger {
+                let _ = log.note(format!("- {}", attempt_msg));
+            }
+            match merge_gate_check(&selected.id, &selected.base_branch, repo_root) {
+                MergeGateResult::Merged => {
+                    let now = now_iso_coordinator();
+                    mark_task_merged_from_merge_gate(&mut registry, &selected.id, &now)?;
+                    crate::coordinator::state::coordinator_state_registry_save(
+                        repo_root,
+                        &BTreeMap::new(),
+                        &registry,
+                    )?;
+                    let msg = format!(
+                        "merge-gate merged task={} base={}; dispatch canceled",
+                        selected.id, selected.base_branch
+                    );
+                    let _ = append_coordinator_event_with_severity(
+                        repo_root,
+                        "merge_gate_merged",
+                        &selected.id,
+                        "merge",
+                        "done",
+                        &msg,
+                        "info",
+                    );
+                    if let Some(log) = logger {
+                        let _ = log.note(format!("- {}", msg));
+                    }
+                    continue;
+                }
+                MergeGateResult::ConflictProceed => {
+                    let msg = format!(
+                        "merge-gate could not merge task={} base={}; proceeding with dispatch",
+                        selected.id, selected.base_branch
+                    );
+                    let _ = append_coordinator_event_with_severity(
+                        repo_root,
+                        "merge_gate_conflict",
+                        &selected.id,
+                        "merge",
+                        "warning",
+                        &msg,
+                        "warning",
+                    );
+                    if let Some(log) = logger {
+                        let _ = log.note(format!("- {}", msg));
+                    }
+                }
+                MergeGateResult::NoBranchProceed => {
+                    let msg = format!(
+                        "merge-gate found no mergeable retry branch task={}; proceeding with dispatch",
+                        selected.id
+                    );
+                    let _ = append_coordinator_event_with_severity(
+                        repo_root,
+                        "merge_gate_no_branch",
+                        &selected.id,
+                        "merge",
+                        "done",
+                        &msg,
+                        "info",
+                    );
+                    if let Some(log) = logger {
+                        let _ = log.note(format!("- {}", msg));
+                    }
+                }
+            }
+        }
 
         let reuse_scan_started = Instant::now();
         let (reusable, reuse_prepare_error) = find_reusable_worktree_native(
@@ -3291,8 +3504,51 @@ pub async fn dispatch_ready_tasks_native(
 
 #[cfg(test)]
 mod tests {
-    use super::should_emit_priority_zero_dispatch_skip;
+    use super::{merge_gate_check, should_emit_priority_zero_dispatch_skip, MergeGateResult};
     use crate::coordinator::runtime::CoordinatorRunState;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::{fs, time::SystemTime};
+
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn run_git(repo: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("run git command");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn make_test_repo() -> PathBuf {
+        let suffix = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let nanos = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let repo = std::env::temp_dir().join(format!(
+            "macc-control-plane-tests-{}-{}-{}",
+            std::process::id(),
+            nanos,
+            suffix
+        ));
+        fs::create_dir_all(&repo).expect("create temp repo");
+        run_git(&repo, &["init"]);
+        run_git(&repo, &["checkout", "-b", "main"]);
+        run_git(&repo, &["config", "user.email", "tests@example.com"]);
+        run_git(&repo, &["config", "user.name", "MACC Tests"]);
+        fs::write(repo.join("base.txt"), "base\n").expect("write base");
+        run_git(&repo, &["add", "base.txt"]);
+        run_git(&repo, &["commit", "-m", "base"]);
+        repo
+    }
 
     #[test]
     fn priority_zero_dispatch_skip_logs_only_once_for_same_task() {
@@ -3306,5 +3562,78 @@ mod tests {
         assert!(should_emit_priority_zero_dispatch_skip(
             &mut state, "TASK-2"
         ));
+    }
+
+    #[test]
+    fn merge_gate_check_returns_no_branch_when_task_branch_missing() {
+        let repo = make_test_repo();
+        assert_eq!(
+            merge_gate_check("TASK-MISSING-001", "main", &repo),
+            MergeGateResult::NoBranchProceed
+        );
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn merge_gate_check_returns_merged_for_clean_retry_branch() {
+        let repo = make_test_repo();
+        run_git(&repo, &["checkout", "-b", "task/task-merge-001"]);
+        fs::write(repo.join("task.txt"), "task work\n").expect("write task file");
+        run_git(&repo, &["add", "task.txt"]);
+        run_git(&repo, &["commit", "-m", "task commit"]);
+        run_git(&repo, &["checkout", "main"]);
+
+        assert_eq!(
+            merge_gate_check("TASK-MERGE-001", "main", &repo),
+            MergeGateResult::Merged
+        );
+        let output = Command::new("git")
+            .args(["log", "--oneline", "main", "--", "task.txt"])
+            .current_dir(&repo)
+            .output()
+            .expect("git log");
+        assert!(
+            output.status.success(),
+            "git log failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !String::from_utf8_lossy(&output.stdout).trim().is_empty(),
+            "expected merged task commit to be reachable from main"
+        );
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn merge_gate_check_returns_conflict_on_conflicting_retry_branch() {
+        let repo = make_test_repo();
+        run_git(&repo, &["checkout", "-b", "task/task-conflict-001"]);
+        fs::write(repo.join("base.txt"), "task-side\n").expect("write task-side change");
+        run_git(&repo, &["add", "base.txt"]);
+        run_git(&repo, &["commit", "-m", "task conflicting commit"]);
+        run_git(&repo, &["checkout", "main"]);
+        fs::write(repo.join("base.txt"), "main-side\n").expect("write main-side change");
+        run_git(&repo, &["add", "base.txt"]);
+        run_git(&repo, &["commit", "-m", "main conflicting commit"]);
+
+        assert_eq!(
+            merge_gate_check("TASK-CONFLICT-001", "main", &repo),
+            MergeGateResult::ConflictProceed
+        );
+        let status = Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&repo)
+            .output()
+            .expect("git status");
+        assert!(
+            status.status.success(),
+            "git status failed: {}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&status.stdout).trim().is_empty(),
+            "merge gate should abort conflict and leave clean tree"
+        );
+        let _ = fs::remove_dir_all(&repo);
     }
 }
