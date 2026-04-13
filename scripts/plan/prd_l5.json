@@ -167,19 +167,20 @@
     },
     {
       "id": "L5-CFG-002",
-      "title": "Replace scattered unwrap_or() defaults with CoordinatorConfigResolved in control_plane.rs",
+      "title": "Replace unwrap_or() in dispatch functions of control_plane.rs",
       "category": "coordinator-config",
-      "description": "Problem/Goal: control_plane.rs re-derives config defaults at dozens of call sites using unwrap_or(N). This is the source of silent default inconsistency: a future change to a default in one place does not propagate to others.\nKey actions: In dispatch_ready_tasks_native() and all other functions in control_plane.rs that receive CoordinatorConfig, call CoordinatorConfigResolved::resolve(coordinator_cfg) at the top of the function and use the resolved struct for all subsequent field access. Remove all inline .unwrap_or(N) patterns for CoordinatorConfig fields.\nOut of scope: Changing any default value. Touching engine.rs or other files. Changing public function signatures.\nSuccess criteria: No .unwrap_or(N) patterns remain for CoordinatorConfig fields in control_plane.rs. All resolved values come from CoordinatorConfigResolved. Existing tests pass. No behavior change.",
-      "objective": "Eliminate scattered config default logic from control_plane.rs so defaults are defined and tested in exactly one place.",
-      "result": "control_plane.rs uses CoordinatorConfigResolved throughout. All CoordinatorConfig field accesses go through the resolved struct.",
+      "description": "Problem/Goal: dispatch_ready_tasks_native() and its dispatch helper functions in control_plane.rs re-derive config defaults at each call site using unwrap_or(N). This is the largest concentration of scattered defaults — the dispatch path alone spans ~1,000+ lines.\nKey actions: At the top of dispatch_ready_tasks_native() and each directly called dispatch helper function that receives coordinator_cfg: Option<&CoordinatorConfig>, add let cfg = CoordinatorConfigResolved::resolve(coordinator_cfg); and replace all .unwrap_or(N) field accesses with cfg.field. Scope: dispatch_ready_tasks_native() and functions it calls (worker selection, worktree acquisition, claim, performer launch helpers). Do not touch sanitize_, phase_, merge_, or utility functions yet.\nOut of scope: Sanitize, phase-runner, merge-gate, or utility functions (L5-CFG-003). engine.rs or other files (L5-CFG-004). Changing any default value or function signature.\nSuccess criteria: No .unwrap_or(N) patterns remain for CoordinatorConfig fields in the dispatch function group. cargo build passes. All tests pass. No behavior change.",
+      "objective": "Eliminate scattered config default logic from the dispatch function group of control_plane.rs — first of three CFG cleanup passes.",
+      "result": "dispatch_ready_tasks_native() and dispatch helpers use CoordinatorConfigResolved. No unwrap_or(N) on CoordinatorConfig fields in the dispatch group.",
       "steps": [
-        "At the top of each function in control_plane.rs receiving coordinator_cfg: Option<&CoordinatorConfig>, add: let cfg = CoordinatorConfigResolved::resolve(coordinator_cfg);",
-        "Replace each cfg_field.unwrap_or(N) with cfg.field for all CoordinatorConfig accesses.",
+        "Identify all functions in the dispatch group: dispatch_ready_tasks_native() and any helper functions it calls directly that receive coordinator_cfg.",
+        "At the top of each identified function, add: let cfg = CoordinatorConfigResolved::resolve(coordinator_cfg);",
+        "Replace each field.unwrap_or(N) with cfg.field for CoordinatorConfig accesses within the dispatch group.",
         "Run cargo build to confirm compilation.",
-        "Run all tests to confirm no behavior change.",
-        "Run cargo clippy to confirm no warnings."
+        "Run cargo test -p macc-core to confirm no behavior change.",
+        "Run cargo clippy to confirm no new warnings."
       ],
-      "notes": "Mechanical replacement — no logic change. Must run after L5-CFG-001 which defines CoordinatorConfigResolved. This opens control_plane.rs for subsequent structural tasks.",
+      "notes": "First of three passes replacing unwrap_or() in control_plane.rs. Scope is intentionally narrow — dispatch group only. L5-CFG-003 covers the remaining function groups in the same file. Mechanical replacement, no logic change.",
       "exclusive_resources": ["core/src/coordinator/control_plane.rs"],
       "dependencies": ["L5-CFG-001"],
       "priority": "2",
@@ -189,6 +190,60 @@
         "context_scope": "module",
         "risk_level": "low",
         "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L5-CFG-003",
+      "title": "Replace unwrap_or() in sanitize, phase-runner, and merge-gate functions of control_plane.rs",
+      "category": "coordinator-config",
+      "description": "Problem/Goal: After L5-CFG-002 cleans the dispatch group, the remaining function groups in control_plane.rs still use unwrap_or(N) for CoordinatorConfig fields: sanitize_worktree_to_base(), switch_worktree_to_base_after_merge(), phase runner functions, merge gate functions, and any utility/coordination helpers outside the dispatch group.\nKey actions: For each function in the sanitize, phase-runner, merge-gate, and utility groups that receives coordinator_cfg: Option<&CoordinatorConfig>, add let cfg = CoordinatorConfigResolved::resolve(coordinator_cfg); at the top and replace all .unwrap_or(N) field accesses with cfg.field.\nOut of scope: Dispatch functions (done in L5-CFG-002). engine.rs or other files (L5-CFG-004). Changing any default value or function signature.\nSuccess criteria: No .unwrap_or(N) patterns remain for CoordinatorConfig fields anywhere in control_plane.rs. cargo build passes. All tests pass. No behavior change.",
+      "objective": "Complete the unwrap_or() cleanup in control_plane.rs, leaving the file fully using CoordinatorConfigResolved — prerequisite for subsequent structural tasks.",
+      "result": "All functions in control_plane.rs use CoordinatorConfigResolved. Zero inline unwrap_or(N) on CoordinatorConfig fields remain in the file.",
+      "steps": [
+        "Grep control_plane.rs for remaining .unwrap_or patterns on CoordinatorConfig fields after L5-CFG-002 is merged.",
+        "For each remaining function: add let cfg = CoordinatorConfigResolved::resolve(coordinator_cfg); at the top.",
+        "Replace each field.unwrap_or(N) with cfg.field.",
+        "Run cargo build to confirm compilation.",
+        "Run cargo test -p macc-core to confirm no behavior change.",
+        "Run cargo clippy to confirm no new warnings.",
+        "Confirm zero unwrap_or on CoordinatorConfig fields remain in control_plane.rs."
+      ],
+      "notes": "Second of three passes. Must run after L5-CFG-002 (same file, sequential). Completion of this task unblocks L5-CTRL-003 which needs the file clean before structural extraction.",
+      "exclusive_resources": ["core/src/coordinator/control_plane.rs"],
+      "dependencies": ["L5-CFG-002"],
+      "priority": "2",
+      "routing_hints": {
+        "execution_mode": "micro",
+        "reasoning_depth": "light",
+        "context_scope": "module",
+        "risk_level": "low",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L5-CFG-004",
+      "title": "Replace unwrap_or() in engine.rs and remaining CoordinatorConfig callers",
+      "category": "coordinator-config",
+      "description": "Problem/Goal: engine.rs and potentially other coordinator files also receive CoordinatorConfig parameters and re-derive defaults with unwrap_or(N). These are independent of control_plane.rs and can be cleaned in parallel.\nKey actions: Grep the coordinator crate for unwrap_or on CoordinatorConfig fields outside control_plane.rs. For each match in engine.rs or other files, add let cfg = CoordinatorConfigResolved::resolve(coordinator_cfg); at the top of the function and replace field accesses. If no matches exist outside control_plane.rs, document the finding in a code comment near CoordinatorConfigResolved.\nOut of scope: control_plane.rs (L5-CFG-002/003). Changing any default value or function signature.\nSuccess criteria: No .unwrap_or(N) patterns remain for CoordinatorConfig fields in any file outside control_plane.rs. cargo build passes. All tests pass.",
+      "objective": "Extend CoordinatorConfigResolved adoption to engine.rs and all remaining callers, completing crate-wide default centralization.",
+      "result": "All CoordinatorConfig field accesses in the coordinator crate go through CoordinatorConfigResolved. Zero inline unwrap_or(N) on CoordinatorConfig fields anywhere in the crate.",
+      "steps": [
+        "Run: grep -rn 'coordinator_cfg.*unwrap_or\\|unwrap_or.*CoordinatorConfig' core/src/coordinator/ --exclude control_plane.rs",
+        "For each match: add let cfg = CoordinatorConfigResolved::resolve(coordinator_cfg); and replace field accesses.",
+        "If no matches found: add a comment near CoordinatorConfigResolved documenting that control_plane.rs is the sole caller.",
+        "Run cargo build --workspace to confirm compilation.",
+        "Run cargo test -p macc-core to confirm no behavior change."
+      ],
+      "notes": "Third of three passes. Independent of L5-CFG-002/003 (different files) — can run in parallel. Completes crate-wide adoption of CoordinatorConfigResolved. If engine.rs has no CoordinatorConfig parameters, this task is a quick audit pass that confirms the scope was control_plane.rs only.",
+      "exclusive_resources": ["core/src/coordinator/engine.rs"],
+      "dependencies": ["L5-CFG-001"],
+      "priority": "2",
+      "routing_hints": {
+        "execution_mode": "micro",
+        "reasoning_depth": "light",
+        "context_scope": "module",
+        "risk_level": "low",
+        "validation_profile": "light"
       }
     },
     {
@@ -287,9 +342,9 @@
         "Reduce switch_worktree_to_base_after_merge() to: prepare_clean_worktree(path, base, SanitizeOptions { fetch_remote: true, fail_on_fetch_error: true, tag_abandoned: true }).await",
         "Run all coordinator tests to confirm behavior is unchanged."
       ],
-      "notes": "Must run after L5-CFG-002 so the file is clean before this structural edit. The fail_on_fetch_error: true preserves current blocking behavior — L5-CTRL-001 will set this to false.",
+      "notes": "Must run after L5-CFG-003 so the file is fully clean (all unwrap_or replaced) before this structural edit. The fail_on_fetch_error: true preserves current blocking behavior — L5-CTRL-001 will set this to false.",
       "exclusive_resources": ["core/src/coordinator/control_plane.rs"],
-      "dependencies": ["L5-CFG-002"],
+      "dependencies": ["L5-CFG-003"],
       "priority": "2",
       "routing_hints": {
         "execution_mode": "standard",
@@ -429,9 +484,9 @@
         "Run all coordinator tests to confirm no behavior change.",
         "Write a test for select_dispatch_candidate() in isolation to verify task priority ordering."
       ],
-      "notes": "This is the structural capstone for control_plane.rs. Must run after all other CTRL tasks so the file is stable before this large refactor. The test for select_dispatch_candidate() in isolation is the key quality gate.",
+      "notes": "This is the structural capstone for control_plane.rs. Must run after all other CTRL tasks so the file is stable before this large refactor. Also requires L5-CFG-003 (not L5-CFG-002) to ensure the full file is clean before this large structural edit. The test for select_dispatch_candidate() in isolation is the key quality gate.",
       "exclusive_resources": ["core/src/coordinator/control_plane.rs"],
-      "dependencies": ["L5-CTRL-004", "L5-CFG-002"],
+      "dependencies": ["L5-CTRL-004", "L5-CFG-003"],
       "priority": "3",
       "routing_hints": {
         "execution_mode": "structural",
@@ -458,7 +513,7 @@
         "Run cargo build --workspace to verify all import paths compile.",
         "Run all coordinator tests to confirm no behavior change."
       ],
-      "notes": "Must run after L5-CTRL-005 which provides the stage-function boundaries. This is a pure move — no logic changes. The key risk is import path adjustments; compile verification is the acceptance gate.",
+      "notes": "Must run after L5-CTRL-005 which provides the stage-function boundaries. This is a pure move — no logic changes. The key risk is import path adjustments; compile verification is the acceptance gate. Can run in parallel with L5-MOD-002 through L5-MOD-004 — the two files (control_plane.rs and engine.rs) are independent.",
       "exclusive_resources": ["core/src/coordinator/control_plane.rs"],
       "dependencies": ["L5-CTRL-005"],
       "priority": "3",
@@ -472,30 +527,85 @@
     },
     {
       "id": "L5-MOD-002",
-      "title": "Decompose engine.rs into focused coordinator sub-modules",
+      "title": "Create engine/ sub-module directory and extract completion.rs",
       "category": "coordinator-structure",
-      "description": "Problem/Goal: engine.rs is 3,403 lines covering the FSM, completion classification, retry strategy resolution, state transitions, and run-loop orchestration. After L5-ENG-001 and L5-ENG-002 extract classify_completion_error(), resolve_retry_strategy(), and apply_state_transitions() as standalone functions, these groups are ready for sub-module extraction.\nKey actions: Create a coordinator/engine/ directory and move function groups into: completion.rs (classify_completion_error, ErrorClassification), retry.rs (resolve_retry_strategy, RetryStrategy), transitions.rs (apply_state_transitions), fsm.rs (core FSM, run_native_control_plane). Keep engine.rs as a thin mod.rs re-exporting public items. Adjust all import paths.\nOut of scope: Changing any function behavior. Touching control_plane.rs. Changing the public API surface of the coordinator module.\nSuccess criteria: engine.rs (mod.rs) is under 100 lines. Each sub-module is under 600 lines. cargo build --workspace passes. All existing tests pass without modification.",
-      "objective": "Break engine.rs into responsibility-aligned sub-modules so the FSM, classification, and retry logic can be read and tested independently.",
-      "result": "core/src/coordinator/engine/ directory with completion.rs, retry.rs, transitions.rs, fsm.rs, and a thin mod.rs. No behavior change.",
+      "description": "Problem/Goal: engine.rs is 3,403 lines. The decomposition starts by establishing the engine/ sub-module directory structure and extracting the smallest, most isolated unit: the completion classification functions defined in L5-ENG-001. classify_completion_error() and ErrorClassification are pure, have no side effects, and have no cross-cutting dependencies — ideal first extraction.\nKey actions: Create core/src/coordinator/engine/ directory. Move classify_completion_error() and ErrorClassification from engine.rs into engine/completion.rs. Convert engine.rs into engine/mod.rs. Re-export completion items via pub use. Fix all import paths.\nOut of scope: Moving retry, transitions, or FSM functions (L5-MOD-003, L5-MOD-004). Touching control_plane.rs. Changing any function behavior.\nSuccess criteria: engine/completion.rs contains classify_completion_error and ErrorClassification. engine/mod.rs re-exports them. cargo build --workspace passes. All engine tests pass.",
+      "objective": "Establish the engine/ sub-module directory and complete the first extraction — laying the foundation for L5-MOD-003 and L5-MOD-004.",
+      "result": "core/src/coordinator/engine/ directory exists. completion.rs has classify_completion_error and ErrorClassification. mod.rs re-exports them. Build and tests clean.",
       "steps": [
         "Create core/src/coordinator/engine/ directory.",
-        "Move completion classification functions (from L5-ENG-001) into completion.rs; adjust imports.",
-        "Move retry strategy and transition functions (from L5-ENG-002) into retry.rs and transitions.rs; adjust imports.",
-        "Move FSM and run-loop functions into fsm.rs; adjust imports.",
-        "Reduce engine.rs to mod.rs with pub use re-exports of all public items.",
-        "Run cargo build --workspace to verify all import paths compile.",
-        "Run all coordinator and engine tests to confirm no behavior change."
+        "Create engine/completion.rs: move classify_completion_error() and ErrorClassification from engine.rs.",
+        "Rename engine.rs to engine/mod.rs (or create mod.rs with the remaining content).",
+        "Add pub mod completion; and re-export public items: pub use completion::{classify_completion_error, ErrorClassification};",
+        "Fix any remaining import references inside mod.rs or other files that imported from engine.rs.",
+        "Run cargo build --workspace to confirm all callers resolve.",
+        "Run cargo test -p macc-core to confirm all engine tests pass."
       ],
-      "notes": "Must run after L5-ENG-002 which provides the extracted function boundaries. Can run in parallel with L5-MOD-001 — the two files are independent. Pure move, no logic changes.",
+      "notes": "First of three engine/ decomposition tasks. Establishes the directory structure used by L5-MOD-003 and L5-MOD-004. Must run after L5-ENG-002 which defines the extracted functions. Can run in parallel with L5-MOD-001 (control_plane/ decomposition) — the two files are independent.",
       "exclusive_resources": ["core/src/coordinator/engine.rs"],
       "dependencies": ["L5-ENG-002"],
       "priority": "3",
       "routing_hints": {
-        "execution_mode": "structural",
+        "execution_mode": "standard",
         "reasoning_depth": "standard",
         "context_scope": "module",
         "risk_level": "medium",
         "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L5-MOD-003",
+      "title": "Extract retry.rs and transitions.rs into engine/ sub-module",
+      "category": "coordinator-structure",
+      "description": "Problem/Goal: After L5-MOD-002 establishes engine/ and extracts completion.rs, the next group is ready: retry strategy resolution and state transition application. resolve_retry_strategy() (pure function, no mutation) and apply_state_transitions() (single mutation commit point) form a natural pair extracted by L5-ENG-002.\nKey actions: Create engine/retry.rs and engine/transitions.rs. Move resolve_retry_strategy() and RetryStrategy enum into retry.rs. Move apply_state_transitions() into transitions.rs. Update engine/mod.rs re-exports. Fix all import paths.\nOut of scope: FSM and run-loop functions (L5-MOD-004). completion.rs (done in L5-MOD-002). Touching control_plane.rs. Changing function behavior.\nSuccess criteria: engine/retry.rs has resolve_retry_strategy and RetryStrategy. engine/transitions.rs has apply_state_transitions. mod.rs re-exports all. cargo build --workspace passes. All tests pass.",
+      "objective": "Extract retry strategy and state transition logic into dedicated sub-modules, continuing the engine/ decomposition sequence.",
+      "result": "engine/retry.rs and engine/transitions.rs exist with their respective functions. mod.rs re-exports them. Build and tests clean.",
+      "steps": [
+        "Create engine/retry.rs: move resolve_retry_strategy() and RetryStrategy enum from engine/mod.rs.",
+        "Create engine/transitions.rs: move apply_state_transitions() from engine/mod.rs.",
+        "Add pub mod retry; pub mod transitions; to mod.rs and re-export public items.",
+        "Fix remaining import references inside mod.rs (fsm functions that call retry or transitions must now import from sub-modules).",
+        "Run cargo build --workspace to confirm all callers resolve.",
+        "Run cargo test -p macc-core to confirm all engine tests pass."
+      ],
+      "notes": "Second of three engine/ decomposition tasks. Depends on L5-MOD-002 which establishes the engine/ directory. The two sub-modules are combined here because both are small after L5-ENG-002 extraction (each function is under 100 lines). Can run in parallel with L5-MOD-001.",
+      "exclusive_resources": ["core/src/coordinator/engine.rs"],
+      "dependencies": ["L5-MOD-002"],
+      "priority": "3",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "medium",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L5-MOD-004",
+      "title": "Extract fsm.rs and finalize engine/ mod.rs as thin re-export facade",
+      "category": "coordinator-structure",
+      "description": "Problem/Goal: After L5-MOD-002 and L5-MOD-003 extract completion, retry, and transitions, the remaining content in engine/mod.rs is the FSM and run-loop orchestration (run_native_control_plane and FSM tick functions). This is the largest and most complex remaining group. Moving it into fsm.rs completes the decomposition and leaves mod.rs as a pure re-export facade under 100 lines.\nKey actions: Create engine/fsm.rs. Move run_native_control_plane() and all FSM tick/state-machine functions from engine/mod.rs into fsm.rs. Update mod.rs re-exports. Confirm mod.rs is under 100 lines. Fix all import paths inside fsm.rs (it imports from completion, retry, transitions). Run full test suite.\nOut of scope: Touching control_plane.rs. Changing function behavior. Changing public API.\nSuccess criteria: engine/fsm.rs contains FSM and run-loop functions. engine/mod.rs is under 100 lines of pure pub use re-exports. cargo build --workspace passes. All coordinator and engine tests pass.",
+      "objective": "Complete the engine/ decomposition by extracting the FSM and run-loop, leaving mod.rs as a thin facade over four focused sub-modules.",
+      "result": "engine/fsm.rs exists. engine/mod.rs is under 100 lines. engine/ has completion.rs, retry.rs, transitions.rs, fsm.rs, mod.rs. All tests pass.",
+      "steps": [
+        "Create engine/fsm.rs: move run_native_control_plane() and all FSM tick/transition functions from engine/mod.rs.",
+        "Add pub mod fsm; to mod.rs and re-export public items from fsm.",
+        "Fix import paths inside fsm.rs — it will need to import ErrorClassification from completion, RetryStrategy from retry, apply_state_transitions from transitions.",
+        "Confirm engine/mod.rs is under 100 lines (only pub mod declarations and pub use re-exports).",
+        "Run cargo build --workspace to confirm all callers resolve.",
+        "Run cargo test -p macc-core to confirm all coordinator and engine tests pass.",
+        "Run cargo clippy to confirm no new warnings."
+      ],
+      "notes": "Final task in the engine/ decomposition sequence (L5-MOD-002 → L5-MOD-003 → L5-MOD-004). The FSM contains the most intra-engine cross-references so import fixes are the primary risk — compile verification is the acceptance gate. Can run in parallel with L5-MOD-001.",
+      "exclusive_resources": ["core/src/coordinator/engine.rs"],
+      "dependencies": ["L5-MOD-003"],
+      "priority": "3",
+      "routing_hints": {
+        "execution_mode": "structural",
+        "reasoning_depth": "deep",
+        "context_scope": "module",
+        "risk_level": "high",
+        "validation_profile": "heavy"
       }
     },
     {
