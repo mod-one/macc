@@ -73,6 +73,9 @@ pub const COORDINATOR_EVENT_TYPES_V1: &[&str] = &[
     "dispatch_skipped",
     "sanitize_done",
     "dispatch_failed",
+    "sync_unmerged_branch_discovered",
+    "sync_unmerged_branch_merged",
+    "sync_unmerged_branch_merge_failed",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
