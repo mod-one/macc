@@ -323,6 +323,25 @@ pub async fn fetch_async(repo_or_worktree: &Path, remote: &str) -> Result<bool> 
     )
 }
 
+pub fn git_remote_exists(repo_or_worktree: &Path, remote: &str) -> Result<bool> {
+    Ok(run_git_status(
+        repo_or_worktree,
+        &["remote", "get-url", remote],
+        "check git remote exists",
+    )?
+    .success())
+}
+
+pub async fn git_remote_exists_async(repo_or_worktree: &Path, remote: &str) -> Result<bool> {
+    Ok(run_git_status_async(
+        repo_or_worktree,
+        &["remote", "get-url", remote],
+        "check git remote exists",
+    )
+    .await?
+    .success())
+}
+
 pub fn merge_ff_only(repo_or_worktree: &Path, reference: &str) -> Result<bool> {
     Ok(run_git_status(
         repo_or_worktree,
@@ -846,9 +865,9 @@ pub fn delete_local_branch(repo_root: &Path, branch: &str, force: bool) -> Resul
 mod tests {
     use super::{
         commits_ahead_of_base, commits_ahead_of_base_async, commits_containing_pattern,
-        commits_containing_pattern_async, create_tag, create_tag_async, list_branches_by_prefix,
-        list_branches_by_prefix_async, parse_git_graph_record, parse_git_graph_records,
-        parse_graph_refs,
+        commits_containing_pattern_async, create_tag, create_tag_async, git_remote_exists,
+        git_remote_exists_async, list_branches_by_prefix, list_branches_by_prefix_async,
+        parse_git_graph_record, parse_git_graph_records, parse_graph_refs,
     };
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -1000,6 +1019,45 @@ mod tests {
 
         create_tag(&repo, "v-test-1", "HEAD").expect("create tag");
         run_git(&repo, &["rev-parse", "--verify", "refs/tags/v-test-1"]);
+    }
+
+    #[test]
+    fn git_remote_exists_returns_true_when_remote_exists() {
+        let repo = make_test_repo();
+        run_git(
+            &repo,
+            &["remote", "add", "origin", "https://example.com/repo.git"],
+        );
+
+        assert!(git_remote_exists(&repo, "origin").expect("remote check succeeds"));
+    }
+
+    #[test]
+    fn git_remote_exists_returns_false_when_remote_missing() {
+        let repo = make_test_repo();
+        assert!(!git_remote_exists(&repo, "origin").expect("remote check succeeds"));
+    }
+
+    #[tokio::test]
+    async fn git_remote_exists_async_matches_sync_result() {
+        let repo = make_test_repo();
+        run_git(
+            &repo,
+            &["remote", "add", "origin", "https://example.com/repo.git"],
+        );
+
+        let sync_exists = git_remote_exists(&repo, "origin").expect("sync remote check succeeds");
+        let async_exists = git_remote_exists_async(&repo, "origin")
+            .await
+            .expect("async remote check succeeds");
+        assert_eq!(async_exists, sync_exists);
+
+        let sync_missing =
+            git_remote_exists(&repo, "upstream").expect("sync remote check succeeds");
+        let async_missing = git_remote_exists_async(&repo, "upstream")
+            .await
+            .expect("async remote check succeeds");
+        assert_eq!(async_missing, sync_missing);
     }
 
     #[tokio::test]
