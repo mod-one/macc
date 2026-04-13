@@ -995,6 +995,108 @@ struct ErrorClassification {
     tool_error: Option<ToolError>,
 }
 
+#[derive(Debug, Clone)]
+struct CompletionErrorDetails {
+    code: String,
+    origin: String,
+    message: String,
+}
+
+impl CompletionErrorDetails {
+    fn from_classification(classification: &ErrorClassification) -> Self {
+        Self {
+            code: classification.error_code.clone(),
+            origin: classification.error_origin.clone(),
+            message: classification.error_message.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CoordinatorConfigResolved {
+    auto_retry_error_codes: Vec<String>,
+    auto_retry_max: usize,
+    backoff_base_seconds: u64,
+    backoff_max_seconds: u64,
+}
+
+impl CoordinatorConfigResolved {
+    fn from_input(input: &JobCompletionInput) -> Self {
+        Self {
+            auto_retry_error_codes: input.auto_retry_error_codes.clone(),
+            auto_retry_max: input.auto_retry_max,
+            backoff_base_seconds: input.backoff_base_seconds,
+            backoff_max_seconds: input.backoff_max_seconds,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum RetryOutcome {
+    ToolReportedError {
+        completion_kind: PerformerCompletionKind,
+        tool_error: Option<ToolError>,
+    },
+    AttemptRetry {
+        error: CompletionErrorDetails,
+        tool_error: Option<ToolError>,
+        now_ts: u64,
+    },
+    RateLimitBackoff {
+        backoff: u64,
+        delayed_until: String,
+        error: CompletionErrorDetails,
+        tool_error: Option<ToolError>,
+        now_ts: u64,
+    },
+    QuotaExhaustedRequeue {
+        cooldown: u64,
+        delayed_until: String,
+        error: CompletionErrorDetails,
+        tool_error: Option<ToolError>,
+        now_ts: u64,
+    },
+    AutoRetry {
+        error: CompletionErrorDetails,
+        tool_error: Option<ToolError>,
+        now_ts: u64,
+    },
+}
+
+#[derive(Debug, Clone)]
+enum BlockOutcome {
+    InvalidInput,
+    TerminalFailure {
+        error: CompletionErrorDetails,
+        tool_error: Option<ToolError>,
+        now_ts: u64,
+    },
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+enum RetryStrategy {
+    Retry {
+        same_worktree: bool,
+        reason: String,
+        outcome: RetryOutcome,
+    },
+    Block {
+        reason: String,
+        outcome: BlockOutcome,
+    },
+    Merge {
+        detail: String,
+        completion_kind: PerformerCompletionKind,
+        tool_error: Option<ToolError>,
+    },
+    PhaseDone {
+        detail: String,
+        completion_kind: PerformerCompletionKind,
+    },
+    NoOp,
+}
+
 fn classify_completion_error(
     input: &JobCompletionInput,
     normalizer: Option<&dyn ErrorNormalizer>,
@@ -1076,6 +1178,520 @@ fn classify_completion_error(
     }
 }
 
+fn resolve_retry_strategy(
+    task: &Task,
+    input: &JobCompletionInput,
+    classification: &ErrorClassification,
+    config: &CoordinatorConfigResolved,
+    is_healthy_worktree: bool,
+    now: &str,
+) -> RetryStrategy {
+    if input.attempt == 0 || input.max_attempts == 0 {
+        return RetryStrategy::Block {
+            reason: "performer completion received with invalid attempt counters".to_string(),
+            outcome: BlockOutcome::InvalidInput,
+        };
+    }
+    if input.status_text.is_empty() {
+        return RetryStrategy::Block {
+            reason: "performer completion received without status detail".to_string(),
+            outcome: BlockOutcome::InvalidInput,
+        };
+    }
+
+    let error_details = CompletionErrorDetails::from_classification(classification);
+    let tool_error = classification.tool_error.clone();
+    let now_ts = chrono::DateTime::parse_from_rfc3339(now)
+        .map(|dt| dt.timestamp() as u64)
+        .unwrap_or(0);
+
+    if classification.completion_success {
+        let completion_kind = classification
+            .completion_kind
+            .unwrap_or(PerformerCompletionKind::SuccessWithChanges);
+        if completion_kind.is_error() {
+            let same_worktree = completion_kind == PerformerCompletionKind::ErrorWithChanges
+                && classification.has_commits
+                && is_healthy_worktree;
+            return RetryStrategy::Retry {
+                same_worktree,
+                reason: input.status_text.clone(),
+                outcome: RetryOutcome::ToolReportedError {
+                    completion_kind,
+                    tool_error: None,
+                },
+            };
+        }
+        if completion_kind == PerformerCompletionKind::AlreadySatisfied
+            || completion_kind == PerformerCompletionKind::SuccessWithoutChanges
+        {
+            return RetryStrategy::Merge {
+                detail: input.status_text.clone(),
+                completion_kind,
+                tool_error: None,
+            };
+        }
+        return RetryStrategy::PhaseDone {
+            detail: input.status_text.clone(),
+            completion_kind,
+        };
+    }
+
+    if let Some(ref ni) = input.normalizer_input {
+        let stdout_says_done = ni.stdout.contains("MACC_TASK_RESULT: success")
+            || ni.stdout.contains("already_satisfied");
+        let transient_error = tool_error
+            .as_ref()
+            .map(|te| {
+                matches!(
+                    te.canonical_class,
+                    CanonicalClass::Overloaded | CanonicalClass::RateLimit
+                )
+            })
+            .unwrap_or(false);
+        if stdout_says_done && transient_error {
+            return RetryStrategy::Merge {
+                detail: "exit-code override: stdout indicates completion despite transient error"
+                    .to_string(),
+                completion_kind: PerformerCompletionKind::AlreadySatisfied,
+                tool_error,
+            };
+        }
+
+        let stdout_says_error = ni.stdout.contains("MACC_TASK_RESULT: error_with_changes")
+            || ni
+                .stdout
+                .contains("MACC_TASK_RESULT: error_without_changes");
+        if stdout_says_error {
+            let completion_kind = if ni.stdout.contains("error_with_changes") {
+                PerformerCompletionKind::ErrorWithChanges
+            } else {
+                PerformerCompletionKind::ErrorWithoutChanges
+            };
+            let same_worktree = completion_kind == PerformerCompletionKind::ErrorWithChanges
+                && classification.has_commits
+                && is_healthy_worktree;
+            return RetryStrategy::Retry {
+                same_worktree,
+                reason: input.status_text.clone(),
+                outcome: RetryOutcome::ToolReportedError {
+                    completion_kind,
+                    tool_error,
+                },
+            };
+        }
+    }
+
+    if error_details.code == E601_RATE_LIMITED {
+        let retry_after = tool_error.as_ref().and_then(|te| te.retry_after_seconds);
+        let backoff = compute_backoff_delay(
+            input.attempt,
+            config.backoff_base_seconds,
+            config.backoff_max_seconds,
+            retry_after,
+        );
+        let delayed_until = chrono::DateTime::parse_from_rfc3339(now)
+            .ok()
+            .and_then(|dt| dt.checked_add_signed(chrono::Duration::seconds(backoff as i64)))
+            .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+            .unwrap_or_default();
+        return RetryStrategy::Retry {
+            same_worktree: false,
+            reason: format!(
+                "rate-limited; backoff {}s, delayed until {}",
+                backoff, delayed_until
+            ),
+            outcome: RetryOutcome::RateLimitBackoff {
+                backoff,
+                delayed_until,
+                error: error_details,
+                tool_error,
+                now_ts,
+            },
+        };
+    }
+
+    if error_details.code == E602_QUOTA_EXHAUSTED {
+        let retry_after = tool_error.as_ref().and_then(|te| te.retry_after_seconds);
+        let cooldown = retry_after.unwrap_or(3600);
+        let delayed_until = chrono::DateTime::parse_from_rfc3339(now)
+            .ok()
+            .and_then(|dt| dt.checked_add_signed(chrono::Duration::seconds(cooldown as i64)))
+            .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+            .unwrap_or_default();
+        return RetryStrategy::Retry {
+            same_worktree: false,
+            reason: format!(
+                "quota exhausted; cooldown {}s, re-queued for tool fallback",
+                cooldown
+            ),
+            outcome: RetryOutcome::QuotaExhaustedRequeue {
+                cooldown,
+                delayed_until,
+                error: error_details,
+                tool_error,
+                now_ts,
+            },
+        };
+    }
+
+    if input.attempt < input.max_attempts {
+        let reason = if input.timed_out {
+            format!(
+                "performer timed out after {}s on attempt {} (elapsed={}s)",
+                input.phase_timeout_seconds, input.attempt, input.elapsed_seconds
+            )
+        } else {
+            format!(
+                "performer failed on attempt {}: {}",
+                input.attempt, input.status_text
+            )
+        };
+        return RetryStrategy::Retry {
+            same_worktree: true,
+            reason,
+            outcome: RetryOutcome::AttemptRetry {
+                error: error_details,
+                tool_error,
+                now_ts,
+            },
+        };
+    }
+
+    let reason = if input.timed_out {
+        format!(
+            "performer timed out after {}s (max attempts reached: {}, elapsed={}s)",
+            input.phase_timeout_seconds, input.max_attempts, input.elapsed_seconds
+        )
+    } else {
+        format!(
+            "performer failed after {} attempts: {}",
+            input.attempt, input.status_text
+        )
+    };
+    let retries_total = task.task_runtime.retries_count();
+    if should_auto_retry_error_code(
+        &error_details.code,
+        &config.auto_retry_error_codes,
+        config.auto_retry_max,
+        retries_total,
+    ) {
+        return RetryStrategy::Retry {
+            same_worktree: false,
+            reason: format!(
+                "auto-retry scheduled for error code {}",
+                error_details.code
+            ),
+            outcome: RetryOutcome::AutoRetry {
+                error: error_details,
+                tool_error,
+                now_ts,
+            },
+        };
+    }
+
+    RetryStrategy::Block {
+        reason,
+        outcome: BlockOutcome::TerminalFailure {
+            error: error_details,
+            tool_error,
+            now_ts,
+        },
+    }
+}
+
+fn apply_state_transitions(task: &mut Task, strategy: &RetryStrategy, now: &str) -> JobCompletionResult {
+    match strategy {
+        RetryStrategy::Retry {
+            same_worktree,
+            reason,
+            outcome,
+        } => match outcome {
+            RetryOutcome::ToolReportedError {
+                completion_kind,
+                tool_error,
+            } => {
+                task.set_workflow_state(WorkflowState::Todo);
+                preserve_active_session_chain(task);
+                capture_last_assignment_before_clear(task);
+                if !same_worktree {
+                    task.worktree = None;
+                }
+                let runtime = task.ensure_runtime();
+                runtime.completion_kind = Some(completion_kind.as_str().to_string());
+                runtime.set_status(RuntimeStatus::Failed);
+                runtime.current_phase = None;
+                runtime.pid = None;
+                runtime.last_error = Some(reason.clone());
+                task.tool = None;
+                task.assignee = None;
+                task.touch_state_changed(now);
+                JobCompletionResult {
+                    should_retry: false,
+                    status_label: completion_kind.as_str(),
+                    detail: reason.clone(),
+                    completion_kind: Some(*completion_kind),
+                    tool_error: tool_error.clone(),
+                }
+            }
+            RetryOutcome::AttemptRetry {
+                error,
+                tool_error,
+                now_ts,
+            } => {
+                task.set_workflow_state(WorkflowState::Claimed);
+                let runtime = task.ensure_runtime();
+                runtime.set_status(RuntimeStatus::Running);
+                runtime.current_phase = Some("dev".to_string());
+                runtime.completion_kind = None;
+                runtime.pid = None;
+                runtime.set_last_error_details(
+                    error.code.clone(),
+                    error.origin.clone(),
+                    error.message.clone(),
+                );
+                runtime.last_error = Some(reason.clone());
+                store_classified_error_in_extra(runtime, tool_error, *now_ts);
+                task.touch_state_changed(now);
+                JobCompletionResult {
+                    should_retry: true,
+                    status_label: "retry",
+                    detail: reason.clone(),
+                    completion_kind: None,
+                    tool_error: tool_error.clone(),
+                }
+            }
+            RetryOutcome::RateLimitBackoff {
+                backoff,
+                delayed_until,
+                error,
+                tool_error,
+                now_ts,
+            } => {
+                let tool_id_str = task.tool.as_deref().unwrap_or("").to_string();
+                let runtime = task.ensure_runtime();
+                let mut throttle: ToolThrottleState = runtime
+                    .extra
+                    .get("throttle_state")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_else(|| ToolThrottleState {
+                        tool_id: tool_id_str.clone(),
+                        ..Default::default()
+                    });
+                let rli = RateLimitInfo {
+                    tool_id: tool_id_str,
+                    error_code: E601_RATE_LIMITED.to_string(),
+                    retry_after_seconds: tool_error.as_ref().and_then(|te| te.retry_after_seconds),
+                    detected_at: *now_ts,
+                    source_header: None,
+                };
+                update_throttle_state(&mut throttle, &rli, *backoff, *now_ts);
+                if let Ok(v) = serde_json::to_value(&throttle) {
+                    runtime.extra.insert("throttle_state".to_string(), v);
+                }
+                runtime.delayed_until = Some(delayed_until.clone());
+                runtime.set_status(RuntimeStatus::Idle);
+                runtime.current_phase = Some("dev".to_string());
+                runtime.completion_kind = None;
+                runtime.pid = None;
+                runtime.set_last_error_details(
+                    error.code.clone(),
+                    error.origin.clone(),
+                    error.message.clone(),
+                );
+                runtime.last_error = Some(format!("rate-limited; backoff {}s", backoff));
+                store_classified_error_in_extra(runtime, tool_error, *now_ts);
+                capture_last_assignment_before_clear(task);
+                task.worktree = None;
+                task.set_workflow_state(WorkflowState::Todo);
+                task.touch_state_changed(now);
+                JobCompletionResult {
+                    should_retry: false,
+                    status_label: "rate_limit_backoff",
+                    detail: reason.clone(),
+                    completion_kind: None,
+                    tool_error: tool_error.clone(),
+                }
+            }
+            RetryOutcome::QuotaExhaustedRequeue {
+                cooldown,
+                delayed_until,
+                error,
+                tool_error,
+                now_ts,
+            } => {
+                let tool_id_str = task.tool.as_deref().unwrap_or("").to_string();
+                let runtime = task.ensure_runtime();
+                let mut throttle: ToolThrottleState = runtime
+                    .extra
+                    .get("throttle_state")
+                    .and_then(|v| serde_json::from_value(v.clone()).ok())
+                    .unwrap_or_else(|| ToolThrottleState {
+                        tool_id: tool_id_str.clone(),
+                        ..Default::default()
+                    });
+                let rli = RateLimitInfo {
+                    tool_id: tool_id_str,
+                    error_code: E602_QUOTA_EXHAUSTED.to_string(),
+                    retry_after_seconds: Some(*cooldown),
+                    detected_at: *now_ts,
+                    source_header: None,
+                };
+                update_throttle_state(&mut throttle, &rli, *cooldown, *now_ts);
+                if let Ok(v) = serde_json::to_value(&throttle) {
+                    runtime.extra.insert("throttle_state".to_string(), v);
+                }
+                runtime.delayed_until = Some(delayed_until.clone());
+                runtime.set_status(RuntimeStatus::Idle);
+                runtime.completion_kind = None;
+                runtime.pid = None;
+                runtime.set_last_error_details(
+                    error.code.clone(),
+                    error.origin.clone(),
+                    error.message.clone(),
+                );
+                runtime.last_error = Some(format!("quota exhausted; cooldown {}s", cooldown));
+                store_classified_error_in_extra(runtime, tool_error, *now_ts);
+                capture_last_assignment_before_clear(task);
+                task.worktree = None;
+                task.set_workflow_state(WorkflowState::Todo);
+                task.touch_state_changed(now);
+                JobCompletionResult {
+                    should_retry: false,
+                    status_label: "quota_exhausted_requeue",
+                    detail: reason.clone(),
+                    completion_kind: None,
+                    tool_error: tool_error.clone(),
+                }
+            }
+            RetryOutcome::AutoRetry {
+                error,
+                tool_error,
+                now_ts,
+            } => {
+                task.set_workflow_state(WorkflowState::Todo);
+                capture_last_assignment_before_clear(task);
+                task.worktree = None;
+                let runtime = task.ensure_runtime();
+                runtime.increment_retries();
+                runtime.set_status(RuntimeStatus::Idle);
+                runtime.pid = None;
+                runtime.current_phase = Some("dev".to_string());
+                runtime.completion_kind = None;
+                runtime.set_last_error_details(
+                    error.code.clone(),
+                    error.origin.clone(),
+                    error.message.clone(),
+                );
+                runtime.last_error = Some(reason.clone());
+                store_classified_error_in_extra(runtime, tool_error, *now_ts);
+                task.touch_state_changed(now);
+                JobCompletionResult {
+                    should_retry: false,
+                    status_label: "auto_retry",
+                    detail: reason.clone(),
+                    completion_kind: None,
+                    tool_error: tool_error.clone(),
+                }
+            }
+        },
+        RetryStrategy::Block { reason, outcome } => match outcome {
+            BlockOutcome::InvalidInput => {
+                task.set_workflow_state(WorkflowState::Blocked);
+                let runtime = task.ensure_runtime();
+                runtime.set_status(RuntimeStatus::Failed);
+                runtime.pid = None;
+                runtime.set_last_error_details("E901", "coordinator", reason.clone());
+                runtime.last_error = Some(reason.clone());
+                task.touch_state_changed(now);
+                JobCompletionResult {
+                    should_retry: false,
+                    status_label: "failed",
+                    detail: reason.clone(),
+                    completion_kind: None,
+                    tool_error: None,
+                }
+            }
+            BlockOutcome::TerminalFailure {
+                error,
+                tool_error,
+                now_ts,
+            } => {
+                task.set_workflow_state(WorkflowState::Blocked);
+                let runtime = task.ensure_runtime();
+                runtime.set_status(RuntimeStatus::Failed);
+                runtime.completion_kind = None;
+                runtime.pid = None;
+                runtime.set_last_error_details(
+                    error.code.clone(),
+                    error.origin.clone(),
+                    error.message.clone(),
+                );
+                runtime.last_error = Some(reason.clone());
+                store_classified_error_in_extra(runtime, tool_error, *now_ts);
+                task.touch_state_changed(now);
+                JobCompletionResult {
+                    should_retry: false,
+                    status_label: "failed",
+                    detail: reason.clone(),
+                    completion_kind: None,
+                    tool_error: tool_error.clone(),
+                }
+            }
+        },
+        RetryStrategy::Merge {
+            detail,
+            completion_kind,
+            tool_error,
+        } => {
+            task.set_workflow_state(WorkflowState::Merged);
+            let runtime = task.ensure_runtime();
+            runtime.completion_kind = Some(completion_kind.as_str().to_string());
+            runtime.set_status(RuntimeStatus::Idle);
+            runtime.current_phase = None;
+            runtime.pid = None;
+            task.touch_state_changed(now);
+            JobCompletionResult {
+                should_retry: false,
+                status_label: match completion_kind {
+                    PerformerCompletionKind::AlreadySatisfied => "already_satisfied",
+                    PerformerCompletionKind::SuccessWithoutChanges => "success_without_changes",
+                    _ => "already_satisfied",
+                },
+                detail: detail.clone(),
+                completion_kind: Some(*completion_kind),
+                tool_error: tool_error.clone(),
+            }
+        }
+        RetryStrategy::PhaseDone {
+            detail,
+            completion_kind,
+        } => {
+            task.set_workflow_state(WorkflowState::InProgress);
+            let runtime = task.ensure_runtime();
+            runtime.completion_kind = Some(completion_kind.as_str().to_string());
+            runtime.set_status(RuntimeStatus::PhaseDone);
+            runtime.current_phase = Some("dev".to_string());
+            runtime.pid = None;
+            task.touch_state_changed(now);
+            JobCompletionResult {
+                should_retry: false,
+                status_label: "phase_done",
+                detail: detail.clone(),
+                completion_kind: Some(*completion_kind),
+                tool_error: None,
+            }
+        }
+        RetryStrategy::NoOp => JobCompletionResult {
+            should_retry: false,
+            status_label: "failed",
+            detail: "completion strategy resolved to no-op".to_string(),
+            completion_kind: None,
+            tool_error: None,
+        },
+    }
+}
+
 fn apply_job_completion_typed(
     task: &mut Task,
     input: &JobCompletionInput,
@@ -1109,454 +1725,16 @@ fn apply_job_completion_typed(
         classification.completion_authority != CompletionAuthority::IpcSignal
             || classification.has_commits
     );
-
-    // ── Guard: invalid attempt counters ─────────────────────────────
-    if input.attempt == 0 || input.max_attempts == 0 {
-        task.set_workflow_state(WorkflowState::Blocked);
-        let runtime = task.ensure_runtime();
-        runtime.set_status(RuntimeStatus::Failed);
-        runtime.pid = None;
-        let detail = "performer completion received with invalid attempt counters".to_string();
-        runtime.set_last_error_details("E901", "coordinator", detail.clone());
-        runtime.last_error = Some(detail.clone());
-        task.touch_state_changed(now);
-        return JobCompletionResult {
-            should_retry: false,
-            status_label: "failed",
-            detail,
-            completion_kind: None,
-            tool_error: None,
-        };
-    }
-    if input.status_text.is_empty() {
-        task.set_workflow_state(WorkflowState::Blocked);
-        let runtime = task.ensure_runtime();
-        runtime.set_status(RuntimeStatus::Failed);
-        runtime.pid = None;
-        let detail = "performer completion received without status detail".to_string();
-        runtime.set_last_error_details("E901", "coordinator", detail.clone());
-        runtime.last_error = Some(detail.clone());
-        task.touch_state_changed(now);
-        return JobCompletionResult {
-            should_retry: false,
-            status_label: "failed",
-            detail,
-            completion_kind: None,
-            tool_error: None,
-        };
-    }
-    let error_code = classification.error_code.clone();
-    let error_origin = classification.error_origin.clone();
-    let error_message = classification.error_message.clone();
-    let classified_tool_error = classification.tool_error.clone();
-
-    // ── Success ──────────────────────────────────────────────────────
-    if classification.completion_success {
-        let completion_kind = classification
-            .completion_kind
-            .unwrap_or(PerformerCompletionKind::SuccessWithChanges);
-
-        // ── Tool-reported error: re-queue the task ──────────────────
-        // The tool ran but reported it could not complete the task
-        // (sandbox failure, env issue, etc.). Reset to Todo so the
-        // coordinator can retry with the same or a different tool.
-        if completion_kind.is_error() {
-            let retain_worktree_for_retry = completion_kind
-                == PerformerCompletionKind::ErrorWithChanges
-                && classification.has_commits
-                && is_healthy_worktree;
-            task.set_workflow_state(WorkflowState::Todo);
-            // Capture session info before clearing worktree and tool so retries
-            // can resume with cached context instead of cold-starting a new session.
-            preserve_active_session_chain(task);
-            capture_last_assignment_before_clear(task);
-            if !retain_worktree_for_retry {
-                task.worktree = None;
-            }
-            {
-                let runtime = task.ensure_runtime();
-                runtime.completion_kind = Some(completion_kind.as_str().to_string());
-                runtime.set_status(RuntimeStatus::Failed);
-                runtime.current_phase = None;
-                runtime.pid = None;
-                runtime.last_error = Some(input.status_text.clone());
-            }
-            task.tool = None;
-            task.assignee = None;
-            task.touch_state_changed(now);
-            return JobCompletionResult {
-                should_retry: false,
-                status_label: completion_kind.as_str(),
-                detail: input.status_text.clone(),
-                completion_kind: Some(completion_kind),
-                tool_error: None,
-            };
-        }
-
-        let terminal_noop = completion_kind == PerformerCompletionKind::AlreadySatisfied
-            || completion_kind == PerformerCompletionKind::SuccessWithoutChanges;
-        task.set_workflow_state(if terminal_noop {
-            WorkflowState::Merged
-        } else {
-            WorkflowState::InProgress
-        });
-        let runtime = task.ensure_runtime();
-        runtime.completion_kind = Some(completion_kind.as_str().to_string());
-        runtime.set_status(if terminal_noop {
-            RuntimeStatus::Idle
-        } else {
-            RuntimeStatus::PhaseDone
-        });
-        runtime.current_phase = if terminal_noop {
-            None
-        } else {
-            Some("dev".to_string())
-        };
-        runtime.pid = None;
-        task.touch_state_changed(now);
-        return JobCompletionResult {
-            should_retry: false,
-            status_label: match completion_kind {
-                PerformerCompletionKind::SuccessWithChanges => "phase_done",
-                PerformerCompletionKind::SuccessWithoutChanges => "success_without_changes",
-                PerformerCompletionKind::AlreadySatisfied => "already_satisfied",
-                // Error kinds handled above; unreachable here.
-                PerformerCompletionKind::ErrorWithChanges => "error_with_changes",
-                PerformerCompletionKind::ErrorWithoutChanges => "error_without_changes",
-            },
-            detail: input.status_text.clone(),
-            completion_kind: Some(completion_kind),
-            tool_error: None,
-        };
-    }
-
-    // ── Exit-code override ───────────────────────────────────────────
-    // When a performer exits non-zero but its stdout contains a success
-    // marker AND the only detected error was transient (Overloaded /
-    // RateLimit), the task likely completed before the transient error
-    // fired. Treat as AlreadySatisfied to avoid losing completed work.
-    // This addresses the "Run 2 bug" where Claude returned already_satisfied
-    // but exit code was 1 due to an earlier 529 overload hit on teardown.
-    if let Some(ref ni) = input.normalizer_input {
-        let stdout_says_done = ni.stdout.contains("MACC_TASK_RESULT: success")
-            || ni.stdout.contains("already_satisfied");
-        let transient_error = classified_tool_error
-            .as_ref()
-            .map(|te| {
-                matches!(
-                    te.canonical_class,
-                    CanonicalClass::Overloaded | CanonicalClass::RateLimit
-                )
-            })
-            .unwrap_or(false);
-        if stdout_says_done && transient_error {
-            task.set_workflow_state(WorkflowState::Merged);
-            let runtime = task.ensure_runtime();
-            runtime.completion_kind = Some(
-                PerformerCompletionKind::AlreadySatisfied
-                    .as_str()
-                    .to_string(),
-            );
-            runtime.set_status(RuntimeStatus::Idle);
-            runtime.current_phase = None;
-            runtime.pid = None;
-            task.touch_state_changed(now);
-            return JobCompletionResult {
-                should_retry: false,
-                status_label: "already_satisfied",
-                detail: "exit-code override: stdout indicates completion despite transient error"
-                    .to_string(),
-                completion_kind: Some(PerformerCompletionKind::AlreadySatisfied),
-                tool_error: classified_tool_error,
-            };
-        }
-
-        // ── Tool-reported error with non-zero exit ──────────────────
-        // The tool exited non-zero but printed an explicit error marker.
-        // Re-queue the task so the coordinator retries with the same or
-        // a different tool.
-        let stdout_says_error = ni.stdout.contains("MACC_TASK_RESULT: error_with_changes")
-            || ni
-                .stdout
-                .contains("MACC_TASK_RESULT: error_without_changes");
-        if stdout_says_error {
-            let kind = if ni.stdout.contains("error_with_changes") {
-                PerformerCompletionKind::ErrorWithChanges
-            } else {
-                PerformerCompletionKind::ErrorWithoutChanges
-            };
-            let retain_worktree_for_retry = kind == PerformerCompletionKind::ErrorWithChanges
-                && classification.has_commits
-                && is_healthy_worktree;
-            task.set_workflow_state(WorkflowState::Todo);
-            preserve_active_session_chain(task);
-            capture_last_assignment_before_clear(task);
-            if !retain_worktree_for_retry {
-                task.worktree = None;
-            }
-            {
-                let runtime = task.ensure_runtime();
-                runtime.completion_kind = Some(kind.as_str().to_string());
-                runtime.set_status(RuntimeStatus::Failed);
-                runtime.current_phase = None;
-                runtime.pid = None;
-                runtime.last_error = Some(input.status_text.clone());
-            }
-            task.tool = None;
-            task.assignee = None;
-            task.touch_state_changed(now);
-            return JobCompletionResult {
-                should_retry: false,
-                status_label: kind.as_str(),
-                detail: input.status_text.clone(),
-                completion_kind: Some(kind),
-                tool_error: classified_tool_error,
-            };
-        }
-    }
-
-    let now_ts = chrono::DateTime::parse_from_rfc3339(now)
-        .map(|dt| dt.timestamp() as u64)
-        .unwrap_or(0);
-
-    // ── Rate-limit backoff (E601) ─────────────────────────────────────
-    // Re-queue the task as Todo with a delayed_until timestamp instead of
-    // consuming an attempt. The rate-limit was not the task's fault.
-    if error_code == E601_RATE_LIMITED {
-        let retry_after = classified_tool_error
-            .as_ref()
-            .and_then(|te| te.retry_after_seconds);
-        let backoff = compute_backoff_delay(
-            input.attempt,
-            input.backoff_base_seconds,
-            input.backoff_max_seconds,
-            retry_after,
-        );
-        let delayed_until_str = chrono::DateTime::parse_from_rfc3339(now)
-            .ok()
-            .and_then(|dt| dt.checked_add_signed(chrono::Duration::seconds(backoff as i64)))
-            .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
-            .unwrap_or_default();
-        // Update per-tool throttle state stored in extra.
-        let tool_id_str = task.tool.as_deref().unwrap_or("").to_string();
-        let runtime = task.ensure_runtime();
-        let mut throttle: ToolThrottleState = runtime
-            .extra
-            .get("throttle_state")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_else(|| ToolThrottleState {
-                tool_id: tool_id_str.clone(),
-                ..Default::default()
-            });
-        let rli = RateLimitInfo {
-            tool_id: tool_id_str,
-            error_code: E601_RATE_LIMITED.to_string(),
-            retry_after_seconds: retry_after,
-            detected_at: now_ts,
-            source_header: None,
-        };
-        update_throttle_state(&mut throttle, &rli, backoff, now_ts);
-        if let Ok(v) = serde_json::to_value(&throttle) {
-            runtime.extra.insert("throttle_state".to_string(), v);
-        }
-        runtime.delayed_until = Some(delayed_until_str.clone());
-        runtime.set_status(RuntimeStatus::Idle);
-        runtime.current_phase = Some("dev".to_string());
-        runtime.completion_kind = None;
-        runtime.pid = None;
-        runtime.set_last_error_details(
-            error_code.clone(),
-            error_origin.clone(),
-            error_message.clone(),
-        );
-        runtime.last_error = Some(format!("rate-limited; backoff {}s", backoff));
-        store_classified_error_in_extra(runtime, &classified_tool_error, now_ts);
-        capture_last_assignment_before_clear(task);
-        task.worktree = None;
-        task.set_workflow_state(WorkflowState::Todo);
-        task.touch_state_changed(now);
-        return JobCompletionResult {
-            should_retry: false,
-            status_label: "rate_limit_backoff",
-            detail: format!(
-                "rate-limited; backoff {}s, delayed until {}",
-                backoff, delayed_until_str
-            ),
-            completion_kind: None,
-            tool_error: classified_tool_error,
-        };
-    }
-
-    // ── Quota exhausted (E602) ────────────────────────────────────────
-    // Register a long cooldown for the exhausted tool and re-queue the task
-    // so the dispatch loop can fall back to a different tool.  The cooldown
-    // uses the provider's reset time when available, otherwise a default of
-    // 1 hour.  The task is NOT blocked — it goes back to its pre-phase
-    // state so pick_tool() can route it to another tool.
-    if error_code == E602_QUOTA_EXHAUSTED {
-        let retry_after = classified_tool_error
-            .as_ref()
-            .and_then(|te| te.retry_after_seconds);
-        let cooldown = retry_after.unwrap_or(3600); // default 1 hour
-        let delayed_until_str = chrono::DateTime::parse_from_rfc3339(now)
-            .ok()
-            .and_then(|dt| dt.checked_add_signed(chrono::Duration::seconds(cooldown as i64)))
-            .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
-            .unwrap_or_default();
-        // Update per-tool throttle state stored in extra.
-        let tool_id_str = task.tool.as_deref().unwrap_or("").to_string();
-        let runtime = task.ensure_runtime();
-        let mut throttle: ToolThrottleState = runtime
-            .extra
-            .get("throttle_state")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_else(|| ToolThrottleState {
-                tool_id: tool_id_str.clone(),
-                ..Default::default()
-            });
-        let rli = RateLimitInfo {
-            tool_id: tool_id_str,
-            error_code: E602_QUOTA_EXHAUSTED.to_string(),
-            retry_after_seconds: Some(cooldown),
-            detected_at: now_ts,
-            source_header: None,
-        };
-        update_throttle_state(&mut throttle, &rli, cooldown, now_ts);
-        if let Ok(v) = serde_json::to_value(&throttle) {
-            runtime.extra.insert("throttle_state".to_string(), v);
-        }
-        // Short delay before re-dispatch so the tool selector can pick a
-        // fallback tool on the next advance cycle.
-        runtime.delayed_until = Some(delayed_until_str.clone());
-        runtime.set_status(RuntimeStatus::Idle);
-        runtime.completion_kind = None;
-        runtime.pid = None;
-        runtime.set_last_error_details(
-            error_code.clone(),
-            error_origin.clone(),
-            error_message.clone(),
-        );
-        runtime.last_error = Some(format!("quota exhausted; cooldown {}s", cooldown));
-        store_classified_error_in_extra(runtime, &classified_tool_error, now_ts);
-        // Re-queue the task as Todo so the dispatch loop can route it to a
-        // fallback tool.  The per-tool throttle entry ensures the exhausted
-        // tool is skipped during pick_tool().
-        capture_last_assignment_before_clear(task);
-        task.worktree = None;
-        task.set_workflow_state(WorkflowState::Todo);
-        task.touch_state_changed(now);
-        return JobCompletionResult {
-            should_retry: false,
-            status_label: "quota_exhausted_requeue",
-            detail: format!(
-                "quota exhausted; cooldown {}s, re-queued for tool fallback",
-                cooldown
-            ),
-            completion_kind: None,
-            tool_error: classified_tool_error,
-        };
-    }
-
-    // ── Retry (attempt < max_attempts) ───────────────────────────────
-    if input.attempt < input.max_attempts {
-        task.set_workflow_state(WorkflowState::Claimed);
-        let runtime = task.ensure_runtime();
-        runtime.set_status(RuntimeStatus::Running);
-        runtime.current_phase = Some("dev".to_string());
-        runtime.completion_kind = None;
-        runtime.pid = None;
-        let reason = if input.timed_out {
-            format!(
-                "performer timed out after {}s on attempt {} (elapsed={}s)",
-                input.phase_timeout_seconds, input.attempt, input.elapsed_seconds
-            )
-        } else {
-            format!(
-                "performer failed on attempt {}: {}",
-                input.attempt, input.status_text
-            )
-        };
-        runtime.set_last_error_details(
-            error_code.clone(),
-            error_origin.clone(),
-            error_message.clone(),
-        );
-        runtime.last_error = Some(reason.clone());
-        store_classified_error_in_extra(runtime, &classified_tool_error, now_ts);
-        task.touch_state_changed(now);
-        return JobCompletionResult {
-            should_retry: true,
-            status_label: "retry",
-            detail: reason,
-            completion_kind: None,
-            tool_error: classified_tool_error,
-        };
-    }
-
-    let reason = if input.timed_out {
-        format!(
-            "performer timed out after {}s (max attempts reached: {}, elapsed={}s)",
-            input.phase_timeout_seconds, input.max_attempts, input.elapsed_seconds
-        )
-    } else {
-        format!(
-            "performer failed after {} attempts: {}",
-            input.attempt, input.status_text
-        )
-    };
-
-    let retries_total = task.task_runtime.retries_count();
-    if should_auto_retry_error_code(
-        &error_code,
-        &input.auto_retry_error_codes,
-        input.auto_retry_max,
-        retries_total,
-    ) {
-        task.set_workflow_state(WorkflowState::Todo);
-        // Clear stale worktree metadata so the task selector treats
-        // this task as unassigned and eligible for re-dispatch.
-        capture_last_assignment_before_clear(task);
-        task.worktree = None;
-        let runtime = task.ensure_runtime();
-        runtime.increment_retries();
-        runtime.set_status(RuntimeStatus::Idle);
-        runtime.pid = None;
-        runtime.current_phase = Some("dev".to_string());
-        runtime.completion_kind = None;
-        runtime.set_last_error_details(
-            error_code.clone(),
-            error_origin.clone(),
-            error_message.clone(),
-        );
-        runtime.last_error = Some(reason.clone());
-        store_classified_error_in_extra(runtime, &classified_tool_error, now_ts);
-        task.touch_state_changed(now);
-        return JobCompletionResult {
-            should_retry: false,
-            status_label: "auto_retry",
-            detail: format!("auto-retry scheduled for error code {}", error_code),
-            completion_kind: None,
-            tool_error: classified_tool_error,
-        };
-    }
-
-    // ── Terminal failure ─────────────────────────────────────────────
-    task.set_workflow_state(WorkflowState::Blocked);
-    let runtime = task.ensure_runtime();
-    runtime.set_status(RuntimeStatus::Failed);
-    runtime.completion_kind = None;
-    runtime.pid = None;
-    runtime.set_last_error_details(error_code, error_origin, error_message);
-    runtime.last_error = Some(reason.clone());
-    store_classified_error_in_extra(runtime, &classified_tool_error, now_ts);
-    task.touch_state_changed(now);
-    JobCompletionResult {
-        should_retry: false,
-        status_label: "failed",
-        detail: reason,
-        completion_kind: None,
-        tool_error: classified_tool_error,
-    }
+    let config = CoordinatorConfigResolved::from_input(input);
+    let strategy = resolve_retry_strategy(
+        task,
+        input,
+        &classification,
+        &config,
+        is_healthy_worktree,
+        now,
+    );
+    apply_state_transitions(task, &strategy, now)
 }
 
 fn should_auto_retry_error_code(
@@ -2931,6 +3109,182 @@ mod tests {
                 .map(|te| te.error_code.as_str()),
             Some(E602_QUOTA_EXHAUSTED)
         );
+    }
+
+    fn make_strategy_task() -> Task {
+        parse_compat_task(&json!({
+            "id":"S1",
+            "state":"claimed",
+            "assignee":"agentA",
+            "tool":"claude",
+            "worktree":{"worktree_path":"/tmp/wt-s1","branch":"task/S1","base_branch":"main"},
+            "task_runtime":{"status":"running","pid":123,"retries":1}
+        }))
+    }
+
+    #[test]
+    fn resolve_retry_strategy_maps_core_variants() {
+        let task = make_strategy_task();
+        let cfg = CoordinatorConfigResolved {
+            auto_retry_error_codes: vec!["E201".to_string()],
+            auto_retry_max: 2,
+            backoff_base_seconds: 30,
+            backoff_max_seconds: 300,
+        };
+
+        let mut phase_done_input = make_classification_input(true, None);
+        phase_done_input.status_text = "ok".to_string();
+        let phase_done_classified = classify_completion_error(&phase_done_input, None, false);
+        let phase_done = resolve_retry_strategy(
+            &task,
+            &phase_done_input,
+            &phase_done_classified,
+            &cfg,
+            true,
+            "2026-02-21T00:00:00Z",
+        );
+        assert!(matches!(phase_done, RetryStrategy::PhaseDone { .. }));
+
+        let merge_input =
+            make_classification_input(true, Some(PerformerCompletionKind::AlreadySatisfied));
+        let merge_classified = classify_completion_error(&merge_input, None, false);
+        let merge = resolve_retry_strategy(
+            &task,
+            &merge_input,
+            &merge_classified,
+            &cfg,
+            true,
+            "2026-02-21T00:00:00Z",
+        );
+        assert!(matches!(merge, RetryStrategy::Merge { .. }));
+
+        let mut retry_input = make_classification_input(false, None);
+        retry_input.attempt = 1;
+        retry_input.max_attempts = 2;
+        let retry_classified = classify_completion_error(&retry_input, None, false);
+        let retry = resolve_retry_strategy(
+            &task,
+            &retry_input,
+            &retry_classified,
+            &cfg,
+            true,
+            "2026-02-21T00:00:00Z",
+        );
+        assert!(matches!(
+            retry,
+            RetryStrategy::Retry {
+                outcome: RetryOutcome::AttemptRetry { .. },
+                ..
+            }
+        ));
+
+        let mut block_input = make_classification_input(false, None);
+        block_input.attempt = 1;
+        block_input.max_attempts = 1;
+        block_input.error_code = Some("E999".to_string());
+        let block_classified = classify_completion_error(&block_input, None, false);
+        let block = resolve_retry_strategy(
+            &task,
+            &block_input,
+            &block_classified,
+            &cfg,
+            true,
+            "2026-02-21T00:00:00Z",
+        );
+        assert!(matches!(
+            block,
+            RetryStrategy::Block {
+                outcome: BlockOutcome::TerminalFailure { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn apply_state_transitions_updates_state_fields_consistently() {
+        let now = "2026-02-21T00:00:00Z";
+        let mut retry_task = make_strategy_task();
+        let retry_out = apply_state_transitions(
+            &mut retry_task,
+            &RetryStrategy::Retry {
+                same_worktree: false,
+                reason: "tool error".to_string(),
+                outcome: RetryOutcome::ToolReportedError {
+                    completion_kind: PerformerCompletionKind::ErrorWithoutChanges,
+                    tool_error: None,
+                },
+            },
+            now,
+        );
+        assert_eq!(retry_out.status_label, "error_without_changes");
+        assert_eq!(retry_task.state, "todo");
+        assert!(retry_task.worktree.is_none());
+        assert!(retry_task.assignee.is_none());
+
+        let mut auto_retry_task = make_strategy_task();
+        let auto_retry_out = apply_state_transitions(
+            &mut auto_retry_task,
+            &RetryStrategy::Retry {
+                same_worktree: false,
+                reason: "auto-retry scheduled for error code E201".to_string(),
+                outcome: RetryOutcome::AutoRetry {
+                    error: CompletionErrorDetails {
+                        code: "E201".to_string(),
+                        origin: "runner".to_string(),
+                        message: "auth".to_string(),
+                    },
+                    tool_error: None,
+                    now_ts: 0,
+                },
+            },
+            now,
+        );
+        assert_eq!(auto_retry_out.status_label, "auto_retry");
+        assert_eq!(auto_retry_task.state, "todo");
+        assert_eq!(auto_retry_task.task_runtime.retries_count(), 2);
+
+        let mut block_task = make_strategy_task();
+        let block_out = apply_state_transitions(
+            &mut block_task,
+            &RetryStrategy::Block {
+                reason: "terminal failure".to_string(),
+                outcome: BlockOutcome::InvalidInput,
+            },
+            now,
+        );
+        assert_eq!(block_out.status_label, "failed");
+        assert_eq!(block_task.state, "blocked");
+
+        let mut merge_task = make_strategy_task();
+        let merge_out = apply_state_transitions(
+            &mut merge_task,
+            &RetryStrategy::Merge {
+                detail: "already satisfied".to_string(),
+                completion_kind: PerformerCompletionKind::AlreadySatisfied,
+                tool_error: None,
+            },
+            now,
+        );
+        assert_eq!(merge_out.status_label, "already_satisfied");
+        assert_eq!(merge_task.state, "merged");
+        assert!(merge_task.worktree.is_some());
+
+        let mut phase_done_task = make_strategy_task();
+        let phase_done_out = apply_state_transitions(
+            &mut phase_done_task,
+            &RetryStrategy::PhaseDone {
+                detail: "phase done".to_string(),
+                completion_kind: PerformerCompletionKind::SuccessWithChanges,
+            },
+            now,
+        );
+        assert_eq!(phase_done_out.status_label, "phase_done");
+        assert_eq!(phase_done_task.state, "in_progress");
+
+        let mut noop_task = make_strategy_task();
+        let noop_out = apply_state_transitions(&mut noop_task, &RetryStrategy::NoOp, now);
+        assert_eq!(noop_out.status_label, "failed");
+        assert_eq!(noop_task.state, "claimed");
     }
 
     #[test]
