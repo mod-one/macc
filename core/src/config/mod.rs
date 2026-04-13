@@ -349,6 +349,392 @@ impl Default for CoordinatorConfig {
     }
 }
 
+/// All coordinator configuration fields with canonical defaults baked in.
+///
+/// Construct via [`CoordinatorConfigResolved::resolve`] to guarantee that every
+/// field has a single, well-documented value regardless of whether the user
+/// supplied a `CoordinatorConfig` in `macc.yaml`.
+///
+/// Call sites that previously called `config.field.unwrap_or(N)` should be
+/// updated to read `resolved.field` directly (tracked in L5-CFG-002).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CoordinatorConfigResolved {
+    // ── Identity / tool selection ────────────────────────────────────────────
+
+    /// Override which tool executes coordinator phases (review, fix).
+    /// `None` means auto-select: first enabled tool from `tool_priority`, or
+    /// the first enabled tool overall.
+    pub coordinator_tool: Option<String>,
+
+    // ── Task source ──────────────────────────────────────────────────────────
+
+    /// Path to the PRD JSON file.
+    /// `None` means use the project-default path (`prd.json` in project root).
+    pub prd_file: Option<String>,
+
+    /// Path to the task registry JSON file.
+    /// `None` means use the fixed default: `.macc/automation/task/task_registry.json`.
+    pub task_registry_file: Option<String>,
+
+    // ── Dispatch / parallelism ───────────────────────────────────────────────
+
+    /// Git branch to rebase/merge finished task branches onto.
+    /// Default: `"master"` — matches git's historical default.
+    pub reference_branch: String,
+
+    /// Ordered list of tools to prefer when dispatching new tasks.
+    /// Default: empty — all enabled tools are eligible equally.
+    pub tool_priority: Vec<String>,
+
+    /// Per-tool cap on concurrent performers.
+    /// Default: empty — no per-tool cap; `max_parallel` is the only bound.
+    pub max_parallel_per_tool: BTreeMap<String, usize>,
+
+    /// Restrict specific task categories to specific tools.
+    /// Default: empty — all tools handle all categories.
+    pub tool_specializations: BTreeMap<String, Vec<String>>,
+
+    /// Maximum number of tasks dispatched per coordinator cycle.
+    /// Default: `10` — limits blast radius on first run.
+    pub max_dispatch: usize,
+
+    /// Maximum number of tasks executing in parallel across all tools.
+    /// Default: `3` — conservative; raise for machines with more cores/quota.
+    pub max_parallel: usize,
+
+    /// Wall-clock timeout for the entire coordinator run in seconds.
+    /// `0` means unlimited.  Default: `0`.
+    pub timeout_seconds: usize,
+
+    /// Number of times a phase runner (performer/reviewer) is retried on
+    /// non-fatal failures before the task is marked failed.
+    /// Default: `1` (one attempt, no automatic retry at the runner level).
+    pub phase_runner_max_attempts: usize,
+
+    // ── Logging ──────────────────────────────────────────────────────────────
+
+    /// Flush the coordinator log file after this many buffered lines.
+    /// Default: `500` — balances I/O cost vs. data-loss risk.
+    pub log_flush_lines: usize,
+
+    /// Flush the coordinator log file after this many milliseconds even if
+    /// the line threshold has not been reached.
+    /// Default: `60_000` (1 minute).
+    pub log_flush_ms: u64,
+
+    /// Debounce interval in milliseconds for the JSON mirror writer.
+    /// `None` means the mirror writer uses its own internal default.
+    pub mirror_json_debounce_ms: Option<u64>,
+
+    // ── Staleness / health ───────────────────────────────────────────────────
+
+    /// Mark a task as stale (and apply `stale_action`) if it has been in the
+    /// `claimed` state for more than this many seconds.
+    /// `0` disables stale-claimed detection.  Default: `0`.
+    pub stale_claimed_seconds: usize,
+
+    /// Mark a task as stale if it has been `in_progress` for more than this
+    /// many seconds.  `0` disables.  Also used as the phase execution timeout.
+    /// Default: `0`.
+    pub stale_in_progress_seconds: usize,
+
+    /// Mark a task as stale if it has been waiting for `changes_requested`
+    /// review for more than this many seconds.  `0` disables.  Default: `0`.
+    pub stale_changes_requested_seconds: usize,
+
+    /// Action taken when a task is detected as stale.
+    /// Valid values: `"block"`, `"retry"`, `"requeue"`.
+    /// Default: `"block"` — safe; requires operator to investigate.
+    pub stale_action: String,
+
+    /// Grace period in seconds before a task whose heartbeat has stopped is
+    /// considered a ghost and cleaned up.
+    /// Default: `30` — matches the default performer heartbeat interval.
+    pub ghost_heartbeat_grace_seconds: i64,
+
+    // ── Storage ──────────────────────────────────────────────────────────────
+
+    /// Backend used for coordinator state persistence.
+    /// Valid values: `"sqlite"`, `"json"`, `"dual-write"`.
+    /// Default: `"sqlite"` — recommended for production; atomic and fast.
+    pub storage_mode: String,
+
+    /// When `true`, write the coordinator snapshot to the legacy JSON mirror
+    /// in addition to SQLite.  Useful during migration.
+    /// Default: `false`.
+    pub json_compat: bool,
+
+    /// When `true`, fall back to the JSON store if the SQLite store is empty
+    /// or missing.  Useful during migration.
+    /// Default: `false`.
+    pub legacy_json_fallback: bool,
+
+    // ── Merging ───────────────────────────────────────────────────────────────
+
+    /// When `true`, invoke an AI tool to auto-resolve merge conflicts.
+    /// Default: `false` — AI merge is opt-in; manual review is safer by
+    /// default.
+    pub merge_ai_fix: bool,
+
+    /// Timeout in seconds for a merge job.
+    /// `0` means unlimited.  Default: `0`.
+    pub merge_job_timeout_seconds: usize,
+
+    /// Timeout in seconds for the post-merge hook.
+    /// Default: `90` — enough for most CI-style hooks.
+    pub merge_hook_timeout_seconds: u64,
+
+    // ── Dispatch scheduling ───────────────────────────────────────────────────
+
+    /// Minimum seconds between successive dispatch cycles.
+    /// Default: `2` — prevents tight spin-loop when all slots are busy.
+    pub dispatch_cooldown_seconds: u64,
+
+    /// How long (seconds) a worktree session is considered "warm" for
+    /// dispatch preference.  Coordinator prefers re-using warm sessions to
+    /// avoid cold-start latency in the AI tool.
+    /// Default: `300` (5 minutes) — matches typical prompt-cache TTL.
+    pub session_cache_ttl_seconds: u64,
+
+    // ── Error-code retry ──────────────────────────────────────────────────────
+
+    /// Comma-separated list of error codes eligible for automatic retry.
+    /// Default: `"E101,E102,E103,E301,E302,E303,E601,E603"` — covers
+    /// transient runner, filesystem, and rate-limit failures.
+    pub error_code_retry_list: String,
+
+    /// Maximum number of automatic retries per task before the task is
+    /// permanently marked failed.
+    /// Default: `2`.
+    pub error_code_retry_max: usize,
+
+    // ── Rate-limit handling ───────────────────────────────────────────────────
+
+    /// Base backoff in seconds for the first rate-limit retry (E601).
+    /// Subsequent retries use exponential backoff capped at
+    /// `rate_limit_backoff_max_seconds`.
+    /// Default: `30`.
+    pub rate_limit_backoff_base_seconds: u64,
+
+    /// Maximum backoff in seconds for rate-limit retries.
+    /// Default: `300` (5 minutes).
+    pub rate_limit_backoff_max_seconds: u64,
+
+    /// When `true`, fall back to the next tool in `tool_priority` when the
+    /// primary tool is rate-limited.
+    /// Default: `true`.
+    pub rate_limit_fallback_enabled: bool,
+
+    /// When `true`, reduce `effective_max_parallel` on each rate-limit event
+    /// and restore it on recovery.
+    /// Default: `true`.
+    pub rate_limit_throttle_parallel: bool,
+
+    // ── Cutover gate ─────────────────────────────────────────────────────────
+
+    /// Number of recent coordinator events inspected by the SQLite→primary
+    /// cutover gate to assess storage health.
+    /// Default: `2000`.
+    pub cutover_gate_window_events: usize,
+
+    /// Maximum fraction of inspected events that may be `blocked` before the
+    /// cutover gate refuses to proceed.
+    /// Default: `0.25` (25 %).
+    pub cutover_gate_max_blocked_ratio: f64,
+
+    /// Maximum fraction of inspected events that may be `stale` before the
+    /// cutover gate refuses to proceed.
+    /// Default: `0.25` (25 %).
+    pub cutover_gate_max_stale_ratio: f64,
+
+    // ── Process lifecycle ─────────────────────────────────────────────────────
+
+    /// Seconds between receiving a terminal failure signal and force-killing
+    /// the performer process.
+    /// Default: `30` — gives performers time to flush logs before SIGKILL.
+    pub force_kill_grace_seconds: u64,
+
+    /// Maximum review→fix→review cycles allowed per task.
+    /// `None` means unlimited.  `0` skips review entirely.
+    pub max_review_cycles: Option<usize>,
+
+    // ── Reliability feature toggles ───────────────────────────────────────────
+
+    /// Attempt to salvage partial work from the last worktree before retrying.
+    /// Default: `true`.
+    pub salvage_before_retry: bool,
+
+    /// Retry a failed task on the same worktree slot when available.
+    /// Preserves local context and warm session state.
+    /// Default: `true`.
+    pub retry_on_same_worktree: bool,
+
+    /// Run a merge-health check before dispatching a new task.
+    /// Prevents cascade failures when the reference branch is broken.
+    /// Default: `true`.
+    pub merge_gate_on_dispatch: bool,
+
+    /// Tag branches of abandoned tasks before cleanup so they are
+    /// discoverable via `git tag`.
+    /// Default: `true`.
+    pub tag_abandoned_branches: bool,
+
+    /// Scan unmerged branches during sync to recover partially-complete work.
+    /// Default: `true`.
+    pub sync_unmerged_branches: bool,
+
+    /// Timeout in seconds for the salvage-merge operation.
+    /// Default: `120`.
+    pub salvage_merge_timeout_seconds: u64,
+
+    /// Maximum salvage attempts per task before giving up and hard-failing.
+    /// Default: `1`.
+    pub max_salvage_attempts_per_task: u32,
+}
+
+impl CoordinatorConfigResolved {
+    /// Apply canonical defaults for every field in `CoordinatorConfig`.
+    ///
+    /// Pass `None` to get a fully-default resolved config (useful for tests
+    /// and callers that have no `macc.yaml`).  Pass `Some(cfg)` to layer the
+    /// user's overrides on top of the defaults.
+    ///
+    /// Every `Option<T>` field in `CoordinatorConfig` maps to a concrete
+    /// value here so call sites never need scattered `unwrap_or(N)` calls.
+    pub fn resolve(config: Option<&CoordinatorConfig>) -> Self {
+        Self {
+            coordinator_tool: config.and_then(|c| c.coordinator_tool.clone()),
+            prd_file: config.and_then(|c| c.prd_file.clone()),
+            task_registry_file: config.and_then(|c| c.task_registry_file.clone()),
+            reference_branch: config
+                .and_then(|c| c.reference_branch.clone())
+                .unwrap_or_else(|| "master".to_string()),
+            tool_priority: config
+                .map(|c| c.tool_priority.clone())
+                .unwrap_or_default(),
+            max_parallel_per_tool: config
+                .map(|c| c.max_parallel_per_tool.clone())
+                .unwrap_or_default(),
+            tool_specializations: config
+                .map(|c| c.tool_specializations.clone())
+                .unwrap_or_default(),
+            max_dispatch: config
+                .and_then(|c| c.max_dispatch)
+                .unwrap_or(10),
+            max_parallel: config
+                .and_then(|c| c.max_parallel)
+                .unwrap_or(3),
+            timeout_seconds: config
+                .and_then(|c| c.timeout_seconds)
+                .unwrap_or(0),
+            phase_runner_max_attempts: config
+                .and_then(|c| c.phase_runner_max_attempts)
+                .unwrap_or(1)
+                .max(1),
+            log_flush_lines: config
+                .and_then(|c| c.log_flush_lines)
+                .filter(|v| *v > 0)
+                .unwrap_or(500),
+            log_flush_ms: config
+                .and_then(|c| c.log_flush_ms)
+                .filter(|v| *v > 0)
+                .unwrap_or(60_000),
+            mirror_json_debounce_ms: config.and_then(|c| c.mirror_json_debounce_ms),
+            stale_claimed_seconds: config
+                .and_then(|c| c.stale_claimed_seconds)
+                .unwrap_or(0),
+            stale_in_progress_seconds: config
+                .and_then(|c| c.stale_in_progress_seconds)
+                .unwrap_or(0),
+            stale_changes_requested_seconds: config
+                .and_then(|c| c.stale_changes_requested_seconds)
+                .unwrap_or(0),
+            stale_action: config
+                .and_then(|c| c.stale_action.clone())
+                .unwrap_or_else(|| "block".to_string()),
+            ghost_heartbeat_grace_seconds: config
+                .and_then(|c| c.ghost_heartbeat_grace_seconds)
+                .unwrap_or(30),
+            storage_mode: config
+                .and_then(|c| c.storage_mode.clone())
+                .unwrap_or_else(|| "sqlite".to_string()),
+            json_compat: config
+                .and_then(|c| c.json_compat)
+                .unwrap_or(false),
+            legacy_json_fallback: config
+                .and_then(|c| c.legacy_json_fallback)
+                .unwrap_or(false),
+            merge_ai_fix: config
+                .and_then(|c| c.merge_ai_fix)
+                .unwrap_or(false),
+            merge_job_timeout_seconds: config
+                .and_then(|c| c.merge_job_timeout_seconds)
+                .unwrap_or(0),
+            merge_hook_timeout_seconds: config
+                .and_then(|c| c.merge_hook_timeout_seconds)
+                .unwrap_or(90),
+            dispatch_cooldown_seconds: config
+                .and_then(|c| c.dispatch_cooldown_seconds)
+                .unwrap_or(2),
+            session_cache_ttl_seconds: config
+                .and_then(|c| c.session_cache_ttl_seconds)
+                .unwrap_or(300),
+            error_code_retry_list: config
+                .and_then(|c| c.error_code_retry_list.clone())
+                .unwrap_or_else(|| "E101,E102,E103,E301,E302,E303,E601,E603".to_string()),
+            error_code_retry_max: config
+                .and_then(|c| c.error_code_retry_max)
+                .unwrap_or(2),
+            rate_limit_backoff_base_seconds: config
+                .and_then(|c| c.rate_limit_backoff_base_seconds)
+                .unwrap_or(30),
+            rate_limit_backoff_max_seconds: config
+                .and_then(|c| c.rate_limit_backoff_max_seconds)
+                .unwrap_or(300),
+            rate_limit_fallback_enabled: config
+                .and_then(|c| c.rate_limit_fallback_enabled)
+                .unwrap_or(true),
+            rate_limit_throttle_parallel: config
+                .and_then(|c| c.rate_limit_throttle_parallel)
+                .unwrap_or(true),
+            cutover_gate_window_events: config
+                .and_then(|c| c.cutover_gate_window_events)
+                .unwrap_or(2000),
+            cutover_gate_max_blocked_ratio: config
+                .and_then(|c| c.cutover_gate_max_blocked_ratio)
+                .unwrap_or(0.25),
+            cutover_gate_max_stale_ratio: config
+                .and_then(|c| c.cutover_gate_max_stale_ratio)
+                .unwrap_or(0.25),
+            force_kill_grace_seconds: config
+                .and_then(|c| c.force_kill_grace_seconds)
+                .unwrap_or(30),
+            max_review_cycles: config.and_then(|c| c.max_review_cycles),
+            salvage_before_retry: config
+                .map(|c| c.salvage_before_retry)
+                .unwrap_or(true),
+            retry_on_same_worktree: config
+                .map(|c| c.retry_on_same_worktree)
+                .unwrap_or(true),
+            merge_gate_on_dispatch: config
+                .map(|c| c.merge_gate_on_dispatch)
+                .unwrap_or(true),
+            tag_abandoned_branches: config
+                .map(|c| c.tag_abandoned_branches)
+                .unwrap_or(true),
+            sync_unmerged_branches: config
+                .map(|c| c.sync_unmerged_branches)
+                .unwrap_or(true),
+            salvage_merge_timeout_seconds: config
+                .map(|c| c.salvage_merge_timeout_seconds)
+                .unwrap_or(120),
+            max_salvage_attempts_per_task: config
+                .map(|c| c.max_salvage_attempts_per_task)
+                .unwrap_or(1),
+        }
+    }
+}
+
 impl CanonicalConfig {
     pub fn from_yaml(yaml: &str) -> Result<Self, serde_yaml::Error> {
         serde_yaml::from_str(yaml)
@@ -1005,5 +1391,197 @@ unknown_field: true
             .duration_since(UNIX_EPOCH)
             .expect("Time went backwards");
         format!("{:?}", since_the_epoch.as_nanos())
+    }
+
+    // ── CoordinatorConfigResolved tests ──────────────────────────────────────
+
+    #[test]
+    fn test_coordinator_config_resolved_none_produces_defaults() {
+        let r = CoordinatorConfigResolved::resolve(None);
+
+        // Identity
+        assert!(r.coordinator_tool.is_none());
+        assert!(r.prd_file.is_none());
+        assert!(r.task_registry_file.is_none());
+
+        // Dispatch / parallelism
+        assert_eq!(r.reference_branch, "master");
+        assert!(r.tool_priority.is_empty());
+        assert!(r.max_parallel_per_tool.is_empty());
+        assert!(r.tool_specializations.is_empty());
+        assert_eq!(r.max_dispatch, 10);
+        assert_eq!(r.max_parallel, 3);
+        assert_eq!(r.timeout_seconds, 0);
+        assert_eq!(r.phase_runner_max_attempts, 1);
+
+        // Logging
+        assert_eq!(r.log_flush_lines, 500);
+        assert_eq!(r.log_flush_ms, 60_000);
+        assert!(r.mirror_json_debounce_ms.is_none());
+
+        // Staleness / health
+        assert_eq!(r.stale_claimed_seconds, 0);
+        assert_eq!(r.stale_in_progress_seconds, 0);
+        assert_eq!(r.stale_changes_requested_seconds, 0);
+        assert_eq!(r.stale_action, "block");
+        assert_eq!(r.ghost_heartbeat_grace_seconds, 30);
+
+        // Storage
+        assert_eq!(r.storage_mode, "sqlite");
+        assert!(!r.json_compat);
+        assert!(!r.legacy_json_fallback);
+
+        // Merging
+        assert!(!r.merge_ai_fix);
+        assert_eq!(r.merge_job_timeout_seconds, 0);
+        assert_eq!(r.merge_hook_timeout_seconds, 90);
+
+        // Scheduling
+        assert_eq!(r.dispatch_cooldown_seconds, 2);
+        assert_eq!(r.session_cache_ttl_seconds, 300);
+
+        // Error-code retry
+        assert_eq!(
+            r.error_code_retry_list,
+            "E101,E102,E103,E301,E302,E303,E601,E603"
+        );
+        assert_eq!(r.error_code_retry_max, 2);
+
+        // Rate-limit
+        assert_eq!(r.rate_limit_backoff_base_seconds, 30);
+        assert_eq!(r.rate_limit_backoff_max_seconds, 300);
+        assert!(r.rate_limit_fallback_enabled);
+        assert!(r.rate_limit_throttle_parallel);
+
+        // Cutover gate
+        assert_eq!(r.cutover_gate_window_events, 2000);
+        assert!((r.cutover_gate_max_blocked_ratio - 0.25).abs() < f64::EPSILON);
+        assert!((r.cutover_gate_max_stale_ratio - 0.25).abs() < f64::EPSILON);
+
+        // Process lifecycle
+        assert_eq!(r.force_kill_grace_seconds, 30);
+        assert!(r.max_review_cycles.is_none());
+
+        // Reliability toggles
+        assert!(r.salvage_before_retry);
+        assert!(r.retry_on_same_worktree);
+        assert!(r.merge_gate_on_dispatch);
+        assert!(r.tag_abandoned_branches);
+        assert!(r.sync_unmerged_branches);
+        assert_eq!(r.salvage_merge_timeout_seconds, 120);
+        assert_eq!(r.max_salvage_attempts_per_task, 1);
+    }
+
+    #[test]
+    fn test_coordinator_config_resolved_overrides_provided_fields() {
+        let mut cfg = CoordinatorConfig::default();
+        cfg.coordinator_tool = Some("my-tool".to_string());
+        cfg.reference_branch = Some("develop".to_string());
+        cfg.max_dispatch = Some(5);
+        cfg.max_parallel = Some(2);
+        cfg.phase_runner_max_attempts = Some(3);
+        cfg.log_flush_lines = Some(100);
+        cfg.log_flush_ms = Some(5_000);
+        cfg.mirror_json_debounce_ms = Some(250);
+        cfg.stale_claimed_seconds = Some(600);
+        cfg.stale_in_progress_seconds = Some(1200);
+        cfg.stale_changes_requested_seconds = Some(1800);
+        cfg.stale_action = Some("retry".to_string());
+        cfg.ghost_heartbeat_grace_seconds = Some(60);
+        cfg.storage_mode = Some("json".to_string());
+        cfg.json_compat = Some(true);
+        cfg.legacy_json_fallback = Some(true);
+        cfg.merge_ai_fix = Some(true);
+        cfg.merge_job_timeout_seconds = Some(120);
+        cfg.merge_hook_timeout_seconds = Some(45);
+        cfg.dispatch_cooldown_seconds = Some(5);
+        cfg.session_cache_ttl_seconds = Some(600);
+        cfg.error_code_retry_list = Some("E601".to_string());
+        cfg.error_code_retry_max = Some(5);
+        cfg.rate_limit_backoff_base_seconds = Some(60);
+        cfg.rate_limit_backoff_max_seconds = Some(3600);
+        cfg.rate_limit_fallback_enabled = Some(false);
+        cfg.rate_limit_throttle_parallel = Some(false);
+        cfg.cutover_gate_window_events = Some(500);
+        cfg.cutover_gate_max_blocked_ratio = Some(0.5);
+        cfg.cutover_gate_max_stale_ratio = Some(0.1);
+        cfg.force_kill_grace_seconds = Some(10);
+        cfg.max_review_cycles = Some(2);
+        cfg.salvage_before_retry = false;
+        cfg.retry_on_same_worktree = false;
+        cfg.merge_gate_on_dispatch = false;
+        cfg.tag_abandoned_branches = false;
+        cfg.sync_unmerged_branches = false;
+        cfg.salvage_merge_timeout_seconds = 60;
+        cfg.max_salvage_attempts_per_task = 3;
+
+        let r = CoordinatorConfigResolved::resolve(Some(&cfg));
+
+        assert_eq!(r.coordinator_tool.as_deref(), Some("my-tool"));
+        assert_eq!(r.reference_branch, "develop");
+        assert_eq!(r.max_dispatch, 5);
+        assert_eq!(r.max_parallel, 2);
+        assert_eq!(r.phase_runner_max_attempts, 3);
+        assert_eq!(r.log_flush_lines, 100);
+        assert_eq!(r.log_flush_ms, 5_000);
+        assert_eq!(r.mirror_json_debounce_ms, Some(250));
+        assert_eq!(r.stale_claimed_seconds, 600);
+        assert_eq!(r.stale_in_progress_seconds, 1200);
+        assert_eq!(r.stale_changes_requested_seconds, 1800);
+        assert_eq!(r.stale_action, "retry");
+        assert_eq!(r.ghost_heartbeat_grace_seconds, 60);
+        assert_eq!(r.storage_mode, "json");
+        assert!(r.json_compat);
+        assert!(r.legacy_json_fallback);
+        assert!(r.merge_ai_fix);
+        assert_eq!(r.merge_job_timeout_seconds, 120);
+        assert_eq!(r.merge_hook_timeout_seconds, 45);
+        assert_eq!(r.dispatch_cooldown_seconds, 5);
+        assert_eq!(r.session_cache_ttl_seconds, 600);
+        assert_eq!(r.error_code_retry_list, "E601");
+        assert_eq!(r.error_code_retry_max, 5);
+        assert_eq!(r.rate_limit_backoff_base_seconds, 60);
+        assert_eq!(r.rate_limit_backoff_max_seconds, 3600);
+        assert!(!r.rate_limit_fallback_enabled);
+        assert!(!r.rate_limit_throttle_parallel);
+        assert_eq!(r.cutover_gate_window_events, 500);
+        assert!((r.cutover_gate_max_blocked_ratio - 0.5).abs() < f64::EPSILON);
+        assert!((r.cutover_gate_max_stale_ratio - 0.1).abs() < f64::EPSILON);
+        assert_eq!(r.force_kill_grace_seconds, 10);
+        assert_eq!(r.max_review_cycles, Some(2));
+        assert!(!r.salvage_before_retry);
+        assert!(!r.retry_on_same_worktree);
+        assert!(!r.merge_gate_on_dispatch);
+        assert!(!r.tag_abandoned_branches);
+        assert!(!r.sync_unmerged_branches);
+        assert_eq!(r.salvage_merge_timeout_seconds, 60);
+        assert_eq!(r.max_salvage_attempts_per_task, 3);
+    }
+
+    #[test]
+    fn test_coordinator_config_resolved_partial_override_uses_default_for_rest() {
+        // Only override a few fields; the rest must remain at their defaults.
+        let mut cfg = CoordinatorConfig::default();
+        cfg.max_dispatch = Some(99);
+        cfg.stale_action = Some("requeue".to_string());
+
+        let r = CoordinatorConfigResolved::resolve(Some(&cfg));
+
+        assert_eq!(r.max_dispatch, 99);
+        assert_eq!(r.stale_action, "requeue");
+        // Unset fields fall back to defaults.
+        assert_eq!(r.max_parallel, 3);
+        assert_eq!(r.reference_branch, "master");
+        assert_eq!(r.dispatch_cooldown_seconds, 2);
+        assert_eq!(r.error_code_retry_max, 2);
+    }
+
+    #[test]
+    fn test_coordinator_config_resolved_phase_runner_min_one() {
+        // phase_runner_max_attempts is clamped to at least 1.
+        let mut cfg = CoordinatorConfig::default();
+        cfg.phase_runner_max_attempts = Some(0);
+        let r = CoordinatorConfigResolved::resolve(Some(&cfg));
+        assert_eq!(r.phase_runner_max_attempts, 1);
     }
 }
