@@ -4,7 +4,9 @@ use super::{
 };
 use crate::config::{CanonicalConfig, CoordinatorConfig};
 use crate::coordinator::control_plane::CoordinatorLog;
-use crate::coordinator::error_normalizer::{CanonicalClass, NormalizerRegistry, ToolError};
+use crate::coordinator::error_normalizer::{
+    error_code_to_canonical_class, CanonicalClass, ErrorNormalizer, NormalizerRegistry, ToolError,
+};
 use crate::coordinator::model::{Task, TaskRegistry};
 use crate::coordinator::rate_limit::{
     compute_backoff_delay, update_throttle_state, RateLimitInfo, ToolThrottleState,
@@ -980,6 +982,100 @@ where
     }
 }
 
+#[derive(Debug, Clone)]
+struct ErrorClassification {
+    canonical_class: CanonicalClass,
+    error_code: String,
+    error_origin: String,
+    error_message: String,
+    completion_kind: Option<PerformerCompletionKind>,
+    completion_success: bool,
+    completion_authority: CompletionAuthority,
+    has_commits: bool,
+    tool_error: Option<ToolError>,
+}
+
+fn classify_completion_error(
+    input: &JobCompletionInput,
+    normalizer: Option<&dyn ErrorNormalizer>,
+    has_commits: bool,
+) -> ErrorClassification {
+    // ── Baseline error classification from caller ────────────────────
+    let raw_error_code = input
+        .error_code
+        .clone()
+        .unwrap_or_else(|| "E101".to_string());
+    let error_origin = input
+        .error_origin
+        .clone()
+        .unwrap_or_else(|| "runner".to_string());
+    let raw_error_message = input
+        .error_message
+        .clone()
+        .unwrap_or_else(|| input.status_text.clone());
+
+    // ── Per-adapter error normalization ──────────────────────────────
+    // Run when the caller provides raw process output AND the job failed.
+    // The normalizer output takes priority over the caller-supplied error code.
+    let tool_error: Option<ToolError> = if !input.success {
+        input.normalizer_input.as_ref().and_then(|ni| {
+            normalizer.and_then(|n| {
+                n.normalize(ni.exit_code, &ni.stderr, &ni.stdout)
+                    .map(|mut te| {
+                        te.attempt = input.attempt as u32;
+                        te.operation = "performer_run".to_string();
+                        te
+                    })
+            })
+        })
+    } else {
+        None
+    };
+
+    // Override caller-supplied error code/message with normalizer output.
+    let error_code = tool_error
+        .as_ref()
+        .map(|te| te.error_code.clone())
+        .unwrap_or(raw_error_code);
+    let error_message = tool_error
+        .as_ref()
+        .map(|te| te.raw_message.clone())
+        .unwrap_or(raw_error_message);
+    let canonical_class = tool_error
+        .as_ref()
+        .map(|te| te.canonical_class.clone())
+        .unwrap_or_else(|| error_code_to_canonical_class(&error_code));
+
+    // Resolve authority last, after normalization is complete.
+    let completion_resolution =
+        resolve_completion_authority(input.completion_kind, has_commits, input.success);
+    let ipc_phase_done_override = completion_resolution.authority == CompletionAuthority::IpcSignal
+        && completion_resolution.completion_kind
+            == Some(PerformerCompletionKind::SuccessWithChanges);
+    let completion_success = if ipc_phase_done_override {
+        true
+    } else {
+        input.success
+    };
+    let completion_kind = if ipc_phase_done_override {
+        Some(PerformerCompletionKind::SuccessWithChanges)
+    } else {
+        input.completion_kind
+    };
+
+    ErrorClassification {
+        canonical_class,
+        error_code,
+        error_origin,
+        error_message,
+        completion_kind,
+        completion_success,
+        completion_authority: completion_resolution.authority,
+        has_commits,
+        tool_error,
+    }
+}
+
 fn apply_job_completion_typed(
     task: &mut Task,
     input: &JobCompletionInput,
@@ -998,38 +1094,21 @@ fn apply_job_completion_typed(
         .as_deref()
         .map(|path| is_worktree_healthy(Path::new(path)))
         .unwrap_or(false);
-    let completion_resolution = resolve_completion_authority(
-        input.completion_kind,
-        has_commits_ahead_of_base,
-        input.success,
+    let normalizer = task
+        .tool
+        .as_deref()
+        .and_then(|tool_id| normalizer_registry.get(tool_id));
+    let classification =
+        classify_completion_error(input, normalizer.as_deref(), has_commits_ahead_of_base);
+    debug_assert!(
+        classification.tool_error.is_some()
+            || classification.canonical_class
+                == error_code_to_canonical_class(&classification.error_code)
     );
-    let ipc_phase_done_override = completion_resolution.authority == CompletionAuthority::IpcSignal
-        && completion_resolution.completion_kind
-            == Some(PerformerCompletionKind::SuccessWithChanges);
-    let completion_success = if ipc_phase_done_override {
-        true
-    } else {
-        input.success
-    };
-    let resolved_completion_kind = if ipc_phase_done_override {
-        Some(PerformerCompletionKind::SuccessWithChanges)
-    } else {
-        input.completion_kind
-    };
-
-    // ── Baseline error classification from caller ────────────────────
-    let raw_error_code = input
-        .error_code
-        .clone()
-        .unwrap_or_else(|| "E101".to_string());
-    let error_origin = input
-        .error_origin
-        .clone()
-        .unwrap_or_else(|| "runner".to_string());
-    let raw_error_message = input
-        .error_message
-        .clone()
-        .unwrap_or_else(|| input.status_text.clone());
+    debug_assert!(
+        classification.completion_authority != CompletionAuthority::IpcSignal
+            || classification.has_commits
+    );
 
     // ── Guard: invalid attempt counters ─────────────────────────────
     if input.attempt == 0 || input.max_attempts == 0 {
@@ -1066,40 +1145,16 @@ fn apply_job_completion_typed(
             tool_error: None,
         };
     }
-
-    // ── Per-adapter error normalization ──────────────────────────────
-    // Run when the caller provides raw process output AND the job failed.
-    // The normalizer output takes priority over the caller-supplied error code.
-    let classified_tool_error: Option<ToolError> = if !input.success {
-        input.normalizer_input.as_ref().and_then(|ni| {
-            let tool_id = task.tool.as_deref().unwrap_or("");
-            normalizer_registry.get(tool_id).and_then(|n| {
-                n.normalize(ni.exit_code, &ni.stderr, &ni.stdout)
-                    .map(|mut te| {
-                        te.attempt = input.attempt as u32;
-                        te.operation = "performer_run".to_string();
-                        te
-                    })
-            })
-        })
-    } else {
-        None
-    };
-
-    // Override caller-supplied error code/message with normalizer output.
-    let error_code = classified_tool_error
-        .as_ref()
-        .map(|te| te.error_code.clone())
-        .unwrap_or(raw_error_code);
-    let error_message = classified_tool_error
-        .as_ref()
-        .map(|te| te.raw_message.clone())
-        .unwrap_or(raw_error_message);
+    let error_code = classification.error_code.clone();
+    let error_origin = classification.error_origin.clone();
+    let error_message = classification.error_message.clone();
+    let classified_tool_error = classification.tool_error.clone();
 
     // ── Success ──────────────────────────────────────────────────────
-    if completion_success {
-        let completion_kind =
-            resolved_completion_kind.unwrap_or(PerformerCompletionKind::SuccessWithChanges);
+    if classification.completion_success {
+        let completion_kind = classification
+            .completion_kind
+            .unwrap_or(PerformerCompletionKind::SuccessWithChanges);
 
         // ── Tool-reported error: re-queue the task ──────────────────
         // The tool ran but reported it could not complete the task
@@ -1108,7 +1163,7 @@ fn apply_job_completion_typed(
         if completion_kind.is_error() {
             let retain_worktree_for_retry = completion_kind
                 == PerformerCompletionKind::ErrorWithChanges
-                && has_commits_ahead_of_base
+                && classification.has_commits
                 && is_healthy_worktree;
             task.set_workflow_state(WorkflowState::Todo);
             // Capture session info before clearing worktree and tool so retries
@@ -1231,7 +1286,7 @@ fn apply_job_completion_typed(
                 PerformerCompletionKind::ErrorWithoutChanges
             };
             let retain_worktree_for_retry = kind == PerformerCompletionKind::ErrorWithChanges
-                && has_commits_ahead_of_base
+                && classification.has_commits
                 && is_healthy_worktree;
             task.set_workflow_state(WorkflowState::Todo);
             preserve_active_session_chain(task);
@@ -2293,6 +2348,41 @@ mod tests {
         );
     }
 
+    #[derive(Clone)]
+    struct StubNormalizer {
+        tool_error: ToolError,
+    }
+
+    impl ErrorNormalizer for StubNormalizer {
+        fn normalize(&self, _exit_code: i32, _stderr: &str, _stdout: &str) -> Option<ToolError> {
+            Some(self.tool_error.clone())
+        }
+    }
+
+    fn make_classification_input(
+        success: bool,
+        completion_kind: Option<PerformerCompletionKind>,
+    ) -> JobCompletionInput {
+        JobCompletionInput {
+            success,
+            attempt: 1,
+            max_attempts: 1,
+            timed_out: false,
+            phase_timeout_seconds: 300,
+            elapsed_seconds: 5,
+            status_text: "performer failed".to_string(),
+            completion_kind,
+            error_code: None,
+            error_origin: None,
+            error_message: None,
+            auto_retry_error_codes: Vec::new(),
+            auto_retry_max: 0,
+            backoff_base_seconds: 30,
+            backoff_max_seconds: 300,
+            normalizer_input: None,
+        }
+    }
+
     fn make_repo_with_commit_ahead(base_branch: &str) -> PathBuf {
         let mut repo = std::env::temp_dir();
         let nanos = SystemTime::now()
@@ -2735,6 +2825,112 @@ mod tests {
 
         assert_eq!(out.status_label, "failed");
         assert_eq!(task["task_runtime"]["last_error_code"], "E201");
+    }
+
+    #[test]
+    fn classify_completion_error_ipc_with_commits_uses_ipc_authority() {
+        let input =
+            make_classification_input(false, Some(PerformerCompletionKind::SuccessWithChanges));
+        let classified = classify_completion_error(&input, None, true);
+
+        assert_eq!(
+            classified.completion_authority,
+            CompletionAuthority::IpcSignal
+        );
+        assert!(classified.completion_success);
+        assert_eq!(
+            classified.completion_kind,
+            Some(PerformerCompletionKind::SuccessWithChanges)
+        );
+        assert!(classified.has_commits);
+    }
+
+    #[test]
+    fn classify_completion_error_exit_error_without_commits_falls_back() {
+        let input =
+            make_classification_input(false, Some(PerformerCompletionKind::SuccessWithChanges));
+        let classified = classify_completion_error(&input, None, false);
+
+        assert_eq!(
+            classified.completion_authority,
+            CompletionAuthority::Fallback
+        );
+        assert!(!classified.completion_success);
+        assert_eq!(
+            classified.completion_kind,
+            Some(PerformerCompletionKind::SuccessWithChanges)
+        );
+        assert!(!classified.has_commits);
+    }
+
+    #[test]
+    fn classify_completion_error_sets_rate_limit_class_from_normalizer() {
+        let mut input = make_classification_input(false, None);
+        input.normalizer_input = Some(NormalizerInput {
+            exit_code: 1,
+            stderr: "429 rate limit".to_string(),
+            stdout: String::new(),
+        });
+        let normalizer = StubNormalizer {
+            tool_error: ToolError {
+                provider: "stub".to_string(),
+                canonical_class: CanonicalClass::RateLimit,
+                retryable: true,
+                retry_after_seconds: Some(30),
+                user_action_required: false,
+                raw_message: "rate-limited".to_string(),
+                error_code: E601_RATE_LIMITED.to_string(),
+                request_id: None,
+                attempt: 0,
+                operation: String::new(),
+            },
+        };
+        let classified = classify_completion_error(&input, Some(&normalizer), false);
+
+        assert_eq!(classified.canonical_class, CanonicalClass::RateLimit);
+        assert_eq!(classified.error_code, E601_RATE_LIMITED);
+        assert_eq!(
+            classified
+                .tool_error
+                .as_ref()
+                .map(|te| te.error_code.as_str()),
+            Some(E601_RATE_LIMITED)
+        );
+    }
+
+    #[test]
+    fn classify_completion_error_sets_quota_class_from_normalizer() {
+        let mut input = make_classification_input(false, None);
+        input.normalizer_input = Some(NormalizerInput {
+            exit_code: 1,
+            stderr: "quota exhausted".to_string(),
+            stdout: String::new(),
+        });
+        let normalizer = StubNormalizer {
+            tool_error: ToolError {
+                provider: "stub".to_string(),
+                canonical_class: CanonicalClass::QuotaExhausted,
+                retryable: false,
+                retry_after_seconds: Some(3600),
+                user_action_required: true,
+                raw_message: "quota exhausted".to_string(),
+                error_code: E602_QUOTA_EXHAUSTED.to_string(),
+                request_id: None,
+                attempt: 0,
+                operation: String::new(),
+            },
+        };
+        let classified = classify_completion_error(&input, Some(&normalizer), false);
+
+        assert_eq!(classified.canonical_class, CanonicalClass::QuotaExhausted);
+        assert_eq!(classified.error_code, E602_QUOTA_EXHAUSTED);
+        assert_eq!(
+            classified
+                .tool_error
+                .as_ref()
+                .map(|te| te.error_code.as_str()),
+            Some(E602_QUOTA_EXHAUSTED)
+        );
     }
 
     #[test]
