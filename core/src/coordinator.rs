@@ -83,6 +83,9 @@ pub const COORDINATOR_EVENT_TYPES_V1: &[&str] = &[
     "sync_unmerged_branch_found",
     "sync_unmerged_branch_merged",
     "worktree_health_check_failed",
+    "sync_unmerged_branch_discovered",
+    "sync_unmerged_branch_merged",
+    "sync_unmerged_branch_merge_failed",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

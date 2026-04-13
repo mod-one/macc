@@ -94,7 +94,10 @@
         "branch_tagged_abandoned",
         "sync_unmerged_branch_found",
         "sync_unmerged_branch_merged",
-        "worktree_health_check_failed"
+        "worktree_health_check_failed",
+        "sync_unmerged_branch_discovered",
+        "sync_unmerged_branch_merged",
+        "sync_unmerged_branch_merge_failed"
       ]
     },
     "phase": {
