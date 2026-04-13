@@ -435,7 +435,7 @@ pub fn restore_sessions(repo_root: &Path, name: &str, dry_run: bool) -> Result<S
 
         let current_tools = root
             .as_object_mut()
-            .unwrap()
+            .ok_or_else(|| MaccError::Validation("sessions file root must be an object".into()))?
             .entry("tools")
             .or_insert_with(|| Value::Object(Map::new()))
             .as_object_mut()
