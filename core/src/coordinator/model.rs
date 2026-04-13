@@ -147,6 +147,10 @@ pub struct TaskRuntime {
     /// Number of review cycles completed for this task.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_cycles: Option<usize>,
+    /// Active AI tool session ID currently associated with this task lifecycle.
+    /// Set from worktree-scoped `tool-sessions.json` during dispatch/completion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_session_id: Option<String>,
     /// Session ID from the most recent run, preserved on error so retries can resume
     /// with cached context instead of cold-starting a new session.
     #[serde(default, skip_serializing_if = "Option::is_none")]

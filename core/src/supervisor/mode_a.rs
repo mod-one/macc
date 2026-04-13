@@ -364,7 +364,12 @@ where
         let events = self.tailer.tail_new_events()?;
         for event in events {
             if let Some(ts) = event.ts {
-                if self.state.last_event_at.map(|last| ts > last).unwrap_or(true) {
+                if self
+                    .state
+                    .last_event_at
+                    .map(|last| ts > last)
+                    .unwrap_or(true)
+                {
                     self.state.last_event_at = Some(ts);
                 }
             }
