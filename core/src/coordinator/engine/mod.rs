@@ -7,7 +7,7 @@ use crate::config::{
 };
 use crate::coordinator::control_plane::CoordinatorLog;
 use crate::coordinator::error_normalizer::{
-    error_code_to_canonical_class, CanonicalClass, ErrorNormalizer, NormalizerRegistry, ToolError,
+    error_code_to_canonical_class, CanonicalClass, NormalizerRegistry, ToolError,
 };
 use crate::coordinator::model::{Task, TaskRegistry};
 use crate::coordinator::rate_limit::{
@@ -32,6 +32,9 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+pub mod completion;
+pub use completion::{classify_completion_error, ErrorClassification};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhaseTransition {
@@ -985,19 +988,6 @@ where
 }
 
 #[derive(Debug, Clone)]
-struct ErrorClassification {
-    canonical_class: CanonicalClass,
-    error_code: String,
-    error_origin: String,
-    error_message: String,
-    completion_kind: Option<PerformerCompletionKind>,
-    completion_success: bool,
-    completion_authority: CompletionAuthority,
-    has_commits: bool,
-    tool_error: Option<ToolError>,
-}
-
-#[derive(Debug, Clone)]
 struct CompletionErrorDetails {
     code: String,
     origin: String,
@@ -1097,87 +1087,6 @@ enum RetryStrategy {
         completion_kind: PerformerCompletionKind,
     },
     NoOp,
-}
-
-fn classify_completion_error(
-    input: &JobCompletionInput,
-    normalizer: Option<&dyn ErrorNormalizer>,
-    has_commits: bool,
-) -> ErrorClassification {
-    // ── Baseline error classification from caller ────────────────────
-    let raw_error_code = input
-        .error_code
-        .clone()
-        .unwrap_or_else(|| "E101".to_string());
-    let error_origin = input
-        .error_origin
-        .clone()
-        .unwrap_or_else(|| "runner".to_string());
-    let raw_error_message = input
-        .error_message
-        .clone()
-        .unwrap_or_else(|| input.status_text.clone());
-
-    // ── Per-adapter error normalization ──────────────────────────────
-    // Run when the caller provides raw process output AND the job failed.
-    // The normalizer output takes priority over the caller-supplied error code.
-    let tool_error: Option<ToolError> = if !input.success {
-        input.normalizer_input.as_ref().and_then(|ni| {
-            normalizer.and_then(|n| {
-                n.normalize(ni.exit_code, &ni.stderr, &ni.stdout)
-                    .map(|mut te| {
-                        te.attempt = input.attempt as u32;
-                        te.operation = "performer_run".to_string();
-                        te
-                    })
-            })
-        })
-    } else {
-        None
-    };
-
-    // Override caller-supplied error code/message with normalizer output.
-    let error_code = tool_error
-        .as_ref()
-        .map(|te| te.error_code.clone())
-        .unwrap_or(raw_error_code);
-    let error_message = tool_error
-        .as_ref()
-        .map(|te| te.raw_message.clone())
-        .unwrap_or(raw_error_message);
-    let canonical_class = tool_error
-        .as_ref()
-        .map(|te| te.canonical_class.clone())
-        .unwrap_or_else(|| error_code_to_canonical_class(&error_code));
-
-    // Resolve authority last, after normalization is complete.
-    let completion_resolution =
-        resolve_completion_authority(input.completion_kind, has_commits, input.success);
-    let ipc_phase_done_override = completion_resolution.authority == CompletionAuthority::IpcSignal
-        && completion_resolution.completion_kind
-            == Some(PerformerCompletionKind::SuccessWithChanges);
-    let completion_success = if ipc_phase_done_override {
-        true
-    } else {
-        input.success
-    };
-    let completion_kind = if ipc_phase_done_override {
-        Some(PerformerCompletionKind::SuccessWithChanges)
-    } else {
-        input.completion_kind
-    };
-
-    ErrorClassification {
-        canonical_class,
-        error_code,
-        error_origin,
-        error_message,
-        completion_kind,
-        completion_success,
-        completion_authority: completion_resolution.authority,
-        has_commits,
-        tool_error,
-    }
 }
 
 fn resolve_retry_strategy(
@@ -1380,10 +1289,7 @@ fn resolve_retry_strategy(
     ) {
         return RetryStrategy::Retry {
             same_worktree: false,
-            reason: format!(
-                "auto-retry scheduled for error code {}",
-                error_details.code
-            ),
+            reason: format!("auto-retry scheduled for error code {}", error_details.code),
             outcome: RetryOutcome::AutoRetry {
                 error: error_details,
                 tool_error,
@@ -1402,7 +1308,11 @@ fn resolve_retry_strategy(
     }
 }
 
-fn apply_state_transitions(task: &mut Task, strategy: &RetryStrategy, now: &str) -> JobCompletionResult {
+fn apply_state_transitions(
+    task: &mut Task,
+    strategy: &RetryStrategy,
+    now: &str,
+) -> JobCompletionResult {
     match strategy {
         RetryStrategy::Retry {
             same_worktree,
@@ -2500,6 +2410,7 @@ pub async fn run_native_control_plane(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::coordinator::error_normalizer::ErrorNormalizer;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
