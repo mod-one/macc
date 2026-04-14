@@ -12,6 +12,7 @@ use crate::coordinator::runtime::{
 };
 use crate::coordinator::types::CoordinatorEnvConfig;
 use crate::coordinator::{engine as coordinator_engine, runtime as coordinator_runtime};
+use crate::config::CoordinatorConfigResolved;
 use crate::{MaccError, Result};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
@@ -72,18 +73,17 @@ fn resolve_dispatch_cooldown_seconds(
     env_cfg: &CoordinatorEnvConfig,
     coordinator: Option<&crate::config::CoordinatorConfig>,
 ) -> u64 {
+    let cfg = CoordinatorConfigResolved::resolve(coordinator);
     env_cfg
         .dispatch_cooldown_seconds
-        .or_else(|| coordinator.and_then(|c| c.dispatch_cooldown_seconds))
-        .unwrap_or(2)
+        .unwrap_or(cfg.dispatch_cooldown_seconds)
 }
 
 fn resolve_session_cache_ttl_seconds(
     coordinator: Option<&crate::config::CoordinatorConfig>,
 ) -> u64 {
-    coordinator
-        .and_then(|c| c.session_cache_ttl_seconds)
-        .unwrap_or(300)
+    let cfg = CoordinatorConfigResolved::resolve(coordinator);
+    cfg.session_cache_ttl_seconds
 }
 
 fn resolve_merge_timeout_seconds(
@@ -2534,10 +2534,10 @@ fn resolve_rate_limit_fallback_enabled(
     env_cfg: &CoordinatorEnvConfig,
     coordinator: Option<&crate::config::CoordinatorConfig>,
 ) -> bool {
+    let cfg = CoordinatorConfigResolved::resolve(coordinator);
     env_cfg
         .rate_limit_fallback_enabled
-        .or_else(|| coordinator.and_then(|c| c.rate_limit_fallback_enabled))
-        .unwrap_or(true)
+        .unwrap_or(cfg.rate_limit_fallback_enabled)
 }
 
 fn resolve_rate_limit_throttle_parallel(
@@ -2666,6 +2666,7 @@ pub async fn dispatch_ready_tasks_native(
     state: &mut CoordinatorRunState,
     logger: Option<&dyn CoordinatorLog>,
 ) -> Result<usize> {
+    let cfg = CoordinatorConfigResolved::resolve(coordinator);
     ensure_performer_ipc_listener(repo_root, state, logger).await?;
     let mut dispatched = 0usize;
     let mut dispatch_failed_this_cycle: HashSet<String> = HashSet::new();
@@ -2673,14 +2674,8 @@ pub async fn dispatch_ready_tasks_native(
     state
         .dispatch_retry_not_before
         .retain(|_, until| *until > Instant::now());
-    let max_dispatch_total = env_cfg
-        .max_dispatch
-        .or_else(|| coordinator.and_then(|c| c.max_dispatch))
-        .unwrap_or(10);
-    let max_parallel = env_cfg
-        .max_parallel
-        .or_else(|| coordinator.and_then(|c| c.max_parallel))
-        .unwrap_or(3);
+    let max_dispatch_total = env_cfg.max_dispatch.unwrap_or(cfg.max_dispatch);
+    let max_parallel = env_cfg.max_parallel.unwrap_or(cfg.max_parallel);
 
     // RL-THROTTLE-006: lazy-initialize effective/original concurrency.
     if state.original_max_parallel == 0 {
@@ -2738,41 +2733,23 @@ pub async fn dispatch_ready_tasks_native(
                         .filter(|v| !v.is_empty())
                         .collect::<Vec<_>>()
                 })
-                .or_else(|| coordinator.map(|c| c.tool_priority.clone()))
-                .unwrap_or_default(),
+                .unwrap_or_else(|| cfg.tool_priority.clone()),
             max_parallel_per_tool: env_cfg
                 .max_parallel_per_tool_json
                 .clone()
                 .and_then(|raw| serde_json::from_str::<HashMap<String, usize>>(&raw).ok())
-                .or_else(|| {
-                    coordinator.map(|c| {
-                        c.max_parallel_per_tool
-                            .clone()
-                            .into_iter()
-                            .collect::<HashMap<_, _>>()
-                    })
-                })
-                .unwrap_or_default(),
+                .unwrap_or_else(|| cfg.max_parallel_per_tool.clone().into_iter().collect()),
             tool_specializations: env_cfg
                 .tool_specializations_json
                 .clone()
                 .and_then(|raw| serde_json::from_str::<HashMap<String, Vec<String>>>(&raw).ok())
-                .or_else(|| {
-                    coordinator.map(|c| {
-                        c.tool_specializations
-                            .clone()
-                            .into_iter()
-                            .collect::<HashMap<_, _>>()
-                    })
-                })
-                .unwrap_or_default(),
+                .unwrap_or_else(|| cfg.tool_specializations.clone().into_iter().collect()),
             max_parallel: state.effective_max_parallel,
             default_tool: canonical.tools.enabled.first().cloned().unwrap_or_default(),
             default_base_branch: env_cfg
                 .reference_branch
                 .clone()
-                .or_else(|| coordinator.and_then(|c| c.reference_branch.clone()))
-                .unwrap_or_else(|| "master".to_string()),
+                .unwrap_or_else(|| cfg.reference_branch.clone()),
             now: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             throttle_registry: state.throttle_registry.clone(),
             rate_limit_fallback_enabled: resolve_rate_limit_fallback_enabled(env_cfg, coordinator),
@@ -2868,9 +2845,7 @@ pub async fn dispatch_ready_tasks_native(
                 selected.id, selected.tool, selected.base_branch
             ));
         }
-        let merge_gate_enabled = coordinator
-            .map(|cfg| cfg.merge_gate_on_dispatch)
-            .unwrap_or(true);
+        let merge_gate_enabled = cfg.merge_gate_on_dispatch;
         if merge_gate_enabled && retry_count_for_task(&registry, &selected.id) > 0 {
             let attempt_msg = format!(
                 "merge-gate check started task={} base={}",
@@ -3476,10 +3451,13 @@ pub async fn dispatch_ready_tasks_native(
             ));
         }
 
-        let phase_timeout_seconds = env_cfg
-            .stale_in_progress_seconds
-            .or_else(|| coordinator.and_then(|c| c.stale_in_progress_seconds))
-            .unwrap_or(600);
+        let phase_timeout_seconds = env_cfg.stale_in_progress_seconds.unwrap_or_else(|| {
+            if coordinator.is_some_and(|c| c.stale_in_progress_seconds.is_some()) {
+                cfg.stale_in_progress_seconds
+            } else {
+                600
+            }
+        });
         let current_exe = std::env::current_exe().map_err(|e| {
             MaccError::Validation(format!("Failed to resolve current executable path: {}", e))
         })?;
