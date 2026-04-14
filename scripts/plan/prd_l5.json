@@ -29,7 +29,9 @@
     "prepare_clean_worktree() must be extracted before the fetch non-blocking fix is integrated into it.",
     "The git_command! macro refactor is purely internal to git.rs and does not change any public API.",
     "MaccError::Io { path, action, source } is the canonical error type for IO failures in this codebase.",
-    "The coordinator uses SanitizeOptions-style configuration objects already established in Lot 4 patterns."
+    "The coordinator uses SanitizeOptions-style configuration objects already established in Lot 4 patterns.",
+    "mode_b.rs (1,160 lines) is over the 800-line anti-god-file threshold — L5-SUP-004 adds coordinator evidence/prompt logic to a new file (core/src/supervisor/coordinator_supervisor.rs) rather than growing mode_b.rs further.",
+    "core/src/coordinator/runtime.rs is independent of all other L5 tasks touching control_plane.rs — the CoordinatorPidGuard addition is isolated to the IPC listener startup path and is parallel-safe."
   ],
   "tasks": [
     {
@@ -686,6 +688,198 @@
         "context_scope": "cross-cutting",
         "risk_level": "low",
         "validation_profile": "light"
+      }
+    },
+    {
+      "id": "L5-SUP-001",
+      "title": "Write coordinator PID file via CoordinatorPidGuard",
+      "category": "supervisor-reliability",
+      "description": "Problem/Goal: The supervisor's CoordinatorProcessManager::health_check() always returns Crashed because .macc/state/coordinator.pid never exists. Every supervisor health check is a false positive, making Mode A/C wiring meaningless without this file.\nKey actions: Add a CoordinatorPidGuard struct to core/src/coordinator/runtime.rs. Guard writes the PID to .macc/state/coordinator.pid atomically (write to .tmp path then rename) immediately after the IPC listener binds. Guard's Drop impl removes the file so crashes and clean exits both clean up. Propagate the guard to the coordinator run loop so it is held for the full lifetime of the run.\nOut of scope: Changing Mode A, Mode C, or the supervisor CLI. Any other change to runtime.rs.\nSuccess criteria: .macc/state/coordinator.pid exists while coordinator is running and is removed on any exit (clean or panic). File content is the process PID as a decimal string. Atomic write verified by test (write failure does not leave partial file).",
+      "objective": "Give the supervisor a reliable signal to distinguish 'coordinator is running' from 'coordinator has exited'.",
+      "result": "CoordinatorPidGuard struct in core/src/coordinator/runtime.rs. Atomic PID file written after IPC listener binds, removed on Drop. Unit test covering normal exit and drop-on-panic paths.",
+      "steps": [
+        "Add CoordinatorPidGuard { path: PathBuf } struct with a new() constructor that atomically writes current PID to .macc/state/coordinator.pid (.tmp + rename).",
+        "Implement Drop for CoordinatorPidGuard: remove the PID file, log warning if removal fails.",
+        "Wire CoordinatorPidGuard into the coordinator run loop: construct it after the IPC listener binds, hold it until the loop exits.",
+        "Add unit test: guard writes PID file on construction, file is removed after guard drops.",
+        "Add unit test: if the .macc/state/ directory does not exist, guard returns an error rather than panicking."
+      ],
+      "notes": "Prerequisite for all other L5-SUP tasks. runtime.rs is independent of all control_plane.rs changes in this lot — parallel-safe with L5-CFG/CTRL/MOD tasks.",
+      "exclusive_resources": ["core/src/coordinator/runtime.rs"],
+      "dependencies": [],
+      "priority": "1",
+      "routing_hints": {
+        "execution_mode": "micro",
+        "reasoning_depth": "standard",
+        "context_scope": "local",
+        "risk_level": "medium",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L5-SUP-002",
+      "title": "Wire Mode A watchdog to Mode C recovery via SupervisorFsmState",
+      "category": "supervisor-reliability",
+      "description": "Problem/Goal: Mode A's run_forever() calls check_once() and sleeps — it never acts on a Crashed result. Mode C's run_recovery() is dead code never called from outside its own file. There is no way for supervisor to restart a crashed coordinator.\nKey actions: Add SupervisorFsmState enum (Starting, Healthy, CrashedPostRun) to the watchdog. Transition to Healthy on first successful health check. When a previously-Healthy coordinator becomes Crashed: read the last coordinator event from events.jsonl to distinguish (a) clean exit with result:failed — skip restart, flag for analysis — from (b) unexpected crash (no clean exit event) — call ModeCRecovery::run_recovery(). Add configurable debounce: N consecutive Crashed checks required before acting (prevents false positives during startup). Debounce N should be configurable via SupervisorConfig.\nOut of scope: Mode B analysis integration (handled in L5-SUP-005). Changing Mode C internals. Changing the CLI.\nSuccess criteria: Watchdog calls run_recovery() only when coordinator was previously healthy AND N consecutive Crashed checks are observed AND last event is not a clean exit. Clean coordinator exit (result:failed) is correctly distinguished from unexpected crash. Unit tests cover all three FSM transitions.",
+      "objective": "Close the Mode A → Mode C gap so a crashed coordinator triggers automatic recovery instead of silent no-op.",
+      "result": "SupervisorFsmState added to SupervisorWatchdog in mode_a.rs. run_forever() transitions state and calls ModeCRecovery::run_recovery() on unexpected crash after debounce. Unit tests for all FSM transitions and the clean-exit vs crash distinction.",
+      "steps": [
+        "Define SupervisorFsmState { Starting, Healthy, CrashedPostRun } in mode_a.rs.",
+        "Add fsm_state: SupervisorFsmState and crash_check_count: u32 fields to SupervisorWatchdog.",
+        "In run_forever(): on HealthCheckResult::Healthy, transition to Healthy and reset crash_check_count.",
+        "On HealthCheckResult::Crashed: if state is Healthy, increment crash_check_count; when crash_check_count >= config.crash_debounce_checks, read last event from events.jsonl.",
+        "If last event is a clean-exit marker (result: failed or result: success), transition to CrashedPostRun and log — do not restart.",
+        "If no clean-exit marker is found, call ModeCRecovery::run_recovery() and reset state to Starting.",
+        "Add crash_debounce_checks: u32 field to SupervisorConfig with default 3.",
+        "Write unit tests: Starting→Healthy, Healthy→Crashed-debounce, Crashed-clean-exit skips recovery, Crashed-unexpected triggers run_recovery()."
+      ],
+      "notes": "Depends on L5-SUP-001 for the PID file that drives HealthCheckResult. mode_a.rs is 637 lines — within safe bounds for targeted additions.",
+      "exclusive_resources": ["core/src/supervisor/mode_a.rs"],
+      "dependencies": ["L5-SUP-001"],
+      "priority": "1",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "deep",
+        "context_scope": "module",
+        "risk_level": "high",
+        "validation_profile": "heavy"
+      }
+    },
+    {
+      "id": "L5-SUP-003",
+      "title": "Add --supervisor flag to macc coordinator run and --attach mode to supervisor start",
+      "category": "supervisor-reliability",
+      "description": "Problem/Goal: Supervisor must be started manually with a separate command. There is no way for a user running macc coordinator run to opt into automatic supervision in a single command.\nKey actions: Add --supervisor bool flag to the Coordinator run subcommand in cli/src/main.rs. When --supervisor is set: spawn macc supervisor start --daemon --attach as a child before entering the coordinator loop; coordinator passes its own PID to the supervisor so supervisor can monitor it directly. Add --attach mode to supervisor start in cli/src/commands/supervisor.rs: in --attach mode the supervisor monitors the coordinator process by PID (via the PID file) and exits cleanly when the coordinator exits with success, or triggers recovery when coordinator exits failure or crashes. --attach is implied when spawned by --supervisor but also usable standalone.\nOut of scope: Changing Mode A internals (L5-SUP-002). Changing Mode C internals. Changing mode_b.rs.\nSuccess criteria: macc coordinator run --supervisor starts supervisor automatically. Supervisor exits cleanly when coordinator finishes successfully. Supervisor triggers Mode C when coordinator exits with failure or unexpected crash. Existing macc supervisor start (without --attach) continues to work unchanged.",
+      "objective": "Unify coordinator run and supervisor startup into a single command so users get supervised execution by default.",
+      "result": "--supervisor flag on coordinator run. --attach mode on supervisor start. Integration test: coordinator run --supervisor with simulated crash triggers run_recovery().",
+      "steps": [
+        "Add --supervisor flag to coordinator run CLI args in cli/src/main.rs.",
+        "When --supervisor is set, spawn `macc supervisor start --daemon --attach` before entering the coordinator loop; pass coordinator PID via env or flag.",
+        "Add --attach bool flag to supervisor start command in cli/src/commands/supervisor.rs.",
+        "In --attach mode: poll the coordinator PID file and process liveness; exit(0) when coordinator exits success; call run_recovery() when coordinator exits failure or crashes.",
+        "Ensure --attach does not require --daemon (can run in foreground for scripting use).",
+        "Add integration test: simulate coordinator crash, verify --attach mode triggers recovery path.",
+        "Update help text for both coordinator run and supervisor start."
+      ],
+      "notes": "Depends on L5-SUP-001 (PID file) and L5-SUP-002 (FSM state and recovery wiring). cli/ changes are isolated from core/ Rust changes.",
+      "exclusive_resources": ["cli/src/main.rs", "cli/src/commands/supervisor.rs"],
+      "dependencies": ["L5-SUP-001", "L5-SUP-002"],
+      "priority": "1",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "medium",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L5-SUP-004",
+      "title": "Add coordinator-level evidence collector and analysis prompt builder",
+      "category": "supervisor-intelligence",
+      "description": "Problem/Goal: Mode B's AnalysisPromptBuilder produces a per-worktree prompt about stuck performers. When the coordinator itself fails (all tasks exhausted, clean exit with result:failed), there is no coordinator-level prompt — supervisor has no way to understand or report the full failure chain. mode_b.rs is already 1,160 lines and must not grow further.\nKey actions: Create new file core/src/supervisor/coordinator_supervisor.rs. Add CoordinatorEvidenceCollector struct that gathers: last N coordinator events from events.jsonl, task registry state (counts per workflow state), performer log excerpts for failed tasks (last 100 lines each), and the coordinator run log footer (result: success/failed, exit reason). Add CoordinatorAnalysisPromptBuilder that builds a coordinator-context analysis prompt distinct from the per-worktree prompt: includes full failure chain, which tasks failed and why (from task runtime.last_error), coordinator exit reason, and a request for recovery actions and improvement hints.\nOut of scope: Executing recovery actions (L5-SUP-005). Changing mode_b.rs. Changing SupervisorReport schema (L5-SUP-007).\nSuccess criteria: CoordinatorEvidenceCollector correctly reads events.jsonl, task registry, and performer logs. CoordinatorAnalysisPromptBuilder produces a well-structured prompt covering failure chain and exit reason. Unit tests for evidence collection with fixture data.",
+      "objective": "Give the supervisor the ability to understand and reason about coordinator-level failures, not just per-worktree stalls.",
+      "result": "New file core/src/supervisor/coordinator_supervisor.rs with CoordinatorEvidenceCollector and CoordinatorAnalysisPromptBuilder. Unit tests with fixture coordinator events and task registry snapshots.",
+      "steps": [
+        "Create core/src/supervisor/coordinator_supervisor.rs and add it to mod.rs.",
+        "Implement CoordinatorEvidenceCollector::collect() reading: last N events from events.jsonl, task registry state breakdown by workflow state, performer log excerpts for blocked/failed tasks.",
+        "Implement CoordinatorAnalysisPromptBuilder::build(evidence) producing a structured prompt with: coordinator exit reason, failure chain, failed-task summaries, and explicit request for recovery actions and improvement hints.",
+        "Add unit tests using fixture events.jsonl and task registry JSON to verify evidence collection and prompt structure.",
+        "Wire CoordinatorEvidenceCollector into mode_b.rs as an optional coordinator-level evidence source (call path left for L5-SUP-005 to complete)."
+      ],
+      "notes": "Parallel-safe with L5-SUP-001, L5-SUP-002, L5-SUP-003 — no shared files. mode_b.rs at 1,160 lines is over the 800-line anti-god-file threshold; new logic goes into coordinator_supervisor.rs to avoid further growth.",
+      "exclusive_resources": ["core/src/supervisor/coordinator_supervisor.rs"],
+      "dependencies": [],
+      "priority": "2",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "medium",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L5-SUP-005",
+      "title": "Add deterministic coordinator recovery actions to Mode B",
+      "category": "supervisor-intelligence",
+      "description": "Problem/Goal: RecoveryActionKind only has GitReset, GitClean, and None — there are no coordinator-level recovery actions. When the supervisor detects a blocked coordinator, it cannot unlock tasks or trigger reconcile. Mode B never calls CoordinatorEvidenceCollector.\nKey actions: Extend RecoveryActionKind with CoordinatorUnlock { task_ids: Vec<String> } and CoordinatorReconcile variants. Extend execute_recovery() to spawn macc coordinator unlock [task_ids...] and macc coordinator reconcile as child processes. Add safety guard: only execute when coordinator is not running (PID file absent or PID process not alive). Wire CoordinatorEvidenceCollector (from coordinator_supervisor.rs) into ModeBSupervisor::analyse() as an optional coordinator-level evidence path that runs when coordinator events.jsonl is available.\nOut of scope: AI-powered fix actions (L5-SUP-006). Changing SupervisorReport schema (L5-SUP-007).\nSuccess criteria: execute_recovery() correctly spawns coordinator unlock and reconcile commands. Safety guard prevents double-execution when coordinator is still running. Unit tests for both new action variants and the safety guard.",
+      "objective": "Enable Mode B to take deterministic corrective actions at the coordinator level, not just at the worktree level.",
+      "result": "RecoveryActionKind::CoordinatorUnlock and CoordinatorReconcile in mode_b.rs. execute_recovery() handles both. Safety guard checks PID liveness. Unit tests for new variants.",
+      "steps": [
+        "Add CoordinatorUnlock { task_ids: Vec<String> } and CoordinatorReconcile variants to RecoveryActionKind.",
+        "Implement execute_recovery() branches for CoordinatorUnlock and CoordinatorReconcile using tokio::process::Command to spawn macc subcommands.",
+        "Add is_coordinator_running() helper: check .macc/state/coordinator.pid exists and process is alive.",
+        "Add safety guard in execute_recovery(): if coordinator is running, skip CoordinatorUnlock/Reconcile and log a warning instead.",
+        "Wire CoordinatorEvidenceCollector into ModeBSupervisor::analyse(): when events.jsonl exists, collect coordinator evidence and include in the analysis prompt.",
+        "Write unit tests for CoordinatorUnlock execution, CoordinatorReconcile execution, and the safety guard (mock PID file present/absent)."
+      ],
+      "notes": "Depends on L5-SUP-004 (same file boundary as coordinator_supervisor.rs wiring). mode_b.rs exclusive resource — must be sequential with L5-SUP-006.",
+      "exclusive_resources": ["core/src/supervisor/mode_b.rs"],
+      "dependencies": ["L5-SUP-004"],
+      "priority": "2",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "medium",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L5-SUP-006",
+      "title": "Add AI-powered FixTest recovery action with compile verification",
+      "category": "supervisor-intelligence",
+      "description": "Problem/Goal: When a performer fails because a test file does not compile (e.g., a call-site mismatch after a function signature change), the supervisor has no mechanism to fix the test and unblock the task. A targeted AI-powered fix for test compile errors — with mandatory verification — closes this gap without risking implementation file mutation.\nKey actions: Add RecoveryActionKind::FixTest { file_path: PathBuf, description: String } and RecoveryActionKind::Escalate { reason: String } to mode_b.rs. In execute_recovery() for FixTest: build a targeted AI prompt (compile error + current function signature → fix the test call only). After AI generates a fix: run cargo build -p macc-core --tests to verify the fix compiles before applying it. If compilation fails, fall back to Escalate. Strict guard: FixTest only applies to test files (path contains /tests/ or filename ends with _test.rs or _integration.rs) — never implementation files.\nOut of scope: Fixing implementation files. Using FixTest for non-compile errors. Changing SupervisorReport schema (L5-SUP-007).\nSuccess criteria: FixTest action invokes AI tool with a targeted prompt, verifies fix compiles, applies only if cargo build passes. Test-file guard rejects implementation file paths. Escalate action writes reason to report and exits cleanly. Unit tests for guard logic and Escalate path.",
+      "objective": "Unblock stalled performers caused by test compile errors without risking implementation file mutation.",
+      "result": "RecoveryActionKind::FixTest and Escalate in mode_b.rs. execute_recovery() handles both with compile verification gate. Test-file guard. Unit tests for guard logic, FixTest flow, and Escalate.",
+      "steps": [
+        "Add FixTest { file_path: PathBuf, description: String } and Escalate { reason: String } to RecoveryActionKind.",
+        "Implement is_test_file(path) guard: path contains '/tests/' OR filename ends in '_test.rs' OR '_integration.rs'.",
+        "Implement execute_recovery() branch for FixTest: validate test-file guard, build AI prompt with compile error + function signature, dispatch to AI tool, run cargo build -p macc-core --tests on proposed patch, apply only if build passes, fall back to Escalate on build failure.",
+        "Implement execute_recovery() branch for Escalate: write reason to supervisor report output, log at WARN level, return without spawning any process.",
+        "Write unit test: FixTest on implementation file path → guard rejects.",
+        "Write unit test: Escalate → report contains reason, no process spawned.",
+        "Write unit test: FixTest with mock AI response → cargo build gate called before apply."
+      ],
+      "notes": "Depends on L5-SUP-005 (same file, sequential). The compile-verification gate is mandatory — never apply AI patches without it. Only applies to test files by design.",
+      "exclusive_resources": ["core/src/supervisor/mode_b.rs"],
+      "dependencies": ["L5-SUP-005"],
+      "priority": "2",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "deep",
+        "context_scope": "module",
+        "risk_level": "high",
+        "validation_profile": "heavy"
+      }
+    },
+    {
+      "id": "L5-SUP-007",
+      "title": "Add CoordinatorImprovementHint to SupervisorReport and emit from Mode B and Mode C",
+      "category": "supervisor-intelligence",
+      "description": "Problem/Goal: Supervisor reports describe what happened but give no structured guidance on how the coordinator should handle the same problem autonomously in the future. Without improvement hints, every recurring failure requires the same manual supervisor intervention.\nKey actions: Add CoordinatorImprovementHint { problem_class: String, detection_hook: String, suggested_coordinator_behavior: String, suggested_prd_task: Option<String> } struct to core/src/supervisor/mod.rs. Add improvement_hints: Vec<CoordinatorImprovementHint> field to SupervisorReport. Update CoordinatorAnalysisPromptBuilder in coordinator_supervisor.rs to request improvement hints as a JSON array in the AI response — parallel to the existing recovery_actions array. Update Mode C build_supervisor_report() in mode_c.rs to populate improvement_hints from crash analysis. Serialize hints in the existing report JSON output.\nOut of scope: Acting on hints automatically. Changing coordinator behavior based on hints (that is a future PRD task). Changing CLI commands.\nSuccess criteria: SupervisorReport JSON output includes improvement_hints array. Mode B coordinator analysis response populates at least one hint when a pattern is recognized. Mode C crash report populates hints for known crash patterns. Unit tests verify hint serialization and Mode C hint population.",
+      "objective": "Give operators structured, actionable guidance for improving the coordinator so recurring failures become self-resolving over time.",
+      "result": "CoordinatorImprovementHint in mod.rs. SupervisorReport.improvement_hints field. Mode B and Mode C emit hints. Unit tests for serialization and hint population.",
+      "steps": [
+        "Add CoordinatorImprovementHint { problem_class, detection_hook, suggested_coordinator_behavior, suggested_prd_task } to mod.rs.",
+        "Add improvement_hints: Vec<CoordinatorImprovementHint> to SupervisorReport in mod.rs.",
+        "Update CoordinatorAnalysisPromptBuilder in coordinator_supervisor.rs: add improvement_hints JSON array section to the prompt template alongside recovery_actions.",
+        "Update ModeBSupervisor::analyse() to parse improvement_hints from AI response and populate SupervisorReport.",
+        "Update Mode C build_supervisor_report() in mode_c.rs: map known crash patterns (e.g., PID file missing, events.jsonl truncated) to CoordinatorImprovementHint entries.",
+        "Verify report JSON serialization includes the hints array.",
+        "Write unit tests: hint serialization round-trip, Mode C hint population for known crash patterns."
+      ],
+      "notes": "Depends on L5-SUP-006 (mode_b.rs exclusive resource chain complete). Touches mod.rs, mode_b.rs, and mode_c.rs — list all three as exclusive resources to prevent collision.",
+      "exclusive_resources": ["core/src/supervisor/mod.rs", "core/src/supervisor/mode_b.rs", "core/src/supervisor/mode_c.rs", "core/src/supervisor/coordinator_supervisor.rs"],
+      "dependencies": ["L5-SUP-006"],
+      "priority": "3",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "medium",
+        "validation_profile": "standard"
       }
     }
   ]
