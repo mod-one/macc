@@ -1,4 +1,14 @@
-use super::*;
+use super::completion::ErrorClassification;
+use super::fsm::{
+    should_auto_retry_error_code, BlockOutcome, CompletionErrorDetails, CoordinatorConfigResolved,
+    JobCompletionInput, RetryOutcome,
+};
+use crate::coordinator::error_normalizer::{CanonicalClass, ToolError};
+use crate::coordinator::model::Task;
+use crate::coordinator::rate_limit::{
+    compute_backoff_delay, E601_RATE_LIMITED, E602_QUOTA_EXHAUSTED,
+};
+use crate::coordinator::PerformerCompletionKind;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
