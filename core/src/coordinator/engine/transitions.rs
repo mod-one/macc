@@ -1,4 +1,14 @@
-use super::*;
+use super::fsm::{
+    capture_last_assignment_before_clear, preserve_active_session_chain,
+    store_classified_error_in_extra, BlockOutcome, JobCompletionResult, RetryOutcome,
+};
+use super::retry::RetryStrategy;
+use crate::coordinator::model::Task;
+use crate::coordinator::rate_limit::{
+    update_throttle_state, RateLimitInfo, ToolThrottleState, E601_RATE_LIMITED,
+    E602_QUOTA_EXHAUSTED,
+};
+use crate::coordinator::{PerformerCompletionKind, RuntimeStatus, WorkflowState};
 
 pub(super) fn apply_state_transitions(
     task: &mut Task,
