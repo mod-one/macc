@@ -90,10 +90,10 @@ fn resolve_merge_timeout_seconds(
     env_cfg: &CoordinatorEnvConfig,
     coordinator: Option<&crate::config::CoordinatorConfig>,
 ) -> usize {
+    let cfg = CoordinatorConfigResolved::resolve(coordinator);
     env_cfg
         .merge_job_timeout_seconds
-        .or_else(|| coordinator.and_then(|c| c.merge_job_timeout_seconds))
-        .unwrap_or(0)
+        .unwrap_or(cfg.merge_job_timeout_seconds)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1329,6 +1329,7 @@ pub async fn advance_tasks_native(
     state: &mut CoordinatorRunState,
     logger: Option<&dyn CoordinatorLog>,
 ) -> Result<coordinator_engine::AdvanceResult> {
+    let cfg = CoordinatorConfigResolved::resolve(coordinator);
     let mut registry =
         crate::coordinator::state::coordinator_state_registry_load(repo_root, &BTreeMap::new())?;
     let registry_snapshot = TaskRegistry::from_value(&registry)?;
@@ -1345,9 +1346,7 @@ pub async fn advance_tasks_native(
         .keys()
         .cloned()
         .collect::<HashSet<_>>();
-    let max_review_cycles = env_cfg
-        .max_review_cycles
-        .or_else(|| coordinator.and_then(|c| c.max_review_cycles));
+    let max_review_cycles = env_cfg.max_review_cycles.or(cfg.max_review_cycles);
     let actions = coordinator_engine::build_advance_actions(
         &registry,
         &active_merge_ids,
@@ -1533,13 +1532,10 @@ pub async fn advance_tasks_native(
                 let branch_for_worker = branch.clone();
                 let base_for_worker = base.clone();
 
-                let merge_ai_fix = env_cfg
-                    .merge_ai_fix
-                    .or_else(|| coordinator.and_then(|c| c.merge_ai_fix))
-                    .unwrap_or(false);
+                let merge_ai_fix = env_cfg.merge_ai_fix.unwrap_or(cfg.merge_ai_fix);
                 let merge_hook_timeout = env_cfg
                     .merge_hook_timeout_seconds
-                    .or_else(|| coordinator.and_then(|c| c.merge_hook_timeout_seconds));
+                    .or(Some(cfg.merge_hook_timeout_seconds));
 
                 coordinator_runtime::spawn_merge_job(
                     &task_id,
@@ -1604,6 +1600,7 @@ pub async fn monitor_active_jobs_native(
     phase_timeout_seconds: usize,
     logger: Option<&dyn CoordinatorLog>,
 ) -> Result<()> {
+    let cfg = CoordinatorConfigResolved::resolve(coordinator);
     ensure_performer_ipc_listener(repo_root, state, logger).await?;
     consume_runtime_events(repo_root, state, logger)?;
     apply_runtime_event_bus_updates(repo_root, env_cfg, coordinator, state, logger)?;
@@ -1856,11 +1853,10 @@ pub async fn monitor_active_jobs_native(
                         repo_root,
                         env_cfg
                             .merge_ai_fix
-                            .or_else(|| coordinator.and_then(|c| c.merge_ai_fix))
-                            .unwrap_or(false),
+                            .unwrap_or(cfg.merge_ai_fix),
                         env_cfg
                             .merge_hook_timeout_seconds
-                            .or_else(|| coordinator.and_then(|c| c.merge_hook_timeout_seconds)),
+                            .or(Some(cfg.merge_hook_timeout_seconds)),
                         &now_iso_coordinator(),
                         |event_type, task_id, phase, status, detail, severity| {
                             let _ = append_coordinator_event_with_severity(
@@ -2451,10 +2447,10 @@ fn resolve_stale_heartbeat_seconds(
     env_cfg: &CoordinatorEnvConfig,
     coordinator: Option<&crate::config::CoordinatorConfig>,
 ) -> usize {
+    let cfg = CoordinatorConfigResolved::resolve(coordinator);
     env_cfg
         .stale_in_progress_seconds
-        .or_else(|| coordinator.and_then(|c| c.stale_in_progress_seconds))
-        .unwrap_or(0)
+        .unwrap_or(cfg.stale_in_progress_seconds)
 }
 
 fn resolve_stale_heartbeat_action(
@@ -2504,30 +2500,30 @@ fn resolve_error_code_retry_max(
     env_cfg: &CoordinatorEnvConfig,
     coordinator: Option<&crate::config::CoordinatorConfig>,
 ) -> usize {
+    let cfg = CoordinatorConfigResolved::resolve(coordinator);
     env_cfg
         .error_code_retry_max
-        .or_else(|| coordinator.and_then(|c| c.error_code_retry_max))
-        .unwrap_or(2)
+        .unwrap_or(cfg.error_code_retry_max)
 }
 
 fn resolve_rate_limit_backoff_base_seconds(
     env_cfg: &CoordinatorEnvConfig,
     coordinator: Option<&crate::config::CoordinatorConfig>,
 ) -> u64 {
+    let cfg = CoordinatorConfigResolved::resolve(coordinator);
     env_cfg
         .rate_limit_backoff_base_seconds
-        .or_else(|| coordinator.and_then(|c| c.rate_limit_backoff_base_seconds))
-        .unwrap_or(30)
+        .unwrap_or(cfg.rate_limit_backoff_base_seconds)
 }
 
 fn resolve_rate_limit_backoff_max_seconds(
     env_cfg: &CoordinatorEnvConfig,
     coordinator: Option<&crate::config::CoordinatorConfig>,
 ) -> u64 {
+    let cfg = CoordinatorConfigResolved::resolve(coordinator);
     env_cfg
         .rate_limit_backoff_max_seconds
-        .or_else(|| coordinator.and_then(|c| c.rate_limit_backoff_max_seconds))
-        .unwrap_or(300)
+        .unwrap_or(cfg.rate_limit_backoff_max_seconds)
 }
 
 fn resolve_rate_limit_fallback_enabled(
@@ -2544,20 +2540,20 @@ fn resolve_rate_limit_throttle_parallel(
     env_cfg: &CoordinatorEnvConfig,
     coordinator: Option<&crate::config::CoordinatorConfig>,
 ) -> bool {
+    let cfg = CoordinatorConfigResolved::resolve(coordinator);
     env_cfg
         .rate_limit_throttle_parallel
-        .or_else(|| coordinator.and_then(|c| c.rate_limit_throttle_parallel))
-        .unwrap_or(true)
+        .unwrap_or(cfg.rate_limit_throttle_parallel)
 }
 
 fn resolve_force_kill_grace_seconds(
     env_cfg: &CoordinatorEnvConfig,
     coordinator: Option<&crate::config::CoordinatorConfig>,
 ) -> u64 {
+    let cfg = CoordinatorConfigResolved::resolve(coordinator);
     env_cfg
         .force_kill_grace_seconds
-        .or_else(|| coordinator.and_then(|c| c.force_kill_grace_seconds))
-        .unwrap_or(crate::coordinator::runtime::FORCE_KILL_GRACE_SECONDS)
+        .unwrap_or(cfg.force_kill_grace_seconds)
 }
 
 pub async fn monitor_merge_jobs_native(
