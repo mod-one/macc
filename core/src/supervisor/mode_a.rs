@@ -1,3 +1,4 @@
+use crate::supervisor::mode_c::{ModeCConfig, ModeCError, ModeCRecovery};
 use crate::supervisor::{HealthCheckResult, ProcessManager, ProcessManagerError};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -25,6 +26,10 @@ fn default_error_burst_threshold() -> usize {
     3
 }
 
+fn default_crash_debounce_checks() -> u32 {
+    3
+}
+
 fn default_pid_file_path() -> PathBuf {
     PathBuf::from(".macc/state/coordinator.pid")
 }
@@ -41,6 +46,8 @@ pub struct WatchdogConfig {
     pub stall_threshold_seconds: u64,
     #[serde(default = "default_error_burst_threshold")]
     pub error_burst_threshold: usize,
+    #[serde(default = "default_crash_debounce_checks")]
+    pub crash_debounce_checks: u32,
     #[serde(default = "default_events_log_path")]
     pub events_log_path: PathBuf,
     #[serde(default = "default_pid_file_path")]
@@ -55,6 +62,7 @@ impl Default for WatchdogConfig {
             watchdog_interval_seconds: default_watchdog_interval_seconds(),
             stall_threshold_seconds: default_stall_threshold_seconds(),
             error_burst_threshold: default_error_burst_threshold(),
+            crash_debounce_checks: default_crash_debounce_checks(),
             events_log_path: default_events_log_path(),
             pid_file_path: default_pid_file_path(),
             health_status_path: default_health_status_path(),
@@ -83,6 +91,8 @@ pub enum WatchdogError {
     Io(#[from] std::io::Error),
     #[error("serde error: {0}")]
     Serde(#[from] serde_json::Error),
+    #[error("mode_c recovery error: {0}")]
+    ModeC(#[from] ModeCError),
 }
 
 #[derive(Debug, Clone)]
@@ -328,11 +338,20 @@ struct WatchdogState {
     consecutive_error_events: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SupervisorFsmState {
+    Starting,
+    Healthy,
+    CrashedPostRun,
+}
+
 pub struct SupervisorWatchdog<P> {
     config: WatchdogConfig,
     process_manager: P,
     tailer: EventStreamTailer,
     state: WatchdogState,
+    fsm_state: SupervisorFsmState,
+    crash_check_count: u32,
 }
 
 impl<P> SupervisorWatchdog<P>
@@ -346,6 +365,8 @@ where
             process_manager,
             tailer,
             state: WatchdogState::default(),
+            fsm_state: SupervisorFsmState::Starting,
+            crash_check_count: 0,
         }
     }
 
@@ -414,12 +435,108 @@ where
     pub async fn run_forever(&mut self) -> Result<(), WatchdogError> {
         let interval = Duration::from_secs(self.config.watchdog_interval_seconds.max(1));
         loop {
-            if let Err(err) = self.check_once().await {
+            if let Err(err) = self.run_cycle().await {
                 tracing::warn!("supervisor mode_a cycle failed: {}", err);
             }
             tokio::time::sleep(interval).await;
         }
     }
+
+    async fn run_cycle(&mut self) -> Result<SupervisorHealthStatus, WatchdogError> {
+        let status = self.check_once().await?;
+        self.advance_fsm(&status.health).await?;
+        Ok(status)
+    }
+
+    async fn advance_fsm(&mut self, health: &HealthCheckResult) -> Result<(), WatchdogError> {
+        match health {
+            HealthCheckResult::Healthy => {
+                self.fsm_state = SupervisorFsmState::Healthy;
+                self.crash_check_count = 0;
+            }
+            HealthCheckResult::Crashed { exit_code } => {
+                if self.fsm_state == SupervisorFsmState::Healthy {
+                    self.crash_check_count = self.crash_check_count.saturating_add(1);
+                    let debounce = self.config.crash_debounce_checks.max(1);
+                    if self.crash_check_count < debounce {
+                        return Ok(());
+                    }
+
+                    if self.last_event_is_clean_exit()? {
+                        self.fsm_state = SupervisorFsmState::CrashedPostRun;
+                        self.crash_check_count = 0;
+                        tracing::warn!(
+                            "supervisor mode_a detected clean coordinator exit event; skipping recovery"
+                        );
+                        return Ok(());
+                    }
+
+                    self.trigger_mode_c_recovery(*exit_code).await?;
+                    self.fsm_state = SupervisorFsmState::Starting;
+                    self.crash_check_count = 0;
+                }
+            }
+            _ => {
+                self.crash_check_count = 0;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn last_event_is_clean_exit(&self) -> Result<bool, WatchdogError> {
+        let Some(event) = read_last_event(&self.config.events_log_path)? else {
+            return Ok(false);
+        };
+        Ok(event_result_kind(&event)
+            .map(|result| {
+                result.eq_ignore_ascii_case("failed") || result.eq_ignore_ascii_case("success")
+            })
+            .unwrap_or(false))
+    }
+
+    async fn trigger_mode_c_recovery(&self, exit_code: Option<i32>) -> Result<(), WatchdogError> {
+        let mut recovery = ModeCRecovery::new(ModeCConfig {
+            events_log_path: self.config.events_log_path.clone(),
+            ..ModeCConfig::default()
+        });
+        recovery
+            .run_recovery(&self.process_manager, exit_code)
+            .await?;
+        Ok(())
+    }
+}
+
+fn read_last_event(path: &Path) -> Result<Option<Value>, std::io::Error> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let raw = fs::read_to_string(path)?;
+    for line in raw.lines().rev() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+            return Ok(Some(value));
+        }
+        tracing::warn!(
+            "supervisor mode_a: failed to parse coordinator event while checking clean exit marker"
+        );
+        return Ok(None);
+    }
+
+    Ok(None)
+}
+
+fn event_result_kind(event: &Value) -> Option<&str> {
+    event.get("result").and_then(Value::as_str).or_else(|| {
+        event
+            .get("payload")
+            .and_then(|payload| payload.get("result"))
+            .and_then(Value::as_str)
+    })
 }
 
 fn evaluate_health(
@@ -492,15 +609,40 @@ fn write_health_status(path: &Path, status: &SupervisorHealthStatus) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::{Arc, Mutex};
 
     struct MockProcessManager {
-        health: HealthCheckResult,
+        health_queue: Arc<Mutex<VecDeque<HealthCheckResult>>>,
+        fallback_health: HealthCheckResult,
         pid: Option<u32>,
+        start_calls: Arc<AtomicU32>,
+    }
+
+    impl MockProcessManager {
+        fn new(
+            health_queue: Vec<HealthCheckResult>,
+            fallback_health: HealthCheckResult,
+            pid: Option<u32>,
+        ) -> Self {
+            Self {
+                health_queue: Arc::new(Mutex::new(VecDeque::from(health_queue))),
+                fallback_health,
+                pid,
+                start_calls: Arc::new(AtomicU32::new(0)),
+            }
+        }
+
+        fn start_calls(&self) -> u32 {
+            self.start_calls.load(Ordering::SeqCst)
+        }
     }
 
     #[async_trait]
     impl ProcessManager for MockProcessManager {
         async fn start_coordinator(&self) -> Result<(), ProcessManagerError> {
+            self.start_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
 
@@ -509,7 +651,10 @@ mod tests {
         }
 
         async fn health_check(&self) -> Result<HealthCheckResult, ProcessManagerError> {
-            Ok(self.health.clone())
+            let mut queue = self.health_queue.lock().expect("health queue lock");
+            Ok(queue
+                .pop_front()
+                .unwrap_or_else(|| self.fallback_health.clone()))
         }
 
         async fn coordinator_pid(&self) -> Option<u32> {
@@ -533,6 +678,19 @@ mod tests {
         fs::write(path, format!("{}\n", line)).expect("write event");
     }
 
+    fn write_raw_event(path: &Path, event: Value) {
+        fs::write(path, format!("{}\n", event)).expect("write raw event");
+    }
+
+    fn append_raw_event(path: &Path, event: Value) {
+        let existing = if path.exists() {
+            fs::read_to_string(path).expect("read events")
+        } else {
+            String::new()
+        };
+        fs::write(path, format!("{}{}\n", existing, event)).expect("append raw event");
+    }
+
     #[tokio::test]
     async fn healthy_coordinator_is_reported_healthy() {
         let root = temp_dir("healthy");
@@ -544,6 +702,7 @@ mod tests {
             watchdog_interval_seconds: 30,
             stall_threshold_seconds: 120,
             error_burst_threshold: 3,
+            crash_debounce_checks: 3,
             events_log_path: events_path,
             pid_file_path: root.join("coordinator.pid"),
             health_status_path: health_path.clone(),
@@ -551,10 +710,7 @@ mod tests {
 
         let mut watchdog = SupervisorWatchdog::new(
             config,
-            MockProcessManager {
-                health: HealthCheckResult::Healthy,
-                pid: Some(4242),
-            },
+            MockProcessManager::new(vec![], HealthCheckResult::Healthy, Some(4242)),
         );
 
         let now = DateTime::parse_from_rfc3339("2026-04-13T00:01:00Z")
@@ -577,6 +733,7 @@ mod tests {
             watchdog_interval_seconds: 30,
             stall_threshold_seconds: 30,
             error_burst_threshold: 3,
+            crash_debounce_checks: 3,
             events_log_path: events_path,
             pid_file_path: root.join("coordinator.pid"),
             health_status_path: root.join("supervisor-health.json"),
@@ -584,10 +741,7 @@ mod tests {
 
         let mut watchdog = SupervisorWatchdog::new(
             config,
-            MockProcessManager {
-                health: HealthCheckResult::Healthy,
-                pid: Some(7001),
-            },
+            MockProcessManager::new(vec![], HealthCheckResult::Healthy, Some(7001)),
         );
 
         let now = DateTime::parse_from_rfc3339("2026-04-13T00:01:00Z")
@@ -611,6 +765,7 @@ mod tests {
             watchdog_interval_seconds: 30,
             stall_threshold_seconds: 30,
             error_burst_threshold: 3,
+            crash_debounce_checks: 3,
             events_log_path: root.join("events.jsonl"),
             pid_file_path: root.join("coordinator.pid"),
             health_status_path: root.join("supervisor-health.json"),
@@ -618,10 +773,11 @@ mod tests {
 
         let mut watchdog = SupervisorWatchdog::new(
             config,
-            MockProcessManager {
-                health: HealthCheckResult::Crashed { exit_code: Some(1) },
-                pid: None,
-            },
+            MockProcessManager::new(
+                vec![],
+                HealthCheckResult::Crashed { exit_code: Some(1) },
+                None,
+            ),
         );
 
         let now = DateTime::parse_from_rfc3339("2026-04-13T00:01:00Z")
@@ -633,5 +789,149 @@ mod tests {
             status.health,
             HealthCheckResult::Crashed { exit_code: Some(1) }
         );
+    }
+
+    #[tokio::test]
+    async fn fsm_transitions_from_starting_to_healthy() {
+        let root = temp_dir("fsm-starting-healthy");
+        let events_path = root.join("events.jsonl");
+        write_event(&events_path, &Utc::now().to_rfc3339(), "heartbeat", "ok");
+
+        let config = WatchdogConfig {
+            crash_debounce_checks: 2,
+            stall_threshold_seconds: 3600,
+            events_log_path: events_path,
+            pid_file_path: root.join("coordinator.pid"),
+            health_status_path: root.join("supervisor-health.json"),
+            ..WatchdogConfig::default()
+        };
+
+        let pm = MockProcessManager::new(vec![], HealthCheckResult::Healthy, Some(11));
+        let mut watchdog = SupervisorWatchdog::new(config, pm);
+        let status = watchdog.run_cycle().await.expect("watchdog cycle");
+
+        assert_eq!(status.health, HealthCheckResult::Healthy);
+        assert_eq!(watchdog.fsm_state, SupervisorFsmState::Healthy);
+        assert_eq!(watchdog.crash_check_count, 0);
+    }
+
+    #[tokio::test]
+    async fn healthy_crash_is_debounced_before_action() {
+        let root = temp_dir("fsm-debounce");
+        let events_path = root.join("events.jsonl");
+        write_event(&events_path, &Utc::now().to_rfc3339(), "heartbeat", "ok");
+
+        let config = WatchdogConfig {
+            crash_debounce_checks: 2,
+            stall_threshold_seconds: 3600,
+            events_log_path: events_path,
+            pid_file_path: root.join("coordinator.pid"),
+            health_status_path: root.join("supervisor-health.json"),
+            ..WatchdogConfig::default()
+        };
+
+        let pm = MockProcessManager::new(
+            vec![
+                HealthCheckResult::Healthy,
+                HealthCheckResult::Crashed { exit_code: Some(1) },
+            ],
+            HealthCheckResult::Crashed { exit_code: Some(1) },
+            Some(22),
+        );
+        let mut watchdog = SupervisorWatchdog::new(config, pm);
+        watchdog.run_cycle().await.expect("healthy cycle");
+        watchdog.run_cycle().await.expect("first crashed cycle");
+
+        assert_eq!(watchdog.fsm_state, SupervisorFsmState::Healthy);
+        assert_eq!(watchdog.crash_check_count, 1);
+        assert_eq!(watchdog.process_manager.start_calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn clean_exit_marker_skips_recovery_and_transitions_to_crashed_post_run() {
+        let root = temp_dir("fsm-clean-exit");
+        let events_path = root.join("events.jsonl");
+        write_raw_event(
+            &events_path,
+            serde_json::json!({
+                "ts": Utc::now().to_rfc3339(),
+                "type": "heartbeat",
+                "status": "ok"
+            }),
+        );
+
+        let config = WatchdogConfig {
+            crash_debounce_checks: 1,
+            stall_threshold_seconds: 3600,
+            events_log_path: events_path.clone(),
+            pid_file_path: root.join("coordinator.pid"),
+            health_status_path: root.join("supervisor-health.json"),
+            ..WatchdogConfig::default()
+        };
+
+        let pm = MockProcessManager::new(
+            vec![
+                HealthCheckResult::Healthy,
+                HealthCheckResult::Crashed { exit_code: Some(1) },
+            ],
+            HealthCheckResult::Crashed { exit_code: Some(1) },
+            Some(33),
+        );
+        let mut watchdog = SupervisorWatchdog::new(config, pm);
+        watchdog.run_cycle().await.expect("healthy cycle");
+
+        append_raw_event(
+            &events_path,
+            serde_json::json!({
+                "type": "phase_result",
+                "result": "failed"
+            }),
+        );
+        watchdog.run_cycle().await.expect("crashed cycle");
+
+        assert_eq!(watchdog.fsm_state, SupervisorFsmState::CrashedPostRun);
+        assert_eq!(watchdog.crash_check_count, 0);
+        assert_eq!(watchdog.process_manager.start_calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn unexpected_crash_triggers_mode_c_recovery_and_resets_to_starting() {
+        let root = temp_dir("fsm-unexpected-crash");
+        let events_path = root.join("events.jsonl");
+        write_raw_event(
+            &events_path,
+            serde_json::json!({
+                "ts": Utc::now().to_rfc3339(),
+                "type": "heartbeat",
+                "status": "ok"
+            }),
+        );
+
+        let config = WatchdogConfig {
+            crash_debounce_checks: 1,
+            stall_threshold_seconds: 3600,
+            events_log_path: events_path,
+            pid_file_path: root.join("coordinator.pid"),
+            health_status_path: root.join("supervisor-health.json"),
+            ..WatchdogConfig::default()
+        };
+
+        let pm = MockProcessManager::new(
+            vec![
+                HealthCheckResult::Healthy,
+                HealthCheckResult::Crashed {
+                    exit_code: Some(137),
+                },
+            ],
+            HealthCheckResult::Healthy,
+            Some(44),
+        );
+        let mut watchdog = SupervisorWatchdog::new(config, pm);
+        watchdog.run_cycle().await.expect("healthy cycle");
+        watchdog.run_cycle().await.expect("crashed cycle");
+
+        assert_eq!(watchdog.fsm_state, SupervisorFsmState::Starting);
+        assert_eq!(watchdog.crash_check_count, 0);
+        assert_eq!(watchdog.process_manager.start_calls(), 1);
     }
 }

@@ -82,6 +82,7 @@ impl<'a> SupervisorCommand<'a> {
         let mut watchdog_cfg = WatchdogConfig {
             watchdog_interval_seconds: supervisor_cfg.watchdog_interval_seconds.max(1),
             stall_threshold_seconds: supervisor_cfg.log_analysis_window_seconds.max(1),
+            crash_debounce_checks: supervisor_cfg.crash_debounce_checks.max(1),
             events_log_path: resolve_project_path(&paths.root, &supervisor_cfg.events_log_path),
             ..WatchdogConfig::default()
         };
