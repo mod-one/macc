@@ -360,14 +360,12 @@ impl Default for CoordinatorConfig {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CoordinatorConfigResolved {
     // ── Identity / tool selection ────────────────────────────────────────────
-
     /// Override which tool executes coordinator phases (review, fix).
     /// `None` means auto-select: first enabled tool from `tool_priority`, or
     /// the first enabled tool overall.
     pub coordinator_tool: Option<String>,
 
     // ── Task source ──────────────────────────────────────────────────────────
-
     /// Path to the PRD JSON file.
     /// `None` means use the project-default path (`prd.json` in project root).
     pub prd_file: Option<String>,
@@ -377,7 +375,6 @@ pub struct CoordinatorConfigResolved {
     pub task_registry_file: Option<String>,
 
     // ── Dispatch / parallelism ───────────────────────────────────────────────
-
     /// Git branch to rebase/merge finished task branches onto.
     /// Default: `"master"` — matches git's historical default.
     pub reference_branch: String,
@@ -412,7 +409,6 @@ pub struct CoordinatorConfigResolved {
     pub phase_runner_max_attempts: usize,
 
     // ── Logging ──────────────────────────────────────────────────────────────
-
     /// Flush the coordinator log file after this many buffered lines.
     /// Default: `500` — balances I/O cost vs. data-loss risk.
     pub log_flush_lines: usize,
@@ -427,7 +423,6 @@ pub struct CoordinatorConfigResolved {
     pub mirror_json_debounce_ms: Option<u64>,
 
     // ── Staleness / health ───────────────────────────────────────────────────
-
     /// Mark a task as stale (and apply `stale_action`) if it has been in the
     /// `claimed` state for more than this many seconds.
     /// `0` disables stale-claimed detection.  Default: `0`.
@@ -453,7 +448,6 @@ pub struct CoordinatorConfigResolved {
     pub ghost_heartbeat_grace_seconds: i64,
 
     // ── Storage ──────────────────────────────────────────────────────────────
-
     /// Backend used for coordinator state persistence.
     /// Valid values: `"sqlite"`, `"json"`, `"dual-write"`.
     /// Default: `"sqlite"` — recommended for production; atomic and fast.
@@ -470,7 +464,6 @@ pub struct CoordinatorConfigResolved {
     pub legacy_json_fallback: bool,
 
     // ── Merging ───────────────────────────────────────────────────────────────
-
     /// When `true`, invoke an AI tool to auto-resolve merge conflicts.
     /// Default: `false` — AI merge is opt-in; manual review is safer by
     /// default.
@@ -485,7 +478,6 @@ pub struct CoordinatorConfigResolved {
     pub merge_hook_timeout_seconds: u64,
 
     // ── Dispatch scheduling ───────────────────────────────────────────────────
-
     /// Minimum seconds between successive dispatch cycles.
     /// Default: `2` — prevents tight spin-loop when all slots are busy.
     pub dispatch_cooldown_seconds: u64,
@@ -497,7 +489,6 @@ pub struct CoordinatorConfigResolved {
     pub session_cache_ttl_seconds: u64,
 
     // ── Error-code retry ──────────────────────────────────────────────────────
-
     /// Comma-separated list of error codes eligible for automatic retry.
     /// Default: `"E101,E102,E103,E301,E302,E303,E601,E603"` — covers
     /// transient runner, filesystem, and rate-limit failures.
@@ -509,7 +500,6 @@ pub struct CoordinatorConfigResolved {
     pub error_code_retry_max: usize,
 
     // ── Rate-limit handling ───────────────────────────────────────────────────
-
     /// Base backoff in seconds for the first rate-limit retry (E601).
     /// Subsequent retries use exponential backoff capped at
     /// `rate_limit_backoff_max_seconds`.
@@ -531,7 +521,6 @@ pub struct CoordinatorConfigResolved {
     pub rate_limit_throttle_parallel: bool,
 
     // ── Cutover gate ─────────────────────────────────────────────────────────
-
     /// Number of recent coordinator events inspected by the SQLite→primary
     /// cutover gate to assess storage health.
     /// Default: `2000`.
@@ -548,7 +537,6 @@ pub struct CoordinatorConfigResolved {
     pub cutover_gate_max_stale_ratio: f64,
 
     // ── Process lifecycle ─────────────────────────────────────────────────────
-
     /// Seconds between receiving a terminal failure signal and force-killing
     /// the performer process.
     /// Default: `30` — gives performers time to flush logs before SIGKILL.
@@ -559,7 +547,6 @@ pub struct CoordinatorConfigResolved {
     pub max_review_cycles: Option<usize>,
 
     // ── Reliability feature toggles ───────────────────────────────────────────
-
     /// Attempt to salvage partial work from the last worktree before retrying.
     /// Default: `true`.
     pub salvage_before_retry: bool,
@@ -609,24 +596,16 @@ impl CoordinatorConfigResolved {
             reference_branch: config
                 .and_then(|c| c.reference_branch.clone())
                 .unwrap_or_else(|| "master".to_string()),
-            tool_priority: config
-                .map(|c| c.tool_priority.clone())
-                .unwrap_or_default(),
+            tool_priority: config.map(|c| c.tool_priority.clone()).unwrap_or_default(),
             max_parallel_per_tool: config
                 .map(|c| c.max_parallel_per_tool.clone())
                 .unwrap_or_default(),
             tool_specializations: config
                 .map(|c| c.tool_specializations.clone())
                 .unwrap_or_default(),
-            max_dispatch: config
-                .and_then(|c| c.max_dispatch)
-                .unwrap_or(10),
-            max_parallel: config
-                .and_then(|c| c.max_parallel)
-                .unwrap_or(3),
-            timeout_seconds: config
-                .and_then(|c| c.timeout_seconds)
-                .unwrap_or(0),
+            max_dispatch: config.and_then(|c| c.max_dispatch).unwrap_or(10),
+            max_parallel: config.and_then(|c| c.max_parallel).unwrap_or(3),
+            timeout_seconds: config.and_then(|c| c.timeout_seconds).unwrap_or(0),
             phase_runner_max_attempts: config
                 .and_then(|c| c.phase_runner_max_attempts)
                 .unwrap_or(1)
@@ -640,9 +619,7 @@ impl CoordinatorConfigResolved {
                 .filter(|v| *v > 0)
                 .unwrap_or(60_000),
             mirror_json_debounce_ms: config.and_then(|c| c.mirror_json_debounce_ms),
-            stale_claimed_seconds: config
-                .and_then(|c| c.stale_claimed_seconds)
-                .unwrap_or(0),
+            stale_claimed_seconds: config.and_then(|c| c.stale_claimed_seconds).unwrap_or(0),
             stale_in_progress_seconds: config
                 .and_then(|c| c.stale_in_progress_seconds)
                 .unwrap_or(0),
@@ -658,15 +635,9 @@ impl CoordinatorConfigResolved {
             storage_mode: config
                 .and_then(|c| c.storage_mode.clone())
                 .unwrap_or_else(|| "sqlite".to_string()),
-            json_compat: config
-                .and_then(|c| c.json_compat)
-                .unwrap_or(false),
-            legacy_json_fallback: config
-                .and_then(|c| c.legacy_json_fallback)
-                .unwrap_or(false),
-            merge_ai_fix: config
-                .and_then(|c| c.merge_ai_fix)
-                .unwrap_or(false),
+            json_compat: config.and_then(|c| c.json_compat).unwrap_or(false),
+            legacy_json_fallback: config.and_then(|c| c.legacy_json_fallback).unwrap_or(false),
+            merge_ai_fix: config.and_then(|c| c.merge_ai_fix).unwrap_or(false),
             merge_job_timeout_seconds: config
                 .and_then(|c| c.merge_job_timeout_seconds)
                 .unwrap_or(0),
@@ -682,9 +653,7 @@ impl CoordinatorConfigResolved {
             error_code_retry_list: config
                 .and_then(|c| c.error_code_retry_list.clone())
                 .unwrap_or_else(|| "E101,E102,E103,E301,E302,E303,E601,E603".to_string()),
-            error_code_retry_max: config
-                .and_then(|c| c.error_code_retry_max)
-                .unwrap_or(2),
+            error_code_retry_max: config.and_then(|c| c.error_code_retry_max).unwrap_or(2),
             rate_limit_backoff_base_seconds: config
                 .and_then(|c| c.rate_limit_backoff_base_seconds)
                 .unwrap_or(30),
@@ -710,21 +679,11 @@ impl CoordinatorConfigResolved {
                 .and_then(|c| c.force_kill_grace_seconds)
                 .unwrap_or(30),
             max_review_cycles: config.and_then(|c| c.max_review_cycles),
-            salvage_before_retry: config
-                .map(|c| c.salvage_before_retry)
-                .unwrap_or(true),
-            retry_on_same_worktree: config
-                .map(|c| c.retry_on_same_worktree)
-                .unwrap_or(true),
-            merge_gate_on_dispatch: config
-                .map(|c| c.merge_gate_on_dispatch)
-                .unwrap_or(true),
-            tag_abandoned_branches: config
-                .map(|c| c.tag_abandoned_branches)
-                .unwrap_or(true),
-            sync_unmerged_branches: config
-                .map(|c| c.sync_unmerged_branches)
-                .unwrap_or(true),
+            salvage_before_retry: config.map(|c| c.salvage_before_retry).unwrap_or(true),
+            retry_on_same_worktree: config.map(|c| c.retry_on_same_worktree).unwrap_or(true),
+            merge_gate_on_dispatch: config.map(|c| c.merge_gate_on_dispatch).unwrap_or(true),
+            tag_abandoned_branches: config.map(|c| c.tag_abandoned_branches).unwrap_or(true),
+            sync_unmerged_branches: config.map(|c| c.sync_unmerged_branches).unwrap_or(true),
             salvage_merge_timeout_seconds: config
                 .map(|c| c.salvage_merge_timeout_seconds)
                 .unwrap_or(120),

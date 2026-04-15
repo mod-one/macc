@@ -1,20 +1,26 @@
 use chrono::{SecondsFormat, TimeDelta, Utc};
 use macc_core::config::CanonicalConfig;
 use macc_core::coordinator::commit_reconciler::{sync_unmerged_branches, SyncBranchStatus};
-use macc_core::coordinator::control_plane::{dispatch_ready_tasks_native, run_phase_for_task_native};
-use macc_core::coordinator::engine::{apply_job_completion_in_registry, JobCompletionInput, NormalizerInput};
+use macc_core::coordinator::control_plane::{
+    dispatch_ready_tasks_native, run_phase_for_task_native,
+};
+use macc_core::coordinator::engine::{
+    apply_job_completion_in_registry, JobCompletionInput, NormalizerInput,
+};
 use macc_core::coordinator::error_normalizer::NormalizerRegistry;
 use macc_core::coordinator::helpers::find_reusable_worktree_native;
 use macc_core::coordinator::runtime::CoordinatorRunState;
-use macc_core::coordinator::state::{coordinator_state_registry_load, coordinator_state_registry_save};
+use macc_core::coordinator::state::{
+    coordinator_state_registry_load, coordinator_state_registry_save,
+};
 use macc_core::coordinator::types::CoordinatorEnvConfig;
 use macc_core::coordinator::{model::TaskRegistry, PerformerCompletionKind};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -216,9 +222,7 @@ fn coordinator_reliability_chain_integration() {
     .expect("phase_done completion");
     assert_eq!(phase_done.status_label, "phase_done");
     let typed_phase_done = TaskRegistry::from_value(&registry_a).expect("typed");
-    let phase_done_task = typed_phase_done
-        .find_task(task_id_a)
-        .expect("task");
+    let phase_done_task = typed_phase_done.find_task(task_id_a).expect("task");
     assert_eq!(phase_done_task.state, "in_progress");
     assert_eq!(
         phase_done_task.task_runtime.status.as_deref(),
@@ -264,7 +268,10 @@ fn coordinator_reliability_chain_integration() {
     let typed_a = TaskRegistry::from_value(&registry_a).expect("typed registry");
     let retry_task = typed_a.find_task(task_id_a).expect("retry task");
     assert_eq!(retry_task.state, "todo");
-    assert_eq!(retry_task.worktree_path(), Some(worktree_a.to_string_lossy().as_ref()));
+    assert_eq!(
+        retry_task.worktree_path(),
+        Some(worktree_a.to_string_lossy().as_ref())
+    );
     assert_eq!(
         retry_task.task_runtime.last_session_id.as_deref(),
         Some("sid-chain")
@@ -310,15 +317,8 @@ fn coordinator_reliability_chain_integration() {
     )
     .expect("write coordinator ipc addr");
 
-    let run_out = run_phase_for_task_native(
-        &repo_a,
-        retry_task,
-        "dev",
-        Some("codex"),
-        1,
-        None,
-    )
-    .expect("phase run should execute");
+    let run_out = run_phase_for_task_native(&repo_a, retry_task, "dev", Some("codex"), 1, None)
+        .expect("phase run should execute");
     assert!(run_out.is_ok(), "phase should succeed: {run_out:?}");
 
     let captured = fs::read_to_string(&capture_path).expect("read runner args");

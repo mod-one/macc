@@ -226,7 +226,6 @@ pub enum SupervisorAction {
     NoAction { reason: String },
 
     // ── Mode B: worktree-level recovery actions ───────────────────────────
-
     /// Supervisor ran `git reset --hard HEAD` in the target worktree.
     WorktreeGitReset {
         worktree_path: String,
@@ -253,13 +252,9 @@ pub enum SupervisorAction {
     },
 
     /// AI analysis was skipped because the recovery attempt limit was reached.
-    RecoveryAttemptLimitReached {
-        task_id: String,
-        limit: u32,
-    },
+    RecoveryAttemptLimitReached { task_id: String, limit: u32 },
 
     // ── Mode C: coordinator crash recovery actions ────────────────────────
-
     /// Task registry was scanned and orphaned tasks were found before restart.
     RegistryScanned {
         /// Total tasks in claimed/in_progress state at time of scan.
@@ -275,30 +270,19 @@ pub enum SupervisorAction {
     },
 
     /// Session snapshot was saved before coordinator restart.
-    SessionSnapshotSaved {
-        snapshot_name: String,
-    },
+    SessionSnapshotSaved { snapshot_name: String },
 
     /// Coordinator was restarted after a crash.
-    CoordinatorRestarted {
-        attempt: u32,
-        max_attempts: u32,
-    },
+    CoordinatorRestarted { attempt: u32, max_attempts: u32 },
 
     /// Post-restart health verification confirmed coordinator is running.
-    PostRestartHealthVerified {
-        healthy_checks: u32,
-    },
+    PostRestartHealthVerified { healthy_checks: u32 },
 
     /// Maximum restart attempts exceeded; supervisor gave up.
-    MaxRestartsExceeded {
-        max_attempts: u32,
-    },
+    MaxRestartsExceeded { max_attempts: u32 },
 
     /// Crash recovery report was written to disk.
-    CrashRecoveryReportWritten {
-        report_path: String,
-    },
+    CrashRecoveryReportWritten { report_path: String },
 }
 
 // ── Report ───────────────────────────────────────────────────────────────────

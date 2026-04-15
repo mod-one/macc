@@ -1,3 +1,4 @@
+use crate::config::CoordinatorConfigResolved;
 use crate::coordinator::helpers::{
     append_coordinator_event, append_coordinator_event_with_severity, build_non_task_worker_slug,
     count_pool_worktrees, find_reusable_worktree_native, is_worktree_activity_recent,
@@ -12,7 +13,6 @@ use crate::coordinator::runtime::{
 };
 use crate::coordinator::types::CoordinatorEnvConfig;
 use crate::coordinator::{engine as coordinator_engine, runtime as coordinator_runtime};
-use crate::config::CoordinatorConfigResolved;
 use crate::{MaccError, Result};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
@@ -544,37 +544,72 @@ fn handle_phase_tool_unavailability(
 /// Sanitize a worktree back to the base branch.
 /// Returns `Ok(None)` on success, `Ok(Some(step_name))` when a specific step
 /// fails, allowing the caller to include the failed step in diagnostics.
-async fn sanitize_worktree_to_base(
+type SanitizeStepFailure = Option<&'static str>;
+
+#[derive(Debug, Clone, Copy)]
+struct SanitizeOptions {
+    fetch_remote: bool,
+    fail_on_fetch_error: bool,
+    tag_abandoned: bool,
+}
+
+async fn prepare_clean_worktree(
     worktree_path: &Path,
     base_branch: &str,
-) -> Result<Option<&'static str>> {
-    if !crate::git::reset_hard_async(worktree_path, "HEAD").await? {
+    options: SanitizeOptions,
+) -> Result<SanitizeStepFailure> {
+    if !crate::git::reset_hard_async(worktree_path, "HEAD").await? && !options.tag_abandoned {
         return Ok(Some("reset_hard_head"));
     }
-    if !crate::git::clean_fd_async(worktree_path).await? {
+    if !crate::git::clean_fd_async(worktree_path).await? && !options.tag_abandoned {
         return Ok(Some("clean_fd"));
     }
-    if !crate::git::checkout_async(worktree_path, base_branch, false).await?
-        && !crate::git::checkout_reset_branch_async(worktree_path, base_branch, false).await?
+    if !crate::git::checkout_async(worktree_path, base_branch, options.tag_abandoned).await?
+        && !crate::git::checkout_reset_branch_async(
+            worktree_path,
+            base_branch,
+            options.tag_abandoned,
+        )
+        .await?
     {
         // Base branch may be checked out in the main worktree; detach HEAD as fallback.
         if !crate::git::checkout_detach_async(worktree_path).await? {
             return Ok(Some("checkout_base_branch"));
         }
     }
-    if !crate::git::fetch_async(worktree_path, "origin").await? {
-        return Ok(Some("fetch_origin"));
+    if options.fetch_remote && !crate::git::fetch_async(worktree_path, "origin").await? {
+        if options.fail_on_fetch_error {
+            return Ok(Some("fetch_origin"));
+        }
     }
     if !crate::git::reset_hard_async(worktree_path, base_branch).await? {
         return Ok(Some("reset_hard_base_branch"));
     }
-    if !crate::git::reset_hard_async(worktree_path, "HEAD").await? {
-        return Ok(Some("reset_hard_head_final"));
-    }
-    if !crate::git::clean_fd_async(worktree_path).await? {
-        return Ok(Some("clean_fd_final"));
+    if !options.tag_abandoned {
+        if !crate::git::reset_hard_async(worktree_path, "HEAD").await? {
+            return Ok(Some("reset_hard_head_final"));
+        }
+        if !crate::git::clean_fd_async(worktree_path).await? {
+            return Ok(Some("clean_fd_final"));
+        }
     }
     Ok(None)
+}
+
+async fn sanitize_worktree_to_base(
+    worktree_path: &Path,
+    base_branch: &str,
+) -> Result<Option<&'static str>> {
+    prepare_clean_worktree(
+        worktree_path,
+        base_branch,
+        SanitizeOptions {
+            fetch_remote: true,
+            fail_on_fetch_error: true,
+            tag_abandoned: false,
+        },
+    )
+    .await
 }
 
 fn ensure_expected_worktree_branch(worktree_path: &Path, expected_branch: &str) -> Result<bool> {
@@ -628,14 +663,56 @@ async fn switch_worktree_to_base_after_merge(
     let base_branch = task.base_branch("master");
 
     let wt = Path::new(worktree_path);
+    let failed_step = prepare_clean_worktree(
+        wt,
+        &base_branch,
+        SanitizeOptions {
+            fetch_remote: true,
+            fail_on_fetch_error: true,
+            tag_abandoned: true,
+        },
+    )
+    .await?;
 
-    // First action after merge success: force checkout base to release task branch immediately.
-    let switched = if crate::git::checkout_async(wt, &base_branch, true).await? {
-        true
-    } else {
-        crate::git::checkout_reset_branch_async(wt, &base_branch, true).await?
-    };
-    if !switched {
+    if let Some(step) = failed_step {
+        if step == "fetch_origin" {
+            let msg = format!(
+                "worktree switch warning task={} path={} base={} reason=fetch_failed",
+                task_id, worktree_path, base_branch
+            );
+            let _ = append_coordinator_event_with_severity(
+                repo_root,
+                "worktree_switch",
+                task_id,
+                "merge",
+                "warning",
+                &msg,
+                "warning",
+            );
+            if let Some(log) = logger {
+                let _ = log.note(format!("- {}", msg));
+            }
+            return Ok(());
+        }
+        if step == "reset_hard_base_branch" {
+            let msg = format!(
+                "worktree switch warning task={} path={} base={} reason=reset_hard_failed",
+                task_id, worktree_path, base_branch
+            );
+            let _ = append_coordinator_event_with_severity(
+                repo_root,
+                "worktree_switch",
+                task_id,
+                "merge",
+                "warning",
+                &msg,
+                "warning",
+            );
+            if let Some(log) = logger {
+                let _ = log.note(format!("- {}", msg));
+            }
+            return Ok(());
+        }
         let msg = format!(
             "worktree switch skipped task={} path={} base={} reason=checkout_failed",
             task_id, worktree_path, base_branch
@@ -646,48 +723,6 @@ async fn switch_worktree_to_base_after_merge(
             task_id,
             "merge",
             "failed",
-            &msg,
-            "warning",
-        );
-        if let Some(log) = logger {
-            let _ = log.note(format!("- {}", msg));
-        }
-        return Ok(());
-    }
-    // Continue with sanitization now that the worker branch is no longer checked out.
-    let _ = crate::git::reset_hard_async(wt, "HEAD").await?;
-    let _ = crate::git::clean_fd_async(wt).await?;
-    // Stateless policy: fetch origin refs then hard reset to base.
-    if !crate::git::fetch_async(wt, "origin").await? {
-        let msg = format!(
-            "worktree switch warning task={} path={} base={} reason=fetch_failed",
-            task_id, worktree_path, base_branch
-        );
-        let _ = append_coordinator_event_with_severity(
-            repo_root,
-            "worktree_switch",
-            task_id,
-            "merge",
-            "warning",
-            &msg,
-            "warning",
-        );
-        if let Some(log) = logger {
-            let _ = log.note(format!("- {}", msg));
-        }
-        return Ok(());
-    }
-    if !crate::git::reset_hard_async(wt, &base_branch).await? {
-        let msg = format!(
-            "worktree switch warning task={} path={} base={} reason=reset_hard_failed",
-            task_id, worktree_path, base_branch
-        );
-        let _ = append_coordinator_event_with_severity(
-            repo_root,
-            "worktree_switch",
-            task_id,
-            "merge",
-            "warning",
             &msg,
             "warning",
         );
@@ -1851,9 +1886,7 @@ pub async fn monitor_active_jobs_native(
                         &mut registry,
                         &evt.task_id,
                         repo_root,
-                        env_cfg
-                            .merge_ai_fix
-                            .unwrap_or(cfg.merge_ai_fix),
+                        env_cfg.merge_ai_fix.unwrap_or(cfg.merge_ai_fix),
                         env_cfg
                             .merge_hook_timeout_seconds
                             .or(Some(cfg.merge_hook_timeout_seconds)),

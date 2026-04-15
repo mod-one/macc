@@ -141,8 +141,10 @@ impl EvidenceCollector {
     ) -> WorktreeEvidence {
         let branch = self.read_current_branch(worktree_path);
         let git_status = self.run_git_in(worktree_path, &["status", "--short"]);
-        let commits_ahead =
-            self.run_git_in(worktree_path, &["log", "--oneline", &format!("HEAD ^{}", base_branch)]);
+        let commits_ahead = self.run_git_in(
+            worktree_path,
+            &["log", "--oneline", &format!("HEAD ^{}", base_branch)],
+        );
         let performer_log = self.read_performer_log(task_id, worktree_path);
         let coordinator_events = self.read_coordinator_events(task_id);
 
@@ -245,11 +247,7 @@ fn truncate_str(s: String, max_bytes: usize) -> String {
     let start = s.len().saturating_sub(max_bytes);
     let sliced = &s[start..];
     // Walk forward to next valid UTF-8 boundary.
-    let offset = sliced
-        .char_indices()
-        .next()
-        .map(|(i, _)| i)
-        .unwrap_or(0);
+    let offset = sliced.char_indices().next().map(|(i, _)| i).unwrap_or(0);
     format!("[...truncated...]\n{}", &sliced[offset..])
 }
 
@@ -517,10 +515,7 @@ pub struct RecoveryOutcome {
 ///
 /// Only worktree-local git operations are permitted.  Coordinator state is
 /// never modified here.
-pub fn execute_recovery(
-    action: &RecoveryActionKind,
-    worktree_path: &Path,
-) -> RecoveryOutcome {
+pub fn execute_recovery(action: &RecoveryActionKind, worktree_path: &Path) -> RecoveryOutcome {
     match action {
         RecoveryActionKind::None => RecoveryOutcome {
             action: action.clone(),
@@ -764,7 +759,10 @@ fn build_recovery_supervisor_action(
     let wt = worktree_path.to_string_lossy().into_owned();
     match action {
         RecoveryActionKind::None => SupervisorAction::NoAction {
-            reason: format!("Mode B: no recovery action recommended for task {}", task_id),
+            reason: format!(
+                "Mode B: no recovery action recommended for task {}",
+                task_id
+            ),
         },
         RecoveryActionKind::GitReset => SupervisorAction::WorktreeGitReset {
             worktree_path: wt,
@@ -788,8 +786,7 @@ mod tests {
 
     fn temp_dir(prefix: &str) -> PathBuf {
         let nanos = Utc::now().timestamp_nanos_opt().unwrap_or_default();
-        let path = std::env::temp_dir()
-            .join(format!("macc-mode-b-{}-{}", prefix, nanos));
+        let path = std::env::temp_dir().join(format!("macc-mode-b-{}-{}", prefix, nanos));
         fs::create_dir_all(&path).expect("create temp dir");
         path
     }
@@ -850,10 +847,7 @@ mod tests {
     fn evidence_collector_truncates_large_log() {
         let root = temp_dir("collector");
         let wt = temp_dir("wt");
-        let log_dir = root
-            .join(".macc")
-            .join("log")
-            .join("performer");
+        let log_dir = root.join(".macc").join("log").join("performer");
         fs::create_dir_all(&log_dir).expect("create log dir");
 
         // Write a log file for task MY-TASK.
@@ -875,10 +869,7 @@ mod tests {
     fn evidence_collector_filters_coordinator_events() {
         let root = temp_dir("events");
         let wt = temp_dir("wt2");
-        let events_dir = root
-            .join(".macc")
-            .join("log")
-            .join("coordinator");
+        let events_dir = root.join(".macc").join("log").join("coordinator");
         fs::create_dir_all(&events_dir).expect("create events dir");
 
         let events_file = events_dir.join("events.jsonl");
@@ -1044,11 +1035,8 @@ mod tests {
             report_output_dir: root.join(".macc").join("log").join("supervisor"),
             ..Default::default()
         };
-        let mut supervisor = ModeBSupervisor::new(
-            root.clone(),
-            config.clone(),
-            MockDispatcher { response },
-        );
+        let mut supervisor =
+            ModeBSupervisor::new(root.clone(), config.clone(), MockDispatcher { response });
 
         let (report, path) = supervisor
             .analyse("L4-TEST-002", &wt, "main", Some("E101"), Some("exit 1"))
@@ -1075,11 +1063,8 @@ mod tests {
             report_output_dir: root.join(".macc").join("log").join("supervisor"),
             ..Default::default()
         };
-        let mut supervisor = ModeBSupervisor::new(
-            root.clone(),
-            config,
-            MockDispatcher { response },
-        );
+        let mut supervisor =
+            ModeBSupervisor::new(root.clone(), config, MockDispatcher { response });
 
         // First attempt should succeed (even if git fails — we don't care about git here).
         let _ = supervisor
@@ -1109,7 +1094,10 @@ mod tests {
             .analyse("ERR-001", &wt, "main", None, None)
             .await
             .expect_err("should fail");
-        assert!(matches!(err, ModeBError::Dispatch(DispatchError::EmptyOutput)));
+        assert!(matches!(
+            err,
+            ModeBError::Dispatch(DispatchError::EmptyOutput)
+        ));
     }
 
     #[tokio::test]
@@ -1123,11 +1111,8 @@ mod tests {
             report_output_dir: root.join(".macc").join("log").join("supervisor"),
             ..Default::default()
         };
-        let mut supervisor = ModeBSupervisor::new(
-            root.clone(),
-            config,
-            MockDispatcher { response },
-        );
+        let mut supervisor =
+            ModeBSupervisor::new(root.clone(), config, MockDispatcher { response });
 
         // Exhaust first cycle.
         let _ = supervisor

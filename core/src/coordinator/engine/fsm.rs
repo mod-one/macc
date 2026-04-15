@@ -1,5 +1,6 @@
 use crate::config::{
-    CanonicalConfig, CoordinatorConfig, CoordinatorConfigResolved as CanonicalCoordinatorConfigResolved,
+    CanonicalConfig, CoordinatorConfig,
+    CoordinatorConfigResolved as CanonicalCoordinatorConfigResolved,
 };
 use crate::coordinator::control_plane::CoordinatorLog;
 use crate::coordinator::error_normalizer::{
@@ -15,12 +16,12 @@ use crate::coordinator::state_runtime::{
     cleanup_dead_runtime_tasks, clear_coordinator_pause_file, coordinator_pause_file_path,
     resume_paused_task_merge, set_task_paused_for_merge, write_coordinator_pause_file,
 };
+use crate::coordinator::{
+    CompletionAuthority, PerformerCompletionKind, RuntimeStatus, WorkflowState,
+};
 use crate::coordinator_storage::{
     coordinator_storage_bootstrap_sqlite_from_json, coordinator_storage_export_sqlite_to_json,
     CoordinatorStorageMode,
-};
-use crate::coordinator::{
-    CompletionAuthority, PerformerCompletionKind, RuntimeStatus, WorkflowState,
 };
 use crate::{MaccError, Result};
 use async_trait::async_trait;
@@ -1657,9 +1658,7 @@ pub async fn run_native_control_plane(
             let _ = log.note(format!("- Coordinator tool: {}", tool));
         }
     }
-    let max_review_cycles = env_cfg
-        .max_review_cycles
-        .or(cfg.max_review_cycles);
+    let max_review_cycles = env_cfg.max_review_cycles.or(cfg.max_review_cycles);
     if let Some(log) = logger {
         match max_review_cycles {
             Some(n) => {
@@ -1678,9 +1677,7 @@ pub async fn run_native_control_plane(
         .ghost_heartbeat_grace_seconds
         .unwrap_or(cfg.ghost_heartbeat_grace_seconds);
 
-    let json_compat = env_cfg
-        .json_compat
-        .unwrap_or(cfg.json_compat);
+    let json_compat = env_cfg.json_compat.unwrap_or(cfg.json_compat);
 
     let storage_mode = resolve_storage_mode(env_cfg, coordinator)?;
     let storage_paths = crate::ProjectPaths::from_root(repo_root);
@@ -1757,9 +1754,7 @@ pub async fn run_native_control_plane(
         last_cycle_progressed: false,
     };
 
-    let timeout_seconds = env_cfg
-        .timeout_seconds
-        .unwrap_or(cfg.timeout_seconds);
+    let timeout_seconds = env_cfg.timeout_seconds.unwrap_or(cfg.timeout_seconds);
     let loop_cfg = ControlPlaneLoopConfig {
         timeout: if timeout_seconds > 0 {
             Some(Duration::from_secs(timeout_seconds as u64))
@@ -1869,9 +1864,9 @@ pub async fn run_native_control_plane(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::coordinator::engine::retry::RetryStrategy;
     use crate::coordinator::error_normalizer::ErrorNormalizer;
     use crate::coordinator::rate_limit::{E601_RATE_LIMITED, E602_QUOTA_EXHAUSTED};
-    use crate::coordinator::engine::retry::RetryStrategy;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
