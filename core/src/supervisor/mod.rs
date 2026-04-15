@@ -23,6 +23,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+pub mod coordinator_supervisor;
 pub mod mode_a;
 pub mod mode_b;
 pub mod mode_c;

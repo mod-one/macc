@@ -18,6 +18,7 @@
 //! state). Only worktree-local git operations are permitted as recovery actions.
 
 use crate::supervisor::{
+    coordinator_supervisor::CoordinatorEvidenceConfig,
     Finding, FindingCategory, HealthCheckResult, Recommendation, Severity, SupervisorAction,
     SupervisorReport,
 };
@@ -54,6 +55,14 @@ pub struct ModeBConfig {
     /// Max coordinator event lines to include in the prompt.
     #[serde(default = "default_max_event_lines")]
     pub max_event_lines: usize,
+
+    /// Optional coordinator-level evidence configuration.
+    ///
+    /// When set, Mode B can collect coordinator-scoped evidence (events, task
+    /// registry state, run log footer) in addition to per-worktree evidence.
+    /// The call path that uses this config is completed by L5-SUP-005.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coordinator_evidence_config: Option<CoordinatorEvidenceConfig>,
 }
 
 fn default_analysis_timeout_seconds() -> u64 {
@@ -80,6 +89,7 @@ impl Default for ModeBConfig {
             report_output_dir: default_report_output_dir(),
             max_log_bytes: default_max_log_bytes(),
             max_event_lines: default_max_event_lines(),
+            coordinator_evidence_config: None,
         }
     }
 }
