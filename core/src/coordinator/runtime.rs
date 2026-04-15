@@ -7,6 +7,8 @@ use crate::git;
 use crate::{MaccError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -221,6 +223,7 @@ pub struct CoordinatorRunState {
     pub performer_ipc_addr: Option<String>,
     pub performer_ipc_listener_started: bool,
     pub performer_ipc_listener_alive: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub coordinator_pid_guard: Option<CoordinatorPidGuard>,
     /// Last dispatch failure message (shown in no-progress diagnostics).
     pub last_dispatch_failure: Option<String>,
     // RL-ROUTE-005: per-tool throttle state
@@ -230,6 +233,63 @@ pub struct CoordinatorRunState {
     // RL-THROTTLE-006: dynamic concurrency control
     pub effective_max_parallel: usize,
     pub original_max_parallel: usize,
+}
+
+#[derive(Debug)]
+pub struct CoordinatorPidGuard {
+    path: PathBuf,
+}
+
+impl CoordinatorPidGuard {
+    pub fn new(repo_root: &Path) -> Result<Self> {
+        let path = repo_root.join(".macc").join("state").join("coordinator.pid");
+        let tmp_path = path.with_extension("pid.tmp");
+        let pid = std::process::id().to_string();
+
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&tmp_path)
+            .map_err(|source| MaccError::Io {
+                path: tmp_path.to_string_lossy().into(),
+                action: "create temporary coordinator pid file".into(),
+                source,
+            })?;
+
+        if let Err(source) = file.write_all(pid.as_bytes()) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(MaccError::Io {
+                path: tmp_path.to_string_lossy().into(),
+                action: "write coordinator pid".into(),
+                source,
+            });
+        }
+
+        if let Err(source) = std::fs::rename(&tmp_path, &path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(MaccError::Io {
+                path: path.to_string_lossy().into(),
+                action: "atomically install coordinator pid file".into(),
+                source,
+            });
+        }
+
+        Ok(Self { path })
+    }
+}
+
+impl Drop for CoordinatorPidGuard {
+    fn drop(&mut self) {
+        if let Err(err) = std::fs::remove_file(&self.path) {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    path = %self.path.display(),
+                    "failed to remove coordinator pid file: {}",
+                    err
+                );
+            }
+        }
+    }
 }
 
 pub trait PhaseExecutor {
@@ -270,6 +330,7 @@ impl CoordinatorRunState {
             performer_ipc_listener_alive: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
                 false,
             )),
+            coordinator_pid_guard: None,
             last_dispatch_failure: None,
             throttle_registry: ToolThrottleRegistry::default(),
             normalizer_registry:
@@ -308,6 +369,19 @@ impl Default for CoordinatorRunState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_root(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "macc-coordinator-runtime-{}-{}",
+            label,
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ))
+    }
 
     fn state_with_parallel(original: usize) -> CoordinatorRunState {
         let mut s = CoordinatorRunState::new();
@@ -594,6 +668,51 @@ mod tests {
                 outcome: String::new(),
             }
         );
+    }
+
+    #[test]
+    fn coordinator_pid_guard_writes_pid_and_removes_on_drop() {
+        let root = temp_root("pid-guard-drop");
+        fs::create_dir_all(root.join(".macc").join("state")).expect("create state dir");
+        let pid_path = root.join(".macc").join("state").join("coordinator.pid");
+
+        {
+            let _guard = CoordinatorPidGuard::new(&root).expect("create pid guard");
+            let content = fs::read_to_string(&pid_path).expect("read pid");
+            assert_eq!(content, std::process::id().to_string());
+        }
+
+        assert!(!pid_path.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn coordinator_pid_guard_removes_file_during_panic_unwind() {
+        let root = temp_root("pid-guard-panic");
+        fs::create_dir_all(root.join(".macc").join("state")).expect("create state dir");
+        let pid_path = root.join(".macc").join("state").join("coordinator.pid");
+        let unwind = std::panic::catch_unwind(|| {
+            let _guard = CoordinatorPidGuard::new(&root).expect("create pid guard");
+            assert!(pid_path.exists());
+            panic!("simulate coordinator panic");
+        });
+        assert!(unwind.is_err());
+        assert!(!pid_path.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn coordinator_pid_guard_errors_when_state_dir_missing() {
+        let root = temp_root("pid-guard-missing-dir");
+        fs::create_dir_all(&root).expect("create root dir");
+        let pid_path = root.join(".macc").join("state").join("coordinator.pid");
+        let tmp_path = pid_path.with_extension("pid.tmp");
+
+        let result = CoordinatorPidGuard::new(&root);
+        assert!(result.is_err());
+        assert!(!pid_path.exists());
+        assert!(!tmp_path.exists());
+        let _ = fs::remove_dir_all(root);
     }
 }
 
