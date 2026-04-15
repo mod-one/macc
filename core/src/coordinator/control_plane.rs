@@ -577,9 +577,22 @@ async fn prepare_clean_worktree(
             return Ok(Some("checkout_base_branch"));
         }
     }
-    if options.fetch_remote && !crate::git::fetch_async(worktree_path, "origin").await? {
-        if options.fail_on_fetch_error {
-            return Ok(Some("fetch_origin"));
+    if options.fetch_remote {
+        if !crate::git::git_remote_exists_async(worktree_path, "origin").await? {
+            tracing::info!(
+                "prepare_clean_worktree fetch skipped path={} base={} remote=origin reason=remote_missing",
+                worktree_path.display(),
+                base_branch
+            );
+        } else if !crate::git::fetch_async(worktree_path, "origin").await? {
+            if options.fail_on_fetch_error {
+                return Ok(Some("fetch_origin"));
+            }
+            tracing::warn!(
+                "prepare_clean_worktree fetch failed but continuing path={} base={} remote=origin",
+                worktree_path.display(),
+                base_branch
+            );
         }
     }
     if !crate::git::reset_hard_async(worktree_path, base_branch).await? {
@@ -605,7 +618,7 @@ async fn sanitize_worktree_to_base(
         base_branch,
         SanitizeOptions {
             fetch_remote: true,
-            fail_on_fetch_error: true,
+            fail_on_fetch_error: false,
             tag_abandoned: false,
         },
     )
@@ -668,7 +681,7 @@ async fn switch_worktree_to_base_after_merge(
         &base_branch,
         SanitizeOptions {
             fetch_remote: true,
-            fail_on_fetch_error: true,
+            fail_on_fetch_error: false,
             tag_abandoned: true,
         },
     )
@@ -3707,10 +3720,11 @@ pub async fn dispatch_ready_tasks_native(
 #[cfg(test)]
 mod tests {
     use super::{
-        merge_gate_check, refresh_task_active_session_id_in_registry,
-        should_emit_priority_zero_dispatch_skip, MergeGateResult,
+        merge_gate_check, prepare_clean_worktree, refresh_task_active_session_id_in_registry,
+        should_emit_priority_zero_dispatch_skip, MergeGateResult, SanitizeOptions,
     };
     use crate::coordinator::runtime::CoordinatorRunState;
+    use std::future::Future;
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -3753,6 +3767,17 @@ mod tests {
         run_git(&repo, &["add", "base.txt"]);
         run_git(&repo, &["commit", "-m", "base"]);
         repo
+    }
+
+    fn run_async_test<F>(future: F) -> F::Output
+    where
+        F: Future,
+    {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("create tokio runtime")
+            .block_on(future)
     }
 
     #[test]
@@ -3900,6 +3925,59 @@ mod tests {
             registry["tasks"][0]["task_runtime"]["last_session_tool"],
             "codex"
         );
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn prepare_clean_worktree_skips_fetch_when_origin_missing() {
+        let repo = make_test_repo();
+        let result = run_async_test(prepare_clean_worktree(
+            &repo,
+            "main",
+            SanitizeOptions {
+                fetch_remote: true,
+                fail_on_fetch_error: false,
+                tag_abandoned: false,
+            },
+        ))
+        .expect("prepare clean worktree succeeds");
+        assert_eq!(result, None);
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn prepare_clean_worktree_continues_when_origin_fetch_fails() {
+        let repo = make_test_repo();
+        run_git(&repo, &["remote", "add", "origin", "/tmp/macc-missing-origin-repo"]);
+        let result = run_async_test(prepare_clean_worktree(
+            &repo,
+            "main",
+            SanitizeOptions {
+                fetch_remote: true,
+                fail_on_fetch_error: false,
+                tag_abandoned: false,
+            },
+        ))
+        .expect("prepare clean worktree should continue after fetch failure");
+        assert_eq!(result, None);
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn prepare_clean_worktree_still_fails_when_reset_to_base_fails() {
+        let repo = make_test_repo();
+        run_git(&repo, &["remote", "add", "origin", "/tmp/macc-missing-origin-repo"]);
+        let result = run_async_test(prepare_clean_worktree(
+            &repo,
+            "missing-base-branch",
+            SanitizeOptions {
+                fetch_remote: true,
+                fail_on_fetch_error: false,
+                tag_abandoned: false,
+            },
+        ))
+        .expect("prepare clean worktree call should not error");
+        assert_eq!(result, Some("reset_hard_base_branch"));
         let _ = fs::remove_dir_all(&repo);
     }
 }
