@@ -1,6 +1,6 @@
 use crate::coordinator::control_plane::CoordinatorLog;
 use crate::coordinator::runtime::{
-    raw_event_identity, raw_event_to_runtime_event, CoordinatorRunState,
+    raw_event_identity, raw_event_to_runtime_event, CoordinatorPidGuard, CoordinatorRunState,
 };
 use crate::coordinator_storage;
 use crate::{MaccError, ProjectPaths, Result};
@@ -77,6 +77,9 @@ pub async fn ensure_performer_ipc_listener(
     let listener = TcpListener::bind("127.0.0.1:0").await.map_err(|e| {
         MaccError::Validation(format!("Failed to bind coordinator IPC listener: {}", e))
     })?;
+    if state.coordinator_pid_guard.is_none() {
+        state.coordinator_pid_guard = Some(CoordinatorPidGuard::new(repo_root)?);
+    }
     let local_addr = listener.local_addr().map_err(|e| {
         MaccError::Validation(format!("Failed to resolve coordinator IPC address: {}", e))
     })?;
