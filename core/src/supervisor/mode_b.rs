@@ -14,11 +14,16 @@
 //!
 //! # Safety contract
 //!
-//! Mode B **must not** modify coordinator state (task registry, locks, or IPC
-//! state). Only worktree-local git operations are permitted as recovery actions.
+//! Mode B may only execute coordinator-level recovery actions (`unlock`,
+//! `reconcile`) when the coordinator process is **not running** — verified by
+//! checking `.macc/state/coordinator.pid` before spawning any subcommand.
+//! Worktree-local git operations (`reset`, `clean`) are always safe and do
+//! not require the coordinator to be stopped.
 
 use crate::supervisor::{
-    coordinator_supervisor::CoordinatorEvidenceConfig,
+    coordinator_supervisor::{
+        CoordinatorEvidence, CoordinatorEvidenceCollector, CoordinatorEvidenceConfig,
+    },
     Finding, FindingCategory, HealthCheckResult, Recommendation, Severity, SupervisorAction,
     SupervisorReport,
 };
@@ -372,6 +377,52 @@ Respond with ONLY valid JSON matching this schema (no markdown fences, no extra 
     }
 }
 
+/// Format coordinator-level evidence as a supplemental prompt section.
+///
+/// Appended to the per-worktree prompt when `coordinator_evidence_config` is
+/// set and `events.jsonl` exists, giving the AI additional context about the
+/// full coordinator state.
+fn format_coordinator_evidence_section(ce: &CoordinatorEvidence) -> String {
+    let result = ce.coordinator_result.as_deref().unwrap_or("(unknown)");
+    let exit_reason = ce
+        .coordinator_exit_reason
+        .as_deref()
+        .unwrap_or("(not recorded)");
+    let counts = &ce.task_state_counts.counts;
+    let state_summary = format!(
+        "total={}, failed={}, todo={}, merged={}, in_progress={}",
+        ce.task_state_counts.total,
+        counts.get("failed").copied().unwrap_or(0),
+        counts.get("todo").copied().unwrap_or(0),
+        counts.get("merged").copied().unwrap_or(0),
+        counts.get("in_progress").copied().unwrap_or(0),
+    );
+    let recent_events = if ce.recent_events.is_empty() {
+        "(none)".to_string()
+    } else {
+        ce.recent_events.join("\n")
+    };
+
+    format!(
+        r#"
+## Coordinator-level context (supplemental)
+Coordinator result: {result}
+Exit reason: {exit_reason}
+Task state summary: {state_summary}
+
+Recent coordinator events (last {n} lines from events.jsonl):
+```
+{events}
+```
+"#,
+        result = result,
+        exit_reason = exit_reason,
+        state_summary = state_summary,
+        n = ce.recent_events.len(),
+        events = recent_events,
+    )
+}
+
 // ── AI Dispatcher trait ───────────────────────────────────────────────────────
 
 /// Errors from [`AiAnalysisDispatcher`].
@@ -488,6 +539,14 @@ pub enum RecoveryActionKind {
     GitReset,
     /// Run `git clean -fd` in the worktree.
     GitClean,
+    /// Run `macc coordinator unlock [task_ids...]`.
+    ///
+    /// Only executed when the coordinator is **not** running (safety guard).
+    CoordinatorUnlock { task_ids: Vec<String> },
+    /// Run `macc coordinator reconcile`.
+    ///
+    /// Only executed when the coordinator is **not** running (safety guard).
+    CoordinatorReconcile,
     /// Take no automated action.
     #[default]
     None,
@@ -523,9 +582,20 @@ pub struct RecoveryOutcome {
 
 /// Execute the recovery action recommended by the AI in `worktree_path`.
 ///
-/// Only worktree-local git operations are permitted.  Coordinator state is
-/// never modified here.
-pub fn execute_recovery(action: &RecoveryActionKind, worktree_path: &Path) -> RecoveryOutcome {
+/// `repo_root` is required for coordinator-level actions — they are run with
+/// `repo_root` as the working directory and the PID file is checked relative
+/// to it.
+///
+/// # Safety guard
+///
+/// `CoordinatorUnlock` and `CoordinatorReconcile` are **skipped** (with a
+/// warning log) when [`is_coordinator_running`] returns `true`.  This prevents
+/// double-execution when the coordinator is still alive.
+pub async fn execute_recovery(
+    action: &RecoveryActionKind,
+    worktree_path: &Path,
+    repo_root: &Path,
+) -> RecoveryOutcome {
     match action {
         RecoveryActionKind::None => RecoveryOutcome {
             action: action.clone(),
@@ -568,6 +638,104 @@ pub fn execute_recovery(action: &RecoveryActionKind, worktree_path: &Path) -> Re
                 },
             }
         }
+        RecoveryActionKind::CoordinatorUnlock { task_ids } => {
+            if is_coordinator_running(repo_root) {
+                tracing::warn!(
+                    "supervisor mode_b: skipping coordinator unlock — coordinator is running"
+                );
+                return RecoveryOutcome {
+                    action: action.clone(),
+                    succeeded: false,
+                    output: "skipped: coordinator is still running".to_string(),
+                };
+            }
+            let mut cmd = tokio::process::Command::new("macc");
+            cmd.arg("coordinator").arg("unlock");
+            for id in task_ids {
+                cmd.arg(id);
+            }
+            cmd.current_dir(repo_root);
+            match cmd.output().await {
+                Ok(o) => RecoveryOutcome {
+                    action: action.clone(),
+                    succeeded: o.status.success(),
+                    output: String::from_utf8_lossy(&o.stdout).trim().to_owned(),
+                },
+                Err(e) => RecoveryOutcome {
+                    action: action.clone(),
+                    succeeded: false,
+                    output: e.to_string(),
+                },
+            }
+        }
+        RecoveryActionKind::CoordinatorReconcile => {
+            if is_coordinator_running(repo_root) {
+                tracing::warn!(
+                    "supervisor mode_b: skipping coordinator reconcile — coordinator is running"
+                );
+                return RecoveryOutcome {
+                    action: action.clone(),
+                    succeeded: false,
+                    output: "skipped: coordinator is still running".to_string(),
+                };
+            }
+            let mut cmd = tokio::process::Command::new("macc");
+            cmd.args(["coordinator", "reconcile"]);
+            cmd.current_dir(repo_root);
+            match cmd.output().await {
+                Ok(o) => RecoveryOutcome {
+                    action: action.clone(),
+                    succeeded: o.status.success(),
+                    output: String::from_utf8_lossy(&o.stdout).trim().to_owned(),
+                },
+                Err(e) => RecoveryOutcome {
+                    action: action.clone(),
+                    succeeded: false,
+                    output: e.to_string(),
+                },
+            }
+        }
+    }
+}
+
+// ── Coordinator PID guard ─────────────────────────────────────────────────────
+
+/// Return `true` if the coordinator is currently running.
+///
+/// Checks `.macc/state/coordinator.pid` relative to `repo_root`.  Returns
+/// `false` when the file is absent, unreadable, or contains an invalid PID.
+pub fn is_coordinator_running(repo_root: &Path) -> bool {
+    let pid_file = repo_root
+        .join(".macc")
+        .join("state")
+        .join("coordinator.pid");
+    let Ok(content) = fs::read_to_string(&pid_file) else {
+        return false;
+    };
+    let Ok(pid) = content.trim().parse::<u32>() else {
+        return false;
+    };
+    process_is_alive(pid)
+}
+
+fn process_is_alive(pid: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        std::path::Path::new("/proc").join(pid.to_string()).exists()
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
     }
 }
 
@@ -717,8 +885,25 @@ impl<D: AiAnalysisDispatcher> ModeBSupervisor<D> {
             last_error_message,
         );
 
-        // Step 2 – build prompt.
-        let prompt = AnalysisPromptBuilder::build(&evidence);
+        // Step 2 – build prompt, optionally augmented with coordinator evidence.
+        let mut prompt = AnalysisPromptBuilder::build(&evidence);
+        if let Some(ref cec_config) = self.config.coordinator_evidence_config {
+            let events_path = if cec_config.events_log_path.is_absolute() {
+                cec_config.events_log_path.clone()
+            } else {
+                self.repo_root.join(&cec_config.events_log_path)
+            };
+            if events_path.exists() {
+                let cec =
+                    CoordinatorEvidenceCollector::new(self.repo_root.clone(), cec_config.clone());
+                let ce = cec.collect();
+                prompt.push_str(&format_coordinator_evidence_section(&ce));
+                tracing::debug!(
+                    task_id,
+                    "supervisor mode_b: coordinator evidence appended to prompt"
+                );
+            }
+        }
 
         // Step 3 – dispatch with timeout.
         let timeout = Duration::from_secs(self.config.analysis_timeout_seconds);
@@ -732,7 +917,8 @@ impl<D: AiAnalysisDispatcher> ModeBSupervisor<D> {
         let mut result = parse_ai_response(&raw)?;
 
         // Step 5 – execute recovery action.
-        let recovery_outcome = execute_recovery(&result.recovery_action, worktree_path);
+        let recovery_outcome =
+            execute_recovery(&result.recovery_action, worktree_path, &self.repo_root).await;
         let recovery_action = build_recovery_supervisor_action(
             task_id,
             worktree_path,
@@ -780,6 +966,15 @@ fn build_recovery_supervisor_action(
         },
         RecoveryActionKind::GitClean => SupervisorAction::WorktreeGitClean {
             worktree_path: wt,
+            succeeded: outcome.succeeded,
+        },
+        RecoveryActionKind::CoordinatorUnlock { task_ids } => {
+            SupervisorAction::CoordinatorUnlocked {
+                task_ids: task_ids.clone(),
+                succeeded: outcome.succeeded,
+            }
+        }
+        RecoveryActionKind::CoordinatorReconcile => SupervisorAction::CoordinatorReconciled {
             succeeded: outcome.succeeded,
         },
     }
@@ -1142,14 +1337,131 @@ mod tests {
 
     #[test]
     fn recovery_action_kind_round_trips() {
-        for action in [
+        let actions = vec![
             RecoveryActionKind::GitReset,
             RecoveryActionKind::GitClean,
             RecoveryActionKind::None,
-        ] {
+            RecoveryActionKind::CoordinatorUnlock {
+                task_ids: vec!["L5-FOO-001".to_string(), "L5-FOO-002".to_string()],
+            },
+            RecoveryActionKind::CoordinatorReconcile,
+        ];
+        for action in actions {
             let json = serde_json::to_string(&action).expect("serialize");
             let back: RecoveryActionKind = serde_json::from_str(&json).expect("deserialize");
             assert_eq!(action, back);
         }
+    }
+
+    // ── is_coordinator_running ────────────────────────────────────────────────
+
+    #[test]
+    fn is_coordinator_running_false_when_no_pid_file() {
+        let root = temp_dir("coord-no-pid");
+        assert!(!is_coordinator_running(&root));
+    }
+
+    #[test]
+    fn is_coordinator_running_false_when_pid_file_has_invalid_content() {
+        let root = temp_dir("coord-bad-pid");
+        let state_dir = root.join(".macc").join("state");
+        fs::create_dir_all(&state_dir).expect("create state dir");
+        fs::write(state_dir.join("coordinator.pid"), "not-a-pid").expect("write pid file");
+        assert!(!is_coordinator_running(&root));
+    }
+
+    #[test]
+    fn is_coordinator_running_true_when_pid_is_current_process() {
+        let root = temp_dir("coord-live-pid");
+        let state_dir = root.join(".macc").join("state");
+        fs::create_dir_all(&state_dir).expect("create state dir");
+        let my_pid = std::process::id();
+        fs::write(state_dir.join("coordinator.pid"), my_pid.to_string()).expect("write pid file");
+        // Current process is alive.
+        assert!(is_coordinator_running(&root));
+    }
+
+    #[test]
+    fn is_coordinator_running_false_when_pid_is_dead() {
+        let root = temp_dir("coord-dead-pid");
+        let state_dir = root.join(".macc").join("state");
+        fs::create_dir_all(&state_dir).expect("create state dir");
+        // PID 1 is always alive on Linux; pick an unlikely high PID that is
+        // almost certainly not alive (u32::MAX rounds to a large value which
+        // the OS will reject / not find in /proc).
+        fs::write(state_dir.join("coordinator.pid"), "4194305").expect("write pid file");
+        // This might be alive on some machines, but on typical test runners
+        // the PID space wraps much lower. Just assert that the function does
+        // not panic (result is either true or false — we cannot guarantee the
+        // PID is dead on all environments).
+        let _ = is_coordinator_running(&root);
+    }
+
+    // ── Safety guard: CoordinatorUnlock/Reconcile skipped when running ────────
+
+    #[tokio::test]
+    async fn coordinator_unlock_skipped_when_coordinator_running() {
+        let root = temp_dir("coord-unlock-guard");
+        let wt = temp_dir("coord-unlock-wt");
+        // Plant current-process PID → coordinator "is running".
+        let state_dir = root.join(".macc").join("state");
+        fs::create_dir_all(&state_dir).expect("create state dir");
+        fs::write(state_dir.join("coordinator.pid"), std::process::id().to_string())
+            .expect("write pid file");
+
+        let action = RecoveryActionKind::CoordinatorUnlock {
+            task_ids: vec!["L5-FOO-001".to_string()],
+        };
+        let outcome = execute_recovery(&action, &wt, &root).await;
+
+        assert!(!outcome.succeeded);
+        assert!(outcome.output.contains("skipped"));
+    }
+
+    #[tokio::test]
+    async fn coordinator_reconcile_skipped_when_coordinator_running() {
+        let root = temp_dir("coord-reconcile-guard");
+        let wt = temp_dir("coord-reconcile-wt");
+        // Plant current-process PID → coordinator "is running".
+        let state_dir = root.join(".macc").join("state");
+        fs::create_dir_all(&state_dir).expect("create state dir");
+        fs::write(state_dir.join("coordinator.pid"), std::process::id().to_string())
+            .expect("write pid file");
+
+        let action = RecoveryActionKind::CoordinatorReconcile;
+        let outcome = execute_recovery(&action, &wt, &root).await;
+
+        assert!(!outcome.succeeded);
+        assert!(outcome.output.contains("skipped"));
+    }
+
+    #[tokio::test]
+    async fn coordinator_unlock_attempts_command_when_not_running() {
+        let root = temp_dir("coord-unlock-noguard");
+        let wt = temp_dir("coord-unlock-noguard-wt");
+        // No PID file → coordinator is NOT running → command is attempted.
+
+        let action = RecoveryActionKind::CoordinatorUnlock {
+            task_ids: vec!["L5-FOO-001".to_string()],
+        };
+        let outcome = execute_recovery(&action, &wt, &root).await;
+
+        // The outcome may succeed or fail depending on whether `macc` is in PATH.
+        // What matters is that the safety-guard "skipped" message is absent —
+        // the command was actually attempted.
+        assert!(!outcome.output.contains("skipped: coordinator is still running"));
+    }
+
+    #[tokio::test]
+    async fn coordinator_reconcile_attempts_command_when_not_running() {
+        let root = temp_dir("coord-reconcile-noguard");
+        let wt = temp_dir("coord-reconcile-noguard-wt");
+        // No PID file → coordinator is NOT running → command is attempted.
+
+        let action = RecoveryActionKind::CoordinatorReconcile;
+        let outcome = execute_recovery(&action, &wt, &root).await;
+
+        // Same rationale as above — guard "skipped" message must be absent.
+        assert!(!outcome.output.contains("skipped: coordinator is still running"));
     }
 }

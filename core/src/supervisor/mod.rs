@@ -255,6 +255,22 @@ pub enum SupervisorAction {
     /// AI analysis was skipped because the recovery attempt limit was reached.
     RecoveryAttemptLimitReached { task_id: String, limit: u32 },
 
+    // ── Mode B: coordinator-level recovery actions ────────────────────────
+    /// Supervisor executed `macc coordinator unlock` for specific tasks.
+    ///
+    /// `succeeded` is `false` when the coordinator was still running (safety
+    /// guard skipped the command) or when the command exited non-zero.
+    CoordinatorUnlocked {
+        task_ids: Vec<String>,
+        succeeded: bool,
+    },
+
+    /// Supervisor executed `macc coordinator reconcile`.
+    ///
+    /// `succeeded` is `false` when the coordinator was still running (safety
+    /// guard skipped the command) or when the command exited non-zero.
+    CoordinatorReconciled { succeeded: bool },
+
     // ── Mode C: coordinator crash recovery actions ────────────────────────
     /// Task registry was scanned and orphaned tasks were found before restart.
     RegistryScanned {
