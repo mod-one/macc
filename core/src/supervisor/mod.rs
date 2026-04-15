@@ -44,6 +44,10 @@ pub struct SupervisorConfig {
     #[serde(default = "default_log_analysis_window_seconds")]
     pub log_analysis_window_seconds: u64,
 
+    /// Number of consecutive crashed checks required before acting.
+    #[serde(default = "default_crash_debounce_checks")]
+    pub crash_debounce_checks: u32,
+
     /// Path where the supervisor writes its structured JSON report.
     #[serde(default = "default_report_output_path")]
     pub report_output_path: PathBuf,
@@ -62,6 +66,9 @@ fn default_max_restart_attempts() -> u32 {
 fn default_log_analysis_window_seconds() -> u64 {
     300
 }
+fn default_crash_debounce_checks() -> u32 {
+    3
+}
 fn default_report_output_path() -> PathBuf {
     PathBuf::from(".macc/log/supervisor/report.json")
 }
@@ -75,6 +82,7 @@ impl Default for SupervisorConfig {
             watchdog_interval_seconds: default_watchdog_interval_seconds(),
             max_restart_attempts: default_max_restart_attempts(),
             log_analysis_window_seconds: default_log_analysis_window_seconds(),
+            crash_debounce_checks: default_crash_debounce_checks(),
             report_output_path: default_report_output_path(),
             events_log_path: default_events_log_path(),
         }
@@ -427,6 +435,7 @@ mod tests {
             watchdog_interval_seconds: 60,
             max_restart_attempts: 5,
             log_analysis_window_seconds: 600,
+            crash_debounce_checks: 4,
             report_output_path: PathBuf::from("/tmp/report.json"),
             events_log_path: PathBuf::from("/tmp/events.jsonl"),
         }
@@ -478,6 +487,7 @@ mod tests {
         assert_eq!(config.watchdog_interval_seconds, 30);
         assert_eq!(config.max_restart_attempts, 3);
         assert_eq!(config.log_analysis_window_seconds, 300);
+        assert_eq!(config.crash_debounce_checks, 3);
     }
 
     #[test]
