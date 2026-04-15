@@ -24,8 +24,8 @@
 
 use crate::coordinator::model::{Task, TaskRegistry};
 use crate::supervisor::{
-    Finding, FindingCategory, HealthCheckResult, ProcessManager, ProcessManagerError, Recommendation,
-    Severity, SupervisorAction, SupervisorReport,
+    Finding, FindingCategory, HealthCheckResult, ProcessManager, ProcessManagerError,
+    Recommendation, Severity, SupervisorAction, SupervisorReport,
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -462,8 +462,11 @@ impl ModeCRecovery {
         let mut actions: Vec<SupervisorAction> = Vec::new();
 
         // Step 1: Collect crash evidence.
-        let mut evidence =
-            collect_crash_evidence(&self.config.events_log_path, self.config.max_crash_event_lines, exit_code);
+        let mut evidence = collect_crash_evidence(
+            &self.config.events_log_path,
+            self.config.max_crash_event_lines,
+            exit_code,
+        );
 
         // Step 2: Registry cleanup.
         let cleanup_result = match cleanup_orphaned_tasks(&self.config.registry_path) {
@@ -750,7 +753,9 @@ mod tests {
 
         fn crash_then_recover() -> Self {
             // Start as crashed; after start_coordinator(), health returns Healthy.
-            let health = Arc::new(Mutex::new(HealthCheckResult::Crashed { exit_code: Some(1) }));
+            let health = Arc::new(Mutex::new(HealthCheckResult::Crashed {
+                exit_code: Some(1),
+            }));
             let start_result = Arc::new(Mutex::new(Ok(())));
             Self {
                 health,
@@ -761,7 +766,9 @@ mod tests {
 
         fn always_fail_start() -> Self {
             Self {
-                health: Arc::new(Mutex::new(HealthCheckResult::Crashed { exit_code: Some(1) })),
+                health: Arc::new(Mutex::new(HealthCheckResult::Crashed {
+                    exit_code: Some(1),
+                })),
                 start_result: Arc::new(Mutex::new(Err(ProcessManagerError::SpawnFailed(
                     "injected failure".to_string(),
                 )))),
@@ -845,7 +852,10 @@ mod tests {
         let root = temp_dir("cleanup-inprog");
         let registry_path = root.join("task_registry.json");
 
-        write_registry(&registry_path, &[("T-002", "in_progress", Some(999_998_u32))]);
+        write_registry(
+            &registry_path,
+            &[("T-002", "in_progress", Some(999_998_u32))],
+        );
 
         let result = cleanup_orphaned_tasks(&registry_path).expect("cleanup");
 
@@ -880,7 +890,12 @@ mod tests {
         let events_path = root.join("events.jsonl");
 
         let events = (0..60)
-            .map(|i| format!("{{\"ts\":\"2026-04-13T00:{:02}:00Z\",\"type\":\"heartbeat\"}}", i))
+            .map(|i| {
+                format!(
+                    "{{\"ts\":\"2026-04-13T00:{:02}:00Z\",\"type\":\"heartbeat\"}}",
+                    i
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n");
         fs::write(&events_path, events).expect("write events");
@@ -1052,7 +1067,10 @@ mod tests {
         let pm = MockProcessManager::crash_then_recover();
         let mut recovery = ModeCRecovery::new(config);
 
-        let report = recovery.run_recovery(&pm, Some(137)).await.expect("recovery");
+        let report = recovery
+            .run_recovery(&pm, Some(137))
+            .await
+            .expect("recovery");
 
         assert!(report.cleanup_result.is_some());
         let cleanup = report.cleanup_result.as_ref().unwrap();
@@ -1158,10 +1176,7 @@ mod tests {
 
         let report = build_supervisor_report(&recovery);
 
-        assert!(matches!(
-            report.health,
-            HealthCheckResult::Crashed { .. }
-        ));
+        assert!(matches!(report.health, HealthCheckResult::Crashed { .. }));
         assert!(report.has_severity(&Severity::Critical));
         assert!(!report.recommendations.is_empty());
     }
