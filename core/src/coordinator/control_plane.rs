@@ -625,6 +625,101 @@ async fn sanitize_worktree_to_base(
     .await
 }
 
+fn append_worktree_orphan_cleaned_event(
+    repo_root: &Path,
+    task_id: &str,
+    worktree_path: &Path,
+    sanitize_step: &str,
+) -> Result<()> {
+    let run_id = crate::coordinator::helpers::ensure_coordinator_run_id();
+    let now = now_iso_coordinator();
+    let seq = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default() as u64;
+    let path = worktree_path.to_string_lossy().to_string();
+    let message = format!(
+        "worktree orphan cleaned task={} path={} sanitize_step={}",
+        task_id, path, sanitize_step
+    );
+    let payload = serde_json::json!({
+        "schema_version":"1",
+        "event_id": format!("evt-worktree_orphan_cleaned-{}-{}", task_id, seq),
+        "run_id": run_id,
+        "seq": seq,
+        "ts": now,
+        "source": "coordinator:native",
+        "task_id": task_id,
+        "type": "worktree_orphan_cleaned",
+        "phase": "dev",
+        "status": "success",
+        "severity": "info",
+        "payload": {
+            "message": message,
+            "worktree_path": path,
+            "sanitize_step": sanitize_step
+        }
+    });
+    let project_paths = crate::ProjectPaths::from_root(repo_root);
+    let _ = crate::coordinator_storage::append_event_sqlite(&project_paths, &payload)?;
+    Ok(())
+}
+
+fn maybe_rollback_new_worktree_on_sanitize_failure(
+    repo_root: &Path,
+    state: &mut CoordinatorRunState,
+    task_id: &str,
+    sanitize_step: &str,
+    rollback_path: Option<&Path>,
+    worktree_was_newly_created: bool,
+    rollback_enabled: bool,
+    logger: Option<&dyn CoordinatorLog>,
+) -> bool {
+    if !rollback_enabled || !worktree_was_newly_created {
+        return false;
+    }
+    let Some(path) = rollback_path else {
+        return false;
+    };
+
+    let path_key = path.to_string_lossy().to_string();
+    state.last_session_activity_at.remove(&path_key);
+
+    match crate::remove_worktree(repo_root, path, true) {
+        Ok(()) => {
+            let _ = append_worktree_orphan_cleaned_event(repo_root, task_id, path, sanitize_step);
+            if let Some(log) = logger {
+                let _ = log.note(format!(
+                    "- worktree orphan cleaned task={} path={} sanitize_step={}",
+                    task_id,
+                    path.display(),
+                    sanitize_step
+                ));
+            }
+            true
+        }
+        Err(err) => {
+            let msg = format!(
+                "worktree orphan cleanup failed task={} path={} sanitize_step={} error={}",
+                task_id,
+                path.display(),
+                sanitize_step,
+                err
+            );
+            let _ = append_coordinator_event_with_severity(
+                repo_root,
+                "worktree_orphan_cleanup_failed",
+                task_id,
+                "dev",
+                "warning",
+                &msg,
+                "warning",
+            );
+            if let Some(log) = logger {
+                let _ = log.note(format!("- {}", msg));
+            }
+            false
+        }
+    }
+}
+
 fn ensure_expected_worktree_branch(worktree_path: &Path, expected_branch: &str) -> Result<bool> {
     let current_branch = crate::git::current_branch(worktree_path)?;
     Ok(current_branch == expected_branch)
@@ -2078,6 +2173,9 @@ fn apply_runtime_event_bus_updates(
                         CoordinatorRuntimeEventKind::WorktreeHealthCheckFailed { .. } => {
                             "worktree_health_check_failed"
                         }
+                        CoordinatorRuntimeEventKind::WorktreeOrphanCleaned { .. } => {
+                            "worktree_orphan_cleaned"
+                        }
                     };
                     let _ = log.note(format!(
                         "- performer event received task={} type={} source={}",
@@ -2149,7 +2247,8 @@ fn apply_runtime_event_bus_updates(
                     | CoordinatorRuntimeEventKind::BranchTaggedAbandoned { .. }
                     | CoordinatorRuntimeEventKind::SyncUnmergedBranchFound { .. }
                     | CoordinatorRuntimeEventKind::SyncUnmergedBranchMerged { .. }
-                    | CoordinatorRuntimeEventKind::WorktreeHealthCheckFailed { .. } => {}
+                    | CoordinatorRuntimeEventKind::WorktreeHealthCheckFailed { .. }
+                    | CoordinatorRuntimeEventKind::WorktreeOrphanCleaned { .. } => {}
                 }
             }
             Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
@@ -3108,14 +3207,26 @@ pub async fn dispatch_ready_tasks_native(
             let created = created
                 .pop()
                 .ok_or_else(|| MaccError::Validation("No worktree created".into()))?;
+            let rollback_path = created.path.clone();
+            let worktree_was_newly_created = true;
             let sanitize_started = Instant::now();
             if let Some(failed_step) =
                 sanitize_worktree_to_base(&created.path, &selected.base_branch).await?
             {
+                let cleaned_orphan = maybe_rollback_new_worktree_on_sanitize_failure(
+                    repo_root,
+                    state,
+                    &selected.id,
+                    failed_step,
+                    Some(&rollback_path),
+                    worktree_was_newly_created,
+                    cfg.remove_worktree_on_sanitize_failure,
+                    logger,
+                );
                 let msg =
                     format!(
-                    "dispatch failed for task {}: sanitize new worktree failed at step '{}' ({})",
-                    selected.id, failed_step, created.path.display()
+                    "dispatch failed for task {}: sanitize new worktree failed at step '{}' ({}) rollback_applied={}",
+                    selected.id, failed_step, created.path.display(), cleaned_orphan
                 );
                 let _ = append_coordinator_event_with_severity(
                     repo_root,
@@ -3720,10 +3831,12 @@ pub async fn dispatch_ready_tasks_native(
 #[cfg(test)]
 mod tests {
     use super::{
-        merge_gate_check, prepare_clean_worktree, refresh_task_active_session_id_in_registry,
-        should_emit_priority_zero_dispatch_skip, MergeGateResult, SanitizeOptions,
+        maybe_rollback_new_worktree_on_sanitize_failure, merge_gate_check, prepare_clean_worktree,
+        refresh_task_active_session_id_in_registry, should_emit_priority_zero_dispatch_skip,
+        MergeGateResult, SanitizeOptions,
     };
     use crate::coordinator::runtime::CoordinatorRunState;
+    use rusqlite::Connection;
     use std::future::Future;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -3778,6 +3891,58 @@ mod tests {
             .build()
             .expect("create tokio runtime")
             .block_on(future)
+    }
+
+    fn create_pool_worktree(repo: &Path) -> PathBuf {
+        let mut created = crate::create_worktrees(
+            repo,
+            &crate::WorktreeCreateSpec {
+                slug: "worker".to_string(),
+                tool: "codex".to_string(),
+                count: 1,
+                base: "main".to_string(),
+                dir: PathBuf::from(".macc/worktree"),
+                scope: None,
+                feature: None,
+            },
+        )
+        .expect("create worktree");
+        created.pop().expect("one worktree created").path
+    }
+
+    fn has_worktree_orphan_cleaned_event(
+        repo: &Path,
+        expected_path: &Path,
+        expected_step: &str,
+    ) -> bool {
+        let db_path = repo.join(".macc").join("state").join("coordinator.sqlite");
+        if !db_path.exists() {
+            return false;
+        }
+        let Ok(conn) = Connection::open(db_path) else {
+            return false;
+        };
+        let mut stmt = conn
+            .prepare(
+                "SELECT payload_json FROM events WHERE event_type = 'worktree_orphan_cleaned' ORDER BY seq DESC LIMIT 1",
+            )
+            .expect("prepare query");
+        let mut rows = stmt.query([]).expect("query events");
+        let Some(row) = rows.next().expect("iterate rows") else {
+            return false;
+        };
+        let payload_raw: String = row.get(0).expect("payload json");
+        let Ok(payload_json) = serde_json::from_str::<serde_json::Value>(&payload_raw) else {
+            return false;
+        };
+        payload_json["worktree_path"]
+            .as_str()
+            .map(|value| value == expected_path.to_string_lossy())
+            .unwrap_or(false)
+            && payload_json["sanitize_step"]
+                .as_str()
+                .map(|value| value == expected_step)
+                .unwrap_or(false)
     }
 
     #[test]
@@ -3948,7 +4113,10 @@ mod tests {
     #[test]
     fn prepare_clean_worktree_continues_when_origin_fetch_fails() {
         let repo = make_test_repo();
-        run_git(&repo, &["remote", "add", "origin", "/tmp/macc-missing-origin-repo"]);
+        run_git(
+            &repo,
+            &["remote", "add", "origin", "/tmp/macc-missing-origin-repo"],
+        );
         let result = run_async_test(prepare_clean_worktree(
             &repo,
             "main",
@@ -3966,7 +4134,10 @@ mod tests {
     #[test]
     fn prepare_clean_worktree_still_fails_when_reset_to_base_fails() {
         let repo = make_test_repo();
-        run_git(&repo, &["remote", "add", "origin", "/tmp/macc-missing-origin-repo"]);
+        run_git(
+            &repo,
+            &["remote", "add", "origin", "/tmp/macc-missing-origin-repo"],
+        );
         let result = run_async_test(prepare_clean_worktree(
             &repo,
             "missing-base-branch",
@@ -3978,6 +4149,116 @@ mod tests {
         ))
         .expect("prepare clean worktree call should not error");
         assert_eq!(result, Some("reset_hard_base_branch"));
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn sanitize_failure_rolls_back_new_worktree_and_emits_event() {
+        let repo = make_test_repo();
+        let worktree_path = create_pool_worktree(&repo);
+        assert!(worktree_path.exists());
+
+        let mut state = CoordinatorRunState::new();
+        state.last_session_activity_at.insert(
+            worktree_path.to_string_lossy().to_string(),
+            chrono::Utc::now().timestamp(),
+        );
+
+        let rolled_back = maybe_rollback_new_worktree_on_sanitize_failure(
+            &repo,
+            &mut state,
+            "L5-CTRL-002",
+            "reset_hard_base_branch",
+            Some(&worktree_path),
+            true,
+            true,
+            None,
+        );
+
+        assert!(rolled_back);
+        assert!(!worktree_path.exists());
+        assert!(!state
+            .last_session_activity_at
+            .contains_key(&worktree_path.to_string_lossy().to_string()));
+        assert!(has_worktree_orphan_cleaned_event(
+            &repo,
+            &worktree_path,
+            "reset_hard_base_branch"
+        ));
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn sanitize_failure_rollback_disabled_keeps_new_worktree() {
+        let repo = make_test_repo();
+        let worktree_path = create_pool_worktree(&repo);
+        assert!(worktree_path.exists());
+
+        let mut state = CoordinatorRunState::new();
+        state.last_session_activity_at.insert(
+            worktree_path.to_string_lossy().to_string(),
+            chrono::Utc::now().timestamp(),
+        );
+
+        let rolled_back = maybe_rollback_new_worktree_on_sanitize_failure(
+            &repo,
+            &mut state,
+            "L5-CTRL-002",
+            "reset_hard_base_branch",
+            Some(&worktree_path),
+            true,
+            false,
+            None,
+        );
+
+        assert!(!rolled_back);
+        assert!(worktree_path.exists());
+        assert!(state
+            .last_session_activity_at
+            .contains_key(&worktree_path.to_string_lossy().to_string()));
+        assert!(!has_worktree_orphan_cleaned_event(
+            &repo,
+            &worktree_path,
+            "reset_hard_base_branch"
+        ));
+        let _ = crate::remove_worktree(&repo, &worktree_path, true);
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn sanitize_failure_on_reused_worktree_does_not_rollback() {
+        let repo = make_test_repo();
+        let worktree_path = create_pool_worktree(&repo);
+        assert!(worktree_path.exists());
+
+        let mut state = CoordinatorRunState::new();
+        state.last_session_activity_at.insert(
+            worktree_path.to_string_lossy().to_string(),
+            chrono::Utc::now().timestamp(),
+        );
+
+        let rolled_back = maybe_rollback_new_worktree_on_sanitize_failure(
+            &repo,
+            &mut state,
+            "L5-CTRL-002",
+            "reset_hard_base_branch",
+            Some(&worktree_path),
+            false,
+            true,
+            None,
+        );
+
+        assert!(!rolled_back);
+        assert!(worktree_path.exists());
+        assert!(state
+            .last_session_activity_at
+            .contains_key(&worktree_path.to_string_lossy().to_string()));
+        assert!(!has_worktree_orphan_cleaned_event(
+            &repo,
+            &worktree_path,
+            "reset_hard_base_branch"
+        ));
+        let _ = crate::remove_worktree(&repo, &worktree_path, true);
         let _ = fs::remove_dir_all(&repo);
     }
 }
