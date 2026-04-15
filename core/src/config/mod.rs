@@ -197,6 +197,11 @@ pub struct CoordinatorConfig {
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub merge_gate_on_dispatch: bool,
 
+    /// Remove newly-created worktrees when sanitization fails during dispatch.
+    /// Default: true.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub remove_worktree_on_sanitize_failure: bool,
+
     /// Tag branches for abandoned tasks so they are discoverable after cleanup.
     /// Default: true.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
@@ -341,6 +346,7 @@ impl Default for CoordinatorConfig {
             salvage_before_retry: true,
             retry_on_same_worktree: true,
             merge_gate_on_dispatch: true,
+            remove_worktree_on_sanitize_failure: true,
             tag_abandoned_branches: true,
             sync_unmerged_branches: true,
             salvage_merge_timeout_seconds: 120,
@@ -561,6 +567,10 @@ pub struct CoordinatorConfigResolved {
     /// Default: `true`.
     pub merge_gate_on_dispatch: bool,
 
+    /// Remove newly-created worktrees when sanitization fails during dispatch.
+    /// Default: `true`.
+    pub remove_worktree_on_sanitize_failure: bool,
+
     /// Tag branches of abandoned tasks before cleanup so they are
     /// discoverable via `git tag`.
     /// Default: `true`.
@@ -682,6 +692,9 @@ impl CoordinatorConfigResolved {
             salvage_before_retry: config.map(|c| c.salvage_before_retry).unwrap_or(true),
             retry_on_same_worktree: config.map(|c| c.retry_on_same_worktree).unwrap_or(true),
             merge_gate_on_dispatch: config.map(|c| c.merge_gate_on_dispatch).unwrap_or(true),
+            remove_worktree_on_sanitize_failure: config
+                .map(|c| c.remove_worktree_on_sanitize_failure)
+                .unwrap_or(true),
             tag_abandoned_branches: config.map(|c| c.tag_abandoned_branches).unwrap_or(true),
             sync_unmerged_branches: config.map(|c| c.sync_unmerged_branches).unwrap_or(true),
             salvage_merge_timeout_seconds: config
@@ -1071,6 +1084,10 @@ automation:
             "merge_gate_on_dispatch should default to true"
         );
         assert!(
+            config.remove_worktree_on_sanitize_failure,
+            "remove_worktree_on_sanitize_failure should default to true"
+        );
+        assert!(
             config.tag_abandoned_branches,
             "tag_abandoned_branches should default to true"
         );
@@ -1097,6 +1114,7 @@ automation:
     salvage_before_retry: false
     retry_on_same_worktree: false
     merge_gate_on_dispatch: false
+    remove_worktree_on_sanitize_failure: false
     tag_abandoned_branches: false
     sync_unmerged_branches: false
     salvage_merge_timeout_seconds: 60
@@ -1111,6 +1129,7 @@ automation:
         assert!(!coordinator.salvage_before_retry);
         assert!(!coordinator.retry_on_same_worktree);
         assert!(!coordinator.merge_gate_on_dispatch);
+        assert!(!coordinator.remove_worktree_on_sanitize_failure);
         assert!(!coordinator.tag_abandoned_branches);
         assert!(!coordinator.sync_unmerged_branches);
         assert_eq!(coordinator.salvage_merge_timeout_seconds, 60);
@@ -1425,6 +1444,7 @@ unknown_field: true
         assert!(r.salvage_before_retry);
         assert!(r.retry_on_same_worktree);
         assert!(r.merge_gate_on_dispatch);
+        assert!(r.remove_worktree_on_sanitize_failure);
         assert!(r.tag_abandoned_branches);
         assert!(r.sync_unmerged_branches);
         assert_eq!(r.salvage_merge_timeout_seconds, 120);
@@ -1469,6 +1489,7 @@ unknown_field: true
         cfg.salvage_before_retry = false;
         cfg.retry_on_same_worktree = false;
         cfg.merge_gate_on_dispatch = false;
+        cfg.remove_worktree_on_sanitize_failure = false;
         cfg.tag_abandoned_branches = false;
         cfg.sync_unmerged_branches = false;
         cfg.salvage_merge_timeout_seconds = 60;
@@ -1511,6 +1532,7 @@ unknown_field: true
         assert!(!r.salvage_before_retry);
         assert!(!r.retry_on_same_worktree);
         assert!(!r.merge_gate_on_dispatch);
+        assert!(!r.remove_worktree_on_sanitize_failure);
         assert!(!r.tag_abandoned_branches);
         assert!(!r.sync_unmerged_branches);
         assert_eq!(r.salvage_merge_timeout_seconds, 60);

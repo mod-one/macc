@@ -8,8 +8,8 @@ use crate::{MaccError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::OpenOptions;
-use std::io::Write;
 use std::io::Read;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
@@ -190,6 +190,12 @@ pub enum CoordinatorRuntimeEventKind {
         worktree_path: String,
         outcome: String,
     },
+    /// A newly-created worktree failed sanitize during dispatch and was
+    /// removed to prevent orphaned pool slots.
+    WorktreeOrphanCleaned {
+        worktree_path: String,
+        sanitize_step: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -242,7 +248,10 @@ pub struct CoordinatorPidGuard {
 
 impl CoordinatorPidGuard {
     pub fn new(repo_root: &Path) -> Result<Self> {
-        let path = repo_root.join(".macc").join("state").join("coordinator.pid");
+        let path = repo_root
+            .join(".macc")
+            .join("state")
+            .join("coordinator.pid");
         let tmp_path = path.with_extension("pid.tmp");
         let pid = std::process::id().to_string();
 
@@ -656,6 +665,25 @@ mod tests {
     }
 
     #[test]
+    fn worktree_orphan_cleaned_event_roundtrip() {
+        let record = make_record(
+            "worktree_orphan_cleaned",
+            serde_json::json!({
+                "worktree_path": "/tmp/wt/worker-03",
+                "sanitize_step": "reset_hard_base_branch"
+            }),
+        );
+        let ev = raw_event_to_runtime_event(&record).expect("should parse");
+        assert_eq!(
+            ev.kind,
+            CoordinatorRuntimeEventKind::WorktreeOrphanCleaned {
+                worktree_path: "/tmp/wt/worker-03".to_string(),
+                sanitize_step: "reset_hard_base_branch".to_string(),
+            }
+        );
+    }
+
+    #[test]
     fn reliability_events_with_missing_payload_fields_degrade_gracefully() {
         // payload_str returns "" for missing keys — events still parse
         let record = make_record("salvage_attempted", serde_json::json!({}));
@@ -820,6 +848,10 @@ pub fn raw_event_to_runtime_event(
         "worktree_health_check_failed" => CoordinatorRuntimeEventKind::WorktreeHealthCheckFailed {
             worktree_path: payload_str(&event.payload, "worktree_path"),
             outcome: payload_str(&event.payload, "outcome"),
+        },
+        "worktree_orphan_cleaned" => CoordinatorRuntimeEventKind::WorktreeOrphanCleaned {
+            worktree_path: payload_str(&event.payload, "worktree_path"),
+            sanitize_step: payload_str(&event.payload, "sanitize_step"),
         },
         _ => return None,
     };
