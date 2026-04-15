@@ -547,6 +547,26 @@ pub enum RecoveryActionKind {
     ///
     /// Only executed when the coordinator is **not** running (safety guard).
     CoordinatorReconcile,
+    /// AI-powered fix for a compile error in a test file.
+    ///
+    /// `file_path` must refer to a test file (enforced by [`is_test_file`]).
+    /// `description` should contain the compile error and any context needed
+    /// for the AI to produce a targeted call-site fix.
+    ///
+    /// # Safety
+    /// This action is **never** applied to implementation files.  The
+    /// [`is_test_file`] guard is checked inside [`execute_recovery`] and the
+    /// action falls back to [`RecoveryActionKind::Escalate`] when the guard
+    /// rejects the path.
+    FixTest {
+        file_path: PathBuf,
+        description: String,
+    },
+    /// Escalate: take no automated action.
+    ///
+    /// The `reason` is written to the recovery outcome and logged at WARN
+    /// level.  No subprocess is spawned.
+    Escalate { reason: String },
     /// Take no automated action.
     #[default]
     None,
@@ -570,6 +590,62 @@ fn strip_json_fences(s: &str) -> &str {
     s.trim()
 }
 
+// ── Test-file guard ───────────────────────────────────────────────────────────
+
+/// Returns `true` if `path` refers to a test file.
+///
+/// A path is considered a test file when **any** of the following hold:
+/// - It contains a `tests` path component (e.g., `core/tests/foo.rs`).
+/// - Its filename ends with `_test.rs`.
+/// - Its filename ends with `_integration.rs`.
+///
+/// Implementation files (e.g., `core/src/lib.rs`, `core/src/foo.rs`) are
+/// always rejected so that [`RecoveryActionKind::FixTest`] can never mutate
+/// non-test sources.
+pub fn is_test_file(path: &Path) -> bool {
+    // Check for a `tests` directory component anywhere in the path.
+    if path.components().any(|c| c.as_os_str() == "tests") {
+        return true;
+    }
+    // Check filename suffixes.
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .map(|name| name.ends_with("_test.rs") || name.ends_with("_integration.rs"))
+        .unwrap_or(false)
+}
+
+/// Build the targeted AI prompt for a [`RecoveryActionKind::FixTest`] action.
+fn build_fix_test_prompt(file_path: &Path, file_content: &str, description: &str) -> String {
+    format!(
+        r#"You are a Rust compiler assistant. A test file has a compile error caused by a
+function signature mismatch (e.g., the implementation changed and the test call-site
+was not updated). Your task is to fix the call-site in the test file only.
+
+## Test file path
+{path}
+
+## Compile error / context
+{description}
+
+## Current test file content
+```rust
+{content}
+```
+
+## Rules
+- Fix ONLY the test call-site(s) that caused the compile error.
+- Do NOT modify any implementation files.
+- Do NOT change test logic, assertions, or structure — only adjust arguments or
+  method names to match the current function signature.
+- Return ONLY the complete fixed file content, with no markdown fences, no
+  explanation, and no preamble.
+"#,
+        path = file_path.display(),
+        description = description,
+        content = file_content,
+    )
+}
+
 // ── Recovery executor ─────────────────────────────────────────────────────────
 
 /// Result of executing a recovery action.
@@ -586,15 +662,23 @@ pub struct RecoveryOutcome {
 /// `repo_root` as the working directory and the PID file is checked relative
 /// to it.
 ///
-/// # Safety guard
+/// `ai_dispatcher` is used only by [`RecoveryActionKind::FixTest`]; all other
+/// actions ignore it.  Pass `None` when no AI dispatcher is available (FixTest
+/// will fall back to [`RecoveryActionKind::Escalate`]).
 ///
-/// `CoordinatorUnlock` and `CoordinatorReconcile` are **skipped** (with a
-/// warning log) when [`is_coordinator_running`] returns `true`.  This prevents
-/// double-execution when the coordinator is still alive.
-pub async fn execute_recovery(
+/// # Safety guards
+///
+/// - `CoordinatorUnlock` and `CoordinatorReconcile` are **skipped** when
+///   [`is_coordinator_running`] returns `true`.
+/// - `FixTest` is **rejected** for non-test files via [`is_test_file`].  The
+///   compile verification gate (`cargo build -p macc-core --tests`) must pass
+///   before the AI-generated fix is kept; otherwise the original file is
+///   restored and the action falls back to `Escalate`.
+pub async fn execute_recovery<D: AiAnalysisDispatcher>(
     action: &RecoveryActionKind,
     worktree_path: &Path,
     repo_root: &Path,
+    ai_dispatcher: Option<&D>,
 ) -> RecoveryOutcome {
     match action {
         RecoveryActionKind::None => RecoveryOutcome {
@@ -694,6 +778,194 @@ pub async fn execute_recovery(
                     output: e.to_string(),
                 },
             }
+        }
+        RecoveryActionKind::FixTest {
+            file_path,
+            description,
+        } => {
+            execute_fix_test(file_path, description, worktree_path, repo_root, ai_dispatcher)
+                .await
+        }
+        RecoveryActionKind::Escalate { reason } => {
+            tracing::warn!(
+                reason = %reason,
+                "supervisor mode_b: escalating — no automated fix applied"
+            );
+            RecoveryOutcome {
+                action: action.clone(),
+                succeeded: true,
+                output: format!("escalated: {}", reason),
+            }
+        }
+    }
+}
+
+/// Inner implementation for [`RecoveryActionKind::FixTest`].
+///
+/// Separated to keep [`execute_recovery`] readable.  Call only from there.
+async fn execute_fix_test<D: AiAnalysisDispatcher>(
+    file_path: &Path,
+    description: &str,
+    worktree_path: &Path,
+    repo_root: &Path,
+    ai_dispatcher: Option<&D>,
+) -> RecoveryOutcome {
+    // ── Guard: only test files ────────────────────────────────────────────────
+    if !is_test_file(file_path) {
+        let reason = format!(
+            "FixTest guard rejected non-test file: {}",
+            file_path.display()
+        );
+        tracing::warn!(reason = %reason, "supervisor mode_b: FixTest guard rejected path");
+        return RecoveryOutcome {
+            action: RecoveryActionKind::Escalate {
+                reason: reason.clone(),
+            },
+            succeeded: false,
+            output: reason,
+        };
+    }
+
+    // ── Require a dispatcher ──────────────────────────────────────────────────
+    let dispatcher = match ai_dispatcher {
+        Some(d) => d,
+        None => {
+            let reason = "FixTest: no AI dispatcher available".to_string();
+            tracing::warn!(reason = %reason, "supervisor mode_b: FixTest skipped");
+            return RecoveryOutcome {
+                action: RecoveryActionKind::Escalate {
+                    reason: reason.clone(),
+                },
+                succeeded: false,
+                output: reason,
+            };
+        }
+    };
+
+    // ── Resolve path (relative paths are resolved relative to worktree) ───────
+    let resolved = if file_path.is_absolute() {
+        file_path.to_path_buf()
+    } else {
+        worktree_path.join(file_path)
+    };
+
+    // ── Read current file content ─────────────────────────────────────────────
+    let original_content = match fs::read_to_string(&resolved) {
+        Ok(c) => c,
+        Err(e) => {
+            let reason = format!(
+                "FixTest: cannot read {}: {}",
+                resolved.display(),
+                e
+            );
+            tracing::warn!(reason = %reason, "supervisor mode_b: FixTest read error");
+            return RecoveryOutcome {
+                action: RecoveryActionKind::Escalate {
+                    reason: reason.clone(),
+                },
+                succeeded: false,
+                output: reason,
+            };
+        }
+    };
+
+    // ── Build and dispatch prompt ─────────────────────────────────────────────
+    let prompt = build_fix_test_prompt(&resolved, &original_content, description);
+    let fixed_content = match dispatcher.dispatch(&prompt).await {
+        Ok(content) => content,
+        Err(e) => {
+            let reason = format!("FixTest: AI dispatch failed: {}", e);
+            tracing::warn!(reason = %reason, "supervisor mode_b: FixTest dispatch error");
+            return RecoveryOutcome {
+                action: RecoveryActionKind::Escalate {
+                    reason: reason.clone(),
+                },
+                succeeded: false,
+                output: reason,
+            };
+        }
+    };
+
+    // ── Write fix, run compile gate, restore on failure ───────────────────────
+    let backup_path = resolved.with_extension("rs.fix_backup");
+    if let Err(e) = fs::write(&backup_path, &original_content) {
+        let reason = format!("FixTest: cannot write backup: {}", e);
+        tracing::warn!(reason = %reason, "supervisor mode_b: FixTest backup error");
+        return RecoveryOutcome {
+            action: RecoveryActionKind::Escalate {
+                reason: reason.clone(),
+            },
+            succeeded: false,
+            output: reason,
+        };
+    }
+    if let Err(e) = fs::write(&resolved, &fixed_content) {
+        let reason = format!("FixTest: cannot write fix: {}", e);
+        let _ = fs::remove_file(&backup_path);
+        tracing::warn!(reason = %reason, "supervisor mode_b: FixTest write error");
+        return RecoveryOutcome {
+            action: RecoveryActionKind::Escalate {
+                reason: reason.clone(),
+            },
+            succeeded: false,
+            output: reason,
+        };
+    }
+
+    // Compile verification gate: `cargo build -p macc-core --tests`
+    let build_result = tokio::process::Command::new("cargo")
+        .args(["build", "-p", "macc-core", "--tests"])
+        .current_dir(repo_root)
+        .output()
+        .await;
+
+    let (build_ok, build_stderr) = match build_result {
+        Ok(o) => (
+            o.status.success(),
+            String::from_utf8_lossy(&o.stderr).trim().to_owned(),
+        ),
+        Err(e) => (false, e.to_string()),
+    };
+
+    if build_ok {
+        // Fix compiles — discard backup and report success.
+        let _ = fs::remove_file(&backup_path);
+        tracing::info!(
+            file = %resolved.display(),
+            "supervisor mode_b: FixTest applied — compile gate passed"
+        );
+        RecoveryOutcome {
+            action: RecoveryActionKind::FixTest {
+                file_path: file_path.to_path_buf(),
+                description: description.to_string(),
+            },
+            succeeded: true,
+            output: format!(
+                "FixTest: fix applied and verified for {}",
+                resolved.display()
+            ),
+        }
+    } else {
+        // Build failed — restore original, escalate.
+        if let Err(e) = fs::rename(&backup_path, &resolved) {
+            tracing::error!(
+                file = %resolved.display(),
+                error = %e,
+                "supervisor mode_b: FixTest failed to restore backup after compile failure"
+            );
+        }
+        let reason = format!(
+            "FixTest: compile gate failed for {} — fix not applied. Build error: {}",
+            resolved.display(),
+            build_stderr
+        );
+        tracing::warn!(reason = %reason, "supervisor mode_b: FixTest compile gate failed");
+        RecoveryOutcome {
+            action: RecoveryActionKind::Escalate {
+                reason: reason.clone(),
+            },
+            succeeded: false,
+            output: reason,
         }
     }
 }
@@ -917,12 +1189,16 @@ impl<D: AiAnalysisDispatcher> ModeBSupervisor<D> {
         let mut result = parse_ai_response(&raw)?;
 
         // Step 5 – execute recovery action.
-        let recovery_outcome =
-            execute_recovery(&result.recovery_action, worktree_path, &self.repo_root).await;
+        let recovery_outcome = execute_recovery(
+            &result.recovery_action,
+            worktree_path,
+            &self.repo_root,
+            Some(&self.dispatcher),
+        )
+        .await;
         let recovery_action = build_recovery_supervisor_action(
             task_id,
             worktree_path,
-            &result.recovery_action,
             &recovery_outcome,
         );
         result.report.actions_taken.push(recovery_action);
@@ -949,11 +1225,13 @@ impl<D: AiAnalysisDispatcher> ModeBSupervisor<D> {
 fn build_recovery_supervisor_action(
     task_id: &str,
     worktree_path: &Path,
-    action: &RecoveryActionKind,
     outcome: &RecoveryOutcome,
 ) -> SupervisorAction {
     let wt = worktree_path.to_string_lossy().into_owned();
-    match action {
+    // Match on the *actual* action taken (outcome.action), not the originally
+    // recommended action.  This correctly captures fall-backs, e.g. when
+    // FixTest falls back to Escalate after a compile-gate failure.
+    match &outcome.action {
         RecoveryActionKind::None => SupervisorAction::NoAction {
             reason: format!(
                 "Mode B: no recovery action recommended for task {}",
@@ -977,6 +1255,13 @@ fn build_recovery_supervisor_action(
         RecoveryActionKind::CoordinatorReconcile => SupervisorAction::CoordinatorReconciled {
             succeeded: outcome.succeeded,
         },
+        RecoveryActionKind::FixTest { file_path, .. } => SupervisorAction::TestFixApplied {
+            file_path: file_path.to_string_lossy().into_owned(),
+            succeeded: outcome.succeeded,
+        },
+        RecoveryActionKind::Escalate { reason } => SupervisorAction::Escalated {
+            reason: reason.clone(),
+        },
     }
 }
 
@@ -985,7 +1270,6 @@ fn build_recovery_supervisor_action(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
 
     // ── helpers ───────────────────────────────────────────────────────────────
 
@@ -1345,6 +1629,13 @@ mod tests {
                 task_ids: vec!["L5-FOO-001".to_string(), "L5-FOO-002".to_string()],
             },
             RecoveryActionKind::CoordinatorReconcile,
+            RecoveryActionKind::FixTest {
+                file_path: PathBuf::from("tests/foo_test.rs"),
+                description: "error[E0061]: argument count mismatch".to_string(),
+            },
+            RecoveryActionKind::Escalate {
+                reason: "compile gate rejected fix".to_string(),
+            },
         ];
         for action in actions {
             let json = serde_json::to_string(&action).expect("serialize");
@@ -1412,7 +1703,7 @@ mod tests {
         let action = RecoveryActionKind::CoordinatorUnlock {
             task_ids: vec!["L5-FOO-001".to_string()],
         };
-        let outcome = execute_recovery(&action, &wt, &root).await;
+        let outcome = execute_recovery::<MockDispatcher>(&action, &wt, &root, None).await;
 
         assert!(!outcome.succeeded);
         assert!(outcome.output.contains("skipped"));
@@ -1429,7 +1720,7 @@ mod tests {
             .expect("write pid file");
 
         let action = RecoveryActionKind::CoordinatorReconcile;
-        let outcome = execute_recovery(&action, &wt, &root).await;
+        let outcome = execute_recovery::<MockDispatcher>(&action, &wt, &root, None).await;
 
         assert!(!outcome.succeeded);
         assert!(outcome.output.contains("skipped"));
@@ -1444,7 +1735,7 @@ mod tests {
         let action = RecoveryActionKind::CoordinatorUnlock {
             task_ids: vec!["L5-FOO-001".to_string()],
         };
-        let outcome = execute_recovery(&action, &wt, &root).await;
+        let outcome = execute_recovery::<MockDispatcher>(&action, &wt, &root, None).await;
 
         // The outcome may succeed or fail depending on whether `macc` is in PATH.
         // What matters is that the safety-guard "skipped" message is absent —
@@ -1459,9 +1750,157 @@ mod tests {
         // No PID file → coordinator is NOT running → command is attempted.
 
         let action = RecoveryActionKind::CoordinatorReconcile;
-        let outcome = execute_recovery(&action, &wt, &root).await;
+        let outcome = execute_recovery::<MockDispatcher>(&action, &wt, &root, None).await;
 
         // Same rationale as above — guard "skipped" message must be absent.
         assert!(!outcome.output.contains("skipped: coordinator is still running"));
+    }
+
+    // ── is_test_file guard ────────────────────────────────────────────────────
+
+    #[test]
+    fn is_test_file_accepts_tests_directory_component() {
+        assert!(is_test_file(Path::new("core/tests/foo.rs")));
+        assert!(is_test_file(Path::new("/abs/path/tests/bar_test.rs")));
+        assert!(is_test_file(Path::new("tests/integration.rs")));
+    }
+
+    #[test]
+    fn is_test_file_accepts_test_suffix() {
+        assert!(is_test_file(Path::new("core/src/foo_test.rs")));
+        assert!(is_test_file(Path::new("src/bar_test.rs")));
+    }
+
+    #[test]
+    fn is_test_file_accepts_integration_suffix() {
+        assert!(is_test_file(Path::new("core/src/foo_integration.rs")));
+        assert!(is_test_file(Path::new("src/bar_integration.rs")));
+    }
+
+    #[test]
+    fn is_test_file_rejects_implementation_files() {
+        assert!(!is_test_file(Path::new("core/src/lib.rs")));
+        assert!(!is_test_file(Path::new("core/src/coordinator/engine.rs")));
+        assert!(!is_test_file(Path::new("src/main.rs")));
+        assert!(!is_test_file(Path::new("core/src/supervisor/mode_b.rs")));
+    }
+
+    // ── Escalate action ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn escalate_writes_reason_to_outcome_and_does_not_spawn_process() {
+        let root = temp_dir("escalate-root");
+        let wt = temp_dir("escalate-wt");
+        let reason = "test compile error: argument count mismatch".to_string();
+        let action = RecoveryActionKind::Escalate {
+            reason: reason.clone(),
+        };
+
+        let outcome = execute_recovery::<MockDispatcher>(&action, &wt, &root, None).await;
+
+        // Escalate should succeed (no process error) and include the reason.
+        assert!(outcome.succeeded);
+        assert!(outcome.output.contains(&reason));
+        // Outcome action should be Escalate.
+        assert!(
+            matches!(&outcome.action, RecoveryActionKind::Escalate { reason: r } if r == &reason)
+        );
+    }
+
+    // ── FixTest guard: rejects implementation files ───────────────────────────
+
+    #[tokio::test]
+    async fn fix_test_on_implementation_file_escalates() {
+        let root = temp_dir("fix-test-guard-root");
+        let wt = temp_dir("fix-test-guard-wt");
+
+        // Use an implementation file path (not a test file).
+        let impl_path = PathBuf::from("core/src/supervisor/mode_b.rs");
+        let action = RecoveryActionKind::FixTest {
+            file_path: impl_path.clone(),
+            description: "some compile error".to_string(),
+        };
+        let dispatcher = MockDispatcher {
+            response: "// fixed content".to_string(),
+        };
+        let outcome = execute_recovery(&action, &wt, &root, Some(&dispatcher)).await;
+
+        // Guard must reject and fall back to Escalate.
+        assert!(!outcome.succeeded);
+        assert!(
+            matches!(&outcome.action, RecoveryActionKind::Escalate { .. }),
+            "expected Escalate fallback, got {:?}",
+            outcome.action
+        );
+        assert!(outcome.output.contains("guard rejected"));
+    }
+
+    // ── FixTest: compile gate called before applying fix ─────────────────────
+
+    #[tokio::test]
+    async fn fix_test_with_mock_ai_verifies_compile_gate_before_applying() {
+        // This test verifies the compile gate by observing that the fix is NOT
+        // applied when `cargo build -p macc-core --tests` fails (which it will
+        // in an isolated temp dir without a Cargo.toml).
+        let root = temp_dir("fix-test-compile-gate-root");
+        let wt = temp_dir("fix-test-compile-gate-wt");
+
+        // Create a fake test file in the worktree under a `tests/` directory.
+        let tests_dir = wt.join("tests");
+        fs::create_dir_all(&tests_dir).expect("create tests dir");
+        let test_file = tests_dir.join("my_test.rs");
+        let original_content = "fn old_api_call() {}";
+        fs::write(&test_file, original_content).expect("write test file");
+
+        // The mock AI returns "fixed" content.
+        let fixed_content = "fn new_api_call() {}";
+        let dispatcher = MockDispatcher {
+            response: fixed_content.to_string(),
+        };
+
+        // Use a relative path so execute_fix_test resolves it against worktree.
+        let action = RecoveryActionKind::FixTest {
+            file_path: PathBuf::from("tests/my_test.rs"),
+            description: "call to old_api_call() does not compile: function removed".to_string(),
+        };
+
+        let outcome = execute_recovery(&action, &wt, &root, Some(&dispatcher)).await;
+
+        // The compile gate must fail (no Cargo.toml in temp root).
+        // Therefore the fix must NOT be applied and the file must be restored.
+        let content_after = fs::read_to_string(&test_file).expect("read after");
+        assert_eq!(
+            content_after, original_content,
+            "original file must be restored when compile gate fails"
+        );
+
+        // Outcome should be Escalate (gate failed → fell back to Escalate).
+        assert!(
+            matches!(&outcome.action, RecoveryActionKind::Escalate { .. }),
+            "expected Escalate after compile-gate failure, got {:?}",
+            outcome.action
+        );
+        assert!(!outcome.succeeded);
+        assert!(outcome.output.contains("compile gate failed") || outcome.output.contains("FixTest"));
+    }
+
+    // ── RecoveryActionKind serde (new variants) ───────────────────────────────
+
+    #[test]
+    fn recovery_action_kind_new_variants_round_trip() {
+        let actions = vec![
+            RecoveryActionKind::FixTest {
+                file_path: PathBuf::from("tests/foo_test.rs"),
+                description: "error[E0061]: wrong number of arguments".to_string(),
+            },
+            RecoveryActionKind::Escalate {
+                reason: "compile gate rejected the AI-generated fix".to_string(),
+            },
+        ];
+        for action in actions {
+            let json = serde_json::to_string(&action).expect("serialize");
+            let back: RecoveryActionKind = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(action, back);
+        }
     }
 }

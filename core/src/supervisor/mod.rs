@@ -308,6 +308,25 @@ pub enum SupervisorAction {
 
     /// Crash recovery report was written to disk.
     CrashRecoveryReportWritten { report_path: String },
+
+    // ── Mode B: AI-powered test fix actions ──────────────────────────────────
+    /// Supervisor applied an AI-generated fix to a test file after the compile
+    /// verification gate passed.
+    ///
+    /// `succeeded` is `false` when the compile gate rejected the fix (original
+    /// file was restored) or when a guard/dispatch error prevented the fix.
+    TestFixApplied {
+        /// Repository-relative or absolute path of the fixed test file.
+        file_path: String,
+        succeeded: bool,
+    },
+
+    /// Supervisor escalated without applying any automated fix.
+    ///
+    /// Used when a recovery action cannot safely proceed: the test-file guard
+    /// rejected the path, the compile gate failed, the AI dispatcher was
+    /// unavailable, or a read/write error occurred.
+    Escalated { reason: String },
 }
 
 // ── Report ───────────────────────────────────────────────────────────────────
