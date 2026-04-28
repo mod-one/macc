@@ -329,6 +329,33 @@ pub enum SupervisorAction {
     Escalated { reason: String },
 }
 
+// ── CoordinatorImprovementHint ────────────────────────────────────────────────
+
+/// A structured hint for how the coordinator could handle a recurring problem
+/// autonomously in the future.
+///
+/// Hints are informational only — they are not acted on automatically.
+/// Consumers (CI, dashboards, downstream planners) should use them to drive
+/// PRD tasks that implement the suggested coordinator behavior.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CoordinatorImprovementHint {
+    /// Short label for the class of problem that was observed (e.g.,
+    /// `"coordinator_crash"`, `"orphaned_tasks_on_crash"`).
+    pub problem_class: String,
+
+    /// Where in the coordinator lifecycle this problem can be detected (e.g.,
+    /// `"watchdog_health_check"`, `"registry_scan_on_startup"`).
+    pub detection_hook: String,
+
+    /// What the coordinator should do autonomously when the problem is detected
+    /// (e.g., `"implement exponential backoff before restart"`).
+    pub suggested_coordinator_behavior: String,
+
+    /// Optional PRD task ID that would implement the suggested behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggested_prd_task: Option<String>,
+}
+
 // ── Report ───────────────────────────────────────────────────────────────────
 
 /// Machine-readable report produced by one supervisor cycle.
@@ -361,6 +388,14 @@ pub struct SupervisorReport {
     /// Concrete source-level changes suggested to improve coordinator resilience.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub suggested_code_changes: Vec<CodeChange>,
+
+    /// Structured hints for improving the coordinator so recurring failures can
+    /// be resolved autonomously in the future.
+    ///
+    /// Populated by Mode B (via AI analysis) and Mode C (via deterministic
+    /// crash-pattern matching).  Absent from the JSON output when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub improvement_hints: Vec<CoordinatorImprovementHint>,
 }
 
 impl SupervisorReport {
@@ -490,6 +525,7 @@ mod tests {
                 before_context: None,
                 suggested_change: "Add a periodic check that requeues claimed tasks older than stale_claimed_seconds".to_string(),
             }],
+            improvement_hints: vec![],
         }
     }
 
@@ -572,9 +608,65 @@ mod tests {
             recommendations: vec![],
             actions_taken: vec![],
             suggested_code_changes: vec![],
+            improvement_hints: vec![],
         };
         assert!(report.is_clean());
         assert!(!sample_report().is_clean());
+    }
+
+    #[test]
+    fn coordinator_improvement_hint_round_trips_json() {
+        let hint = CoordinatorImprovementHint {
+            problem_class: "coordinator_crash".to_string(),
+            detection_hook: "watchdog_health_check".to_string(),
+            suggested_coordinator_behavior:
+                "implement exponential backoff before restart".to_string(),
+            suggested_prd_task: Some("L6-COORD-001".to_string()),
+        };
+        let json = serde_json::to_string(&hint).expect("serialize");
+        let back: CoordinatorImprovementHint = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(hint, back);
+    }
+
+    #[test]
+    fn coordinator_improvement_hint_optional_prd_task_is_skipped_when_none() {
+        let hint = CoordinatorImprovementHint {
+            problem_class: "orphaned_tasks_on_crash".to_string(),
+            detection_hook: "registry_scan_on_startup".to_string(),
+            suggested_coordinator_behavior:
+                "scan for orphaned tasks and reset them on startup".to_string(),
+            suggested_prd_task: None,
+        };
+        let json = serde_json::to_string(&hint).expect("serialize");
+        // None field must not appear in JSON output.
+        assert!(!json.contains("suggested_prd_task"));
+        let back: CoordinatorImprovementHint = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(hint, back);
+    }
+
+    #[test]
+    fn supervisor_report_with_improvement_hints_round_trips_json() {
+        let mut report = sample_report();
+        report.improvement_hints = vec![CoordinatorImprovementHint {
+            problem_class: "coordinator_crash".to_string(),
+            detection_hook: "watchdog_health_check".to_string(),
+            suggested_coordinator_behavior:
+                "implement exponential backoff before restart".to_string(),
+            suggested_prd_task: None,
+        }];
+        let json = serde_json::to_string_pretty(&report).expect("serialize");
+        assert!(json.contains("improvement_hints"));
+        assert!(json.contains("coordinator_crash"));
+        let back: SupervisorReport = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(report, back);
+    }
+
+    #[test]
+    fn supervisor_report_improvement_hints_absent_from_json_when_empty() {
+        let report = sample_report(); // improvement_hints is vec![]
+        let json = serde_json::to_string(&report).expect("serialize");
+        // Empty vec must be omitted entirely.
+        assert!(!json.contains("improvement_hints"));
     }
 
     #[test]
