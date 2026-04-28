@@ -223,6 +223,9 @@ enum Commands {
         /// Disable TUI live view for `macc coordinator run`
         #[arg(long)]
         no_tui: bool,
+        /// Start supervisor in daemon+attach mode before running coordinator
+        #[arg(long)]
+        supervisor: bool,
         /// Graceful stop (SIGTERM only, no SIGKILL escalation)
         #[arg(long)]
         graceful: bool,
@@ -525,6 +528,12 @@ pub enum SupervisorCommands {
         /// Run in background as a daemon process
         #[arg(long)]
         daemon: bool,
+        /// Attach to an existing coordinator run and monitor its PID lifecycle
+        #[arg(long)]
+        attach: bool,
+        /// Explicit coordinator PID to write into the coordinator PID file before attach
+        #[arg(long)]
+        coordinator_pid: Option<u32>,
     },
     /// Stop the supervisor watchdog
     Stop,
@@ -942,6 +951,7 @@ fn run_with_engine_provider(
         Some(Commands::Coordinator {
             command_name,
             no_tui,
+            supervisor,
             graceful,
             remove_worktrees,
             remove_branches,
@@ -983,6 +993,7 @@ fn run_with_engine_provider(
             coordinator::command::CoordinatorCommandInput {
                 command_name: command_name.clone(),
                 no_tui: *no_tui,
+                supervisor: *supervisor,
                 graceful: *graceful,
                 remove_worktrees: *remove_worktrees,
                 remove_branches: *remove_branches,
@@ -1593,6 +1604,23 @@ mod tests {
         let to = parsed.to;
         assert_eq!(from, WorkflowState::Todo);
         assert_eq!(to, WorkflowState::Claimed);
+    }
+
+    #[test]
+    fn test_parse_coordinator_run_supervisor_flag() {
+        let cli = Cli::try_parse_from(["macc", "coordinator", "run", "--supervisor"])
+            .expect("parse coordinator run --supervisor");
+        match cli.command {
+            Some(Commands::Coordinator {
+                command_name,
+                supervisor,
+                ..
+            }) => {
+                assert_eq!(command_name, "run");
+                assert!(supervisor);
+            }
+            _ => panic!("unexpected command"),
+        }
     }
 
     #[test]
@@ -2367,6 +2395,7 @@ fi
                 command: Some(Commands::Coordinator {
                     command_name: "stop".to_string(),
                     no_tui: true,
+                    supervisor: false,
                     graceful: true,
                     remove_worktrees: true,
                     remove_branches: true,
@@ -3762,12 +3791,50 @@ fi
 
     #[test]
     fn test_supervisor_start_daemon_command_parsing() {
-        let cli = Cli::try_parse_from(["macc", "supervisor", "start", "--daemon"])
-            .expect("parse supervisor start command");
+        let cli = Cli::try_parse_from([
+            "macc",
+            "supervisor",
+            "start",
+            "--daemon",
+            "--attach",
+            "--coordinator-pid",
+            "1234",
+        ])
+        .expect("parse supervisor start command");
 
         match cli.command {
             Some(Commands::Supervisor { supervisor_command }) => match supervisor_command {
-                SupervisorCommands::Start { daemon } => assert!(daemon),
+                SupervisorCommands::Start {
+                    daemon,
+                    attach,
+                    coordinator_pid,
+                } => {
+                    assert!(daemon);
+                    assert!(attach);
+                    assert_eq!(coordinator_pid, Some(1234));
+                }
+                _ => panic!("unexpected supervisor subcommand"),
+            },
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn test_supervisor_start_attach_without_daemon_parsing() {
+        let cli = Cli::try_parse_from(["macc", "supervisor", "start", "--attach"])
+            .expect("parse supervisor start attach command");
+
+        match cli.command {
+            Some(Commands::Supervisor { supervisor_command }) => match supervisor_command {
+                SupervisorCommands::Start {
+                    daemon,
+                    attach,
+                    coordinator_pid,
+                } => {
+                    assert!(!daemon);
+                    assert!(attach);
+                    assert_eq!(coordinator_pid, None);
+                }
                 _ => panic!("unexpected supervisor subcommand"),
             },
             _ => panic!("unexpected command"),

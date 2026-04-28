@@ -783,8 +783,14 @@ pub async fn execute_recovery<D: AiAnalysisDispatcher>(
             file_path,
             description,
         } => {
-            execute_fix_test(file_path, description, worktree_path, repo_root, ai_dispatcher)
-                .await
+            execute_fix_test(
+                file_path,
+                description,
+                worktree_path,
+                repo_root,
+                ai_dispatcher,
+            )
+            .await
         }
         RecoveryActionKind::Escalate { reason } => {
             tracing::warn!(
@@ -853,11 +859,7 @@ async fn execute_fix_test<D: AiAnalysisDispatcher>(
     let original_content = match fs::read_to_string(&resolved) {
         Ok(c) => c,
         Err(e) => {
-            let reason = format!(
-                "FixTest: cannot read {}: {}",
-                resolved.display(),
-                e
-            );
+            let reason = format!("FixTest: cannot read {}: {}", resolved.display(), e);
             tracing::warn!(reason = %reason, "supervisor mode_b: FixTest read error");
             return RecoveryOutcome {
                 action: RecoveryActionKind::Escalate {
@@ -1196,11 +1198,8 @@ impl<D: AiAnalysisDispatcher> ModeBSupervisor<D> {
             Some(&self.dispatcher),
         )
         .await;
-        let recovery_action = build_recovery_supervisor_action(
-            task_id,
-            worktree_path,
-            &recovery_outcome,
-        );
+        let recovery_action =
+            build_recovery_supervisor_action(task_id, worktree_path, &recovery_outcome);
         result.report.actions_taken.push(recovery_action);
 
         // Step 6 – write report to disk.
@@ -1697,8 +1696,11 @@ mod tests {
         // Plant current-process PID → coordinator "is running".
         let state_dir = root.join(".macc").join("state");
         fs::create_dir_all(&state_dir).expect("create state dir");
-        fs::write(state_dir.join("coordinator.pid"), std::process::id().to_string())
-            .expect("write pid file");
+        fs::write(
+            state_dir.join("coordinator.pid"),
+            std::process::id().to_string(),
+        )
+        .expect("write pid file");
 
         let action = RecoveryActionKind::CoordinatorUnlock {
             task_ids: vec!["L5-FOO-001".to_string()],
@@ -1716,8 +1718,11 @@ mod tests {
         // Plant current-process PID → coordinator "is running".
         let state_dir = root.join(".macc").join("state");
         fs::create_dir_all(&state_dir).expect("create state dir");
-        fs::write(state_dir.join("coordinator.pid"), std::process::id().to_string())
-            .expect("write pid file");
+        fs::write(
+            state_dir.join("coordinator.pid"),
+            std::process::id().to_string(),
+        )
+        .expect("write pid file");
 
         let action = RecoveryActionKind::CoordinatorReconcile;
         let outcome = execute_recovery::<MockDispatcher>(&action, &wt, &root, None).await;
@@ -1740,7 +1745,9 @@ mod tests {
         // The outcome may succeed or fail depending on whether `macc` is in PATH.
         // What matters is that the safety-guard "skipped" message is absent —
         // the command was actually attempted.
-        assert!(!outcome.output.contains("skipped: coordinator is still running"));
+        assert!(!outcome
+            .output
+            .contains("skipped: coordinator is still running"));
     }
 
     #[tokio::test]
@@ -1753,7 +1760,9 @@ mod tests {
         let outcome = execute_recovery::<MockDispatcher>(&action, &wt, &root, None).await;
 
         // Same rationale as above — guard "skipped" message must be absent.
-        assert!(!outcome.output.contains("skipped: coordinator is still running"));
+        assert!(!outcome
+            .output
+            .contains("skipped: coordinator is still running"));
     }
 
     // ── is_test_file guard ────────────────────────────────────────────────────
@@ -1881,7 +1890,9 @@ mod tests {
             outcome.action
         );
         assert!(!outcome.succeeded);
-        assert!(outcome.output.contains("compile gate failed") || outcome.output.contains("FixTest"));
+        assert!(
+            outcome.output.contains("compile gate failed") || outcome.output.contains("FixTest")
+        );
     }
 
     // ── RecoveryActionKind serde (new variants) ───────────────────────────────
