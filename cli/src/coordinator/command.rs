@@ -11,6 +11,7 @@ use macc_core::service::coordinator_workflow::{
 };
 use macc_core::{load_canonical_config, MaccError, Result};
 use std::path::Path;
+use std::process::{Command as ProcessCommand, Stdio};
 
 fn build_native_logger(
     repo_root: &Path,
@@ -42,6 +43,7 @@ impl macc_core::coordinator::control_plane::CoordinatorLog for LoggerAdapter<'_>
 pub struct CoordinatorCommandInput {
     pub command_name: String,
     pub no_tui: bool,
+    pub supervisor: bool,
     pub graceful: bool,
     pub remove_worktrees: bool,
     pub remove_branches: bool,
@@ -93,6 +95,10 @@ pub fn handle(
         input.remove_worktrees,
         input.remove_branches,
     )?;
+
+    if input.supervisor && input.command_name == "run" {
+        spawn_attached_supervisor(&context.paths.root)?;
+    }
 
     if matches!(command, CoordinatorCommand::Run) && !input.no_tui {
         return macc_tui::run_tui_with_launch(macc_tui::LaunchMode::CoordinatorRun).map_err(|e| {
@@ -283,6 +289,43 @@ Performers cannot commit without it. Fix this first:\n\
     }
 
     Ok(())
+}
+
+fn spawn_attached_supervisor(project_root: &Path) -> Result<()> {
+    let current_exe = std::env::current_exe().map_err(|e| MaccError::Io {
+        path: project_root.to_string_lossy().into(),
+        action: "resolve current executable for coordinator supervisor bootstrap".into(),
+        source: e,
+    })?;
+    let coordinator_pid = std::process::id();
+    let status = ProcessCommand::new(current_exe)
+        .current_dir(project_root)
+        .arg("--cwd")
+        .arg(project_root)
+        .arg("supervisor")
+        .arg("start")
+        .arg("--daemon")
+        .arg("--attach")
+        .arg("--coordinator-pid")
+        .arg(coordinator_pid.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| MaccError::Io {
+            path: project_root.to_string_lossy().into(),
+            action: "spawn supervisor from coordinator run --supervisor".into(),
+            source: e,
+        })?;
+
+    if status.success() {
+        return Ok(());
+    }
+
+    Err(MaccError::Validation(format!(
+        "failed to start supervisor for coordinator run (exit code: {:?})",
+        status.code()
+    )))
 }
 
 fn handle_sessions_command(repo_root: &Path, extra_args: &[String]) -> Result<()> {

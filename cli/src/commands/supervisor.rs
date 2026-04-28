@@ -5,8 +5,10 @@ use macc_core::supervisor::mode_a::{
     CoordinatorProcessManager, SupervisorHealthStatus, SupervisorWatchdog, WatchdogConfig,
     WatchdogError,
 };
+use macc_core::supervisor::mode_c::{ModeCConfig, ModeCRecovery};
 use macc_core::supervisor::SupervisorReport;
 use macc_core::{MaccError, Result};
+use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
@@ -30,7 +32,11 @@ impl<'a> SupervisorCommand<'a> {
 impl<'a> Command for SupervisorCommand<'a> {
     fn run(&self) -> Result<()> {
         match self.command {
-            SupervisorCommands::Start { daemon } => self.start(*daemon),
+            SupervisorCommands::Start {
+                daemon,
+                attach,
+                coordinator_pid,
+            } => self.start(*daemon, *attach, *coordinator_pid),
             SupervisorCommands::Stop => self.stop(),
             SupervisorCommands::Status => self.status(),
             SupervisorCommands::Report => self.report(),
@@ -39,11 +45,20 @@ impl<'a> Command for SupervisorCommand<'a> {
 }
 
 impl<'a> SupervisorCommand<'a> {
-    fn start(&self, daemon: bool) -> Result<()> {
+    fn start(&self, daemon: bool, attach: bool, coordinator_pid: Option<u32>) -> Result<()> {
         let paths = self.app.ensure_initialized_paths()?;
         let canonical = self.app.canonical_config()?;
         let supervisor_cfg = canonical.automation.supervisor.unwrap_or_default();
         let supervisor_pid_path = paths.root.join(SUPERVISOR_PID_REL_PATH);
+        let mut watchdog_cfg = WatchdogConfig {
+            watchdog_interval_seconds: supervisor_cfg.watchdog_interval_seconds.max(1),
+            stall_threshold_seconds: supervisor_cfg.log_analysis_window_seconds.max(1),
+            crash_debounce_checks: supervisor_cfg.crash_debounce_checks.max(1),
+            events_log_path: resolve_project_path(&paths.root, &supervisor_cfg.events_log_path),
+            ..WatchdogConfig::default()
+        };
+        watchdog_cfg.health_status_path = paths.root.join(SUPERVISOR_HEALTH_REL_PATH);
+        watchdog_cfg.pid_file_path = resolve_project_path(&paths.root, &watchdog_cfg.pid_file_path);
 
         if daemon {
             ensure_not_running(&supervisor_pid_path)?;
@@ -59,6 +74,12 @@ impl<'a> SupervisorCommand<'a> {
                 .arg(&paths.root)
                 .arg("supervisor")
                 .arg("start")
+                .args(attach.then_some("--attach"))
+                .args(
+                    coordinator_pid
+                        .map(|pid| vec!["--coordinator-pid".to_string(), pid.to_string()])
+                        .unwrap_or_default(),
+                )
                 .env(SUPERVISOR_DAEMON_CHILD_ENV, "1")
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
@@ -78,19 +99,9 @@ impl<'a> SupervisorCommand<'a> {
 
         let process_id = std::process::id();
         write_pid_file(&supervisor_pid_path, process_id)?;
-
-        let mut watchdog_cfg = WatchdogConfig {
-            watchdog_interval_seconds: supervisor_cfg.watchdog_interval_seconds.max(1),
-            stall_threshold_seconds: supervisor_cfg.log_analysis_window_seconds.max(1),
-            crash_debounce_checks: supervisor_cfg.crash_debounce_checks.max(1),
-            events_log_path: resolve_project_path(&paths.root, &supervisor_cfg.events_log_path),
-            ..WatchdogConfig::default()
-        };
-
-        watchdog_cfg.health_status_path = paths.root.join(SUPERVISOR_HEALTH_REL_PATH);
-
-        let coordinator_pid_path = resolve_project_path(&paths.root, &watchdog_cfg.pid_file_path);
-        watchdog_cfg.pid_file_path = coordinator_pid_path;
+        if let Some(pid) = coordinator_pid {
+            write_pid_file(&watchdog_cfg.pid_file_path, pid)?;
+        }
 
         let coordinator_start_cmd = vec![
             std::env::current_exe()
@@ -110,12 +121,12 @@ impl<'a> SupervisorCommand<'a> {
 
         let process_manager = CoordinatorProcessManager::new(watchdog_cfg.pid_file_path.clone())
             .with_start_command(coordinator_start_cmd);
-        let mut watchdog = SupervisorWatchdog::new(watchdog_cfg.clone(), process_manager);
+        let mut watchdog = SupervisorWatchdog::new(watchdog_cfg, process_manager.clone());
 
         println!(
             "Supervisor started (watchdog={}s, health={}).",
-            watchdog_cfg.watchdog_interval_seconds,
-            watchdog_cfg.health_status_path.display()
+            supervisor_cfg.watchdog_interval_seconds.max(1),
+            paths.root.join(SUPERVISOR_HEALTH_REL_PATH).display()
         );
 
         let runtime = tokio::runtime::Runtime::new().map_err(|e| {
@@ -123,15 +134,95 @@ impl<'a> SupervisorCommand<'a> {
         })?;
 
         let result = runtime.block_on(async {
-            tokio::select! {
-                res = watchdog.run_forever() => map_watchdog_error(res),
-                sig = tokio::signal::ctrl_c() => {
-                    sig.map_err(|e| MaccError::Io {
-                        path: "signal".into(),
-                        action: "wait for ctrl-c".into(),
-                        source: e,
+            if attach {
+                loop {
+                    let status = watchdog.check_once().await.map_err(|err| {
+                        MaccError::Validation(format!("supervisor attach check failed: {}", err))
                     })?;
-                    Ok(())
+
+                    if let Some(pid) = status.coordinator_pid {
+                        if !is_pid_running(pid) {
+                            let result = read_last_coordinator_result(&resolve_project_path(
+                                &paths.root,
+                                &supervisor_cfg.events_log_path,
+                            ))?;
+                            if matches!(result.as_deref(), Some("success")) {
+                                return Ok(());
+                            }
+                            let mut recovery = ModeCRecovery::new(ModeCConfig {
+                                events_log_path: resolve_project_path(
+                                    &paths.root,
+                                    &supervisor_cfg.events_log_path,
+                                ),
+                                ..ModeCConfig::default()
+                            });
+                            let exit_code = match status.health {
+                                macc_core::supervisor::HealthCheckResult::Crashed { exit_code } => {
+                                    exit_code
+                                }
+                                _ => None,
+                            };
+                            recovery
+                                .run_recovery(&process_manager, exit_code)
+                                .await
+                                .map_err(|err| {
+                                    MaccError::Validation(format!(
+                                        "supervisor attach recovery failed: {}",
+                                        err
+                                    ))
+                                })?;
+                            return Ok(());
+                        }
+                    } else {
+                        let result = read_last_coordinator_result(&resolve_project_path(
+                            &paths.root,
+                            &supervisor_cfg.events_log_path,
+                        ))?;
+                        if matches!(result.as_deref(), Some("success")) {
+                            return Ok(());
+                        }
+                        if matches!(result.as_deref(), Some("failed")) {
+                            let mut recovery = ModeCRecovery::new(ModeCConfig {
+                                events_log_path: resolve_project_path(
+                                    &paths.root,
+                                    &supervisor_cfg.events_log_path,
+                                ),
+                                ..ModeCConfig::default()
+                            });
+                            let exit_code = match status.health {
+                                macc_core::supervisor::HealthCheckResult::Crashed { exit_code } => {
+                                    exit_code
+                                }
+                                _ => None,
+                            };
+                            recovery
+                                .run_recovery(&process_manager, exit_code)
+                                .await
+                                .map_err(|err| {
+                                    MaccError::Validation(format!(
+                                        "supervisor attach recovery failed: {}",
+                                        err
+                                    ))
+                                })?;
+                            return Ok(());
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_secs(
+                        supervisor_cfg.watchdog_interval_seconds.max(1),
+                    ))
+                    .await;
+                }
+            } else {
+                tokio::select! {
+                    res = watchdog.run_forever() => map_watchdog_error(res),
+                    sig = tokio::signal::ctrl_c() => {
+                        sig.map_err(|e| MaccError::Io {
+                            path: "signal".into(),
+                            action: "wait for ctrl-c".into(),
+                            source: e,
+                        })?;
+                        Ok(())
+                    }
                 }
             }
         });
@@ -280,6 +371,37 @@ impl<'a> SupervisorCommand<'a> {
 
         Ok(())
     }
+}
+
+fn read_last_coordinator_result(path: &Path) -> Result<Option<String>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(path).map_err(|e| MaccError::Io {
+        path: path.to_string_lossy().into(),
+        action: "read coordinator events log".into(),
+        source: e,
+    })?;
+    for line in raw.lines().rev() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+            let result = value
+                .get("result")
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    value
+                        .get("payload")
+                        .and_then(|payload| payload.get("result"))
+                        .and_then(Value::as_str)
+                })
+                .map(|v| v.to_ascii_lowercase());
+            return Ok(result);
+        }
+    }
+    Ok(None)
 }
 
 fn resolve_project_path(root: &Path, path: &Path) -> PathBuf {

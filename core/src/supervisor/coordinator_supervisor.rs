@@ -284,10 +284,7 @@ impl CoordinatorEvidenceCollector {
             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if name.contains(task_id) && path.is_file() {
                 if let Ok(content) = fs::read_to_string(&path) {
-                    let lines: Vec<String> = content
-                        .lines()
-                        .map(str::to_owned)
-                        .collect();
+                    let lines: Vec<String> = content.lines().map(str::to_owned).collect();
                     let tail = if lines.len() > max_lines {
                         lines[lines.len() - max_lines..].to_vec()
                     } else {
@@ -305,10 +302,7 @@ impl CoordinatorEvidenceCollector {
         let Ok(content) = fs::read_to_string(&path) else {
             return Vec::new();
         };
-        let lines: Vec<String> = content
-            .lines()
-            .map(str::to_owned)
-            .collect();
+        let lines: Vec<String> = content.lines().map(str::to_owned).collect();
         let n = self.config.run_log_footer_lines;
         if lines.len() > n {
             lines[lines.len() - n..].to_vec()
@@ -546,11 +540,7 @@ mod tests {
     }
 
     /// Build a minimal fixture repo root with events, registry, and run log.
-    fn fixture_repo(
-        events: &[&str],
-        registry_json: &str,
-        run_log: &[&str],
-    ) -> PathBuf {
+    fn fixture_repo(events: &[&str], registry_json: &str, run_log: &[&str]) -> PathBuf {
         let root = temp_dir("fixture");
 
         // events.jsonl
@@ -570,13 +560,9 @@ mod tests {
         }
 
         // task registry
-        let registry_dir = root
-            .join(".macc")
-            .join("automation")
-            .join("task");
+        let registry_dir = root.join(".macc").join("automation").join("task");
         fs::create_dir_all(&registry_dir).expect("create registry dir");
-        fs::write(registry_dir.join("task_registry.json"), registry_json)
-            .expect("write registry");
+        fs::write(registry_dir.join("task_registry.json"), registry_json).expect("write registry");
 
         // performer log dir (empty for most tests)
         let performer_log_dir = root.join(".macc").join("log").join("performer");
@@ -874,9 +860,7 @@ mod tests {
 
     #[test]
     fn parse_result_handles_json_style() {
-        let footer = vec![
-            r#"{"result":"failed","exit_reason":"all_exhausted"}"#.to_string(),
-        ];
+        let footer = vec![r#"{"result":"failed","exit_reason":"all_exhausted"}"#.to_string()];
         let (result, reason) = parse_coordinator_result(&footer);
         assert_eq!(result.as_deref(), Some("failed"));
         assert_eq!(reason.as_deref(), Some("all_exhausted"));
