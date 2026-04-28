@@ -24,8 +24,8 @@
 
 use crate::coordinator::model::{Task, TaskRegistry};
 use crate::supervisor::{
-    CoordinatorImprovementHint, Finding, FindingCategory, HealthCheckResult, ProcessManager,
-    ProcessManagerError, Recommendation, Severity, SupervisorAction, SupervisorReport,
+    Finding, FindingCategory, HealthCheckResult, ProcessManager, ProcessManagerError,
+    Recommendation, Severity, SupervisorAction, SupervisorReport,
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -683,8 +683,6 @@ pub fn build_supervisor_report(recovery: &CrashRecoveryReport) -> SupervisorRepo
         });
     }
 
-    let improvement_hints = build_improvement_hints(recovery);
-
     SupervisorReport {
         timestamp: recovery.timestamp.clone(),
         analysis_window_seconds: 0,
@@ -693,74 +691,7 @@ pub fn build_supervisor_report(recovery: &CrashRecoveryReport) -> SupervisorRepo
         recommendations,
         actions_taken: recovery.actions_taken.clone(),
         suggested_code_changes: Vec::new(),
-        improvement_hints,
     }
-}
-
-/// Derive structured improvement hints from a crash recovery report.
-///
-/// Each known crash pattern maps to a [`CoordinatorImprovementHint`] that gives
-/// operators structured, actionable guidance for making the coordinator handle
-/// the same problem autonomously in the future.
-fn build_improvement_hints(recovery: &CrashRecoveryReport) -> Vec<CoordinatorImprovementHint> {
-    let mut hints: Vec<CoordinatorImprovementHint> = Vec::new();
-
-    // Pattern: coordinator crashed (always present in Mode C).
-    hints.push(CoordinatorImprovementHint {
-        problem_class: "coordinator_crash".to_string(),
-        detection_hook: "watchdog_health_check".to_string(),
-        suggested_coordinator_behavior: "implement exponential backoff before each restart \
-            attempt and emit a structured alert on repeated crashes so operators are notified \
-            without requiring supervisor intervention"
-            .to_string(),
-        suggested_prd_task: None,
-    });
-
-    // Pattern: orphaned tasks found — performers were not running when crash was detected.
-    if let Some(cleanup) = &recovery.cleanup_result {
-        if !cleanup.reset_task_ids.is_empty() {
-            hints.push(CoordinatorImprovementHint {
-                problem_class: "orphaned_tasks_on_crash".to_string(),
-                detection_hook: "registry_scan_on_startup".to_string(),
-                suggested_coordinator_behavior:
-                    "scan the task registry on every coordinator startup and automatically reset \
-                    tasks in claimed/in_progress state whose performer PID is no longer alive, \
-                    preventing manual supervisor intervention on each restart"
-                        .to_string(),
-                suggested_prd_task: None,
-            });
-        }
-    }
-
-    // Pattern: max restart attempts exceeded — persistent crash loop.
-    if recovery.max_restarts_exceeded {
-        hints.push(CoordinatorImprovementHint {
-            problem_class: "persistent_crash_loop".to_string(),
-            detection_hook: "restart_attempt_counter".to_string(),
-            suggested_coordinator_behavior:
-                "circuit-break after reaching the max restart threshold: stop retrying, write \
-                a critical alert to the event log, and wait for explicit operator resume signal \
-                instead of silently giving up"
-                    .to_string(),
-            suggested_prd_task: None,
-        });
-    }
-
-    // Pattern: events log was empty or missing at crash time.
-    if recovery.crash_evidence.last_events.is_empty() {
-        hints.push(CoordinatorImprovementHint {
-            problem_class: "events_log_unavailable_at_crash".to_string(),
-            detection_hook: "events_log_read_on_crash_detection".to_string(),
-            suggested_coordinator_behavior:
-                "add a startup check that validates events.jsonl writability before beginning \
-                orchestration; emit a structured warning when the log cannot be opened so \
-                operators can diagnose storage or permission issues before tasks are dispatched"
-                    .to_string(),
-            suggested_prd_task: None,
-        });
-    }
-
-    hints
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -1248,128 +1179,6 @@ mod tests {
         assert!(matches!(report.health, HealthCheckResult::Crashed { .. }));
         assert!(report.has_severity(&Severity::Critical));
         assert!(!report.recommendations.is_empty());
-    }
-
-    // ── build_supervisor_report: improvement hints ─────────────────────────────
-
-    fn basic_crash_report(max_restarts_exceeded: bool, orphaned: bool, events_empty: bool) -> CrashRecoveryReport {
-        CrashRecoveryReport {
-            timestamp: "2026-04-28T00:00:00Z".to_string(),
-            crash_evidence: CrashEvidence {
-                exit_code: Some(1),
-                last_events: if events_empty {
-                    vec![]
-                } else {
-                    vec!["event1".to_string()]
-                },
-                detected_at: "2026-04-28T00:00:00Z".to_string(),
-                active_tasks_at_crash: if orphaned { 1 } else { 0 },
-            },
-            cleanup_result: if orphaned {
-                Some(RegistryCleanupResult {
-                    reset_task_ids: vec!["T-001".to_string()],
-                    skipped_active: 0,
-                })
-            } else {
-                None
-            },
-            restart_succeeded: !max_restarts_exceeded,
-            restart_attempts: if max_restarts_exceeded { 3 } else { 1 },
-            post_restart_healthy: !max_restarts_exceeded,
-            actions_taken: vec![],
-            max_restarts_exceeded,
-            session_snapshot_path: None,
-        }
-    }
-
-    #[test]
-    fn build_supervisor_report_always_emits_coordinator_crash_hint() {
-        let recovery = basic_crash_report(false, false, false);
-        let report = build_supervisor_report(&recovery);
-        let classes: Vec<&str> = report
-            .improvement_hints
-            .iter()
-            .map(|h| h.problem_class.as_str())
-            .collect();
-        assert!(
-            classes.contains(&"coordinator_crash"),
-            "expected coordinator_crash hint, got: {:?}",
-            classes
-        );
-    }
-
-    #[test]
-    fn build_supervisor_report_emits_orphaned_tasks_hint_when_tasks_were_reset() {
-        let recovery = basic_crash_report(false, true, false);
-        let report = build_supervisor_report(&recovery);
-        let classes: Vec<&str> = report
-            .improvement_hints
-            .iter()
-            .map(|h| h.problem_class.as_str())
-            .collect();
-        assert!(
-            classes.contains(&"orphaned_tasks_on_crash"),
-            "expected orphaned_tasks_on_crash hint, got: {:?}",
-            classes
-        );
-    }
-
-    #[test]
-    fn build_supervisor_report_no_orphaned_tasks_hint_when_no_reset() {
-        let recovery = basic_crash_report(false, false, false);
-        let report = build_supervisor_report(&recovery);
-        let classes: Vec<&str> = report
-            .improvement_hints
-            .iter()
-            .map(|h| h.problem_class.as_str())
-            .collect();
-        assert!(
-            !classes.contains(&"orphaned_tasks_on_crash"),
-            "unexpected orphaned_tasks_on_crash hint when no tasks were reset"
-        );
-    }
-
-    #[test]
-    fn build_supervisor_report_emits_persistent_crash_loop_hint_when_max_exceeded() {
-        let recovery = basic_crash_report(true, false, false);
-        let report = build_supervisor_report(&recovery);
-        let classes: Vec<&str> = report
-            .improvement_hints
-            .iter()
-            .map(|h| h.problem_class.as_str())
-            .collect();
-        assert!(
-            classes.contains(&"persistent_crash_loop"),
-            "expected persistent_crash_loop hint, got: {:?}",
-            classes
-        );
-    }
-
-    #[test]
-    fn build_supervisor_report_emits_events_log_hint_when_events_empty() {
-        let recovery = basic_crash_report(false, false, true);
-        let report = build_supervisor_report(&recovery);
-        let classes: Vec<&str> = report
-            .improvement_hints
-            .iter()
-            .map(|h| h.problem_class.as_str())
-            .collect();
-        assert!(
-            classes.contains(&"events_log_unavailable_at_crash"),
-            "expected events_log_unavailable_at_crash hint, got: {:?}",
-            classes
-        );
-    }
-
-    #[test]
-    fn build_supervisor_report_improvement_hints_serialize_in_json_output() {
-        let recovery = basic_crash_report(false, false, false);
-        let report = build_supervisor_report(&recovery);
-        assert!(!report.improvement_hints.is_empty());
-        let json = serde_json::to_string_pretty(&report).expect("serialize");
-        assert!(json.contains("improvement_hints"));
-        assert!(json.contains("problem_class"));
-        assert!(json.contains("coordinator_crash"));
     }
 
     #[test]

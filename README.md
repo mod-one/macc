@@ -306,7 +306,6 @@ Coordinator can auto-retry failed tasks based on error code. This is configured 
 
 - `error_code_retry_list` default: `E101,E102,E103,E301,E302,E303,E601,E603`
 - `error_code_retry_max` default: `2`
-- `max_dispatch_retries` default: `5` (caps dispatch preparation retries before task is blocked with `dispatch_retry_limit_exceeded`)
 
 When a failed task has an error code in the allow-list and retries are below the max, the task is requeued to `todo` with an `auto_retry:<code>` reason.
 
@@ -314,7 +313,6 @@ E602 (quota exhausted) is intentionally excluded - it requires operator action, 
 
 Retry strategy details:
 
-- Fetch failures during dispatch sanitize are non-blocking warnings: if `git fetch origin` fails during worktree preparation, coordinator logs a warning and continues. Dispatch still aborts on required sanitize failures (for example `git reset --hard` failure).
 - `salvage_before_retry` (default `true`): before retrying a failed task with existing local work, coordinator attempts salvage/merge of the last worktree state.
 - `retry_on_same_worktree` (default `true`): retries prefer reusing the same worktree slot when the slot is healthy, so local context and session continuity are preserved.
 - `merge_gate_on_dispatch` (default `true`): for retry attempts, coordinator runs a pre-dispatch merge-gate; if prior branch can already merge cleanly, task is marked merged and dispatch is skipped.

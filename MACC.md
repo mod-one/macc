@@ -411,10 +411,6 @@ Standard recovery sequence:
 5) `macc coordinator cleanup`
 6) `macc coordinator` (resume loop)
 
-If a task is blocked with `dispatch_retry_limit_exceeded`, treat it as a dispatch preparation failure cap (`max_dispatch_retries`) and start recovery with:
-- `macc coordinator unlock`
-Then rerun the standard sequence above after fixing the underlying sanitize/dispatch cause.
-
 Post-run PRD enrichment (optional):
 - `macc coordinator audit-prd -- --tool <tool_id>` (AI-powered update of prd.json notes)
 
@@ -464,7 +460,6 @@ Error code schema (v1):
 Auto-retry controls (coordinator settings):
 - `error_code_retry_list`: comma-separated list of error codes eligible for auto-retry.
 - `error_code_retry_max`: max retries per task for eligible codes.
-- `max_dispatch_retries`: max dispatch preparation retries before coordinator blocks task with `dispatch_retry_limit_exceeded`.
 
 Default policy:
 - `error_code_retry_list=E101,E102,E103,E301,E302,E303,E601,E603`
@@ -859,7 +854,6 @@ Important behavior:
 - If all known sessions are occupied, create a new one.
 - Session IDs are reused in serial runs for the same worktree/scope.
 - Worktree pool reuse keeps session continuity because the scope key (worktree path) remains stable.
-- `session_manager.rs` I/O failures now surface as structured errors (no panic path), so operator-visible failures remain diagnosable in coordinator/task error metadata.
 
 ### 12.5 Session save / restore
 

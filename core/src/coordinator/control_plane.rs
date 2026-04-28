@@ -15,7 +15,7 @@ use crate::coordinator::types::CoordinatorEnvConfig;
 use crate::coordinator::{engine as coordinator_engine, runtime as coordinator_runtime};
 use crate::{MaccError, Result};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 pub trait CoordinatorLog: Sync {
@@ -77,78 +77,6 @@ fn resolve_dispatch_cooldown_seconds(
     env_cfg
         .dispatch_cooldown_seconds
         .unwrap_or(cfg.dispatch_cooldown_seconds)
-}
-
-fn record_dispatch_retry_or_block(
-    repo_root: &Path,
-    state: &mut CoordinatorRunState,
-    task_id: &str,
-    cooldown_seconds: u64,
-    max_dispatch_retries: u32,
-    logger: Option<&dyn CoordinatorLog>,
-) -> Result<bool> {
-    let retry_count = {
-        let entry = state.dispatch_retry_count.entry(task_id.to_string()).or_insert(0);
-        *entry += 1;
-        *entry
-    };
-    if retry_count >= max_dispatch_retries {
-        let registry_value = crate::coordinator::state::coordinator_state_registry_load(
-            repo_root,
-            &BTreeMap::new(),
-        )?;
-        let mut registry = TaskRegistry::from_value(&registry_value)?;
-        let mut blocked = false;
-        if let Some(task) = registry.find_task_mut(task_id) {
-            task.state = "blocked".to_string();
-            let runtime = task.ensure_runtime();
-            runtime.status = Some("failed".to_string());
-            runtime.last_error = Some("dispatch_retry_limit_exceeded".to_string());
-            runtime.set_last_error_details(
-                "E901",
-                "coordinator",
-                "dispatch_retry_limit_exceeded".to_string(),
-            );
-            let now = now_iso_coordinator();
-            task.updated_at = Some(now.clone());
-            task.state_changed_at = Some(now.clone());
-            registry.recompute_resource_locks(&now);
-            registry.set_updated_at(now);
-            crate::coordinator::state::coordinator_state_registry_save(
-                repo_root,
-                &BTreeMap::new(),
-                &registry.to_value()?,
-            )?;
-            blocked = true;
-        }
-        state.dispatch_retry_count.remove(task_id);
-        state.dispatch_retry_not_before.remove(task_id);
-        let msg = format!(
-            "dispatch retry limit reached task={} retry_count={} max_dispatch_retries={}",
-            task_id, retry_count, max_dispatch_retries
-        );
-        let _ = append_coordinator_event_with_severity(
-            repo_root,
-            "dispatch_retry_limit_reached",
-            task_id,
-            "dev",
-            "failed",
-            &msg,
-            "warning",
-        );
-        if let Some(log) = logger {
-            let _ = log.note(format!("- {}", msg));
-        }
-        return Ok(blocked);
-    }
-
-    if cooldown_seconds > 0 {
-        state.dispatch_retry_not_before.insert(
-            task_id.to_string(),
-            Instant::now() + Duration::from_secs(cooldown_seconds),
-        );
-    }
-    Ok(false)
 }
 
 fn resolve_session_cache_ttl_seconds(
@@ -2248,9 +2176,6 @@ fn apply_runtime_event_bus_updates(
                         CoordinatorRuntimeEventKind::WorktreeOrphanCleaned { .. } => {
                             "worktree_orphan_cleaned"
                         }
-                        CoordinatorRuntimeEventKind::DispatchRetryLimitReached { .. } => {
-                            "dispatch_retry_limit_reached"
-                        }
                     };
                     let _ = log.note(format!(
                         "- performer event received task={} type={} source={}",
@@ -2323,8 +2248,7 @@ fn apply_runtime_event_bus_updates(
                     | CoordinatorRuntimeEventKind::SyncUnmergedBranchFound { .. }
                     | CoordinatorRuntimeEventKind::SyncUnmergedBranchMerged { .. }
                     | CoordinatorRuntimeEventKind::WorktreeHealthCheckFailed { .. }
-                    | CoordinatorRuntimeEventKind::WorktreeOrphanCleaned { .. }
-                    | CoordinatorRuntimeEventKind::DispatchRetryLimitReached { .. } => {}
+                    | CoordinatorRuntimeEventKind::WorktreeOrphanCleaned { .. } => {}
                 }
             }
             Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
@@ -2874,439 +2798,6 @@ pub async fn monitor_merge_jobs_native(
     Ok(blocked_merge)
 }
 
-#[derive(Debug, Clone)]
-struct DispatchCandidate {
-    task: crate::coordinator::task_selector::SelectedTask,
-    worktree_slot: WorktreeSlot,
-}
-
-#[derive(Debug, Clone)]
-enum WorktreeSlot {
-    Auto,
-}
-
-#[derive(Debug, Clone)]
-struct AcquiredWorktree {
-    path: PathBuf,
-    branch: String,
-    is_new: bool,
-    last_commit: String,
-    active_session_id: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-struct DispatchClaim {
-    task_id: String,
-    worktree_path: PathBuf,
-    branch: String,
-    session_id: String,
-    tool: String,
-    base_branch: String,
-    last_commit: String,
-    active_session_id: Option<String>,
-}
-
-fn build_task_selector_config(
-    canonical: &crate::config::CanonicalConfig,
-    env_cfg: &CoordinatorEnvConfig,
-    cfg: &CoordinatorConfigResolved,
-    coordinator: Option<&crate::config::CoordinatorConfig>,
-    state: &CoordinatorRunState,
-) -> crate::coordinator::task_selector::TaskSelectorConfig {
-    crate::coordinator::task_selector::TaskSelectorConfig {
-        enabled_tools: canonical.tools.enabled.clone(),
-        tool_priority: env_cfg
-            .tool_priority
-            .clone()
-            .map(|csv| {
-                csv.split(',')
-                    .map(|v| v.trim().to_string())
-                    .filter(|v| !v.is_empty())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_else(|| cfg.tool_priority.clone()),
-        max_parallel_per_tool: env_cfg
-            .max_parallel_per_tool_json
-            .clone()
-            .and_then(|raw| serde_json::from_str::<HashMap<String, usize>>(&raw).ok())
-            .unwrap_or_else(|| cfg.max_parallel_per_tool.clone().into_iter().collect()),
-        tool_specializations: env_cfg
-            .tool_specializations_json
-            .clone()
-            .and_then(|raw| serde_json::from_str::<HashMap<String, Vec<String>>>(&raw).ok())
-            .unwrap_or_else(|| cfg.tool_specializations.clone().into_iter().collect()),
-        max_parallel: state.effective_max_parallel,
-        default_tool: canonical.tools.enabled.first().cloned().unwrap_or_default(),
-        default_base_branch: env_cfg
-            .reference_branch
-            .clone()
-            .unwrap_or_else(|| cfg.reference_branch.clone()),
-        now: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        throttle_registry: state.throttle_registry.clone(),
-        rate_limit_fallback_enabled: resolve_rate_limit_fallback_enabled(env_cfg, coordinator),
-    }
-}
-
-fn select_dispatch_candidate(
-    registry: &serde_json::Value,
-    config: &crate::coordinator::task_selector::TaskSelectorConfig,
-) -> Option<DispatchCandidate> {
-    let task = crate::coordinator::task_selector::select_next_ready_task(registry, config)?;
-    Some(DispatchCandidate {
-        task,
-        worktree_slot: WorktreeSlot::Auto,
-    })
-}
-
-async fn acquire_worktree_for_dispatch(
-    repo_root: &Path,
-    registry: &serde_json::Value,
-    candidate: &DispatchCandidate,
-    cfg: &CoordinatorConfigResolved,
-    state: &mut CoordinatorRunState,
-    logger: Option<&dyn CoordinatorLog>,
-) -> Result<AcquiredWorktree> {
-    let task = &candidate.task;
-    let session_cache_ttl_seconds = cfg.session_cache_ttl_seconds;
-    let (reusable, _reuse_prepare_error) = find_reusable_worktree_native(
-        repo_root,
-        registry,
-        &task.tool,
-        &task.base_branch,
-        session_cache_ttl_seconds,
-        &state.last_session_activity_at,
-    )?;
-    if let Some((path, branch, last_commit, skipped_reset, dirty_before)) = reusable {
-        let _ = candidate.worktree_slot.clone();
-        let warm_by_session = matches!(
-            score_worktree_session_warmth(repo_root, &path, &task.tool, session_cache_ttl_seconds),
-            crate::coordinator::helpers::SessionWarmth::Warm(_)
-        );
-        let warm_by_activity = is_worktree_activity_recent(
-            &state.last_session_activity_at,
-            &path,
-            session_cache_ttl_seconds,
-        );
-        if warm_by_session || warm_by_activity {
-            let warm_msg = format!(
-                "warm_slot_reuse task={} tool={} path={} warm_session={} warm_recent_activity={}",
-                task.id,
-                task.tool,
-                path.display(),
-                warm_by_session,
-                warm_by_activity
-            );
-            let _ = append_coordinator_event_with_severity(
-                repo_root,
-                "warm_slot_reuse",
-                &task.id,
-                "dev",
-                "info",
-                &warm_msg,
-                "info",
-            );
-        }
-        let _ = append_coordinator_event_with_severity(
-            repo_root,
-            "sanitize_done",
-            &task.id,
-            "dev",
-            "success",
-            &format!(
-                "sanitize done task={} mode=reused path={} dirty_before={} skipped_reset={}",
-                task.id,
-                path.display(),
-                dirty_before,
-                skipped_reset
-            ),
-            "info",
-        );
-        if let Some(log) = logger {
-            let _ = log.note(format!(
-                "- Lifecycle task={} stage=sanitize path={} dirty_before={} skipped_reset={}",
-                task.id,
-                path.display(),
-                dirty_before,
-                skipped_reset
-            ));
-        }
-        let active_session_id = read_session_id_from_state(repo_root, &task.tool, &path);
-        return Ok(AcquiredWorktree {
-            path,
-            branch,
-            is_new: false,
-            last_commit,
-            active_session_id,
-        });
-    }
-
-    let pool_count = count_pool_worktrees(repo_root)?;
-    let create_spec = crate::WorktreeCreateSpec {
-        slug: build_non_task_worker_slug(pool_count),
-        tool: task.tool.clone(),
-        count: 1,
-        base: task.base_branch.clone(),
-        dir: std::path::PathBuf::from(".macc/worktree"),
-        scope: None,
-        feature: None,
-    };
-    let mut created = crate::create_worktrees(repo_root, &create_spec)?;
-    let created = created
-        .pop()
-        .ok_or_else(|| MaccError::Validation("No worktree created".into()))?;
-    if let Some(failed_step) = sanitize_worktree_to_base(&created.path, &task.base_branch).await? {
-        let _ = maybe_rollback_new_worktree_on_sanitize_failure(
-            repo_root,
-            state,
-            &task.id,
-            failed_step,
-            Some(&created.path),
-            true,
-            cfg.remove_worktree_on_sanitize_failure,
-            logger,
-        );
-        return Err(MaccError::Coordinator {
-            code: "sanitize_new_worktree_failed",
-            message: format!("sanitize failed at step '{}'", failed_step),
-        });
-    }
-    if !crate::git::checkout_async(&created.path, &created.branch, false).await? {
-        return Err(MaccError::Coordinator {
-            code: "restore_task_branch_failed",
-            message: created.branch.clone(),
-        });
-    }
-    let last_commit = crate::git::head_commit_async(&created.path)
-        .await
-        .unwrap_or_default();
-    let active_session_id = read_session_id_from_state(repo_root, &task.tool, &created.path);
-    Ok(AcquiredWorktree {
-        path: created.path,
-        branch: created.branch,
-        is_new: true,
-        last_commit,
-        active_session_id,
-    })
-}
-
-fn claim_task_in_registry(
-    repo_root: &Path,
-    candidate: &DispatchCandidate,
-    worktree: &AcquiredWorktree,
-    registry: &mut serde_json::Value,
-    logger: Option<&dyn CoordinatorLog>,
-) -> Result<DispatchClaim> {
-    let dispatch_now = now_iso_coordinator();
-    let session_id = format!("coordinator-{}-{}", candidate.task.id, dispatch_now);
-    let claim_update = coordinator_engine::DispatchClaimUpdate {
-        task_id: candidate.task.id.clone(),
-        tool: candidate.task.tool.clone(),
-        worktree_path: worktree.path.to_string_lossy().to_string(),
-        branch: worktree.branch.clone(),
-        base_branch: candidate.task.base_branch.clone(),
-        last_commit: worktree.last_commit.clone(),
-        session_id: session_id.clone(),
-        active_session_id: worktree.active_session_id.clone(),
-        pid: None,
-        phase: "dev".to_string(),
-        now: dispatch_now,
-    };
-    coordinator_engine::apply_dispatch_claim_in_registry(registry, &claim_update)?;
-    recompute_resource_locks_from_tasks(registry);
-    set_registry_updated_at(registry);
-    crate::coordinator::state::coordinator_state_registry_save(repo_root, &BTreeMap::new(), registry)?;
-    if let Some(log) = logger {
-        let _ = log.note(format!(
-            "- Lifecycle task={} stage=claim persisted session_id={}",
-            candidate.task.id, session_id
-        ));
-    }
-    Ok(DispatchClaim {
-        task_id: candidate.task.id.clone(),
-        worktree_path: worktree.path.clone(),
-        branch: worktree.branch.clone(),
-        session_id,
-        tool: candidate.task.tool.clone(),
-        base_branch: candidate.task.base_branch.clone(),
-        last_commit: worktree.last_commit.clone(),
-        active_session_id: worktree.active_session_id.clone(),
-    })
-}
-
-async fn launch_performer(
-    repo_root: &Path,
-    prd_file: &Path,
-    canonical: &crate::config::CanonicalConfig,
-    coordinator: Option<&crate::config::CoordinatorConfig>,
-    env_cfg: &CoordinatorEnvConfig,
-    state: &mut CoordinatorRunState,
-    logger: Option<&dyn CoordinatorLog>,
-    claim: &DispatchClaim,
-) -> Result<Option<i64>> {
-    write_worktree_prd_for_task(prd_file, &claim.task_id, &claim.worktree_path)?;
-    ensure_tool_json_for_tool(repo_root, &claim.worktree_path, &claim.tool)?;
-    let worktree_paths = crate::ProjectPaths::from_root(&claim.worktree_path);
-    crate::init(&worktree_paths, false)?;
-    let canonical_yaml = canonical.to_yaml().map_err(|e| {
-        MaccError::Validation(format!(
-            "Failed to serialize canonical config for worktree dispatch apply: {}",
-            e
-        ))
-    })?;
-    crate::atomic_write(
-        &worktree_paths,
-        &worktree_paths.config_path,
-        canonical_yaml.as_bytes(),
-    )?;
-    let mut apply_cmd = tokio::process::Command::new(std::env::current_exe().map_err(|e| {
-        MaccError::Validation(format!("Failed to resolve current executable path: {}", e))
-    })?);
-    apply_cmd
-        .current_dir(repo_root)
-        .arg("--cwd")
-        .arg(repo_root)
-        .arg("worktree")
-        .arg("apply")
-        .arg(claim.worktree_path.to_string_lossy().to_string())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    let apply_output = apply_cmd.output().await.map_err(|e| MaccError::Io {
-        path: claim.worktree_path.to_string_lossy().into(),
-        action: "run worktree apply for coordinator dispatch".into(),
-        source: e,
-    })?;
-    if !apply_output.status.success() {
-        return Err(MaccError::Coordinator {
-            code: "worktree_apply_failed",
-            message: format!("status={}", apply_output.status),
-        });
-    }
-    let phase_timeout_seconds = env_cfg.stale_in_progress_seconds.unwrap_or_else(|| {
-        let cfg = CoordinatorConfigResolved::resolve(coordinator);
-        if coordinator.is_some_and(|c| c.stale_in_progress_seconds.is_some()) {
-            cfg.stale_in_progress_seconds
-        } else {
-            600
-        }
-    });
-    if !ensure_expected_worktree_branch(&claim.worktree_path, &claim.branch)? {
-        return Err(MaccError::Coordinator {
-            code: "worktree_head_mismatch",
-            message: claim.branch.clone(),
-        });
-    }
-    let current_exe = std::env::current_exe().map_err(|e| {
-        MaccError::Validation(format!("Failed to resolve current executable path: {}", e))
-    })?;
-    let pid = coordinator_runtime::spawn_performer_job(
-        &current_exe,
-        repo_root,
-        &claim.task_id,
-        &claim.base_branch,
-        &claim.worktree_path,
-        &state.event_tx,
-        &mut state.join_set,
-        phase_timeout_seconds,
-        state.performer_ipc_addr.as_deref(),
-    )?;
-    let mut registry =
-        crate::coordinator::state::coordinator_state_registry_load(repo_root, &BTreeMap::new())?;
-    coordinator_engine::apply_dispatch_pid_in_registry(&mut registry, &claim.task_id, pid)?;
-    set_registry_updated_at(&mut registry);
-    crate::coordinator::state::coordinator_state_registry_save(repo_root, &BTreeMap::new(), &registry)?;
-    if let Some(log) = logger {
-        let _ = log.note(format!("- Lifecycle task={} stage=run", claim.task_id));
-    }
-    Ok(pid)
-}
-
-fn dispatch_limit_reached(
-    repo_root: &Path,
-    state: &mut CoordinatorRunState,
-    max_dispatch_total: usize,
-    logger: Option<&dyn CoordinatorLog>,
-) -> bool {
-    if max_dispatch_total == 0 || state.dispatched_total_run < max_dispatch_total {
-        return false;
-    }
-    if !state.dispatch_limit_event_emitted {
-        let msg = format!(
-            "dispatch limit reached run_total={} max_dispatch={}",
-            state.dispatched_total_run, max_dispatch_total
-        );
-        let _ = append_coordinator_event_with_severity(
-            repo_root,
-            "dispatch_limit_reached",
-            "-",
-            "dev",
-            "done",
-            &msg,
-            "info",
-        );
-        if let Some(log) = logger {
-            let _ = log.note(format!("- {}", msg));
-        }
-        state.dispatch_limit_event_emitted = true;
-    }
-    true
-}
-
-async fn run_dispatch_pipeline(
-    repo_root: &Path,
-    canonical: &crate::config::CanonicalConfig,
-    coordinator: Option<&crate::config::CoordinatorConfig>,
-    env_cfg: &CoordinatorEnvConfig,
-    prd_file: &Path,
-    state: &mut CoordinatorRunState,
-    logger: Option<&dyn CoordinatorLog>,
-    cfg: &CoordinatorConfigResolved,
-    remaining_budget: usize,
-) -> Result<usize> {
-    let mut dispatched = 0usize;
-    while dispatched < remaining_budget {
-        if state.effective_max_parallel > 0 && state.active_jobs.len() >= state.effective_max_parallel {
-            break;
-        }
-        let mut registry = crate::coordinator::state::coordinator_state_registry_load(repo_root, &BTreeMap::new())?;
-        let config = build_task_selector_config(canonical, env_cfg, cfg, coordinator, state);
-        let Some(candidate) = select_dispatch_candidate(&registry, &config) else {
-            break;
-        };
-        let worktree = acquire_worktree_for_dispatch(repo_root, &registry, &candidate, cfg, state, logger).await?;
-        let claim = claim_task_in_registry(repo_root, &candidate, &worktree, &mut registry, logger)?;
-        let pid = launch_performer(repo_root, prd_file, canonical, coordinator, env_cfg, state, logger, &claim).await?;
-        let _ = append_task_lifecycle_event_with_session(
-            repo_root,
-            "task_dispatched",
-            &claim.task_id,
-            "dev",
-            "started",
-            &format!("task {} dispatched tool={} worktree={} pid={}", claim.task_id, claim.tool, claim.worktree_path.display(), pid.map(|v| v.to_string()).unwrap_or_else(|| "unknown".to_string())),
-            claim.active_session_id.as_deref(),
-        );
-        state.active_jobs.insert(
-            claim.task_id.clone(),
-            CoordinatorJob {
-                tool: claim.tool,
-                base_branch: claim.base_branch,
-                worktree_path: claim.worktree_path,
-                attempt: 1,
-                started_at: std::time::Instant::now(),
-                pid,
-                failure_signaled_at: None,
-            },
-        );
-        state.dispatch_retry_count.remove(&claim.task_id);
-        state.dispatch_retry_not_before.remove(&claim.task_id);
-        dispatched += 1;
-        state.dispatched_total_run += 1;
-        if dispatch_limit_reached(repo_root, state, env_cfg.max_dispatch.unwrap_or(cfg.max_dispatch), logger) {
-            break;
-        }
-    }
-    Ok(dispatched)
-}
-
 pub async fn dispatch_ready_tasks_native(
     repo_root: &Path,
     canonical: &crate::config::CanonicalConfig,
@@ -3318,6 +2809,9 @@ pub async fn dispatch_ready_tasks_native(
 ) -> Result<usize> {
     let cfg = CoordinatorConfigResolved::resolve(coordinator);
     ensure_performer_ipc_listener(repo_root, state, logger).await?;
+    let mut dispatched = 0usize;
+    let mut dispatch_failed_this_cycle: HashSet<String> = HashSet::new();
+    let cooldown_seconds = resolve_dispatch_cooldown_seconds(env_cfg, coordinator);
     state
         .dispatch_retry_not_before
         .retain(|_, until| *until > Instant::now());
@@ -3329,7 +2823,27 @@ pub async fn dispatch_ready_tasks_native(
         state.original_max_parallel = max_parallel;
         state.effective_max_parallel = max_parallel;
     }
-    if dispatch_limit_reached(repo_root, state, max_dispatch_total, logger) {
+
+    if max_dispatch_total > 0 && state.dispatched_total_run >= max_dispatch_total {
+        if !state.dispatch_limit_event_emitted {
+            let msg = format!(
+                "dispatch limit reached run_total={} max_dispatch={}",
+                state.dispatched_total_run, max_dispatch_total
+            );
+            let _ = append_coordinator_event_with_severity(
+                repo_root,
+                "dispatch_limit_reached",
+                "-",
+                "dev",
+                "done",
+                &msg,
+                "info",
+            );
+            if let Some(log) = logger {
+                let _ = log.note(format!("- {}", msg));
+            }
+            state.dispatch_limit_event_emitted = true;
+        }
         return Ok(0);
     }
     let remaining_budget = if max_dispatch_total == 0 {
@@ -3337,33 +2851,992 @@ pub async fn dispatch_ready_tasks_native(
     } else {
         max_dispatch_total.saturating_sub(state.dispatched_total_run)
     };
-    run_dispatch_pipeline(
-        repo_root,
-        canonical,
-        coordinator,
-        env_cfg,
-        prd_file,
-        state,
-        logger,
-        &cfg,
-        remaining_budget,
-    )
-    .await
+
+    while dispatched < remaining_budget {
+        if state.effective_max_parallel > 0
+            && state.active_jobs.len() >= state.effective_max_parallel
+        {
+            break;
+        }
+
+        let mut registry = crate::coordinator::state::coordinator_state_registry_load(
+            repo_root,
+            &BTreeMap::new(),
+        )?;
+        let config = crate::coordinator::task_selector::TaskSelectorConfig {
+            enabled_tools: canonical.tools.enabled.clone(),
+            tool_priority: env_cfg
+                .tool_priority
+                .clone()
+                .map(|csv| {
+                    csv.split(',')
+                        .map(|v| v.trim().to_string())
+                        .filter(|v| !v.is_empty())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_else(|| cfg.tool_priority.clone()),
+            max_parallel_per_tool: env_cfg
+                .max_parallel_per_tool_json
+                .clone()
+                .and_then(|raw| serde_json::from_str::<HashMap<String, usize>>(&raw).ok())
+                .unwrap_or_else(|| cfg.max_parallel_per_tool.clone().into_iter().collect()),
+            tool_specializations: env_cfg
+                .tool_specializations_json
+                .clone()
+                .and_then(|raw| serde_json::from_str::<HashMap<String, Vec<String>>>(&raw).ok())
+                .unwrap_or_else(|| cfg.tool_specializations.clone().into_iter().collect()),
+            max_parallel: state.effective_max_parallel,
+            default_tool: canonical.tools.enabled.first().cloned().unwrap_or_default(),
+            default_base_branch: env_cfg
+                .reference_branch
+                .clone()
+                .unwrap_or_else(|| cfg.reference_branch.clone()),
+            now: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            throttle_registry: state.throttle_registry.clone(),
+            rate_limit_fallback_enabled: resolve_rate_limit_fallback_enabled(env_cfg, coordinator),
+        };
+
+        if let Some(reason) =
+            crate::coordinator::task_selector::dispatch_block_reason(&registry, &config)
+        {
+            match reason {
+                crate::coordinator::task_selector::DispatchBlockReason::ActivePriorityZero {
+                    task_id,
+                } => {
+                    if should_emit_priority_zero_dispatch_skip(state, &task_id) {
+                        emit_dispatch_skipped(
+                            repo_root,
+                            logger,
+                            &task_id,
+                            "priority_zero_exclusive",
+                            "an active priority=0 task blocks parallel dispatch",
+                        );
+                    }
+                }
+                crate::coordinator::task_selector::DispatchBlockReason::ReadyPriorityZeroBlocked {
+                    task_id,
+                } => {
+                    if should_emit_priority_zero_dispatch_skip(state, &task_id) {
+                        emit_dispatch_skipped(
+                            repo_root,
+                            logger,
+                            &task_id,
+                            "priority_zero_exclusive",
+                            "a ready priority=0 task must run alone before lower-priority dispatch",
+                        );
+                    }
+                }
+            }
+            break;
+        }
+        state.last_priority_zero_dispatch_block_task_id = None;
+        let Some(selected) =
+            crate::coordinator::task_selector::select_next_ready_task(&registry, &config)
+        else {
+            break;
+        };
+        // RL-ROUTE-005: emit tool_fallback event when primary tool is throttled.
+        if selected.is_fallback {
+            let msg = format!(
+                "tool_fallback task={} selected_tool={} reason=rate_limit_throttled",
+                selected.id, selected.tool
+            );
+            let _ = append_coordinator_event_with_severity(
+                repo_root,
+                "tool_fallback",
+                &selected.id,
+                "dev",
+                "info",
+                &msg,
+                "info",
+            );
+            if let Some(log) = logger {
+                let _ = log.note(format!("- {}", msg));
+            }
+        }
+        if let Some(until) = state.dispatch_retry_not_before.get(&selected.id) {
+            let now = Instant::now();
+            if *until > now {
+                let remaining = until.duration_since(now).as_secs();
+                emit_dispatch_skipped(
+                    repo_root,
+                    logger,
+                    &selected.id,
+                    "cooldown_active",
+                    &format!("retry in {}s", remaining),
+                );
+                break;
+            }
+        }
+        if dispatch_failed_this_cycle.contains(&selected.id) {
+            if let Some(log) = logger {
+                let _ = log.note(format!(
+                    "- Dispatch stop: task {} already failed worktree preparation in this cycle",
+                    selected.id
+                ));
+            }
+            break;
+        }
+        if let Some(log) = logger {
+            let _ = log.note(format!("- Lifecycle task={} stage=claim", selected.id));
+        }
+        if let Some(log) = logger {
+            let _ = log.note(format!(
+                "- Dispatch candidate task={} tool={} base={}",
+                selected.id, selected.tool, selected.base_branch
+            ));
+        }
+        let merge_gate_enabled = cfg.merge_gate_on_dispatch;
+        if merge_gate_enabled && retry_count_for_task(&registry, &selected.id) > 0 {
+            let attempt_msg = format!(
+                "merge-gate check started task={} base={}",
+                selected.id, selected.base_branch
+            );
+            let _ = append_coordinator_event_with_severity(
+                repo_root,
+                "merge_gate_attempt",
+                &selected.id,
+                "dev",
+                "started",
+                &attempt_msg,
+                "info",
+            );
+            if let Some(log) = logger {
+                let _ = log.note(format!("- {}", attempt_msg));
+            }
+            match merge_gate_check(&selected.id, &selected.base_branch, repo_root) {
+                MergeGateResult::Merged => {
+                    let now = now_iso_coordinator();
+                    mark_task_merged_from_merge_gate(&mut registry, &selected.id, &now)?;
+                    crate::coordinator::state::coordinator_state_registry_save(
+                        repo_root,
+                        &BTreeMap::new(),
+                        &registry,
+                    )?;
+                    let msg = format!(
+                        "merge-gate merged task={} base={}; dispatch canceled",
+                        selected.id, selected.base_branch
+                    );
+                    let _ = append_coordinator_event_with_severity(
+                        repo_root,
+                        "merge_gate_merged",
+                        &selected.id,
+                        "merge",
+                        "done",
+                        &msg,
+                        "info",
+                    );
+                    if let Some(log) = logger {
+                        let _ = log.note(format!("- {}", msg));
+                    }
+                    continue;
+                }
+                MergeGateResult::ConflictProceed => {
+                    let msg = format!(
+                        "merge-gate could not merge task={} base={}; proceeding with dispatch",
+                        selected.id, selected.base_branch
+                    );
+                    let _ = append_coordinator_event_with_severity(
+                        repo_root,
+                        "merge_gate_conflict",
+                        &selected.id,
+                        "merge",
+                        "warning",
+                        &msg,
+                        "warning",
+                    );
+                    if let Some(log) = logger {
+                        let _ = log.note(format!("- {}", msg));
+                    }
+                }
+                MergeGateResult::NoBranchProceed => {
+                    let msg = format!(
+                        "merge-gate found no mergeable retry branch task={}; proceeding with dispatch",
+                        selected.id
+                    );
+                    let _ = append_coordinator_event_with_severity(
+                        repo_root,
+                        "merge_gate_no_branch",
+                        &selected.id,
+                        "merge",
+                        "done",
+                        &msg,
+                        "info",
+                    );
+                    if let Some(log) = logger {
+                        let _ = log.note(format!("- {}", msg));
+                    }
+                }
+            }
+        }
+
+        let reuse_scan_started = Instant::now();
+        let session_cache_ttl_seconds = resolve_session_cache_ttl_seconds(coordinator);
+        let (reusable, reuse_prepare_error) = find_reusable_worktree_native(
+            repo_root,
+            &registry,
+            &selected.tool,
+            &selected.base_branch,
+            session_cache_ttl_seconds,
+            &state.last_session_activity_at,
+        )?;
+        let reuse_scan_elapsed_ms = reuse_scan_started.elapsed().as_millis();
+
+        let (worktree_path, branch, last_commit) = if let Some(reused) = reusable {
+            let (path, branch, last_commit, skipped_reset, dirty_before) = reused;
+            let warm_by_session = matches!(
+                score_worktree_session_warmth(
+                    repo_root,
+                    &path,
+                    &selected.tool,
+                    session_cache_ttl_seconds
+                ),
+                crate::coordinator::helpers::SessionWarmth::Warm(_)
+            );
+            let warm_by_activity = is_worktree_activity_recent(
+                &state.last_session_activity_at,
+                &path,
+                session_cache_ttl_seconds,
+            );
+            if warm_by_session || warm_by_activity {
+                let warm_msg = format!(
+                    "warm_slot_reuse task={} tool={} path={} warm_session={} warm_recent_activity={}",
+                    selected.id,
+                    selected.tool,
+                    path.display(),
+                    warm_by_session,
+                    warm_by_activity
+                );
+                let _ = append_coordinator_event_with_severity(
+                    repo_root,
+                    "warm_slot_reuse",
+                    &selected.id,
+                    "dev",
+                    "info",
+                    &warm_msg,
+                    "info",
+                );
+            }
+            let sanitize_msg = format!(
+                "sanitize done task={} mode=reused path={} duration_ms={} dirty_before={} skipped_reset={}",
+                selected.id,
+                path.display(),
+                reuse_scan_elapsed_ms,
+                dirty_before,
+                skipped_reset
+            );
+            let _ = append_coordinator_event_with_severity(
+                repo_root,
+                "sanitize_done",
+                &selected.id,
+                "dev",
+                "success",
+                &sanitize_msg,
+                "info",
+            );
+            if let Some(log) = logger {
+                let _ = log.note(format!(
+                    "- Lifecycle task={} stage=sanitize path={} dirty_before={} skipped_reset={}",
+                    selected.id,
+                    path.display(),
+                    dirty_before,
+                    skipped_reset
+                ));
+            }
+            (path, branch, last_commit)
+        } else {
+            let pool_count = count_pool_worktrees(repo_root)?;
+            if state.effective_max_parallel > 0 && pool_count >= state.effective_max_parallel {
+                if let Some((reason, detail)) = reuse_prepare_error {
+                    emit_dispatch_skipped(repo_root, logger, &selected.id, &reason, &detail);
+                    if cooldown_seconds > 0 {
+                        state.dispatch_retry_not_before.insert(
+                            selected.id.clone(),
+                            Instant::now() + Duration::from_secs(cooldown_seconds),
+                        );
+                    }
+                    dispatch_failed_this_cycle.insert(selected.id.clone());
+                }
+                break;
+            }
+            let create_spec = crate::WorktreeCreateSpec {
+                slug: build_non_task_worker_slug(pool_count),
+                tool: selected.tool.clone(),
+                count: 1,
+                base: selected.base_branch.clone(),
+                dir: std::path::PathBuf::from(".macc/worktree"),
+                scope: None,
+                feature: None,
+            };
+            let mut created = match crate::create_worktrees(repo_root, &create_spec) {
+                Ok(v) => v,
+                Err(e) => {
+                    let msg = format!(
+                        "dispatch failed for task {}: create worktree failed ({})",
+                        selected.id, e
+                    );
+                    let _ = append_coordinator_event_with_severity(
+                        repo_root,
+                        "dispatch_failed",
+                        &selected.id,
+                        "dev",
+                        "failed",
+                        &msg,
+                        "warning",
+                    );
+                    if let Some(log) = logger {
+                        let _ = log.note(format!("- {}", msg));
+                    }
+                    emit_dispatch_skipped(
+                        repo_root,
+                        logger,
+                        &selected.id,
+                        "create_worktree_failed",
+                        &e.to_string(),
+                    );
+                    if cooldown_seconds > 0 {
+                        state.dispatch_retry_not_before.insert(
+                            selected.id.clone(),
+                            Instant::now() + Duration::from_secs(cooldown_seconds),
+                        );
+                    }
+                    dispatch_failed_this_cycle.insert(selected.id.clone());
+                    break;
+                }
+            };
+            let created = created
+                .pop()
+                .ok_or_else(|| MaccError::Validation("No worktree created".into()))?;
+            let rollback_path = created.path.clone();
+            let worktree_was_newly_created = true;
+            let sanitize_started = Instant::now();
+            if let Some(failed_step) =
+                sanitize_worktree_to_base(&created.path, &selected.base_branch).await?
+            {
+                let cleaned_orphan = maybe_rollback_new_worktree_on_sanitize_failure(
+                    repo_root,
+                    state,
+                    &selected.id,
+                    failed_step,
+                    Some(&rollback_path),
+                    worktree_was_newly_created,
+                    cfg.remove_worktree_on_sanitize_failure,
+                    logger,
+                );
+                let msg =
+                    format!(
+                    "dispatch failed for task {}: sanitize new worktree failed at step '{}' ({}) rollback_applied={}",
+                    selected.id, failed_step, created.path.display(), cleaned_orphan
+                );
+                let _ = append_coordinator_event_with_severity(
+                    repo_root,
+                    "dispatch_failed",
+                    &selected.id,
+                    "dev",
+                    "failed",
+                    &msg,
+                    "error",
+                );
+                if let Some(log) = logger {
+                    let _ = log.note(format!("- {}", msg));
+                }
+                emit_dispatch_skipped(
+                    repo_root,
+                    logger,
+                    &selected.id,
+                    "sanitize_new_worktree_failed",
+                    &created.path.to_string_lossy(),
+                );
+                if cooldown_seconds > 0 {
+                    state.dispatch_retry_not_before.insert(
+                        selected.id.clone(),
+                        Instant::now() + Duration::from_secs(cooldown_seconds),
+                    );
+                }
+                dispatch_failed_this_cycle.insert(selected.id.clone());
+                break;
+            }
+            if !crate::git::checkout_async(&created.path, &created.branch, false).await? {
+                let msg = format!(
+                    "dispatch failed for task {}: restore task branch failed path={} branch={}",
+                    selected.id,
+                    created.path.display(),
+                    created.branch
+                );
+                let _ = append_coordinator_event_with_severity(
+                    repo_root,
+                    "dispatch_failed",
+                    &selected.id,
+                    "dev",
+                    "failed",
+                    &msg,
+                    "warning",
+                );
+                if let Some(log) = logger {
+                    let _ = log.note(format!("- {}", msg));
+                }
+                emit_dispatch_skipped(
+                    repo_root,
+                    logger,
+                    &selected.id,
+                    "restore_task_branch_failed",
+                    &created.branch,
+                );
+                if cooldown_seconds > 0 {
+                    state.dispatch_retry_not_before.insert(
+                        selected.id.clone(),
+                        Instant::now() + Duration::from_secs(cooldown_seconds),
+                    );
+                }
+                dispatch_failed_this_cycle.insert(selected.id.clone());
+                break;
+            }
+            let sanitize_elapsed_ms = sanitize_started.elapsed().as_millis();
+            let sanitize_msg = format!(
+                "sanitize done task={} mode=new path={} duration_ms={} dirty_before=false skipped_reset=false",
+                selected.id,
+                created.path.display(),
+                sanitize_elapsed_ms
+            );
+            let _ = append_coordinator_event_with_severity(
+                repo_root,
+                "sanitize_done",
+                &selected.id,
+                "dev",
+                "success",
+                &sanitize_msg,
+                "info",
+            );
+            let last_commit = crate::git::head_commit_async(&created.path)
+                .await
+                .unwrap_or_default();
+            if let Some(log) = logger {
+                let _ = log.note(format!(
+                    "- Lifecycle task={} stage=sanitize path={} dirty_before=false skipped_reset=false",
+                    selected.id,
+                    created.path.display()
+                ));
+            }
+            (created.path, created.branch, last_commit)
+        };
+        let active_session_id =
+            read_session_id_from_state(repo_root, &selected.tool, &worktree_path);
+        let dispatch_now = now_iso_coordinator();
+        let dispatch_session_id = format!("coordinator-{}-{}", selected.id, dispatch_now);
+        let claim_update = coordinator_engine::DispatchClaimUpdate {
+            task_id: selected.id.clone(),
+            tool: selected.tool.clone(),
+            worktree_path: worktree_path.to_string_lossy().to_string(),
+            branch: branch.clone(),
+            base_branch: selected.base_branch.clone(),
+            last_commit: last_commit.clone(),
+            session_id: dispatch_session_id.clone(),
+            active_session_id: active_session_id.clone(),
+            pid: None,
+            phase: "dev".to_string(),
+            now: dispatch_now.clone(),
+        };
+        coordinator_engine::apply_dispatch_claim_in_registry(&mut registry, &claim_update)?;
+        recompute_resource_locks_from_tasks(&mut registry);
+        set_registry_updated_at(&mut registry);
+        crate::coordinator::state::coordinator_state_registry_save(
+            repo_root,
+            &BTreeMap::new(),
+            &registry,
+        )?;
+        if let Some(log) = logger {
+            let _ = log.note(format!(
+                "- Lifecycle task={} stage=claim persisted session_id={}",
+                selected.id, dispatch_session_id
+            ));
+        }
+
+        let rollback_claim = |detail: &str| -> Result<()> {
+            let rollback_registry_value =
+                crate::coordinator::state::coordinator_state_registry_load(
+                    repo_root,
+                    &BTreeMap::new(),
+                )?;
+            let mut rollback_registry = TaskRegistry::from_value(&rollback_registry_value)?;
+            if let Some(task) = rollback_registry.find_task_mut(selected.id.as_str()) {
+                let now = now_iso_coordinator();
+                task.state = "todo".to_string();
+                task.assignee = None;
+                task.claimed_at = None;
+                task.worktree = None;
+                let runtime = task.ensure_runtime();
+                runtime.status = Some("idle".to_string());
+                runtime.pid = None;
+                runtime.current_phase = None;
+                runtime.last_error = Some(detail.to_string());
+                task.updated_at = Some(now.clone());
+                task.state_changed_at = Some(now);
+            }
+            rollback_registry.recompute_resource_locks(&now_iso_coordinator());
+            rollback_registry.set_updated_at(now_iso_coordinator());
+            crate::coordinator::state::coordinator_state_registry_save(
+                repo_root,
+                &BTreeMap::new(),
+                &rollback_registry.to_value()?,
+            )
+        };
+
+        if let Some(log) = logger {
+            let _ = log.note(format!("- Lifecycle task={} stage=setup", selected.id));
+        }
+        if let Err(err) = write_worktree_prd_for_task(prd_file, &selected.id, &worktree_path) {
+            let msg = format!(
+                "dispatch failed for task {}: write worktree.prd.json failed ({})",
+                selected.id, err
+            );
+            let _ = append_coordinator_event_with_severity(
+                repo_root,
+                "dispatch_failed",
+                &selected.id,
+                "dev",
+                "failed",
+                &msg,
+                "warning",
+            );
+            emit_dispatch_skipped(
+                repo_root,
+                logger,
+                &selected.id,
+                "write_worktree_prd_failed",
+                &err.to_string(),
+            );
+            let _ = rollback_claim(&msg);
+            if let Some(log) = logger {
+                let _ = log.note(format!("- {}", msg));
+            }
+            if cooldown_seconds > 0 {
+                state.dispatch_retry_not_before.insert(
+                    selected.id.clone(),
+                    Instant::now() + Duration::from_secs(cooldown_seconds),
+                );
+            }
+            dispatch_failed_this_cycle.insert(selected.id.clone());
+            break;
+        }
+        // Always ensure tool.json matches the selected tool.  When a worktree
+        // is recycled from a previous task that used a different tool, the old
+        // tool.json would otherwise persist and cause the performer to invoke
+        // the wrong command.
+        if let Err(err) = ensure_tool_json_for_tool(repo_root, &worktree_path, &selected.tool) {
+            let msg = format!(
+                "dispatch failed for task {}: ensure tool.json failed ({})",
+                selected.id, err
+            );
+            let _ = append_coordinator_event_with_severity(
+                repo_root,
+                "dispatch_failed",
+                &selected.id,
+                "dev",
+                "failed",
+                &msg,
+                "warning",
+            );
+            emit_dispatch_skipped(
+                repo_root,
+                logger,
+                &selected.id,
+                "ensure_tool_json_failed",
+                &err.to_string(),
+            );
+            let _ = rollback_claim(&msg);
+            if let Some(log) = logger {
+                let _ = log.note(format!("- {}", msg));
+            }
+            if cooldown_seconds > 0 {
+                state.dispatch_retry_not_before.insert(
+                    selected.id.clone(),
+                    Instant::now() + Duration::from_secs(cooldown_seconds),
+                );
+            }
+            dispatch_failed_this_cycle.insert(selected.id.clone());
+            break;
+        }
+        let worktree_paths = crate::ProjectPaths::from_root(&worktree_path);
+        if let Err(err) = crate::init(&worktree_paths, false) {
+            let msg = format!(
+                "dispatch failed for task {}: initialize worktree failed ({})",
+                selected.id, err
+            );
+            let _ = append_coordinator_event_with_severity(
+                repo_root,
+                "dispatch_failed",
+                &selected.id,
+                "dev",
+                "failed",
+                &msg,
+                "warning",
+            );
+            emit_dispatch_skipped(
+                repo_root,
+                logger,
+                &selected.id,
+                "worktree_init_failed",
+                &err.to_string(),
+            );
+            let _ = rollback_claim(&msg);
+            if let Some(log) = logger {
+                let _ = log.note(format!("- {}", msg));
+            }
+            if cooldown_seconds > 0 {
+                state.dispatch_retry_not_before.insert(
+                    selected.id.clone(),
+                    Instant::now() + Duration::from_secs(cooldown_seconds),
+                );
+            }
+            dispatch_failed_this_cycle.insert(selected.id.clone());
+            break;
+        }
+        let canonical_yaml = canonical.to_yaml().map_err(|e| {
+            MaccError::Validation(format!(
+                "Failed to serialize canonical config for worktree dispatch apply: {}",
+                e
+            ))
+        })?;
+        if let Err(err) = crate::atomic_write(
+            &worktree_paths,
+            &worktree_paths.config_path,
+            canonical_yaml.as_bytes(),
+        ) {
+            let msg = format!(
+                "dispatch failed for task {}: write canonical config failed ({})",
+                selected.id, err
+            );
+            let _ = append_coordinator_event_with_severity(
+                repo_root,
+                "dispatch_failed",
+                &selected.id,
+                "dev",
+                "failed",
+                &msg,
+                "warning",
+            );
+            emit_dispatch_skipped(
+                repo_root,
+                logger,
+                &selected.id,
+                "write_canonical_config_failed",
+                &err.to_string(),
+            );
+            let _ = rollback_claim(&msg);
+            if let Some(log) = logger {
+                let _ = log.note(format!("- {}", msg));
+            }
+            if cooldown_seconds > 0 {
+                state.dispatch_retry_not_before.insert(
+                    selected.id.clone(),
+                    Instant::now() + Duration::from_secs(cooldown_seconds),
+                );
+            }
+            dispatch_failed_this_cycle.insert(selected.id.clone());
+            break;
+        }
+
+        let mut apply_cmd = tokio::process::Command::new(std::env::current_exe().map_err(|e| {
+            MaccError::Validation(format!("Failed to resolve current executable path: {}", e))
+        })?);
+        apply_cmd
+            .current_dir(repo_root)
+            .arg("--cwd")
+            .arg(repo_root)
+            .arg("worktree")
+            .arg("apply")
+            .arg(worktree_path.to_string_lossy().to_string())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let apply_output = apply_cmd.output().await.map_err(|e| MaccError::Io {
+            path: worktree_path.to_string_lossy().into(),
+            action: "run worktree apply for coordinator dispatch".into(),
+            source: e,
+        })?;
+        if !apply_output.status.success() {
+            let detail = format!(
+                "stdout=\"{}\" stderr=\"{}\"",
+                coordinator_runtime::summarize_output(&String::from_utf8_lossy(
+                    &apply_output.stdout
+                )),
+                coordinator_runtime::summarize_output(&String::from_utf8_lossy(
+                    &apply_output.stderr
+                ))
+            );
+            let msg = format!(
+                "dispatch failed for task {}: worktree apply failed status={} {}",
+                selected.id, apply_output.status, detail
+            );
+            let _ = append_coordinator_event_with_severity(
+                repo_root,
+                "dispatch_failed",
+                &selected.id,
+                "dev",
+                "failed",
+                &msg,
+                "warning",
+            );
+            if let Some(log) = logger {
+                let _ = log.note(format!("- {}", msg));
+            }
+            emit_dispatch_skipped(
+                repo_root,
+                logger,
+                &selected.id,
+                "worktree_apply_failed",
+                &detail,
+            );
+            let _ = rollback_claim(&msg);
+            if cooldown_seconds > 0 {
+                state.dispatch_retry_not_before.insert(
+                    selected.id.clone(),
+                    Instant::now() + Duration::from_secs(cooldown_seconds),
+                );
+            }
+            dispatch_failed_this_cycle.insert(selected.id.clone());
+            break;
+        }
+        if let Some(log) = logger {
+            let _ = log.note(format!(
+                "- Worktree ready task={} path={}",
+                selected.id,
+                worktree_path.display()
+            ));
+        }
+
+        let phase_timeout_seconds = env_cfg.stale_in_progress_seconds.unwrap_or_else(|| {
+            if coordinator.is_some_and(|c| c.stale_in_progress_seconds.is_some()) {
+                cfg.stale_in_progress_seconds
+            } else {
+                600
+            }
+        });
+        let current_exe = std::env::current_exe().map_err(|e| {
+            MaccError::Validation(format!("Failed to resolve current executable path: {}", e))
+        })?;
+        let branch_matches = match ensure_expected_worktree_branch(&worktree_path, &branch) {
+            Ok(matches) => matches,
+            Err(err) => {
+                let msg = format!(
+                    "dispatch failed for task {}: verify worktree branch failed ({})",
+                    selected.id, err
+                );
+                let _ = append_coordinator_event_with_severity(
+                    repo_root,
+                    "dispatch_failed",
+                    &selected.id,
+                    "dev",
+                    "failed",
+                    &msg,
+                    "warning",
+                );
+                let _ = rollback_claim(&msg);
+                if let Some(log) = logger {
+                    let _ = log.note(format!("- {}", msg));
+                }
+                emit_dispatch_skipped(
+                    repo_root,
+                    logger,
+                    &selected.id,
+                    "verify_worktree_branch_failed",
+                    &err.to_string(),
+                );
+                dispatch_failed_this_cycle.insert(selected.id.clone());
+                if cooldown_seconds > 0 {
+                    state.dispatch_retry_not_before.insert(
+                        selected.id.clone(),
+                        Instant::now() + Duration::from_secs(cooldown_seconds),
+                    );
+                }
+                break;
+            }
+        };
+        if !branch_matches {
+            let current_branch = crate::git::current_branch(&worktree_path)
+                .unwrap_or_else(|_| "unknown".to_string());
+            let msg = format!(
+                "dispatch failed for task {}: worktree HEAD mismatch expected={} actual={}",
+                selected.id, branch, current_branch
+            );
+            let _ = append_coordinator_event_with_severity(
+                repo_root,
+                "dispatch_failed",
+                &selected.id,
+                "dev",
+                "failed",
+                &msg,
+                "warning",
+            );
+            let _ = rollback_claim(&msg);
+            if let Some(log) = logger {
+                let _ = log.note(format!("- {}", msg));
+            }
+            emit_dispatch_skipped(
+                repo_root,
+                logger,
+                &selected.id,
+                "worktree_head_mismatch",
+                &format!("expected={} actual={}", branch, current_branch),
+            );
+            dispatch_failed_this_cycle.insert(selected.id.clone());
+            if cooldown_seconds > 0 {
+                state.dispatch_retry_not_before.insert(
+                    selected.id.clone(),
+                    Instant::now() + Duration::from_secs(cooldown_seconds),
+                );
+            }
+            break;
+        }
+        let pid = match coordinator_runtime::spawn_performer_job(
+            &current_exe,
+            repo_root,
+            &selected.id,
+            &selected.base_branch,
+            &worktree_path,
+            &state.event_tx,
+            &mut state.join_set,
+            phase_timeout_seconds,
+            state.performer_ipc_addr.as_deref(),
+        ) {
+            Ok(pid) => pid,
+            Err(err) => {
+                let msg = format!(
+                    "dispatch failed for task {}: performer spawn failed ({})",
+                    selected.id, err
+                );
+                let _ = append_coordinator_event_with_severity(
+                    repo_root,
+                    "dispatch_failed",
+                    &selected.id,
+                    "dev",
+                    "failed",
+                    &msg,
+                    "warning",
+                );
+                let _ = rollback_claim(&msg);
+                if let Some(log) = logger {
+                    let _ = log.note(format!("- {}", msg));
+                }
+                emit_dispatch_skipped(
+                    repo_root,
+                    logger,
+                    &selected.id,
+                    "spawn_performer_failed",
+                    &err.to_string(),
+                );
+                dispatch_failed_this_cycle.insert(selected.id.clone());
+                if cooldown_seconds > 0 {
+                    state.dispatch_retry_not_before.insert(
+                        selected.id.clone(),
+                        Instant::now() + Duration::from_secs(cooldown_seconds),
+                    );
+                }
+                break;
+            }
+        };
+        let mut registry = crate::coordinator::state::coordinator_state_registry_load(
+            repo_root,
+            &BTreeMap::new(),
+        )?;
+        coordinator_engine::apply_dispatch_pid_in_registry(&mut registry, &selected.id, pid)?;
+        set_registry_updated_at(&mut registry);
+        crate::coordinator::state::coordinator_state_registry_save(
+            repo_root,
+            &BTreeMap::new(),
+            &registry,
+        )?;
+        if let Some(log) = logger {
+            let _ = log.note(format!(
+                "- Lifecycle task={} stage=run pid_persisted={}",
+                selected.id,
+                pid.map(|v| v.to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+            ));
+        }
+        let dispatch_event_message = format!(
+            "task {} dispatched tool={} worktree={} pid={}",
+            selected.id,
+            selected.tool,
+            worktree_path.display(),
+            pid.map(|v| v.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
+        );
+        let _ = append_task_lifecycle_event_with_session(
+            repo_root,
+            "task_dispatched",
+            &selected.id,
+            "dev",
+            "started",
+            &dispatch_event_message,
+            active_session_id.as_deref(),
+        );
+
+        state.active_jobs.insert(
+            selected.id.clone(),
+            CoordinatorJob {
+                tool: selected.tool,
+                base_branch: selected.base_branch,
+                worktree_path,
+                attempt: 1,
+                started_at: std::time::Instant::now(),
+                pid,
+                failure_signaled_at: None,
+            },
+        );
+        if let Some(log) = logger {
+            let _ = log.note(format!("- Lifecycle task={} stage=run", selected.id));
+            let _ = log.note(format!(
+                "- Task dispatched task={} pid={}",
+                selected.id,
+                pid.map(|v| v.to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+            ));
+        }
+        dispatched += 1;
+        state.dispatched_total_run += 1;
+        if max_dispatch_total > 0 && state.dispatched_total_run >= max_dispatch_total {
+            if !state.dispatch_limit_event_emitted {
+                let msg = format!(
+                    "dispatch limit reached run_total={} max_dispatch={}",
+                    state.dispatched_total_run, max_dispatch_total
+                );
+                let _ = append_coordinator_event_with_severity(
+                    repo_root,
+                    "dispatch_limit_reached",
+                    "-",
+                    "dev",
+                    "done",
+                    &msg,
+                    "info",
+                );
+                if let Some(log) = logger {
+                    let _ = log.note(format!("- {}", msg));
+                }
+                state.dispatch_limit_event_emitted = true;
+            }
+            break;
+        }
+    }
+    if !dispatch_failed_this_cycle.is_empty() {
+        let failed_ids: Vec<&String> = dispatch_failed_this_cycle.iter().take(3).collect();
+        state.last_dispatch_failure = Some(format!(
+            "dispatch failed for {} task(s): {:?}. Check coordinator logs for details.",
+            dispatch_failed_this_cycle.len(),
+            failed_ids,
+        ));
+    }
+    Ok(dispatched)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         maybe_rollback_new_worktree_on_sanitize_failure, merge_gate_check, prepare_clean_worktree,
-        record_dispatch_retry_or_block, refresh_task_active_session_id_in_registry,
-        select_dispatch_candidate, should_emit_priority_zero_dispatch_skip, MergeGateResult,
-        SanitizeOptions,
+        refresh_task_active_session_id_in_registry, should_emit_priority_zero_dispatch_skip,
+        MergeGateResult, SanitizeOptions,
     };
-    use crate::coordinator::model::TaskRegistry;
     use crate::coordinator::runtime::CoordinatorRunState;
     use rusqlite::Connection;
-    use serde_json::json;
-    use std::collections::{BTreeMap, HashMap};
     use std::future::Future;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -3470,27 +3943,6 @@ mod tests {
                 .as_str()
                 .map(|value| value == expected_step)
                 .unwrap_or(false)
-    }
-
-    fn has_dispatch_retry_limit_event(repo: &Path, task_id: &str) -> bool {
-        let db_path = repo.join(".macc").join("state").join("coordinator.sqlite");
-        if !db_path.exists() {
-            return false;
-        }
-        let Ok(conn) = Connection::open(db_path) else {
-            return false;
-        };
-        let mut stmt = conn
-            .prepare(
-                "SELECT task_id FROM events WHERE event_type = 'dispatch_retry_limit_reached' AND task_id = ?1 ORDER BY seq DESC LIMIT 1",
-            )
-            .expect("prepare query");
-        let mut rows = stmt.query([task_id]).expect("query events");
-        let Some(row) = rows.next().expect("iterate rows") else {
-            return false;
-        };
-        let event_task_id: String = row.get(0).expect("task_id");
-        event_task_id == task_id
     }
 
     #[test]
@@ -3808,133 +4260,5 @@ mod tests {
         ));
         let _ = crate::remove_worktree(&repo, &worktree_path, true);
         let _ = fs::remove_dir_all(&repo);
-    }
-
-    #[test]
-    fn dispatch_retry_limit_blocks_task_and_emits_event() {
-        let repo = make_test_repo();
-        crate::init(&crate::ProjectPaths::from_root(&repo), false).expect("init repo");
-        crate::coordinator::state::coordinator_state_registry_save(
-            &repo,
-            &BTreeMap::new(),
-            &json!({
-                "tasks": [{
-                    "id": "L5-CTRL-004",
-                    "state": "todo",
-                    "task_runtime": {}
-                }]
-            }),
-        )
-        .expect("seed registry");
-
-        let mut state = CoordinatorRunState::new();
-        for _ in 0..4 {
-            let blocked = record_dispatch_retry_or_block(
-                &repo,
-                &mut state,
-                "L5-CTRL-004",
-                2,
-                5,
-                None,
-            )
-            .expect("record retry");
-            assert!(!blocked);
-        }
-        let blocked = record_dispatch_retry_or_block(&repo, &mut state, "L5-CTRL-004", 2, 5, None)
-            .expect("record retry");
-        assert!(blocked);
-        assert!(!state.dispatch_retry_count.contains_key("L5-CTRL-004"));
-        assert!(!state.dispatch_retry_not_before.contains_key("L5-CTRL-004"));
-
-        let registry = crate::coordinator::state::coordinator_state_registry_load(
-            &repo,
-            &BTreeMap::new(),
-        )
-        .expect("load registry");
-        let registry = TaskRegistry::from_value(&registry).expect("typed registry");
-        let task = registry.find_task("L5-CTRL-004").expect("task exists");
-        assert_eq!(task.state, "blocked");
-        assert_eq!(
-            task.task_runtime.last_error.as_deref(),
-            Some("dispatch_retry_limit_exceeded")
-        );
-        assert!(has_dispatch_retry_limit_event(&repo, "L5-CTRL-004"));
-        let _ = fs::remove_dir_all(&repo);
-    }
-
-    #[test]
-    fn manual_unlock_resets_dispatch_retry_count_for_future_dispatch() {
-        let repo = make_test_repo();
-        crate::init(&crate::ProjectPaths::from_root(&repo), false).expect("init repo");
-        crate::coordinator::state::coordinator_state_registry_save(
-            &repo,
-            &BTreeMap::new(),
-            &json!({
-                "tasks": [{
-                    "id": "L5-CTRL-004",
-                    "state": "todo",
-                    "task_runtime": {}
-                }]
-            }),
-        )
-        .expect("seed registry");
-
-        let mut state = CoordinatorRunState::new();
-        for _ in 0..5 {
-            let _ = record_dispatch_retry_or_block(&repo, &mut state, "L5-CTRL-004", 2, 5, None)
-                .expect("record retry");
-        }
-
-        let mut args = BTreeMap::new();
-        args.insert("task-id".to_string(), "L5-CTRL-004".to_string());
-        args.insert("state".to_string(), "todo".to_string());
-        args.insert("reason".to_string(), "manual_unlock".to_string());
-        crate::coordinator::state::coordinator_state_apply_transition(&repo, &args)
-            .expect("manual unlock transition");
-
-        let blocked = record_dispatch_retry_or_block(&repo, &mut state, "L5-CTRL-004", 2, 5, None)
-            .expect("record retry after unlock");
-        assert!(!blocked);
-        assert_eq!(state.dispatch_retry_count.get("L5-CTRL-004"), Some(&1));
-        let _ = fs::remove_dir_all(&repo);
-    }
-
-    #[test]
-    fn select_dispatch_candidate_prefers_highest_priority_ready_task() {
-        let registry = json!({
-            "tasks": [
-                {
-                    "id": "T-LOW",
-                    "title": "lower priority",
-                    "state": "todo",
-                    "priority": "5",
-                    "dependencies": [],
-                    "exclusive_resources": []
-                },
-                {
-                    "id": "T-HIGH",
-                    "title": "higher priority",
-                    "state": "todo",
-                    "priority": "1",
-                    "dependencies": [],
-                    "exclusive_resources": []
-                }
-            ],
-            "resource_locks": {}
-        });
-        let cfg = crate::coordinator::task_selector::TaskSelectorConfig {
-            enabled_tools: vec!["codex".to_string()],
-            tool_priority: vec!["codex".to_string()],
-            max_parallel_per_tool: HashMap::new(),
-            tool_specializations: HashMap::new(),
-            max_parallel: 2,
-            default_tool: "codex".to_string(),
-            default_base_branch: "main".to_string(),
-            now: chrono::Utc::now().to_rfc3339(),
-            throttle_registry: BTreeMap::new(),
-            rate_limit_fallback_enabled: false,
-        };
-        let candidate = select_dispatch_candidate(&registry, &cfg).expect("candidate selected");
-        assert_eq!(candidate.task.id, "T-HIGH");
     }
 }

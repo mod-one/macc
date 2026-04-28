@@ -145,8 +145,6 @@ pub struct CoordinatorConfig {
     pub ghost_heartbeat_grace_seconds: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dispatch_cooldown_seconds: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_dispatch_retries: Option<u32>,
     /// Session cache TTL in seconds used by dispatch when preferring warm
     /// worktree sessions. Default behavior when unset: 300 seconds.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -331,7 +329,6 @@ impl Default for CoordinatorConfig {
             merge_hook_timeout_seconds: None,
             ghost_heartbeat_grace_seconds: None,
             dispatch_cooldown_seconds: None,
-            max_dispatch_retries: None,
             session_cache_ttl_seconds: None,
             json_compat: None,
             legacy_json_fallback: None,
@@ -416,9 +413,6 @@ pub struct CoordinatorConfigResolved {
     /// non-fatal failures before the task is marked failed.
     /// Default: `1` (one attempt, no automatic retry at the runner level).
     pub phase_runner_max_attempts: usize,
-    /// Maximum number of dispatch cooldown retries before the task is blocked.
-    /// Default: `5`.
-    pub max_dispatch_retries: u32,
 
     // ── Logging ──────────────────────────────────────────────────────────────
     /// Flush the coordinator log file after this many buffered lines.
@@ -626,7 +620,6 @@ impl CoordinatorConfigResolved {
                 .and_then(|c| c.phase_runner_max_attempts)
                 .unwrap_or(1)
                 .max(1),
-            max_dispatch_retries: config.and_then(|c| c.max_dispatch_retries).unwrap_or(5),
             log_flush_lines: config
                 .and_then(|c| c.log_flush_lines)
                 .filter(|v| *v > 0)
@@ -1398,7 +1391,6 @@ unknown_field: true
         assert_eq!(r.max_parallel, 3);
         assert_eq!(r.timeout_seconds, 0);
         assert_eq!(r.phase_runner_max_attempts, 1);
-        assert_eq!(r.max_dispatch_retries, 5);
 
         // Logging
         assert_eq!(r.log_flush_lines, 500);
@@ -1482,7 +1474,6 @@ unknown_field: true
         cfg.merge_job_timeout_seconds = Some(120);
         cfg.merge_hook_timeout_seconds = Some(45);
         cfg.dispatch_cooldown_seconds = Some(5);
-        cfg.max_dispatch_retries = Some(7);
         cfg.session_cache_ttl_seconds = Some(600);
         cfg.error_code_retry_list = Some("E601".to_string());
         cfg.error_code_retry_max = Some(5);
@@ -1526,7 +1517,6 @@ unknown_field: true
         assert_eq!(r.merge_job_timeout_seconds, 120);
         assert_eq!(r.merge_hook_timeout_seconds, 45);
         assert_eq!(r.dispatch_cooldown_seconds, 5);
-        assert_eq!(r.max_dispatch_retries, 7);
         assert_eq!(r.session_cache_ttl_seconds, 600);
         assert_eq!(r.error_code_retry_list, "E601");
         assert_eq!(r.error_code_retry_max, 5);

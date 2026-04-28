@@ -196,10 +196,6 @@ pub enum CoordinatorRuntimeEventKind {
         worktree_path: String,
         sanitize_step: String,
     },
-    DispatchRetryLimitReached {
-        task_id: String,
-        retry_count: u32,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -224,7 +220,6 @@ pub struct CoordinatorRunState {
     pub last_heartbeat_log_at: Option<std::time::Instant>,
     pub heartbeat_updates_since_log: usize,
     pub dispatch_retry_not_before: HashMap<String, std::time::Instant>,
-    pub dispatch_retry_count: HashMap<String, u32>,
     pub last_priority_zero_dispatch_block_task_id: Option<String>,
     pub dispatched_total_run: usize,
     pub dispatch_limit_event_emitted: bool,
@@ -335,7 +330,6 @@ impl CoordinatorRunState {
             last_heartbeat_log_at: None,
             heartbeat_updates_since_log: 0,
             dispatch_retry_not_before: HashMap::new(),
-            dispatch_retry_count: HashMap::new(),
             last_priority_zero_dispatch_block_task_id: None,
             dispatched_total_run: 0,
             dispatch_limit_event_emitted: false,
@@ -690,25 +684,6 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_retry_limit_reached_event_roundtrip() {
-        let record = make_record(
-            "dispatch_retry_limit_reached",
-            serde_json::json!({
-                "task_id": "TEST-001",
-                "retry_count": 5
-            }),
-        );
-        let ev = raw_event_to_runtime_event(&record).expect("should parse");
-        assert_eq!(
-            ev.kind,
-            CoordinatorRuntimeEventKind::DispatchRetryLimitReached {
-                task_id: "TEST-001".to_string(),
-                retry_count: 5,
-            }
-        );
-    }
-
-    #[test]
     fn reliability_events_with_missing_payload_fields_degrade_gracefully() {
         // payload_str returns "" for missing keys — events still parse
         let record = make_record("salvage_attempted", serde_json::json!({}));
@@ -877,28 +852,6 @@ pub fn raw_event_to_runtime_event(
         "worktree_orphan_cleaned" => CoordinatorRuntimeEventKind::WorktreeOrphanCleaned {
             worktree_path: payload_str(&event.payload, "worktree_path"),
             sanitize_step: payload_str(&event.payload, "sanitize_step"),
-        },
-        "dispatch_retry_limit_reached" => CoordinatorRuntimeEventKind::DispatchRetryLimitReached {
-            task_id: if task_id.is_empty() {
-                payload_str(&event.payload, "task_id")
-            } else {
-                task_id.clone()
-            },
-            retry_count: event
-                .payload
-                .get("retry_count")
-                .and_then(serde_json::Value::as_u64)
-                .and_then(|v| u32::try_from(v).ok())
-                .or_else(|| {
-                    event
-                        .payload
-                        .get("message")
-                        .and_then(serde_json::Value::as_str)
-                        .and_then(|msg| msg.split("retry_count=").nth(1))
-                        .and_then(|tail| tail.split_whitespace().next())
-                        .and_then(|v| v.parse::<u32>().ok())
-                })
-                .unwrap_or(0),
         },
         _ => return None,
     };
