@@ -25,7 +25,8 @@ use super::dispatch::{
 use super::merge_gate::{merge_gate_check, MergeGateResult};
 use super::phase_runner::{
     append_task_lifecycle_event_with_session, ensure_tool_json_for_tool, read_session_id_from_state,
-    refresh_task_active_session_id_in_registry, NativePhaseExecutor,
+    refresh_task_active_session_id_in_registry, task_active_session_id_from_registry,
+    NativePhaseExecutor,
 };
 use super::sanitize::{
     maybe_rollback_new_worktree_on_sanitize_failure, prepare_clean_worktree, sanitize_worktree_to_base,
@@ -182,7 +183,7 @@ fn resolve_merge_timeout_seconds(
         .unwrap_or(cfg.merge_job_timeout_seconds)
 }
 
-fn retry_count_for_task(registry: &serde_json::Value, task_id: &str) -> usize {
+pub(super) fn retry_count_for_task(registry: &serde_json::Value, task_id: &str) -> usize {
     crate::coordinator::model::TaskRegistry::from_value(registry)
         .ok()
         .and_then(|typed| {
@@ -193,7 +194,7 @@ fn retry_count_for_task(registry: &serde_json::Value, task_id: &str) -> usize {
         .unwrap_or(0)
 }
 
-fn mark_task_merged_from_merge_gate(
+pub(super) fn mark_task_merged_from_merge_gate(
     registry: &mut serde_json::Value,
     task_id: &str,
     now: &str,
@@ -1687,7 +1688,7 @@ fn force_kill_stale_failures(
             // Kill the entire process group (PGID == PID because we spawn
             // with process_group(0)).  This ensures orphaned tool subprocesses
             // are also killed, not just the shell wrapper.
-            super::runtime::kill_process_group_sync(pid);
+            crate::coordinator::runtime::kill_process_group_sync(pid);
             if let Some(log) = logger {
                 let _ = log.note(format!(
                     "- Force-killed performer task={} pid={} reason=failure_signaled_grace_expired elapsed={:.1}s",
@@ -1987,7 +1988,7 @@ fn resolve_rate_limit_backoff_max_seconds(
         .unwrap_or(cfg.rate_limit_backoff_max_seconds)
 }
 
-fn resolve_rate_limit_fallback_enabled(
+pub(super) fn resolve_rate_limit_fallback_enabled(
     env_cfg: &CoordinatorEnvConfig,
     coordinator: Option<&crate::config::CoordinatorConfig>,
 ) -> bool {

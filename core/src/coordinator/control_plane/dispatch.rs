@@ -1,11 +1,32 @@
-use super::base::*;
+use crate::config::CoordinatorConfigResolved;
+use crate::coordinator::{engine as coordinator_engine, runtime as coordinator_runtime};
+use crate::coordinator::helpers::{
+    append_coordinator_event_with_severity, build_non_task_worker_slug, count_pool_worktrees,
+    find_reusable_worktree_native, is_worktree_activity_recent, now_iso_coordinator,
+    recompute_resource_locks_from_tasks, score_worktree_session_warmth, set_registry_updated_at,
+    write_worktree_prd_for_task,
+};
+use crate::coordinator::runtime::{CoordinatorJob, CoordinatorRunState};
+use crate::coordinator::types::CoordinatorEnvConfig;
+use crate::{MaccError, Result};
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
+use super::base::{
+    mark_task_merged_from_merge_gate, resolve_rate_limit_fallback_enabled, retry_count_for_task,
+    CoordinatorLog,
+};
+use super::merge_gate::{merge_gate_check, MergeGateResult};
+use super::phase_runner::{
+    append_task_lifecycle_event_with_session, ensure_tool_json_for_tool, read_session_id_from_state,
+};
+use super::sanitize::{maybe_rollback_new_worktree_on_sanitize_failure, sanitize_worktree_to_base};
 
 fn ensure_expected_worktree_branch(worktree_path: &Path, expected_branch: &str) -> Result<bool> {
     let current_branch = crate::git::current_branch(worktree_path)?;
     Ok(current_branch == expected_branch)
 }
-struct DispatchCandidate {
-    task: crate::coordinator::task_selector::SelectedTask,
+pub(super) struct DispatchCandidate {
+    pub(super) task: crate::coordinator::task_selector::SelectedTask,
     worktree_slot: WorktreeSlot,
 }
 
@@ -401,6 +422,90 @@ pub(super) async fn run_dispatch_pipeline(
         let Some(candidate) = select_dispatch_candidate(&registry, &config) else {
             break;
         };
+        // Merge-gate: for retry tasks, check if the task branch is already
+        // cleanly merged — if so, mark merged and skip dispatch.
+        if cfg.merge_gate_on_dispatch && retry_count_for_task(&registry, &candidate.task.id) > 0 {
+            let attempt_msg = format!(
+                "merge-gate check started task={} base={}",
+                candidate.task.id, candidate.task.base_branch
+            );
+            let _ = append_coordinator_event_with_severity(
+                repo_root,
+                "merge_gate_attempt",
+                &candidate.task.id,
+                "dev",
+                "started",
+                &attempt_msg,
+                "info",
+            );
+            if let Some(log) = logger {
+                let _ = log.note(format!("- {}", attempt_msg));
+            }
+            match merge_gate_check(&candidate.task.id, &candidate.task.base_branch, repo_root) {
+                MergeGateResult::Merged => {
+                    let now = now_iso_coordinator();
+                    mark_task_merged_from_merge_gate(&mut registry, &candidate.task.id, &now)?;
+                    crate::coordinator::state::coordinator_state_registry_save(
+                        repo_root,
+                        &BTreeMap::new(),
+                        &registry,
+                    )?;
+                    let msg = format!(
+                        "merge-gate merged task={} base={}; dispatch canceled",
+                        candidate.task.id, candidate.task.base_branch
+                    );
+                    let _ = append_coordinator_event_with_severity(
+                        repo_root,
+                        "merge_gate_merged",
+                        &candidate.task.id,
+                        "merge",
+                        "done",
+                        &msg,
+                        "info",
+                    );
+                    if let Some(log) = logger {
+                        let _ = log.note(format!("- {}", msg));
+                    }
+                    continue;
+                }
+                MergeGateResult::ConflictProceed => {
+                    let msg = format!(
+                        "merge-gate could not merge task={} base={}; proceeding with dispatch",
+                        candidate.task.id, candidate.task.base_branch
+                    );
+                    let _ = append_coordinator_event_with_severity(
+                        repo_root,
+                        "merge_gate_conflict",
+                        &candidate.task.id,
+                        "merge",
+                        "warning",
+                        &msg,
+                        "warning",
+                    );
+                    if let Some(log) = logger {
+                        let _ = log.note(format!("- {}", msg));
+                    }
+                }
+                MergeGateResult::NoBranchProceed => {
+                    let msg = format!(
+                        "merge-gate found no mergeable retry branch task={}; proceeding with dispatch",
+                        candidate.task.id
+                    );
+                    let _ = append_coordinator_event_with_severity(
+                        repo_root,
+                        "merge_gate_no_branch",
+                        &candidate.task.id,
+                        "merge",
+                        "done",
+                        &msg,
+                        "info",
+                    );
+                    if let Some(log) = logger {
+                        let _ = log.note(format!("- {}", msg));
+                    }
+                }
+            }
+        }
         let worktree = acquire_worktree_for_dispatch(repo_root, &registry, &candidate, cfg, state, logger).await?;
         let claim = claim_task_in_registry(repo_root, &candidate, &worktree, &mut registry, logger)?;
         let pid = launch_performer(repo_root, prd_file, canonical, coordinator, env_cfg, state, logger, &claim).await?;

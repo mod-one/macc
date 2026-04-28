@@ -1,11 +1,16 @@
-use super::base::*;
+use crate::coordinator::helpers::{append_coordinator_event_with_severity, now_iso_coordinator};
+use crate::coordinator::runtime::CoordinatorRunState;
+use crate::Result;
+use std::path::Path;
+use super::base::CoordinatorLog;
+
 pub(super) type SanitizeStepFailure = Option<&'static str>;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct SanitizeOptions {
-    fetch_remote: bool,
-    fail_on_fetch_error: bool,
-    tag_abandoned: bool,
+    pub(super) fetch_remote: bool,
+    pub(super) fail_on_fetch_error: bool,
+    pub(super) tag_abandoned: bool,
 }
 
 pub(super) async fn prepare_clean_worktree(

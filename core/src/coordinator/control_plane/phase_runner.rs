@@ -1,7 +1,14 @@
-use super::base::*;
+use crate::coordinator::model::TaskRegistry;
+use crate::coordinator::{engine as coordinator_engine, runtime as coordinator_runtime};
+use crate::coordinator::ipc::read_performer_ipc_addr;
+use crate::coordinator::helpers::now_iso_coordinator;
+use crate::{MaccError, Result};
+use std::path::Path;
+use super::base::CoordinatorLog;
+
 pub(super) struct NativePhaseExecutor<'a> {
-    repo_root: &'a Path,
-    logger: Option<&'a dyn CoordinatorLog>,
+    pub(super) repo_root: &'a Path,
+    pub(super) logger: Option<&'a dyn CoordinatorLog>,
 }
 
 /// Append a line to the performer log file for this task.
@@ -64,7 +71,7 @@ pub(super) fn read_session_id_from_state(
     None
 }
 
-fn task_active_session_id_from_registry(
+pub(super) fn task_active_session_id_from_registry(
     registry: &serde_json::Value,
     task_id: &str,
 ) -> Option<String> {

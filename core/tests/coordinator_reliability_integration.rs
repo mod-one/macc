@@ -351,7 +351,7 @@ fn coordinator_reliability_chain_integration() {
         ]
     });
     let (reused_b, prep_error_b) =
-        find_reusable_worktree_native(&repo_b, &registry_b, "codex", "main", 300)
+        find_reusable_worktree_native(&repo_b, &registry_b, "codex", "main", 300, &std::collections::HashMap::new())
             .expect("reuse abandoned worktree");
     assert!(prep_error_b.is_none());
     assert!(reused_b.is_some());
@@ -467,7 +467,7 @@ fn coordinator_reliability_chain_integration() {
     write_tool_sessions(&repo_e, "codex", &warm_wt, "sid-warm", &fresh);
     let registry_e = json!({ "tasks": [] });
     let (reused_e, prep_error_e) =
-        find_reusable_worktree_native(&repo_e, &registry_e, "codex", "main", 300)
+        find_reusable_worktree_native(&repo_e, &registry_e, "codex", "main", 300, &std::collections::HashMap::new())
             .expect("reuse scan");
     assert!(prep_error_e.is_none());
     let (picked, _, _, _, _) = reused_e.expect("expected reusable worktree");

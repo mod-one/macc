@@ -1,4 +1,6 @@
-use super::base::*;
+use std::path::Path;
+
+#[derive(Debug, PartialEq)]
 pub(super) enum MergeGateResult {
     Merged,
     ConflictProceed,
