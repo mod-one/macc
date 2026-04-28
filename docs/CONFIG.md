@@ -163,6 +163,7 @@ Controls coordinator runtime defaults for `.macc/automation/coordinator.sh`.
 - `max_parallel_per_tool`: per-tool concurrency limits.
 - `tool_specializations`: category-to-tools routing map.
 - `max_dispatch`: max tasks launched per `dispatch` run (`0` means no cap).
+- `max_dispatch_retries`: max dispatch preparation retries per task before blocking it with `dispatch_retry_limit_exceeded` (default `5`, minimum effective runtime value `1`).
 - `max_parallel`: max concurrent performer runs.
 - `timeout_seconds`: lock wait timeout (`0` disables timeout).
 - `phase_runner_max_attempts`: retry attempts for phase runner fallback.
@@ -175,6 +176,7 @@ Controls coordinator runtime defaults for `.macc/automation/coordinator.sh`.
 - `merge_gate_on_dispatch` (bool, default `true`): gate dispatch behind a merge-health check to prevent cascading failures.
 - `tag_abandoned_branches` (bool, default `true`): tag branches for abandoned tasks so they are discoverable after cleanup.
 - `sync_unmerged_branches` (bool, default `true`): scan unmerged branches during sync to recover partially-complete work.
+- `remove_worktree_on_sanitize_failure` (bool, default `true`): when sanitize fails on a newly created worktree, remove that orphan worktree automatically.
 - `salvage_merge_timeout_seconds` (u64, default `120`): timeout in seconds for the salvage-merge operation.
 - `max_salvage_attempts_per_task` (u32, default `1`): maximum number of salvage attempts allowed per task before giving up.
 - `session_cache_ttl_seconds` (u64, default `300`): warm-session TTL used by dispatch preference logic; recent activity inside this window gets higher reuse priority.

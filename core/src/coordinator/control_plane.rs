@@ -79,6 +79,78 @@ fn resolve_dispatch_cooldown_seconds(
         .unwrap_or(cfg.dispatch_cooldown_seconds)
 }
 
+fn record_dispatch_retry_or_block(
+    repo_root: &Path,
+    state: &mut CoordinatorRunState,
+    task_id: &str,
+    cooldown_seconds: u64,
+    max_dispatch_retries: u32,
+    logger: Option<&dyn CoordinatorLog>,
+) -> Result<bool> {
+    let retry_count = {
+        let entry = state.dispatch_retry_count.entry(task_id.to_string()).or_insert(0);
+        *entry += 1;
+        *entry
+    };
+    if retry_count >= max_dispatch_retries {
+        let registry_value = crate::coordinator::state::coordinator_state_registry_load(
+            repo_root,
+            &BTreeMap::new(),
+        )?;
+        let mut registry = TaskRegistry::from_value(&registry_value)?;
+        let mut blocked = false;
+        if let Some(task) = registry.find_task_mut(task_id) {
+            task.state = "blocked".to_string();
+            let runtime = task.ensure_runtime();
+            runtime.status = Some("failed".to_string());
+            runtime.last_error = Some("dispatch_retry_limit_exceeded".to_string());
+            runtime.set_last_error_details(
+                "E901",
+                "coordinator",
+                "dispatch_retry_limit_exceeded".to_string(),
+            );
+            let now = now_iso_coordinator();
+            task.updated_at = Some(now.clone());
+            task.state_changed_at = Some(now.clone());
+            registry.recompute_resource_locks(&now);
+            registry.set_updated_at(now);
+            crate::coordinator::state::coordinator_state_registry_save(
+                repo_root,
+                &BTreeMap::new(),
+                &registry.to_value()?,
+            )?;
+            blocked = true;
+        }
+        state.dispatch_retry_count.remove(task_id);
+        state.dispatch_retry_not_before.remove(task_id);
+        let msg = format!(
+            "dispatch retry limit reached task={} retry_count={} max_dispatch_retries={}",
+            task_id, retry_count, max_dispatch_retries
+        );
+        let _ = append_coordinator_event_with_severity(
+            repo_root,
+            "dispatch_retry_limit_reached",
+            task_id,
+            "dev",
+            "failed",
+            &msg,
+            "warning",
+        );
+        if let Some(log) = logger {
+            let _ = log.note(format!("- {}", msg));
+        }
+        return Ok(blocked);
+    }
+
+    if cooldown_seconds > 0 {
+        state.dispatch_retry_not_before.insert(
+            task_id.to_string(),
+            Instant::now() + Duration::from_secs(cooldown_seconds),
+        );
+    }
+    Ok(false)
+}
+
 fn resolve_session_cache_ttl_seconds(
     coordinator: Option<&crate::config::CoordinatorConfig>,
 ) -> u64 {
@@ -2176,6 +2248,9 @@ fn apply_runtime_event_bus_updates(
                         CoordinatorRuntimeEventKind::WorktreeOrphanCleaned { .. } => {
                             "worktree_orphan_cleaned"
                         }
+                        CoordinatorRuntimeEventKind::DispatchRetryLimitReached { .. } => {
+                            "dispatch_retry_limit_reached"
+                        }
                     };
                     let _ = log.note(format!(
                         "- performer event received task={} type={} source={}",
@@ -2248,7 +2323,8 @@ fn apply_runtime_event_bus_updates(
                     | CoordinatorRuntimeEventKind::SyncUnmergedBranchFound { .. }
                     | CoordinatorRuntimeEventKind::SyncUnmergedBranchMerged { .. }
                     | CoordinatorRuntimeEventKind::WorktreeHealthCheckFailed { .. }
-                    | CoordinatorRuntimeEventKind::WorktreeOrphanCleaned { .. } => {}
+                    | CoordinatorRuntimeEventKind::WorktreeOrphanCleaned { .. }
+                    | CoordinatorRuntimeEventKind::DispatchRetryLimitReached { .. } => {}
                 }
             }
             Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
@@ -2808,6 +2884,7 @@ pub async fn dispatch_ready_tasks_native(
     logger: Option<&dyn CoordinatorLog>,
 ) -> Result<usize> {
     let cfg = CoordinatorConfigResolved::resolve(coordinator);
+    let max_dispatch_retries = cfg.max_dispatch_retries.max(1);
     ensure_performer_ipc_listener(repo_root, state, logger).await?;
     let mut dispatched = 0usize;
     let mut dispatch_failed_this_cycle: HashSet<String> = HashSet::new();
@@ -3149,11 +3226,15 @@ pub async fn dispatch_ready_tasks_native(
             if state.effective_max_parallel > 0 && pool_count >= state.effective_max_parallel {
                 if let Some((reason, detail)) = reuse_prepare_error {
                     emit_dispatch_skipped(repo_root, logger, &selected.id, &reason, &detail);
-                    if cooldown_seconds > 0 {
-                        state.dispatch_retry_not_before.insert(
-                            selected.id.clone(),
-                            Instant::now() + Duration::from_secs(cooldown_seconds),
-                        );
+                    if record_dispatch_retry_or_block(
+                        repo_root,
+                        state,
+                        &selected.id,
+                        cooldown_seconds,
+                        max_dispatch_retries,
+                        logger,
+                    )? {
+                        break;
                     }
                     dispatch_failed_this_cycle.insert(selected.id.clone());
                 }
@@ -3194,11 +3275,15 @@ pub async fn dispatch_ready_tasks_native(
                         "create_worktree_failed",
                         &e.to_string(),
                     );
-                    if cooldown_seconds > 0 {
-                        state.dispatch_retry_not_before.insert(
-                            selected.id.clone(),
-                            Instant::now() + Duration::from_secs(cooldown_seconds),
-                        );
+                    if record_dispatch_retry_or_block(
+                        repo_root,
+                        state,
+                        &selected.id,
+                        cooldown_seconds,
+                        max_dispatch_retries,
+                        logger,
+                    )? {
+                        break;
                     }
                     dispatch_failed_this_cycle.insert(selected.id.clone());
                     break;
@@ -3247,12 +3332,16 @@ pub async fn dispatch_ready_tasks_native(
                     "sanitize_new_worktree_failed",
                     &created.path.to_string_lossy(),
                 );
-                if cooldown_seconds > 0 {
-                    state.dispatch_retry_not_before.insert(
-                        selected.id.clone(),
-                        Instant::now() + Duration::from_secs(cooldown_seconds),
-                    );
-                }
+                if record_dispatch_retry_or_block(
+                        repo_root,
+                        state,
+                        &selected.id,
+                        cooldown_seconds,
+                        max_dispatch_retries,
+                        logger,
+                    )? {
+                        break;
+                    }
                 dispatch_failed_this_cycle.insert(selected.id.clone());
                 break;
             }
@@ -3282,12 +3371,16 @@ pub async fn dispatch_ready_tasks_native(
                     "restore_task_branch_failed",
                     &created.branch,
                 );
-                if cooldown_seconds > 0 {
-                    state.dispatch_retry_not_before.insert(
-                        selected.id.clone(),
-                        Instant::now() + Duration::from_secs(cooldown_seconds),
-                    );
-                }
+                if record_dispatch_retry_or_block(
+                        repo_root,
+                        state,
+                        &selected.id,
+                        cooldown_seconds,
+                        max_dispatch_retries,
+                        logger,
+                    )? {
+                        break;
+                    }
                 dispatch_failed_this_cycle.insert(selected.id.clone());
                 break;
             }
@@ -3409,12 +3502,16 @@ pub async fn dispatch_ready_tasks_native(
             if let Some(log) = logger {
                 let _ = log.note(format!("- {}", msg));
             }
-            if cooldown_seconds > 0 {
-                state.dispatch_retry_not_before.insert(
-                    selected.id.clone(),
-                    Instant::now() + Duration::from_secs(cooldown_seconds),
-                );
-            }
+            if record_dispatch_retry_or_block(
+                        repo_root,
+                        state,
+                        &selected.id,
+                        cooldown_seconds,
+                        max_dispatch_retries,
+                        logger,
+                    )? {
+                        break;
+                    }
             dispatch_failed_this_cycle.insert(selected.id.clone());
             break;
         }
@@ -3447,12 +3544,16 @@ pub async fn dispatch_ready_tasks_native(
             if let Some(log) = logger {
                 let _ = log.note(format!("- {}", msg));
             }
-            if cooldown_seconds > 0 {
-                state.dispatch_retry_not_before.insert(
-                    selected.id.clone(),
-                    Instant::now() + Duration::from_secs(cooldown_seconds),
-                );
-            }
+            if record_dispatch_retry_or_block(
+                        repo_root,
+                        state,
+                        &selected.id,
+                        cooldown_seconds,
+                        max_dispatch_retries,
+                        logger,
+                    )? {
+                        break;
+                    }
             dispatch_failed_this_cycle.insert(selected.id.clone());
             break;
         }
@@ -3482,12 +3583,16 @@ pub async fn dispatch_ready_tasks_native(
             if let Some(log) = logger {
                 let _ = log.note(format!("- {}", msg));
             }
-            if cooldown_seconds > 0 {
-                state.dispatch_retry_not_before.insert(
-                    selected.id.clone(),
-                    Instant::now() + Duration::from_secs(cooldown_seconds),
-                );
-            }
+            if record_dispatch_retry_or_block(
+                        repo_root,
+                        state,
+                        &selected.id,
+                        cooldown_seconds,
+                        max_dispatch_retries,
+                        logger,
+                    )? {
+                        break;
+                    }
             dispatch_failed_this_cycle.insert(selected.id.clone());
             break;
         }
@@ -3526,12 +3631,16 @@ pub async fn dispatch_ready_tasks_native(
             if let Some(log) = logger {
                 let _ = log.note(format!("- {}", msg));
             }
-            if cooldown_seconds > 0 {
-                state.dispatch_retry_not_before.insert(
-                    selected.id.clone(),
-                    Instant::now() + Duration::from_secs(cooldown_seconds),
-                );
-            }
+            if record_dispatch_retry_or_block(
+                        repo_root,
+                        state,
+                        &selected.id,
+                        cooldown_seconds,
+                        max_dispatch_retries,
+                        logger,
+                    )? {
+                        break;
+                    }
             dispatch_failed_this_cycle.insert(selected.id.clone());
             break;
         }
@@ -3587,12 +3696,16 @@ pub async fn dispatch_ready_tasks_native(
                 &detail,
             );
             let _ = rollback_claim(&msg);
-            if cooldown_seconds > 0 {
-                state.dispatch_retry_not_before.insert(
-                    selected.id.clone(),
-                    Instant::now() + Duration::from_secs(cooldown_seconds),
-                );
-            }
+            if record_dispatch_retry_or_block(
+                        repo_root,
+                        state,
+                        &selected.id,
+                        cooldown_seconds,
+                        max_dispatch_retries,
+                        logger,
+                    )? {
+                        break;
+                    }
             dispatch_failed_this_cycle.insert(selected.id.clone());
             break;
         }
@@ -3642,12 +3755,16 @@ pub async fn dispatch_ready_tasks_native(
                     &err.to_string(),
                 );
                 dispatch_failed_this_cycle.insert(selected.id.clone());
-                if cooldown_seconds > 0 {
-                    state.dispatch_retry_not_before.insert(
-                        selected.id.clone(),
-                        Instant::now() + Duration::from_secs(cooldown_seconds),
-                    );
-                }
+                if record_dispatch_retry_or_block(
+                        repo_root,
+                        state,
+                        &selected.id,
+                        cooldown_seconds,
+                        max_dispatch_retries,
+                        logger,
+                    )? {
+                        break;
+                    }
                 break;
             }
         };
@@ -3679,12 +3796,16 @@ pub async fn dispatch_ready_tasks_native(
                 &format!("expected={} actual={}", branch, current_branch),
             );
             dispatch_failed_this_cycle.insert(selected.id.clone());
-            if cooldown_seconds > 0 {
-                state.dispatch_retry_not_before.insert(
-                    selected.id.clone(),
-                    Instant::now() + Duration::from_secs(cooldown_seconds),
-                );
-            }
+            if record_dispatch_retry_or_block(
+                        repo_root,
+                        state,
+                        &selected.id,
+                        cooldown_seconds,
+                        max_dispatch_retries,
+                        logger,
+                    )? {
+                        break;
+                    }
             break;
         }
         let pid = match coordinator_runtime::spawn_performer_job(
@@ -3725,12 +3846,16 @@ pub async fn dispatch_ready_tasks_native(
                     &err.to_string(),
                 );
                 dispatch_failed_this_cycle.insert(selected.id.clone());
-                if cooldown_seconds > 0 {
-                    state.dispatch_retry_not_before.insert(
-                        selected.id.clone(),
-                        Instant::now() + Duration::from_secs(cooldown_seconds),
-                    );
-                }
+                if record_dispatch_retry_or_block(
+                        repo_root,
+                        state,
+                        &selected.id,
+                        cooldown_seconds,
+                        max_dispatch_retries,
+                        logger,
+                    )? {
+                        break;
+                    }
                 break;
             }
         };
@@ -3792,6 +3917,8 @@ pub async fn dispatch_ready_tasks_native(
                     .unwrap_or_else(|| "unknown".to_string())
             ));
         }
+        state.dispatch_retry_count.remove(&selected.id);
+        state.dispatch_retry_not_before.remove(&selected.id);
         dispatched += 1;
         state.dispatched_total_run += 1;
         if max_dispatch_total > 0 && state.dispatched_total_run >= max_dispatch_total {
@@ -3832,11 +3959,14 @@ pub async fn dispatch_ready_tasks_native(
 mod tests {
     use super::{
         maybe_rollback_new_worktree_on_sanitize_failure, merge_gate_check, prepare_clean_worktree,
-        refresh_task_active_session_id_in_registry, should_emit_priority_zero_dispatch_skip,
-        MergeGateResult, SanitizeOptions,
+        record_dispatch_retry_or_block, refresh_task_active_session_id_in_registry,
+        should_emit_priority_zero_dispatch_skip, MergeGateResult, SanitizeOptions,
     };
+    use crate::coordinator::model::TaskRegistry;
     use crate::coordinator::runtime::CoordinatorRunState;
     use rusqlite::Connection;
+    use serde_json::json;
+    use std::collections::BTreeMap;
     use std::future::Future;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -3943,6 +4073,27 @@ mod tests {
                 .as_str()
                 .map(|value| value == expected_step)
                 .unwrap_or(false)
+    }
+
+    fn has_dispatch_retry_limit_event(repo: &Path, task_id: &str) -> bool {
+        let db_path = repo.join(".macc").join("state").join("coordinator.sqlite");
+        if !db_path.exists() {
+            return false;
+        }
+        let Ok(conn) = Connection::open(db_path) else {
+            return false;
+        };
+        let mut stmt = conn
+            .prepare(
+                "SELECT task_id FROM events WHERE event_type = 'dispatch_retry_limit_reached' AND task_id = ?1 ORDER BY seq DESC LIMIT 1",
+            )
+            .expect("prepare query");
+        let mut rows = stmt.query([task_id]).expect("query events");
+        let Some(row) = rows.next().expect("iterate rows") else {
+            return false;
+        };
+        let event_task_id: String = row.get(0).expect("task_id");
+        event_task_id == task_id
     }
 
     #[test]
@@ -4259,6 +4410,95 @@ mod tests {
             "reset_hard_base_branch"
         ));
         let _ = crate::remove_worktree(&repo, &worktree_path, true);
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn dispatch_retry_limit_blocks_task_and_emits_event() {
+        let repo = make_test_repo();
+        crate::init(&crate::ProjectPaths::from_root(&repo), false).expect("init repo");
+        crate::coordinator::state::coordinator_state_registry_save(
+            &repo,
+            &BTreeMap::new(),
+            &json!({
+                "tasks": [{
+                    "id": "L5-CTRL-004",
+                    "state": "todo",
+                    "task_runtime": {}
+                }]
+            }),
+        )
+        .expect("seed registry");
+
+        let mut state = CoordinatorRunState::new();
+        for _ in 0..4 {
+            let blocked = record_dispatch_retry_or_block(
+                &repo,
+                &mut state,
+                "L5-CTRL-004",
+                2,
+                5,
+                None,
+            )
+            .expect("record retry");
+            assert!(!blocked);
+        }
+        let blocked = record_dispatch_retry_or_block(&repo, &mut state, "L5-CTRL-004", 2, 5, None)
+            .expect("record retry");
+        assert!(blocked);
+        assert!(!state.dispatch_retry_count.contains_key("L5-CTRL-004"));
+        assert!(!state.dispatch_retry_not_before.contains_key("L5-CTRL-004"));
+
+        let registry = crate::coordinator::state::coordinator_state_registry_load(
+            &repo,
+            &BTreeMap::new(),
+        )
+        .expect("load registry");
+        let registry = TaskRegistry::from_value(&registry).expect("typed registry");
+        let task = registry.find_task("L5-CTRL-004").expect("task exists");
+        assert_eq!(task.state, "blocked");
+        assert_eq!(
+            task.task_runtime.last_error.as_deref(),
+            Some("dispatch_retry_limit_exceeded")
+        );
+        assert!(has_dispatch_retry_limit_event(&repo, "L5-CTRL-004"));
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn manual_unlock_resets_dispatch_retry_count_for_future_dispatch() {
+        let repo = make_test_repo();
+        crate::init(&crate::ProjectPaths::from_root(&repo), false).expect("init repo");
+        crate::coordinator::state::coordinator_state_registry_save(
+            &repo,
+            &BTreeMap::new(),
+            &json!({
+                "tasks": [{
+                    "id": "L5-CTRL-004",
+                    "state": "todo",
+                    "task_runtime": {}
+                }]
+            }),
+        )
+        .expect("seed registry");
+
+        let mut state = CoordinatorRunState::new();
+        for _ in 0..5 {
+            let _ = record_dispatch_retry_or_block(&repo, &mut state, "L5-CTRL-004", 2, 5, None)
+                .expect("record retry");
+        }
+
+        let mut args = BTreeMap::new();
+        args.insert("task-id".to_string(), "L5-CTRL-004".to_string());
+        args.insert("state".to_string(), "todo".to_string());
+        args.insert("reason".to_string(), "manual_unlock".to_string());
+        crate::coordinator::state::coordinator_state_apply_transition(&repo, &args)
+            .expect("manual unlock transition");
+
+        let blocked = record_dispatch_retry_or_block(&repo, &mut state, "L5-CTRL-004", 2, 5, None)
+            .expect("record retry after unlock");
+        assert!(!blocked);
+        assert_eq!(state.dispatch_retry_count.get("L5-CTRL-004"), Some(&1));
         let _ = fs::remove_dir_all(&repo);
     }
 }
