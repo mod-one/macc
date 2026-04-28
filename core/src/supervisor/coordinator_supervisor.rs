@@ -469,7 +469,15 @@ Respond with ONLY valid JSON matching this schema (no markdown fences, no extra 
     }}
   ],
   "actions_taken": [],
-  "suggested_code_changes": []
+  "suggested_code_changes": [],
+  "improvement_hints": [
+    {{
+      "problem_class": "<short label for the class of recurring problem>",
+      "detection_hook": "<where in the coordinator lifecycle this can be detected>",
+      "suggested_coordinator_behavior": "<what the coordinator should do autonomously when detected>",
+      "suggested_prd_task": "<optional PRD task ID that would implement this, or omit field>"
+    }}
+  ]
 }}
 "#,
             coordinator_result = coordinator_result,
@@ -868,6 +876,10 @@ mod tests {
         assert!(prompt.contains("Respond with ONLY valid JSON"));
         assert!(prompt.contains("\"findings\""));
         assert!(prompt.contains("\"recommendations\""));
+        assert!(prompt.contains("\"improvement_hints\""));
+        assert!(prompt.contains("problem_class"));
+        assert!(prompt.contains("detection_hook"));
+        assert!(prompt.contains("suggested_coordinator_behavior"));
     }
 
     // ── parse_coordinator_result ──────────────────────────────────────────────

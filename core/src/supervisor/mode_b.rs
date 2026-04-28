@@ -362,6 +362,14 @@ Respond with ONLY valid JSON matching this schema (no markdown fences, no extra 
   ],
   "actions_taken": [],
   "suggested_code_changes": [],
+  "improvement_hints": [
+    {{
+      "problem_class": "<short label for the class of recurring problem>",
+      "detection_hook": "<where in the coordinator lifecycle this can be detected>",
+      "suggested_coordinator_behavior": "<what the coordinator should do autonomously when detected>",
+      "suggested_prd_task": "<optional PRD task ID that would implement this, or omit field>"
+    }}
+  ],
   "recovery_action": "git_reset|git_clean|none"
 }}
 "#,
@@ -1302,6 +1310,7 @@ mod tests {
             }],
             actions_taken: vec![],
             suggested_code_changes: vec![],
+            improvement_hints: vec![],
         }
     }
 
@@ -1402,6 +1411,10 @@ mod tests {
         assert!(prompt.contains("runner exited non-zero"));
         assert!(prompt.contains("M core/src/lib.rs"));
         assert!(prompt.contains("recovery_action"));
+        assert!(prompt.contains("improvement_hints"));
+        assert!(prompt.contains("problem_class"));
+        assert!(prompt.contains("detection_hook"));
+        assert!(prompt.contains("suggested_coordinator_behavior"));
     }
 
     // ── parse_ai_response ─────────────────────────────────────────────────────
