@@ -167,8 +167,10 @@ Controls coordinator runtime defaults for `.macc/automation/coordinator.sh`.
 - `max_parallel`: max concurrent performer runs.
 - `timeout_seconds`: lock wait timeout (`0` disables timeout).
 - `phase_runner_max_attempts`: retry attempts for phase runner fallback.
-- `stale_*_seconds`: stale thresholds for task states (`0` disables each threshold).
-- `stale_action`: stale policy (`abandon`, `todo`, `blocked`).
+- `stale_claimed_seconds` (usize, default `0`): auto-stale timeout for tasks in the `claimed` state; `0` disables.
+- `stale_in_progress_seconds` (usize, default `0`): hard kill timeout for the performer process in seconds. When the process exceeds this limit the coordinator sends SIGTERM, then SIGKILL after `force_kill_grace_seconds`. `0` disables the timeout (process runs until it exits on its own). Set this to limit runaway tasks, e.g. `stale_in_progress_seconds: 3600` for a 1-hour ceiling.
+- `stale_changes_requested_seconds` (usize, default `0`): auto-stale timeout for tasks in the `changes_requested` state; `0` disables.
+- `stale_action`: action taken when a stale threshold fires: `block` (default), `retry`, or `requeue`.
 
 **Reliability feature toggles** (all default to enabled):
 - `salvage_before_retry` (bool, default `true`): attempt to salvage partial work before retrying a failed task.

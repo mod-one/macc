@@ -331,13 +331,12 @@ pub(super) async fn launch_performer(
             message: format!("status={}", apply_output.status),
         });
     }
+    // Use stale_in_progress_seconds as the per-phase hard kill timeout, matching
+    // the FSM path (fsm.rs). Default is 0 (disabled) — consistent with
+    // CoordinatorConfigResolved::resolve returning 0 when not configured.
     let phase_timeout_seconds = env_cfg.stale_in_progress_seconds.unwrap_or_else(|| {
         let cfg = CoordinatorConfigResolved::resolve(coordinator);
-        if coordinator.is_some_and(|c| c.stale_in_progress_seconds.is_some()) {
-            cfg.stale_in_progress_seconds
-        } else {
-            600
-        }
+        cfg.stale_in_progress_seconds
     });
     if !ensure_expected_worktree_branch(&claim.worktree_path, &claim.branch)? {
         return Err(MaccError::Coordinator {

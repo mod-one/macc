@@ -492,7 +492,8 @@ Coordinator orchestrates the end-to-end automation cycle: it reads the task regi
   - `--tool-priority`, `--max-parallel-per-tool-json`, `--tool-specializations-json`
   - `--max-dispatch`, `--max-parallel`, `--timeout-seconds`
   - `--phase-runner-max-attempts`
-  - `--stale-claimed-seconds`, `--stale-in-progress-seconds`, `--stale-changes-requested-seconds`, `--stale-action`
+  - `--stale-claimed-seconds`, `--stale-changes-requested-seconds`, `--stale-action`: auto-stale thresholds for `claimed`/`changes_requested` states (`0` disables).
+  - `--stale-in-progress-seconds`: hard kill timeout for the performer process in seconds (`0` disables). When exceeded, the coordinator sends SIGTERM then SIGKILL after `force_kill_grace_seconds`. Default `0` — tasks run until they exit naturally. Set to e.g. `3600` to cap task runtime at one hour.
   - Heartbeat events update `task_runtime.last_heartbeat` from `events.jsonl`.
   - Runtime stale heartbeat policy via env: `STALE_HEARTBEAT_SECONDS`, `STALE_HEARTBEAT_ACTION=retry|block|requeue` (retry/requeue resets task to `todo`; retry also increments runtime retries).
 - Task registry path is fixed to `.macc/automation/task/task_registry.json`.
