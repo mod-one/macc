@@ -46,6 +46,7 @@ fn collect_runner_paths(adapters_dir: &Path) -> Vec<PathBuf> {
         if !path.is_dir() {
             continue;
         }
+        let is_shared = path.file_name().map(|n| n == "shared").unwrap_or(false);
         let Ok(sub_entries) = fs::read_dir(&path) else {
             continue;
         };
@@ -54,7 +55,10 @@ fn collect_runner_paths(adapters_dir: &Path) -> Vec<PathBuf> {
             let Some(name) = sub_path.file_name().and_then(|n| n.to_str()) else {
                 continue;
             };
-            if name.ends_with(".performer.sh") {
+            if is_shared && name.ends_with(".sh") {
+                // Embed all shared library scripts so adapter performers can source them.
+                paths.push(sub_path);
+            } else if name.ends_with(".performer.sh") {
                 paths.push(sub_path);
             }
         }

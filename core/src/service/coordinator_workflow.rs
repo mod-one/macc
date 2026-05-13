@@ -1335,6 +1335,12 @@ pub fn coordinator_sync<E: crate::engine::Engine + ?Sized>(
     engine.coordinator_sync_registry_from_prd_with_logger(&paths.root, &prd_file, logger)?;
     // Reconcile task states from commit history on the reference branch.
     coordinator_sync_prd(paths, coordinator_cfg, env_cfg, logger)?;
+    let sync_unmerged_branches = coordinator_cfg
+        .map(|cfg| cfg.sync_unmerged_branches)
+        .unwrap_or(true);
+    if sync_unmerged_branches {
+        coordinator_sync_unmerged_branches(paths, coordinator_cfg, env_cfg, logger)?;
+    }
     // Reconcile runtime state: reset ghost/orphan tasks whose performer is dead.
     coordinator_reconcile(paths, env_cfg, coordinator_cfg, logger)?;
     let json_compat = env_cfg
@@ -1441,6 +1447,147 @@ pub fn coordinator_sync_prd(
         ));
     }
     Ok(report)
+}
+
+pub fn coordinator_sync_unmerged_branches(
+    paths: &ProjectPaths,
+    coordinator_cfg: Option<&CoordinatorConfig>,
+    env_cfg: &CoordinatorEnvConfig,
+    logger: Option<&dyn CoordinatorLog>,
+) -> Result<Vec<crate::coordinator::commit_reconciler::SyncBranchResult>> {
+    use crate::coordinator::commit_reconciler;
+    use crate::coordinator::helpers::append_coordinator_event_with_severity;
+    use crate::coordinator_storage::CoordinatorStoragePaths;
+
+    if let Some(log) = logger {
+        let _ = log.note("- Sync Branches: reconciling unmerged task branches".to_string());
+    }
+
+    let base_branch = env_cfg
+        .reference_branch
+        .as_deref()
+        .or_else(|| coordinator_cfg.and_then(|c| c.reference_branch.as_deref()))
+        .unwrap_or("main");
+
+    let storage_mode = coordinator_engine::resolve_storage_mode(env_cfg, coordinator_cfg)?;
+    let store_paths = CoordinatorStoragePaths::from_project_paths(paths);
+    let mut snapshot = match storage_mode {
+        CoordinatorStorageMode::Json => JsonStorage::new(store_paths.clone()).load_snapshot()?,
+        _ => SqliteStorage::new(store_paths.clone()).load_snapshot()?,
+    };
+
+    let results = commit_reconciler::sync_unmerged_branches(
+        &mut snapshot.registry,
+        &paths.root,
+        base_branch,
+    )?;
+    let merged_tasks: usize = results
+        .iter()
+        .map(|result| result.merged_task_ids.len())
+        .sum();
+    if merged_tasks > 0 {
+        match storage_mode {
+            CoordinatorStorageMode::Json => {
+                JsonStorage::new(store_paths).save_snapshot(&snapshot)?
+            }
+            _ => SqliteStorage::new(store_paths).save_snapshot(&snapshot)?,
+        }
+    }
+
+    for result in &results {
+        let branch_detail = format!(
+            "branch={} tasks={}",
+            result.branch,
+            if result.discovered_task_ids.is_empty() {
+                "-".to_string()
+            } else {
+                result.discovered_task_ids.join(",")
+            }
+        );
+        let _ = append_coordinator_event_with_severity(
+            &paths.root,
+            "sync_unmerged_branch_discovered",
+            result
+                .discovered_task_ids
+                .first()
+                .map(String::as_str)
+                .unwrap_or(""),
+            "merge",
+            "observed",
+            &branch_detail,
+            "info",
+        );
+
+        if let Some(log) = logger {
+            let _ = log.note(format!(
+                "- Sync Branches: {} status={} merged_tasks={}",
+                result.branch,
+                result.status.as_str(),
+                result.merged_task_ids.len()
+            ));
+        }
+
+        match result.status {
+            commit_reconciler::SyncBranchStatus::Merged => {
+                for task_id in &result.merged_task_ids {
+                    let _ = append_coordinator_event_with_severity(
+                        &paths.root,
+                        "sync_unmerged_branch_merged",
+                        task_id,
+                        "merge",
+                        "done",
+                        &format!("branch={} merged into {}", result.branch, base_branch),
+                        "info",
+                    );
+                }
+            }
+            commit_reconciler::SyncBranchStatus::MergeFailed => {
+                let detail = result
+                    .detail
+                    .as_deref()
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or("merge failed");
+                let task_ids: Vec<&str> = result
+                    .discovered_task_ids
+                    .iter()
+                    .map(String::as_str)
+                    .collect();
+                if task_ids.is_empty() {
+                    let _ = append_coordinator_event_with_severity(
+                        &paths.root,
+                        "sync_unmerged_branch_merge_failed",
+                        "",
+                        "merge",
+                        "failed",
+                        detail,
+                        "warn",
+                    );
+                } else {
+                    for task_id in task_ids {
+                        let _ = append_coordinator_event_with_severity(
+                            &paths.root,
+                            "sync_unmerged_branch_merge_failed",
+                            task_id,
+                            "merge",
+                            "failed",
+                            detail,
+                            "warn",
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(log) = logger {
+        let _ = log.note(format!(
+            "- Sync Branches: scanned {} branch(es), merged {} task(s)",
+            results.len(),
+            merged_tasks
+        ));
+    }
+    Ok(results)
 }
 
 /// Build a human-readable sync-prd summary for inclusion in the audit prompt.
@@ -1932,6 +2079,7 @@ fn retry_dev_phase<E: crate::engine::Engine + ?Sized>(
         &current_exe,
         &paths.root,
         task_id,
+        &task.base_branch("master"),
         &worktree,
         &state.event_tx,
         &mut state.join_set,
@@ -1942,6 +2090,7 @@ fn retry_dev_phase<E: crate::engine::Engine + ?Sized>(
         task_id.to_string(),
         coordinator_runtime::CoordinatorJob {
             tool: task.task_tool().unwrap_or_default().to_string(),
+            base_branch: task.base_branch("master"),
             worktree_path: worktree.clone(),
             attempt: 1,
             started_at: std::time::Instant::now(),

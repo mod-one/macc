@@ -55,6 +55,7 @@ pub(super) struct ApiError {
 }
 
 impl ApiError {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
         status: StatusCode,
         code: &str,

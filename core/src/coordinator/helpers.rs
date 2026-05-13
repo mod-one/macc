@@ -2,7 +2,7 @@ use crate::coordinator::model::{PrdInput, TaskRegistry};
 use crate::coordinator::runtime as coordinator_runtime;
 use crate::coordinator_storage::append_event_sqlite;
 use crate::{MaccError, Result};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 pub fn now_iso_coordinator() -> String {
@@ -54,6 +54,175 @@ fn can_reuse_worktree_slot(registry: &serde_json::Value, worktree_path: &Path) -
     TaskRegistry::from_value(registry)
         .map(|typed| typed.can_reuse_worktree_slot(&worktree_path.to_string_lossy()))
         .unwrap_or(false)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionWarmth {
+    Warm(u64),
+    Cold,
+}
+
+impl SessionWarmth {
+    fn sort_key(self) -> (u8, u64) {
+        match self {
+            SessionWarmth::Warm(age_secs) => (0, age_secs),
+            SessionWarmth::Cold => (1, u64::MAX),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SlotActivityRecency {
+    Recent(u64),
+    Stale,
+}
+
+impl SlotActivityRecency {
+    fn sort_key(self) -> (u8, u64) {
+        match self {
+            SlotActivityRecency::Recent(age_secs) => (0, age_secs),
+            SlotActivityRecency::Stale => (1, u64::MAX),
+        }
+    }
+}
+
+fn load_tool_sessions_state(repo_root: &Path) -> Option<serde_json::Value> {
+    let path = repo_root.join(".macc/state/tool-sessions.json");
+    let raw = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn session_id_is_active(tool_node: &serde_json::Value, session_id: &str) -> bool {
+    let Some(leases) = tool_node
+        .get("leases")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return true;
+    };
+    leases
+        .get(session_id)
+        .and_then(|lease| lease.get("status"))
+        .and_then(serde_json::Value::as_str)
+        == Some("active")
+}
+
+fn score_worktree_session_warmth_from_state(
+    state: Option<&serde_json::Value>,
+    worktree_path: &Path,
+    tool_id: &str,
+    ttl_seconds: u64,
+    now_epoch: i64,
+) -> SessionWarmth {
+    let Some(root) = state else {
+        return SessionWarmth::Cold;
+    };
+    let Some(tool_node) = root.get("tools").and_then(|v| v.get(tool_id)) else {
+        return SessionWarmth::Cold;
+    };
+    let Some(sessions) = tool_node
+        .get("sessions")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return SessionWarmth::Cold;
+    };
+    let key_plain = worktree_path.to_string_lossy().to_string();
+    let key_canon = std::fs::canonicalize(worktree_path)
+        .ok()
+        .map(|p| p.to_string_lossy().to_string());
+    let entry = std::iter::once(key_plain.as_str())
+        .chain(key_canon.as_deref())
+        .find_map(|key| sessions.get(key));
+    let Some(entry) = entry else {
+        return SessionWarmth::Cold;
+    };
+    let Some(session_id) = entry
+        .get("session_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|sid| !sid.is_empty())
+    else {
+        return SessionWarmth::Cold;
+    };
+    if !session_id_is_active(tool_node, session_id) {
+        return SessionWarmth::Cold;
+    }
+    let Some(updated_at) = entry.get("updated_at").and_then(serde_json::Value::as_str) else {
+        return SessionWarmth::Cold;
+    };
+    let Ok(updated_at_epoch) = chrono::DateTime::parse_from_rfc3339(updated_at)
+        .map(|ts| ts.with_timezone(&chrono::Utc).timestamp())
+    else {
+        return SessionWarmth::Cold;
+    };
+    if updated_at_epoch > now_epoch {
+        return SessionWarmth::Warm(0);
+    }
+    let age_secs = now_epoch.saturating_sub(updated_at_epoch) as u64;
+    if age_secs <= ttl_seconds {
+        SessionWarmth::Warm(age_secs)
+    } else {
+        SessionWarmth::Cold
+    }
+}
+
+pub fn score_worktree_session_warmth(
+    repo_root: &Path,
+    worktree_path: &Path,
+    tool_id: &str,
+    ttl_seconds: u64,
+) -> SessionWarmth {
+    let state = load_tool_sessions_state(repo_root);
+    let now_epoch = chrono::Utc::now().timestamp();
+    score_worktree_session_warmth_from_state(
+        state.as_ref(),
+        worktree_path,
+        tool_id,
+        ttl_seconds,
+        now_epoch,
+    )
+}
+
+fn score_worktree_activity_recency_from_state(
+    last_session_activity_at: &HashMap<String, i64>,
+    worktree_path: &Path,
+    ttl_seconds: u64,
+    now_epoch: i64,
+) -> SlotActivityRecency {
+    let key_plain = worktree_path.to_string_lossy().to_string();
+    let key_canon = std::fs::canonicalize(worktree_path)
+        .ok()
+        .map(|p| p.to_string_lossy().to_string());
+    let updated_epoch = std::iter::once(key_plain.as_str())
+        .chain(key_canon.as_deref())
+        .find_map(|key| last_session_activity_at.get(key).copied());
+    let Some(updated_epoch) = updated_epoch else {
+        return SlotActivityRecency::Stale;
+    };
+    if updated_epoch > now_epoch {
+        return SlotActivityRecency::Recent(0);
+    }
+    let age_secs = now_epoch.saturating_sub(updated_epoch) as u64;
+    if age_secs <= ttl_seconds {
+        SlotActivityRecency::Recent(age_secs)
+    } else {
+        SlotActivityRecency::Stale
+    }
+}
+
+pub fn is_worktree_activity_recent(
+    last_session_activity_at: &HashMap<String, i64>,
+    worktree_path: &Path,
+    ttl_seconds: u64,
+) -> bool {
+    let now_epoch = chrono::Utc::now().timestamp();
+    matches!(
+        score_worktree_activity_recency_from_state(
+            last_session_activity_at,
+            worktree_path,
+            ttl_seconds,
+            now_epoch
+        ),
+        SlotActivityRecency::Recent(_)
+    )
 }
 
 fn has_in_progress_or_queued_on_worktree(
@@ -110,20 +279,174 @@ fn git_current_branch_name(worktree_path: &Path) -> Option<String> {
     crate::git::current_branch(worktree_path).ok()
 }
 
-fn prepare_reused_worktree_base(worktree_path: &Path, base_branch: &str) -> Result<(bool, bool)> {
+fn task_id_for_worktree(registry: &serde_json::Value, worktree_path: &Path) -> Option<String> {
+    let key = worktree_path.to_string_lossy();
+    TaskRegistry::from_value(registry)
+        .ok()
+        .and_then(|typed| {
+            typed
+                .tasks
+                .iter()
+                .find(|task| task.worktree_path().is_some_and(|path| path == key))
+                .map(|task| task.id.clone())
+        })
+        .filter(|id| !id.trim().is_empty())
+}
+
+fn extract_task_id_from_text(input: &str) -> Option<String> {
+    let mut best = String::new();
+    let mut current = String::new();
+    for ch in input.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' {
+            current.push(ch);
+        } else {
+            if current.matches('-').count() >= 2
+                && current.chars().any(|c| c.is_ascii_alphabetic())
+                && current.chars().any(|c| c.is_ascii_digit())
+                && current.len() > best.len()
+            {
+                best = current.clone();
+            }
+            current.clear();
+        }
+    }
+    if current.matches('-').count() >= 2
+        && current.chars().any(|c| c.is_ascii_alphabetic())
+        && current.chars().any(|c| c.is_ascii_digit())
+        && current.len() > best.len()
+    {
+        best = current;
+    }
+    if best.is_empty() {
+        None
+    } else {
+        Some(best)
+    }
+}
+
+fn sanitize_tag_component(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
+            out.push(ch);
+        } else {
+            out.push('-');
+        }
+    }
+    while out.contains("--") {
+        out = out.replace("--", "-");
+    }
+    out.trim_matches('-').trim_matches('.').to_string()
+}
+
+fn resolve_abandon_task_id(
+    worktree_path: &Path,
+    branch_hint: Option<&str>,
+    task_id_hint: Option<&str>,
+) -> String {
+    if let Some(id) = task_id_hint {
+        let trimmed = id.trim();
+        if !trimmed.is_empty() {
+            return sanitize_tag_component(trimmed);
+        }
+    }
+    if let Some(branch) = branch_hint {
+        if let Some(id) = extract_task_id_from_text(branch) {
+            return sanitize_tag_component(&id);
+        }
+    }
+    if let Some(branch) = git_current_branch_name(worktree_path) {
+        if let Some(id) = extract_task_id_from_text(&branch) {
+            return sanitize_tag_component(&id);
+        }
+    }
+    if let Ok(Some(metadata)) = crate::read_worktree_metadata(worktree_path) {
+        if let Some(id) = extract_task_id_from_text(&metadata.branch) {
+            return sanitize_tag_component(&id);
+        }
+    }
+    "unknown-task".to_string()
+}
+
+fn create_abandonment_tag_if_needed(
+    repo_root: &Path,
+    worktree_path: &Path,
+    base_branch: &str,
+    branch_hint: Option<&str>,
+    task_id_hint: Option<&str>,
+) -> Result<Option<String>> {
+    let commits = crate::git::commits_ahead_of_base(worktree_path, base_branch)?;
+    if commits.is_empty() {
+        return Ok(None);
+    }
+
+    let task_id = resolve_abandon_task_id(worktree_path, branch_hint, task_id_hint);
+    let head = crate::git::head_commit(worktree_path)?;
+    let timestamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+    let base_tag = format!("macc/abandoned/{}-{}", task_id, timestamp);
+    let mut tag = base_tag.clone();
+    let mut index = 0usize;
+    while crate::git::rev_parse_verify(repo_root, &format!("refs/tags/{}", tag)).unwrap_or(false) {
+        index += 1;
+        tag = format!("{}-{}", base_tag, index);
+    }
+    crate::git::create_tag(repo_root, &tag, &head)?;
+
+    let branch_for_log = branch_hint
+        .map(|s| s.to_string())
+        .or_else(|| git_current_branch_name(worktree_path))
+        .unwrap_or_else(|| "<detached>".to_string());
+    let message = format!(
+        "created abandonment tag {} for branch {} at {}",
+        tag, branch_for_log, head
+    );
+    if let Err(err) = append_coordinator_event_with_severity(
+        repo_root, "progress", &task_id, "dispatch", "ok", &message, "info",
+    ) {
+        tracing::warn!("failed to append abandonment tag event: {}", err);
+    }
+    Ok(Some(tag))
+}
+
+fn prepare_reused_worktree_base(
+    repo_root: &Path,
+    worktree_path: &Path,
+    base_branch: &str,
+    branch_hint: Option<&str>,
+    task_id_hint: Option<&str>,
+) -> Result<(bool, bool)> {
+    let _ = create_abandonment_tag_if_needed(
+        repo_root,
+        worktree_path,
+        base_branch,
+        branch_hint,
+        task_id_hint,
+    )?;
     if !crate::git::reset_hard(worktree_path, "HEAD")? {
         return Ok((false, false));
     }
     if !crate::git::clean_fd(worktree_path)? {
         return Ok((false, false));
     }
+    // Try checkout base_branch directly first. If that fails (e.g. because
+    // the branch is already checked out in another worktree), detach HEAD
+    // and reset to the base commit instead.
     if !crate::git::checkout(worktree_path, base_branch, false)?
         && !crate::git::checkout_reset_branch(worktree_path, base_branch, false)?
+        && !crate::git::checkout_detach(worktree_path)?
     {
         return Ok((false, false));
     }
-    if !crate::git::fetch(worktree_path, "origin")? {
-        return Ok((false, false));
+    // Fetch is best-effort: a network failure should not permanently block
+    // worktree reuse.  This mirrors the behaviour of prepare_clean_worktree
+    // which only hard-fails on fetch when fail_on_fetch_error is set.
+    if crate::git::git_remote_exists(worktree_path, "origin")? {
+        if !crate::git::fetch(worktree_path, "origin")? {
+            tracing::warn!(
+                "prepare_reused_worktree_base: fetch failed for {}, continuing",
+                worktree_path.display()
+            );
+        }
     }
     if !crate::git::reset_hard(worktree_path, base_branch)? {
         return Ok((false, false));
@@ -156,6 +479,8 @@ pub fn find_reusable_worktree_native(
     registry: &serde_json::Value,
     tool: &str,
     base_branch: &str,
+    session_cache_ttl_seconds: u64,
+    last_session_activity_at: &HashMap<String, i64>,
 ) -> Result<(
     Option<ReusableWorktree>,
     Option<ReusableWorktreePrepareError>,
@@ -163,11 +488,37 @@ pub fn find_reusable_worktree_native(
     let active_paths = active_task_worktree_paths(registry);
     let pool_root = repo_root.join(".macc").join("worktree");
     let entries = crate::list_worktrees(repo_root)?;
+    let sessions_state = load_tool_sessions_state(repo_root);
+    let now_epoch = chrono::Utc::now().timestamp();
+    let mut ranked_entries = entries
+        .into_iter()
+        .enumerate()
+        .filter(|(_, entry)| entry.path.starts_with(&pool_root))
+        .map(|(idx, entry)| {
+            let warmth = score_worktree_session_warmth_from_state(
+                sessions_state.as_ref(),
+                &entry.path,
+                tool,
+                session_cache_ttl_seconds,
+                now_epoch,
+            );
+            let recency = score_worktree_activity_recency_from_state(
+                last_session_activity_at,
+                &entry.path,
+                session_cache_ttl_seconds,
+                now_epoch,
+            );
+            (idx, entry, warmth, recency)
+        })
+        .collect::<Vec<_>>();
+    ranked_entries.sort_by(|a, b| {
+        a.2.sort_key()
+            .cmp(&b.2.sort_key())
+            .then_with(|| a.3.sort_key().cmp(&b.3.sort_key()))
+            .then_with(|| a.0.cmp(&b.0))
+    });
     let mut last_prepare_error: Option<(String, String)> = None;
-    for entry in entries {
-        if !entry.path.starts_with(&pool_root) {
-            continue;
-        }
+    for (_, entry, _, _) in ranked_entries {
         let key = entry.path.to_string_lossy().to_string();
         if active_paths.contains(&key) {
             continue;
@@ -211,6 +562,7 @@ pub fn find_reusable_worktree_native(
         }
 
         let previous_branch = git_current_branch_name(&entry.path).unwrap_or_default();
+        let task_id_hint = task_id_for_worktree(registry, &entry.path);
         if !is_branch_merged_into_base(&entry.path, &previous_branch, base_branch) {
             // If the task that owns this branch is permanently stuck (blocked/failed/abandoned),
             // it will never merge autonomously. Force-checkout to base to reclaim the slot
@@ -219,18 +571,29 @@ pub fn find_reusable_worktree_native(
                 .map(|r| r.task_on_worktree_is_permanently_stuck(&entry.path.to_string_lossy()))
                 .unwrap_or(false);
             if stuck {
-                // Abandon the unmerged branch by checking out base, then fall through
-                // to prepare_reused_worktree_base which will reset and clean.
-                if crate::git::checkout(&entry.path, base_branch, true).unwrap_or(false) {
-                    // Fall through — prepare_reused_worktree_base will reset HEAD.
+                let _ = create_abandonment_tag_if_needed(
+                    repo_root,
+                    &entry.path,
+                    base_branch,
+                    Some(&previous_branch),
+                    task_id_hint.as_deref(),
+                )?;
+                // Abandon the unmerged branch. We cannot `git checkout <base>` directly
+                // because git forbids checking out a branch that is already used by
+                // another worktree (the main repo). Instead we detach HEAD first, then
+                // reset to the base branch commit. prepare_reused_worktree_base will
+                // also handle the checkout-to-base via the same detach+reset pattern.
+                let detached = crate::git::checkout_detach(&entry.path).unwrap_or(false);
+                if detached {
+                    let _ = crate::git::reset_hard(&entry.path, base_branch);
+                    // Fall through — prepare_reused_worktree_base will finish the reset.
                 } else {
                     last_prepare_error = Some((
                         "stuck_branch_checkout_failed".to_string(),
                         format!(
-                            "worktree {} stuck branch {} could not be abandoned (checkout to {} failed)",
+                            "worktree {} stuck branch {} could not be abandoned (detach failed)",
                             entry.path.display(),
                             previous_branch,
-                            base_branch
                         ),
                     ));
                     continue;
@@ -249,7 +612,13 @@ pub fn find_reusable_worktree_native(
             }
         }
 
-        let (prepared, skipped_reset) = prepare_reused_worktree_base(&entry.path, base_branch)?;
+        let (prepared, skipped_reset) = prepare_reused_worktree_base(
+            repo_root,
+            &entry.path,
+            base_branch,
+            Some(&previous_branch),
+            task_id_hint.as_deref(),
+        )?;
         if !prepared {
             last_prepare_error = Some((
                 "sanitize_failed".to_string(),
@@ -345,6 +714,129 @@ pub fn find_reusable_worktree_native(
         ));
     }
     Ok((None, last_prepare_error))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        score_worktree_activity_recency_from_state, score_worktree_session_warmth_from_state,
+        SessionWarmth, SlotActivityRecency,
+    };
+    use serde_json::json;
+    use std::collections::HashMap;
+    use std::path::Path;
+
+    #[test]
+    fn warm_session_scored_when_within_ttl() {
+        let updated_at = "2026-04-13T00:00:00Z";
+        let now_epoch = chrono::DateTime::parse_from_rfc3339(updated_at)
+            .expect("valid ts")
+            .with_timezone(&chrono::Utc)
+            .timestamp()
+            + 300;
+        let state = json!({
+            "tools": {
+                "codex": {
+                    "sessions": {
+                        "/tmp/wt-1": {
+                            "session_id": "sid-1",
+                            "updated_at": updated_at
+                        }
+                    },
+                    "leases": {
+                        "sid-1": { "status": "active" }
+                    }
+                }
+            }
+        });
+        let warmth = score_worktree_session_warmth_from_state(
+            Some(&state),
+            Path::new("/tmp/wt-1"),
+            "codex",
+            300,
+            now_epoch,
+        );
+        assert_eq!(warmth, SessionWarmth::Warm(300));
+    }
+
+    #[test]
+    fn expired_session_scored_cold() {
+        let updated_at = "2026-04-13T00:00:00Z";
+        let now_epoch = chrono::DateTime::parse_from_rfc3339(updated_at)
+            .expect("valid ts")
+            .with_timezone(&chrono::Utc)
+            .timestamp()
+            + 301;
+        let state = json!({
+            "tools": {
+                "codex": {
+                    "sessions": {
+                        "/tmp/wt-1": {
+                            "session_id": "sid-1",
+                            "updated_at": updated_at
+                        }
+                    },
+                    "leases": {
+                        "sid-1": { "status": "active" }
+                    }
+                }
+            }
+        });
+        let warmth = score_worktree_session_warmth_from_state(
+            Some(&state),
+            Path::new("/tmp/wt-1"),
+            "codex",
+            300,
+            now_epoch,
+        );
+        assert_eq!(warmth, SessionWarmth::Cold);
+    }
+
+    #[test]
+    fn missing_session_scored_cold() {
+        let state = json!({
+            "tools": {
+                "codex": {
+                    "sessions": {},
+                    "leases": {}
+                }
+            }
+        });
+        let warmth = score_worktree_session_warmth_from_state(
+            Some(&state),
+            Path::new("/tmp/wt-1"),
+            "codex",
+            300,
+            1_744_505_100,
+        );
+        assert_eq!(warmth, SessionWarmth::Cold);
+    }
+
+    #[test]
+    fn recent_activity_scored_within_ttl() {
+        let mut activity = HashMap::new();
+        activity.insert("/tmp/wt-1".to_string(), 1_744_505_100);
+        let recency = score_worktree_activity_recency_from_state(
+            &activity,
+            Path::new("/tmp/wt-1"),
+            300,
+            1_744_505_400,
+        );
+        assert_eq!(recency, SlotActivityRecency::Recent(300));
+    }
+
+    #[test]
+    fn stale_activity_scored_outside_ttl() {
+        let mut activity = HashMap::new();
+        activity.insert("/tmp/wt-1".to_string(), 1_744_505_100);
+        let recency = score_worktree_activity_recency_from_state(
+            &activity,
+            Path::new("/tmp/wt-1"),
+            300,
+            1_744_505_401,
+        );
+        assert_eq!(recency, SlotActivityRecency::Stale);
+    }
 }
 
 pub fn count_pool_worktrees(repo_root: &Path) -> Result<usize> {

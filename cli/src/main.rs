@@ -209,14 +209,23 @@ enum Commands {
         #[command(subcommand)]
         logs_command: LogsCommands,
     },
+    /// Supervisor watchdog controls
+    Supervisor {
+        #[command(subcommand)]
+        supervisor_command: SupervisorCommands,
+    },
     /// Run the project coordinator automation script
+    #[command(trailing_var_arg = true)]
     Coordinator {
-        /// Coordinator command (run, control-plane-run, dispatch, advance, resume, sync, sync-prd, audit-prd, status, reconcile, unlock, cleanup, retry-phase, cutover-gate, stop, validate-transition, validate-runtime-transition, runtime-status-from-event, storage-import, storage-export, events-export, storage-verify, storage-sync, select-ready-task, state-apply-transition, state-set-runtime, state-task-field, state-task-exists, state-counts, state-locks, state-set-merge-pending, state-set-merge-processed, state-increment-retries, state-upsert-slo-warning, state-slo-metric)
+        /// Coordinator command (run, control-plane-run, dispatch, advance, resume, sync, sync-prd, audit-prd, status, reconcile, unlock, cleanup, retry-phase, cutover-gate, stop, sessions, validate-transition, validate-runtime-transition, runtime-status-from-event, storage-import, storage-export, events-export, storage-verify, storage-sync, select-ready-task, state-apply-transition, state-set-runtime, state-task-field, state-task-exists, state-counts, state-locks, state-set-merge-pending, state-set-merge-processed, state-increment-retries, state-upsert-slo-warning, state-slo-metric)
         #[arg(default_value = "run")]
         command_name: String,
         /// Disable TUI live view for `macc coordinator run`
         #[arg(long)]
         no_tui: bool,
+        /// Start supervisor in daemon+attach mode before running coordinator
+        #[arg(long)]
+        supervisor: bool,
         /// Graceful stop (SIGTERM only, no SIGKILL escalation)
         #[arg(long)]
         graceful: bool,
@@ -322,8 +331,8 @@ enum Commands {
         /// Max review cycles per task (0=skip review, 1=one review+fix, N=N loops). Default: unlimited.
         #[arg(long)]
         max_review_cycles: Option<usize>,
-        /// Extra args passed directly to coordinator.sh (use after --)
-        #[arg(last = true)]
+        /// Extra args passed to coordinator subcommands (positional or after --)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         extra_args: Vec<String>,
     },
 }
@@ -510,6 +519,28 @@ pub enum CatalogSubCommands {
         #[arg(long)]
         id: String,
     },
+}
+
+#[derive(Subcommand)]
+pub enum SupervisorCommands {
+    /// Start the supervisor watchdog
+    Start {
+        /// Run in background as a daemon process
+        #[arg(long)]
+        daemon: bool,
+        /// Attach to an existing coordinator run and monitor its PID lifecycle
+        #[arg(long)]
+        attach: bool,
+        /// Explicit coordinator PID to write into the coordinator PID file before attach
+        #[arg(long)]
+        coordinator_pid: Option<u32>,
+    },
+    /// Stop the supervisor watchdog
+    Stop,
+    /// Show supervisor and coordinator health
+    Status,
+    /// Show the latest supervisor report summary
+    Report,
 }
 
 #[derive(Subcommand)]
@@ -817,7 +848,7 @@ fn run_with_engine_provider(
                 commands::config::ConfigAction::Delete { name },
             )
             .run(),
-        }
+        },
         Some(Commands::Quickstart { yes, apply, no_tui }) => {
             commands::quickstart::QuickstartCommand::new(app.clone(), *yes, *apply, *no_tui).run()
         }
@@ -914,9 +945,13 @@ fn run_with_engine_provider(
         Some(Commands::Logs { logs_command }) => {
             commands::logs::LogsCommand::new(app.clone(), logs_command).run()
         }
+        Some(Commands::Supervisor { supervisor_command }) => {
+            commands::supervisor::SupervisorCommand::new(app.clone(), supervisor_command).run()
+        }
         Some(Commands::Coordinator {
             command_name,
             no_tui,
+            supervisor,
             graceful,
             remove_worktrees,
             remove_branches,
@@ -958,6 +993,7 @@ fn run_with_engine_provider(
             coordinator::command::CoordinatorCommandInput {
                 command_name: command_name.clone(),
                 no_tui: *no_tui,
+                supervisor: *supervisor,
                 graceful: *graceful,
                 remove_worktrees: *remove_worktrees,
                 remove_branches: *remove_branches,
@@ -1568,6 +1604,23 @@ mod tests {
         let to = parsed.to;
         assert_eq!(from, WorkflowState::Todo);
         assert_eq!(to, WorkflowState::Claimed);
+    }
+
+    #[test]
+    fn test_parse_coordinator_run_supervisor_flag() {
+        let cli = Cli::try_parse_from(["macc", "coordinator", "run", "--supervisor"])
+            .expect("parse coordinator run --supervisor");
+        match cli.command {
+            Some(Commands::Coordinator {
+                command_name,
+                supervisor,
+                ..
+            }) => {
+                assert_eq!(command_name, "run");
+                assert!(supervisor);
+            }
+            _ => panic!("unexpected command"),
+        }
     }
 
     #[test]
@@ -2342,6 +2395,7 @@ fi
                 command: Some(Commands::Coordinator {
                     command_name: "stop".to_string(),
                     no_tui: true,
+                    supervisor: false,
                     graceful: true,
                     remove_worktrees: true,
                     remove_branches: true,
@@ -3732,6 +3786,58 @@ fi
                 assert_eq!(assets, None);
             }
             other => panic!("unexpected command: {:?}", other.map(|_| "non-web")),
+        }
+    }
+
+    #[test]
+    fn test_supervisor_start_daemon_command_parsing() {
+        let cli = Cli::try_parse_from([
+            "macc",
+            "supervisor",
+            "start",
+            "--daemon",
+            "--attach",
+            "--coordinator-pid",
+            "1234",
+        ])
+        .expect("parse supervisor start command");
+
+        match cli.command {
+            Some(Commands::Supervisor { supervisor_command }) => match supervisor_command {
+                SupervisorCommands::Start {
+                    daemon,
+                    attach,
+                    coordinator_pid,
+                } => {
+                    assert!(daemon);
+                    assert!(attach);
+                    assert_eq!(coordinator_pid, Some(1234));
+                }
+                _ => panic!("unexpected supervisor subcommand"),
+            },
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn test_supervisor_start_attach_without_daemon_parsing() {
+        let cli = Cli::try_parse_from(["macc", "supervisor", "start", "--attach"])
+            .expect("parse supervisor start attach command");
+
+        match cli.command {
+            Some(Commands::Supervisor { supervisor_command }) => match supervisor_command {
+                SupervisorCommands::Start {
+                    daemon,
+                    attach,
+                    coordinator_pid,
+                } => {
+                    assert!(!daemon);
+                    assert!(attach);
+                    assert_eq!(coordinator_pid, None);
+                }
+                _ => panic!("unexpected supervisor subcommand"),
+            },
+            _ => panic!("unexpected command"),
         }
     }
 }

@@ -1,21 +1,30 @@
+#[allow(clippy::result_large_err)]
 mod apply;
 mod assets;
 mod audit;
+#[allow(clippy::result_large_err)]
 mod backups;
 mod config;
 mod coordinator;
+#[allow(clippy::result_large_err)]
 mod doctor;
 mod errors;
+#[allow(clippy::result_large_err)]
 mod git;
+#[allow(clippy::result_large_err)]
 mod logs;
 mod plan;
+#[allow(clippy::result_large_err)]
 mod prd;
+#[allow(clippy::result_large_err)]
 mod registry;
 mod sse;
+#[allow(clippy::result_large_err)]
 mod terminal;
 #[cfg(test)]
 mod tests;
 mod types;
+#[allow(clippy::result_large_err)]
 mod worktrees;
 
 use crate::commands::AppContext;

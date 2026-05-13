@@ -347,9 +347,10 @@ function CoordinatorTab({
           onChange={(v) => update({ staleClaimedSeconds: v })}
         />
         <NumberField
-          label="Stale In-Progress (seconds)"
+          label="In-Progress Timeout (seconds)"
           value={draft.staleInProgressSeconds}
           onChange={(v) => update({ staleInProgressSeconds: v })}
+          helpText="Hard kill timeout for the performer process. 0 = disabled (no limit). Sends SIGTERM then SIGKILL after force_kill_grace_seconds."
         />
         <NumberField
           label="Stale Changes-Requested (seconds)"

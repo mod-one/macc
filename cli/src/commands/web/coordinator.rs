@@ -4,7 +4,6 @@ use axum::extract::{Path, State};
 use axum::Json;
 use macc_core::coordinator::task_selector::SelectedTask;
 use macc_core::coordinator::types::CoordinatorEnvConfig;
-use macc_core::load_canonical_config;
 use macc_core::service::coordinator_workflow::{
     CoordinatorCommand, CoordinatorCommandRequest, CoordinatorCommandResult, CoordinatorStatus,
     ThrottledToolStatus,
@@ -220,11 +219,9 @@ pub(super) async fn coordinator_stop_handler(
 ) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
     let paths = state.paths.clone();
     let engine = state.engine.clone();
-    tokio::task::spawn_blocking(move || {
-        engine.coordinator_stop(&paths.root, "web api stop")
-    })
-    .await
-    .map_err(|e| ApiError::validation(e.to_string()))??;
+    tokio::task::spawn_blocking(move || engine.coordinator_stop(&paths.root, "web api stop"))
+        .await
+        .map_err(|e| ApiError::validation(e.to_string()))??;
     Ok(Json(ApiCoordinatorCommandResult::from(
         CoordinatorCommandResult::default(),
     )))
@@ -249,7 +246,7 @@ pub(super) async fn coordinator_dispatch_handler(
     let paths = state.paths.clone();
     let engine = state.engine.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let canonical = load_canonical_config(&paths.config_path)?;
+        let canonical = engine.load_canonical_config(&paths)?;
         let env_cfg = CoordinatorEnvConfig::default();
         engine.coordinator_execute_command(
             &paths,
@@ -319,9 +316,7 @@ pub(super) async fn coordinator_resume_handler(
     let paths = state.paths.clone();
     let engine = state.engine.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let was_paused =
-            macc_core::coordinator::state_runtime::read_coordinator_pause_file(&paths.root)?
-                .is_some();
+        let was_paused = engine.get_coordinator_status(&paths)?.paused;
         engine.coordinator_resume(&paths.root)?;
         Ok::<_, macc_core::MaccError>(CoordinatorCommandResult {
             resumed: Some(was_paused),

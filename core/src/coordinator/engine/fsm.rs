@@ -1,18 +1,23 @@
-use super::{PerformerCompletionKind, RuntimeStatus, WorkflowState};
-use crate::config::{CanonicalConfig, CoordinatorConfig};
-use crate::coordinator::control_plane::CoordinatorLog;
-use crate::coordinator::error_normalizer::{CanonicalClass, NormalizerRegistry, ToolError};
-use crate::coordinator::model::{Task, TaskRegistry};
-use crate::coordinator::rate_limit::{
-    compute_backoff_delay, update_throttle_state, RateLimitInfo, ToolThrottleState,
-    E601_RATE_LIMITED, E602_QUOTA_EXHAUSTED,
+use crate::config::{
+    CanonicalConfig, CoordinatorConfig,
+    CoordinatorConfigResolved as CanonicalCoordinatorConfigResolved,
 };
+use crate::coordinator::control_plane::CoordinatorLog;
+use crate::coordinator::error_normalizer::{
+    error_code_to_canonical_class, CanonicalClass, NormalizerRegistry, ToolError,
+};
+use crate::coordinator::model::{Task, TaskRegistry};
+use crate::coordinator::rate_limit::RateLimitInfo;
 use crate::coordinator::runtime::{
-    process_branch_cleanup_queue, terminate_active_jobs, CoordinatorRunState,
+    merge_task_with_policy_native, process_branch_cleanup_queue, terminate_active_jobs,
+    CoordinatorRunState,
 };
 use crate::coordinator::state_runtime::{
     cleanup_dead_runtime_tasks, clear_coordinator_pause_file, coordinator_pause_file_path,
     resume_paused_task_merge, set_task_paused_for_merge, write_coordinator_pause_file,
+};
+use crate::coordinator::{
+    CompletionAuthority, PerformerCompletionKind, RuntimeStatus, WorkflowState,
 };
 use crate::coordinator_storage::{
     coordinator_storage_bootstrap_sqlite_from_json, coordinator_storage_export_sqlite_to_json,
@@ -24,6 +29,10 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+use super::completion::{classify_completion_error, ErrorClassification};
+use super::retry::resolve_retry_strategy;
+use super::transitions::apply_state_transitions;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhaseTransition {
@@ -78,6 +87,7 @@ pub struct DispatchClaimUpdate {
     pub base_branch: String,
     pub last_commit: String,
     pub session_id: String,
+    pub active_session_id: Option<String>,
     pub pid: Option<i64>,
     pub phase: String,
     pub now: String,
@@ -132,6 +142,13 @@ pub struct JobCompletionResult {
     /// Canonical error classification produced by the per-adapter normalizer.
     /// `None` when the job succeeded or the normalizer was not invoked.
     pub tool_error: Option<ToolError>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SalvageResult {
+    Merged,
+    ConflictProceedRetry,
+    NoCommitsProceedRetry,
 }
 
 #[derive(Debug, Clone)]
@@ -292,7 +309,7 @@ fn transition_workflow_state(from: WorkflowState, event: WorkflowEvent) -> Resul
         }
     };
 
-    if !super::is_valid_workflow_transition(from, to) {
+    if !crate::coordinator::is_valid_workflow_transition(from, to) {
         return Err(MaccError::Coordinator {
             code: "invalid_transition",
             message: format!(
@@ -495,6 +512,37 @@ pub fn apply_merge_result_in_registry(
     Ok(())
 }
 
+pub fn salvage_check_in_registry<FE>(
+    registry: &mut Value,
+    task_id: &str,
+    repo_root: &Path,
+    merge_ai_fix: bool,
+    merge_hook_timeout: Option<u64>,
+    now: &str,
+    mut emit_event: FE,
+) -> Result<SalvageResult>
+where
+    FE: FnMut(&str, &str, &str, &str, &str, &str),
+{
+    let mut typed = TaskRegistry::from_value(registry)?;
+    let task = typed
+        .find_task_mut(task_id)
+        .ok_or_else(|| MaccError::Coordinator {
+            code: "task_not_found",
+            message: format!("Task '{}' not found in registry", task_id),
+        })?;
+    let out = salvage_check_typed(
+        task,
+        repo_root,
+        merge_ai_fix,
+        merge_hook_timeout,
+        now,
+        &mut emit_event,
+    )?;
+    *registry = typed.to_value()?;
+    Ok(out)
+}
+
 pub fn ensure_runtime_object(task: &mut Value) {
     if !task
         .get("task_runtime")
@@ -540,6 +588,9 @@ fn apply_dispatch_claim_typed(task: &mut Task, update: &DispatchClaimUpdate) {
     runtime.set_status(RuntimeStatus::Running);
     runtime.current_phase = Some(update.phase.clone());
     runtime.started_at = Some(update.now.clone());
+    if let Some(active_session_id) = update.active_session_id.as_ref() {
+        runtime.active_session_id = Some(active_session_id.clone());
+    }
     runtime.pid = update.pid;
     task.touch_state_changed(&update.now);
 }
@@ -709,7 +760,7 @@ pub(crate) fn apply_merge_failure_typed(task: &mut Task, reason: &str, now: &str
 
 /// Store a classified [`ToolError`] (and, when applicable, [`RateLimitInfo`])
 /// into `task_runtime.extra` for diagnostics and downstream consumers.
-fn store_classified_error_in_extra(
+pub(super) fn store_classified_error_in_extra(
     runtime: &mut crate::coordinator::model::TaskRuntime,
     tool_error: &Option<ToolError>,
     now_ts: u64,
@@ -735,479 +786,330 @@ fn store_classified_error_in_extra(
     }
 }
 
+pub(super) fn capture_last_assignment_before_clear(task: &mut Task) {
+    let (last_worktree_path, last_branch) = match task.worktree.as_ref() {
+        Some(worktree) => (
+            worktree
+                .worktree_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+            worktree
+                .branch
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+        ),
+        None => (None, None),
+    };
+    let runtime = task.ensure_runtime();
+    if let Some(path) = last_worktree_path {
+        runtime.last_worktree_path = Some(path);
+    }
+    if let Some(branch) = last_branch {
+        runtime.last_branch = Some(branch);
+    }
+}
+
+pub(super) fn preserve_active_session_chain(task: &mut Task) {
+    let tool = task.tool.clone();
+    let active_session = task
+        .task_runtime
+        .active_session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            task.session_id()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        });
+    if let Some(session_id) = active_session {
+        let runtime = task.ensure_runtime();
+        runtime.last_session_id = Some(session_id);
+        runtime.last_session_tool = tool;
+    }
+}
+
+fn git_path_for(worktree_path: &Path, relative_path: &str) -> Option<PathBuf> {
+    let output = crate::git::run_git_output_mapped(
+        worktree_path,
+        &["rev-parse", "--git-path", relative_path],
+        "resolve git path",
+    )
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let resolved = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if resolved.is_empty() {
+        return None;
+    }
+    let git_path = PathBuf::from(resolved);
+    Some(if git_path.is_absolute() {
+        git_path
+    } else {
+        worktree_path.join(git_path)
+    })
+}
+
+pub fn is_worktree_healthy(worktree_path: &Path) -> bool {
+    if !worktree_path.exists() || !worktree_path.is_dir() {
+        return false;
+    }
+
+    let inside_worktree = crate::git::run_git_output_mapped(
+        worktree_path,
+        &["rev-parse", "--is-inside-work-tree"],
+        "check git worktree",
+    )
+    .ok()
+    .map(|output| {
+        output.status.success()
+            && String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .eq_ignore_ascii_case("true")
+    })
+    .unwrap_or(false);
+    if !inside_worktree {
+        return false;
+    }
+
+    // Any lock file indicates concurrent git mutation; avoid reusing this slot.
+    let has_lock = ["index.lock", "HEAD.lock", "packed-refs.lock"]
+        .iter()
+        .any(|path| git_path_for(worktree_path, path).is_some_and(|p| p.exists()));
+    if has_lock {
+        return false;
+    }
+
+    // Active merge/rebase state is unsafe for a retry-on-same-worktree run.
+    let has_rebase_or_merge = ["MERGE_HEAD", "rebase-apply", "rebase-merge"]
+        .iter()
+        .any(|path| git_path_for(worktree_path, path).is_some_and(|p| p.exists()));
+    if has_rebase_or_merge {
+        return false;
+    }
+
+    true
+}
+
+fn salvage_check_typed<FE>(
+    task: &mut Task,
+    repo_root: &Path,
+    merge_ai_fix: bool,
+    merge_hook_timeout: Option<u64>,
+    now: &str,
+    emit_event: &mut FE,
+) -> Result<SalvageResult>
+where
+    FE: FnMut(&str, &str, &str, &str, &str, &str),
+{
+    let runtime = &task.task_runtime;
+    let worktree_path = runtime
+        .last_worktree_path
+        .as_deref()
+        .or_else(|| task.worktree_path())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let branch = runtime
+        .last_branch
+        .as_deref()
+        .or_else(|| task.branch())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let Some(worktree_path) = worktree_path else {
+        return Ok(SalvageResult::NoCommitsProceedRetry);
+    };
+    let Some(branch) = branch else {
+        return Ok(SalvageResult::NoCommitsProceedRetry);
+    };
+    let base_branch = task.base_branch("master").to_string();
+    let commits = match crate::git::commits_containing_pattern(
+        Path::new(&worktree_path),
+        &base_branch,
+        &task.id,
+    ) {
+        Ok(commits) => commits,
+        Err(_) => return Ok(SalvageResult::NoCommitsProceedRetry),
+    };
+    if commits.is_empty() {
+        return Ok(SalvageResult::NoCommitsProceedRetry);
+    }
+
+    let description = task
+        .extra
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let objective = task
+        .extra
+        .get("objective")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let merge_context = MergeTaskContext {
+        tool: task.tool.clone().unwrap_or_default(),
+        worktree_path,
+        title: task.title.clone().unwrap_or_default(),
+        description,
+        objective,
+    };
+    match merge_task_with_policy_native(
+        repo_root,
+        task.id.as_str(),
+        &branch,
+        &base_branch,
+        merge_ai_fix,
+        merge_hook_timeout,
+        &merge_context,
+        emit_event,
+    ) {
+        Ok(Ok(())) => {
+            task.set_workflow_state(WorkflowState::Merged);
+            let runtime = task.ensure_runtime();
+            runtime.set_status(RuntimeStatus::Idle);
+            runtime.current_phase = None;
+            runtime.pid = None;
+            task.touch_state_changed(now);
+            Ok(SalvageResult::Merged)
+        }
+        Ok(Err(_)) | Err(_) => Ok(SalvageResult::ConflictProceedRetry),
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct CompletionErrorDetails {
+    pub(super) code: String,
+    pub(super) origin: String,
+    pub(super) message: String,
+}
+
+impl CompletionErrorDetails {
+    pub(super) fn from_classification(classification: &ErrorClassification) -> Self {
+        Self {
+            code: classification.error_code.clone(),
+            origin: classification.error_origin.clone(),
+            message: classification.error_message.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct CoordinatorConfigResolved {
+    pub(super) auto_retry_error_codes: Vec<String>,
+    pub(super) auto_retry_max: usize,
+    pub(super) backoff_base_seconds: u64,
+    pub(super) backoff_max_seconds: u64,
+}
+
+impl CoordinatorConfigResolved {
+    fn from_input(input: &JobCompletionInput) -> Self {
+        Self {
+            auto_retry_error_codes: input.auto_retry_error_codes.clone(),
+            auto_retry_max: input.auto_retry_max,
+            backoff_base_seconds: input.backoff_base_seconds,
+            backoff_max_seconds: input.backoff_max_seconds,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(super) enum RetryOutcome {
+    ToolReportedError {
+        completion_kind: PerformerCompletionKind,
+        tool_error: Option<ToolError>,
+    },
+    AttemptRetry {
+        error: CompletionErrorDetails,
+        tool_error: Option<ToolError>,
+        now_ts: u64,
+    },
+    RateLimitBackoff {
+        backoff: u64,
+        delayed_until: String,
+        error: CompletionErrorDetails,
+        tool_error: Option<ToolError>,
+        now_ts: u64,
+    },
+    QuotaExhaustedRequeue {
+        cooldown: u64,
+        delayed_until: String,
+        error: CompletionErrorDetails,
+        tool_error: Option<ToolError>,
+        now_ts: u64,
+    },
+    AutoRetry {
+        error: CompletionErrorDetails,
+        tool_error: Option<ToolError>,
+        now_ts: u64,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub(super) enum BlockOutcome {
+    InvalidInput,
+    TerminalFailure {
+        error: CompletionErrorDetails,
+        tool_error: Option<ToolError>,
+        now_ts: u64,
+    },
+}
+
+#[allow(dead_code)]
 fn apply_job_completion_typed(
     task: &mut Task,
     input: &JobCompletionInput,
     normalizer_registry: &NormalizerRegistry,
     now: &str,
 ) -> JobCompletionResult {
-    // ── Baseline error classification from caller ────────────────────
-    let raw_error_code = input
-        .error_code
-        .clone()
-        .unwrap_or_else(|| "E101".to_string());
-    let error_origin = input
-        .error_origin
-        .clone()
-        .unwrap_or_else(|| "runner".to_string());
-    let raw_error_message = input
-        .error_message
-        .clone()
-        .unwrap_or_else(|| input.status_text.clone());
-
-    // ── Guard: invalid attempt counters ─────────────────────────────
-    if input.attempt == 0 || input.max_attempts == 0 {
-        task.set_workflow_state(WorkflowState::Blocked);
-        let runtime = task.ensure_runtime();
-        runtime.set_status(RuntimeStatus::Failed);
-        runtime.pid = None;
-        let detail = "performer completion received with invalid attempt counters".to_string();
-        runtime.set_last_error_details("E901", "coordinator", detail.clone());
-        runtime.last_error = Some(detail.clone());
-        task.touch_state_changed(now);
-        return JobCompletionResult {
-            should_retry: false,
-            status_label: "failed",
-            detail,
-            completion_kind: None,
-            tool_error: None,
-        };
-    }
-    if input.status_text.is_empty() {
-        task.set_workflow_state(WorkflowState::Blocked);
-        let runtime = task.ensure_runtime();
-        runtime.set_status(RuntimeStatus::Failed);
-        runtime.pid = None;
-        let detail = "performer completion received without status detail".to_string();
-        runtime.set_last_error_details("E901", "coordinator", detail.clone());
-        runtime.last_error = Some(detail.clone());
-        task.touch_state_changed(now);
-        return JobCompletionResult {
-            should_retry: false,
-            status_label: "failed",
-            detail,
-            completion_kind: None,
-            tool_error: None,
-        };
-    }
-
-    // ── Per-adapter error normalization ──────────────────────────────
-    // Run when the caller provides raw process output AND the job failed.
-    // The normalizer output takes priority over the caller-supplied error code.
-    let classified_tool_error: Option<ToolError> = if !input.success {
-        input.normalizer_input.as_ref().and_then(|ni| {
-            let tool_id = task.tool.as_deref().unwrap_or("");
-            normalizer_registry.get(tool_id).and_then(|n| {
-                n.normalize(ni.exit_code, &ni.stderr, &ni.stdout)
-                    .map(|mut te| {
-                        te.attempt = input.attempt as u32;
-                        te.operation = "performer_run".to_string();
-                        te
-                    })
-            })
+    let worktree_path = task.worktree_path().map(str::to_string);
+    let has_commits_ahead_of_base = worktree_path
+        .as_deref()
+        .map(|worktree_path| {
+            let base_branch = task.base_branch("master");
+            crate::git::has_commits_ahead(Path::new(worktree_path), &base_branch)
         })
-    } else {
-        None
-    };
-
-    // Override caller-supplied error code/message with normalizer output.
-    let error_code = classified_tool_error
-        .as_ref()
-        .map(|te| te.error_code.clone())
-        .unwrap_or(raw_error_code);
-    let error_message = classified_tool_error
-        .as_ref()
-        .map(|te| te.raw_message.clone())
-        .unwrap_or(raw_error_message);
-
-    // ── Success ──────────────────────────────────────────────────────
-    if input.success {
-        let completion_kind = input
-            .completion_kind
-            .unwrap_or(PerformerCompletionKind::SuccessWithChanges);
-
-        // ── Tool-reported error: re-queue the task ──────────────────
-        // The tool ran but reported it could not complete the task
-        // (sandbox failure, env issue, etc.). Reset to Todo so the
-        // coordinator can retry with the same or a different tool.
-        if completion_kind.is_error() {
-            task.set_workflow_state(WorkflowState::Todo);
-            task.worktree = None;
-            {
-                let runtime = task.ensure_runtime();
-                runtime.completion_kind = Some(completion_kind.as_str().to_string());
-                runtime.set_status(RuntimeStatus::Failed);
-                runtime.current_phase = None;
-                runtime.pid = None;
-                runtime.last_error = Some(input.status_text.clone());
-            }
-            task.tool = None;
-            task.assignee = None;
-            task.touch_state_changed(now);
-            return JobCompletionResult {
-                should_retry: false,
-                status_label: completion_kind.as_str(),
-                detail: input.status_text.clone(),
-                completion_kind: Some(completion_kind),
-                tool_error: None,
-            };
-        }
-
-        let terminal_noop = completion_kind == PerformerCompletionKind::AlreadySatisfied
-            || completion_kind == PerformerCompletionKind::SuccessWithoutChanges;
-        task.set_workflow_state(if terminal_noop {
-            WorkflowState::Merged
-        } else {
-            WorkflowState::InProgress
-        });
-        let runtime = task.ensure_runtime();
-        runtime.completion_kind = Some(completion_kind.as_str().to_string());
-        runtime.set_status(if terminal_noop {
-            RuntimeStatus::Idle
-        } else {
-            RuntimeStatus::PhaseDone
-        });
-        runtime.current_phase = if terminal_noop {
-            None
-        } else {
-            Some("dev".to_string())
-        };
-        runtime.pid = None;
-        task.touch_state_changed(now);
-        return JobCompletionResult {
-            should_retry: false,
-            status_label: match completion_kind {
-                PerformerCompletionKind::SuccessWithChanges => "phase_done",
-                PerformerCompletionKind::SuccessWithoutChanges => "success_without_changes",
-                PerformerCompletionKind::AlreadySatisfied => "already_satisfied",
-                // Error kinds handled above; unreachable here.
-                PerformerCompletionKind::ErrorWithChanges => "error_with_changes",
-                PerformerCompletionKind::ErrorWithoutChanges => "error_without_changes",
-            },
-            detail: input.status_text.clone(),
-            completion_kind: Some(completion_kind),
-            tool_error: None,
-        };
-    }
-
-    // ── Exit-code override ───────────────────────────────────────────
-    // When a performer exits non-zero but its stdout contains a success
-    // marker AND the only detected error was transient (Overloaded /
-    // RateLimit), the task likely completed before the transient error
-    // fired. Treat as AlreadySatisfied to avoid losing completed work.
-    // This addresses the "Run 2 bug" where Claude returned already_satisfied
-    // but exit code was 1 due to an earlier 529 overload hit on teardown.
-    if let Some(ref ni) = input.normalizer_input {
-        let stdout_says_done = ni.stdout.contains("MACC_TASK_RESULT: success")
-            || ni.stdout.contains("already_satisfied");
-        let transient_error = classified_tool_error
-            .as_ref()
-            .map(|te| {
-                matches!(
-                    te.canonical_class,
-                    CanonicalClass::Overloaded | CanonicalClass::RateLimit
-                )
-            })
-            .unwrap_or(false);
-        if stdout_says_done && transient_error {
-            task.set_workflow_state(WorkflowState::Merged);
-            let runtime = task.ensure_runtime();
-            runtime.completion_kind = Some(
-                PerformerCompletionKind::AlreadySatisfied
-                    .as_str()
-                    .to_string(),
-            );
-            runtime.set_status(RuntimeStatus::Idle);
-            runtime.current_phase = None;
-            runtime.pid = None;
-            task.touch_state_changed(now);
-            return JobCompletionResult {
-                should_retry: false,
-                status_label: "already_satisfied",
-                detail: "exit-code override: stdout indicates completion despite transient error"
-                    .to_string(),
-                completion_kind: Some(PerformerCompletionKind::AlreadySatisfied),
-                tool_error: classified_tool_error,
-            };
-        }
-
-        // ── Tool-reported error with non-zero exit ──────────────────
-        // The tool exited non-zero but printed an explicit error marker.
-        // Re-queue the task so the coordinator retries with the same or
-        // a different tool.
-        let stdout_says_error = ni.stdout.contains("MACC_TASK_RESULT: error_with_changes")
-            || ni.stdout.contains("MACC_TASK_RESULT: error_without_changes");
-        if stdout_says_error {
-            let kind = if ni.stdout.contains("error_with_changes") {
-                PerformerCompletionKind::ErrorWithChanges
-            } else {
-                PerformerCompletionKind::ErrorWithoutChanges
-            };
-            task.set_workflow_state(WorkflowState::Todo);
-            task.worktree = None;
-            {
-                let runtime = task.ensure_runtime();
-                runtime.completion_kind = Some(kind.as_str().to_string());
-                runtime.set_status(RuntimeStatus::Failed);
-                runtime.current_phase = None;
-                runtime.pid = None;
-                runtime.last_error = Some(input.status_text.clone());
-            }
-            task.tool = None;
-            task.assignee = None;
-            task.touch_state_changed(now);
-            return JobCompletionResult {
-                should_retry: false,
-                status_label: kind.as_str(),
-                detail: input.status_text.clone(),
-                completion_kind: Some(kind),
-                tool_error: classified_tool_error,
-            };
-        }
-    }
-
-    let now_ts = chrono::DateTime::parse_from_rfc3339(now)
-        .map(|dt| dt.timestamp() as u64)
-        .unwrap_or(0);
-
-    // ── Rate-limit backoff (E601) ─────────────────────────────────────
-    // Re-queue the task as Todo with a delayed_until timestamp instead of
-    // consuming an attempt. The rate-limit was not the task's fault.
-    if error_code == E601_RATE_LIMITED {
-        let retry_after = classified_tool_error
-            .as_ref()
-            .and_then(|te| te.retry_after_seconds);
-        let backoff = compute_backoff_delay(
-            input.attempt,
-            input.backoff_base_seconds,
-            input.backoff_max_seconds,
-            retry_after,
-        );
-        let delayed_until_str = chrono::DateTime::parse_from_rfc3339(now)
-            .ok()
-            .and_then(|dt| dt.checked_add_signed(chrono::Duration::seconds(backoff as i64)))
-            .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
-            .unwrap_or_default();
-        // Update per-tool throttle state stored in extra.
-        let tool_id_str = task.tool.as_deref().unwrap_or("").to_string();
-        let runtime = task.ensure_runtime();
-        let mut throttle: ToolThrottleState = runtime
-            .extra
-            .get("throttle_state")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_else(|| ToolThrottleState {
-                tool_id: tool_id_str.clone(),
-                ..Default::default()
-            });
-        let rli = RateLimitInfo {
-            tool_id: tool_id_str,
-            error_code: E601_RATE_LIMITED.to_string(),
-            retry_after_seconds: retry_after,
-            detected_at: now_ts,
-            source_header: None,
-        };
-        update_throttle_state(&mut throttle, &rli, backoff, now_ts);
-        if let Ok(v) = serde_json::to_value(&throttle) {
-            runtime.extra.insert("throttle_state".to_string(), v);
-        }
-        runtime.delayed_until = Some(delayed_until_str.clone());
-        runtime.set_status(RuntimeStatus::Idle);
-        runtime.current_phase = Some("dev".to_string());
-        runtime.completion_kind = None;
-        runtime.pid = None;
-        runtime.set_last_error_details(
-            error_code.clone(),
-            error_origin.clone(),
-            error_message.clone(),
-        );
-        runtime.last_error = Some(format!("rate-limited; backoff {}s", backoff));
-        store_classified_error_in_extra(runtime, &classified_tool_error, now_ts);
-        task.worktree = None;
-        task.set_workflow_state(WorkflowState::Todo);
-        task.touch_state_changed(now);
-        return JobCompletionResult {
-            should_retry: false,
-            status_label: "rate_limit_backoff",
-            detail: format!(
-                "rate-limited; backoff {}s, delayed until {}",
-                backoff, delayed_until_str
-            ),
-            completion_kind: None,
-            tool_error: classified_tool_error,
-        };
-    }
-
-    // ── Quota exhausted (E602) ────────────────────────────────────────
-    // Register a long cooldown for the exhausted tool and re-queue the task
-    // so the dispatch loop can fall back to a different tool.  The cooldown
-    // uses the provider's reset time when available, otherwise a default of
-    // 1 hour.  The task is NOT blocked — it goes back to its pre-phase
-    // state so pick_tool() can route it to another tool.
-    if error_code == E602_QUOTA_EXHAUSTED {
-        let retry_after = classified_tool_error
-            .as_ref()
-            .and_then(|te| te.retry_after_seconds);
-        let cooldown = retry_after.unwrap_or(3600); // default 1 hour
-        let delayed_until_str = chrono::DateTime::parse_from_rfc3339(now)
-            .ok()
-            .and_then(|dt| dt.checked_add_signed(chrono::Duration::seconds(cooldown as i64)))
-            .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
-            .unwrap_or_default();
-        // Update per-tool throttle state stored in extra.
-        let tool_id_str = task.tool.as_deref().unwrap_or("").to_string();
-        let runtime = task.ensure_runtime();
-        let mut throttle: ToolThrottleState = runtime
-            .extra
-            .get("throttle_state")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_else(|| ToolThrottleState {
-                tool_id: tool_id_str.clone(),
-                ..Default::default()
-            });
-        let rli = RateLimitInfo {
-            tool_id: tool_id_str,
-            error_code: E602_QUOTA_EXHAUSTED.to_string(),
-            retry_after_seconds: Some(cooldown),
-            detected_at: now_ts,
-            source_header: None,
-        };
-        update_throttle_state(&mut throttle, &rli, cooldown, now_ts);
-        if let Ok(v) = serde_json::to_value(&throttle) {
-            runtime.extra.insert("throttle_state".to_string(), v);
-        }
-        // Short delay before re-dispatch so the tool selector can pick a
-        // fallback tool on the next advance cycle.
-        runtime.delayed_until = Some(delayed_until_str.clone());
-        runtime.set_status(RuntimeStatus::Idle);
-        runtime.completion_kind = None;
-        runtime.pid = None;
-        runtime.set_last_error_details(
-            error_code.clone(),
-            error_origin.clone(),
-            error_message.clone(),
-        );
-        runtime.last_error = Some(format!("quota exhausted; cooldown {}s", cooldown));
-        store_classified_error_in_extra(runtime, &classified_tool_error, now_ts);
-        // Re-queue the task as Todo so the dispatch loop can route it to a
-        // fallback tool.  The per-tool throttle entry ensures the exhausted
-        // tool is skipped during pick_tool().
-        task.worktree = None;
-        task.set_workflow_state(WorkflowState::Todo);
-        task.touch_state_changed(now);
-        return JobCompletionResult {
-            should_retry: false,
-            status_label: "quota_exhausted_requeue",
-            detail: format!(
-                "quota exhausted; cooldown {}s, re-queued for tool fallback",
-                cooldown
-            ),
-            completion_kind: None,
-            tool_error: classified_tool_error,
-        };
-    }
-
-    // ── Retry (attempt < max_attempts) ───────────────────────────────
-    if input.attempt < input.max_attempts {
-        task.set_workflow_state(WorkflowState::Claimed);
-        let runtime = task.ensure_runtime();
-        runtime.set_status(RuntimeStatus::Running);
-        runtime.current_phase = Some("dev".to_string());
-        runtime.completion_kind = None;
-        runtime.pid = None;
-        let reason = if input.timed_out {
-            format!(
-                "performer timed out after {}s on attempt {} (elapsed={}s)",
-                input.phase_timeout_seconds, input.attempt, input.elapsed_seconds
-            )
-        } else {
-            format!(
-                "performer failed on attempt {}: {}",
-                input.attempt, input.status_text
-            )
-        };
-        runtime.set_last_error_details(
-            error_code.clone(),
-            error_origin.clone(),
-            error_message.clone(),
-        );
-        runtime.last_error = Some(reason.clone());
-        store_classified_error_in_extra(runtime, &classified_tool_error, now_ts);
-        task.touch_state_changed(now);
-        return JobCompletionResult {
-            should_retry: true,
-            status_label: "retry",
-            detail: reason,
-            completion_kind: None,
-            tool_error: classified_tool_error,
-        };
-    }
-
-    let reason = if input.timed_out {
-        format!(
-            "performer timed out after {}s (max attempts reached: {}, elapsed={}s)",
-            input.phase_timeout_seconds, input.max_attempts, input.elapsed_seconds
-        )
-    } else {
-        format!(
-            "performer failed after {} attempts: {}",
-            input.attempt, input.status_text
-        )
-    };
-
-    let retries_total = task.task_runtime.retries_count();
-    if should_auto_retry_error_code(
-        &error_code,
-        &input.auto_retry_error_codes,
-        input.auto_retry_max,
-        retries_total,
-    ) {
-        task.set_workflow_state(WorkflowState::Todo);
-        // Clear stale worktree metadata so the task selector treats
-        // this task as unassigned and eligible for re-dispatch.
-        task.worktree = None;
-        let runtime = task.ensure_runtime();
-        runtime.increment_retries();
-        runtime.set_status(RuntimeStatus::Idle);
-        runtime.pid = None;
-        runtime.current_phase = Some("dev".to_string());
-        runtime.completion_kind = None;
-        runtime.set_last_error_details(
-            error_code.clone(),
-            error_origin.clone(),
-            error_message.clone(),
-        );
-        runtime.last_error = Some(reason.clone());
-        store_classified_error_in_extra(runtime, &classified_tool_error, now_ts);
-        task.touch_state_changed(now);
-        return JobCompletionResult {
-            should_retry: false,
-            status_label: "auto_retry",
-            detail: format!("auto-retry scheduled for error code {}", error_code),
-            completion_kind: None,
-            tool_error: classified_tool_error,
-        };
-    }
-
-    // ── Terminal failure ─────────────────────────────────────────────
-    task.set_workflow_state(WorkflowState::Blocked);
-    let runtime = task.ensure_runtime();
-    runtime.set_status(RuntimeStatus::Failed);
-    runtime.completion_kind = None;
-    runtime.pid = None;
-    runtime.set_last_error_details(error_code, error_origin, error_message);
-    runtime.last_error = Some(reason.clone());
-    store_classified_error_in_extra(runtime, &classified_tool_error, now_ts);
-    task.touch_state_changed(now);
-    JobCompletionResult {
-        should_retry: false,
-        status_label: "failed",
-        detail: reason,
-        completion_kind: None,
-        tool_error: classified_tool_error,
-    }
+        .unwrap_or(false);
+    let is_healthy_worktree = worktree_path
+        .as_deref()
+        .map(|path| is_worktree_healthy(Path::new(path)))
+        .unwrap_or(false);
+    let normalizer = task
+        .tool
+        .as_deref()
+        .and_then(|tool_id| normalizer_registry.get(tool_id));
+    let classification =
+        classify_completion_error(input, normalizer.as_deref(), has_commits_ahead_of_base);
+    debug_assert!(
+        classification.tool_error.is_some()
+            || classification.canonical_class
+                == error_code_to_canonical_class(&classification.error_code)
+    );
+    debug_assert!(
+        classification.completion_authority != CompletionAuthority::IpcSignal
+            || classification.has_commits
+    );
+    let config = CoordinatorConfigResolved::from_input(input);
+    let strategy = resolve_retry_strategy(
+        task,
+        input,
+        &classification,
+        &config,
+        is_healthy_worktree,
+        now,
+    );
+    apply_state_transitions(task, &strategy, now)
 }
 
-fn should_auto_retry_error_code(
+pub(super) fn should_auto_retry_error_code(
     code: &str,
     list: &[String],
     max_retries: usize,
@@ -1423,13 +1325,12 @@ struct NativeControlPlaneBackend<'a> {
     repo_root: &'a Path,
     canonical: &'a CanonicalConfig,
     coordinator: Option<&'a CoordinatorConfig>,
-    env_cfg: &'a super::types::CoordinatorEnvConfig,
+    env_cfg: &'a crate::coordinator::types::CoordinatorEnvConfig,
     logger: Option<&'a dyn CoordinatorLog>,
     prd_file: PathBuf,
     run_state: CoordinatorRunState,
     phase_runner_max_attempts: usize,
     coordinator_tool_override: Option<String>,
-    max_review_cycles: Option<usize>,
     phase_timeout_seconds: usize,
     ghost_heartbeat_grace_seconds: i64,
     last_logged_counts: Option<CoordinatorCounts>,
@@ -1604,11 +1505,8 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
     }
 
     fn should_terminate_run(&self, counts: &CoordinatorCounts) -> Option<String> {
-        let max_dispatch_total = self
-            .env_cfg
-            .max_dispatch
-            .or_else(|| self.coordinator.and_then(|c| c.max_dispatch))
-            .unwrap_or(0);
+        let cfg = CanonicalCoordinatorConfigResolved::resolve(self.coordinator);
+        let max_dispatch_total = self.env_cfg.max_dispatch.unwrap_or(cfg.max_dispatch);
         if max_dispatch_total > 0
             && self.run_state.dispatched_total_run >= max_dispatch_total
             && counts.active == 0
@@ -1618,10 +1516,7 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
             return Some(format!(
                 "Coordinator stopped: dispatch limit reached (dispatched={}, max_dispatch={}). \
                  Remaining: todo={}, merged={}. Restart the coordinator to continue.",
-                self.run_state.dispatched_total_run,
-                max_dispatch_total,
-                counts.todo,
-                counts.merged,
+                self.run_state.dispatched_total_run, max_dispatch_total, counts.todo, counts.merged,
             ));
         }
         None
@@ -1633,14 +1528,14 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
 }
 
 pub fn resolve_storage_mode(
-    env_cfg: &super::types::CoordinatorEnvConfig,
+    env_cfg: &crate::coordinator::types::CoordinatorEnvConfig,
     coordinator: Option<&CoordinatorConfig>,
 ) -> Result<CoordinatorStorageMode> {
+    let cfg = CanonicalCoordinatorConfigResolved::resolve(coordinator);
     let raw = env_cfg
         .storage_mode
         .clone()
-        .or_else(|| coordinator.and_then(|c| c.storage_mode.clone()))
-        .unwrap_or_else(|| "sqlite".to_string());
+        .unwrap_or_else(|| cfg.storage_mode.clone());
     raw.parse::<CoordinatorStorageMode>()
         .map_err(MaccError::Validation)
 }
@@ -1670,9 +1565,10 @@ pub async fn run_native_control_plane(
     repo_root: &Path,
     canonical: &CanonicalConfig,
     coordinator: Option<&CoordinatorConfig>,
-    env_cfg: &super::types::CoordinatorEnvConfig,
+    env_cfg: &crate::coordinator::types::CoordinatorEnvConfig,
     logger: Option<&dyn CoordinatorLog>,
 ) -> Result<()> {
+    let cfg = CanonicalCoordinatorConfigResolved::resolve(coordinator);
     let run_id = if let Ok(existing) = std::env::var("COORDINATOR_RUN_ID") {
         let trimmed = existing.trim();
         if trimmed.is_empty() {
@@ -1710,11 +1606,7 @@ pub async fn run_native_control_plane(
         .prd
         .as_ref()
         .map(PathBuf::from)
-        .or_else(|| {
-            coordinator
-                .and_then(|c| c.prd_file.clone())
-                .map(PathBuf::from)
-        })
+        .or_else(|| cfg.prd_file.clone().map(PathBuf::from))
         .unwrap_or_else(|| repo_root.join("prd.json"));
     if !prd_file.exists() {
         return Err(MaccError::Validation(format!(
@@ -1725,13 +1617,12 @@ pub async fn run_native_control_plane(
 
     let phase_runner_max_attempts = env_cfg
         .phase_runner_max_attempts
-        .or_else(|| coordinator.and_then(|c| c.phase_runner_max_attempts))
-        .unwrap_or(1)
+        .unwrap_or(cfg.phase_runner_max_attempts)
         .max(1);
     let coordinator_tool_override = env_cfg
         .coordinator_tool
         .clone()
-        .or_else(|| coordinator.and_then(|c| c.coordinator_tool.clone()))
+        .or_else(|| cfg.coordinator_tool.clone())
         .or_else(|| {
             // Auto-resolve: pick the first enabled tool from tool_priority,
             // or fall back to the first enabled tool overall.  This ensures a
@@ -1749,9 +1640,11 @@ pub async fn run_native_control_plane(
                         .collect()
                 })
                 .or_else(|| {
-                    coordinator
-                        .map(|c| c.tool_priority.clone())
-                        .filter(|v| !v.is_empty())
+                    if cfg.tool_priority.is_empty() {
+                        None
+                    } else {
+                        Some(cfg.tool_priority.clone())
+                    }
                 })
                 .unwrap_or_default();
             priority
@@ -1765,9 +1658,7 @@ pub async fn run_native_control_plane(
             let _ = log.note(format!("- Coordinator tool: {}", tool));
         }
     }
-    let max_review_cycles = env_cfg
-        .max_review_cycles
-        .or_else(|| coordinator.and_then(|c| c.max_review_cycles));
+    let max_review_cycles = env_cfg.max_review_cycles.or(cfg.max_review_cycles);
     if let Some(log) = logger {
         match max_review_cycles {
             Some(n) => {
@@ -1781,17 +1672,12 @@ pub async fn run_native_control_plane(
 
     let phase_timeout_seconds = env_cfg
         .stale_in_progress_seconds
-        .or_else(|| coordinator.and_then(|c| c.stale_in_progress_seconds))
-        .unwrap_or(0);
+        .unwrap_or(cfg.stale_in_progress_seconds);
     let ghost_heartbeat_grace_seconds = env_cfg
         .ghost_heartbeat_grace_seconds
-        .or_else(|| coordinator.and_then(|c| c.ghost_heartbeat_grace_seconds))
-        .unwrap_or(30);
+        .unwrap_or(cfg.ghost_heartbeat_grace_seconds);
 
-    let json_compat = env_cfg
-        .json_compat
-        .or_else(|| coordinator.and_then(|c| c.json_compat))
-        .unwrap_or(false);
+    let json_compat = env_cfg.json_compat.unwrap_or(cfg.json_compat);
 
     let storage_mode = resolve_storage_mode(env_cfg, coordinator)?;
     let storage_paths = crate::ProjectPaths::from_root(repo_root);
@@ -1862,17 +1748,13 @@ pub async fn run_native_control_plane(
         run_state,
         phase_runner_max_attempts,
         coordinator_tool_override,
-        max_review_cycles,
         phase_timeout_seconds,
         ghost_heartbeat_grace_seconds,
         last_logged_counts: None,
         last_cycle_progressed: false,
     };
 
-    let timeout_seconds = env_cfg
-        .timeout_seconds
-        .or_else(|| coordinator.and_then(|c| c.timeout_seconds))
-        .unwrap_or(0);
+    let timeout_seconds = env_cfg.timeout_seconds.unwrap_or(cfg.timeout_seconds);
     let loop_cfg = ControlPlaneLoopConfig {
         timeout: if timeout_seconds > 0 {
             Some(Duration::from_secs(timeout_seconds as u64))
@@ -1982,6 +1864,211 @@ pub async fn run_native_control_plane(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::coordinator::engine::retry::RetryStrategy;
+    use crate::coordinator::error_normalizer::ErrorNormalizer;
+    use crate::coordinator::rate_limit::{E601_RATE_LIMITED, E602_QUOTA_EXHAUSTED};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn run_git(dir: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("run git command");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[derive(Clone)]
+    struct StubNormalizer {
+        tool_error: ToolError,
+    }
+
+    impl ErrorNormalizer for StubNormalizer {
+        fn normalize(&self, _exit_code: i32, _stderr: &str, _stdout: &str) -> Option<ToolError> {
+            Some(self.tool_error.clone())
+        }
+    }
+
+    fn make_classification_input(
+        success: bool,
+        completion_kind: Option<PerformerCompletionKind>,
+    ) -> JobCompletionInput {
+        JobCompletionInput {
+            success,
+            attempt: 1,
+            max_attempts: 1,
+            timed_out: false,
+            phase_timeout_seconds: 300,
+            elapsed_seconds: 5,
+            status_text: "performer failed".to_string(),
+            completion_kind,
+            error_code: None,
+            error_origin: None,
+            error_message: None,
+            auto_retry_error_codes: Vec::new(),
+            auto_retry_max: 0,
+            backoff_base_seconds: 30,
+            backoff_max_seconds: 300,
+            normalizer_input: None,
+        }
+    }
+
+    fn make_repo_with_commit_ahead(base_branch: &str) -> PathBuf {
+        let mut repo = std::env::temp_dir();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        repo.push(format!("macc-engine-ipc-{}", nanos));
+        fs::create_dir_all(&repo).expect("create temp repo");
+
+        run_git(&repo, &["init"]);
+        run_git(&repo, &["checkout", "-b", base_branch]);
+        fs::write(repo.join("fixture.txt"), "base\n").expect("write base fixture");
+        run_git(&repo, &["add", "fixture.txt"]);
+        run_git(
+            &repo,
+            &[
+                "-c",
+                "user.name=MACC Test",
+                "-c",
+                "user.email=macc-test@example.com",
+                "commit",
+                "-m",
+                "base commit",
+            ],
+        );
+
+        run_git(&repo, &["checkout", "-b", "task/ipc-override"]);
+        fs::write(repo.join("fixture.txt"), "base\nahead\n").expect("write ahead fixture");
+        run_git(&repo, &["add", "fixture.txt"]);
+        run_git(
+            &repo,
+            &[
+                "-c",
+                "user.name=MACC Test",
+                "-c",
+                "user.email=macc-test@example.com",
+                "commit",
+                "-m",
+                "ahead commit",
+            ],
+        );
+
+        repo
+    }
+
+    fn make_salvage_repo(
+        base_branch: &str,
+        task_id: &str,
+        conflict: bool,
+    ) -> (PathBuf, String, PathBuf) {
+        let mut repo = std::env::temp_dir();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        repo.push(format!("macc-engine-salvage-{}", nanos));
+        fs::create_dir_all(&repo).expect("create temp repo");
+
+        run_git(&repo, &["init"]);
+        run_git(&repo, &["checkout", "-b", base_branch]);
+        fs::write(repo.join("fixture.txt"), "base\n").expect("write base fixture");
+        run_git(&repo, &["add", "fixture.txt"]);
+        run_git(
+            &repo,
+            &[
+                "-c",
+                "user.name=MACC Test",
+                "-c",
+                "user.email=macc-test@example.com",
+                "commit",
+                "-m",
+                "base commit",
+            ],
+        );
+
+        let task_branch = format!("task/{}", task_id.to_ascii_lowercase());
+        run_git(&repo, &["checkout", "-b", &task_branch]);
+        fs::write(
+            repo.join("task.txt"),
+            format!("task {}\ncommitted work\n", task_id),
+        )
+        .expect("write task fixture");
+        run_git(&repo, &["add", "task.txt"]);
+        run_git(
+            &repo,
+            &[
+                "-c",
+                "user.name=MACC Test",
+                "-c",
+                "user.email=macc-test@example.com",
+                "commit",
+                "-m",
+                &format!("macc: {} - salvage candidate", task_id),
+            ],
+        );
+        if conflict {
+            fs::write(repo.join("fixture.txt"), "task-side-change\n").expect("write task change");
+            run_git(&repo, &["add", "fixture.txt"]);
+            run_git(
+                &repo,
+                &[
+                    "-c",
+                    "user.name=MACC Test",
+                    "-c",
+                    "user.email=macc-test@example.com",
+                    "commit",
+                    "-m",
+                    &format!("macc: {} - conflicting change", task_id),
+                ],
+            );
+        }
+
+        run_git(&repo, &["checkout", base_branch]);
+        if conflict {
+            fs::write(repo.join("fixture.txt"), "base-side-change\n").expect("write base change");
+            run_git(&repo, &["add", "fixture.txt"]);
+            run_git(
+                &repo,
+                &[
+                    "-c",
+                    "user.name=MACC Test",
+                    "-c",
+                    "user.email=macc-test@example.com",
+                    "commit",
+                    "-m",
+                    "base conflicting change",
+                ],
+            );
+        }
+
+        let mut worktree = std::env::temp_dir();
+        let wt_nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        worktree.push(format!("macc-engine-salvage-wt-{}", wt_nanos));
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                worktree.to_string_lossy().as_ref(),
+                &task_branch,
+            ],
+        );
+
+        (repo, task_branch, worktree)
+    }
 
     #[test]
     fn plan_advance_maps_states() {
@@ -2075,6 +2162,7 @@ mod tests {
             base_branch: "main".to_string(),
             last_commit: "abc".to_string(),
             session_id: "s-1".to_string(),
+            active_session_id: Some("tool-session-1".to_string()),
             pid: Some(123),
             phase: "dev".to_string(),
             now: "2026-02-20T00:00:00Z".to_string(),
@@ -2082,6 +2170,7 @@ mod tests {
         apply_dispatch_claim(&mut task, &update);
         assert_eq!(task["state"], "claimed");
         assert_eq!(task["task_runtime"]["status"], "running");
+        assert_eq!(task["task_runtime"]["active_session_id"], "tool-session-1");
         assert_eq!(task["task_runtime"]["pid"], 123);
     }
 
@@ -2196,6 +2285,369 @@ mod tests {
     }
 
     #[test]
+    fn apply_job_completion_ipc_phase_done_with_commits_ahead_overrides_failed_exit() {
+        let repo = make_repo_with_commit_ahead("main");
+        let mut task = json!({
+            "id":"T3d",
+            "state":"claimed",
+            "base_branch":"main",
+            "worktree":{"worktree_path": repo.to_string_lossy().to_string()},
+            "task_runtime":{"status":"running","pid":123}
+        });
+        let out = apply_job_completion(
+            &mut task,
+            &JobCompletionInput {
+                success: false,
+                attempt: 1,
+                max_attempts: 1,
+                timed_out: false,
+                phase_timeout_seconds: 0,
+                elapsed_seconds: 1,
+                status_text: "exit status: 1".to_string(),
+                completion_kind: Some(PerformerCompletionKind::SuccessWithChanges),
+                error_code: Some("E101".to_string()),
+                error_origin: Some("runner".to_string()),
+                error_message: Some("non-zero exit".to_string()),
+                auto_retry_error_codes: Vec::new(),
+                auto_retry_max: 0,
+                backoff_base_seconds: 30,
+                backoff_max_seconds: 300,
+                normalizer_input: None,
+            },
+            &NormalizerRegistry::empty(),
+            "2026-02-21T00:00:00Z",
+        );
+
+        assert!(!out.should_retry);
+        assert_eq!(out.status_label, "phase_done");
+        assert_eq!(
+            out.completion_kind,
+            Some(PerformerCompletionKind::SuccessWithChanges)
+        );
+        assert_eq!(task["state"], "in_progress");
+        assert_eq!(task["task_runtime"]["status"], "phase_done");
+
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn apply_job_completion_no_ipc_signal_keeps_failed_exit_classification() {
+        let mut task = json!({
+            "id":"T3e",
+            "state":"claimed",
+            "task_runtime":{"status":"running","pid":123}
+        });
+        let out = apply_job_completion(
+            &mut task,
+            &JobCompletionInput {
+                success: false,
+                attempt: 1,
+                max_attempts: 1,
+                timed_out: false,
+                phase_timeout_seconds: 300,
+                elapsed_seconds: 5,
+                status_text: "performer failed".to_string(),
+                completion_kind: None,
+                error_code: Some("E201".to_string()),
+                error_origin: Some("runner".to_string()),
+                error_message: Some("auth error".to_string()),
+                auto_retry_error_codes: Vec::new(),
+                auto_retry_max: 0,
+                backoff_base_seconds: 30,
+                backoff_max_seconds: 300,
+                normalizer_input: None,
+            },
+            &NormalizerRegistry::empty(),
+            "2026-02-21T00:00:00Z",
+        );
+
+        assert_eq!(out.status_label, "failed");
+        assert_eq!(task["task_runtime"]["last_error_code"], "E201");
+    }
+
+    #[test]
+    fn classify_completion_error_ipc_with_commits_uses_ipc_authority() {
+        let input =
+            make_classification_input(false, Some(PerformerCompletionKind::SuccessWithChanges));
+        let classified = classify_completion_error(&input, None, true);
+
+        assert_eq!(
+            classified.completion_authority,
+            CompletionAuthority::IpcSignal
+        );
+        assert!(classified.completion_success);
+        assert_eq!(
+            classified.completion_kind,
+            Some(PerformerCompletionKind::SuccessWithChanges)
+        );
+        assert!(classified.has_commits);
+    }
+
+    #[test]
+    fn classify_completion_error_exit_error_without_commits_falls_back() {
+        let input =
+            make_classification_input(false, Some(PerformerCompletionKind::SuccessWithChanges));
+        let classified = classify_completion_error(&input, None, false);
+
+        assert_eq!(
+            classified.completion_authority,
+            CompletionAuthority::Fallback
+        );
+        assert!(!classified.completion_success);
+        assert_eq!(
+            classified.completion_kind,
+            Some(PerformerCompletionKind::SuccessWithChanges)
+        );
+        assert!(!classified.has_commits);
+    }
+
+    #[test]
+    fn classify_completion_error_sets_rate_limit_class_from_normalizer() {
+        let mut input = make_classification_input(false, None);
+        input.normalizer_input = Some(NormalizerInput {
+            exit_code: 1,
+            stderr: "429 rate limit".to_string(),
+            stdout: String::new(),
+        });
+        let normalizer = StubNormalizer {
+            tool_error: ToolError {
+                provider: "stub".to_string(),
+                canonical_class: CanonicalClass::RateLimit,
+                retryable: true,
+                retry_after_seconds: Some(30),
+                user_action_required: false,
+                raw_message: "rate-limited".to_string(),
+                error_code: E601_RATE_LIMITED.to_string(),
+                request_id: None,
+                attempt: 0,
+                operation: String::new(),
+            },
+        };
+        let classified = classify_completion_error(&input, Some(&normalizer), false);
+
+        assert_eq!(classified.canonical_class, CanonicalClass::RateLimit);
+        assert_eq!(classified.error_code, E601_RATE_LIMITED);
+        assert_eq!(
+            classified
+                .tool_error
+                .as_ref()
+                .map(|te| te.error_code.as_str()),
+            Some(E601_RATE_LIMITED)
+        );
+    }
+
+    #[test]
+    fn classify_completion_error_sets_quota_class_from_normalizer() {
+        let mut input = make_classification_input(false, None);
+        input.normalizer_input = Some(NormalizerInput {
+            exit_code: 1,
+            stderr: "quota exhausted".to_string(),
+            stdout: String::new(),
+        });
+        let normalizer = StubNormalizer {
+            tool_error: ToolError {
+                provider: "stub".to_string(),
+                canonical_class: CanonicalClass::QuotaExhausted,
+                retryable: false,
+                retry_after_seconds: Some(3600),
+                user_action_required: true,
+                raw_message: "quota exhausted".to_string(),
+                error_code: E602_QUOTA_EXHAUSTED.to_string(),
+                request_id: None,
+                attempt: 0,
+                operation: String::new(),
+            },
+        };
+        let classified = classify_completion_error(&input, Some(&normalizer), false);
+
+        assert_eq!(classified.canonical_class, CanonicalClass::QuotaExhausted);
+        assert_eq!(classified.error_code, E602_QUOTA_EXHAUSTED);
+        assert_eq!(
+            classified
+                .tool_error
+                .as_ref()
+                .map(|te| te.error_code.as_str()),
+            Some(E602_QUOTA_EXHAUSTED)
+        );
+    }
+
+    fn make_strategy_task() -> Task {
+        parse_compat_task(&json!({
+            "id":"S1",
+            "state":"claimed",
+            "assignee":"agentA",
+            "tool":"claude",
+            "worktree":{"worktree_path":"/tmp/wt-s1","branch":"task/S1","base_branch":"main"},
+            "task_runtime":{"status":"running","pid":123,"retries":1}
+        }))
+    }
+
+    #[test]
+    fn resolve_retry_strategy_maps_core_variants() {
+        let task = make_strategy_task();
+        let cfg = CoordinatorConfigResolved {
+            auto_retry_error_codes: vec!["E201".to_string()],
+            auto_retry_max: 2,
+            backoff_base_seconds: 30,
+            backoff_max_seconds: 300,
+        };
+
+        let mut phase_done_input = make_classification_input(true, None);
+        phase_done_input.status_text = "ok".to_string();
+        let phase_done_classified = classify_completion_error(&phase_done_input, None, false);
+        let phase_done = resolve_retry_strategy(
+            &task,
+            &phase_done_input,
+            &phase_done_classified,
+            &cfg,
+            true,
+            "2026-02-21T00:00:00Z",
+        );
+        assert!(matches!(phase_done, RetryStrategy::PhaseDone { .. }));
+
+        let merge_input =
+            make_classification_input(true, Some(PerformerCompletionKind::AlreadySatisfied));
+        let merge_classified = classify_completion_error(&merge_input, None, false);
+        let merge = resolve_retry_strategy(
+            &task,
+            &merge_input,
+            &merge_classified,
+            &cfg,
+            true,
+            "2026-02-21T00:00:00Z",
+        );
+        assert!(matches!(merge, RetryStrategy::Merge { .. }));
+
+        let mut retry_input = make_classification_input(false, None);
+        retry_input.attempt = 1;
+        retry_input.max_attempts = 2;
+        let retry_classified = classify_completion_error(&retry_input, None, false);
+        let retry = resolve_retry_strategy(
+            &task,
+            &retry_input,
+            &retry_classified,
+            &cfg,
+            true,
+            "2026-02-21T00:00:00Z",
+        );
+        assert!(matches!(
+            retry,
+            RetryStrategy::Retry {
+                outcome: RetryOutcome::AttemptRetry { .. },
+                ..
+            }
+        ));
+
+        let mut block_input = make_classification_input(false, None);
+        block_input.attempt = 1;
+        block_input.max_attempts = 1;
+        block_input.error_code = Some("E999".to_string());
+        let block_classified = classify_completion_error(&block_input, None, false);
+        let block = resolve_retry_strategy(
+            &task,
+            &block_input,
+            &block_classified,
+            &cfg,
+            true,
+            "2026-02-21T00:00:00Z",
+        );
+        assert!(matches!(
+            block,
+            RetryStrategy::Block {
+                outcome: BlockOutcome::TerminalFailure { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn apply_state_transitions_updates_state_fields_consistently() {
+        let now = "2026-02-21T00:00:00Z";
+        let mut retry_task = make_strategy_task();
+        let retry_out = apply_state_transitions(
+            &mut retry_task,
+            &RetryStrategy::Retry {
+                same_worktree: false,
+                reason: "tool error".to_string(),
+                outcome: RetryOutcome::ToolReportedError {
+                    completion_kind: PerformerCompletionKind::ErrorWithoutChanges,
+                    tool_error: None,
+                },
+            },
+            now,
+        );
+        assert_eq!(retry_out.status_label, "error_without_changes");
+        assert_eq!(retry_task.state, "todo");
+        assert!(retry_task.worktree.is_none());
+        assert!(retry_task.assignee.is_none());
+
+        let mut auto_retry_task = make_strategy_task();
+        let auto_retry_out = apply_state_transitions(
+            &mut auto_retry_task,
+            &RetryStrategy::Retry {
+                same_worktree: false,
+                reason: "auto-retry scheduled for error code E201".to_string(),
+                outcome: RetryOutcome::AutoRetry {
+                    error: CompletionErrorDetails {
+                        code: "E201".to_string(),
+                        origin: "runner".to_string(),
+                        message: "auth".to_string(),
+                    },
+                    tool_error: None,
+                    now_ts: 0,
+                },
+            },
+            now,
+        );
+        assert_eq!(auto_retry_out.status_label, "auto_retry");
+        assert_eq!(auto_retry_task.state, "todo");
+        assert_eq!(auto_retry_task.task_runtime.retries_count(), 2);
+
+        let mut block_task = make_strategy_task();
+        let block_out = apply_state_transitions(
+            &mut block_task,
+            &RetryStrategy::Block {
+                reason: "terminal failure".to_string(),
+                outcome: BlockOutcome::InvalidInput,
+            },
+            now,
+        );
+        assert_eq!(block_out.status_label, "failed");
+        assert_eq!(block_task.state, "blocked");
+
+        let mut merge_task = make_strategy_task();
+        let merge_out = apply_state_transitions(
+            &mut merge_task,
+            &RetryStrategy::Merge {
+                detail: "already satisfied".to_string(),
+                completion_kind: PerformerCompletionKind::AlreadySatisfied,
+                tool_error: None,
+            },
+            now,
+        );
+        assert_eq!(merge_out.status_label, "already_satisfied");
+        assert_eq!(merge_task.state, "merged");
+        assert!(merge_task.worktree.is_some());
+
+        let mut phase_done_task = make_strategy_task();
+        let phase_done_out = apply_state_transitions(
+            &mut phase_done_task,
+            &RetryStrategy::PhaseDone {
+                detail: "phase done".to_string(),
+                completion_kind: PerformerCompletionKind::SuccessWithChanges,
+            },
+            now,
+        );
+        assert_eq!(phase_done_out.status_label, "phase_done");
+        assert_eq!(phase_done_task.state, "in_progress");
+
+        let mut noop_task = make_strategy_task();
+        let noop_out = apply_state_transitions(&mut noop_task, &RetryStrategy::NoOp, now);
+        assert_eq!(noop_out.status_label, "failed");
+        assert_eq!(noop_task.state, "claimed");
+    }
+
+    #[test]
     fn already_satisfied_task_does_not_schedule_review_or_merge() {
         let mut registry = json!({
             "tasks": [
@@ -2249,7 +2701,8 @@ mod tests {
         .expect("apply completion");
         assert_eq!(completion.status_label, "already_satisfied");
         assert_eq!(registry["tasks"][0]["state"], "merged");
-        let actions = build_advance_actions(&registry, &HashSet::new(), "", None).expect("advance actions");
+        let actions =
+            build_advance_actions(&registry, &HashSet::new(), "", None).expect("advance actions");
         assert!(!actions.iter().any(|action| {
             matches!(
                 action,
@@ -2314,7 +2767,8 @@ mod tests {
         .expect("apply completion");
         assert_eq!(completion.status_label, "success_without_changes");
         assert_eq!(registry["tasks"][0]["state"], "merged");
-        let actions = build_advance_actions(&registry, &HashSet::new(), "", None).expect("advance actions");
+        let actions =
+            build_advance_actions(&registry, &HashSet::new(), "", None).expect("advance actions");
         assert!(!actions.iter().any(|action| {
             matches!(
                 action,
@@ -2486,5 +2940,374 @@ mod tests {
         assert_eq!(out.status_label, "failed");
         assert_eq!(task_val["task_runtime"]["last_error_code"], "E201");
         assert!(out.tool_error.is_none());
+    }
+
+    // ── L4-SES-001: session preservation on error ──────────────────────
+
+    fn make_error_completion_input(kind: PerformerCompletionKind) -> JobCompletionInput {
+        JobCompletionInput {
+            success: true,
+            attempt: 1,
+            max_attempts: 1,
+            timed_out: false,
+            phase_timeout_seconds: 300,
+            elapsed_seconds: 5,
+            status_text: "performer reported error".to_string(),
+            completion_kind: Some(kind),
+            error_code: None,
+            error_origin: None,
+            error_message: None,
+            auto_retry_error_codes: Vec::new(),
+            auto_retry_max: 0,
+            backoff_base_seconds: 30,
+            backoff_max_seconds: 300,
+            normalizer_input: None,
+        }
+    }
+
+    #[test]
+    fn error_with_changes_preserves_session_id_in_runtime() {
+        // Healthy worktree + committed progress should keep the same worktree
+        // attached so the retry can continue from existing commits.
+        let repo = make_repo_with_commit_ahead("main");
+        let wt = repo.to_string_lossy().to_string();
+        let mut task_val = json!({
+            "id": "SES1",
+            "state": "claimed",
+            "tool": "claude",
+            "worktree": {
+                "worktree_path": wt,
+                "base_branch": "main",
+                "session_id": "claude-session-abc"
+            },
+            "task_runtime": { "status": "running", "pid": 42 }
+        });
+        let out = apply_job_completion(
+            &mut task_val,
+            &make_error_completion_input(PerformerCompletionKind::ErrorWithChanges),
+            &NormalizerRegistry::empty(),
+            "2026-04-12T00:00:00Z",
+        );
+        assert_eq!(out.status_label, "error_with_changes");
+        assert_eq!(
+            task_val["worktree"]["worktree_path"],
+            repo.to_string_lossy().to_string()
+        );
+        // Task reset to todo for retry.
+        assert_eq!(task_val["state"], "todo");
+        // Session preserved in runtime.
+        assert_eq!(
+            task_val["task_runtime"]["last_session_id"],
+            "claude-session-abc"
+        );
+        assert_eq!(task_val["task_runtime"]["last_session_tool"], "claude");
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn error_with_changes_prefers_active_session_chain_over_claim_session() {
+        let mut task_val = json!({
+            "id": "SES1B",
+            "state": "claimed",
+            "tool": "codex",
+            "worktree": {
+                "worktree_path": "/tmp/wt-ses1b",
+                "session_id": "coordinator-L4-SES-002-2026"
+            },
+            "task_runtime": {
+                "status": "running",
+                "active_session_id": "codex-session-real"
+            }
+        });
+        apply_job_completion(
+            &mut task_val,
+            &make_error_completion_input(PerformerCompletionKind::ErrorWithChanges),
+            &NormalizerRegistry::empty(),
+            "2026-04-12T00:00:00Z",
+        );
+        assert_eq!(
+            task_val["task_runtime"]["last_session_id"],
+            "codex-session-real"
+        );
+        assert_eq!(task_val["task_runtime"]["last_session_tool"], "codex");
+    }
+
+    #[test]
+    fn error_without_changes_preserves_session_id_in_runtime() {
+        // Same guarantee for error_without_changes.
+        let mut task_val = json!({
+            "id": "SES2",
+            "state": "claimed",
+            "tool": "codex",
+            "worktree": {
+                "worktree_path": "/tmp/wt-ses2",
+                "session_id": "codex-session-xyz"
+            },
+            "task_runtime": { "status": "running" }
+        });
+        apply_job_completion(
+            &mut task_val,
+            &make_error_completion_input(PerformerCompletionKind::ErrorWithoutChanges),
+            &NormalizerRegistry::empty(),
+            "2026-04-12T00:00:00Z",
+        );
+        assert!(task_val["worktree"].is_null());
+        assert_eq!(
+            task_val["task_runtime"]["last_session_id"],
+            "codex-session-xyz"
+        );
+        assert_eq!(task_val["task_runtime"]["last_session_tool"], "codex");
+    }
+
+    #[test]
+    fn error_with_changes_no_session_does_not_overwrite_prior_preserved() {
+        // When the worktree has no session_id (e.g. was never set), the existing
+        // last_session_id in the runtime must not be cleared.
+        let mut task_val = json!({
+            "id": "SES3",
+            "state": "claimed",
+            "tool": "claude",
+            "worktree": { "worktree_path": "/tmp/wt-ses3" },
+            "task_runtime": {
+                "status": "running",
+                "last_session_id": "claude-session-prev",
+                "last_session_tool": "claude"
+            }
+        });
+        apply_job_completion(
+            &mut task_val,
+            &make_error_completion_input(PerformerCompletionKind::ErrorWithChanges),
+            &NormalizerRegistry::empty(),
+            "2026-04-12T00:00:00Z",
+        );
+        // No new session to preserve; prior value must remain unchanged.
+        assert_eq!(
+            task_val["task_runtime"]["last_session_id"],
+            "claude-session-prev"
+        );
+        assert_eq!(task_val["task_runtime"]["last_session_tool"], "claude");
+    }
+
+    #[test]
+    fn error_with_changes_unhealthy_worktree_is_cleared() {
+        let repo = make_repo_with_commit_ahead("main");
+        fs::write(repo.join(".git/index.lock"), "").expect("write index lock");
+        let mut task_val = json!({
+            "id": "SES4",
+            "state": "claimed",
+            "tool": "claude",
+            "worktree": {
+                "worktree_path": repo.to_string_lossy().to_string(),
+                "base_branch": "main",
+                "session_id": "claude-session-unhealthy"
+            },
+            "task_runtime": { "status": "running" }
+        });
+
+        apply_job_completion(
+            &mut task_val,
+            &make_error_completion_input(PerformerCompletionKind::ErrorWithChanges),
+            &NormalizerRegistry::empty(),
+            "2026-04-12T00:00:00Z",
+        );
+        assert!(task_val["worktree"].is_null());
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn error_with_changes_stdout_marker_preserves_healthy_worktree() {
+        let repo = make_repo_with_commit_ahead("main");
+        let mut task_val = json!({
+            "id": "SES5",
+            "state": "claimed",
+            "tool": "claude",
+            "worktree": {
+                "worktree_path": repo.to_string_lossy().to_string(),
+                "base_branch": "main"
+            },
+            "task_runtime": { "status": "running" }
+        });
+        let out = apply_job_completion(
+            &mut task_val,
+            &JobCompletionInput {
+                success: false,
+                attempt: 1,
+                max_attempts: 1,
+                timed_out: false,
+                phase_timeout_seconds: 300,
+                elapsed_seconds: 5,
+                status_text: "performer failed".to_string(),
+                completion_kind: None,
+                error_code: None,
+                error_origin: None,
+                error_message: None,
+                auto_retry_error_codes: Vec::new(),
+                auto_retry_max: 0,
+                backoff_base_seconds: 30,
+                backoff_max_seconds: 300,
+                normalizer_input: Some(NormalizerInput {
+                    exit_code: 1,
+                    stderr: String::new(),
+                    stdout: "MACC_TASK_RESULT: error_with_changes".to_string(),
+                }),
+            },
+            &NormalizerRegistry::empty(),
+            "2026-04-12T00:00:00Z",
+        );
+        assert_eq!(out.status_label, "error_with_changes");
+        assert_eq!(
+            task_val["worktree"]["worktree_path"],
+            repo.to_string_lossy().to_string()
+        );
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn salvage_check_merged_marks_task_merged_and_skips_retry() {
+        let task_id = "SALVAGE-MERGED-001";
+        let (repo, branch, worktree) = make_salvage_repo("main", task_id, false);
+        let mut registry = json!({
+            "tasks": [{
+                "id": task_id,
+                "state": "claimed",
+                "base_branch": "main",
+                "task_runtime": {
+                    "status": "running",
+                    "last_worktree_path": worktree.to_string_lossy().to_string(),
+                    "last_branch": branch
+                }
+            }],
+            "resource_locks": {}
+        });
+
+        let result = salvage_check_in_registry(
+            &mut registry,
+            task_id,
+            &repo,
+            false,
+            None,
+            "2026-03-01T00:00:00Z",
+            |_, _, _, _, _, _| {},
+        )
+        .expect("salvage check");
+
+        assert_eq!(result, SalvageResult::Merged);
+        assert_eq!(registry["tasks"][0]["state"], "merged");
+        assert_eq!(registry["tasks"][0]["task_runtime"]["status"], "idle");
+        let _ = fs::remove_dir_all(&worktree);
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn salvage_check_conflict_proceeds_retry() {
+        let task_id = "SALVAGE-CONFLICT-001";
+        let (repo, branch, worktree) = make_salvage_repo("main", task_id, true);
+        let mut registry = json!({
+            "tasks": [{
+                "id": task_id,
+                "state": "claimed",
+                "base_branch": "main",
+                "task_runtime": {
+                    "status": "running",
+                    "last_worktree_path": worktree.to_string_lossy().to_string(),
+                    "last_branch": branch
+                }
+            }],
+            "resource_locks": {}
+        });
+
+        let result = salvage_check_in_registry(
+            &mut registry,
+            task_id,
+            &repo,
+            false,
+            None,
+            "2026-03-01T00:00:00Z",
+            |_, _, _, _, _, _| {},
+        )
+        .expect("salvage check");
+
+        assert_eq!(result, SalvageResult::ConflictProceedRetry);
+        assert_eq!(registry["tasks"][0]["state"], "claimed");
+        let _ = fs::remove_dir_all(&worktree);
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn salvage_check_no_commits_proceeds_retry() {
+        let repo = make_repo_with_commit_ahead("main");
+        let mut registry = json!({
+            "tasks": [{
+                "id": "SALVAGE-NOCOMMITS-001",
+                "state": "claimed",
+                "base_branch": "main",
+                "task_runtime": {
+                    "status": "running",
+                    "last_worktree_path": repo.to_string_lossy().to_string(),
+                    "last_branch": "task/ipc-override"
+                }
+            }],
+            "resource_locks": {}
+        });
+
+        let result = salvage_check_in_registry(
+            &mut registry,
+            "SALVAGE-NOCOMMITS-001",
+            &repo,
+            false,
+            None,
+            "2026-03-01T00:00:00Z",
+            |_, _, _, _, _, _| {},
+        )
+        .expect("salvage check");
+
+        assert_eq!(result, SalvageResult::NoCommitsProceedRetry);
+        assert_eq!(registry["tasks"][0]["state"], "claimed");
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn apply_job_completion_error_preserves_last_worktree_metadata_before_clear() {
+        let mut task = json!({
+            "id":"T-LAST-WT",
+            "state":"claimed",
+            "worktree":{
+                "worktree_path":"/tmp/salvage-wt",
+                "branch":"task/T-LAST-WT",
+                "base_branch":"main"
+            },
+            "task_runtime":{"status":"running","pid":123}
+        });
+        let out = apply_job_completion(
+            &mut task,
+            &JobCompletionInput {
+                success: true,
+                attempt: 1,
+                max_attempts: 1,
+                timed_out: false,
+                phase_timeout_seconds: 0,
+                elapsed_seconds: 1,
+                status_text: "performer reported error".to_string(),
+                completion_kind: Some(PerformerCompletionKind::ErrorWithoutChanges),
+                error_code: None,
+                error_origin: None,
+                error_message: None,
+                auto_retry_error_codes: Vec::new(),
+                auto_retry_max: 0,
+                backoff_base_seconds: 30,
+                backoff_max_seconds: 300,
+                normalizer_input: None,
+            },
+            &NormalizerRegistry::empty(),
+            "2026-03-01T00:00:00Z",
+        );
+
+        assert_eq!(out.status_label, "error_without_changes");
+        assert!(task["worktree"].is_null());
+        assert_eq!(
+            task["task_runtime"]["last_worktree_path"],
+            "/tmp/salvage-wt"
+        );
+        assert_eq!(task["task_runtime"]["last_branch"], "task/T-LAST-WT");
     }
 }

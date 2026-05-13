@@ -1,0 +1,886 @@
+{
+  "lot": "Lot 5 - Coordinator Code Quality & Operational Hardening",
+  "version": "1.0",
+  "generated_at": "2026-04-13",
+  "timezone": "Europe/Paris",
+  "priority_mapping": {
+    "0": "P0 / Not parallel-safe — must run alone",
+    "1": "P1 / Must-have — production reliability",
+    "2": "P2 / Should-have — code quality",
+    "3": "P3 / Nice-to-have — maintainability",
+    "4": "P4 / Lowest priority"
+  },
+  "routing_hints_mapping": {
+    "execution_mode": "micro | standard | structural",
+    "reasoning_depth": "light | standard | deep",
+    "context_scope": "local | module | cross-cutting",
+    "risk_level": "low | medium | high",
+    "validation_profile": "light | standard | heavy"
+  },
+  "assumptions": [
+    "All changes are in the existing Rust codebase under core/src/coordinator/ and core/src/git.rs.",
+    "Existing tests (312+ core tests) must continue passing after each task.",
+    "control_plane.rs (~3,900 lines) is the primary hotspot — all tasks touching it are serialized via dependencies.",
+    "engine.rs (~3,400 lines) is a secondary hotspot — tasks touching it are serialized via dependencies.",
+    "git.rs is touched by both the remote-exists helper and the macro refactor — both tasks are serialized.",
+    "session_manager.rs IO fix is isolated and parallel-safe with respect to all other tasks.",
+    "performer scripts (adapters/) are isolated from core Rust changes — parallel-safe.",
+    "CoordinatorConfigResolved must be defined before any call-site cleanup in control_plane.rs.",
+    "prepare_clean_worktree() must be extracted before the fetch non-blocking fix is integrated into it.",
+    "The git_command! macro refactor is purely internal to git.rs and does not change any public API.",
+    "MaccError::Io { path, action, source } is the canonical error type for IO failures in this codebase.",
+    "The coordinator uses SanitizeOptions-style configuration objects already established in Lot 4 patterns.",
+    "mode_b.rs (1,160 lines) is over the 800-line anti-god-file threshold — L5-SUP-004 adds coordinator evidence/prompt logic to a new file (core/src/supervisor/coordinator_supervisor.rs) rather than growing mode_b.rs further.",
+    "core/src/coordinator/runtime.rs is independent of all other L5 tasks touching control_plane.rs — the CoordinatorPidGuard addition is isolated to the IPC listener startup path and is parallel-safe."
+  ],
+  "tasks": [
+    {
+      "id": "L5-GIT-001",
+      "title": "Add git_remote_exists() helper to git.rs",
+      "category": "git-operations",
+      "description": "Problem/Goal: Before fetching from a remote, the coordinator has no way to distinguish 'remote does not exist' from 'remote is unreachable'. Both cause git fetch to fail, but only the first is permanent. A helper that checks remote presence before fetch is the building block for making fetch non-blocking.\nKey actions: Implement git_remote_exists(worktree, remote_name) -> Result<bool> using `git remote get-url <name>`. Implement git_remote_exists_async() async variant. Follow existing patterns in git.rs (run_git_status / tokio::process::Command).\nOut of scope: Changing any fetch behavior. Touching control_plane.rs.\nSuccess criteria: git_remote_exists() returns true when remote exists, false when it does not. Both sync and async variants have unit tests using temporary git repos following existing git.rs test patterns.",
+      "objective": "Provide a primitive for remote-existence detection that decouples 'no remote configured' from 'network failure'.",
+      "result": "git.rs has git_remote_exists() and git_remote_exists_async() with unit tests.",
+      "steps": [
+        "Implement git_remote_exists(repo_or_worktree: &Path, remote: &str) -> Result<bool> using `git remote get-url <remote>` exit status.",
+        "Implement git_remote_exists_async() using tokio::process::Command following existing async patterns.",
+        "Write unit test: repo with remote → returns true.",
+        "Write unit test: repo without named remote → returns false.",
+        "Write unit test: async variant matches sync result."
+      ],
+      "notes": "This is the prerequisite for L5-CTRL-001. Kept small so it can be reviewed independently.",
+      "exclusive_resources": ["core/src/git.rs"],
+      "dependencies": [],
+      "priority": "1",
+      "routing_hints": {
+        "execution_mode": "micro",
+        "reasoning_depth": "light",
+        "context_scope": "local",
+        "risk_level": "low",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L5-CFG-001",
+      "title": "Define CoordinatorConfigResolved with baked-in defaults",
+      "category": "coordinator-config",
+      "description": "Problem/Goal: CoordinatorConfig in config/mod.rs has 30+ Option<T> fields. Default values are re-computed at each call site with unwrap_or(N) scattered across control_plane.rs. Missing a default at one call site, or using an inconsistent value, is a silent bug.\nKey actions: Define CoordinatorConfigResolved struct with all fields non-optional (u64, usize, bool, String as appropriate). Implement fn resolve(config: Option<&CoordinatorConfig>) -> CoordinatorConfigResolved that applies all canonical defaults in one place. Place CoordinatorConfigResolved in config/mod.rs next to CoordinatorConfig. Document each default value with a comment explaining its rationale.\nOut of scope: Replacing call sites (done in L5-CFG-002). Changing any default value semantics. Touching control_plane.rs.\nSuccess criteria: CoordinatorConfigResolved exists with all fields non-optional. resolve() produces correct defaults when called with None. Unit tests verify each default value and override behavior.",
+      "objective": "Centralize all coordinator config defaults so they are defined once and impossible to forget at call sites.",
+      "result": "config/mod.rs has CoordinatorConfigResolved struct and resolve() function with unit tests for defaults and overrides.",
+      "steps": [
+        "Audit control_plane.rs for all unwrap_or(N) and unwrap_or_default() patterns on CoordinatorConfig fields — list every field and its current default.",
+        "Define CoordinatorConfigResolved with the same field names but all non-optional.",
+        "Implement resolve(config: Option<&CoordinatorConfig>) -> CoordinatorConfigResolved mapping each Option to its canonical default.",
+        "Add doc comments on each field in CoordinatorConfigResolved explaining the default and its operational meaning.",
+        "Write unit test: resolve(None) produces all expected defaults.",
+        "Write unit test: resolve(Some(&partial_config)) overrides only provided fields."
+      ],
+      "notes": "This is a contracts-first task for L5-CFG-002. Keep it pure — no behavior change, only type definition and default centralization.",
+      "exclusive_resources": ["core/src/config/mod.rs"],
+      "dependencies": [],
+      "priority": "2",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "low",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L5-SES-001",
+      "title": "Replace .expect()/.unwrap() on IO operations in session_manager.rs",
+      "category": "coordinator-sessions",
+      "description": "Problem/Goal: session_manager.rs uses .expect() on IO operations at lines 438, 693, 623-624, 629, 658, 667 and .unwrap() on path operations at line 693, 750-751. These panic instead of returning structured errors, making session failures unrecoverable and untraceable.\nKey actions: Replace every .expect() on file creation, file write, and path manipulation with .map_err(|e| MaccError::Io { path: ..., action: ..., source: e })?. Replace .unwrap() on parent() and similar path operations with explicit error returns. Ensure all public functions in session_manager.rs return Result, never panic on IO.\nOut of scope: Changing session logic or lease semantics. Modifying test code that uses .expect() on Result assertions (test assertions are acceptable).\nSuccess criteria: No .expect() or .unwrap() remain in non-test code in session_manager.rs. All IO errors surface as MaccError::Io. Existing session tests pass.",
+      "objective": "Make session management failures recoverable and observable instead of causing coordinator panics.",
+      "result": "session_manager.rs non-test code has zero .expect()/.unwrap() on IO or path operations. All errors are Result-typed.",
+      "steps": [
+        "Scan session_manager.rs for all .expect() and .unwrap() outside #[cfg(test)] blocks.",
+        "For each file-creation or file-write .expect(), replace with .map_err(|e| MaccError::Io { path: path.to_string_lossy().into(), action: \"<context>\".into(), source: e })?.",
+        "For each path .unwrap() (e.g., parent().unwrap()), replace with .ok_or_else(|| MaccError::Validation(\"...\".into()))?.",
+        "Verify all existing session_manager tests still pass.",
+        "Run cargo clippy to confirm no new warnings introduced."
+      ],
+      "notes": "This task is isolated — session_manager.rs has no dependency on the control_plane.rs or engine.rs changes. Can run in parallel with any other task. Straightforward mechanical replacement.",
+      "exclusive_resources": ["core/src/coordinator/session_manager.rs"],
+      "dependencies": [],
+      "priority": "2",
+      "routing_hints": {
+        "execution_mode": "micro",
+        "reasoning_depth": "light",
+        "context_scope": "local",
+        "risk_level": "low",
+        "validation_profile": "light"
+      }
+    },
+    {
+      "id": "L5-ENG-001",
+      "title": "Extract classify_completion_error() from apply_job_completion_typed()",
+      "category": "coordinator-engine",
+      "description": "Problem/Goal: apply_job_completion_typed() in engine.rs is 522 lines. Error normalization, authority resolution, rate-limit classification, retry logic, and state mutation are all tangled in one function. The first extraction step is to isolate error classification as a pure function with no side effects — making it testable in isolation and removing the authority-resolution ordering bug (currently authority is resolved before normalization, but normalization can change the error class).\nKey actions: Extract classify_completion_error(input: &JobCompletionInput, normalizer: &ErrorNormalizer) -> ErrorClassification where ErrorClassification captures: canonical_class, error_code, completion_kind, has_commits. Move all error normalization and authority resolution logic into this function. Authority resolution happens LAST inside this function, after normalization is complete. apply_job_completion_typed() calls classify_completion_error() as its first step.\nOut of scope: Extracting retry logic (done in L5-ENG-002). Changing any classification outcome — behavior must be identical, only structure changes.\nSuccess criteria: classify_completion_error() is a pure function (no state mutation, no registry writes). Authority resolution happens after normalization within it. apply_job_completion_typed() delegates to it. All existing engine tests pass.",
+      "objective": "Isolate error classification as a pure, testable function and fix the authority-before-normalization ordering bug.",
+      "result": "engine.rs has standalone classify_completion_error() function. apply_job_completion_typed() delegates to it. Behavior unchanged, structure improved.",
+      "steps": [
+        "Define ErrorClassification struct: { canonical_class: CanonicalClass, error_code: Option<String>, completion_kind: PerformerCompletionKind, has_commits: bool, completion_authority: CompletionAuthority }.",
+        "Extract error normalization logic from apply_job_completion_typed() into classify_completion_error().",
+        "Move authority resolution to the end of classify_completion_error(), after normalization.",
+        "Replace the corresponding block in apply_job_completion_typed() with a single call to classify_completion_error().",
+        "Write unit tests for classify_completion_error() covering: IPC+commits, exit-error+no-commits, rate-limit class, quota class.",
+        "Verify all existing engine.rs tests pass without modification."
+      ],
+      "notes": "First of two engine.rs extraction tasks. Keep this focused on classification only — do not touch retry logic or state transitions. L5-ENG-002 handles those.",
+      "exclusive_resources": ["core/src/coordinator/engine.rs"],
+      "dependencies": [],
+      "priority": "1",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "deep",
+        "context_scope": "module",
+        "risk_level": "high",
+        "validation_profile": "heavy"
+      }
+    },
+    {
+      "id": "L5-SH-001",
+      "title": "Create adapters/shared/performer_lib.sh shared bash library",
+      "category": "performer-scripts",
+      "description": "Problem/Goal: claude.performer.sh, codex.performer.sh, and gemini.performer.sh differ in only 3 lines (tool name in log messages). All session management, lease locking, IPC signal detection, output capture, and signal handling are copy-pasted. A bug in any of these areas must be fixed three times.\nKey actions: Create adapters/shared/performer_lib.sh containing all shared logic: session key computation, session lock acquire/release, read_session_id(), write_active_lease(), extract_session_id_from_output(), discover_session_id(), reserve_generated_session_id(), IPC signal detection, run_and_capture(), run_resume_and_capture(), signal handler setup. Define extension points as bash variables that each adapter sets before sourcing the library: TOOL_ID, TOOL_LOG_PREFIX.\nOut of scope: Modifying adapters to use the library (done in L5-SH-002). Changing any behavior — library is an exact extraction, not a rewrite.\nSuccess criteria: adapters/shared/performer_lib.sh exists and contains all shared logic. A diff between the library and each original script shows only the 3 tool-specific lines differ. The library is self-contained (sources no external files beyond standard bash).",
+      "objective": "Eliminate triple-copy maintenance burden for performer scripts by extracting all shared logic to one library.",
+      "result": "adapters/shared/performer_lib.sh exists with all shared performer logic extracted. Adapter-specific variables documented at the top of the library.",
+      "steps": [
+        "Compare all three performer scripts line by line to identify the exact set of differing lines.",
+        "Create adapters/shared/performer_lib.sh — copy shared logic verbatim from claude.performer.sh as the baseline.",
+        "Replace the 3 tool-specific literals with $TOOL_ID and $TOOL_LOG_PREFIX variable references.",
+        "Add a header comment listing required variables each adapter must set before sourcing.",
+        "Verify the library has no hardcoded tool names (grep for 'claude', 'codex', 'gemini' to confirm).",
+        "Do not modify the adapter scripts yet — that is L5-SH-002."
+      ],
+      "notes": "This task only creates the library. Adapters are untouched until L5-SH-002. This allows the library to be reviewed independently before the adapters are migrated.",
+      "exclusive_resources": [],
+      "dependencies": [],
+      "priority": "3",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "light",
+        "context_scope": "module",
+        "risk_level": "medium",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L5-CFG-002",
+      "title": "Replace unwrap_or() in dispatch functions of control_plane.rs",
+      "category": "coordinator-config",
+      "description": "Problem/Goal: dispatch_ready_tasks_native() and its dispatch helper functions in control_plane.rs re-derive config defaults at each call site using unwrap_or(N). This is the largest concentration of scattered defaults — the dispatch path alone spans ~1,000+ lines.\nKey actions: At the top of dispatch_ready_tasks_native() and each directly called dispatch helper function that receives coordinator_cfg: Option<&CoordinatorConfig>, add let cfg = CoordinatorConfigResolved::resolve(coordinator_cfg); and replace all .unwrap_or(N) field accesses with cfg.field. Scope: dispatch_ready_tasks_native() and functions it calls (worker selection, worktree acquisition, claim, performer launch helpers). Do not touch sanitize_, phase_, merge_, or utility functions yet.\nOut of scope: Sanitize, phase-runner, merge-gate, or utility functions (L5-CFG-003). engine.rs or other files (L5-CFG-004). Changing any default value or function signature.\nSuccess criteria: No .unwrap_or(N) patterns remain for CoordinatorConfig fields in the dispatch function group. cargo build passes. All tests pass. No behavior change.",
+      "objective": "Eliminate scattered config default logic from the dispatch function group of control_plane.rs — first of three CFG cleanup passes.",
+      "result": "dispatch_ready_tasks_native() and dispatch helpers use CoordinatorConfigResolved. No unwrap_or(N) on CoordinatorConfig fields in the dispatch group.",
+      "steps": [
+        "Identify all functions in the dispatch group: dispatch_ready_tasks_native() and any helper functions it calls directly that receive coordinator_cfg.",
+        "At the top of each identified function, add: let cfg = CoordinatorConfigResolved::resolve(coordinator_cfg);",
+        "Replace each field.unwrap_or(N) with cfg.field for CoordinatorConfig accesses within the dispatch group.",
+        "Run cargo build to confirm compilation.",
+        "Run cargo test -p macc-core to confirm no behavior change.",
+        "Run cargo clippy to confirm no new warnings."
+      ],
+      "notes": "First of three passes replacing unwrap_or() in control_plane.rs. Scope is intentionally narrow — dispatch group only. L5-CFG-003 covers the remaining function groups in the same file. Mechanical replacement, no logic change.",
+      "exclusive_resources": ["core/src/coordinator/control_plane.rs"],
+      "dependencies": ["L5-CFG-001"],
+      "priority": "2",
+      "routing_hints": {
+        "execution_mode": "micro",
+        "reasoning_depth": "light",
+        "context_scope": "module",
+        "risk_level": "low",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L5-CFG-003",
+      "title": "Replace unwrap_or() in sanitize, phase-runner, and merge-gate functions of control_plane.rs",
+      "category": "coordinator-config",
+      "description": "Problem/Goal: After L5-CFG-002 cleans the dispatch group, the remaining function groups in control_plane.rs still use unwrap_or(N) for CoordinatorConfig fields: sanitize_worktree_to_base(), switch_worktree_to_base_after_merge(), phase runner functions, merge gate functions, and any utility/coordination helpers outside the dispatch group.\nKey actions: For each function in the sanitize, phase-runner, merge-gate, and utility groups that receives coordinator_cfg: Option<&CoordinatorConfig>, add let cfg = CoordinatorConfigResolved::resolve(coordinator_cfg); at the top and replace all .unwrap_or(N) field accesses with cfg.field.\nOut of scope: Dispatch functions (done in L5-CFG-002). engine.rs or other files (L5-CFG-004). Changing any default value or function signature.\nSuccess criteria: No .unwrap_or(N) patterns remain for CoordinatorConfig fields anywhere in control_plane.rs. cargo build passes. All tests pass. No behavior change.",
+      "objective": "Complete the unwrap_or() cleanup in control_plane.rs, leaving the file fully using CoordinatorConfigResolved — prerequisite for subsequent structural tasks.",
+      "result": "All functions in control_plane.rs use CoordinatorConfigResolved. Zero inline unwrap_or(N) on CoordinatorConfig fields remain in the file.",
+      "steps": [
+        "Grep control_plane.rs for remaining .unwrap_or patterns on CoordinatorConfig fields after L5-CFG-002 is merged.",
+        "For each remaining function: add let cfg = CoordinatorConfigResolved::resolve(coordinator_cfg); at the top.",
+        "Replace each field.unwrap_or(N) with cfg.field.",
+        "Run cargo build to confirm compilation.",
+        "Run cargo test -p macc-core to confirm no behavior change.",
+        "Run cargo clippy to confirm no new warnings.",
+        "Confirm zero unwrap_or on CoordinatorConfig fields remain in control_plane.rs."
+      ],
+      "notes": "Second of three passes. Must run after L5-CFG-002 (same file, sequential). Completion of this task unblocks L5-CTRL-003 which needs the file clean before structural extraction.",
+      "exclusive_resources": ["core/src/coordinator/control_plane.rs"],
+      "dependencies": ["L5-CFG-002"],
+      "priority": "2",
+      "routing_hints": {
+        "execution_mode": "micro",
+        "reasoning_depth": "light",
+        "context_scope": "module",
+        "risk_level": "low",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L5-CFG-004",
+      "title": "Replace unwrap_or() in engine.rs and remaining CoordinatorConfig callers",
+      "category": "coordinator-config",
+      "description": "Problem/Goal: engine.rs and potentially other coordinator files also receive CoordinatorConfig parameters and re-derive defaults with unwrap_or(N). These are independent of control_plane.rs and can be cleaned in parallel.\nKey actions: Grep the coordinator crate for unwrap_or on CoordinatorConfig fields outside control_plane.rs. For each match in engine.rs or other files, add let cfg = CoordinatorConfigResolved::resolve(coordinator_cfg); at the top of the function and replace field accesses. If no matches exist outside control_plane.rs, document the finding in a code comment near CoordinatorConfigResolved.\nOut of scope: control_plane.rs (L5-CFG-002/003). Changing any default value or function signature.\nSuccess criteria: No .unwrap_or(N) patterns remain for CoordinatorConfig fields in any file outside control_plane.rs. cargo build passes. All tests pass.",
+      "objective": "Extend CoordinatorConfigResolved adoption to engine.rs and all remaining callers, completing crate-wide default centralization.",
+      "result": "All CoordinatorConfig field accesses in the coordinator crate go through CoordinatorConfigResolved. Zero inline unwrap_or(N) on CoordinatorConfig fields anywhere in the crate.",
+      "steps": [
+        "Run: grep -rn 'coordinator_cfg.*unwrap_or\\|unwrap_or.*CoordinatorConfig' core/src/coordinator/ --exclude control_plane.rs",
+        "For each match: add let cfg = CoordinatorConfigResolved::resolve(coordinator_cfg); and replace field accesses.",
+        "If no matches found: add a comment near CoordinatorConfigResolved documenting that control_plane.rs is the sole caller.",
+        "Run cargo build --workspace to confirm compilation.",
+        "Run cargo test -p macc-core to confirm no behavior change."
+      ],
+      "notes": "Third of three passes. Independent of L5-CFG-002/003 (different files) — can run in parallel. Completes crate-wide adoption of CoordinatorConfigResolved. If engine.rs has no CoordinatorConfig parameters, this task is a quick audit pass that confirms the scope was control_plane.rs only.",
+      "exclusive_resources": ["core/src/coordinator/engine.rs"],
+      "dependencies": ["L5-CFG-001"],
+      "priority": "2",
+      "routing_hints": {
+        "execution_mode": "micro",
+        "reasoning_depth": "light",
+        "context_scope": "module",
+        "risk_level": "low",
+        "validation_profile": "light"
+      }
+    },
+    {
+      "id": "L5-ENG-002",
+      "title": "Extract resolve_retry_strategy() and apply_state_transitions() from apply_job_completion_typed()",
+      "category": "coordinator-engine",
+      "description": "Problem/Goal: After L5-ENG-001 extracts error classification, apply_job_completion_typed() still contains retry logic and state mutation interleaved. State is mutated in multiple branches without a single commit point, making it possible for a task to end up in an inconsistent intermediate state if a branch exits early.\nKey actions: Extract resolve_retry_strategy(task, classification: &ErrorClassification, config: &CoordinatorConfigResolved) -> RetryStrategy — pure, no mutation. Extract apply_state_transitions(task, registry, strategy: &RetryStrategy) -> Result<()> — the single place where task state fields (state, worktree, assignee, retry_count) are written. apply_job_completion_typed() becomes a thin orchestrator: classify → resolve → apply.\nOut of scope: Changing retry semantics. Touching classify_completion_error() (done in L5-ENG-001). Touching control_plane.rs.\nSuccess criteria: resolve_retry_strategy() is pure (no mutation). apply_state_transitions() is the only place task state fields are written in the completion path. apply_job_completion_typed() is under 80 lines. All existing tests pass.",
+      "objective": "Give the completion path a single state-mutation commit point, eliminating the risk of partially-mutated task state.",
+      "result": "engine.rs has resolve_retry_strategy() and apply_state_transitions(). apply_job_completion_typed() orchestrates them. No partial state mutation possible.",
+      "steps": [
+        "Define RetryStrategy enum: { Retry { same_worktree: bool, reason: String }, Block { reason: String }, Merge, PhaseDone, NoOp }.",
+        "Extract resolve_retry_strategy() — pure function mapping ErrorClassification + task metadata + config to RetryStrategy.",
+        "Extract apply_state_transitions() — takes task + registry + RetryStrategy, performs all state writes, returns Result<()>.",
+        "Reduce apply_job_completion_typed() to: let classification = classify_completion_error(...); let strategy = resolve_retry_strategy(...); apply_state_transitions(...)?;",
+        "Write unit tests for resolve_retry_strategy() for each RetryStrategy variant.",
+        "Write unit test for apply_state_transitions() verifying consistent state after each strategy.",
+        "Confirm all existing engine.rs tests pass."
+      ],
+      "notes": "This depends on L5-ENG-001 which defines ErrorClassification. Together these two tasks reduce apply_job_completion_typed() from 522 lines to ~80 lines.",
+      "exclusive_resources": ["core/src/coordinator/engine.rs"],
+      "dependencies": ["L5-ENG-001"],
+      "priority": "1",
+      "routing_hints": {
+        "execution_mode": "structural",
+        "reasoning_depth": "deep",
+        "context_scope": "module",
+        "risk_level": "high",
+        "validation_profile": "heavy"
+      }
+    },
+    {
+      "id": "L5-GIT-002",
+      "title": "Define git_command! macro for sync/async git operation pairs",
+      "category": "git-operations",
+      "description": "Problem/Goal: git.rs has ~100+ lines of duplicated sync/async pairs: checkout/checkout_async, reset_hard/reset_hard_async, clean_fd/clean_fd_async, fetch/fetch_async, etc. A bug fixed in one variant must be manually applied to the other.\nKey actions: Define a macro git_command!(fn_name, git_subcommand, args...) that generates both the sync variant (using std::process::Command) and the async variant (using tokio::process::Command). The macro body must exactly match the patterns used in existing functions so generated code is identical to the current hand-written code. Apply the macro only to simple operations where sync and async logic is genuinely identical.\nOut of scope: Applying the macro to functions with non-trivial logic differences. Changing any git operation behavior. Touching control_plane.rs.\nSuccess criteria: The macro compiles cleanly. Generated function signatures and return types match the existing hand-written equivalents. The macro is defined in git.rs (not a separate file).",
+      "objective": "Define the macro that eliminates git.rs sync/async duplication — prerequisite for applying it in L5-GIT-003.",
+      "result": "git.rs has a git_command! macro with doc comment. The macro is verified to compile by applying it to one operation as a smoke test.",
+      "steps": [
+        "Study the three most common patterns in git.rs sync/async pairs: simple bool-returning, output-capturing, and status-checking.",
+        "Define macro_rules! git_command! covering the bool-returning pattern (most common) with sync and async arms.",
+        "Apply the macro to one simple operation (e.g., clean_fd / clean_fd_async) as a compilation smoke test.",
+        "Verify the generated function has the same signature as the removed hand-written version.",
+        "Add a doc comment to the macro explaining its intended use and the operations it covers."
+      ],
+      "notes": "Kept intentionally small — only macro definition and one smoke-test application. L5-GIT-003 applies it broadly. This ordering allows the macro to be reviewed and refined before mass application.",
+      "exclusive_resources": ["core/src/git.rs"],
+      "dependencies": ["L5-GIT-001"],
+      "priority": "3",
+      "routing_hints": {
+        "execution_mode": "micro",
+        "reasoning_depth": "standard",
+        "context_scope": "local",
+        "risk_level": "medium",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L5-SH-002",
+      "title": "Refactor performer adapter scripts to source performer_lib.sh",
+      "category": "performer-scripts",
+      "description": "Problem/Goal: claude.performer.sh, codex.performer.sh, and gemini.performer.sh still contain their own copy of all shared logic. After L5-SH-001 creates the shared library, each adapter must be migrated to source it.\nKey actions: For each of the three adapter scripts: set TOOL_ID and TOOL_LOG_PREFIX at the top, source adapters/shared/performer_lib.sh, remove all now-redundant code (session management, lease operations, run_and_capture, etc.), keep only tool-specific argument parsing and any genuinely tool-specific logic.\nOut of scope: Changing performer_lib.sh. Changing any performer behavior — outputs, exit codes, and IPC signals must remain identical.\nSuccess criteria: Each adapter script is under 50 lines after migration. A behavioral diff between the old and new versions of each script shows only whitespace/comment differences in functional paths. The shared library is sourced via a path relative to the script's own directory.",
+      "objective": "Complete the performer script consolidation so each adapter contains only tool-specific logic.",
+      "result": "claude.performer.sh, codex.performer.sh, and gemini.performer.sh each source performer_lib.sh and contain only their 3 tool-specific lines.",
+      "steps": [
+        "Determine the correct relative path from each adapter to adapters/shared/performer_lib.sh.",
+        "In claude.performer.sh: set TOOL_ID=claude TOOL_LOG_PREFIX='[MACC] invoke (claude 1):', source the library, remove duplicated functions.",
+        "In codex.performer.sh: same pattern with codex identifiers.",
+        "In gemini.performer.sh: same pattern with gemini identifiers.",
+        "For each refactored script, manually trace the happy path to confirm no missing variable or function.",
+        "Verify the scripts are executable and have correct shebang lines."
+      ],
+      "notes": "Run after L5-SH-001. The 50-line target is approximate — the key acceptance criterion is that no session/lease/IPC logic appears more than once across the three scripts.",
+      "exclusive_resources": [],
+      "dependencies": ["L5-SH-001"],
+      "priority": "3",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "medium",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L5-CTRL-003",
+      "title": "Extract prepare_clean_worktree() to eliminate sanitization duplication",
+      "category": "coordinator-dispatch",
+      "description": "Problem/Goal: sanitize_worktree_to_base() and switch_worktree_to_base_after_merge() in control_plane.rs both implement the same sequence: reset HEAD → clean → checkout → fetch → reset base. ~90 lines of near-identical code. A fix in one does not automatically apply to the other.\nKey actions: Extract async fn prepare_clean_worktree(worktree: &Path, base_branch: &str, options: SanitizeOptions) -> Result<SanitizeStepFailure> where SanitizeOptions has: fetch_remote: bool (whether to attempt fetch), fail_on_fetch_error: bool (whether fetch failure is blocking), tag_abandoned: bool (whether to tag uncommitted work before reset). Both sanitize_worktree_to_base() and switch_worktree_to_base_after_merge() become thin wrappers that call prepare_clean_worktree() with their specific options.\nOut of scope: Changing fetch blocking behavior (done in L5-CTRL-001). Changing any sanitization outcome — behavior must be identical before L5-CTRL-001.\nSuccess criteria: prepare_clean_worktree() exists and both callers use it. The two original functions are reduced to option-setting + delegation. Existing sanitization behavior is unchanged. Tests pass.",
+      "objective": "Eliminate sanitization code duplication so fixes apply to both callers automatically.",
+      "result": "control_plane.rs has prepare_clean_worktree() with SanitizeOptions. sanitize_worktree_to_base() and switch_worktree_to_base_after_merge() are thin wrappers. ~90 lines of duplication removed.",
+      "steps": [
+        "Define SanitizeOptions struct: { fetch_remote: bool, fail_on_fetch_error: bool, tag_abandoned: bool }.",
+        "Define SanitizeStepFailure as an alias or newtype over &'static str (preserving the existing return type pattern).",
+        "Extract prepare_clean_worktree() by copying sanitize_worktree_to_base() body and parameterizing the fetch behavior via options.",
+        "Reduce sanitize_worktree_to_base() to: prepare_clean_worktree(path, base, SanitizeOptions { fetch_remote: true, fail_on_fetch_error: true, tag_abandoned: false }).await",
+        "Reduce switch_worktree_to_base_after_merge() to: prepare_clean_worktree(path, base, SanitizeOptions { fetch_remote: true, fail_on_fetch_error: true, tag_abandoned: true }).await",
+        "Run all coordinator tests to confirm behavior is unchanged."
+      ],
+      "notes": "Must run after L5-CFG-003 so the file is fully clean (all unwrap_or replaced) before this structural edit. The fail_on_fetch_error: true preserves current blocking behavior — L5-CTRL-001 will set this to false.",
+      "exclusive_resources": ["core/src/coordinator/control_plane.rs"],
+      "dependencies": ["L5-CFG-003"],
+      "priority": "2",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "medium",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L5-GIT-003",
+      "title": "Apply git_command! macro to duplicate sync/async pairs in git.rs",
+      "category": "git-operations",
+      "description": "Problem/Goal: After defining the macro in L5-GIT-002, the remaining duplicate sync/async pairs in git.rs should be replaced. Target operations: checkout, checkout_reset_branch, checkout_detach, reset_hard, fetch, create_tag, list_branches_by_prefix. Each currently has a hand-written sync + async version.\nKey actions: For each target operation, verify the sync and async versions are structurally identical (only std:: vs tokio:: differ). Replace with git_command! macro invocation. Keep hand-written implementations only for operations with genuine logic differences between sync and async.\nOut of scope: Changing git operation behavior. Changing any public API. Touching any caller in control_plane.rs.\nSuccess criteria: All target operations use the macro. No duplicate sync/async implementations remain for simple operations. cargo build --workspace passes. All git.rs tests pass.",
+      "objective": "Eliminate ~100 lines of duplicate git operation code using the macro defined in L5-GIT-002.",
+      "result": "git.rs has macro-generated sync/async pairs for all simple operations. Hand-written code only where logic genuinely differs.",
+      "steps": [
+        "For each target operation (checkout, checkout_reset_branch, checkout_detach, reset_hard, fetch, create_tag, list_branches_by_prefix), confirm sync and async are structurally identical.",
+        "Replace each confirmed pair with a git_command! invocation.",
+        "For any operation where sync/async differ meaningfully, leave the hand-written version and add a comment explaining why.",
+        "Run cargo build --workspace to confirm all callers still compile.",
+        "Run cargo test -p macc-core to confirm all git.rs tests pass."
+      ],
+      "notes": "git_remote_exists() added in L5-GIT-001 is exempt — it uses a different pattern. This task targets only the pre-existing duplicate pairs.",
+      "exclusive_resources": ["core/src/git.rs"],
+      "dependencies": ["L5-GIT-002"],
+      "priority": "3",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "light",
+        "context_scope": "local",
+        "risk_level": "medium",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L5-CTRL-001",
+      "title": "Make fetch_origin non-blocking in prepare_clean_worktree()",
+      "category": "coordinator-dispatch",
+      "description": "Problem/Goal: prepare_clean_worktree() (after L5-CTRL-003 extracts it) still treats git fetch failure as a hard blocker. This caused a production coordinator crash when VS Code's credential helper socket was unavailable — the coordinator entered an infinite cooldown loop instead of proceeding with the existing local copy of the base branch.\nKey actions: In prepare_clean_worktree(), when fetch_remote is true: (1) call git_remote_exists_async() first — if remote does not exist, skip fetch entirely and log a notice, (2) attempt fetch, (3) if fetch fails AND fail_on_fetch_error is false, log a warning and continue rather than returning a step failure. Update the two callers to pass fail_on_fetch_error: false. Only block on reset --hard failure (which proves the base is genuinely unavailable).\nOut of scope: Changing reset_hard behavior. Touching engine.rs or helpers.rs. Changing error codes.\nSuccess criteria: A fetch failure with origin present (e.g., network down, auth expired) produces a logged warning but does not abort dispatch. A missing origin remote is detected before fetch and skipped cleanly. The subsequent reset --hard still blocks if it fails. Coordinator completes dispatch where previously it looped in cooldown.",
+      "objective": "Eliminate the production crash mode where credential/network fetch failures cause infinite dispatch cooldown loops.",
+      "result": "prepare_clean_worktree() treats fetch failure as a warning when fail_on_fetch_error is false. Both sanitize callers use fail_on_fetch_error: false. No dispatch abort on transient fetch errors.",
+      "steps": [
+        "In prepare_clean_worktree(), before the fetch block: if options.fetch_remote { if !git_remote_exists_async(worktree, \"origin\").await? { log notice; skip fetch; } else { attempt fetch; if fails && !options.fail_on_fetch_error { log warning; continue; } else if fails { return step failure; } } }",
+        "Update sanitize_worktree_to_base() caller to use fail_on_fetch_error: false.",
+        "Update switch_worktree_to_base_after_merge() caller to use fail_on_fetch_error: false.",
+        "Add a coordinator log line when fetch is skipped (no remote) and when fetch fails but is non-blocking.",
+        "Write unit test: prepare_clean_worktree with no origin remote → skips fetch, proceeds.",
+        "Write unit test: prepare_clean_worktree with unreachable origin → logs warning, proceeds.",
+        "Write unit test: reset_hard failure still returns step failure regardless of fetch outcome."
+      ],
+      "notes": "This is the fix for the production crash described in the run-20260412T225328Z.md log. Depends on L5-GIT-001 (git_remote_exists_async) and L5-CTRL-003 (extracted function to modify).",
+      "exclusive_resources": ["core/src/coordinator/control_plane.rs"],
+      "dependencies": ["L5-GIT-001", "L5-CTRL-003"],
+      "priority": "1",
+      "routing_hints": {
+        "execution_mode": "micro",
+        "reasoning_depth": "standard",
+        "context_scope": "local",
+        "risk_level": "medium",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L5-CTRL-002",
+      "title": "Add orphaned worktree rollback guard when sanitization fails",
+      "category": "coordinator-dispatch",
+      "description": "Problem/Goal: dispatch_ready_tasks_native() creates a new worktree, then calls sanitize_worktree_to_base(). If sanitization fails, the worktree is left on disk and in the pool. Over multiple failed dispatches this leaks disk space and leaves ghost entries in the pool that confuse future dispatch.\nKey actions: After creating a worktree in dispatch_ready_tasks_native(), wrap the sanitization call in a rollback guard: if sanitization fails, call git worktree remove --force on the created path and remove its entry from the pool state before returning the dispatch error. Emit a coordinator event WorktreeOrphanCleaned. Add remove_worktree_on_sanitize_failure: bool to CoordinatorConfigResolved (default true).\nOut of scope: Changing sanitization behavior. Changing how reused worktrees (vs new ones) are handled — rollback only applies to newly-created worktrees.\nSuccess criteria: When sanitization fails for a newly-created worktree, the worktree is removed from disk. No orphaned .macc/worktree/ directories after failed dispatches. Event is emitted. Config toggle disables rollback when false.",
+      "objective": "Prevent disk and pool state leaks when worktree sanitization fails during dispatch.",
+      "result": "dispatch_ready_tasks_native() removes newly-created worktrees when sanitization fails. WorktreeOrphanCleaned event emitted. Config toggle present.",
+      "steps": [
+        "Add remove_worktree_on_sanitize_failure: bool (default true) to CoordinatorConfigResolved.",
+        "In the dispatch path after new worktree creation, record the created path in a local rollback_path variable.",
+        "After sanitize call: if result is a step failure AND cfg.remove_worktree_on_sanitize_failure { remove the worktree; emit WorktreeOrphanCleaned event; }",
+        "Add WorktreeOrphanCleaned to CoordinatorRuntimeEventKind with fields: worktree_path, sanitize_step.",
+        "Write test: sanitize failure on new worktree → worktree removed, event emitted.",
+        "Write test: rollback disabled via config → worktree left on disk (existing behavior).",
+        "Write test: reused worktree sanitize failure → no removal (rollback only for new worktrees)."
+      ],
+      "notes": "Applies only to newly-created worktrees. A reused slot that fails sanitization should not be removed — it is an existing pool member. The distinction is tracked via a local boolean set at creation time.",
+      "exclusive_resources": ["core/src/coordinator/control_plane.rs"],
+      "dependencies": ["L5-CTRL-001"],
+      "priority": "1",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "medium",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L5-CTRL-004",
+      "title": "Add dispatch retry cap to prevent infinite cooldown loops",
+      "category": "coordinator-dispatch",
+      "description": "Problem/Goal: dispatch_retry_not_before in the dispatch loop tracks cooldown Instants per task but has no maximum retry count. A task whose dispatch repeatedly fails (e.g., worktree creation errors, persistent sanitization failures) can be cooled down forever with no operator signal and no transition to a terminal state.\nKey actions: Add dispatch_retry_count: HashMap<String, u32> to coordinator dispatch state (alongside dispatch_retry_not_before). Increment on each cooldown. When count exceeds cfg.max_dispatch_retries (CoordinatorConfigResolved, default 5), transition the task to blocked state with runtime reason dispatch_retry_limit_exceeded and clear the task from the retry maps. Emit a DispatchRetryLimitReached coordinator event.\nOut of scope: Changing cooldown timing. Changing what happens to blocked tasks (operator handles them via macc coordinator unlock). Touching engine.rs.\nSuccess criteria: A task that fails dispatch 5 times (default) transitions to blocked. DispatchRetryLimitReached event is emitted with task ID and retry count. Blocked task appears in macc coordinator status. Retry count resets when task is manually unblocked.",
+      "objective": "Bound dispatch retry loops so persistent dispatch failures produce an actionable operator signal instead of spinning forever.",
+      "result": "Dispatch loop tracks retry counts per task. Tasks exceeding max_dispatch_retries become blocked with a clear reason. Event emitted.",
+      "steps": [
+        "Add max_dispatch_retries: u32 (default 5) to CoordinatorConfigResolved.",
+        "Add dispatch_retry_count: HashMap<String, u32> to the coordinator dispatch runtime state struct.",
+        "In the dispatch cooldown path, increment dispatch_retry_count[task_id].",
+        "After incrementing: if count >= cfg.max_dispatch_retries { transition task to blocked, set runtime reason to dispatch_retry_limit_exceeded, emit event, remove from retry maps. }",
+        "Add DispatchRetryLimitReached to CoordinatorRuntimeEventKind with fields: task_id, retry_count.",
+        "On task unlock (macc coordinator unlock), reset dispatch_retry_count for that task_id.",
+        "Write test: task cooled down max_dispatch_retries times → transitions to blocked.",
+        "Write test: unlock resets retry count → task can be dispatched again."
+      ],
+      "notes": "This pairs with L5-CTRL-001 (non-blocking fetch). Even with non-blocking fetch, other dispatch failures (worktree creation, reset --hard) can still loop. The cap applies to all dispatch failure reasons.",
+      "exclusive_resources": ["core/src/coordinator/control_plane.rs"],
+      "dependencies": ["L5-CTRL-002"],
+      "priority": "2",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "medium",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L5-CTRL-005",
+      "title": "Split dispatch_ready_tasks_native() into a 4-stage pipeline",
+      "category": "coordinator-dispatch",
+      "description": "Problem/Goal: dispatch_ready_tasks_native() is 1,038 lines performing task selection, worktree acquisition, claim persistence, performer launch, and event emission in a single deeply nested flow. Rollback at individual stages is impossible because there is no stage boundary — cleanup (added in L5-CTRL-002) is grafted onto an otherwise monolithic function. Adding any new dispatch behavior requires reading and modifying the entire function.\nKey actions: Refactor into four focused async functions: (1) select_dispatch_candidate(registry, cfg, state) -> Option<DispatchCandidate> — read-only selection, (2) acquire_worktree_for_dispatch(candidate, repo_root, cfg) -> Result<AcquiredWorktree> — create/reuse + sanitize + rollback on failure, (3) claim_task_in_registry(candidate, worktree, registry) -> Result<DispatchClaim> — atomic registry write, (4) launch_performer(claim, cfg, logger) -> Result<()> — build command, spawn, emit events. dispatch_ready_tasks_native() becomes the orchestrator calling them in sequence.\nOut of scope: Changing dispatch behavior or outcomes. Changing the coordinator public API. Touching engine.rs.\nSuccess criteria: dispatch_ready_tasks_native() is under 80 lines. Each stage function is under 150 lines. All existing coordinator tests pass. New stage functions are individually testable.",
+      "objective": "Make dispatch_ready_tasks_native() a readable orchestrator with clear stage boundaries and per-stage rollback capability.",
+      "result": "dispatch_ready_tasks_native() delegates to four focused functions. Each stage is independently readable and testable. Function is under 80 lines.",
+      "steps": [
+        "Define DispatchCandidate struct: { task: SelectedTask, worktree_slot: WorktreeSlot }.",
+        "Define AcquiredWorktree struct: { path: PathBuf, branch: String, is_new: bool }.",
+        "Define DispatchClaim struct: { task_id: String, worktree_path: PathBuf, branch: String, session_id: String }.",
+        "Extract select_dispatch_candidate() from the task/worktree selection logic at the top of the function.",
+        "Extract acquire_worktree_for_dispatch() from the worktree create/reuse/sanitize block, including the rollback guard from L5-CTRL-002.",
+        "Extract claim_task_in_registry() from the registry write and claim update block.",
+        "Extract launch_performer() from the command construction and spawn block.",
+        "Reduce dispatch_ready_tasks_native() to: loop { let Some(candidate) = select_dispatch_candidate(...) else break; let worktree = acquire_worktree_for_dispatch(...)?; let claim = claim_task_in_registry(...)?; launch_performer(...)?; }",
+        "Run all coordinator tests to confirm no behavior change.",
+        "Write a test for select_dispatch_candidate() in isolation to verify task priority ordering."
+      ],
+      "notes": "This is the structural capstone for control_plane.rs. Must run after all other CTRL tasks so the file is stable before this large refactor. Also requires L5-CFG-003 (not L5-CFG-002) to ensure the full file is clean before this large structural edit. The test for select_dispatch_candidate() in isolation is the key quality gate.",
+      "exclusive_resources": ["core/src/coordinator/control_plane.rs"],
+      "dependencies": ["L5-CTRL-004", "L5-CFG-003"],
+      "priority": "3",
+      "routing_hints": {
+        "execution_mode": "structural",
+        "reasoning_depth": "deep",
+        "context_scope": "module",
+        "risk_level": "high",
+        "validation_profile": "heavy"
+      }
+    },
+    {
+      "id": "L5-MOD-001",
+      "title": "Decompose control_plane.rs into focused coordinator sub-modules",
+      "category": "coordinator-structure",
+      "description": "Problem/Goal: control_plane.rs is 3,898 lines covering dispatch, sanitization, phase running, merge gating, and event emission — entirely unrelated responsibilities in a single file. After L5-CTRL-005 extracts functions into clearly bounded stages, those groups are ready to be moved into dedicated sub-modules. Navigation, testing, and code review are all harder when dispatch logic and merge-gate logic live in the same 4,000-line file.\nKey actions: Create a coordinator/control_plane/ directory and move function groups into: dispatch.rs (select_dispatch_candidate, acquire_worktree_for_dispatch, claim_task_in_registry, launch_performer), sanitize.rs (prepare_clean_worktree, SanitizeOptions, SanitizeStepFailure), phase_runner.rs (run_phase_tool, retry loop), merge_gate.rs (merge_gate_check, MergeGateResult). Keep control_plane.rs as a thin mod.rs re-exporting public items. Adjust all import paths.\nOut of scope: Changing any function behavior. Touching engine.rs. Changing the public API surface of the coordinator module.\nSuccess criteria: control_plane.rs (mod.rs) is under 100 lines. Each sub-module is under 600 lines. cargo build --workspace passes. All existing tests pass without modification.",
+      "objective": "Break control_plane.rs into responsibility-aligned sub-modules so each area can be read, tested, and evolved independently.",
+      "result": "core/src/coordinator/control_plane/ directory with dispatch.rs, sanitize.rs, phase_runner.rs, merge_gate.rs, and a thin mod.rs. No behavior change.",
+      "steps": [
+        "Create core/src/coordinator/control_plane/ directory.",
+        "Move dispatch stage functions (from L5-CTRL-005) into dispatch.rs; adjust imports.",
+        "Move sanitize/prepare_clean_worktree functions (from L5-CTRL-003) into sanitize.rs; adjust imports.",
+        "Move phase runner functions into phase_runner.rs; adjust imports.",
+        "Move merge gate functions into merge_gate.rs; adjust imports.",
+        "Reduce control_plane.rs to mod.rs with pub use re-exports of all public items.",
+        "Run cargo build --workspace to verify all import paths compile.",
+        "Run all coordinator tests to confirm no behavior change."
+      ],
+      "notes": "Must run after L5-CTRL-005 which provides the stage-function boundaries. This is a pure move — no logic changes. The key risk is import path adjustments; compile verification is the acceptance gate. Can run in parallel with L5-MOD-002 through L5-MOD-004 — the two files (control_plane.rs and engine.rs) are independent.",
+      "exclusive_resources": ["core/src/coordinator/control_plane.rs"],
+      "dependencies": ["L5-CTRL-005"],
+      "priority": "3",
+      "routing_hints": {
+        "execution_mode": "structural",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "medium",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L5-MOD-002",
+      "title": "Create engine/ sub-module directory and extract completion.rs",
+      "category": "coordinator-structure",
+      "description": "Problem/Goal: engine.rs is 3,403 lines. The decomposition starts by establishing the engine/ sub-module directory structure and extracting the smallest, most isolated unit: the completion classification functions defined in L5-ENG-001. classify_completion_error() and ErrorClassification are pure, have no side effects, and have no cross-cutting dependencies — ideal first extraction.\nKey actions: Create core/src/coordinator/engine/ directory. Move classify_completion_error() and ErrorClassification from engine.rs into engine/completion.rs. Convert engine.rs into engine/mod.rs. Re-export completion items via pub use. Fix all import paths.\nOut of scope: Moving retry, transitions, or FSM functions (L5-MOD-003, L5-MOD-004). Touching control_plane.rs. Changing any function behavior.\nSuccess criteria: engine/completion.rs contains classify_completion_error and ErrorClassification. engine/mod.rs re-exports them. cargo build --workspace passes. All engine tests pass.",
+      "objective": "Establish the engine/ sub-module directory and complete the first extraction — laying the foundation for L5-MOD-003 and L5-MOD-004.",
+      "result": "core/src/coordinator/engine/ directory exists. completion.rs has classify_completion_error and ErrorClassification. mod.rs re-exports them. Build and tests clean.",
+      "steps": [
+        "Create core/src/coordinator/engine/ directory.",
+        "Create engine/completion.rs: move classify_completion_error() and ErrorClassification from engine.rs.",
+        "Rename engine.rs to engine/mod.rs (or create mod.rs with the remaining content).",
+        "Add pub mod completion; and re-export public items: pub use completion::{classify_completion_error, ErrorClassification};",
+        "Fix any remaining import references inside mod.rs or other files that imported from engine.rs.",
+        "Run cargo build --workspace to confirm all callers resolve.",
+        "Run cargo test -p macc-core to confirm all engine tests pass."
+      ],
+      "notes": "First of three engine/ decomposition tasks. Establishes the directory structure used by L5-MOD-003 and L5-MOD-004. Must run after L5-ENG-002 which defines the extracted functions. Can run in parallel with L5-MOD-001 (control_plane/ decomposition) — the two files are independent.",
+      "exclusive_resources": ["core/src/coordinator/engine.rs"],
+      "dependencies": ["L5-ENG-002"],
+      "priority": "3",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "medium",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L5-MOD-003",
+      "title": "Extract retry.rs and transitions.rs into engine/ sub-module",
+      "category": "coordinator-structure",
+      "description": "Problem/Goal: After L5-MOD-002 establishes engine/ and extracts completion.rs, the next group is ready: retry strategy resolution and state transition application. resolve_retry_strategy() (pure function, no mutation) and apply_state_transitions() (single mutation commit point) form a natural pair extracted by L5-ENG-002.\nKey actions: Create engine/retry.rs and engine/transitions.rs. Move resolve_retry_strategy() and RetryStrategy enum into retry.rs. Move apply_state_transitions() into transitions.rs. Update engine/mod.rs re-exports. Fix all import paths.\nOut of scope: FSM and run-loop functions (L5-MOD-004). completion.rs (done in L5-MOD-002). Touching control_plane.rs. Changing function behavior.\nSuccess criteria: engine/retry.rs has resolve_retry_strategy and RetryStrategy. engine/transitions.rs has apply_state_transitions. mod.rs re-exports all. cargo build --workspace passes. All tests pass.",
+      "objective": "Extract retry strategy and state transition logic into dedicated sub-modules, continuing the engine/ decomposition sequence.",
+      "result": "engine/retry.rs and engine/transitions.rs exist with their respective functions. mod.rs re-exports them. Build and tests clean.",
+      "steps": [
+        "Create engine/retry.rs: move resolve_retry_strategy() and RetryStrategy enum from engine/mod.rs.",
+        "Create engine/transitions.rs: move apply_state_transitions() from engine/mod.rs.",
+        "Add pub mod retry; pub mod transitions; to mod.rs and re-export public items.",
+        "Fix remaining import references inside mod.rs (fsm functions that call retry or transitions must now import from sub-modules).",
+        "Run cargo build --workspace to confirm all callers resolve.",
+        "Run cargo test -p macc-core to confirm all engine tests pass."
+      ],
+      "notes": "Second of three engine/ decomposition tasks. Depends on L5-MOD-002 which establishes the engine/ directory. The two sub-modules are combined here because both are small after L5-ENG-002 extraction (each function is under 100 lines). Can run in parallel with L5-MOD-001.",
+      "exclusive_resources": ["core/src/coordinator/engine.rs"],
+      "dependencies": ["L5-MOD-002"],
+      "priority": "3",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "medium",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L5-MOD-004",
+      "title": "Extract fsm.rs and finalize engine/ mod.rs as thin re-export facade",
+      "category": "coordinator-structure",
+      "description": "Problem/Goal: After L5-MOD-002 and L5-MOD-003 extract completion, retry, and transitions, the remaining content in engine/mod.rs is the FSM and run-loop orchestration (run_native_control_plane and FSM tick functions). This is the largest and most complex remaining group. Moving it into fsm.rs completes the decomposition and leaves mod.rs as a pure re-export facade under 100 lines.\nKey actions: Create engine/fsm.rs. Move run_native_control_plane() and all FSM tick/state-machine functions from engine/mod.rs into fsm.rs. Update mod.rs re-exports. Confirm mod.rs is under 100 lines. Fix all import paths inside fsm.rs (it imports from completion, retry, transitions). Run full test suite.\nOut of scope: Touching control_plane.rs. Changing function behavior. Changing public API.\nSuccess criteria: engine/fsm.rs contains FSM and run-loop functions. engine/mod.rs is under 100 lines of pure pub use re-exports. cargo build --workspace passes. All coordinator and engine tests pass.",
+      "objective": "Complete the engine/ decomposition by extracting the FSM and run-loop, leaving mod.rs as a thin facade over four focused sub-modules.",
+      "result": "engine/fsm.rs exists. engine/mod.rs is under 100 lines. engine/ has completion.rs, retry.rs, transitions.rs, fsm.rs, mod.rs. All tests pass.",
+      "steps": [
+        "Create engine/fsm.rs: move run_native_control_plane() and all FSM tick/transition functions from engine/mod.rs.",
+        "Add pub mod fsm; to mod.rs and re-export public items from fsm.",
+        "Fix import paths inside fsm.rs — it will need to import ErrorClassification from completion, RetryStrategy from retry, apply_state_transitions from transitions.",
+        "Confirm engine/mod.rs is under 100 lines (only pub mod declarations and pub use re-exports).",
+        "Run cargo build --workspace to confirm all callers resolve.",
+        "Run cargo test -p macc-core to confirm all coordinator and engine tests pass.",
+        "Run cargo clippy to confirm no new warnings."
+      ],
+      "notes": "Final task in the engine/ decomposition sequence (L5-MOD-002 → L5-MOD-003 → L5-MOD-004). The FSM contains the most intra-engine cross-references so import fixes are the primary risk — compile verification is the acceptance gate. Can run in parallel with L5-MOD-001.",
+      "exclusive_resources": ["core/src/coordinator/engine.rs"],
+      "dependencies": ["L5-MOD-003"],
+      "priority": "3",
+      "routing_hints": {
+        "execution_mode": "structural",
+        "reasoning_depth": "deep",
+        "context_scope": "module",
+        "risk_level": "high",
+        "validation_profile": "heavy"
+      }
+    },
+    {
+      "id": "L5-UI-001",
+      "title": "Audit and guard Engine trait usage across CLI, TUI, and Web UI",
+      "category": "ui-contracts",
+      "description": "Problem/Goal: The Engine trait in core/src/engine.rs is the shared interface for CLI, TUI, and Web UI. Rust enforces that all non-default methods are implemented, but semantic drift is still possible: web handlers may bypass the Engine trait and call internal functions directly, or default method implementations may diverge between interfaces. There is currently no test that verifies all Engine methods have equivalent behavioral coverage across both UI surfaces.\nKey actions: Audit cli/src/commands/web/ handlers to confirm they use Engine trait methods exclusively and do not call core internals directly. Audit tui/src/ for the same. Add a compile-time or test-time assertion that the Engine trait method count has not silently shrunk (to catch accidental removal of methods via default implementations). Document the Engine trait contract in core/src/engine.rs with a doc comment listing which methods are required vs defaulted and what each interface must honor.\nOut of scope: Changing any Engine trait methods. Refactoring web or TUI handler logic. Adding new Engine methods.\nSuccess criteria: Audit confirms no Engine trait bypasses. Engine trait has a doc comment documenting required vs default methods. A test or static assertion guards against silent trait surface reduction.",
+      "objective": "Verify and document that both UI surfaces use the Engine trait exclusively, and add a guard against future silent divergence.",
+      "result": "Audit report (in code comments or PR notes). Engine trait doc comment. One test or static assertion guarding trait surface. No bypasses found or bypasses corrected.",
+      "steps": [
+        "Grep cli/src/commands/web/ for direct calls to macc_core internal functions that bypass the Engine trait (e.g., calls to coordinator::, git::, plan:: without going through engine.method()).",
+        "Grep tui/src/ for the same pattern.",
+        "For any bypass found: either route through the Engine trait or add a doc comment explaining why the bypass is intentional and safe.",
+        "Add a doc comment to core/src/engine.rs Engine trait listing: required methods (must be implemented), default methods (have fallback), and the contract each UI surface must honor.",
+        "Add a unit test or a static assertion (e.g., using a trait-method-count check) that fails if the Engine trait loses methods silently.",
+        "If WebTestEngine in cli/src/commands/web/tests.rs has stub implementations that diverge from real behavior, document the stubs explicitly."
+      ],
+      "notes": "Rust's type system prevents missing method implementations, so the risk is semantic drift (stubs, bypasses) not compilation failures. This is an audit-first task — if no bypasses are found, the only deliverable is the doc comment and the guard test.",
+      "exclusive_resources": [],
+      "dependencies": [],
+      "priority": "3",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "cross-cutting",
+        "risk_level": "low",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L5-DOC-002",
+      "title": "Add error normalization requirements to TOOL_ONBOARDING.md",
+      "category": "documentation",
+      "description": "Problem/Goal: docs/TOOL_ONBOARDING.md (158 lines) documents how to add a new tool adapter but has zero coverage of error normalization requirements. A new tool integrator has no guidance on which CanonicalClass variants their normalizer must handle, how to map tool-specific output to E-codes, or what error_normalizer.rs interface to implement. This friction is high — error normalization is non-obvious and its absence causes unclassified failures (E901 Unknown).\nKey actions: Add a dedicated 'Error Normalization' section to docs/TOOL_ONBOARDING.md covering: (1) the CanonicalClass enum and what each variant means operationally, (2) the required E-code sub-codes a new adapter must handle (E101-E105, E601-E603), (3) how to implement a per-adapter normalizer and register it in error_normalizer.rs, (4) a minimal worked example showing a rate-limit pattern (HTTP 429 → CanonicalClass::RateLimit → E601), (5) a checklist of cases to test before submitting a new adapter.\nOut of scope: Changing error_normalizer.rs code. Documenting internal MACC error routing beyond what affects adapter authors.\nSuccess criteria: A developer adding a new tool adapter can implement a correct error normalizer using only TOOL_ONBOARDING.md as reference. The section covers all CanonicalClass variants and their E-code mappings.",
+      "objective": "Eliminate the hidden friction of error normalization for new tool adapter authors.",
+      "result": "docs/TOOL_ONBOARDING.md has an 'Error Normalization' section with CanonicalClass reference, E-code mapping, implementation guide, worked example, and test checklist.",
+      "steps": [
+        "Read error_normalizer.rs to enumerate all CanonicalClass variants and their current E-code mappings.",
+        "Add 'Error Normalization' section to TOOL_ONBOARDING.md after the existing adapter sketch.",
+        "Document each CanonicalClass variant with: description, typical tool output pattern, resulting E-code.",
+        "Document the normalizer registration point in error_normalizer.rs with a step-by-step guide.",
+        "Add a worked example: tool outputs 'HTTP 429 Too Many Requests' → match pattern → CanonicalClass::RateLimit → E601 → coordinator applies backoff.",
+        "Add a test checklist: rate-limit, auth failure, quota exhausted, tool crash, malformed output — at minimum."
+      ],
+      "notes": "Documentation-only. Isolated from all code changes. Can run in parallel with any other task.",
+      "exclusive_resources": ["docs/TOOL_ONBOARDING.md"],
+      "dependencies": [],
+      "priority": "2",
+      "routing_hints": {
+        "execution_mode": "micro",
+        "reasoning_depth": "light",
+        "context_scope": "local",
+        "risk_level": "low",
+        "validation_profile": "light"
+      }
+    },
+    {
+      "id": "L5-DOC-001",
+      "title": "Document non-blocking fetch, dispatch retry cap, and config resolved in README and MACC.md",
+      "category": "documentation",
+      "description": "Problem/Goal: The three most operator-visible changes from this lot — non-blocking fetch, dispatch retry cap, and CoordinatorConfigResolved defaults — need user-facing documentation so operators understand the new behavior, the new config keys, and how to recover from dispatch_retry_limit_exceeded.\nKey actions: Update README.md: add max_dispatch_retries to the auto-retry policy section. Document that fetch failures are now non-blocking warnings. Update MACC.md: add dispatch retry limit and dispatch_retry_limit_exceeded reason to the coordinator failure recovery playbook. Document remove_worktree_on_sanitize_failure and max_dispatch_retries config keys in docs/CONFIG.md.\nOut of scope: Documenting internal refactors (completion split, sanitize extraction, git macro). Documenting performer script changes.\nSuccess criteria: An operator reading the docs can understand the new fetch-warning behavior, knows what dispatch_retry_limit_exceeded means, and knows the config keys to tune the retry cap.",
+      "objective": "Document operator-visible behavior changes so failures are diagnosable from docs alone.",
+      "result": "README.md, MACC.md, and docs/CONFIG.md updated with new fetch behavior, dispatch retry cap, and relevant config keys.",
+      "steps": [
+        "Add note to README.md auto-retry policy: fetch failures during dispatch are now warnings; only reset --hard failure aborts dispatch.",
+        "Document max_dispatch_retries and its default in README.md auto-retry section.",
+        "Add dispatch_retry_limit_exceeded to the coordinator failure recovery playbook in MACC.md with recovery command (macc coordinator unlock).",
+        "Document remove_worktree_on_sanitize_failure and max_dispatch_retries in docs/CONFIG.md under automation.coordinator.",
+        "Add a one-sentence note to MACC.md session strategy section: session_manager.rs IO errors now return structured errors instead of panicking."
+      ],
+      "notes": "Documentation-only task. Can run as soon as L5-CTRL-001 and L5-CTRL-004 are done — does not need the structural refactors.",
+      "exclusive_resources": ["README.md", "MACC.md"],
+      "dependencies": ["L5-CTRL-001", "L5-CTRL-004"],
+      "priority": "2",
+      "routing_hints": {
+        "execution_mode": "micro",
+        "reasoning_depth": "light",
+        "context_scope": "cross-cutting",
+        "risk_level": "low",
+        "validation_profile": "light"
+      }
+    },
+    {
+      "id": "L5-SUP-001",
+      "title": "Write coordinator PID file via CoordinatorPidGuard",
+      "category": "supervisor-reliability",
+      "description": "Problem/Goal: The supervisor's CoordinatorProcessManager::health_check() always returns Crashed because .macc/state/coordinator.pid never exists. Every supervisor health check is a false positive, making Mode A/C wiring meaningless without this file.\nKey actions: Add a CoordinatorPidGuard struct to core/src/coordinator/runtime.rs. Guard writes the PID to .macc/state/coordinator.pid atomically (write to .tmp path then rename) immediately after the IPC listener binds. Guard's Drop impl removes the file so crashes and clean exits both clean up. Propagate the guard to the coordinator run loop so it is held for the full lifetime of the run.\nOut of scope: Changing Mode A, Mode C, or the supervisor CLI. Any other change to runtime.rs.\nSuccess criteria: .macc/state/coordinator.pid exists while coordinator is running and is removed on any exit (clean or panic). File content is the process PID as a decimal string. Atomic write verified by test (write failure does not leave partial file).",
+      "objective": "Give the supervisor a reliable signal to distinguish 'coordinator is running' from 'coordinator has exited'.",
+      "result": "CoordinatorPidGuard struct in core/src/coordinator/runtime.rs. Atomic PID file written after IPC listener binds, removed on Drop. Unit test covering normal exit and drop-on-panic paths.",
+      "steps": [
+        "Add CoordinatorPidGuard { path: PathBuf } struct with a new() constructor that atomically writes current PID to .macc/state/coordinator.pid (.tmp + rename).",
+        "Implement Drop for CoordinatorPidGuard: remove the PID file, log warning if removal fails.",
+        "Wire CoordinatorPidGuard into the coordinator run loop: construct it after the IPC listener binds, hold it until the loop exits.",
+        "Add unit test: guard writes PID file on construction, file is removed after guard drops.",
+        "Add unit test: if the .macc/state/ directory does not exist, guard returns an error rather than panicking."
+      ],
+      "notes": "Prerequisite for all other L5-SUP tasks. runtime.rs is independent of all control_plane.rs changes in this lot — parallel-safe with L5-CFG/CTRL/MOD tasks.",
+      "exclusive_resources": ["core/src/coordinator/runtime.rs"],
+      "dependencies": [],
+      "priority": "1",
+      "routing_hints": {
+        "execution_mode": "micro",
+        "reasoning_depth": "standard",
+        "context_scope": "local",
+        "risk_level": "medium",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L5-SUP-002",
+      "title": "Wire Mode A watchdog to Mode C recovery via SupervisorFsmState",
+      "category": "supervisor-reliability",
+      "description": "Problem/Goal: Mode A's run_forever() calls check_once() and sleeps — it never acts on a Crashed result. Mode C's run_recovery() is dead code never called from outside its own file. There is no way for supervisor to restart a crashed coordinator.\nKey actions: Add SupervisorFsmState enum (Starting, Healthy, CrashedPostRun) to the watchdog. Transition to Healthy on first successful health check. When a previously-Healthy coordinator becomes Crashed: read the last coordinator event from events.jsonl to distinguish (a) clean exit with result:failed — skip restart, flag for analysis — from (b) unexpected crash (no clean exit event) — call ModeCRecovery::run_recovery(). Add configurable debounce: N consecutive Crashed checks required before acting (prevents false positives during startup). Debounce N should be configurable via SupervisorConfig.\nOut of scope: Mode B analysis integration (handled in L5-SUP-005). Changing Mode C internals. Changing the CLI.\nSuccess criteria: Watchdog calls run_recovery() only when coordinator was previously healthy AND N consecutive Crashed checks are observed AND last event is not a clean exit. Clean coordinator exit (result:failed) is correctly distinguished from unexpected crash. Unit tests cover all three FSM transitions.",
+      "objective": "Close the Mode A → Mode C gap so a crashed coordinator triggers automatic recovery instead of silent no-op.",
+      "result": "SupervisorFsmState added to SupervisorWatchdog in mode_a.rs. run_forever() transitions state and calls ModeCRecovery::run_recovery() on unexpected crash after debounce. Unit tests for all FSM transitions and the clean-exit vs crash distinction.",
+      "steps": [
+        "Define SupervisorFsmState { Starting, Healthy, CrashedPostRun } in mode_a.rs.",
+        "Add fsm_state: SupervisorFsmState and crash_check_count: u32 fields to SupervisorWatchdog.",
+        "In run_forever(): on HealthCheckResult::Healthy, transition to Healthy and reset crash_check_count.",
+        "On HealthCheckResult::Crashed: if state is Healthy, increment crash_check_count; when crash_check_count >= config.crash_debounce_checks, read last event from events.jsonl.",
+        "If last event is a clean-exit marker (result: failed or result: success), transition to CrashedPostRun and log — do not restart.",
+        "If no clean-exit marker is found, call ModeCRecovery::run_recovery() and reset state to Starting.",
+        "Add crash_debounce_checks: u32 field to SupervisorConfig with default 3.",
+        "Write unit tests: Starting→Healthy, Healthy→Crashed-debounce, Crashed-clean-exit skips recovery, Crashed-unexpected triggers run_recovery()."
+      ],
+      "notes": "Depends on L5-SUP-001 for the PID file that drives HealthCheckResult. mode_a.rs is 637 lines — within safe bounds for targeted additions.",
+      "exclusive_resources": ["core/src/supervisor/mode_a.rs"],
+      "dependencies": ["L5-SUP-001"],
+      "priority": "1",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "deep",
+        "context_scope": "module",
+        "risk_level": "high",
+        "validation_profile": "heavy"
+      }
+    },
+    {
+      "id": "L5-SUP-003",
+      "title": "Add --supervisor flag to macc coordinator run and --attach mode to supervisor start",
+      "category": "supervisor-reliability",
+      "description": "Problem/Goal: Supervisor must be started manually with a separate command. There is no way for a user running macc coordinator run to opt into automatic supervision in a single command.\nKey actions: Add --supervisor bool flag to the Coordinator run subcommand in cli/src/main.rs. When --supervisor is set: spawn macc supervisor start --daemon --attach as a child before entering the coordinator loop; coordinator passes its own PID to the supervisor so supervisor can monitor it directly. Add --attach mode to supervisor start in cli/src/commands/supervisor.rs: in --attach mode the supervisor monitors the coordinator process by PID (via the PID file) and exits cleanly when the coordinator exits with success, or triggers recovery when coordinator exits failure or crashes. --attach is implied when spawned by --supervisor but also usable standalone.\nOut of scope: Changing Mode A internals (L5-SUP-002). Changing Mode C internals. Changing mode_b.rs.\nSuccess criteria: macc coordinator run --supervisor starts supervisor automatically. Supervisor exits cleanly when coordinator finishes successfully. Supervisor triggers Mode C when coordinator exits with failure or unexpected crash. Existing macc supervisor start (without --attach) continues to work unchanged.",
+      "objective": "Unify coordinator run and supervisor startup into a single command so users get supervised execution by default.",
+      "result": "--supervisor flag on coordinator run. --attach mode on supervisor start. Integration test: coordinator run --supervisor with simulated crash triggers run_recovery().",
+      "steps": [
+        "Add --supervisor flag to coordinator run CLI args in cli/src/main.rs.",
+        "When --supervisor is set, spawn `macc supervisor start --daemon --attach` before entering the coordinator loop; pass coordinator PID via env or flag.",
+        "Add --attach bool flag to supervisor start command in cli/src/commands/supervisor.rs.",
+        "In --attach mode: poll the coordinator PID file and process liveness; exit(0) when coordinator exits success; call run_recovery() when coordinator exits failure or crashes.",
+        "Ensure --attach does not require --daemon (can run in foreground for scripting use).",
+        "Add integration test: simulate coordinator crash, verify --attach mode triggers recovery path.",
+        "Update help text for both coordinator run and supervisor start."
+      ],
+      "notes": "Depends on L5-SUP-001 (PID file) and L5-SUP-002 (FSM state and recovery wiring). cli/ changes are isolated from core/ Rust changes.",
+      "exclusive_resources": ["cli/src/main.rs", "cli/src/commands/supervisor.rs"],
+      "dependencies": ["L5-SUP-001", "L5-SUP-002"],
+      "priority": "1",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "medium",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L5-SUP-004",
+      "title": "Add coordinator-level evidence collector and analysis prompt builder",
+      "category": "supervisor-intelligence",
+      "description": "Problem/Goal: Mode B's AnalysisPromptBuilder produces a per-worktree prompt about stuck performers. When the coordinator itself fails (all tasks exhausted, clean exit with result:failed), there is no coordinator-level prompt — supervisor has no way to understand or report the full failure chain. mode_b.rs is already 1,160 lines and must not grow further.\nKey actions: Create new file core/src/supervisor/coordinator_supervisor.rs. Add CoordinatorEvidenceCollector struct that gathers: last N coordinator events from events.jsonl, task registry state (counts per workflow state), performer log excerpts for failed tasks (last 100 lines each), and the coordinator run log footer (result: success/failed, exit reason). Add CoordinatorAnalysisPromptBuilder that builds a coordinator-context analysis prompt distinct from the per-worktree prompt: includes full failure chain, which tasks failed and why (from task runtime.last_error), coordinator exit reason, and a request for recovery actions and improvement hints.\nOut of scope: Executing recovery actions (L5-SUP-005). Changing mode_b.rs. Changing SupervisorReport schema (L5-SUP-007).\nSuccess criteria: CoordinatorEvidenceCollector correctly reads events.jsonl, task registry, and performer logs. CoordinatorAnalysisPromptBuilder produces a well-structured prompt covering failure chain and exit reason. Unit tests for evidence collection with fixture data.",
+      "objective": "Give the supervisor the ability to understand and reason about coordinator-level failures, not just per-worktree stalls.",
+      "result": "New file core/src/supervisor/coordinator_supervisor.rs with CoordinatorEvidenceCollector and CoordinatorAnalysisPromptBuilder. Unit tests with fixture coordinator events and task registry snapshots.",
+      "steps": [
+        "Create core/src/supervisor/coordinator_supervisor.rs and add it to mod.rs.",
+        "Implement CoordinatorEvidenceCollector::collect() reading: last N events from events.jsonl, task registry state breakdown by workflow state, performer log excerpts for blocked/failed tasks.",
+        "Implement CoordinatorAnalysisPromptBuilder::build(evidence) producing a structured prompt with: coordinator exit reason, failure chain, failed-task summaries, and explicit request for recovery actions and improvement hints.",
+        "Add unit tests using fixture events.jsonl and task registry JSON to verify evidence collection and prompt structure.",
+        "Wire CoordinatorEvidenceCollector into mode_b.rs as an optional coordinator-level evidence source (call path left for L5-SUP-005 to complete)."
+      ],
+      "notes": "Parallel-safe with L5-SUP-001, L5-SUP-002, L5-SUP-003 — no shared files. mode_b.rs at 1,160 lines is over the 800-line anti-god-file threshold; new logic goes into coordinator_supervisor.rs to avoid further growth.",
+      "exclusive_resources": ["core/src/supervisor/coordinator_supervisor.rs"],
+      "dependencies": [],
+      "priority": "2",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "medium",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L5-SUP-005",
+      "title": "Add deterministic coordinator recovery actions to Mode B",
+      "category": "supervisor-intelligence",
+      "description": "Problem/Goal: RecoveryActionKind only has GitReset, GitClean, and None — there are no coordinator-level recovery actions. When the supervisor detects a blocked coordinator, it cannot unlock tasks or trigger reconcile. Mode B never calls CoordinatorEvidenceCollector.\nKey actions: Extend RecoveryActionKind with CoordinatorUnlock { task_ids: Vec<String> } and CoordinatorReconcile variants. Extend execute_recovery() to spawn macc coordinator unlock [task_ids...] and macc coordinator reconcile as child processes. Add safety guard: only execute when coordinator is not running (PID file absent or PID process not alive). Wire CoordinatorEvidenceCollector (from coordinator_supervisor.rs) into ModeBSupervisor::analyse() as an optional coordinator-level evidence path that runs when coordinator events.jsonl is available.\nOut of scope: AI-powered fix actions (L5-SUP-006). Changing SupervisorReport schema (L5-SUP-007).\nSuccess criteria: execute_recovery() correctly spawns coordinator unlock and reconcile commands. Safety guard prevents double-execution when coordinator is still running. Unit tests for both new action variants and the safety guard.",
+      "objective": "Enable Mode B to take deterministic corrective actions at the coordinator level, not just at the worktree level.",
+      "result": "RecoveryActionKind::CoordinatorUnlock and CoordinatorReconcile in mode_b.rs. execute_recovery() handles both. Safety guard checks PID liveness. Unit tests for new variants.",
+      "steps": [
+        "Add CoordinatorUnlock { task_ids: Vec<String> } and CoordinatorReconcile variants to RecoveryActionKind.",
+        "Implement execute_recovery() branches for CoordinatorUnlock and CoordinatorReconcile using tokio::process::Command to spawn macc subcommands.",
+        "Add is_coordinator_running() helper: check .macc/state/coordinator.pid exists and process is alive.",
+        "Add safety guard in execute_recovery(): if coordinator is running, skip CoordinatorUnlock/Reconcile and log a warning instead.",
+        "Wire CoordinatorEvidenceCollector into ModeBSupervisor::analyse(): when events.jsonl exists, collect coordinator evidence and include in the analysis prompt.",
+        "Write unit tests for CoordinatorUnlock execution, CoordinatorReconcile execution, and the safety guard (mock PID file present/absent)."
+      ],
+      "notes": "Depends on L5-SUP-004 (same file boundary as coordinator_supervisor.rs wiring). mode_b.rs exclusive resource — must be sequential with L5-SUP-006.",
+      "exclusive_resources": ["core/src/supervisor/mode_b.rs"],
+      "dependencies": ["L5-SUP-004"],
+      "priority": "2",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "medium",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L5-SUP-006",
+      "title": "Add AI-powered FixTest recovery action with compile verification",
+      "category": "supervisor-intelligence",
+      "description": "Problem/Goal: When a performer fails because a test file does not compile (e.g., a call-site mismatch after a function signature change), the supervisor has no mechanism to fix the test and unblock the task. A targeted AI-powered fix for test compile errors — with mandatory verification — closes this gap without risking implementation file mutation.\nKey actions: Add RecoveryActionKind::FixTest { file_path: PathBuf, description: String } and RecoveryActionKind::Escalate { reason: String } to mode_b.rs. In execute_recovery() for FixTest: build a targeted AI prompt (compile error + current function signature → fix the test call only). After AI generates a fix: run cargo build -p macc-core --tests to verify the fix compiles before applying it. If compilation fails, fall back to Escalate. Strict guard: FixTest only applies to test files (path contains /tests/ or filename ends with _test.rs or _integration.rs) — never implementation files.\nOut of scope: Fixing implementation files. Using FixTest for non-compile errors. Changing SupervisorReport schema (L5-SUP-007).\nSuccess criteria: FixTest action invokes AI tool with a targeted prompt, verifies fix compiles, applies only if cargo build passes. Test-file guard rejects implementation file paths. Escalate action writes reason to report and exits cleanly. Unit tests for guard logic and Escalate path.",
+      "objective": "Unblock stalled performers caused by test compile errors without risking implementation file mutation.",
+      "result": "RecoveryActionKind::FixTest and Escalate in mode_b.rs. execute_recovery() handles both with compile verification gate. Test-file guard. Unit tests for guard logic, FixTest flow, and Escalate.",
+      "steps": [
+        "Add FixTest { file_path: PathBuf, description: String } and Escalate { reason: String } to RecoveryActionKind.",
+        "Implement is_test_file(path) guard: path contains '/tests/' OR filename ends in '_test.rs' OR '_integration.rs'.",
+        "Implement execute_recovery() branch for FixTest: validate test-file guard, build AI prompt with compile error + function signature, dispatch to AI tool, run cargo build -p macc-core --tests on proposed patch, apply only if build passes, fall back to Escalate on build failure.",
+        "Implement execute_recovery() branch for Escalate: write reason to supervisor report output, log at WARN level, return without spawning any process.",
+        "Write unit test: FixTest on implementation file path → guard rejects.",
+        "Write unit test: Escalate → report contains reason, no process spawned.",
+        "Write unit test: FixTest with mock AI response → cargo build gate called before apply."
+      ],
+      "notes": "Depends on L5-SUP-005 (same file, sequential). The compile-verification gate is mandatory — never apply AI patches without it. Only applies to test files by design.",
+      "exclusive_resources": ["core/src/supervisor/mode_b.rs"],
+      "dependencies": ["L5-SUP-005"],
+      "priority": "2",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "deep",
+        "context_scope": "module",
+        "risk_level": "high",
+        "validation_profile": "heavy"
+      }
+    },
+    {
+      "id": "L5-SUP-007",
+      "title": "Add CoordinatorImprovementHint to SupervisorReport and emit from Mode B and Mode C",
+      "category": "supervisor-intelligence",
+      "description": "Problem/Goal: Supervisor reports describe what happened but give no structured guidance on how the coordinator should handle the same problem autonomously in the future. Without improvement hints, every recurring failure requires the same manual supervisor intervention.\nKey actions: Add CoordinatorImprovementHint { problem_class: String, detection_hook: String, suggested_coordinator_behavior: String, suggested_prd_task: Option<String> } struct to core/src/supervisor/mod.rs. Add improvement_hints: Vec<CoordinatorImprovementHint> field to SupervisorReport. Update CoordinatorAnalysisPromptBuilder in coordinator_supervisor.rs to request improvement hints as a JSON array in the AI response — parallel to the existing recovery_actions array. Update Mode C build_supervisor_report() in mode_c.rs to populate improvement_hints from crash analysis. Serialize hints in the existing report JSON output.\nOut of scope: Acting on hints automatically. Changing coordinator behavior based on hints (that is a future PRD task). Changing CLI commands.\nSuccess criteria: SupervisorReport JSON output includes improvement_hints array. Mode B coordinator analysis response populates at least one hint when a pattern is recognized. Mode C crash report populates hints for known crash patterns. Unit tests verify hint serialization and Mode C hint population.",
+      "objective": "Give operators structured, actionable guidance for improving the coordinator so recurring failures become self-resolving over time.",
+      "result": "CoordinatorImprovementHint in mod.rs. SupervisorReport.improvement_hints field. Mode B and Mode C emit hints. Unit tests for serialization and hint population.",
+      "steps": [
+        "Add CoordinatorImprovementHint { problem_class, detection_hook, suggested_coordinator_behavior, suggested_prd_task } to mod.rs.",
+        "Add improvement_hints: Vec<CoordinatorImprovementHint> to SupervisorReport in mod.rs.",
+        "Update CoordinatorAnalysisPromptBuilder in coordinator_supervisor.rs: add improvement_hints JSON array section to the prompt template alongside recovery_actions.",
+        "Update ModeBSupervisor::analyse() to parse improvement_hints from AI response and populate SupervisorReport.",
+        "Update Mode C build_supervisor_report() in mode_c.rs: map known crash patterns (e.g., PID file missing, events.jsonl truncated) to CoordinatorImprovementHint entries.",
+        "Verify report JSON serialization includes the hints array.",
+        "Write unit tests: hint serialization round-trip, Mode C hint population for known crash patterns."
+      ],
+      "notes": "Depends on L5-SUP-006 (mode_b.rs exclusive resource chain complete). Touches mod.rs, mode_b.rs, and mode_c.rs — list all three as exclusive resources to prevent collision.",
+      "exclusive_resources": ["core/src/supervisor/mod.rs", "core/src/supervisor/mode_b.rs", "core/src/supervisor/mode_c.rs", "core/src/supervisor/coordinator_supervisor.rs"],
+      "dependencies": ["L5-SUP-006"],
+      "priority": "3",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "medium",
+        "validation_profile": "standard"
+      }
+    }
+  ]
+}

@@ -482,7 +482,7 @@ impl AppState {
             return;
         };
 
-        match macc_core::list_worktrees(&paths.root) {
+        match self.engine.list_worktrees(&paths.root) {
             Ok(entries) => {
                 let current = macc_core::current_worktree(&paths.root, &entries);
                 self.worktree_status = Some(WorktreeStatus {
@@ -1142,7 +1142,7 @@ impl AppState {
                 self.refresh_worktree_status();
                 self.refresh_coordinator_snapshot();
                 self.refresh_coordinator_events();
-                match macc_core::config::load_canonical_config(&paths.config_path) {
+                match self.engine.load_canonical_config(&paths) {
                     Ok(config) => {
                         self.config = Some(config.clone());
                         self.working_copy = Some(config);
@@ -1962,7 +1962,7 @@ impl AppState {
             8 => "Lock wait timeout in seconds, 0 disables timeout.",
             9 => "Max attempts for phase runner fallback.",
             10 => "Auto-stale timeout for claimed tasks in seconds, 0 disables.",
-            11 => "Auto-stale timeout for in_progress tasks in seconds, 0 disables.",
+            11 => "Hard kill timeout for the performer process in seconds. Sends SIGTERM then SIGKILL after force_kill_grace_seconds. 0 disables (no timeout).",
             12 => "Auto-stale timeout for changes_requested tasks in seconds, 0 disables.",
             13 => "Action for stale tasks: block, retry, requeue.",
             14 => "Flush coordinator logs every N lines (0 uses runtime default).",

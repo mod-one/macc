@@ -166,7 +166,10 @@ pub(super) async fn tail_log_handler(
 }
 
 fn maybe_aggregate_performer_logs(state: &WebState) {
-    if let Err(err) = macc_core::coordinator::logs::aggregate_performer_logs(&state.paths.root) {
+    if let Err(err) = state
+        .engine
+        .coordinator_aggregate_performer_logs(&state.paths.root)
+    {
         tracing::warn!(
             "performer log aggregation failed for web logs endpoint: {}",
             err
@@ -236,7 +239,7 @@ fn collect_logs_recursive(
             action: "canonicalize web log file".into(),
             source: err,
         })?;
-        if !canonical_path.starts_with(&canonical_root) {
+        if !canonical_path.starts_with(canonical_root) {
             continue;
         }
 

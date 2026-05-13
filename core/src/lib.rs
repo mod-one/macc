@@ -18,6 +18,7 @@ pub mod security;
 pub mod service;
 pub mod skills;
 mod structured_merge;
+pub mod supervisor;
 pub mod tool;
 pub mod user_backup;
 pub mod worktree;

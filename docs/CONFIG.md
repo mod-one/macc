@@ -163,11 +163,25 @@ Controls coordinator runtime defaults for `.macc/automation/coordinator.sh`.
 - `max_parallel_per_tool`: per-tool concurrency limits.
 - `tool_specializations`: category-to-tools routing map.
 - `max_dispatch`: max tasks launched per `dispatch` run (`0` means no cap).
+- `max_dispatch_retries`: max dispatch preparation retries per task before blocking it with `dispatch_retry_limit_exceeded` (default `5`, minimum effective runtime value `1`).
 - `max_parallel`: max concurrent performer runs.
 - `timeout_seconds`: lock wait timeout (`0` disables timeout).
 - `phase_runner_max_attempts`: retry attempts for phase runner fallback.
-- `stale_*_seconds`: stale thresholds for task states (`0` disables each threshold).
-- `stale_action`: stale policy (`abandon`, `todo`, `blocked`).
+- `stale_claimed_seconds` (usize, default `0`): auto-stale timeout for tasks in the `claimed` state; `0` disables.
+- `stale_in_progress_seconds` (usize, default `0`): hard kill timeout for the performer process in seconds. When the process exceeds this limit the coordinator sends SIGTERM, then SIGKILL after `force_kill_grace_seconds`. `0` disables the timeout (process runs until it exits on its own). Set this to limit runaway tasks, e.g. `stale_in_progress_seconds: 3600` for a 1-hour ceiling.
+- `stale_changes_requested_seconds` (usize, default `0`): auto-stale timeout for tasks in the `changes_requested` state; `0` disables.
+- `stale_action`: action taken when a stale threshold fires: `block` (default), `retry`, or `requeue`.
+
+**Reliability feature toggles** (all default to enabled):
+- `salvage_before_retry` (bool, default `true`): attempt to salvage partial work before retrying a failed task.
+- `retry_on_same_worktree` (bool, default `true`): retry a failed task on the same worktree slot when possible.
+- `merge_gate_on_dispatch` (bool, default `true`): gate dispatch behind a merge-health check to prevent cascading failures.
+- `tag_abandoned_branches` (bool, default `true`): tag branches for abandoned tasks so they are discoverable after cleanup.
+- `sync_unmerged_branches` (bool, default `true`): scan unmerged branches during sync to recover partially-complete work.
+- `remove_worktree_on_sanitize_failure` (bool, default `true`): when sanitize fails on a newly created worktree, remove that orphan worktree automatically.
+- `salvage_merge_timeout_seconds` (u64, default `120`): timeout in seconds for the salvage-merge operation.
+- `max_salvage_attempts_per_task` (u32, default `1`): maximum number of salvage attempts allowed per task before giving up.
+- `session_cache_ttl_seconds` (u64, default `300`): warm-session TTL used by dispatch preference logic; recent activity inside this window gets higher reuse priority.
 
 These values are used by `macc coordinator` as defaults and can be overridden via CLI flags or environment variables.
 

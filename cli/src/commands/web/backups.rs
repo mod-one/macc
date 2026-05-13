@@ -16,7 +16,7 @@ pub(super) async fn list_backups_handler(
     let sets = macc_core::domain::backups::list_backup_sets(&root).map_err(ApiError::from)?;
     let backups = sets
         .iter()
-        .map(|set| backup_set_to_api(set))
+        .map(backup_set_to_api)
         .collect::<std::result::Result<Vec<_>, _>>()?;
     Ok(Json(backups))
 }

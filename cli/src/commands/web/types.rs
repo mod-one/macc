@@ -13,7 +13,6 @@ use std::collections::BTreeMap;
 /// All success payloads in this module use camelCase JSON fields.
 /// All failures for the related endpoints must use the existing web error
 /// envelope defined in `cli/src/commands/web/errors.rs`.
-
 /// Canonical configuration payload returned by config endpoints.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
@@ -809,6 +808,7 @@ pub(crate) struct ApiRegistryEvent {
 }
 
 /// Task action request envelope accepted by registry mutation endpoints.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ApiRegistryTaskActionRequest {
@@ -819,6 +819,7 @@ pub(crate) struct ApiRegistryTaskActionRequest {
 }
 
 /// Supported registry task actions exposed by the web API.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", tag = "kind")]
 pub(crate) enum ApiRegistryTaskAction {

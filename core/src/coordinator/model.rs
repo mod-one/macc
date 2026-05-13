@@ -147,6 +147,25 @@ pub struct TaskRuntime {
     /// Number of review cycles completed for this task.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_cycles: Option<usize>,
+    /// Active AI tool session ID currently associated with this task lifecycle.
+    /// Set from worktree-scoped `tool-sessions.json` during dispatch/completion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_session_id: Option<String>,
+    /// Session ID from the most recent run, preserved on error so retries can resume
+    /// with cached context instead of cold-starting a new session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_session_id: Option<String>,
+    /// Tool that owned `last_session_id`; used to validate the fallback before injecting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_session_tool: Option<String>,
+    /// Last known worktree path retained when the active worktree attachment
+    /// is cleared after a failure, so retry salvage can inspect prior commits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_worktree_path: Option<String>,
+    /// Last known branch retained when the active worktree attachment is
+    /// cleared after a failure, so retry salvage can attempt recovery merge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_branch: Option<String>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -376,16 +395,31 @@ impl TaskRegistry {
         true
     }
 
-    /// Returns `true` if the task assigned to `worktree_path` is in a terminal/stuck
-    /// state that will never self-resolve (blocked, failed, abandoned).
+    /// Returns `true` if the worktree should be considered permanently stuck
+    /// (its branch will never merge autonomously).
+    ///
+    /// This is true when:
+    /// - A task assigned to this worktree is in a terminal/stuck state
+    ///   (blocked, failed, abandoned), OR
+    /// - No task references this worktree at all (orphaned — the task was
+    ///   retried on a different worker and its worktree metadata was cleared).
+    ///
     /// Used by the worktree reuse logic to decide whether to abandon an unmerged
     /// branch and reset the slot rather than deadlocking.
     pub fn task_on_worktree_is_permanently_stuck(&self, worktree_path: &str) -> bool {
         const STUCK: &[&str] = &["blocked", "failed", "abandoned"];
-        self.tasks.iter().any(|task| {
-            task.worktree_path().is_some_and(|p| p == worktree_path)
-                && STUCK.contains(&task.state.as_str())
-        })
+        let mut any_task_references_worktree = false;
+        for task in &self.tasks {
+            if task.worktree_path().is_some_and(|p| p == worktree_path) {
+                any_task_references_worktree = true;
+                if STUCK.contains(&task.state.as_str()) {
+                    return true;
+                }
+            }
+        }
+        // Orphaned worktree: no task points here anymore (e.g. task was
+        // retried on a different worker). The unmerged branch is abandoned.
+        !any_task_references_worktree
     }
 
     pub fn has_in_progress_or_queued_on_worktree(&self, worktree_path: &str) -> bool {

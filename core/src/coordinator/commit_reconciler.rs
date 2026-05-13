@@ -49,6 +49,35 @@ pub struct ReconcileReport {
     pub commits_scanned: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncBranchStatus {
+    Merged,
+    MergeFailed,
+    SkippedNoTaskTags,
+    SkippedTaskState,
+}
+
+impl SyncBranchStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SyncBranchStatus::Merged => "merged",
+            SyncBranchStatus::MergeFailed => "merge_failed",
+            SyncBranchStatus::SkippedNoTaskTags => "skipped_no_task_tags",
+            SyncBranchStatus::SkippedTaskState => "skipped_task_state",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncBranchResult {
+    pub branch: String,
+    pub discovered_task_ids: Vec<String>,
+    pub merged_task_ids: Vec<String>,
+    pub status: SyncBranchStatus,
+    pub detail: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Git log reader
 // ---------------------------------------------------------------------------
@@ -218,6 +247,172 @@ pub fn apply_reconcile_report(registry: &mut TaskRegistry, report: &ReconcileRep
     registry.updated_at = Some(now.to_string());
 }
 
+fn list_local_branches(repo_root: &Path) -> Result<Vec<String>> {
+    let output = git::run_git_output_mapped(
+        repo_root,
+        &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+        "list local git branches",
+    )?;
+    if !output.status.success() {
+        return Err(MaccError::Validation(format!(
+            "failed to list branches: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect())
+}
+
+fn branch_matches_known_patterns(branch: &str, task_ids: &[String]) -> bool {
+    if branch.starts_with("macc/worker-") {
+        return true;
+    }
+    let branch_upper = branch.to_ascii_uppercase();
+    task_ids
+        .iter()
+        .any(|task_id| branch_upper.contains(&task_id.to_ascii_uppercase()))
+}
+
+fn is_unmerged_branch_sync_state(state: &str) -> bool {
+    let normalized = state.trim().to_ascii_lowercase();
+    normalized == "todo"
+        || normalized == "error"
+        || normalized == "failed"
+        || normalized.contains("error")
+}
+
+fn merge_branch_into_base(repo_root: &Path, branch: &str) -> Result<std::process::Output> {
+    git::run_git_output_mapped(
+        repo_root,
+        &["merge", "--no-ff", "--no-edit", branch],
+        "merge branch during sync reconciliation",
+    )
+}
+
+fn abort_merge(repo_root: &Path) {
+    let _ = git::run_git_output_mapped(repo_root, &["merge", "--abort"], "abort conflicted merge");
+}
+
+pub fn sync_unmerged_branches(
+    registry: &mut TaskRegistry,
+    repo_root: &Path,
+    base_branch: &str,
+) -> Result<Vec<SyncBranchResult>> {
+    let known_task_ids: Vec<String> = registry.tasks.iter().map(|task| task.id.clone()).collect();
+    let mut branches: Vec<String> = list_local_branches(repo_root)?
+        .into_iter()
+        .filter(|branch| branch != base_branch)
+        .filter(|branch| branch_matches_known_patterns(branch, &known_task_ids))
+        .collect();
+    branches.sort();
+    branches.dedup();
+
+    let original_branch = git::current_branch_name(repo_root).unwrap_or_default();
+    if original_branch != base_branch {
+        let ok = git::checkout(repo_root, base_branch, false)?;
+        if !ok {
+            return Err(MaccError::Validation(format!(
+                "failed to checkout base branch '{}' before sync_unmerged_branches",
+                base_branch
+            )));
+        }
+    }
+
+    let mut out = Vec::new();
+    for branch in &branches {
+        let commits = read_commit_range(repo_root, Some(base_branch), branch)?;
+        let task_commits = extract_task_ids_from_commits(&commits);
+        let discovered_task_ids: Vec<String> = task_commits.keys().cloned().collect();
+        if discovered_task_ids.is_empty() {
+            out.push(SyncBranchResult {
+                branch: branch.clone(),
+                discovered_task_ids,
+                merged_task_ids: Vec::new(),
+                status: SyncBranchStatus::SkippedNoTaskTags,
+                detail: Some("no [macc:task TASK-ID] tags found in branch commits".to_string()),
+            });
+            continue;
+        }
+
+        let mut eligible_task_ids = Vec::new();
+        for task_id in &discovered_task_ids {
+            if let Some(task) = registry.tasks.iter().find(|task| task.id == *task_id) {
+                if is_unmerged_branch_sync_state(&task.state) {
+                    eligible_task_ids.push(task_id.clone());
+                }
+            }
+        }
+        if eligible_task_ids.is_empty() {
+            out.push(SyncBranchResult {
+                branch: branch.clone(),
+                discovered_task_ids,
+                merged_task_ids: Vec::new(),
+                status: SyncBranchStatus::SkippedTaskState,
+                detail: Some("matching tasks are not in todo/error states".to_string()),
+            });
+            continue;
+        }
+
+        let merge_output = merge_branch_into_base(repo_root, branch)?;
+        if merge_output.status.success() {
+            let report = ReconcileReport {
+                reconciled: eligible_task_ids
+                    .iter()
+                    .filter_map(|task_id| {
+                        let (sha, subject) = task_commits.get(task_id)?;
+                        let previous_state = registry
+                            .tasks
+                            .iter()
+                            .find(|task| task.id == *task_id)?
+                            .state
+                            .clone();
+                        Some(ReconciledTask {
+                            task_id: task_id.clone(),
+                            previous_state,
+                            new_state: WorkflowState::Merged.as_str().to_string(),
+                            matched_commit_sha: sha.clone(),
+                            matched_commit_subject: subject.clone(),
+                        })
+                    })
+                    .collect(),
+                already_done: Vec::new(),
+                commits_scanned: commits.len(),
+            };
+            let now = crate::coordinator::helpers::now_iso_coordinator();
+            apply_reconcile_report(registry, &report, &now);
+            out.push(SyncBranchResult {
+                branch: branch.clone(),
+                discovered_task_ids,
+                merged_task_ids: eligible_task_ids,
+                status: SyncBranchStatus::Merged,
+                detail: None,
+            });
+        } else {
+            abort_merge(repo_root);
+            out.push(SyncBranchResult {
+                branch: branch.clone(),
+                discovered_task_ids,
+                merged_task_ids: Vec::new(),
+                status: SyncBranchStatus::MergeFailed,
+                detail: Some(
+                    String::from_utf8_lossy(&merge_output.stderr)
+                        .trim()
+                        .to_string(),
+                ),
+            });
+        }
+    }
+
+    if !original_branch.is_empty() && original_branch != base_branch {
+        let _ = git::checkout(repo_root, &original_branch, false);
+    }
+    Ok(out)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -225,7 +420,14 @@ pub fn apply_reconcile_report(registry: &mut TaskRegistry, report: &ReconcileRep
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::coordinator::model::{Task, TaskRuntime};
+    use crate::coordinator::model::Task;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::SystemTime;
+
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn make_task(id: &str, state: &str) -> Task {
         Task {
@@ -250,6 +452,48 @@ mod tests {
             tasks,
             ..TaskRegistry::default()
         }
+    }
+
+    fn run_git(repo: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("run git command");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn create_commit(repo: &Path, file: &str, content: &str, message: &str) {
+        let path = repo.join(file);
+        fs::write(&path, content).expect("write file");
+        run_git(repo, &["add", file]);
+        run_git(repo, &["commit", "-m", message]);
+    }
+
+    fn make_test_repo() -> PathBuf {
+        let suffix = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let nanos = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let repo = std::env::temp_dir().join(format!(
+            "macc-sync-unmerged-tests-{}-{}-{}",
+            std::process::id(),
+            nanos,
+            suffix
+        ));
+        fs::create_dir_all(&repo).expect("create temp repo");
+        run_git(&repo, &["init"]);
+        run_git(&repo, &["checkout", "-b", "main"]);
+        run_git(&repo, &["config", "user.email", "tests@example.com"]);
+        run_git(&repo, &["config", "user.name", "MACC Tests"]);
+        create_commit(&repo, "base.txt", "base\n", "chore: base");
+        repo
     }
 
     #[test]
@@ -363,5 +607,59 @@ mod tests {
         let report = reconcile(&registry, &commits);
         assert_eq!(report.reconciled.len(), 1);
         assert_eq!(report.reconciled[0].task_id, "WEB-001");
+    }
+
+    #[test]
+    fn sync_unmerged_branches_merges_orphaned_branch() {
+        let repo = make_test_repo();
+        run_git(&repo, &["checkout", "-b", "macc/worker-01"]);
+        create_commit(
+            &repo,
+            "feature.txt",
+            "feature\n",
+            "feat: L4-SYNC-001\n\n[macc:task L4-SYNC-001]",
+        );
+        run_git(&repo, &["checkout", "main"]);
+
+        let mut registry = make_registry(vec![make_task("L4-SYNC-001", "todo")]);
+        let results = sync_unmerged_branches(&mut registry, &repo, "main").expect("sync branches");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].status, SyncBranchStatus::Merged);
+        assert_eq!(results[0].merged_task_ids, vec!["L4-SYNC-001".to_string()]);
+        assert_eq!(registry.tasks[0].state, "merged");
+    }
+
+    #[test]
+    fn sync_unmerged_branches_conflict_is_skipped() {
+        let repo = make_test_repo();
+        run_git(&repo, &["checkout", "-b", "macc/worker-02"]);
+        create_commit(
+            &repo,
+            "conflict.txt",
+            "branch change\n",
+            "feat: L4-SYNC-002\n\n[macc:task L4-SYNC-002]",
+        );
+        run_git(&repo, &["checkout", "main"]);
+        create_commit(
+            &repo,
+            "conflict.txt",
+            "main change\n",
+            "chore: conflicting main update",
+        );
+
+        let mut registry = make_registry(vec![make_task("L4-SYNC-002", "todo")]);
+        let results = sync_unmerged_branches(&mut registry, &repo, "main").expect("sync branches");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].status, SyncBranchStatus::MergeFailed);
+        assert_eq!(registry.tasks[0].state, "todo");
+    }
+
+    #[test]
+    fn sync_unmerged_branches_returns_empty_when_no_candidates() {
+        let repo = make_test_repo();
+        let mut registry = make_registry(vec![make_task("L4-SYNC-003", "todo")]);
+        let results = sync_unmerged_branches(&mut registry, &repo, "main").expect("sync branches");
+        assert!(results.is_empty());
+        assert_eq!(registry.tasks[0].state, "todo");
     }
 }

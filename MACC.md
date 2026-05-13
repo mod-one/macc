@@ -411,6 +411,10 @@ Standard recovery sequence:
 5) `macc coordinator cleanup`
 6) `macc coordinator` (resume loop)
 
+If a task is blocked with `dispatch_retry_limit_exceeded`, treat it as a dispatch preparation failure cap (`max_dispatch_retries`) and start recovery with:
+- `macc coordinator unlock`
+Then rerun the standard sequence above after fixing the underlying sanitize/dispatch cause.
+
 Post-run PRD enrichment (optional):
 - `macc coordinator audit-prd -- --tool <tool_id>` (AI-powered update of prd.json notes)
 
@@ -429,6 +433,8 @@ Error code schema (v1):
   - `E101` Runner exited non-zero
   - `E102` Tool runner not found / not executable
   - `E103` Tool output malformed / parsing failed
+  - `E104` Performer produced partial changes before failure (conditional retry; prefer salvage on same worktree)
+  - `E105` Performer completed output but exited non-zero (conditional retry after completion-state verification)
 - `E200` Capability/Contract
   - `E201` Requested unavailable tool
   - `E202` Capability guard triggered
@@ -436,12 +442,18 @@ Error code schema (v1):
   - `E301` Worktree missing
   - `E302` PRD missing
   - `E303` tool.json missing
+  - `E304` Worktree branch conflict (conditional retry)
+  - `E305` Worktree checkout failure (conditional retry)
+  - `E306` Worktree reset failure (conditional retry)
 - `E400` Coordinator/Registry
   - `E401` Task registry read/write failure
   - `E402` Task state transition invalid
+  - `E403` Task state conflict (retryable after reconcile)
 - `E500` Merge
   - `E501` Merge conflict
   - `E502` Merge worker failed
+  - `E503` Merge blocked by policy (**not retryable**)
+  - `E504` Post-merge validation failed (conditional retry)
 - `E600` Rate-limit / Provider throttle
   - `E601` Rate-limited / Transient 429 or 529 (overloaded). Retryable with backoff.
   - `E602` Quota exhausted / Hard limit (monthly cap, budget). **Not retryable** — requires operator action.
@@ -452,6 +464,7 @@ Error code schema (v1):
 Auto-retry controls (coordinator settings):
 - `error_code_retry_list`: comma-separated list of error codes eligible for auto-retry.
 - `error_code_retry_max`: max retries per task for eligible codes.
+- `max_dispatch_retries`: max dispatch preparation retries before coordinator blocks task with `dispatch_retry_limit_exceeded`.
 
 Default policy:
 - `error_code_retry_list=E101,E102,E103,E301,E302,E303,E601,E603`
@@ -459,7 +472,34 @@ Default policy:
 
 Note: E602 is intentionally excluded from the default retry list. Quota exhaustion is a hard limit requiring operator action (e.g., wait for quota reset or switch to another tool). Retrying E602 immediately would waste quota.
 
-##### 3.5.5.2 Canonical error model
+##### 3.5.5.2 Coordinator Recovery & Reliability
+
+Coordinator recovery is intentionally staged to minimize lost work and avoid duplicate retries:
+
+- **Salvage before retry** (`salvage_before_retry=true`): on failed tasks with preserved worktree metadata, coordinator attempts a salvage merge before requeueing.
+- **Retry on same worktree** (`retry_on_same_worktree=true`): retries prefer the previous slot when healthy, preserving local state and reducing cold-start cost.
+- **Merge-gate on dispatch** (`merge_gate_on_dispatch=true`): before dispatching a retry, coordinator checks if the retry branch can already merge into base; if yes, task transitions to `merged` without rerunning performer.
+- **Abandonment tagging** (`tag_abandoned_branches=true`): if a branch with commits must be abandoned/reset, coordinator creates `macc/abandoned/<task-id>-<YYYYMMDD-HHMMSS>` before cleanup.
+- **Sync unmerged branches** (`sync_unmerged_branches=true`): sync scans task branches with recoverable commits and attempts merge/reconciliation for tasks still in `todo`/`error`.
+
+Recovery limits:
+
+- `max_salvage_attempts_per_task` bounds salvage retries per task.
+- `salvage_merge_timeout_seconds` caps salvage merge runtime.
+
+##### 3.5.5.3 Session Optimization
+
+Session-aware behavior reduces token waste and preserves conversation continuity:
+
+- **Session-aware dispatch**: dispatch prefers reuse paths that can continue with existing tool session context instead of always cold-starting.
+- **TTL-aware scheduling**: recently active slots are preferred to maximize warm-session reuse windows.
+- **Retry session preservation**: when a task fails with retained worktree state, `last_session_id` and `last_session_tool` are preserved and reused for the next attempt when compatible.
+
+Session optimization config:
+
+- `session_cache_ttl_seconds` (default `300`): warm-session TTL used by dispatch preference scoring.
+
+##### 3.5.5.4 Canonical error model
 
 MACC uses a three-layer canonical error model to normalize provider-specific errors into a uniform representation consumed by the coordinator, TUI, and Web API.
 
@@ -819,12 +859,54 @@ Important behavior:
 - If all known sessions are occupied, create a new one.
 - Session IDs are reused in serial runs for the same worktree/scope.
 - Worktree pool reuse keeps session continuity because the scope key (worktree path) remains stable.
+- `session_manager.rs` I/O failures now surface as structured errors (no panic path), so operator-visible failures remain diagnosable in coordinator/task error metadata.
+
+### 12.5 Session save / restore
+
+Tool sessions can be saved to user-level storage and restored across coordinator runs, preserving AI tool context continuity.
+
+**Storage location**: `~/.macc/sessions/<project-slug>/<name>.json`
+
+**Commands**:
+- `macc coordinator sessions list` — list all saved session snapshots for the current project.
+- `macc coordinator sessions save [<name>]` — snapshot the current `tool-sessions.json` (active sessions, leases, and archived entries) to user-level storage. If no name is provided, an auto-generated timestamp name is used.
+- `macc coordinator sessions restore <name> [--dry-run]` — merge a saved snapshot back into the current `tool-sessions.json`. Existing entries are preserved (snapshot fills gaps, does not overwrite). Restored leases are reset to `available` status so performers can claim them. `--dry-run` previews the merge without writing.
+- `macc coordinator sessions delete <name>` — remove a saved snapshot.
+
+**Auto-save**: when the coordinator is stopped gracefully (`macc coordinator stop --graceful`), a session snapshot is automatically saved. This is best-effort; failure to save does not block the stop.
+
+**Snapshot format**:
+```json
+{
+  "saved_at": "<ISO-8601>",
+  "project_root": "<absolute-path>",
+  "name": "<snapshot-name>",
+  "tools": {
+    "<tool_id>": {
+      "sessions": { "<scope-key>": { "session_id": "...", ... } },
+      "leases": { "<session_id>": { "status": "...", ... } },
+      "archived": { "<archive-key>": { ... } }
+    }
+  }
+}
+```
+
+**Restore merge rules**:
+- Active sessions: snapshot entries are added only if the scope key does not already exist in the current file.
+- Leases: snapshot entries are added only if the session ID is not already present. Status is reset to `available` and a `restored_at` timestamp is added.
+- Archived entries are not merged (they are informational in the snapshot).
+
+**Typical workflow**:
+1. Coordinator run completes or is stopped gracefully (auto-save happens).
+2. Worktrees are removed / new run is started.
+3. `macc coordinator sessions restore <name>` injects saved session IDs into the fresh `tool-sessions.json`.
+4. Performers on the new run pick up restored sessions and resume AI tool conversations with prior context.
 
 ### 12.3 Coordinator command
 
 - `macc coordinator` runs full-cycle mode by default (`run`).
 - Full-cycle loop: `sync -> dispatch -> advance -> reconcile -> cleanup` until convergence.
-- `macc coordinator [run|dispatch|advance|resume|sync|sync-prd|audit-prd|status|reconcile|unlock|cleanup]`
+- `macc coordinator [run|dispatch|advance|resume|sync|sync-prd|audit-prd|status|reconcile|unlock|cleanup|sessions]`
 - `run`, `dispatch`, `advance`, `reconcile`, and `cleanup` are handled natively in Rust.
 - Worktrees are reused as worker slots (not task-coupled names): once a task is merged, the slot is reset to reference, moved to a fresh branch, refreshed for the new task, then relaunched.
 - New worker worktrees are created only when no reusable slot is available; pool size is bounded by `max_parallel`.

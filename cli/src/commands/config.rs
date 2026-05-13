@@ -68,7 +68,11 @@ impl<'a> Command for ConfigCommand<'a> {
                         source: e,
                     }
                 })?;
-                println!("Profile '{}' restored to {}.", name, paths.config_path.display());
+                println!(
+                    "Profile '{}' restored to {}.",
+                    name,
+                    paths.config_path.display()
+                );
                 Ok(())
             }
             ConfigAction::List => {
@@ -76,7 +80,7 @@ impl<'a> Command for ConfigCommand<'a> {
                 if profiles.is_empty() {
                     println!("No saved profiles.");
                 } else {
-                    println!("{:<20} {:<24} {}", "NAME", "CREATED", "DESCRIPTION");
+                    println!("{:<20} {:<24} DESCRIPTION", "NAME", "CREATED");
                     println!("{:-<20} {:-<24} {:-<30}", "", "", "");
                     for p in &profiles {
                         let created = p.created_at.as_deref().unwrap_or("-");

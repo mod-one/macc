@@ -55,20 +55,10 @@ pub(crate) async fn get_prd_handler(
 ) -> Result<Json<ApiPrdResponse>, ApiError> {
     let prd_path = resolve_prd_path(&state, query.path.as_deref())?;
 
-    let content = fs::read_to_string(&prd_path).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            MaccError::Io {
-                path: prd_path.to_string_lossy().to_string(),
-                action: "read PRD".into(),
-                source: e,
-            }
-        } else {
-            MaccError::Io {
-                path: prd_path.to_string_lossy().to_string(),
-                action: "read PRD".into(),
-                source: e,
-            }
-        }
+    let content = fs::read_to_string(&prd_path).map_err(|e| MaccError::Io {
+        path: prd_path.to_string_lossy().to_string(),
+        action: "read PRD".into(),
+        source: e,
     })?;
 
     let mut parsed: serde_json::Value = serde_json::from_str(&content)

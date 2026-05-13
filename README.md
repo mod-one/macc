@@ -272,6 +272,8 @@ MACC emits structured error codes when a performer or coordinator step fails. Th
   - `E101` Runner exited non-zero
   - `E102` Tool runner not found / not executable
   - `E103` Tool output malformed / parsing failed
+  - `E104` Performer produced partial changes before failure. Conditional retry (prefer same-worktree salvage).
+  - `E105` Performer completed output but exited non-zero. Conditional retry (verify completion state first).
 - `E200` Capability/Contract
   - `E201` Requested unavailable tool
   - `E202` Capability guard triggered
@@ -279,12 +281,18 @@ MACC emits structured error codes when a performer or coordinator step fails. Th
   - `E301` Worktree missing
   - `E302` PRD missing
   - `E303` tool.json missing
+  - `E304` Worktree branch conflict. Conditional retry (after conflict resolution or branch refresh).
+  - `E305` Worktree checkout failure. Conditional retry (transient git failures may clear).
+  - `E306` Worktree reset failure. Conditional retry (depends on index/worktree state).
 - `E400` Coordinator/Registry
   - `E401` Task registry read/write failure
   - `E402` Task state transition invalid
+  - `E403` Task state conflict. Retryable (reconcile + retry usually converges).
 - `E500` Merge
   - `E501` Merge conflict
   - `E502` Merge worker failed
+  - `E503` Merge blocked by policy. **Not retryable** - requires operator or policy change.
+  - `E504` Post-merge validation failed. Conditional retry (depends on validation failure root cause).
 - `E600` Rate-limit / Provider throttle
   - `E601` Rate-limited / transient 429 or 529. Retryable with exponential backoff.
   - `E602` Quota exhausted / hard limit. **Not retryable** - requires operator action.
@@ -298,10 +306,23 @@ Coordinator can auto-retry failed tasks based on error code. This is configured 
 
 - `error_code_retry_list` default: `E101,E102,E103,E301,E302,E303,E601,E603`
 - `error_code_retry_max` default: `2`
+- `max_dispatch_retries` default: `5` (caps dispatch preparation retries before task is blocked with `dispatch_retry_limit_exceeded`)
 
 When a failed task has an error code in the allow-list and retries are below the max, the task is requeued to `todo` with an `auto_retry:<code>` reason.
 
 E602 (quota exhausted) is intentionally excluded - it requires operator action, not automatic retry.
+
+Retry strategy details:
+
+- Fetch failures during dispatch sanitize are non-blocking warnings: if `git fetch origin` fails during worktree preparation, coordinator logs a warning and continues. Dispatch still aborts on required sanitize failures (for example `git reset --hard` failure).
+- `salvage_before_retry` (default `true`): before retrying a failed task with existing local work, coordinator attempts salvage/merge of the last worktree state.
+- `retry_on_same_worktree` (default `true`): retries prefer reusing the same worktree slot when the slot is healthy, so local context and session continuity are preserved.
+- `merge_gate_on_dispatch` (default `true`): for retry attempts, coordinator runs a pre-dispatch merge-gate; if prior branch can already merge cleanly, task is marked merged and dispatch is skipped.
+- `sync_unmerged_branches` (default `true`): `sync` also scans recoverable unmerged branches and can merge recovered work before another retry cycle.
+- `max_salvage_attempts_per_task` (default `1`) and `salvage_merge_timeout_seconds` (default `120`) bound salvage cost during recovery.
+- `tag_abandoned_branches` (default `true`): when a retry path abandons a branch with commits, a tag is created before reset to avoid silent loss.
+
+All knobs live under `.macc/macc.yaml` -> `automation.coordinator` (see `docs/CONFIG.md`).
 
 ### Rate-limit handling
 
@@ -458,15 +479,21 @@ Coordinator orchestrates the end-to-end automation cycle: it reads the task regi
 
 - `macc coordinator` (default full cycle: sync -> dispatch -> advance -> reconcile -> cleanup in loop until convergence)
 - `macc coordinator` opens the TUI `Coordinator Live` screen and starts coordinator run.
-- `macc coordinator [run|dispatch|advance|sync|sync-prd|audit-prd|status|reconcile|unlock|cleanup|stop]`
+- `macc coordinator [run|dispatch|advance|sync|sync-prd|audit-prd|status|reconcile|unlock|cleanup|stop|sessions]`
 - `macc coordinator run --no-tui` keeps the previous headless CLI behavior.
 - `macc coordinator stop [--graceful] [--remove-worktrees] [--remove-branches]`
+- `macc coordinator sessions [save|restore|list|delete]`: manage tool session snapshots at user level (`~/.macc/sessions/<project>/`). `save` captures active + archived sessions; `restore` merges saved sessions back into `tool-sessions.json` without overwriting existing entries; `list` shows all snapshots; `delete` removes one. Graceful stop (`--graceful`) auto-saves a snapshot.
+- `macc supervisor start [--daemon]`
+- `macc supervisor stop`
+- `macc supervisor status`
+- `macc supervisor report`
 - Coordinator options can override config at runtime:
   - `--prd`, `--coordinator-tool`
   - `--tool-priority`, `--max-parallel-per-tool-json`, `--tool-specializations-json`
   - `--max-dispatch`, `--max-parallel`, `--timeout-seconds`
   - `--phase-runner-max-attempts`
-  - `--stale-claimed-seconds`, `--stale-in-progress-seconds`, `--stale-changes-requested-seconds`, `--stale-action`
+  - `--stale-claimed-seconds`, `--stale-changes-requested-seconds`, `--stale-action`: auto-stale thresholds for `claimed`/`changes_requested` states (`0` disables).
+  - `--stale-in-progress-seconds`: hard kill timeout for the performer process in seconds (`0` disables). When exceeded, the coordinator sends SIGTERM then SIGKILL after `force_kill_grace_seconds`. Default `0` — tasks run until they exit naturally. Set to e.g. `3600` to cap task runtime at one hour.
   - Heartbeat events update `task_runtime.last_heartbeat` from `events.jsonl`.
   - Runtime stale heartbeat policy via env: `STALE_HEARTBEAT_SECONDS`, `STALE_HEARTBEAT_ACTION=retry|block|requeue` (retry/requeue resets task to `todo`; retry also increments runtime retries).
 - Task registry path is fixed to `.macc/automation/task/task_registry.json`.
@@ -593,6 +620,14 @@ Performer session management is project-level, tool-aware, and lease-based:
 - Sessions are reused in serial execution when available and not leased by active work.
 - If all known sessions are occupied (or none exist), a new session is created.
 - Lease release happens on performer exit, so closed worktrees can donate reusable sessions.
+- Session snapshots can be saved to user-level storage (`~/.macc/sessions/`) and restored across coordinator runs via `macc coordinator sessions save|restore`. Graceful stop auto-saves a snapshot.
+- Coordinator retries preserve session continuity: on `error_with_changes` / `error_without_changes`, the last active session ID is stored and reused on the next attempt for the same tool when available.
+
+### Session optimization
+
+- Dispatch is session-aware: coordinator prefers reuse paths that keep warm tool/worktree context when possible instead of forcing cold starts.
+- Scheduling is TTL-aware: recent worktree/session activity is favored so cached context is reused before it expires.
+- `session_cache_ttl_seconds` (default `300`) controls how long a session is considered warm for dispatch preference; higher values bias reuse, lower values bias fresh distribution.
 
 ## Safety guarantees
 

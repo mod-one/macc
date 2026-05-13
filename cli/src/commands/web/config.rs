@@ -255,9 +255,7 @@ impl From<CanonicalConfig> for ApiConfigResponse {
             force_kill_grace_seconds: coordinator
                 .as_ref()
                 .and_then(|cfg| cfg.force_kill_grace_seconds),
-            max_review_cycles: coordinator
-                .as_ref()
-                .and_then(|cfg| cfg.max_review_cycles),
+            max_review_cycles: coordinator.as_ref().and_then(|cfg| cfg.max_review_cycles),
             requirements_detected: false,
             managed_environment_warnings: Vec::new(),
         }
@@ -283,10 +281,10 @@ fn apply_update(config: &mut CanonicalConfig, request: &ApiConfigUpdateRequest) 
     if let Some(standards_inline) = &request.standards_inline {
         config.standards.inline = standards_inline.clone();
     }
-    apply_selection_update(config, &request);
-    apply_settings_update(config, &request);
-    apply_ralph_update(config, &request);
-    apply_coordinator_update(config, &request);
+    apply_selection_update(config, request);
+    apply_settings_update(config, request);
+    apply_ralph_update(config, request);
+    apply_coordinator_update(config, request);
 }
 
 fn apply_selection_update(config: &mut CanonicalConfig, request: &ApiConfigUpdateRequest) {

@@ -247,6 +247,10 @@ fn registry_event(task_id: &str, event_id: &str, event_type: &str) -> Coordinato
 }
 
 struct WebTestEngine {
+    // This test double intentionally overrides a small subset of Engine behavior
+    // (coordinator command execution/process control, doctor snapshots, and
+    // fixture plan generation) to make web handler tests deterministic.
+    // All other behavior delegates to `inner` to stay aligned with production.
     inner: TestEngine,
     use_fixture_plan_from_overrides: bool,
     real_tool_cooldown_commands: bool,

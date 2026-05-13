@@ -7,12 +7,15 @@ use crate::git;
 use crate::{MaccError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs::OpenOptions;
 use std::io::Read;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct CoordinatorJob {
     pub tool: String,
+    pub base_branch: String,
     pub worktree_path: PathBuf,
     pub attempt: usize,
     pub started_at: std::time::Instant,
@@ -44,7 +47,7 @@ async fn kill_process_tree(pid: Option<i64>, child: &mut tokio::process::Child) 
     #[cfg(unix)]
     if let Some(pid) = pid {
         let pgid = pid; // child is process group leader, so PGID == PID
-        // SIGTERM the entire process group
+                        // SIGTERM the entire process group
         let _ = std::process::Command::new("kill")
             .args(["-TERM", "--", &format!("-{}", pgid)])
             .stdout(std::process::Stdio::null())
@@ -53,10 +56,10 @@ async fn kill_process_tree(pid: Option<i64>, child: &mut tokio::process::Child) 
 
         // Give processes time to shut down gracefully
         let grace = std::time::Duration::from_secs(TIMEOUT_KILL_GRACE_SECONDS);
-        match tokio::time::timeout(grace, child.wait()).await {
-            Ok(_) => return, // exited within grace period
-            Err(_) => {}     // still alive, escalate to SIGKILL
+        if tokio::time::timeout(grace, child.wait()).await.is_ok() {
+            return; // exited within grace period
         }
+        // still alive, escalate to SIGKILL
 
         // SIGKILL the entire process group
         let _ = std::process::Command::new("kill")
@@ -113,6 +116,13 @@ pub struct CoordinatorMergeEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoordinatorRuntimeEventKind {
     Heartbeat,
+    TaskDispatched {
+        session_id: Option<String>,
+    },
+    TaskCompleted {
+        status: String,
+        session_id: Option<String>,
+    },
     Progress {
         status: String,
         phase: Option<String>,
@@ -126,6 +136,69 @@ pub enum CoordinatorRuntimeEventKind {
     Failed {
         phase: Option<String>,
         message: Option<String>,
+    },
+    /// A pre-retry salvage check was attempted for a task worktree.
+    /// Emitted before the coordinator decides whether to retry on the same
+    /// worktree or abandon the slot.
+    SalvageAttempted {
+        branch: String,
+        worktree_path: String,
+        outcome: String,
+    },
+    /// Salvage succeeded: the worktree branch was merged into the reference
+    /// branch and the task state was preserved.
+    SalvageMerged {
+        branch: String,
+        worktree_path: String,
+        outcome: String,
+    },
+    /// Salvage failed: the worktree could not be merged or the partial state
+    /// was not recoverable.
+    SalvageFailed {
+        branch: String,
+        worktree_path: String,
+        outcome: String,
+    },
+    /// A merge-gate check was performed for a branch before merge was allowed.
+    MergeGateChecked {
+        branch: String,
+        outcome: String,
+    },
+    /// A branch passed the merge-gate and was merged.
+    MergeGateMerged {
+        branch: String,
+        outcome: String,
+    },
+    /// A branch was tagged as abandoned (task exceeded retry budget or was
+    /// explicitly abandoned by the coordinator).
+    BranchTaggedAbandoned {
+        branch: String,
+        outcome: String,
+    },
+    /// An unmerged branch was found during `sync-prd` scan.
+    SyncUnmergedBranchFound {
+        branch: String,
+    },
+    /// An unmerged branch found during `sync-prd` was successfully merged.
+    SyncUnmergedBranchMerged {
+        branch: String,
+        outcome: String,
+    },
+    /// A worktree health check detected a problem that prevents normal use
+    /// of the worktree slot.
+    WorktreeHealthCheckFailed {
+        worktree_path: String,
+        outcome: String,
+    },
+    /// A newly-created worktree failed sanitize during dispatch and was
+    /// removed to prevent orphaned pool slots.
+    WorktreeOrphanCleaned {
+        worktree_path: String,
+        sanitize_step: String,
+    },
+    DispatchRetryLimitReached {
+        task_id: String,
+        retry_count: u32,
     },
 }
 
@@ -151,12 +224,17 @@ pub struct CoordinatorRunState {
     pub last_heartbeat_log_at: Option<std::time::Instant>,
     pub heartbeat_updates_since_log: usize,
     pub dispatch_retry_not_before: HashMap<String, std::time::Instant>,
+    pub dispatch_retry_count: HashMap<String, u32>,
     pub last_priority_zero_dispatch_block_task_id: Option<String>,
     pub dispatched_total_run: usize,
     pub dispatch_limit_event_emitted: bool,
+    /// Last performer completion activity per worktree slot path (unix epoch
+    /// seconds). Used as a dispatch preference signal for warm cache reuse.
+    pub last_session_activity_at: HashMap<String, i64>,
     pub performer_ipc_addr: Option<String>,
     pub performer_ipc_listener_started: bool,
     pub performer_ipc_listener_alive: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub coordinator_pid_guard: Option<CoordinatorPidGuard>,
     /// Last dispatch failure message (shown in no-progress diagnostics).
     pub last_dispatch_failure: Option<String>,
     // RL-ROUTE-005: per-tool throttle state
@@ -166,6 +244,66 @@ pub struct CoordinatorRunState {
     // RL-THROTTLE-006: dynamic concurrency control
     pub effective_max_parallel: usize,
     pub original_max_parallel: usize,
+}
+
+#[derive(Debug)]
+pub struct CoordinatorPidGuard {
+    path: PathBuf,
+}
+
+impl CoordinatorPidGuard {
+    pub fn new(repo_root: &Path) -> Result<Self> {
+        let path = repo_root
+            .join(".macc")
+            .join("state")
+            .join("coordinator.pid");
+        let tmp_path = path.with_extension("pid.tmp");
+        let pid = std::process::id().to_string();
+
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&tmp_path)
+            .map_err(|source| MaccError::Io {
+                path: tmp_path.to_string_lossy().into(),
+                action: "create temporary coordinator pid file".into(),
+                source,
+            })?;
+
+        if let Err(source) = file.write_all(pid.as_bytes()) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(MaccError::Io {
+                path: tmp_path.to_string_lossy().into(),
+                action: "write coordinator pid".into(),
+                source,
+            });
+        }
+
+        if let Err(source) = std::fs::rename(&tmp_path, &path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(MaccError::Io {
+                path: path.to_string_lossy().into(),
+                action: "atomically install coordinator pid file".into(),
+                source,
+            });
+        }
+
+        Ok(Self { path })
+    }
+}
+
+impl Drop for CoordinatorPidGuard {
+    fn drop(&mut self) {
+        if let Err(err) = std::fs::remove_file(&self.path) {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    path = %self.path.display(),
+                    "failed to remove coordinator pid file: {}",
+                    err
+                );
+            }
+        }
+    }
 }
 
 pub trait PhaseExecutor {
@@ -197,14 +335,17 @@ impl CoordinatorRunState {
             last_heartbeat_log_at: None,
             heartbeat_updates_since_log: 0,
             dispatch_retry_not_before: HashMap::new(),
+            dispatch_retry_count: HashMap::new(),
             last_priority_zero_dispatch_block_task_id: None,
             dispatched_total_run: 0,
             dispatch_limit_event_emitted: false,
+            last_session_activity_at: HashMap::new(),
             performer_ipc_addr: None,
             performer_ipc_listener_started: false,
             performer_ipc_listener_alive: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
                 false,
             )),
+            coordinator_pid_guard: None,
             last_dispatch_failure: None,
             throttle_registry: ToolThrottleRegistry::default(),
             normalizer_registry:
@@ -243,6 +384,19 @@ impl Default for CoordinatorRunState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_root(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "macc-coordinator-runtime-{}-{}",
+            label,
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ))
+    }
 
     fn state_with_parallel(original: usize) -> CoordinatorRunState {
         let mut s = CoordinatorRunState::new();
@@ -288,6 +442,331 @@ mod tests {
         s.effective_max_parallel = 0;
         assert_eq!(s.restore_parallel(), 0);
     }
+
+    // ---- L4-EVENTS-001: reliability event kind roundtrip tests ----
+
+    fn make_record(event_type: &str, payload: serde_json::Value) -> CoordinatorEventRecord {
+        CoordinatorEventRecord {
+            schema_version: crate::coordinator::COORDINATOR_EVENT_SCHEMA_VERSION.to_string(),
+            event_id: "evt-test".to_string(),
+            ts: "2026-04-13T00:00:00Z".to_string(),
+            source: "coordinator".to_string(),
+            task_id: Some("TEST-001".to_string()),
+            event_type: event_type.to_string(),
+            status: "ok".to_string(),
+            payload,
+            ..CoordinatorEventRecord::default()
+        }
+    }
+
+    #[test]
+    fn task_dispatched_event_roundtrip_with_session_id() {
+        let record = make_record(
+            "task_dispatched",
+            serde_json::json!({
+                "session_id": "tool-session-123"
+            }),
+        );
+        let ev = raw_event_to_runtime_event(&record).expect("should parse");
+        assert_eq!(
+            ev.kind,
+            CoordinatorRuntimeEventKind::TaskDispatched {
+                session_id: Some("tool-session-123".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn task_completed_event_roundtrip_with_session_id() {
+        let mut record = make_record(
+            "task_completed",
+            serde_json::json!({
+                "session_id": "tool-session-456"
+            }),
+        );
+        record.status = "success_without_changes".to_string();
+        let ev = raw_event_to_runtime_event(&record).expect("should parse");
+        assert_eq!(
+            ev.kind,
+            CoordinatorRuntimeEventKind::TaskCompleted {
+                status: "phase_done".to_string(),
+                session_id: Some("tool-session-456".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn salvage_attempted_event_roundtrip() {
+        let record = make_record(
+            "salvage_attempted",
+            serde_json::json!({
+                "branch": "ai/worker-01/task-1",
+                "worktree_path": "/tmp/wt/worker-01",
+                "outcome": "check_passed"
+            }),
+        );
+        let ev = raw_event_to_runtime_event(&record).expect("should parse");
+        assert_eq!(
+            ev.kind,
+            CoordinatorRuntimeEventKind::SalvageAttempted {
+                branch: "ai/worker-01/task-1".to_string(),
+                worktree_path: "/tmp/wt/worker-01".to_string(),
+                outcome: "check_passed".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn salvage_merged_event_roundtrip() {
+        let record = make_record(
+            "salvage_merged",
+            serde_json::json!({
+                "branch": "ai/worker-01/task-1",
+                "worktree_path": "/tmp/wt/worker-01",
+                "outcome": "merged"
+            }),
+        );
+        let ev = raw_event_to_runtime_event(&record).expect("should parse");
+        assert_eq!(
+            ev.kind,
+            CoordinatorRuntimeEventKind::SalvageMerged {
+                branch: "ai/worker-01/task-1".to_string(),
+                worktree_path: "/tmp/wt/worker-01".to_string(),
+                outcome: "merged".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn salvage_failed_event_roundtrip() {
+        let record = make_record(
+            "salvage_failed",
+            serde_json::json!({
+                "branch": "ai/worker-01/task-1",
+                "worktree_path": "/tmp/wt/worker-01",
+                "outcome": "merge_conflict"
+            }),
+        );
+        let ev = raw_event_to_runtime_event(&record).expect("should parse");
+        assert_eq!(
+            ev.kind,
+            CoordinatorRuntimeEventKind::SalvageFailed {
+                branch: "ai/worker-01/task-1".to_string(),
+                worktree_path: "/tmp/wt/worker-01".to_string(),
+                outcome: "merge_conflict".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn merge_gate_checked_event_roundtrip() {
+        let record = make_record(
+            "merge_gate_checked",
+            serde_json::json!({
+                "branch": "ai/worker-01/task-1",
+                "outcome": "passed"
+            }),
+        );
+        let ev = raw_event_to_runtime_event(&record).expect("should parse");
+        assert_eq!(
+            ev.kind,
+            CoordinatorRuntimeEventKind::MergeGateChecked {
+                branch: "ai/worker-01/task-1".to_string(),
+                outcome: "passed".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn merge_gate_merged_event_roundtrip() {
+        let record = make_record(
+            "merge_gate_merged",
+            serde_json::json!({
+                "branch": "ai/worker-01/task-1",
+                "outcome": "merged"
+            }),
+        );
+        let ev = raw_event_to_runtime_event(&record).expect("should parse");
+        assert_eq!(
+            ev.kind,
+            CoordinatorRuntimeEventKind::MergeGateMerged {
+                branch: "ai/worker-01/task-1".to_string(),
+                outcome: "merged".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn branch_tagged_abandoned_event_roundtrip() {
+        let record = make_record(
+            "branch_tagged_abandoned",
+            serde_json::json!({
+                "branch": "ai/worker-01/task-1",
+                "outcome": "retry_budget_exceeded"
+            }),
+        );
+        let ev = raw_event_to_runtime_event(&record).expect("should parse");
+        assert_eq!(
+            ev.kind,
+            CoordinatorRuntimeEventKind::BranchTaggedAbandoned {
+                branch: "ai/worker-01/task-1".to_string(),
+                outcome: "retry_budget_exceeded".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn sync_unmerged_branch_found_event_roundtrip() {
+        let record = make_record(
+            "sync_unmerged_branch_found",
+            serde_json::json!({
+                "branch": "ai/worker-01/task-2"
+            }),
+        );
+        let ev = raw_event_to_runtime_event(&record).expect("should parse");
+        assert_eq!(
+            ev.kind,
+            CoordinatorRuntimeEventKind::SyncUnmergedBranchFound {
+                branch: "ai/worker-01/task-2".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn sync_unmerged_branch_merged_event_roundtrip() {
+        let record = make_record(
+            "sync_unmerged_branch_merged",
+            serde_json::json!({
+                "branch": "ai/worker-01/task-2",
+                "outcome": "merged_successfully"
+            }),
+        );
+        let ev = raw_event_to_runtime_event(&record).expect("should parse");
+        assert_eq!(
+            ev.kind,
+            CoordinatorRuntimeEventKind::SyncUnmergedBranchMerged {
+                branch: "ai/worker-01/task-2".to_string(),
+                outcome: "merged_successfully".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn worktree_health_check_failed_event_roundtrip() {
+        let record = make_record(
+            "worktree_health_check_failed",
+            serde_json::json!({
+                "worktree_path": "/tmp/wt/worker-02",
+                "outcome": "dirty_index"
+            }),
+        );
+        let ev = raw_event_to_runtime_event(&record).expect("should parse");
+        assert_eq!(
+            ev.kind,
+            CoordinatorRuntimeEventKind::WorktreeHealthCheckFailed {
+                worktree_path: "/tmp/wt/worker-02".to_string(),
+                outcome: "dirty_index".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn worktree_orphan_cleaned_event_roundtrip() {
+        let record = make_record(
+            "worktree_orphan_cleaned",
+            serde_json::json!({
+                "worktree_path": "/tmp/wt/worker-03",
+                "sanitize_step": "reset_hard_base_branch"
+            }),
+        );
+        let ev = raw_event_to_runtime_event(&record).expect("should parse");
+        assert_eq!(
+            ev.kind,
+            CoordinatorRuntimeEventKind::WorktreeOrphanCleaned {
+                worktree_path: "/tmp/wt/worker-03".to_string(),
+                sanitize_step: "reset_hard_base_branch".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn dispatch_retry_limit_reached_event_roundtrip() {
+        let record = make_record(
+            "dispatch_retry_limit_reached",
+            serde_json::json!({
+                "task_id": "TEST-001",
+                "retry_count": 5
+            }),
+        );
+        let ev = raw_event_to_runtime_event(&record).expect("should parse");
+        assert_eq!(
+            ev.kind,
+            CoordinatorRuntimeEventKind::DispatchRetryLimitReached {
+                task_id: "TEST-001".to_string(),
+                retry_count: 5,
+            }
+        );
+    }
+
+    #[test]
+    fn reliability_events_with_missing_payload_fields_degrade_gracefully() {
+        // payload_str returns "" for missing keys — events still parse
+        let record = make_record("salvage_attempted", serde_json::json!({}));
+        let ev = raw_event_to_runtime_event(&record).expect("should parse even with empty payload");
+        assert_eq!(
+            ev.kind,
+            CoordinatorRuntimeEventKind::SalvageAttempted {
+                branch: String::new(),
+                worktree_path: String::new(),
+                outcome: String::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn coordinator_pid_guard_writes_pid_and_removes_on_drop() {
+        let root = temp_root("pid-guard-drop");
+        fs::create_dir_all(root.join(".macc").join("state")).expect("create state dir");
+        let pid_path = root.join(".macc").join("state").join("coordinator.pid");
+
+        {
+            let _guard = CoordinatorPidGuard::new(&root).expect("create pid guard");
+            let content = fs::read_to_string(&pid_path).expect("read pid");
+            assert_eq!(content, std::process::id().to_string());
+        }
+
+        assert!(!pid_path.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn coordinator_pid_guard_removes_file_during_panic_unwind() {
+        let root = temp_root("pid-guard-panic");
+        fs::create_dir_all(root.join(".macc").join("state")).expect("create state dir");
+        let pid_path = root.join(".macc").join("state").join("coordinator.pid");
+        let unwind = std::panic::catch_unwind(|| {
+            let _guard = CoordinatorPidGuard::new(&root).expect("create pid guard");
+            assert!(pid_path.exists());
+            panic!("simulate coordinator panic");
+        });
+        assert!(unwind.is_err());
+        assert!(!pid_path.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn coordinator_pid_guard_errors_when_state_dir_missing() {
+        let root = temp_root("pid-guard-missing-dir");
+        fs::create_dir_all(&root).expect("create root dir");
+        let pid_path = root.join(".macc").join("state").join("coordinator.pid");
+        let tmp_path = pid_path.with_extension("pid.tmp");
+
+        let result = CoordinatorPidGuard::new(&root);
+        assert!(result.is_err());
+        assert!(!pid_path.exists());
+        assert!(!tmp_path.exists());
+        let _ = fs::remove_dir_all(root);
+    }
 }
 
 pub fn raw_event_identity(event: &CoordinatorEventRecord) -> Option<(String, String, String)> {
@@ -299,6 +778,16 @@ pub fn raw_event_identity(event: &CoordinatorEventRecord) -> Option<(String, Str
     } else {
         Some((task_id, ts, source))
     }
+}
+
+/// Extract a string value from a JSON payload object, returning an empty
+/// string when the key is absent or the value is not a string.
+fn payload_str(payload: &serde_json::Value, key: &str) -> String {
+    payload
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .to_string()
 }
 
 pub fn raw_event_to_runtime_event(
@@ -314,6 +803,21 @@ pub fn raw_event_to_runtime_event(
         .to_string();
     let kind = match event_type {
         "heartbeat" => CoordinatorRuntimeEventKind::Heartbeat,
+        "task_dispatched" => CoordinatorRuntimeEventKind::TaskDispatched {
+            session_id: event
+                .payload
+                .get("session_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+        },
+        "task_completed" => CoordinatorRuntimeEventKind::TaskCompleted {
+            status: runtime_status,
+            session_id: event
+                .payload
+                .get("session_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+        },
         "progress" => CoordinatorRuntimeEventKind::Progress {
             status: runtime_status,
             phase: event_phase,
@@ -329,6 +833,72 @@ pub fn raw_event_to_runtime_event(
         "failed" => CoordinatorRuntimeEventKind::Failed {
             phase: event_phase,
             message: event_message,
+        },
+        // L4-EVENTS-001: reliability observability event kinds
+        // Metadata is read from the flat payload object.
+        "salvage_attempted" => CoordinatorRuntimeEventKind::SalvageAttempted {
+            branch: payload_str(&event.payload, "branch"),
+            worktree_path: payload_str(&event.payload, "worktree_path"),
+            outcome: payload_str(&event.payload, "outcome"),
+        },
+        "salvage_merged" => CoordinatorRuntimeEventKind::SalvageMerged {
+            branch: payload_str(&event.payload, "branch"),
+            worktree_path: payload_str(&event.payload, "worktree_path"),
+            outcome: payload_str(&event.payload, "outcome"),
+        },
+        "salvage_failed" => CoordinatorRuntimeEventKind::SalvageFailed {
+            branch: payload_str(&event.payload, "branch"),
+            worktree_path: payload_str(&event.payload, "worktree_path"),
+            outcome: payload_str(&event.payload, "outcome"),
+        },
+        "merge_gate_checked" => CoordinatorRuntimeEventKind::MergeGateChecked {
+            branch: payload_str(&event.payload, "branch"),
+            outcome: payload_str(&event.payload, "outcome"),
+        },
+        "merge_gate_merged" => CoordinatorRuntimeEventKind::MergeGateMerged {
+            branch: payload_str(&event.payload, "branch"),
+            outcome: payload_str(&event.payload, "outcome"),
+        },
+        "branch_tagged_abandoned" => CoordinatorRuntimeEventKind::BranchTaggedAbandoned {
+            branch: payload_str(&event.payload, "branch"),
+            outcome: payload_str(&event.payload, "outcome"),
+        },
+        "sync_unmerged_branch_found" => CoordinatorRuntimeEventKind::SyncUnmergedBranchFound {
+            branch: payload_str(&event.payload, "branch"),
+        },
+        "sync_unmerged_branch_merged" => CoordinatorRuntimeEventKind::SyncUnmergedBranchMerged {
+            branch: payload_str(&event.payload, "branch"),
+            outcome: payload_str(&event.payload, "outcome"),
+        },
+        "worktree_health_check_failed" => CoordinatorRuntimeEventKind::WorktreeHealthCheckFailed {
+            worktree_path: payload_str(&event.payload, "worktree_path"),
+            outcome: payload_str(&event.payload, "outcome"),
+        },
+        "worktree_orphan_cleaned" => CoordinatorRuntimeEventKind::WorktreeOrphanCleaned {
+            worktree_path: payload_str(&event.payload, "worktree_path"),
+            sanitize_step: payload_str(&event.payload, "sanitize_step"),
+        },
+        "dispatch_retry_limit_reached" => CoordinatorRuntimeEventKind::DispatchRetryLimitReached {
+            task_id: if task_id.is_empty() {
+                payload_str(&event.payload, "task_id")
+            } else {
+                task_id.clone()
+            },
+            retry_count: event
+                .payload
+                .get("retry_count")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|v| u32::try_from(v).ok())
+                .or_else(|| {
+                    event
+                        .payload
+                        .get("message")
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(|msg| msg.split("retry_count=").nth(1))
+                        .and_then(|tail| tail.split_whitespace().next())
+                        .and_then(|v| v.parse::<u32>().ok())
+                })
+                .unwrap_or(0),
         },
         _ => return None,
     };
@@ -540,6 +1110,7 @@ pub fn spawn_performer_job(
     executable_path: &Path,
     repo_root: &Path,
     task_id: &str,
+    base_branch: &str,
     worktree_path: &Path,
     event_tx: &tokio::sync::mpsc::UnboundedSender<CoordinatorJobEvent>,
     join_set: &mut tokio::task::JoinSet<()>,
@@ -595,6 +1166,7 @@ pub fn spawn_performer_job(
     let pid = child.id().map(|v| v as i64);
     let repo_root_owned = repo_root.to_path_buf();
     let task_id_owned = task_id.to_string();
+    let base_branch_owned = base_branch.to_string();
     let worktree_path_owned = worktree_path.to_path_buf();
     let event_source_owned = event_source.clone();
     let tx = event_tx.clone();
@@ -637,13 +1209,25 @@ pub fn spawn_performer_job(
                 (None, None)
             }
         } else {
-            (None, None)
+            if let Some(details) =
+                read_last_completion_details(&repo_root_owned, &task_id_owned, &event_source_owned)
+            {
+                (Some(details), Some("sqlite".to_string()))
+            } else {
+                (None, None)
+            }
         };
-        let success = if reported_success {
-            completion_details.is_some()
-        } else {
-            false
-        };
+        let ipc_completion_kind = completion_details
+            .as_ref()
+            .and_then(|details| details.result_kind);
+        let has_commits_ahead_of_base =
+            crate::git::has_commits_ahead(&worktree_path_owned, &base_branch_owned);
+        let completion_resolution = crate::coordinator::resolve_completion_authority(
+            ipc_completion_kind,
+            has_commits_ahead_of_base,
+            reported_success,
+        );
+        let success = completion_resolution.success;
         let status_text = if reported_success && completion_details.is_none() {
             "performer exited successfully but no phase_result event was persisted via coordinator IPC"
                 .to_string()
@@ -677,7 +1261,7 @@ pub fn spawn_performer_job(
                 .filter(|message| !message.trim().is_empty())
                 .unwrap_or(status_text),
             timed_out,
-            completion_kind: completion_details.and_then(|details| details.result_kind),
+            completion_kind: completion_resolution.completion_kind,
             completion_details_source,
             error_code,
             error_origin,
