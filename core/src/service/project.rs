@@ -5,10 +5,37 @@ use crate::tool::ToolDiagnostic;
 use crate::{MaccError, ProjectPaths, Result};
 
 pub fn ensure_initialized_paths(start_dir: &std::path::Path) -> Result<ProjectPaths> {
-    let paths =
-        crate::find_project_root(start_dir).unwrap_or_else(|_| ProjectPaths::from_root(start_dir));
+    if let Ok(paths) = crate::find_project_root(start_dir) {
+        crate::init(&paths, false)?;
+        return Ok(paths);
+    }
+    // No existing MACC project found. Auto-create only when inside a git repository,
+    // and at the git root — prevents silent project creation in arbitrary directories
+    // (e.g. $HOME) when macc is invoked outside a project.
+    let git_root = find_git_root(start_dir).ok_or_else(|| MaccError::Validation(
+        format!(
+            "No MACC project found in '{}' or any parent, and no git repository detected. \
+             Navigate to a git repository and run 'macc init'.",
+            start_dir.display()
+        )
+    ))?;
+    let paths = ProjectPaths::from_root(git_root);
     crate::init(&paths, false)?;
     Ok(paths)
+}
+
+fn find_git_root(start_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut current = start_dir.to_path_buf();
+    loop {
+        // Handles both .git directories (normal repos) and .git files (worktrees).
+        if current.join(".git").exists() {
+            return Some(current);
+        }
+        match current.parent() {
+            Some(parent) => current = parent.to_path_buf(),
+            None => return None,
+        }
+    }
 }
 
 pub fn run_doctor(

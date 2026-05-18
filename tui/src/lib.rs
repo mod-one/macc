@@ -67,6 +67,7 @@ pub fn run_tui_with_launch(mode: LaunchMode) -> Result<()> {
     if mode == LaunchMode::CoordinatorRun {
         state.goto_screen(Screen::CoordinatorLive);
         state.start_coordinator_command(CoordinatorCommand::Run);
+        state.coordinator_run_auto_quit = true;
     }
 
     run_app(&mut guard.terminal, &mut state)?;

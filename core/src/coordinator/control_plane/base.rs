@@ -1027,6 +1027,26 @@ pub async fn advance_tasks_native(
                 }
                 progressed = true;
             }
+            coordinator_engine::AdvanceTaskAction::BlockNoBranch { task_id } => {
+                // Task reached merge-ready state but has no branch (worktree
+                // cleared by ghost cleanup before the completion was applied).
+                // Transition to blocked so the coordinator can make progress
+                // instead of spinning with active > 0 forever.
+                if let Some(log) = logger {
+                    let _ = log.note(format!(
+                        "- Blocking task={} reason=no_branch_after_completion",
+                        task_id
+                    ));
+                }
+                let _ = coordinator_engine::apply_merge_result_in_registry(
+                    &mut registry,
+                    &task_id,
+                    false,
+                    "no branch recorded after completion; worktree was cleared by ghost cleanup",
+                    &now,
+                );
+                progressed = true;
+            }
         }
     }
     if progressed {
