@@ -1263,6 +1263,7 @@ pub async fn run_control_plane<B: ControlPlaneBackend + ?Sized>(
         match run_control_plane_cycle(backend, &mut controller, cycle).await {
             Ok(ControlPlaneDecision::Continue) => {
                 consecutive_transient_errors = 0;
+                backend.sleep_between_cycles().await?;
             }
             Ok(ControlPlaneDecision::Complete) => return Ok(()),
             Err(err) if err.is_transient() => {
@@ -1282,6 +1283,17 @@ pub async fn run_control_plane<B: ControlPlaneBackend + ?Sized>(
             Err(err) => return Err(err),
         }
     }
+}
+
+/// Returns true when a merge failure reason represents an actual conflict that
+/// requires operator intervention and justifies killing other running performers.
+///
+/// Transient failures — `precheck_clean` (dirty working tree), `verify_branch`,
+/// `verify_base`, and `timeout` — should be retried automatically without
+/// disturbing other running tasks.  Only `step=merge` (a genuine git conflict)
+/// needs the full operator-wait flow.
+fn is_operator_blocked_merge(reason: &str) -> bool {
+    reason.starts_with("failure:local_merge step=merge")
 }
 
 async fn run_control_plane_cycle<B: ControlPlaneBackend + ?Sized>(
@@ -1416,6 +1428,25 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
     }
 
     async fn on_blocked_merge(&mut self, task_id: &str, reason: &str) -> Result<()> {
+        if !is_operator_blocked_merge(reason) {
+            // Transient failure (e.g. precheck_clean, timeout, verify_branch).
+            // Do not kill other running performers or enter the operator-wait
+            // loop — just resume the task immediately so the merge is retried
+            // in the next advance cycle.  A short sleep lets any transient git
+            // or filesystem state settle before the retry.
+            if let Some(log) = self.logger {
+                let _ = log.note(format!(
+                    "- Merge retry pending task={} reason={} (transient; retrying next cycle)",
+                    task_id, reason
+                ));
+            }
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            resume_paused_task_merge(self.repo_root, task_id)?;
+            return Ok(());
+        }
+
+        // Actual merge conflict — pause all other performers and wait for
+        // an operator to resolve the conflict before continuing.
         for (tid, pid) in terminate_active_jobs(&self.run_state) {
             if let Some(log) = self.logger {
                 let _ = log.note(format!("- Sent TERM to active task={} pid={}", tid, pid));
