@@ -9,7 +9,7 @@ use macc_core::service::coordinator_workflow::{
     coordinator_command_emits_runtime_events, coordinator_command_from_name, CoordinatorCommand,
     CoordinatorCommandRequest,
 };
-use macc_core::{load_canonical_config, MaccError, Result};
+use macc_core::{find_project_root, load_canonical_config, MaccError, Result};
 use std::path::Path;
 use std::process::{Command as ProcessCommand, Stdio};
 
@@ -60,9 +60,16 @@ struct ProjectContext {
 impl ProjectContext {
     fn load(
         absolute_cwd: &Path,
-        engine: &crate::services::engine_provider::SharedEngine,
+        _engine: &crate::services::engine_provider::SharedEngine,
     ) -> Result<Self> {
-        let paths = engine.project_ensure_initialized_paths(absolute_cwd)?;
+        // Use find_project_root (no auto-create fallback): coordinator commands must
+        // run against an existing MACC project. Silent auto-init at the wrong CWD
+        // is what caused spurious project creation at $HOME and similar locations.
+        let paths = find_project_root(absolute_cwd).map_err(|_| MaccError::Validation(format!(
+            "No MACC project found in '{}' or any parent directory. \
+             Run 'macc init' in your repository root to initialize.",
+            absolute_cwd.display()
+        )))?;
         let canonical = load_canonical_config(&paths.config_path)?;
         let coordinator_cfg = canonical.automation.coordinator.clone();
         Ok(Self {
