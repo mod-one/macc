@@ -234,7 +234,7 @@ impl AppState {
             errors: Vec::new(),
             notices: Vec::new(),
             should_quit: false,
-            coordinator_run_auto_quit: false,
+            coordinator_run_auto_quit: true,
             screen_stack: vec![Screen::Home],
             selected_tool_index: 0,
             tool_field_index: 0,
