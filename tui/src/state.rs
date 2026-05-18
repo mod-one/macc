@@ -136,6 +136,9 @@ pub struct AppState {
     pub errors: Vec<String>,
     pub notices: Vec<String>,
     pub should_quit: bool,
+    /// When true, the TUI exits automatically when the coordinator run succeeds.
+    /// Set for `LaunchMode::CoordinatorRun` so `macc coordinator` is self-terminating.
+    pub coordinator_run_auto_quit: bool,
     pub screen_stack: Vec<Screen>,
     pub selected_tool_index: usize,
     pub tool_field_index: usize,
@@ -231,6 +234,7 @@ impl AppState {
             errors: Vec::new(),
             notices: Vec::new(),
             should_quit: false,
+            coordinator_run_auto_quit: false,
             screen_stack: vec![Screen::Home],
             selected_tool_index: 0,
             tool_field_index: 0,
@@ -1426,6 +1430,9 @@ impl AppState {
                     self.coordinator_running_elapsed_secs = None;
                     self.refresh_coordinator_snapshot();
                     self.refresh_coordinator_events();
+                    if self.coordinator_run_auto_quit {
+                        self.should_quit = true;
+                    }
                 }
                 Ok(CoordinatorManagedCommandState::Failed {
                     command,

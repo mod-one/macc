@@ -164,6 +164,12 @@ pub enum AdvanceTaskAction {
         base: String,
         merge_context: MergeTaskContext,
     },
+    /// Task is in a merge-ready state but has no branch recorded (e.g. the
+    /// worktree was cleared by ghost cleanup before the job-exit was applied).
+    /// Block it so the coordinator can make progress instead of spinning.
+    BlockNoBranch {
+        task_id: String,
+    },
 }
 
 /// Task metadata passed to the merge-fix hook so it can resolve conflicts
@@ -390,6 +396,11 @@ pub fn build_advance_actions(
                 }
                 let branch = task.branch().unwrap_or_default().to_string();
                 if branch.is_empty() {
+                    // Worktree/branch was cleared (e.g. by ghost cleanup) while
+                    // the job-exit completion raced ahead and set the task to
+                    // in_progress.  Block it so active > 0 does not spin the
+                    // coordinator forever.
+                    actions.push(AdvanceTaskAction::BlockNoBranch { task_id });
                     continue;
                 }
                 let base = task.base_branch("master");
