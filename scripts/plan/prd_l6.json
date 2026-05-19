@@ -598,6 +598,34 @@
         "risk_level": "medium",
         "validation_profile": "heavy"
       }
+    },
+    {
+      "id": "L6-CHECK-001",
+      "title": "check lot 6",
+      "category": "check",
+      "description": "Problem/Goal: The complete implementation of batch 6 'prd_l6.json' needs to be verified : The objective of this prd is to edit MACC to give the possibility of having TUI or WEB clients accessing the same process (for exemple 'macc coordinator') instance at the same time. - The goal is to make the web, TUI clients simple viewers, allowing them to view and modify configurations all process and command. - The TUI is the reference, as it is currently the most functional and complete. - However, if one client launches a process, the others are simply viewers if the client that launched it is still connected. Therefore, only one client can modify the process, and the others are viewers. A client can request and take control, and the other can accept or reject the request. - Even if no client is connected, the processes continue. The first client to connect takes control, not only viewing the processes but also having the right to modify them. Subsequent clients will be mere viewers. - And this is true for all processes in MACC, not just "macc coordinator". - Note that the architecture is of the type: core = business logic, Rust API = facade, CLI/TUI/WEB = clients: 1. It must be tool-agnostic! Use adapters if needed. 2. Scalable 3. Factored as much as possible 4. Modular",
+      "objective": "The complete implementation of batch 6 'prd_l6.json' needs to be verified",
+      "result": "a report file in '.macc/report/' and corrections of discrepancies if possible, and if not a significant exchange.",
+      "steps": [
+        "Check (1): check Goal : read description param and check",
+        "Check (2): check if (core, API, clients, etc.) are tool-agnostic! Use adapters if needed.",
+        "Check (3): check code : Scalable; Factored; Modular",
+        "Check (4): Apply corrections if necessary and if not too significant.",
+        "Run automation integration tests (automat/tests/run.sh)"
+      ],
+      "notes": "Tests (3) and (4) use a temp repo and read events.jsonl after the service calls to verify event emission. Use the existing append_coordinator_event_with_severity test patterns from coordinator/ipc.rs tests for reference. Test (1) requires importing CoordinatorRunState directly — place in core/src/coordinator/runtime.rs tests module or a core integration test.",
+      "exclusive_resources": [],
+      "dependencies": [
+        "L6-TEST-002"
+      ],
+      "priority": "0",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "cross-cutting",
+        "risk_level": "medium",
+        "validation_profile": "heavy"
+      }
     }
   ]
 }
