@@ -117,26 +117,20 @@ fn add_pool_worktree(repo: &Path, slot: &str, branch: &str) -> PathBuf {
     worktree
 }
 
-fn write_tool_sessions(
-    repo: &Path,
-    tool_id: &str,
-    worktree_path: &Path,
-    session_id: &str,
-    updated_at: &str,
-) {
+fn write_tool_sessions(repo: &Path, tool_id: &str, session_id: &str, updated_at: &str) {
+    // Pool format: session keyed by session_id (not by worktree path).
     let state_dir = repo.join(".macc/state");
     fs::create_dir_all(&state_dir).expect("create state dir");
     let payload = json!({
         "tools": {
             tool_id: {
                 "sessions": {
-                    worktree_path.to_string_lossy().to_string(): {
-                        "session_id": session_id,
-                        "updated_at": updated_at
+                    session_id: {
+                        "status": "available",
+                        "created_at": updated_at,
+                        "updated_at": updated_at,
+                        "last_used_at": updated_at
                     }
-                },
-                "leases": {
-                    session_id: { "status": "active" }
                 }
             }
         }
@@ -456,7 +450,8 @@ fn coordinator_reliability_chain_integration() {
         .expect("merged task");
     assert_eq!(merged_task.state, "merged");
 
-    // (7): warm worktree slot preferred.
+    // (7): slot with recent activity preferred when pool has a warm session.
+    // In the pool model, session warmth is tool-level; the tiebreak is recency.
     let (repo_e, _base_e) = make_test_repo("chain-e");
     let cold_wt = add_pool_worktree(&repo_e, "worker-01", "task/L4-INT-001-E-COLD");
     let warm_wt = add_pool_worktree(&repo_e, "worker-02", "task/L4-INT-001-E-WARM");
@@ -464,10 +459,13 @@ fn coordinator_reliability_chain_integration() {
         .checked_sub_signed(TimeDelta::seconds(15))
         .expect("fresh timestamp")
         .to_rfc3339_opts(SecondsFormat::Secs, true);
-    write_tool_sessions(&repo_e, "codex", &warm_wt, "sid-warm", &fresh);
+    write_tool_sessions(&repo_e, "codex", "sid-warm", &fresh);
     let registry_e = json!({ "tasks": [] });
+    // Give warm_wt recent activity so it wins the tiebreak.
+    let mut activity_e = std::collections::HashMap::new();
+    activity_e.insert(warm_wt.to_string_lossy().to_string(), chrono::Utc::now().timestamp() - 10);
     let (reused_e, prep_error_e) =
-        find_reusable_worktree_native(&repo_e, &registry_e, "codex", "main", 300, &std::collections::HashMap::new())
+        find_reusable_worktree_native(&repo_e, &registry_e, "codex", "main", 300, &activity_e)
             .expect("reuse scan");
     assert!(prep_error_e.is_none());
     let (picked, _, _, _, _) = reused_e.expect("expected reusable worktree");

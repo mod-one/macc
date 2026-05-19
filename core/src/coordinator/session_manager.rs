@@ -7,142 +7,6 @@ use std::time::Duration;
 
 const TOOL_SESSIONS_REL_PATH: &str = ".macc/state/tool-sessions.json";
 
-#[derive(Debug, Clone, Default)]
-pub struct SessionSealOutcome {
-    pub sealed: bool,
-    pub session_id: Option<String>,
-}
-
-pub fn seal_worktree_scoped_session(
-    repo_root: &Path,
-    tool_id: &str,
-    worktree_path: &Path,
-    task_id: &str,
-    now_iso: &str,
-) -> Result<SessionSealOutcome> {
-    if tool_id.trim().is_empty() {
-        return Ok(SessionSealOutcome::default());
-    }
-
-    let scope = read_session_scope(worktree_path).unwrap_or_else(|| "worktree".to_string());
-    if scope != "worktree" {
-        return Ok(SessionSealOutcome::default());
-    }
-
-    let sessions_path = repo_root.join(TOOL_SESSIONS_REL_PATH);
-    if !sessions_path.exists() {
-        return Ok(SessionSealOutcome::default());
-    }
-    let lock_dir = sessions_path.with_extension("json.lock");
-    acquire_lock(&lock_dir)?;
-
-    let result = (|| {
-        let raw = fs::read_to_string(&sessions_path).map_err(|e| MaccError::Io {
-            path: sessions_path.to_string_lossy().into(),
-            action: "read tool sessions state".into(),
-            source: e,
-        })?;
-        let mut root: Value = serde_json::from_str(&raw).map_err(|e| {
-            MaccError::Validation(format!(
-                "Failed to parse sessions file '{}': {}",
-                sessions_path.display(),
-                e
-            ))
-        })?;
-
-        let tools = root
-            .get_mut("tools")
-            .and_then(Value::as_object_mut)
-            .ok_or_else(|| {
-                MaccError::Validation("sessions file missing root .tools object".into())
-            })?;
-        let Some(tool) = tools.get_mut(tool_id).and_then(Value::as_object_mut) else {
-            return Ok(SessionSealOutcome::default());
-        };
-        let Some(sessions_obj) = tool.get_mut("sessions").and_then(Value::as_object_mut) else {
-            return Ok(SessionSealOutcome::default());
-        };
-
-        let key_candidates = worktree_key_candidates(worktree_path);
-        let mut selected_key: Option<String> = None;
-        let mut session_id: Option<String> = None;
-        for key in key_candidates {
-            let Some(candidate) = sessions_obj.get(&key) else {
-                continue;
-            };
-            let sid = candidate
-                .get("session_id")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            if sid.is_empty() {
-                continue;
-            }
-            selected_key = Some(key);
-            session_id = Some(sid.to_string());
-            break;
-        }
-
-        let (Some(selected_key), Some(session_id)) = (selected_key, session_id) else {
-            return Ok(SessionSealOutcome::default());
-        };
-
-        sessions_obj.remove(&selected_key);
-
-        let archived = tool
-            .entry("archived")
-            .or_insert_with(|| Value::Object(Map::new()))
-            .as_object_mut()
-            .ok_or_else(|| MaccError::Validation("sessions .archived must be an object".into()))?;
-        let archive_key = format!("{}-{}", task_id, now_iso.replace(':', ""));
-        archived.insert(
-            archive_key,
-            json!({
-                "task_id": task_id,
-                "session_id": session_id,
-                "sealed_at": now_iso,
-                "scope": "worktree",
-                "session_key": selected_key,
-                "worktree_path": worktree_path.to_string_lossy().to_string(),
-                "reason": "task_commit_completed",
-            }),
-        );
-
-        if let Some(leases_obj) = tool.get_mut("leases").and_then(Value::as_object_mut) {
-            if let Some(lease) = leases_obj
-                .get_mut(&session_id)
-                .and_then(Value::as_object_mut)
-            {
-                lease.insert("status".to_string(), Value::String("sealed".to_string()));
-                lease.insert("updated_at".to_string(), Value::String(now_iso.to_string()));
-            }
-        }
-
-        persist_sessions_file(&sessions_path, &root)?;
-
-        Ok(SessionSealOutcome {
-            sealed: true,
-            session_id: Some(session_id),
-        })
-    })();
-
-    release_lock(&lock_dir);
-    result
-}
-
-fn read_session_scope(worktree_path: &Path) -> Option<String> {
-    let tool_json_path = worktree_path.join(".macc/tool.json");
-    let raw = fs::read_to_string(tool_json_path).ok()?;
-    let parsed: Value = serde_json::from_str(&raw).ok()?;
-    Some(
-        parsed
-            .get("performer")
-            .and_then(|v| v.get("session"))
-            .and_then(|v| v.get("scope"))
-            .and_then(Value::as_str)
-            .unwrap_or("worktree")
-            .to_string(),
-    )
-}
 
 fn persist_sessions_file(path: &Path, value: &Value) -> Result<()> {
     let mut body = serde_json::to_string_pretty(value).map_err(|e| {
@@ -167,17 +31,6 @@ fn persist_sessions_file(path: &Path, value: &Value) -> Result<()> {
     Ok(())
 }
 
-fn worktree_key_candidates(worktree_path: &Path) -> Vec<String> {
-    let mut keys = Vec::new();
-    keys.push(worktree_path.to_string_lossy().to_string());
-    if let Ok(canon) = fs::canonicalize(worktree_path) {
-        let canon_s = canon.to_string_lossy().to_string();
-        if !keys.iter().any(|k| k == &canon_s) {
-            keys.push(canon_s);
-        }
-    }
-    keys
-}
 
 fn acquire_lock(lock_dir: &PathBuf) -> Result<()> {
     for _ in 0..80 {
@@ -460,7 +313,12 @@ pub fn restore_sessions(repo_root: &Path, name: &str, dry_run: bool) -> Result<S
                     ))
                 })?;
 
-            // Merge active sessions: snapshot entries fill in gaps (don't overwrite)
+            // Merge sessions: snapshot entries fill in gaps (don't overwrite existing).
+            // New-format entries (keyed by session_id, carrying a "status" field) are
+            // reset to "available" on restore so performers can claim them immediately.
+            // Old-format entries (keyed by worktree path, with a nested "session_id"
+            // sub-field) are copied as-is for backward compatibility but will be ignored
+            // by the pool lookup in the performers.
             if let Some(snap_sessions) = snap_tool.get("sessions").and_then(Value::as_object) {
                 let current_sessions = current_tool
                     .entry("sessions")
@@ -475,41 +333,32 @@ pub fn restore_sessions(repo_root: &Path, name: &str, dry_run: bool) -> Result<S
 
                 for (key, val) in snap_sessions {
                     if !current_sessions.contains_key(key) {
-                        current_sessions.insert(key.clone(), val.clone());
-                    }
-                }
-            }
-
-            // Merge leases: snapshot leases fill in gaps
-            if let Some(snap_leases) = snap_tool.get("leases").and_then(Value::as_object) {
-                let current_leases = current_tool
-                    .entry("leases")
-                    .or_insert_with(|| Value::Object(Map::new()))
-                    .as_object_mut()
-                    .ok_or_else(|| {
-                        MaccError::Validation(format!(
-                            "sessions .tools.{}.leases must be an object",
-                            tool_id
-                        ))
-                    })?;
-
-                for (key, val) in snap_leases {
-                    if !current_leases.contains_key(key) {
-                        // Reset lease status to "available" so performers can claim it
-                        let mut lease = val.clone();
-                        if let Some(obj) = lease.as_object_mut() {
-                            obj.insert(
-                                "status".to_string(),
-                                Value::String("available".to_string()),
-                            );
-                            obj.insert(
-                                "restored_at".to_string(),
-                                Value::String(
-                                    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-                                ),
-                            );
+                        let mut session_val = val.clone();
+                        // Reset new-format sessions to available; clear owner fields.
+                        if val.get("session_id").is_none() {
+                            if let Some(obj) = session_val.as_object_mut() {
+                                obj.insert(
+                                    "status".to_string(),
+                                    Value::String("available".to_string()),
+                                );
+                                obj.remove("owner_worktree");
+                                obj.remove("owner_task_id");
+                                obj.remove("owner_pid");
+                                obj.insert(
+                                    "heartbeat_epoch".to_string(),
+                                    serde_json::Value::Number(0.into()),
+                                );
+                                obj.insert(
+                                    "restored_at".to_string(),
+                                    Value::String(
+                                        chrono::Utc::now()
+                                            .format("%Y-%m-%dT%H:%M:%SZ")
+                                            .to_string(),
+                                    ),
+                                );
+                            }
                         }
-                        current_leases.insert(key.clone(), lease);
+                        current_sessions.insert(key.clone(), session_val);
                     }
                 }
             }
@@ -617,71 +466,48 @@ mod tests {
     }
 
     #[test]
-    fn seal_session_archives_only_matching_tool() {
-        let root = temp_dir("macc_session_manager");
-        let worktree = root.join(".macc/worktree/worker-01");
-        fs::create_dir_all(worktree.join(".macc")).expect("create worktree");
+    fn pool_session_stays_available_across_tasks() {
+        // Verify that a session in the pool remains available (not deleted or sealed)
+        // and can be found by subsequent tasks using the session_id key.
+        let root = temp_dir("macc_session_pool");
         fs::create_dir_all(root.join(".macc/state")).expect("create state dir");
-        fs::write(
-            worktree.join(".macc/tool.json"),
-            r#"{"id":"codex","performer":{"session":{"scope":"worktree"}}}"#,
-        )
-        .expect("write tool json");
 
         let sessions_path = root.join(TOOL_SESSIONS_REL_PATH);
         let sessions = json!({
             "tools": {
                 "codex": {
                     "sessions": {
-                        worktree.to_string_lossy().to_string(): {
-                            "session_id": "codex-sid",
+                        "codex-sid": {
+                            "status": "available",
+                            "created_at": "2026-02-01T00:00:00Z",
                             "updated_at": "2026-02-01T00:00:00Z"
                         }
-                    },
-                    "leases": {
-                        "codex-sid": { "status": "active", "owner_worktree": worktree.to_string_lossy().to_string() }
                     }
                 },
                 "gemini": {
                     "sessions": {
-                        worktree.to_string_lossy().to_string(): {
-                            "session_id": "gemini-sid",
+                        "gemini-sid": {
+                            "status": "available",
+                            "created_at": "2026-02-01T00:00:00Z",
                             "updated_at": "2026-02-01T00:00:00Z"
                         }
-                    },
-                    "leases": {
-                        "gemini-sid": { "status": "active", "owner_worktree": worktree.to_string_lossy().to_string() }
                     }
                 }
             }
         });
-        persist_sessions_file(&sessions_path, &sessions).expect("persist sessions seed");
+        persist_sessions_file(&sessions_path, &sessions).expect("seed sessions");
 
-        let outcome = seal_worktree_scoped_session(
-            &root,
-            "codex",
-            &worktree,
-            "TASK-1",
-            "2026-02-23T00:00:00Z",
-        )
-        .expect("seal session");
-        assert!(outcome.sealed);
-        assert_eq!(outcome.session_id.as_deref(), Some("codex-sid"));
-
-        let updated: Value = serde_json::from_str(&fs::read_to_string(&sessions_path).unwrap())
-            .expect("updated sessions json");
-        assert!(
-            updated["tools"]["codex"]["sessions"]
-                .as_object()
-                .map(|o| o.is_empty())
-                .unwrap_or(false),
-            "codex session should be removed from active sessions"
+        // Both sessions should still be present and available.
+        let state: Value =
+            serde_json::from_str(&fs::read_to_string(&sessions_path).unwrap()).unwrap();
+        assert_eq!(
+            state["tools"]["codex"]["sessions"]["codex-sid"]["status"].as_str(),
+            Some("available"),
+            "codex session should remain available"
         );
         assert_eq!(
-            updated["tools"]["gemini"]["sessions"][worktree.to_string_lossy().to_string()]
-                ["session_id"]
-                .as_str(),
-            Some("gemini-sid"),
+            state["tools"]["gemini"]["sessions"]["gemini-sid"]["status"].as_str(),
+            Some("available"),
             "gemini session must stay untouched"
         );
 
@@ -695,35 +521,26 @@ mod tests {
             "tools": {
                 "claude": {
                     "sessions": {
-                        "/tmp/worker-01": {
-                            "session_id": "claude-s1",
+                        "claude-s1": {
+                            "status": "available",
+                            "created_at": "2026-04-01T00:00:00Z",
                             "updated_at": "2026-04-01T00:00:00Z"
                         },
-                        "/tmp/worker-02": {
-                            "session_id": "claude-s2",
+                        "claude-s2": {
+                            "status": "available",
+                            "created_at": "2026-04-01T00:00:00Z",
                             "updated_at": "2026-04-01T00:00:00Z"
-                        }
-                    },
-                    "leases": {
-                        "claude-s1": { "status": "active" },
-                        "claude-s2": { "status": "active" }
-                    },
-                    "archived": {
-                        "TASK-1-20260401T000000Z": {
-                            "task_id": "TASK-1",
-                            "session_id": "claude-old",
-                            "sealed_at": "2026-04-01T00:00:00Z"
                         }
                     }
                 },
                 "codex": {
                     "sessions": {
-                        "/tmp/worker-03": {
-                            "session_id": "codex-s1",
+                        "codex-s1": {
+                            "status": "available",
+                            "created_at": "2026-04-01T00:00:00Z",
                             "updated_at": "2026-04-01T00:00:00Z"
                         }
-                    },
-                    "leases": {}
+                    }
                 }
             }
         });
@@ -740,7 +557,7 @@ mod tests {
         assert_eq!(meta.name, "test-snap");
         assert_eq!(meta.tool_count, 2);
         assert_eq!(meta.active_session_count, 3);
-        assert_eq!(meta.archived_session_count, 1);
+        assert_eq!(meta.archived_session_count, 0);
 
         // Verify snapshot file exists
         let snap = snapshot_path(&root, "test-snap").expect("snap path");
@@ -750,12 +567,12 @@ mod tests {
         let raw = fs::read_to_string(&snap).unwrap();
         let parsed: SessionSnapshot = serde_json::from_str(&raw).unwrap();
         assert_eq!(parsed.name, "test-snap");
-        assert!(
+        assert_eq!(
             parsed.tools["claude"]["sessions"]
                 .as_object()
                 .unwrap()
-                .len()
-                == 2
+                .len(),
+            2
         );
 
         let _ = fs::remove_dir_all(&root);
@@ -849,8 +666,8 @@ mod tests {
         let restored: Value =
             serde_json::from_str(&fs::read_to_string(&sessions_path).unwrap()).unwrap();
         assert_eq!(
-            restored["tools"]["claude"]["sessions"]["/tmp/worker-01"]["session_id"].as_str(),
-            Some("claude-s1")
+            restored["tools"]["claude"]["sessions"]["claude-s1"]["status"].as_str(),
+            Some("available")
         );
 
         let _ = fs::remove_dir_all(&root);
@@ -862,22 +679,22 @@ mod tests {
         seed_sessions_file(&root);
         save_sessions(&root, Some("snap")).expect("save");
 
-        // Modify an existing session — restore should NOT overwrite it
+        // Mark an existing session active — restore should NOT overwrite it
         let sessions_path = root.join(TOOL_SESSIONS_REL_PATH);
         let raw = fs::read_to_string(&sessions_path).unwrap();
         let mut current: Value = serde_json::from_str(&raw).unwrap();
-        current["tools"]["claude"]["sessions"]["/tmp/worker-01"]["session_id"] =
-            Value::String("claude-s1-NEW".to_string());
+        current["tools"]["claude"]["sessions"]["claude-s1"]["status"] =
+            Value::String("active".to_string());
         persist_sessions_file(&sessions_path, &current).expect("update");
 
         restore_sessions(&root, "snap", false).expect("restore");
 
         let after: Value =
             serde_json::from_str(&fs::read_to_string(&sessions_path).unwrap()).unwrap();
-        // Should keep the NEW value, not overwrite with snapshot
+        // Should keep the active status, not overwrite with snapshot's available
         assert_eq!(
-            after["tools"]["claude"]["sessions"]["/tmp/worker-01"]["session_id"].as_str(),
-            Some("claude-s1-NEW"),
+            after["tools"]["claude"]["sessions"]["claude-s1"]["status"].as_str(),
+            Some("active"),
             "existing session should not be overwritten by restore"
         );
 
@@ -915,17 +732,17 @@ mod tests {
 
         let restored: Value =
             serde_json::from_str(&fs::read_to_string(&sessions_path).unwrap()).unwrap();
-        // Leases should be reset to "available"
+        // Restored sessions should have status "available" and a restored_at timestamp.
         assert_eq!(
-            restored["tools"]["claude"]["leases"]["claude-s1"]["status"].as_str(),
+            restored["tools"]["claude"]["sessions"]["claude-s1"]["status"].as_str(),
             Some("available"),
-            "restored lease should be 'available'"
+            "restored session should be 'available'"
         );
         assert!(
-            restored["tools"]["claude"]["leases"]["claude-s1"]["restored_at"]
+            restored["tools"]["claude"]["sessions"]["claude-s1"]["restored_at"]
                 .as_str()
                 .is_some(),
-            "restored lease should have restored_at"
+            "restored session should have restored_at"
         );
 
         let _ = fs::remove_dir_all(&root);

@@ -87,26 +87,20 @@ fn add_pool_worktree(repo: &Path, slot: &str, task_id: &str) -> PathBuf {
     worktree
 }
 
-fn write_tool_sessions(
-    repo: &Path,
-    tool_id: &str,
-    worktree_path: &Path,
-    session_id: &str,
-    updated_at: &str,
-) {
+fn write_tool_sessions(repo: &Path, tool_id: &str, session_id: &str, updated_at: &str) {
+    // Pool format: session keyed by session_id (not by worktree path).
     let state_dir = repo.join(".macc/state");
     fs::create_dir_all(&state_dir).expect("create state dir");
     let payload = serde_json::json!({
         "tools": {
             tool_id: {
                 "sessions": {
-                    worktree_path.to_string_lossy().to_string(): {
-                        "session_id": session_id,
-                        "updated_at": updated_at
+                    session_id: {
+                        "status": "available",
+                        "created_at": updated_at,
+                        "updated_at": updated_at,
+                        "last_used_at": updated_at
                     }
-                },
-                "leases": {
-                    session_id: { "status": "active" }
                 }
             }
         }
@@ -120,6 +114,10 @@ fn write_tool_sessions(
 
 #[test]
 fn warm_slot_is_preferred_over_cold_slot() {
+    // In the pool model, session warmth is tool-level (not worktree-specific):
+    // both slots are equally "warm" when the pool has an available session.
+    // The tiebreak is recent slot activity — wt2 is preferred because it was
+    // used more recently.
     let (repo, _base) = make_clone_with_origin();
     let wt1 = add_pool_worktree(&repo, "worker-01", "L4-SES-WARM-001");
     let wt2 = add_pool_worktree(&repo, "worker-02", "L4-SES-WARM-002");
@@ -127,10 +125,14 @@ fn warm_slot_is_preferred_over_cold_slot() {
         .checked_sub_signed(chrono::TimeDelta::seconds(30))
         .expect("fresh ts")
         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    write_tool_sessions(&repo, "codex", &wt2, "sid-warm", &fresh);
+    write_tool_sessions(&repo, "codex", "sid-warm", &fresh);
+
+    // Give wt2 recent activity so it wins the tiebreak.
+    let now_epoch = chrono::Utc::now().timestamp();
+    let mut activity = HashMap::new();
+    activity.insert(wt2.to_string_lossy().to_string(), now_epoch - 10);
 
     let registry = serde_json::json!({ "tasks": [] });
-    let activity = HashMap::new();
     let (reused, prep_error) =
         find_reusable_worktree_native(&repo, &registry, "codex", "main", 300, &activity)
             .expect("reuse result");
@@ -140,7 +142,10 @@ fn warm_slot_is_preferred_over_cold_slot() {
         "unexpected prep error: {prep_error:?}"
     );
     let (picked, _, _, _, _) = reused.expect("expected reusable worktree");
-    assert_eq!(picked, wt2, "warm worktree should be selected first");
+    assert_eq!(
+        picked, wt2,
+        "slot with recent activity should be selected when warmth is tied"
+    );
     assert_ne!(picked, wt1);
 }
 
@@ -153,7 +158,7 @@ fn expired_session_is_treated_as_cold() {
         .checked_sub_signed(chrono::TimeDelta::seconds(3600))
         .expect("expired ts")
         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    write_tool_sessions(&repo, "codex", &wt2, "sid-expired", &expired);
+    write_tool_sessions(&repo, "codex", "sid-expired", &expired);
 
     let registry = serde_json::json!({ "tasks": [] });
     let activity = HashMap::new();

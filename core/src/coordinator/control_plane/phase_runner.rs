@@ -45,7 +45,7 @@ pub(super) fn ensure_tool_json_for_tool(
 pub(super) fn read_session_id_from_state(
     repo_root: &Path,
     tool_id: &str,
-    worktree_path: &Path,
+    _worktree_path: &Path,
 ) -> Option<String> {
     let path = repo_root.join(".macc/state/tool-sessions.json");
     let raw = std::fs::read_to_string(&path).ok()?;
@@ -55,17 +55,19 @@ pub(super) fn read_session_id_from_state(
         .get(tool_id)?
         .get("sessions")?
         .as_object()?;
-    // Try both as-is and canonicalized worktree path as lookup keys.
-    let key_plain = worktree_path.to_string_lossy().to_string();
-    let key_canon = std::fs::canonicalize(worktree_path)
-        .ok()
-        .map(|p| p.to_string_lossy().to_string());
-    for key in std::iter::once(&key_plain).chain(key_canon.iter()) {
-        if let Some(entry) = sessions.get(key.as_str()) {
-            let sid = entry.get("session_id")?.as_str().unwrap_or_default();
-            if !sid.is_empty() {
-                return Some(sid.to_string());
-            }
+    // Pool model: sessions are keyed by session_id; find the first available one.
+    // Old-format entries (keyed by worktree path) carry a nested "session_id"
+    // sub-field and are skipped — they belong to the previous per-worktree scheme.
+    for (session_id, entry) in sessions {
+        if entry.get("session_id").is_some() {
+            continue;
+        }
+        let status = entry
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("available");
+        if status != "active" {
+            return Some(session_id.clone());
         }
     }
     None
