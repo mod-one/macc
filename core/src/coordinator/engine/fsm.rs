@@ -1764,10 +1764,7 @@ pub async fn run_native_control_plane(
         Ok(_) => {}
         Err(e) => {
             if let Some(log) = logger {
-                let _ = log.note(format!(
-                    "- Warning: startup session recovery failed: {}",
-                    e
-                ));
+                let _ = log.note(format!("- Warning: startup session recovery failed: {}", e));
             }
         }
     }

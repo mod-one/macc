@@ -336,9 +336,9 @@ fn offer_saved_config_restore(paths: &ProjectPaths, ui: &dyn LifecycleUi) {
         };
         ui.info(&format!("  {}. {} ({}){}", i + 1, p.name, date, desc_part));
     }
-    let answer = match ui.prompt_line(
-        "Restore a saved configuration? Enter number or press Enter to skip: ",
-    ) {
+    let answer = match ui
+        .prompt_line("Restore a saved configuration? Enter number or press Enter to skip: ")
+    {
         Ok(a) => a,
         Err(_) => return,
     };
@@ -369,7 +369,10 @@ fn offer_saved_config_restore(paths: &ProjectPaths, ui: &dyn LifecycleUi) {
     let merged = match mgr.restore(name, &current_config, None) {
         Ok(m) => m,
         Err(e) => {
-            ui.warn(&format!("Could not restore configuration '{}': {}", name, e));
+            ui.warn(&format!(
+                "Could not restore configuration '{}': {}",
+                name, e
+            ));
             return;
         }
     };
@@ -393,11 +396,10 @@ fn offer_saved_config_restore(paths: &ProjectPaths, ui: &dyn LifecycleUi) {
 /// If saved session snapshots exist for this project, list them and
 /// interactively offer to restore one. All errors are non-fatal.
 fn offer_saved_session_restore(paths: &ProjectPaths, ui: &dyn LifecycleUi) {
-    let snapshots =
-        match crate::coordinator::session_manager::list_saved_sessions(&paths.root) {
-            Ok(s) if !s.is_empty() => s,
-            _ => return,
-        };
+    let snapshots = match crate::coordinator::session_manager::list_saved_sessions(&paths.root) {
+        Ok(s) if !s.is_empty() => s,
+        _ => return,
+    };
     ui.info(&format!(
         "Found {} saved session snapshot(s) for this project:",
         snapshots.len()
@@ -413,12 +415,11 @@ fn offer_saved_session_restore(paths: &ProjectPaths, ui: &dyn LifecycleUi) {
             s.tool_count
         ));
     }
-    let answer = match ui
-        .prompt_line("Restore a session snapshot? Enter number or press Enter to skip: ")
-    {
-        Ok(a) => a,
-        Err(_) => return,
-    };
+    let answer =
+        match ui.prompt_line("Restore a session snapshot? Enter number or press Enter to skip: ") {
+            Ok(a) => a,
+            Err(_) => return,
+        };
     let answer = answer.trim().to_string();
     if answer.is_empty() {
         return;

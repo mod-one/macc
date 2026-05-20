@@ -453,13 +453,10 @@ pub fn reset_stale_active_sessions(repo_root: &Path, lease_ttl_seconds: u64) -> 
         })?;
         let now = chrono::Utc::now().timestamp();
         let mut reset_count = 0usize;
-        let recovered_at = chrono::Utc::now()
-            .format("%Y-%m-%dT%H:%M:%SZ")
-            .to_string();
+        let recovered_at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
         if let Some(tools) = root.get_mut("tools").and_then(Value::as_object_mut) {
             for (_tool_id, tool_val) in tools.iter_mut() {
-                if let Some(sessions) =
-                    tool_val.get_mut("sessions").and_then(Value::as_object_mut)
+                if let Some(sessions) = tool_val.get_mut("sessions").and_then(Value::as_object_mut)
                 {
                     for (_sid, entry) in sessions.iter_mut() {
                         // Skip old-format entries (keyed by worktree path).
@@ -891,18 +888,12 @@ mod tests {
 
         // Fresh session untouched.
         assert_eq!(codex["fresh-sid"]["status"].as_str(), Some("active"));
-        assert_eq!(
-            codex["fresh-sid"]["owner_task_id"].as_str(),
-            Some("TASK-A")
-        );
+        assert_eq!(codex["fresh-sid"]["owner_task_id"].as_str(), Some("TASK-A"));
 
         // Stale sessions reset.
         assert_eq!(codex["stale-sid"]["status"].as_str(), Some("available"));
         assert!(codex["stale-sid"]["owner_task_id"].is_null());
-        assert_eq!(
-            codex["stale-sid"]["heartbeat_epoch"].as_i64(),
-            Some(0)
-        );
+        assert_eq!(codex["stale-sid"]["heartbeat_epoch"].as_i64(), Some(0));
         assert!(codex["stale-sid"]["recovered_at"].as_str().is_some());
 
         assert_eq!(codex["zero-hb-sid"]["status"].as_str(), Some("available"));

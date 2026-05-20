@@ -292,8 +292,9 @@ Performers cannot commit without it. Fix this first:\n\
 
     // Auto-save sessions after a full coordinator run completes and on graceful
     // stop, so 'macc init' can offer them on the next fresh checkout.
-    let should_autosave_sessions = matches!(command, CoordinatorCommand::Stop { graceful: true, .. })
-        || matches!(command, CoordinatorCommand::RunControlPlane);
+    let should_autosave_sessions =
+        matches!(command, CoordinatorCommand::Stop { graceful: true, .. })
+            || matches!(command, CoordinatorCommand::RunControlPlane);
     if should_autosave_sessions {
         match macc_core::coordinator::session_manager::save_sessions(&paths.root, None) {
             Ok(meta) => {
