@@ -58,6 +58,8 @@ pub fn init(
     if wizard {
         run_init_wizard(&paths, engine, ui)?;
     }
+    offer_saved_config_restore(&paths, ui);
+    offer_saved_session_restore(&paths, ui);
     let checks = engine.doctor(&paths);
     ui.print_checks(&checks);
     Ok(())
@@ -175,6 +177,13 @@ pub fn apply(
     }
     let report = engine.apply(&paths, &mut plan, allow_user_scope)?;
     ui.info(&report.render_cli());
+    // Auto-save configuration to user-level profiles so 'macc init' can offer it
+    // on the next fresh checkout. Failure is non-fatal.
+    if let Ok(mgr) = crate::profile::ProfileManager::new() {
+        if let Err(e) = mgr.save_auto(&paths.root, &canonical) {
+            ui.warn(&format!("Note: configuration auto-save failed: {}", e));
+        }
+    }
     ui.mark_apply_completed(&paths)?;
     Ok(())
 }
@@ -297,6 +306,143 @@ fn run_plan_then_optional_apply(
     ui.info(&report.render_cli());
     ui.mark_apply_completed(paths)?;
     Ok(())
+}
+
+/// If saved configurations exist for this project, list them and interactively
+/// offer to restore one. All errors and rejections are silently swallowed —
+/// this is a convenience enhancement, not a required step.
+fn offer_saved_config_restore(paths: &ProjectPaths, ui: &dyn LifecycleUi) {
+    let mgr = match crate::profile::ProfileManager::new() {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+    let profiles = match mgr.list_for_project(&paths.root) {
+        Ok(p) if !p.is_empty() => p,
+        _ => return,
+    };
+    ui.info(&format!(
+        "Found {} saved configuration(s) for this project:",
+        profiles.len()
+    ));
+    for (i, p) in profiles.iter().enumerate() {
+        let date = p
+            .created_at
+            .as_deref()
+            .map(|d| &d[..10.min(d.len())])
+            .unwrap_or("-");
+        let desc_part = match p.description.as_deref() {
+            Some(d) if !d.is_empty() => format!(" — {}", d),
+            _ => String::new(),
+        };
+        ui.info(&format!("  {}. {} ({}){}", i + 1, p.name, date, desc_part));
+    }
+    let answer = match ui.prompt_line(
+        "Restore a saved configuration? Enter number or press Enter to skip: ",
+    ) {
+        Ok(a) => a,
+        Err(_) => return,
+    };
+    let answer = answer.trim().to_string();
+    if answer.is_empty() {
+        return;
+    }
+    let idx = match answer
+        .parse::<usize>()
+        .ok()
+        .and_then(|n| n.checked_sub(1))
+        .filter(|&i| i < profiles.len())
+    {
+        Some(i) => i,
+        None => {
+            ui.warn(&format!("Invalid selection '{}', skipping.", answer));
+            return;
+        }
+    };
+    let name = &profiles[idx].name;
+    let current_config = match crate::load_canonical_config(&paths.config_path) {
+        Ok(c) => c,
+        Err(e) => {
+            ui.warn(&format!("Could not read current config: {}", e));
+            return;
+        }
+    };
+    let merged = match mgr.restore(name, &current_config, None) {
+        Ok(m) => m,
+        Err(e) => {
+            ui.warn(&format!("Could not restore configuration '{}': {}", name, e));
+            return;
+        }
+    };
+    let yaml = match merged.to_yaml() {
+        Ok(y) => y,
+        Err(e) => {
+            ui.warn(&format!(
+                "Could not serialize restored configuration: {}",
+                e
+            ));
+            return;
+        }
+    };
+    if let Err(e) = std::fs::write(&paths.config_path, yaml.as_bytes()) {
+        ui.warn(&format!("Could not write restored configuration: {}", e));
+        return;
+    }
+    ui.info(&format!("Configuration '{}' restored.", name));
+}
+
+/// If saved session snapshots exist for this project, list them and
+/// interactively offer to restore one. All errors are non-fatal.
+fn offer_saved_session_restore(paths: &ProjectPaths, ui: &dyn LifecycleUi) {
+    let snapshots =
+        match crate::coordinator::session_manager::list_saved_sessions(&paths.root) {
+            Ok(s) if !s.is_empty() => s,
+            _ => return,
+        };
+    ui.info(&format!(
+        "Found {} saved session snapshot(s) for this project:",
+        snapshots.len()
+    ));
+    for (i, s) in snapshots.iter().enumerate() {
+        let date = &s.saved_at[..10.min(s.saved_at.len())];
+        ui.info(&format!(
+            "  {}. {} ({}, {} session(s) across {} tool(s))",
+            i + 1,
+            s.name,
+            date,
+            s.active_session_count,
+            s.tool_count
+        ));
+    }
+    let answer = match ui
+        .prompt_line("Restore a session snapshot? Enter number or press Enter to skip: ")
+    {
+        Ok(a) => a,
+        Err(_) => return,
+    };
+    let answer = answer.trim().to_string();
+    if answer.is_empty() {
+        return;
+    }
+    let idx = match answer
+        .parse::<usize>()
+        .ok()
+        .and_then(|n| n.checked_sub(1))
+        .filter(|&i| i < snapshots.len())
+    {
+        Some(i) => i,
+        None => {
+            ui.warn(&format!("Invalid selection '{}', skipping.", answer));
+            return;
+        }
+    };
+    let name = &snapshots[idx].name;
+    match crate::coordinator::session_manager::restore_sessions(&paths.root, name, false) {
+        Ok(_) => ui.info(&format!("Session snapshot '{}' restored.", name)),
+        Err(e) => ui.warn(&format!(
+            "Could not restore session snapshot '{}': {}",
+            name, e
+        )),
+    }
 }
 
 fn run_init_wizard(paths: &ProjectPaths, engine: &dyn Engine, ui: &dyn LifecycleUi) -> Result<()> {

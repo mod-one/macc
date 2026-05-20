@@ -290,17 +290,21 @@ Performers cannot commit without it. Fix this first:\n\
         }
     }
 
-    // Auto-save sessions on graceful stop so they can be restored in future runs.
-    if matches!(command, CoordinatorCommand::Stop { graceful: true, .. }) {
+    // Auto-save sessions after a full coordinator run completes and on graceful
+    // stop, so 'macc init' can offer them on the next fresh checkout.
+    let should_autosave_sessions = matches!(command, CoordinatorCommand::Stop { graceful: true, .. })
+        || matches!(command, CoordinatorCommand::RunControlPlane);
+    if should_autosave_sessions {
         match macc_core::coordinator::session_manager::save_sessions(&paths.root, None) {
             Ok(meta) => {
                 println!(
-                    "Sessions auto-saved as '{}' ({} active, {} archived).",
-                    meta.name, meta.active_session_count, meta.archived_session_count
+                    "Sessions auto-saved as '{}' ({} session(s) across {} tool(s)).",
+                    meta.name, meta.active_session_count, meta.tool_count
                 );
             }
+            Err(e) if e.to_string().contains("Nothing to save") => {}
             Err(e) => {
-                eprintln!("Warning: could not auto-save sessions: {}", e);
+                eprintln!("Note: session auto-save failed: {}", e);
             }
         }
     }
