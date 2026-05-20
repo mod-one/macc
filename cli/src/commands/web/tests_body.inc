@@ -1189,6 +1189,7 @@ async fn audit_log_entry_includes_expected_fields_for_put_request() {
 
 #[tokio::test]
 async fn plan_endpoint_returns_structured_preview_with_diffs() {
+    let _guard = apply_test_guard();
     let root = temp_root("plan-default");
     fs::create_dir_all(&root).expect("create root");
     let paths = ProjectPaths::from_root(&root);
@@ -1252,6 +1253,7 @@ async fn plan_endpoint_returns_structured_preview_with_diffs() {
 
 #[tokio::test]
 async fn plan_endpoint_filters_tools_and_accepts_offline_scope_fields() {
+    let _guard = apply_test_guard();
     let root = temp_root("plan-filtered");
     fs::create_dir_all(&root).expect("create root");
     let engine = Arc::new(WebTestEngine::with_fixture_plan_from_overrides());
@@ -1299,6 +1301,7 @@ async fn plan_endpoint_filters_tools_and_accepts_offline_scope_fields() {
 
 #[tokio::test]
 async fn plan_endpoint_maps_missing_config_to_api_error() {
+    let _guard = apply_test_guard();
     let root = temp_root("plan-missing-config");
     fs::create_dir_all(&root).expect("create root");
     let state = test_web_state(
@@ -1336,6 +1339,7 @@ async fn plan_endpoint_maps_missing_config_to_api_error() {
 
 #[tokio::test]
 async fn plan_endpoint_rejects_user_scope_without_explicit_opt_in() {
+    let _guard = apply_test_guard();
     let root = temp_root("plan-user-scope-rejected");
     fs::create_dir_all(&root).expect("create root");
     write_test_config(&root);

@@ -808,14 +808,6 @@ mod tests {
     }
 
     impl MockProcessManager {
-        fn healthy() -> Self {
-            Self {
-                health: Arc::new(Mutex::new(HealthCheckResult::Healthy)),
-                start_result: Arc::new(Mutex::new(Ok(()))),
-                pid: Some(1234),
-            }
-        }
-
         fn crash_then_recover() -> Self {
             // Start as crashed; after start_coordinator(), health returns Healthy.
             let health = Arc::new(Mutex::new(HealthCheckResult::Crashed {

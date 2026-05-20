@@ -28,7 +28,7 @@ use super::sanitize::{prepare_clean_worktree, SanitizeOptions};
 use super::{
     dispatch::select_dispatch_candidate,
     merge_gate::{merge_gate_check, MergeGateResult},
-    sanitize::{maybe_rollback_new_worktree_on_sanitize_failure, sanitize_worktree_to_base},
+    sanitize::maybe_rollback_new_worktree_on_sanitize_failure,
 };
 
 pub trait CoordinatorLog: Sync {
@@ -80,17 +80,6 @@ fn aggregate_performer_logs_after_completion(
             }
         }
     }
-}
-
-#[cfg(test)]
-fn resolve_dispatch_cooldown_seconds(
-    env_cfg: &CoordinatorEnvConfig,
-    coordinator: Option<&crate::config::CoordinatorConfig>,
-) -> u64 {
-    let cfg = CoordinatorConfigResolved::resolve(coordinator);
-    env_cfg
-        .dispatch_cooldown_seconds
-        .unwrap_or(cfg.dispatch_cooldown_seconds)
 }
 
 #[cfg(test)]
@@ -2131,8 +2120,9 @@ mod tests {
         maybe_rollback_new_worktree_on_sanitize_failure, merge_gate_check, prepare_clean_worktree,
         record_dispatch_retry_or_block, refresh_task_active_session_id_in_registry,
         select_dispatch_candidate, should_emit_priority_zero_dispatch_skip, MergeGateResult,
-        RollbackWorktreeOptions, SanitizeOptions,
+        SanitizeOptions,
     };
+    use crate::coordinator::control_plane::sanitize::RollbackWorktreeOptions;
     use crate::coordinator::model::TaskRegistry;
     use crate::coordinator::runtime::CoordinatorRunState;
     use rusqlite::Connection;

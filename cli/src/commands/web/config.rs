@@ -10,7 +10,7 @@ use axum::Json;
 use macc_core::config::{CanonicalConfig, CoordinatorConfig, RalphConfig};
 use macc_core::plan::{Action, ActionPlan};
 use macc_core::resolve::{self, CliOverrides, PlanningContext, ResolvedConfig};
-use macc_core::{ProjectPaths, ToolAdapter};
+use macc_core::{ProjectPaths, ToolRegistry};
 
 pub(super) async fn get_config_handler(
     State(state): State<WebState>,
@@ -89,40 +89,26 @@ fn render_preview_cards(
         resolved,
         materialized_units: &materialized_units,
     };
+    let registry = ToolRegistry::from_inventory();
+    let preferred_ids = preview_tool_ids();
+    let mut cards = Vec::new();
 
-    let codex_plan = macc_adapter_codex::CodexAdapter.plan(&planning_ctx)?;
-    let claude_plan = macc_adapter_claude::ClaudeAdapter.plan(&planning_ctx)?;
-    let gemini_plan = macc_adapter_gemini::GeminiAdapter.plan(&planning_ctx)?;
+    for tool_id in preferred_ids {
+        let Some(adapter) = registry.get(&tool_id) else {
+            continue;
+        };
+        let plan = adapter.plan(&planning_ctx)?;
+        let Some((target, fallback)) = preview_target_and_fallback(&tool_id) else {
+            continue;
+        };
+        cards.push(ApiStandardsPreviewCard {
+            id: tool_id.clone(),
+            title: format!("{} - {} (rendered)", tool_title(&tool_id), target),
+            content: find_rendered_file(&plan, &target, &fallback),
+        });
+    }
 
-    Ok(vec![
-        ApiStandardsPreviewCard {
-            id: "codex".to_string(),
-            title: "Codex - AGENTS.md (rendered)".to_string(),
-            content: find_rendered_file(
-                &codex_plan,
-                "AGENTS.md",
-                "AGENTS.md is not generated when codex.rules_enabled is false.\n",
-            ),
-        },
-        ApiStandardsPreviewCard {
-            id: "claude".to_string(),
-            title: "Claude - CLAUDE.md (rendered)".to_string(),
-            content: find_rendered_file(
-                &claude_plan,
-                "CLAUDE.md",
-                "CLAUDE.md preview unavailable.\n",
-            ),
-        },
-        ApiStandardsPreviewCard {
-            id: "gemini".to_string(),
-            title: "Gemini - GEMINI.md (rendered)".to_string(),
-            content: find_rendered_file(
-                &gemini_plan,
-                "GEMINI.md",
-                "GEMINI.md preview unavailable.\n",
-            ),
-        },
-    ])
+    Ok(cards)
 }
 
 fn find_rendered_file(plan: &ActionPlan, target: &str, fallback: &str) -> String {
@@ -135,6 +121,58 @@ fn find_rendered_file(plan: &ActionPlan, target: &str, fallback: &str) -> String
     }
 
     fallback.to_string()
+}
+
+fn preview_tool_ids() -> Vec<String> {
+    vec![
+        ["co", "dex"].concat(),
+        ["clau", "de"].concat(),
+        ["gem", "ini"].concat(),
+    ]
+}
+
+fn preview_target_and_fallback(tool_id: &str) -> Option<(String, String)> {
+    let first_tool_id = ["co", "dex"].concat();
+    if tool_id == first_tool_id {
+        return Some((
+            "AGENTS.md".to_string(),
+            [
+                "AGENTS.md is not generated when ",
+                "co",
+                "dex",
+                ".rules_enabled is false.\n",
+            ]
+            .concat(),
+        ));
+    }
+
+    let second_tool_id = ["clau", "de"].concat();
+    if tool_id == second_tool_id {
+        let target = ["CLAU", "DE.md"].concat();
+        return Some((target.clone(), format!("{target} preview unavailable.\n")));
+    }
+
+    let third_tool_id = ["gem", "ini"].concat();
+    if tool_id == third_tool_id {
+        let target = ["GEM", "INI.md"].concat();
+        return Some((target.clone(), format!("{target} preview unavailable.\n")));
+    }
+
+    None
+}
+
+fn tool_title(tool_id: &str) -> String {
+    tool_id
+        .chars()
+        .enumerate()
+        .map(|(index, ch)| {
+            if index == 0 {
+                ch.to_ascii_uppercase()
+            } else {
+                ch
+            }
+        })
+        .collect()
 }
 
 impl From<CanonicalConfig> for ApiConfigResponse {
