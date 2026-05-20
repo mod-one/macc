@@ -68,11 +68,13 @@ impl ProjectContext {
         // Use find_project_root (no auto-create fallback): coordinator commands must
         // run against an existing MACC project. Silent auto-init at the wrong CWD
         // is what caused spurious project creation at $HOME and similar locations.
-        let paths = find_project_root(absolute_cwd).map_err(|_| MaccError::Validation(format!(
-            "No MACC project found in '{}' or any parent directory. \
+        let paths = find_project_root(absolute_cwd).map_err(|_| {
+            MaccError::Validation(format!(
+                "No MACC project found in '{}' or any parent directory. \
              Run 'macc init' in your repository root to initialize.",
-            absolute_cwd.display()
-        )))?;
+                absolute_cwd.display()
+            ))
+        })?;
         let canonical = load_canonical_config(&paths.config_path)?;
         let coordinator_cfg = canonical.automation.coordinator.clone();
         Ok(Self {

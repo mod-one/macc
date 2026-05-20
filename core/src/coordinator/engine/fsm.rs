@@ -167,9 +167,7 @@ pub enum AdvanceTaskAction {
     /// Task is in a merge-ready state but has no branch recorded (e.g. the
     /// worktree was cleared by ghost cleanup before the job-exit was applied).
     /// Block it so the coordinator can make progress instead of spinning.
-    BlockNoBranch {
-        task_id: String,
-    },
+    BlockNoBranch { task_id: String },
 }
 
 /// Task metadata passed to the merge-fix hook so it can resolve conflicts

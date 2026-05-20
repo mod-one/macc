@@ -1,8 +1,8 @@
+use super::base::CoordinatorLog;
 use crate::coordinator::helpers::{append_coordinator_event_with_severity, now_iso_coordinator};
 use crate::coordinator::runtime::CoordinatorRunState;
 use crate::Result;
 use std::path::Path;
-use super::base::CoordinatorLog;
 
 pub(super) type SanitizeStepFailure = Option<&'static str>;
 

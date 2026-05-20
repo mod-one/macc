@@ -1,16 +1,3 @@
-use crate::config::CoordinatorConfigResolved;
-use crate::coordinator::{engine as coordinator_engine, runtime as coordinator_runtime};
-use crate::coordinator::helpers::{
-    append_coordinator_event_with_severity, build_non_task_worker_slug, count_pool_worktrees,
-    find_reusable_worktree_native, is_worktree_activity_recent, now_iso_coordinator,
-    recompute_resource_locks_from_tasks, score_worktree_session_warmth, set_registry_updated_at,
-    write_worktree_prd_for_task,
-};
-use crate::coordinator::runtime::{CoordinatorJob, CoordinatorRunState};
-use crate::coordinator::types::CoordinatorEnvConfig;
-use crate::{MaccError, Result};
-use std::collections::{BTreeMap, HashMap};
-use std::path::{Path, PathBuf};
 use super::base::{
     mark_task_merged_from_merge_gate, resolve_rate_limit_fallback_enabled, retry_count_for_task,
     CoordinatorLog,
@@ -20,6 +7,19 @@ use super::phase_runner::{
     append_task_lifecycle_event_with_session, ensure_tool_json_for_tool, read_session_id_from_state,
 };
 use super::sanitize::{maybe_rollback_new_worktree_on_sanitize_failure, sanitize_worktree_to_base};
+use crate::config::CoordinatorConfigResolved;
+use crate::coordinator::helpers::{
+    append_coordinator_event_with_severity, build_non_task_worker_slug, count_pool_worktrees,
+    find_reusable_worktree_native, is_worktree_activity_recent, now_iso_coordinator,
+    recompute_resource_locks_from_tasks, score_worktree_session_warmth, set_registry_updated_at,
+    write_worktree_prd_for_task,
+};
+use crate::coordinator::runtime::{CoordinatorJob, CoordinatorRunState};
+use crate::coordinator::types::CoordinatorEnvConfig;
+use crate::coordinator::{engine as coordinator_engine, runtime as coordinator_runtime};
+use crate::{MaccError, Result};
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
 
 fn ensure_expected_worktree_branch(worktree_path: &Path, expected_branch: &str) -> Result<bool> {
     let current_branch = crate::git::current_branch(worktree_path)?;
@@ -264,7 +264,11 @@ pub(super) fn claim_task_in_registry(
     coordinator_engine::apply_dispatch_claim_in_registry(registry, &claim_update)?;
     recompute_resource_locks_from_tasks(registry);
     set_registry_updated_at(registry);
-    crate::coordinator::state::coordinator_state_registry_save(repo_root, &BTreeMap::new(), registry)?;
+    crate::coordinator::state::coordinator_state_registry_save(
+        repo_root,
+        &BTreeMap::new(),
+        registry,
+    )?;
     if let Some(log) = logger {
         let _ = log.note(format!(
             "- Lifecycle task={} stage=claim persisted session_id={}",
@@ -362,7 +366,11 @@ pub(super) async fn launch_performer(
         crate::coordinator::state::coordinator_state_registry_load(repo_root, &BTreeMap::new())?;
     coordinator_engine::apply_dispatch_pid_in_registry(&mut registry, &claim.task_id, pid)?;
     set_registry_updated_at(&mut registry);
-    crate::coordinator::state::coordinator_state_registry_save(repo_root, &BTreeMap::new(), &registry)?;
+    crate::coordinator::state::coordinator_state_registry_save(
+        repo_root,
+        &BTreeMap::new(),
+        &registry,
+    )?;
     if let Some(log) = logger {
         let _ = log.note(format!("- Lifecycle task={} stage=run", claim.task_id));
     }
@@ -413,10 +421,15 @@ pub(super) async fn run_dispatch_pipeline(
 ) -> Result<usize> {
     let mut dispatched = 0usize;
     while dispatched < remaining_budget {
-        if state.effective_max_parallel > 0 && state.active_jobs.len() >= state.effective_max_parallel {
+        if state.effective_max_parallel > 0
+            && state.active_jobs.len() >= state.effective_max_parallel
+        {
             break;
         }
-        let mut registry = crate::coordinator::state::coordinator_state_registry_load(repo_root, &BTreeMap::new())?;
+        let mut registry = crate::coordinator::state::coordinator_state_registry_load(
+            repo_root,
+            &BTreeMap::new(),
+        )?;
         let config = build_task_selector_config(canonical, env_cfg, cfg, coordinator, state);
         let Some(candidate) = select_dispatch_candidate(&registry, &config) else {
             break;
@@ -505,16 +518,36 @@ pub(super) async fn run_dispatch_pipeline(
                 }
             }
         }
-        let worktree = acquire_worktree_for_dispatch(repo_root, &registry, &candidate, cfg, state, logger).await?;
-        let claim = claim_task_in_registry(repo_root, &candidate, &worktree, &mut registry, logger)?;
-        let pid = launch_performer(repo_root, prd_file, canonical, coordinator, env_cfg, state, logger, &claim).await?;
+        let worktree =
+            acquire_worktree_for_dispatch(repo_root, &registry, &candidate, cfg, state, logger)
+                .await?;
+        let claim =
+            claim_task_in_registry(repo_root, &candidate, &worktree, &mut registry, logger)?;
+        let pid = launch_performer(
+            repo_root,
+            prd_file,
+            canonical,
+            coordinator,
+            env_cfg,
+            state,
+            logger,
+            &claim,
+        )
+        .await?;
         let _ = append_task_lifecycle_event_with_session(
             repo_root,
             "task_dispatched",
             &claim.task_id,
             "dev",
             "started",
-            &format!("task {} dispatched tool={} worktree={} pid={}", claim.task_id, claim.tool, claim.worktree_path.display(), pid.map(|v| v.to_string()).unwrap_or_else(|| "unknown".to_string())),
+            &format!(
+                "task {} dispatched tool={} worktree={} pid={}",
+                claim.task_id,
+                claim.tool,
+                claim.worktree_path.display(),
+                pid.map(|v| v.to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+            ),
             claim.active_session_id.as_deref(),
         );
         state.active_jobs.insert(
@@ -533,7 +566,12 @@ pub(super) async fn run_dispatch_pipeline(
         state.dispatch_retry_not_before.remove(&claim.task_id);
         dispatched += 1;
         state.dispatched_total_run += 1;
-        if dispatch_limit_reached(repo_root, state, env_cfg.max_dispatch.unwrap_or(cfg.max_dispatch), logger) {
+        if dispatch_limit_reached(
+            repo_root,
+            state,
+            env_cfg.max_dispatch.unwrap_or(cfg.max_dispatch),
+            logger,
+        ) {
             break;
         }
     }

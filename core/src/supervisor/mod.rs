@@ -619,8 +619,8 @@ mod tests {
         let hint = CoordinatorImprovementHint {
             problem_class: "coordinator_crash".to_string(),
             detection_hook: "watchdog_health_check".to_string(),
-            suggested_coordinator_behavior:
-                "implement exponential backoff before restart".to_string(),
+            suggested_coordinator_behavior: "implement exponential backoff before restart"
+                .to_string(),
             suggested_prd_task: Some("L6-COORD-001".to_string()),
         };
         let json = serde_json::to_string(&hint).expect("serialize");
@@ -633,8 +633,8 @@ mod tests {
         let hint = CoordinatorImprovementHint {
             problem_class: "orphaned_tasks_on_crash".to_string(),
             detection_hook: "registry_scan_on_startup".to_string(),
-            suggested_coordinator_behavior:
-                "scan for orphaned tasks and reset them on startup".to_string(),
+            suggested_coordinator_behavior: "scan for orphaned tasks and reset them on startup"
+                .to_string(),
             suggested_prd_task: None,
         };
         let json = serde_json::to_string(&hint).expect("serialize");
@@ -650,8 +650,8 @@ mod tests {
         report.improvement_hints = vec![CoordinatorImprovementHint {
             problem_class: "coordinator_crash".to_string(),
             detection_hook: "watchdog_health_check".to_string(),
-            suggested_coordinator_behavior:
-                "implement exponential backoff before restart".to_string(),
+            suggested_coordinator_behavior: "implement exponential backoff before restart"
+                .to_string(),
             suggested_prd_task: None,
         }];
         let json = serde_json::to_string_pretty(&report).expect("serialize");

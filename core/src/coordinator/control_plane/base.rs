@@ -19,18 +19,18 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use super::dispatch::{
-    acquire_worktree_for_dispatch, claim_task_in_registry, dispatch_limit_reached, launch_performer,
-    run_dispatch_pipeline, select_dispatch_candidate,
+    acquire_worktree_for_dispatch, claim_task_in_registry, dispatch_limit_reached,
+    launch_performer, run_dispatch_pipeline, select_dispatch_candidate,
 };
 use super::merge_gate::{merge_gate_check, MergeGateResult};
 use super::phase_runner::{
-    append_task_lifecycle_event_with_session, ensure_tool_json_for_tool, read_session_id_from_state,
-    refresh_task_active_session_id_in_registry, task_active_session_id_from_registry,
-    NativePhaseExecutor,
+    append_task_lifecycle_event_with_session, ensure_tool_json_for_tool,
+    read_session_id_from_state, refresh_task_active_session_id_in_registry,
+    task_active_session_id_from_registry, NativePhaseExecutor,
 };
 use super::sanitize::{
-    maybe_rollback_new_worktree_on_sanitize_failure, prepare_clean_worktree, sanitize_worktree_to_base,
-    SanitizeOptions,
+    maybe_rollback_new_worktree_on_sanitize_failure, prepare_clean_worktree,
+    sanitize_worktree_to_base, SanitizeOptions,
 };
 
 pub trait CoordinatorLog: Sync {
@@ -103,7 +103,10 @@ fn record_dispatch_retry_or_block(
     logger: Option<&dyn CoordinatorLog>,
 ) -> Result<bool> {
     let retry_count = {
-        let entry = state.dispatch_retry_count.entry(task_id.to_string()).or_insert(0);
+        let entry = state
+            .dispatch_retry_count
+            .entry(task_id.to_string())
+            .or_insert(0);
         *entry += 1;
         *entry
     };
@@ -2630,15 +2633,9 @@ mod tests {
 
         let mut state = CoordinatorRunState::new();
         for _ in 0..4 {
-            let blocked = record_dispatch_retry_or_block(
-                &repo,
-                &mut state,
-                "L5-CTRL-004",
-                2,
-                5,
-                None,
-            )
-            .expect("record retry");
+            let blocked =
+                record_dispatch_retry_or_block(&repo, &mut state, "L5-CTRL-004", 2, 5, None)
+                    .expect("record retry");
             assert!(!blocked);
         }
         let blocked = record_dispatch_retry_or_block(&repo, &mut state, "L5-CTRL-004", 2, 5, None)
@@ -2647,11 +2644,9 @@ mod tests {
         assert!(!state.dispatch_retry_count.contains_key("L5-CTRL-004"));
         assert!(!state.dispatch_retry_not_before.contains_key("L5-CTRL-004"));
 
-        let registry = crate::coordinator::state::coordinator_state_registry_load(
-            &repo,
-            &BTreeMap::new(),
-        )
-        .expect("load registry");
+        let registry =
+            crate::coordinator::state::coordinator_state_registry_load(&repo, &BTreeMap::new())
+                .expect("load registry");
         let registry = TaskRegistry::from_value(&registry).expect("typed registry");
         let task = registry.find_task("L5-CTRL-004").expect("task exists");
         assert_eq!(task.state, "blocked");

@@ -133,7 +133,9 @@ fn score_worktree_session_warmth_from_state(
         let age = match ts_str {
             Some(s) => chrono::DateTime::parse_from_rfc3339(s)
                 .ok()
-                .map(|ts| now_epoch.saturating_sub(ts.with_timezone(&chrono::Utc).timestamp()) as u64)
+                .map(|ts| {
+                    now_epoch.saturating_sub(ts.with_timezone(&chrono::Utc).timestamp()) as u64
+                })
                 .unwrap_or(0),
             None => 0, // no timestamp — freshly created
         };

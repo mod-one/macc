@@ -7,7 +7,6 @@ use std::time::Duration;
 
 const TOOL_SESSIONS_REL_PATH: &str = ".macc/state/tool-sessions.json";
 
-
 fn persist_sessions_file(path: &Path, value: &Value) -> Result<()> {
     let mut body = serde_json::to_string_pretty(value).map_err(|e| {
         MaccError::Validation(format!(
@@ -30,7 +29,6 @@ fn persist_sessions_file(path: &Path, value: &Value) -> Result<()> {
     })?;
     Ok(())
 }
-
 
 fn acquire_lock(lock_dir: &PathBuf) -> Result<()> {
     for _ in 0..80 {
@@ -351,9 +349,7 @@ pub fn restore_sessions(repo_root: &Path, name: &str, dry_run: bool) -> Result<S
                                 obj.insert(
                                     "restored_at".to_string(),
                                     Value::String(
-                                        chrono::Utc::now()
-                                            .format("%Y-%m-%dT%H:%M:%SZ")
-                                            .to_string(),
+                                        chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
                                     ),
                                 );
                             }

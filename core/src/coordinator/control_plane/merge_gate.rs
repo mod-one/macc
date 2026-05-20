@@ -7,7 +7,11 @@ pub(super) enum MergeGateResult {
     NoBranchProceed,
 }
 
-pub(super) fn merge_gate_check(task_id: &str, base_branch: &str, repo_root: &Path) -> MergeGateResult {
+pub(super) fn merge_gate_check(
+    task_id: &str,
+    base_branch: &str,
+    repo_root: &Path,
+) -> MergeGateResult {
     let mut branch_candidates = Vec::new();
     let prefixes = [
         format!("task/{}", task_id.to_ascii_lowercase()),

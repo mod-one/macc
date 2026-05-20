@@ -1252,7 +1252,11 @@ mod tests {
 
     // ── build_supervisor_report: improvement hints ─────────────────────────────
 
-    fn basic_crash_report(max_restarts_exceeded: bool, orphaned: bool, events_empty: bool) -> CrashRecoveryReport {
+    fn basic_crash_report(
+        max_restarts_exceeded: bool,
+        orphaned: bool,
+        events_empty: bool,
+    ) -> CrashRecoveryReport {
         CrashRecoveryReport {
             timestamp: "2026-04-28T00:00:00Z".to_string(),
             crash_evidence: CrashEvidence {
