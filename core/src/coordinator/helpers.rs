@@ -423,13 +423,13 @@ fn prepare_reused_worktree_base(
     // Fetch is best-effort: a network failure should not permanently block
     // worktree reuse.  This mirrors the behaviour of prepare_clean_worktree
     // which only hard-fails on fetch when fail_on_fetch_error is set.
-    if crate::git::git_remote_exists(worktree_path, "origin")? {
-        if !crate::git::fetch(worktree_path, "origin")? {
-            tracing::warn!(
-                "prepare_reused_worktree_base: fetch failed for {}, continuing",
-                worktree_path.display()
-            );
-        }
+    if crate::git::git_remote_exists(worktree_path, "origin")?
+        && !crate::git::fetch(worktree_path, "origin")?
+    {
+        tracing::warn!(
+            "prepare_reused_worktree_base: fetch failed for {}, continuing",
+            worktree_path.display()
+        );
     }
     if !crate::git::reset_hard(worktree_path, base_branch)? {
         return Ok((false, false));

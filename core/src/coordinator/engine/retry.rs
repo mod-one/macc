@@ -247,7 +247,7 @@ pub(super) fn resolve_retry_strategy(
         reason,
         outcome: BlockOutcome::TerminalFailure {
             error: error_details,
-            tool_error,
+            tool_error: Box::new(tool_error),
             now_ts,
         },
     }

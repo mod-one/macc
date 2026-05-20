@@ -212,7 +212,7 @@ fn performer_is_running(pid: Option<u32>) -> bool {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
-        return matches!(status, Ok(s) if s.success());
+        matches!(status, Ok(s) if s.success())
     }
 
     #[cfg(not(unix))]
@@ -369,11 +369,7 @@ impl CrashRecoveryReport {
         fs::create_dir_all(report_dir)?;
 
         // Sanitize the timestamp for use as a filename component.
-        let ts_safe = self
-            .timestamp
-            .replace(':', "-")
-            .replace('.', "-")
-            .replace('+', "-");
+        let ts_safe = self.timestamp.replace([':', '.', '+'], "-");
         let filename = format!("crash-recovery-{}.json", ts_safe);
         let path = report_dir.join(&filename);
 
@@ -498,7 +494,7 @@ impl ModeCRecovery {
         };
 
         // Step 3: Save session snapshot.
-        let ts_safe = ts.replace(':', "-").replace('.', "-").replace('+', "-");
+        let ts_safe = ts.replace([':', '.', '+'], "-");
         let snapshot_name = format!("crash-recovery-pre-restart-{}", ts_safe);
         let session_snapshot_path = match save_session_snapshot(
             &self.config.tool_sessions_path,

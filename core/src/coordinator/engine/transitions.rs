@@ -242,14 +242,14 @@ pub(super) fn apply_state_transitions(
                     error.message.clone(),
                 );
                 runtime.last_error = Some(reason.clone());
-                store_classified_error_in_extra(runtime, tool_error, *now_ts);
+                store_classified_error_in_extra(runtime, tool_error.as_ref(), *now_ts);
                 task.touch_state_changed(now);
                 JobCompletionResult {
                     should_retry: false,
                     status_label: "failed",
                     detail: reason.clone(),
                     completion_kind: None,
-                    tool_error: tool_error.clone(),
+                    tool_error: tool_error.as_ref().clone(),
                 }
             }
         },

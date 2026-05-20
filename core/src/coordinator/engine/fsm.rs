@@ -1067,7 +1067,7 @@ pub(super) enum BlockOutcome {
     InvalidInput,
     TerminalFailure {
         error: CompletionErrorDetails,
-        tool_error: Option<ToolError>,
+        tool_error: Box<Option<ToolError>>,
         now_ts: u64,
     },
 }

@@ -127,15 +127,13 @@ pub(super) fn maybe_rollback_new_worktree_on_sanitize_failure(
     state: &mut CoordinatorRunState,
     task_id: &str,
     sanitize_step: &str,
-    rollback_path: Option<&Path>,
-    worktree_was_newly_created: bool,
-    rollback_enabled: bool,
+    rollback: RollbackWorktreeOptions<'_>,
     logger: Option<&dyn CoordinatorLog>,
 ) -> bool {
-    if !rollback_enabled || !worktree_was_newly_created {
+    if !rollback.enabled || !rollback.was_newly_created {
         return false;
     }
-    let Some(path) = rollback_path else {
+    let Some(path) = rollback.path else {
         return false;
     };
 
@@ -178,4 +176,10 @@ pub(super) fn maybe_rollback_new_worktree_on_sanitize_failure(
             false
         }
     }
+}
+#[derive(Debug, Clone, Copy)]
+pub(super) struct RollbackWorktreeOptions<'a> {
+    pub(super) path: Option<&'a Path>,
+    pub(super) was_newly_created: bool,
+    pub(super) enabled: bool,
 }

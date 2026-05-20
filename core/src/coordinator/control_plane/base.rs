@@ -1,11 +1,9 @@
 use crate::config::CoordinatorConfigResolved;
 use crate::coordinator::helpers::{
-    append_coordinator_event, append_coordinator_event_with_severity, build_non_task_worker_slug,
-    count_pool_worktrees, find_reusable_worktree_native, is_worktree_activity_recent,
-    now_iso_coordinator, recompute_resource_locks_from_tasks, score_worktree_session_warmth,
-    set_registry_updated_at, write_worktree_prd_for_task,
+    append_coordinator_event, append_coordinator_event_with_severity, now_iso_coordinator,
+    recompute_resource_locks_from_tasks, set_registry_updated_at,
 };
-use crate::coordinator::ipc::{ensure_performer_ipc_listener, read_performer_ipc_addr};
+use crate::coordinator::ipc::ensure_performer_ipc_listener;
 use crate::coordinator::model::{PrdInput, Task, TaskRegistry};
 use crate::coordinator::rate_limit::{RateLimitInfo, ToolThrottleState, E602_QUOTA_EXHAUSTED};
 use crate::coordinator::runtime::{
@@ -15,22 +13,22 @@ use crate::coordinator::types::CoordinatorEnvConfig;
 use crate::coordinator::{engine as coordinator_engine, runtime as coordinator_runtime};
 use crate::{MaccError, Result};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::path::Path;
+#[cfg(test)]
+use std::time::Duration;
+use std::time::Instant;
 
-use super::dispatch::{
-    acquire_worktree_for_dispatch, claim_task_in_registry, dispatch_limit_reached,
-    launch_performer, run_dispatch_pipeline, select_dispatch_candidate,
-};
-use super::merge_gate::{merge_gate_check, MergeGateResult};
+use super::dispatch::{dispatch_limit_reached, run_dispatch_pipeline, DispatchPipelineContext};
 use super::phase_runner::{
-    append_task_lifecycle_event_with_session, ensure_tool_json_for_tool,
-    read_session_id_from_state, refresh_task_active_session_id_in_registry,
+    append_task_lifecycle_event_with_session, refresh_task_active_session_id_in_registry,
     task_active_session_id_from_registry, NativePhaseExecutor,
 };
-use super::sanitize::{
-    maybe_rollback_new_worktree_on_sanitize_failure, prepare_clean_worktree,
-    sanitize_worktree_to_base, SanitizeOptions,
+use super::sanitize::{prepare_clean_worktree, SanitizeOptions};
+#[cfg(test)]
+use super::{
+    dispatch::select_dispatch_candidate,
+    merge_gate::{merge_gate_check, MergeGateResult},
+    sanitize::{maybe_rollback_new_worktree_on_sanitize_failure, sanitize_worktree_to_base},
 };
 
 pub trait CoordinatorLog: Sync {
@@ -84,6 +82,7 @@ fn aggregate_performer_logs_after_completion(
     }
 }
 
+#[cfg(test)]
 fn resolve_dispatch_cooldown_seconds(
     env_cfg: &CoordinatorEnvConfig,
     coordinator: Option<&crate::config::CoordinatorConfig>,
@@ -94,6 +93,7 @@ fn resolve_dispatch_cooldown_seconds(
         .unwrap_or(cfg.dispatch_cooldown_seconds)
 }
 
+#[cfg(test)]
 fn record_dispatch_retry_or_block(
     repo_root: &Path,
     state: &mut CoordinatorRunState,
@@ -167,13 +167,6 @@ fn record_dispatch_retry_or_block(
         );
     }
     Ok(false)
-}
-
-fn resolve_session_cache_ttl_seconds(
-    coordinator: Option<&crate::config::CoordinatorConfig>,
-) -> u64 {
-    let cfg = CoordinatorConfigResolved::resolve(coordinator);
-    cfg.session_cache_ttl_seconds
 }
 
 fn resolve_merge_timeout_seconds(
@@ -541,31 +534,7 @@ fn handle_phase_tool_unavailability(
     Ok(())
 }
 
-fn emit_dispatch_skipped(
-    repo_root: &Path,
-    logger: Option<&dyn CoordinatorLog>,
-    task_id: &str,
-    reason: &str,
-    detail: &str,
-) {
-    let msg = format!(
-        "dispatch skipped task={} reason={} detail={}",
-        task_id, reason, detail
-    );
-    let _ = append_coordinator_event_with_severity(
-        repo_root,
-        "dispatch_skipped",
-        task_id,
-        "dev",
-        "skipped",
-        &msg,
-        "warning",
-    );
-    if let Some(log) = logger {
-        let _ = log.note(format!("- {}", msg));
-    }
-}
-
+#[cfg(test)]
 fn should_emit_priority_zero_dispatch_skip(state: &mut CoordinatorRunState, task_id: &str) -> bool {
     if state.last_priority_zero_dispatch_block_task_id.as_deref() == Some(task_id) {
         return false;
@@ -2141,14 +2110,16 @@ pub async fn dispatch_ready_tasks_native(
         max_dispatch_total.saturating_sub(state.dispatched_total_run)
     };
     run_dispatch_pipeline(
-        repo_root,
-        canonical,
-        coordinator,
-        env_cfg,
-        prd_file,
-        state,
-        logger,
-        &cfg,
+        DispatchPipelineContext {
+            repo_root,
+            canonical,
+            coordinator,
+            env_cfg,
+            prd_file,
+            state,
+            logger,
+            cfg: &cfg,
+        },
         remaining_budget,
     )
     .await
@@ -2160,7 +2131,7 @@ mod tests {
         maybe_rollback_new_worktree_on_sanitize_failure, merge_gate_check, prepare_clean_worktree,
         record_dispatch_retry_or_block, refresh_task_active_session_id_in_registry,
         select_dispatch_candidate, should_emit_priority_zero_dispatch_skip, MergeGateResult,
-        SanitizeOptions,
+        RollbackWorktreeOptions, SanitizeOptions,
     };
     use crate::coordinator::model::TaskRegistry;
     use crate::coordinator::runtime::CoordinatorRunState;
@@ -2521,9 +2492,11 @@ mod tests {
             &mut state,
             "L5-CTRL-002",
             "reset_hard_base_branch",
-            Some(&worktree_path),
-            true,
-            true,
+            RollbackWorktreeOptions {
+                path: Some(&worktree_path),
+                was_newly_created: true,
+                enabled: true,
+            },
             None,
         );
 
@@ -2557,9 +2530,11 @@ mod tests {
             &mut state,
             "L5-CTRL-002",
             "reset_hard_base_branch",
-            Some(&worktree_path),
-            true,
-            false,
+            RollbackWorktreeOptions {
+                path: Some(&worktree_path),
+                was_newly_created: true,
+                enabled: false,
+            },
             None,
         );
 
@@ -2594,9 +2569,11 @@ mod tests {
             &mut state,
             "L5-CTRL-002",
             "reset_hard_base_branch",
-            Some(&worktree_path),
-            false,
-            true,
+            RollbackWorktreeOptions {
+                path: Some(&worktree_path),
+                was_newly_created: false,
+                enabled: true,
+            },
             None,
         );
 

@@ -6,7 +6,10 @@ use super::merge_gate::{merge_gate_check, MergeGateResult};
 use super::phase_runner::{
     append_task_lifecycle_event_with_session, ensure_tool_json_for_tool, read_session_id_from_state,
 };
-use super::sanitize::{maybe_rollback_new_worktree_on_sanitize_failure, sanitize_worktree_to_base};
+use super::sanitize::{
+    maybe_rollback_new_worktree_on_sanitize_failure, sanitize_worktree_to_base,
+    RollbackWorktreeOptions,
+};
 use crate::config::CoordinatorConfigResolved;
 use crate::coordinator::helpers::{
     append_coordinator_event_with_severity, build_non_task_worker_slug, count_pool_worktrees,
@@ -36,24 +39,42 @@ enum WorktreeSlot {
 }
 
 #[derive(Debug, Clone)]
-struct AcquiredWorktree {
+pub(super) struct AcquiredWorktree {
     path: PathBuf,
     branch: String,
-    is_new: bool,
     last_commit: String,
     active_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
-struct DispatchClaim {
+pub(super) struct DispatchClaim {
     task_id: String,
     worktree_path: PathBuf,
     branch: String,
-    session_id: String,
     tool: String,
     base_branch: String,
-    last_commit: String,
     active_session_id: Option<String>,
+}
+
+pub(super) struct LaunchPerformerContext<'a> {
+    pub(super) repo_root: &'a Path,
+    pub(super) prd_file: &'a Path,
+    pub(super) canonical: &'a crate::config::CanonicalConfig,
+    pub(super) coordinator: Option<&'a crate::config::CoordinatorConfig>,
+    pub(super) env_cfg: &'a CoordinatorEnvConfig,
+    pub(super) state: &'a mut CoordinatorRunState,
+    pub(super) logger: Option<&'a dyn CoordinatorLog>,
+}
+
+pub(super) struct DispatchPipelineContext<'a> {
+    pub(super) repo_root: &'a Path,
+    pub(super) canonical: &'a crate::config::CanonicalConfig,
+    pub(super) coordinator: Option<&'a crate::config::CoordinatorConfig>,
+    pub(super) env_cfg: &'a CoordinatorEnvConfig,
+    pub(super) prd_file: &'a Path,
+    pub(super) state: &'a mut CoordinatorRunState,
+    pub(super) logger: Option<&'a dyn CoordinatorLog>,
+    pub(super) cfg: &'a CoordinatorConfigResolved,
 }
 
 fn build_task_selector_config(
@@ -184,7 +205,6 @@ pub(super) async fn acquire_worktree_for_dispatch(
         return Ok(AcquiredWorktree {
             path,
             branch,
-            is_new: false,
             last_commit,
             active_session_id,
         });
@@ -210,9 +230,11 @@ pub(super) async fn acquire_worktree_for_dispatch(
             state,
             &task.id,
             failed_step,
-            Some(&created.path),
-            true,
-            cfg.remove_worktree_on_sanitize_failure,
+            RollbackWorktreeOptions {
+                path: Some(&created.path),
+                was_newly_created: true,
+                enabled: cfg.remove_worktree_on_sanitize_failure,
+            },
             logger,
         );
         return Err(MaccError::Coordinator {
@@ -233,7 +255,6 @@ pub(super) async fn acquire_worktree_for_dispatch(
     Ok(AcquiredWorktree {
         path: created.path,
         branch: created.branch,
-        is_new: true,
         last_commit,
         active_session_id,
     })
@@ -279,24 +300,25 @@ pub(super) fn claim_task_in_registry(
         task_id: candidate.task.id.clone(),
         worktree_path: worktree.path.clone(),
         branch: worktree.branch.clone(),
-        session_id,
         tool: candidate.task.tool.clone(),
         base_branch: candidate.task.base_branch.clone(),
-        last_commit: worktree.last_commit.clone(),
         active_session_id: worktree.active_session_id.clone(),
     })
 }
 
 pub(super) async fn launch_performer(
-    repo_root: &Path,
-    prd_file: &Path,
-    canonical: &crate::config::CanonicalConfig,
-    coordinator: Option<&crate::config::CoordinatorConfig>,
-    env_cfg: &CoordinatorEnvConfig,
-    state: &mut CoordinatorRunState,
-    logger: Option<&dyn CoordinatorLog>,
+    ctx: LaunchPerformerContext<'_>,
     claim: &DispatchClaim,
 ) -> Result<Option<i64>> {
+    let LaunchPerformerContext {
+        repo_root,
+        prd_file,
+        canonical,
+        coordinator,
+        env_cfg,
+        state,
+        logger,
+    } = ctx;
     write_worktree_prd_for_task(prd_file, &claim.task_id, &claim.worktree_path)?;
     ensure_tool_json_for_tool(repo_root, &claim.worktree_path, &claim.tool)?;
     let worktree_paths = crate::ProjectPaths::from_root(&claim.worktree_path);
@@ -409,16 +431,19 @@ pub(super) fn dispatch_limit_reached(
 }
 
 pub(super) async fn run_dispatch_pipeline(
-    repo_root: &Path,
-    canonical: &crate::config::CanonicalConfig,
-    coordinator: Option<&crate::config::CoordinatorConfig>,
-    env_cfg: &CoordinatorEnvConfig,
-    prd_file: &Path,
-    state: &mut CoordinatorRunState,
-    logger: Option<&dyn CoordinatorLog>,
-    cfg: &CoordinatorConfigResolved,
+    ctx: DispatchPipelineContext<'_>,
     remaining_budget: usize,
 ) -> Result<usize> {
+    let DispatchPipelineContext {
+        repo_root,
+        canonical,
+        coordinator,
+        env_cfg,
+        prd_file,
+        state,
+        logger,
+        cfg,
+    } = ctx;
     let mut dispatched = 0usize;
     while dispatched < remaining_budget {
         if state.effective_max_parallel > 0
@@ -524,13 +549,15 @@ pub(super) async fn run_dispatch_pipeline(
         let claim =
             claim_task_in_registry(repo_root, &candidate, &worktree, &mut registry, logger)?;
         let pid = launch_performer(
-            repo_root,
-            prd_file,
-            canonical,
-            coordinator,
-            env_cfg,
-            state,
-            logger,
+            LaunchPerformerContext {
+                repo_root,
+                prd_file,
+                canonical,
+                coordinator,
+                env_cfg,
+                state,
+                logger,
+            },
             &claim,
         )
         .await?;

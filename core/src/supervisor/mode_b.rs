@@ -24,8 +24,7 @@ use crate::supervisor::{
     coordinator_supervisor::{
         CoordinatorEvidence, CoordinatorEvidenceCollector, CoordinatorEvidenceConfig,
     },
-    Finding, FindingCategory, HealthCheckResult, Recommendation, Severity, SupervisorAction,
-    SupervisorReport,
+    SupervisorAction, SupervisorReport,
 };
 use async_trait::async_trait;
 use chrono::Utc;
