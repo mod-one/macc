@@ -86,14 +86,6 @@ session_lock_dir="${session_state_file}.lock"
 session_lease_ttl="${SESSION_LEASE_TTL_SECONDS:-1800}"
 mkdir -p "$(dirname "$session_state_file")"
 
-session_key() {
-  if [[ "$session_scope" == "project" ]]; then
-    echo "project"
-  else
-    echo "$worktree"
-  fi
-}
-
 acquire_session_lock() {
   local attempts=0
   until mkdir "$session_lock_dir" 2>/dev/null; do
@@ -110,15 +102,6 @@ release_session_lock() {
   rmdir "$session_lock_dir" >/dev/null 2>&1 || true
 }
 
-read_session_id() {
-  local key
-  key="$(session_key)"
-  [[ -f "$session_state_file" ]] || { echo ""; return 0; }
-  jq -r --arg tool "$tool_id" --arg key "$key" '
-    .tools[$tool].sessions[$key].session_id // empty
-  ' "$session_state_file"
-}
-
 now_iso() {
   date -u +%Y-%m-%dT%H:%M:%SZ
 }
@@ -127,67 +110,56 @@ now_epoch() {
   date -u +%s
 }
 
-lease_owner_worktree() {
-  local sid="$1"
-  [[ -f "$session_state_file" ]] || { echo ""; return 0; }
-  jq -r --arg tool "$tool_id" --arg sid "$sid" '
-    .tools[$tool].leases[$sid].owner_worktree // empty
-  ' "$session_state_file"
-}
-
-lease_status() {
-  local sid="$1"
-  [[ -f "$session_state_file" ]] || { echo ""; return 0; }
-  jq -r --arg tool "$tool_id" --arg sid "$sid" '
-    .tools[$tool].leases[$sid].status // empty
-  ' "$session_state_file"
-}
-
-lease_heartbeat_epoch() {
-  local sid="$1"
-  [[ -f "$session_state_file" ]] || { echo "0"; return 0; }
-  jq -r --arg tool "$tool_id" --arg sid "$sid" '
-    (.tools[$tool].leases[$sid].heartbeat_epoch // 0) | tostring
-  ' "$session_state_file"
-}
-
-worktree_is_alive() {
-  local wt="$1"
-  [[ -n "$wt" ]] && [[ -d "$wt" ]] && [[ -e "$wt/.git" ]]
-}
-
+# Returns true (exit 0) when session $sid is actively held by another live
+# process that has refreshed its heartbeat within session_lease_ttl.
 session_occupied_by_other() {
   local sid="$1"
-  local owner status hb now age
+  local status hb now age
   [[ -n "$sid" ]] || return 1
+  [[ -f "$session_state_file" ]] || return 1
 
-  owner="$(lease_owner_worktree "$sid")"
-  status="$(lease_status "$sid")"
-  hb="$(lease_heartbeat_epoch "$sid")"
+  status="$(jq -r --arg tool "$tool_id" --arg sid "$sid" \
+    '(.tools[$tool].sessions[$sid].status // "available")' \
+    "$session_state_file" 2>/dev/null)"
+  [[ "$status" == "active" ]] || return 1
+
+  hb="$(jq -r --arg tool "$tool_id" --arg sid "$sid" \
+    '(.tools[$tool].sessions[$sid].heartbeat_epoch // 0)' \
+    "$session_state_file" 2>/dev/null)"
   [[ "$hb" =~ ^[0-9]+$ ]] || hb=0
-
-  if [[ -z "$owner" || "$owner" == "$worktree" ]]; then
-    return 1
-  fi
-  if [[ "$status" != "active" ]]; then
-    return 1
-  fi
-  if ! worktree_is_alive "$owner"; then
-    return 1
-  fi
 
   now="$(now_epoch)"
   age=$((now - hb))
-  if (( age > session_lease_ttl )); then
-    return 1
-  fi
-  return 0
+  (( age <= session_lease_ttl )) && return 0
+  return 1
+}
+
+# Scan the tool's session pool and return the first session that is not
+# currently occupied.  Only considers new-format entries (keyed by session_id);
+# old-format entries (keyed by worktree path, with a nested session_id field)
+# are silently skipped.
+find_available_session_id() {
+  [[ -f "$session_state_file" ]] || { echo ""; return 0; }
+  local sids
+  sids="$(jq -r --arg tool "$tool_id" '
+    (.tools[$tool].sessions // {}) | to_entries[] |
+    select((.value | type) == "object" and (.value.session_id == null)) |
+    .key
+  ' "$session_state_file" 2>/dev/null)"
+  local sid
+  while IFS= read -r sid; do
+    [[ -z "$sid" ]] && continue
+    if ! session_occupied_by_other "$sid"; then
+      echo "$sid"
+      return 0
+    fi
+  done <<< "$sids"
+  echo ""
 }
 
 write_active_lease() {
   local sid="$1"
-  local key now ts tmp
-  key="$(session_key)"
+  local now ts tmp
   now="$(now_iso)"
   ts="$(now_epoch)"
   tmp="$(mktemp)"
@@ -195,7 +167,6 @@ write_active_lease() {
   if [[ -f "$session_state_file" ]]; then
     jq \
       --arg tool "$tool_id" \
-      --arg key "$key" \
       --arg sid "$sid" \
       --arg now "$now" \
       --arg wt "$worktree" \
@@ -205,47 +176,43 @@ write_active_lease() {
       .tools = (.tools // {}) |
       .tools[$tool] = (.tools[$tool] // {}) |
       .tools[$tool].sessions = (.tools[$tool].sessions // {}) |
-      .tools[$tool].leases = (.tools[$tool].leases // {}) |
-      .tools[$tool].sessions[$key] = { session_id: $sid, updated_at: $now } |
-      .tools[$tool].leases[$sid] = {
-        owner_worktree: $wt,
-        owner_task_id: $tid,
-        owner_pid: $pid,
-        status: "active",
-        heartbeat_epoch: $hb,
-        updated_at: $now
-      }
+      .tools[$tool].sessions[$sid] = (
+        (.tools[$tool].sessions[$sid] // { created_at: $now }) |
+        . + {
+          status: "active",
+          owner_worktree: $wt,
+          owner_task_id: $tid,
+          owner_pid: $pid,
+          heartbeat_epoch: $hb,
+          updated_at: $now
+        }
+      )
       ' "$session_state_file" >"$tmp"
   else
     jq -n \
       --arg tool "$tool_id" \
-      --arg key "$key" \
       --arg sid "$sid" \
       --arg now "$now" \
       --arg wt "$worktree" \
       --arg tid "$task_id" \
       --arg pid "$$" \
-      --argjson hb "$ts" '
-      {
+      --argjson hb "$ts" '{
         tools: {
           ($tool): {
             sessions: {
-              ($key): { session_id: $sid, updated_at: $now }
-            },
-            leases: {
               ($sid): {
+                status: "active",
+                created_at: $now,
                 owner_worktree: $wt,
                 owner_task_id: $tid,
                 owner_pid: $pid,
-                status: "active",
                 heartbeat_epoch: $hb,
                 updated_at: $now
               }
             }
           }
         }
-      }
-      ' >"$tmp"
+      }' >"$tmp"
   fi
 
   mv "$tmp" "$session_state_file"
@@ -265,17 +232,25 @@ mark_lease_status() {
     --arg sid "$sid" \
     --arg status "$status" \
     --arg now "$now" \
+    --arg tid "${task_id:-}" \
     --argjson hb "$ts" '
     .tools = (.tools // {}) |
     .tools[$tool] = (.tools[$tool] // {}) |
-    .tools[$tool].leases = (.tools[$tool].leases // {}) |
-    if (.tools[$tool].leases[$sid] // null) != null then
-      .tools[$tool].leases[$sid].status = $status |
-      .tools[$tool].leases[$sid].heartbeat_epoch = $hb |
-      .tools[$tool].leases[$sid].updated_at = $now
-    else
-      .
-    end
+    .tools[$tool].sessions = (.tools[$tool].sessions // {}) |
+    if (.tools[$tool].sessions[$sid] // null) != null then
+      .tools[$tool].sessions[$sid].status = $status |
+      .tools[$tool].sessions[$sid].updated_at = $now |
+      if $status == "active" then
+        .tools[$tool].sessions[$sid].heartbeat_epoch = $hb
+      else
+        .tools[$tool].sessions[$sid].heartbeat_epoch = 0 |
+        .tools[$tool].sessions[$sid].last_used_at = $now |
+        (if $tid != "" then .tools[$tool].sessions[$sid].last_task_id = $tid else . end) |
+        del(.tools[$tool].sessions[$sid].owner_worktree) |
+        del(.tools[$tool].sessions[$sid].owner_task_id) |
+        del(.tools[$tool].sessions[$sid].owner_pid)
+      end
+    else . end
     ' "$session_state_file" >"$tmp"
   mv "$tmp" "$session_state_file"
 }
@@ -441,7 +416,7 @@ sid=""
 cleanup_runner() {
   if [[ -n "$active_session_id" ]]; then
     if acquire_session_lock; then
-      mark_lease_status "$active_session_id" "released" || true
+      mark_lease_status "$active_session_id" "available" || true
       release_session_lock
     fi
   fi
@@ -502,10 +477,7 @@ if [[ "$session_enabled" == "true" && -n "$session_resume_command" ]]; then
     fi
   else
     if acquire_session_lock; then
-      sid="$(read_session_id)"
-      if session_occupied_by_other "$sid"; then
-        sid=""
-      fi
+      sid="$(find_available_session_id)"
       if [[ -n "$sid" ]]; then
         write_active_lease "$sid"
         active_session_id="$sid"

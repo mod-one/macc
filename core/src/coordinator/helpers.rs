@@ -92,23 +92,9 @@ fn load_tool_sessions_state(repo_root: &Path) -> Option<serde_json::Value> {
     serde_json::from_str(&raw).ok()
 }
 
-fn session_id_is_active(tool_node: &serde_json::Value, session_id: &str) -> bool {
-    let Some(leases) = tool_node
-        .get("leases")
-        .and_then(serde_json::Value::as_object)
-    else {
-        return true;
-    };
-    leases
-        .get(session_id)
-        .and_then(|lease| lease.get("status"))
-        .and_then(serde_json::Value::as_str)
-        == Some("active")
-}
-
 fn score_worktree_session_warmth_from_state(
     state: Option<&serde_json::Value>,
-    worktree_path: &Path,
+    _worktree_path: &Path,
     tool_id: &str,
     ttl_seconds: u64,
     now_epoch: i64,
@@ -116,51 +102,46 @@ fn score_worktree_session_warmth_from_state(
     let Some(root) = state else {
         return SessionWarmth::Cold;
     };
-    let Some(tool_node) = root.get("tools").and_then(|v| v.get(tool_id)) else {
-        return SessionWarmth::Cold;
-    };
-    let Some(sessions) = tool_node
-        .get("sessions")
+    let Some(sessions) = root
+        .get("tools")
+        .and_then(|v| v.get(tool_id))
+        .and_then(|v| v.get("sessions"))
         .and_then(serde_json::Value::as_object)
     else {
         return SessionWarmth::Cold;
     };
-    let key_plain = worktree_path.to_string_lossy().to_string();
-    let key_canon = std::fs::canonicalize(worktree_path)
-        .ok()
-        .map(|p| p.to_string_lossy().to_string());
-    let entry = std::iter::once(key_plain.as_str())
-        .chain(key_canon.as_deref())
-        .find_map(|key| sessions.get(key));
-    let Some(entry) = entry else {
-        return SessionWarmth::Cold;
-    };
-    let Some(session_id) = entry
-        .get("session_id")
-        .and_then(serde_json::Value::as_str)
-        .filter(|sid| !sid.is_empty())
-    else {
-        return SessionWarmth::Cold;
-    };
-    if !session_id_is_active(tool_node, session_id) {
-        return SessionWarmth::Cold;
+    // Pool model: sessions are keyed by session_id. Find the freshest available
+    // one and use its age as the tool-level warmth score.  Old-format entries
+    // (keyed by worktree path, carrying a nested "session_id" sub-field) are
+    // ignored — they predate the pool model and are not reused.
+    let mut best_age: Option<u64> = None;
+    for (_session_id, entry) in sessions {
+        if entry.get("session_id").is_some() {
+            continue; // old-format entry, skip
+        }
+        let status = entry
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("available");
+        if status == "active" {
+            continue; // in use right now
+        }
+        let ts_str = entry
+            .get("last_used_at")
+            .or_else(|| entry.get("updated_at"))
+            .and_then(serde_json::Value::as_str);
+        let age = match ts_str {
+            Some(s) => chrono::DateTime::parse_from_rfc3339(s)
+                .ok()
+                .map(|ts| now_epoch.saturating_sub(ts.with_timezone(&chrono::Utc).timestamp()) as u64)
+                .unwrap_or(0),
+            None => 0, // no timestamp — freshly created
+        };
+        best_age = Some(best_age.map(|b| b.min(age)).unwrap_or(age));
     }
-    let Some(updated_at) = entry.get("updated_at").and_then(serde_json::Value::as_str) else {
-        return SessionWarmth::Cold;
-    };
-    let Ok(updated_at_epoch) = chrono::DateTime::parse_from_rfc3339(updated_at)
-        .map(|ts| ts.with_timezone(&chrono::Utc).timestamp())
-    else {
-        return SessionWarmth::Cold;
-    };
-    if updated_at_epoch > now_epoch {
-        return SessionWarmth::Warm(0);
-    }
-    let age_secs = now_epoch.saturating_sub(updated_at_epoch) as u64;
-    if age_secs <= ttl_seconds {
-        SessionWarmth::Warm(age_secs)
-    } else {
-        SessionWarmth::Cold
+    match best_age {
+        Some(age) if age <= ttl_seconds => SessionWarmth::Warm(age),
+        _ => SessionWarmth::Cold,
     }
 }
 
@@ -738,13 +719,10 @@ mod tests {
             "tools": {
                 "codex": {
                     "sessions": {
-                        "/tmp/wt-1": {
-                            "session_id": "sid-1",
+                        "sid-1": {
+                            "status": "available",
                             "updated_at": updated_at
                         }
-                    },
-                    "leases": {
-                        "sid-1": { "status": "active" }
                     }
                 }
             }
@@ -771,13 +749,10 @@ mod tests {
             "tools": {
                 "codex": {
                     "sessions": {
-                        "/tmp/wt-1": {
-                            "session_id": "sid-1",
+                        "sid-1": {
+                            "status": "available",
                             "updated_at": updated_at
                         }
-                    },
-                    "leases": {
-                        "sid-1": { "status": "active" }
                     }
                 }
             }
@@ -797,8 +772,7 @@ mod tests {
         let state = json!({
             "tools": {
                 "codex": {
-                    "sessions": {},
-                    "leases": {}
+                    "sessions": {}
                 }
             }
         });
@@ -808,6 +782,41 @@ mod tests {
             "codex",
             300,
             1_744_505_100,
+        );
+        assert_eq!(warmth, SessionWarmth::Cold);
+    }
+
+    #[test]
+    fn old_format_session_not_scored_as_warm() {
+        // Old-format entries (worktree-path key + nested session_id sub-field) must
+        // be ignored by the pool scorer so they don't falsely appear as warm.
+        let updated_at = "2026-04-13T00:00:00Z";
+        let now_epoch = chrono::DateTime::parse_from_rfc3339(updated_at)
+            .expect("valid ts")
+            .with_timezone(&chrono::Utc)
+            .timestamp()
+            + 10;
+        let state = json!({
+            "tools": {
+                "codex": {
+                    "sessions": {
+                        "/tmp/wt-1": {
+                            "session_id": "sid-old",
+                            "updated_at": updated_at
+                        }
+                    },
+                    "leases": {
+                        "sid-old": { "status": "active" }
+                    }
+                }
+            }
+        });
+        let warmth = score_worktree_session_warmth_from_state(
+            Some(&state),
+            Path::new("/tmp/wt-1"),
+            "codex",
+            300,
+            now_epoch,
         );
         assert_eq!(warmth, SessionWarmth::Cold);
     }

@@ -1,0 +1,371 @@
+{
+  "lot": "Lot 5.2 - Add Vibe (Mistral) Tool Adapter",
+  "version": "1.0",
+  "generated_at": "2026-05-18",
+  "timezone": "Europe/Paris",
+  "priority_mapping": {
+    "0": "P0 / Not parallel-safe — must run alone",
+    "1": "P1 / Must-have — feature foundation",
+    "2": "P2 / Should-have — integration and wiring",
+    "3": "P3 / Nice-to-have or preparatory",
+    "4": "P4 / Lowest priority"
+  },
+  "routing_hints_mapping": {
+    "execution_mode": "micro | standard | structural",
+    "reasoning_depth": "light | standard | deep",
+    "context_scope": "local | module | cross-cutting",
+    "risk_level": "low | medium | high",
+    "validation_profile": "light | standard | heavy"
+  },
+  "assumptions": [
+    "Vibe is Mistral's open-source CLI coding assistant. Binary: `vibe`. Install: `uv tool install mistral-vibe` or `pip install mistral-vibe`. API key: MISTRAL_API_KEY (stored in ~/.vibe/.env). Docs: docs/tools/mistral/vibe.md.",
+    "Vibe programmatic invocation: `vibe --prompt '<task>' --agent auto-approve --output text`. Session resume: `vibe --resume <session_id> --agent auto-approve`. Session discovery requires reading vibe session logs.",
+    "Vibe uses AGENTS.md as its project context file (identical to codex). Both tools may be enabled simultaneously; context.protect: true must be documented as the safe default to avoid overwrite conflicts.",
+    "The adapter follows the exact same pattern as claude/codex/gemini: Rust crate in adapters/vibe/, self-registers via inventory::submit!, builds with the same dependency set (inventory, macc-core, macc-adapter-shared, serde, serde_json, regex).",
+    "core/build.rs auto-discovers all *.sh files under adapters/*/. Creating adapters/vibe/vibe.performer.sh is sufficient — no build.rs changes needed.",
+    "The ui-denylist.txt currently lists: claude, gemini, codex, gpt-4, gpt-3.5, anthropic, google, openai. 'vibe' and 'mistral' must be added for consistency. The is_allowed_occurrence() exemptions in core/tests/tool_name_guardrail.rs already cover loader.rs (registry/tools.d/*.tool.yaml paths) and normalizers — no new exemptions required.",
+    "registry/src/lib.rs contains an assertion `assert_eq!(ids.len(), 4)` that must be updated to 5 after adding vibe. The adapters/Cargo.toml workspace and registry/Cargo.toml dependency list require explicit vibe additions.",
+    "All vibe-specific logic stays inside adapters/vibe/. core/, cli/, tui/ must remain tool-agnostic. The adapter registers itself; the engine discovers it via the registry.",
+    "The emit layer generates: AGENTS.md (primary vibe context file, same structure as codex's AGENTS.md) and .vibe/config.toml (non-secret model/agent settings). API keys are never generated into files.",
+    "Tasks L5B-MAP-001 and L5B-ERR-001 can run in parallel after L5B-CRATE-001. L5B-EMIT-001 and L5B-ADAPTER-001 serialize after L5B-MAP-001. L5B-PERF-001 and L5B-GUARD-001 are independent of all Rust adapter tasks."
+  ],
+  "tasks": [
+    {
+      "id": "L5B-SPEC-001",
+      "title": "Create vibe.tool.yaml ToolSpec in registry/tools.d/",
+      "category": "toolspec",
+      "description": "Problem/Goal: MACC discovers tools via ToolSpec YAML files embedded in the registry. Without a vibe.tool.yaml, the TUI does not show vibe as an available tool, macc plan/apply cannot generate vibe config files, and the coordinator cannot dispatch tasks to vibe.\nKey actions: Create registry/tools.d/vibe.tool.yaml following the exact structure of claude.tool.yaml and gemini.tool.yaml. Set: id=vibe, display_name=Vibe, description='Project instructions for Mistral Vibe CLI.'. gitignore: ['.vibe/', 'AGENTS.md']. performer.runner=adapters/vibe/vibe.performer.sh, performer.command=vibe, performer.args=['--agent', 'auto-approve', '--output', 'text'], performer.prompt.mode=arg, performer.prompt.arg='--prompt'. Session config: enabled=true, scope=worktree, init_prompt='Hello', resume.command=vibe, resume.args=['--resume', '{session_id}', '--agent', 'auto-approve', '--output', 'text']. defaults.model: a sensible default Mistral model (e.g. 'mistral-medium-3'). install: confirm_message + uv tool install mistral-vibe command, post_install verifying vibe --version. update: uv tool install --upgrade mistral-vibe. version_check.current: vibe --version. Fields: model (enum of Mistral model names), agent (enum: default, plan, accept-edits, auto-approve), skills (action: open_skills). doctor: which-check for vibe binary with severity=error.\nOut of scope: Rust adapter implementation. Any changes to existing ToolSpecs. Session ID extraction strategy (will be refined when performer script is written).\nSuccess criteria: registry/tools.d/vibe.tool.yaml is valid YAML that passes macc_core::tool::ToolSpec::from_yaml(). Its structure mirrors claude.tool.yaml / gemini.tool.yaml. 'id' field is exactly 'vibe'. performer.command is exactly 'vibe'. All required sections (performer, install, update, version_check, fields, doctor) are present.",
+      "objective": "Declare vibe as a known MACC tool so it is discoverable by the ToolSpecLoader and usable in plan/apply/coordinator cycles.",
+      "result": "registry/tools.d/vibe.tool.yaml exists and parses as a valid ToolSpec. The file mirrors the structure of existing ToolSpecs.",
+      "steps": [
+        "Copy registry/tools.d/codex.tool.yaml as a starting template (codex also uses AGENTS.md and a similar programmatic invocation).",
+        "Update id, display_name, description, gitignore entries for vibe.",
+        "Set performer.command=vibe, performer.args for programmatic/auto-approve mode.",
+        "Configure session.resume with vibe --resume {session_id}.",
+        "Fill install section with uv tool install mistral-vibe and a post_install check.",
+        "Add version_check, update, and doctor sections following gemini/claude patterns.",
+        "Populate fields: model (Mistral model enum), agent (vibe agent enum), skills.",
+        "Validate YAML syntax (python3 -c \"import yaml; yaml.safe_load(open('registry/tools.d/vibe.tool.yaml'))\" or equivalent)."
+      ],
+      "notes": "AGENTS.md is listed in gitignore because vibe writes its context into that file, which is the same file codex uses. When both tools are enabled, users should set tools.config.vibe.context.protect=true in macc.yaml to prevent MACC from overwriting an existing AGENTS.md that was generated by codex. Add a comment in the YAML noting this. The vibe default agent in programmatic mode should be 'auto-approve' — the performer_lib.sh reads args from tool.json so the ToolSpec is the canonical source.",
+      "exclusive_resources": [
+        "registry/tools.d/vibe.tool.yaml"
+      ],
+      "dependencies": [],
+      "priority": "1",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "local",
+        "risk_level": "low",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L5B-CRATE-001",
+      "title": "Create adapters/vibe/ crate skeleton: Cargo.toml and src/lib.rs stubs",
+      "category": "adapter-foundation",
+      "description": "Problem/Goal: The vibe adapter crate must exist as a compilable Rust crate before any module-level work (map, emit, adapter, error normalizer) can proceed. This task establishes the crate boundary and dependency declarations.\nKey actions: Create adapters/vibe/Cargo.toml with package name=macc-adapter-vibe, edition=2021, and dependencies mirroring adapters/claude/Cargo.toml (inventory, macc-core path, macc-adapter-shared path, serde+derive feature, serde_json, regex — no chrono if not needed for error parsing, add it if parsing retry-after timestamps). Create adapters/vibe/src/lib.rs with module declarations (mod adapter; mod doctor; mod emit; pub mod error_normalizer; mod map;), pub use adapter::VibeAdapter, and two inventory::submit! blocks for AdapterRegistration and NormalizerRegistration — both referencing types that will be defined in later tasks (stubs are acceptable: define VibeAdapter as an empty struct in adapter.rs and VibeErrorNormalizer as an empty struct in error_normalizer.rs as placeholder types so the crate compiles).\nOut of scope: Any actual implementation logic. Any changes to adapters/Cargo.toml workspace or registry. The stubs only need to be type-correct, not functionally complete.\nSuccess criteria: cargo build -p macc-adapter-vibe succeeds (with stub types). The crate compiles in isolation. No warnings on the lib.rs module declarations.",
+      "objective": "Establish the compilable crate skeleton that all subsequent vibe adapter tasks will build on.",
+      "result": "adapters/vibe/Cargo.toml and adapters/vibe/src/lib.rs exist and compile. Stub files adapters/vibe/src/adapter.rs, adapters/vibe/src/map.rs, adapters/vibe/src/doctor.rs, adapters/vibe/src/error_normalizer.rs, and adapters/vibe/src/emit/mod.rs exist (empty stubs acceptable).",
+      "steps": [
+        "Create adapters/vibe/ directory.",
+        "Create adapters/vibe/Cargo.toml mirroring adapters/claude/Cargo.toml (update package name and paths).",
+        "Create adapters/vibe/src/lib.rs with module declarations, pub use, and two inventory::submit! blocks using stub types.",
+        "Create stub files: src/adapter.rs (pub struct VibeAdapter;), src/map.rs (empty), src/emit/mod.rs (empty), src/doctor.rs (pub fn diagnostics() -> Vec<Diag> { Vec::new() }), src/error_normalizer.rs (pub struct VibeErrorNormalizer;).",
+        "Run cargo build -p macc-adapter-vibe and confirm it compiles."
+      ],
+      "notes": "Keep stubs minimal — the only requirement is that the crate compiles so downstream tasks can import and extend individual modules without conflicts. The lib.rs inventory::submit! blocks must reference VibeAdapter and VibeErrorNormalizer by name even in stub form, because lib.rs will not be rewritten in later tasks (later tasks only add content to their target files). chrono is needed if the error normalizer will parse retry-after timestamps like the claude adapter does — include it as an optional dep or add it later in L5B-ERR-001.",
+      "exclusive_resources": [
+        "adapters/vibe/"
+      ],
+      "dependencies": [],
+      "priority": "1",
+      "routing_hints": {
+        "execution_mode": "micro",
+        "reasoning_depth": "light",
+        "context_scope": "local",
+        "risk_level": "low",
+        "validation_profile": "light"
+      }
+    },
+    {
+      "id": "L5B-MAP-001",
+      "title": "Implement VibeConfig in adapters/vibe/src/map.rs",
+      "category": "adapter-config",
+      "description": "Problem/Goal: The emit and adapter layers need a strongly-typed config struct that maps the MACC canonical config (ResolvedConfig) to vibe-specific settings. Without this, adapter.rs and the emit functions have no clean source of truth.\nKey actions: Implement VibeConfig struct in adapters/vibe/src/map.rs. Fields: language: String, model: String (default: 'mistral-medium-3' or equivalent Mistral coding model — match what is listed in the ToolSpec), agent: String (default: 'auto-approve'), skills: Vec<String>, tool_config: serde_json::Value, has_mcp: bool. Implement VibeConfig::from_resolved(resolved: &ResolvedConfig) -> Self. Logic: read tool_config from resolved.tools.config.get('vibe') or resolved.tools.specific.get('vibe'), deserialize a VibeConfigSource (serde Deserialize) from it, merge global resolved.selections.skills with tool-specific skills using BTreeSet for deduplication and stable ordering. Mirror the pattern in adapters/claude/src/map.rs and adapters/codex/src/map.rs exactly.\nOut of scope: Emit functions. Adapter plan() logic. Any vibe-specific model validation.\nSuccess criteria: VibeConfig::from_resolved() compiles without warnings. Unit tests: default model when no config provided, skills merged from global + tool-specific selections, agent defaults to 'auto-approve' when not set in config. Mirrors codex/claude map.rs test patterns.",
+      "objective": "Provide a clean, testable config mapping layer that decouples vibe-specific settings from the canonical MACC config model.",
+      "result": "adapters/vibe/src/map.rs with VibeConfig, VibeConfigSource, and from_resolved() implementation. Unit tests pass. Replaces the stub from L5B-CRATE-001.",
+      "steps": [
+        "Define VibeConfigSource with #[derive(Deserialize, Default)] and optional fields: model, language, agent, skills (Vec<String>).",
+        "Define VibeConfig with concrete (non-optional) fields and their resolved defaults.",
+        "Implement from_resolved(): extract tool_config, deserialize VibeConfigSource, merge global + tool-specific skills with BTreeSet, set defaults for missing fields.",
+        "Write unit tests: test_default_model_when_no_config(), test_skills_merged(), test_agent_default_is_auto_approve().",
+        "Run cargo test -p macc-adapter-vibe -- map."
+      ],
+      "notes": "The model field default should match the ToolSpec's defaults.model field exactly so the two sources of truth are consistent. If the model name changes in the ToolSpec, this file must change too — note this coupling in a comment. Use BTreeSet for skill deduplication to ensure deterministic ordering (same approach as ClaudeConfig). The 'agent' field controls which vibe agent profile is used for non-interactive runs — 'auto-approve' is the correct value for performer execution.",
+      "exclusive_resources": [
+        "adapters/vibe/src/map.rs"
+      ],
+      "dependencies": [
+        "L5B-CRATE-001"
+      ],
+      "priority": "1",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "local",
+        "risk_level": "low",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L5B-EMIT-001",
+      "title": "Implement emit layer: AGENTS.md and .vibe/config.toml renderers",
+      "category": "adapter-emit",
+      "description": "Problem/Goal: The adapter's plan() function needs render functions to produce vibe's two config files: AGENTS.md (project context, loaded by vibe on startup) and .vibe/config.toml (non-secret model and agent settings). These renderers must be pure functions over VibeConfig so they are testable in isolation.\nKey actions: Create adapters/vibe/src/emit/mod.rs re-exporting agents_md and config_toml submodules. Create adapters/vibe/src/emit/agents_md.rs with pub fn render_agents_md(config: &VibeConfig) -> String. The AGENTS.md content should include: a header comment identifying it as MACC-generated, standards summary from config.standards_inline, required workflows section (run tests before committing, use English), and a Vibe-specific skills section listing active skills. Mirror adapters/codex/src/emit/agents_md.rs structure. Create adapters/vibe/src/emit/config_toml.rs with pub fn render_config_toml(config: &VibeConfig) -> String. The .vibe/config.toml content should include: default_agent (from config.agent — 'auto-approve' for programmatic use), active_model (from config.model). Do NOT include API keys, passwords, or secrets. Use toml::to_string or manual string building — if toml crate is not yet in dependencies, add it to adapters/vibe/Cargo.toml. Call macc_adapter_shared::render::format::ensure_trailing_newline on all outputs.\nOut of scope: AGENTS.md content specific to other tools. MCP server configuration rendering (can be a follow-up if needed — vibe supports MCP but it is optional). User-level ~/.vibe/ config (MACC only generates project-level files).\nSuccess criteria: render_agents_md() returns a string containing the standards section and required workflows. render_config_toml() returns a valid TOML string with default_agent and active_model keys. Neither function contains secrets or API key strings. Unit tests verify output structure for both renderers.",
+      "objective": "Produce the two config files that vibe reads on startup: AGENTS.md (task context) and .vibe/config.toml (non-secret settings).",
+      "result": "adapters/vibe/src/emit/mod.rs, adapters/vibe/src/emit/agents_md.rs, adapters/vibe/src/emit/config_toml.rs. All render functions compile and have unit tests. Replaces the stub emit/mod.rs from L5B-CRATE-001.",
+      "steps": [
+        "Create emit/agents_md.rs with render_agents_md(config: &VibeConfig) -> String.",
+        "Create emit/config_toml.rs with render_config_toml(config: &VibeConfig) -> String emitting [default_agent] and [active_model] TOML keys.",
+        "Update emit/mod.rs to pub mod agents_md and pub mod config_toml.",
+        "Add toml dependency to adapters/vibe/Cargo.toml if using the toml crate for serialization.",
+        "Write unit tests: render_agents_md contains standards section; render_config_toml contains active_model; render_config_toml does NOT contain 'MISTRAL_API_KEY' or any secret string.",
+        "Run cargo test -p macc-adapter-vibe -- emit."
+      ],
+      "notes": "vibe reads .vibe/config.toml from the project root first, then falls back to ~/.vibe/config.toml. MACC writes only the project-level file. The file must not contain MISTRAL_API_KEY — vibe reads that from ~/.vibe/.env automatically. Setting `active_model` in .vibe/config.toml configures the model for the vibe session. If the toml crate adds complexity, use format! string building for the small config.toml output instead.",
+      "exclusive_resources": [
+        "adapters/vibe/src/emit/"
+      ],
+      "dependencies": [
+        "L5B-MAP-001"
+      ],
+      "priority": "1",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "local",
+        "risk_level": "low",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L5B-ADAPTER-001",
+      "title": "Implement VibeAdapter in adapters/vibe/src/adapter.rs",
+      "category": "adapter-core",
+      "description": "Problem/Goal: VibeAdapter is the core integration point. Its plan() method produces the ActionPlan that MACC's engine translates into file writes during macc apply. Without a complete adapter.rs, the tool cannot generate any project config files.\nKey actions: Implement VibeAdapter in adapters/vibe/src/adapter.rs, replacing the stub from L5B-CRATE-001. Implement ToolAdapter trait: id() returns 'vibe'. plan(ctx: &PlanningContext) -> Result<ActionPlan>: create VibeConfig::from_resolved(ctx.resolved), build an ActionPlan, call plan_builders::write_text to emit AGENTS.md (using emit::agents_md::render_agents_md), call plan_builders::write_text to emit .vibe/config.toml (using emit::config_toml::render_config_toml). Handle remote content: iterate ctx.materialized_units → for skills call plan_builders::plan_skill_install('vibe', ...), for MCP entries call plan_builders::plan_mcp_install. The pattern is identical to adapters/claude/src/adapter.rs fn install_remote_content(). For .mcp.json rendering (MCP server wiring): if any MCP servers are present, render and write .mcp.json using macc_core::mcp_json::render_mcp_json — vibe supports MCP via [[mcp_servers]] in config.toml but .mcp.json is the MACC-canonical approach; note in a comment that a future task can add mcp_servers into .vibe/config.toml directly.\nOut of scope: Session management. Error normalization. Doctor checks. Changing macc_core plan_builders API.\nSuccess criteria: VibeAdapter implements ToolAdapter. plan() returns a non-empty ActionPlan containing at least two write actions (AGENTS.md and .vibe/config.toml). cargo test -p macc-adapter-vibe passes. No new warnings.",
+      "objective": "Complete the VibeAdapter so MACC can generate all vibe project config files when vibe is enabled and macc apply is run.",
+      "result": "adapters/vibe/src/adapter.rs with complete VibeAdapter implementation. plan() builds and returns a valid ActionPlan with AGENTS.md and .vibe/config.toml entries. Replaces the stub from L5B-CRATE-001.",
+      "steps": [
+        "Import VibeConfig, emit functions, and required plan_builders in adapter.rs.",
+        "Implement id() -> String returning 'vibe'.",
+        "Implement plan(): build VibeConfig, create ActionPlan, write AGENTS.md and .vibe/config.toml.",
+        "Add install_remote_content helper (same shape as claude's) for skill and MCP installs.",
+        "Add .mcp.json write action when MCP servers are present (reuse macc_core::mcp_json::render_mcp_json).",
+        "Run cargo test -p macc-adapter-vibe and confirm all tests pass."
+      ],
+      "notes": "AGENTS.md write path is bare 'AGENTS.md' (no subdirectory prefix) — same as codex. The .vibe/config.toml write path must be '.vibe/config.toml' including the directory. If plan_builders::write_text handles directory creation implicitly (check existing usage in codex/gemini adapters), no extra directory-creation step is needed. Follow the skill install pattern from claude/adapter.rs exactly — the skill system is tool-agnostic.",
+      "exclusive_resources": [
+        "adapters/vibe/src/adapter.rs"
+      ],
+      "dependencies": [
+        "L5B-MAP-001",
+        "L5B-EMIT-001"
+      ],
+      "priority": "1",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "medium",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L5B-ERR-001",
+      "title": "Implement VibeErrorNormalizer in adapters/vibe/src/error_normalizer.rs",
+      "category": "adapter-errors",
+      "description": "Problem/Goal: The coordinator's rate-limit handling, retry logic, and error reporting depend on each adapter providing a tool-specific ErrorNormalizer that maps raw CLI output (stderr/stdout) to canonical CanonicalClass values. Without VibeErrorNormalizer, vibe failures appear as UnknownError with no retry strategy.\nKey actions: Replace the stub VibeErrorNormalizer in adapters/vibe/src/error_normalizer.rs with a full implementation following adapters/claude/src/error_normalizer.rs exactly. Define a Pattern list (Regex + CanonicalClass pairs) for Mistral-specific error messages. Priority order (same as claude): (1) QuotaExhausted — 'usage limit', 'quota exceeded', 'resets N(am|pm)' for Mistral usage cap messages; (2) Auth — 'unauthorized', 'invalid api key', 'authentication failed', MISTRAL_API_KEY error messages; (3) PolicyViolation — Mistral content policy rejection patterns; (4) Billing — 'payment required', 'billing error'; (5) Overloaded — '529' or 'server overloaded' (Mistral uses similar codes); (6) RateLimit — '429', 'too many requests', 'rate limit'; (7) Network — ECONNREFUSED/ETIMEDOUT/DNS patterns (same as claude); (8) Timeout — timeout/timed out; (9) Internal — '500 internal server error'. Implement ErrorNormalizer::normalize(exit_code, stderr, stdout) -> Option<ToolError>. Extract request_id from Mistral-specific request ID patterns if available. Extract retry-after from '429' responses if a retry-after header value appears in stderr.\nOut of scope: Changing CanonicalClass definitions or error codes. Adding new canonical classes. Modifying shared normalizer helpers.\nSuccess criteria: VibeErrorNormalizer implements ErrorNormalizer. normalize() returns QuotaExhausted for 'usage limit exceeded', RateLimit for '429 Too Many Requests', Auth for 'invalid api key', None for exit 0 with clean output. Unit tests cover each CanonicalClass case. cargo test -p macc-adapter-vibe passes.",
+      "objective": "Enable the coordinator to classify, retry, and report vibe errors correctly using the same canonical error model as all other tools.",
+      "result": "adapters/vibe/src/error_normalizer.rs with VibeErrorNormalizer and comprehensive unit tests for each error class. Replaces stub from L5B-CRATE-001.",
+      "steps": [
+        "Import OnceLock, Regex, and error_normalizer utilities from macc_adapter_shared.",
+        "Define Mistral-specific Pattern list (Regex + CanonicalClass) in priority order, following claude's pattern list structure.",
+        "Implement normalize(): combine stderr+stdout, run patterns, fall back to Unknown on non-zero exit, return None on exit 0 with no match.",
+        "Extract retry_after_seconds from '429' retry-after text if present.",
+        "Set provider field to 'vibe' in the returned ToolError.",
+        "Write unit tests covering each canonical class plus exit-0-clean, unknown-non-zero-exit, and raw-message-truncation cases.",
+        "Run cargo test -p macc-adapter-vibe -- error_normalizer."
+      ],
+      "notes": "Mistral API error messages may differ slightly from Anthropic's — check the Mistral API docs if specific error JSON format is known. In absence of Mistral-specific documentation, use the same regex patterns as claude for network/timeout/internal errors (these are OS-level and tool-agnostic) and customize only the quota/auth/billing patterns. Use chrono for retry-after timestamp parsing if quota messages include a reset time in Mistral format — add chrono to Cargo.toml if needed. The provider field must be exactly 'vibe' (matching the ToolSpec id field).",
+      "exclusive_resources": [
+        "adapters/vibe/src/error_normalizer.rs"
+      ],
+      "dependencies": [
+        "L5B-CRATE-001"
+      ],
+      "priority": "1",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "local",
+        "risk_level": "medium",
+        "validation_profile": "heavy"
+      }
+    },
+    {
+      "id": "L5B-WIRE-001",
+      "title": "Finalize adapters/vibe/src/lib.rs and implement doctor.rs",
+      "category": "adapter-wiring",
+      "description": "Problem/Goal: lib.rs currently contains stubs from L5B-CRATE-001. Now that VibeAdapter (L5B-ADAPTER-001) and VibeErrorNormalizer (L5B-ERR-001) are implemented, lib.rs must be verified for correctness and doctor.rs must be implemented.\nKey actions: (1) Verify lib.rs: confirm that pub use adapter::VibeAdapter is exported, that both inventory::submit! blocks reference the now-complete VibeAdapter and VibeErrorNormalizer types, and that tool_id in the NormalizerRegistration is exactly 'vibe'. Update imports if stubs left anything placeholder. (2) Implement doctor.rs: pub fn diagnostics() -> Vec<Diag> returning diagnostics for vibe-specific environment checks if useful (for example, a MISTRAL_API_KEY check for a better user-facing message). If no doctor checks beyond the ToolSpec's which-check are needed, leave diagnostics() returning Vec::new() with a comment explaining why. Follow adapters/claude/src/doctor.rs as a template. (3) Run cargo test -p macc-adapter-vibe to confirm the fully-integrated crate compiles and all tests pass.\nOut of scope: Adding new adapter logic. Changing inventory submit! semantics. Changes to any other crate.\nSuccess criteria: cargo build -p macc-adapter-vibe succeeds cleanly. cargo test -p macc-adapter-vibe passes all tests. lib.rs exports VibeAdapter. Both inventory registrations are present with correct tool_id='vibe'.",
+      "objective": "Complete the adapter crate by verifying lib.rs correctness and finalizing the doctor.rs stub into its final form.",
+      "result": "adapters/vibe/src/lib.rs verified and correct. adapters/vibe/src/doctor.rs has its final implementation. cargo test -p macc-adapter-vibe passes all tests.",
+      "steps": [
+        "Review lib.rs: verify module declarations, pub use, and both inventory::submit! blocks reference non-stub types.",
+        "Update NormalizerRegistration tool_id to match 'vibe' exactly.",
+        "Implement diagnostics() in doctor.rs — either meaningful Diag entries or empty with an explanatory comment.",
+        "Run cargo build -p macc-adapter-vibe.",
+        "Run cargo test -p macc-adapter-vibe.",
+        "Fix any compilation errors surfaced by the full integration."
+      ],
+      "notes": "This task is intentionally lightweight — its role is integration verification, not new feature work. If lib.rs stubs from L5B-CRATE-001 were written correctly, this task is mostly a compile-and-test confirmation. The most likely issue is that the stub lib.rs may have used placeholder type names that differ from the final names — fix those and the crate should compile cleanly.",
+      "exclusive_resources": [
+        "adapters/vibe/src/lib.rs",
+        "adapters/vibe/src/doctor.rs"
+      ],
+      "dependencies": [
+        "L5B-ADAPTER-001",
+        "L5B-ERR-001"
+      ],
+      "priority": "1",
+      "routing_hints": {
+        "execution_mode": "micro",
+        "reasoning_depth": "light",
+        "context_scope": "local",
+        "risk_level": "low",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L5B-PERF-001",
+      "title": "Create adapters/vibe/vibe.performer.sh performer script",
+      "category": "performer",
+      "description": "Problem/Goal: The coordinator dispatches tasks to a tool by invoking its performer script. Without adapters/vibe/vibe.performer.sh, the coordinator cannot run vibe tasks — even if the Rust adapter and ToolSpec are complete.\nKey actions: Create adapters/vibe/vibe.performer.sh following the exact pattern of adapters/codex/codex.performer.sh and adapters/claude/claude.performer.sh. The file must: (1) set TOOL_ID='vibe' and TOOL_LOG_PREFIX='vibe'; (2) resolve script_dir using $BASH_SOURCE; (3) source $script_dir/../shared/performer_lib.sh. This is the complete and correct content — the shared performer_lib.sh handles all argument parsing, session management, and tool invocation by reading the tool.json that comes from the ToolSpec (L5B-SPEC-001). Mark the file executable (chmod 755). Note: core/build.rs auto-discovers all *.sh files in adapters/*/. Creating this file is sufficient — it will be embedded automatically into the MACC binary and deployed to .macc/automation/embedded/adapters/vibe/ during macc apply.\nOut of scope: Any performer logic beyond sourcing the shared library. Changes to shared/performer_lib.sh.\nSuccess criteria: adapters/vibe/vibe.performer.sh exists, is executable (mode 755), contains exactly TOOL_ID='vibe', TOOL_LOG_PREFIX='vibe', and the source line for performer_lib.sh. Running shellcheck adapters/vibe/vibe.performer.sh produces no errors. Running bash -n adapters/vibe/vibe.performer.sh succeeds (syntax check).",
+      "objective": "Provide the minimal performer script that lets the coordinator invoke vibe for task execution.",
+      "result": "adapters/vibe/vibe.performer.sh exists, is executable, and is syntactically valid. The script is automatically embedded by core/build.rs and deployed by macc apply.",
+      "steps": [
+        "Copy adapters/codex/codex.performer.sh to adapters/vibe/vibe.performer.sh.",
+        "Replace TOOL_ID='codex' with TOOL_ID='vibe' and TOOL_LOG_PREFIX='codex' with TOOL_LOG_PREFIX='vibe'.",
+        "Verify the source path is correct relative to the new script location (should be $script_dir/../shared/performer_lib.sh — same relative path).",
+        "chmod 755 adapters/vibe/vibe.performer.sh.",
+        "Run bash -n adapters/vibe/vibe.performer.sh to verify syntax.",
+        "Optionally run shellcheck adapters/vibe/vibe.performer.sh."
+      ],
+      "notes": "This is intentionally minimal. The shared performer_lib.sh does all the real work (reads tool.json, builds invocation args, handles session state). The TOOL_ID and TOOL_LOG_PREFIX values must match the ToolSpec id field ('vibe') exactly — mismatches cause performer log routing errors. Do not add vibe-specific logic to the performer script; use the ToolSpec YAML instead.",
+      "exclusive_resources": [
+        "adapters/vibe/vibe.performer.sh"
+      ],
+      "dependencies": [
+        "L5B-SPEC-001"
+      ],
+      "priority": "1",
+      "routing_hints": {
+        "execution_mode": "micro",
+        "reasoning_depth": "light",
+        "context_scope": "local",
+        "risk_level": "low",
+        "validation_profile": "light"
+      }
+    },
+    {
+      "id": "L5B-WS-001",
+      "title": "Add vibe to adapters/Cargo.toml workspace and registry/Cargo.toml dependencies",
+      "category": "workspace",
+      "description": "Problem/Goal: The adapters workspace and the registry crate are unaware of macc-adapter-vibe until it is explicitly added. Without these changes, the Rust build cannot link the vibe adapter into the MACC binary.\nKey actions: (1) Update adapters/Cargo.toml: add 'vibe' to the members array alongside 'shared', 'claude', 'codex', 'gemini'. (2) Update registry/Cargo.toml: add macc-adapter-vibe = { path = '../adapters/vibe' } to [dependencies], matching the pattern for macc-adapter-claude, macc-adapter-codex, macc-adapter-gemini.\nOut of scope: registry/src/lib.rs changes (L5B-REG-001). Any other Cargo.toml files.\nSuccess criteria: cargo build -p macc-registry compiles without errors (it may not link vibe correctly until L5B-REG-001 forces linking, but it should at least resolve dependencies). adapters/Cargo.toml members list includes 'vibe'. registry/Cargo.toml [dependencies] includes macc-adapter-vibe.",
+      "objective": "Register the vibe adapter crate in the workspace and registry so the build system can link it into the binary.",
+      "result": "adapters/Cargo.toml has vibe in members. registry/Cargo.toml has macc-adapter-vibe dependency. cargo build -p macc-registry resolves without dependency errors.",
+      "steps": [
+        "Edit adapters/Cargo.toml: add \"vibe\" to the members array.",
+        "Edit registry/Cargo.toml: add macc-adapter-vibe = { path = \"../adapters/vibe\" } under [dependencies].",
+        "Run cargo build -p macc-registry to confirm dependency resolution."
+      ],
+      "notes": "Keep the members list in adapters/Cargo.toml alphabetically sorted (claude, codex, gemini, shared, vibe — or maintain existing order and append). The path must be ../adapters/vibe relative to registry/ — confirm by checking existing macc-adapter-claude path syntax.",
+      "exclusive_resources": [
+        "adapters/Cargo.toml",
+        "registry/Cargo.toml"
+      ],
+      "dependencies": [
+        "L5B-CRATE-001"
+      ],
+      "priority": "1",
+      "routing_hints": {
+        "execution_mode": "micro",
+        "reasoning_depth": "light",
+        "context_scope": "local",
+        "risk_level": "low",
+        "validation_profile": "light"
+      }
+    },
+    {
+      "id": "L5B-REG-001",
+      "title": "Wire VibeAdapter into registry/src/lib.rs and update registry tests",
+      "category": "registry",
+      "description": "Problem/Goal: The Rust linker includes an adapter only if it is referenced from the linked binary. registry/src/lib.rs uses a forced-reference pattern (let _ = (...AdapterType...)) to ensure inventory::submit! fires for each adapter. Without adding VibeAdapter here, the adapter is silently excluded even though its crate is a dependency.\nKey actions: Edit registry/src/lib.rs: (1) In default_registry(), add macc_adapter_vibe::VibeAdapter to the force-link tuple alongside ClaudeAdapter, CodexAdapter, GeminiAdapter. (2) In test_default_registry_enumeration(): add assert!(ids.contains(&'vibe'.to_string())) and update assert_eq!(ids.len(), 4) to assert_eq!(ids.len(), 5) (4 real adapters + 1 test adapter). (3) In test_tool_descriptors_not_empty(): add assert!(descriptors.iter().any(|d| d.id == 'vibe')). Update registry/tests/contract.rs and registry/tests/engine_normalizer.rs if they enumerate adapters by name — add vibe assertions following the existing claude/codex/gemini patterns. In registry/tests/rate_limit_integration.rs: add a test case for VibeErrorNormalizer if similar tests exist for other normalizers (follow the existing pattern — do not add a test if the file uses a different testing approach that would not naturally include per-adapter tests).\nOut of scope: Changing ToolRegistry internals. Adding new registry methods. Any changes outside the registry/ directory.\nSuccess criteria: cargo test -p macc-registry passes all tests. default_registry() returns an adapter list that includes 'vibe'. tool_descriptors() returns a descriptor with id='vibe'. test_default_registry_enumeration asserts ids.len()==5.",
+      "objective": "Make the vibe adapter active in the MACC binary by forcing its linkage and updating all registry-level tests.",
+      "result": "registry/src/lib.rs references VibeAdapter in default_registry(). Registry tests pass including new vibe assertions. cargo test -p macc-registry is green.",
+      "steps": [
+        "Add macc_adapter_vibe::VibeAdapter to the force-link tuple in default_registry().",
+        "Update test_default_registry_enumeration(): add 'vibe' assertion, update ids.len() check to 5.",
+        "Update test_tool_descriptors_not_empty(): add 'vibe' descriptor assertion.",
+        "Check registry/tests/contract.rs and registry/tests/engine_normalizer.rs for per-adapter patterns — add vibe entries following existing patterns.",
+        "Run cargo test -p macc-registry.",
+        "Verify cargo build succeeds and the full binary links without errors."
+      ],
+      "notes": "The test adapter ('test') contributes 1 to the ids.len() count in test_default_registry_enumeration — the current assertion is ids.len()==4 (claude + codex + gemini + test). After adding vibe, it becomes 5. If the test adapter count is different, count carefully before updating the assertion. The force-link tuple must contain the exact public type name from the adapter's lib.rs — in this case macc_adapter_vibe::VibeAdapter (exported via pub use adapter::VibeAdapter in lib.rs).",
+      "exclusive_resources": [
+        "registry/src/lib.rs",
+        "registry/tests/"
+      ],
+      "dependencies": [
+        "L5B-WIRE-001",
+        "L5B-WS-001"
+      ],
+      "priority": "1",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "medium",
+        "validation_profile": "heavy"
+      }
+    },
+    {
+      "id": "L5B-GUARD-001",
+      "title": "Update scripts/ui-denylist.txt to add vibe and mistral",
+      "category": "toolspec",
+      "description": "Problem/Goal: The ui-denylist.txt controls which tool-specific identifiers are forbidden from appearing in non-adapter Rust code (core/, cli/, tui/). For consistency with the existing entries (claude, gemini, codex, openai, anthropic, google), both 'vibe' and 'mistral' must be added. This ensures future accidental coupling of core logic to the vibe tool is caught at CI time.\nKey actions: Append 'vibe' and 'mistral' as new lines to scripts/ui-denylist.txt. Verify that no violations already exist in core/src, cli/src, tui/src for these tokens (they should not — 'vibe' and 'mistral' do not currently appear in those directories). Confirm that the existing is_allowed_occurrence() exemptions in core/tests/tool_name_guardrail.rs cover the expected safe occurrences: (a) registry/tools.d/vibe.tool.yaml referenced in loader.rs — covered by the existing 'registry/tools.d/' + '.tool.yaml' exemption; (b) normalizers dispatch in normalizers.rs — covered by the existing normalizers.rs file exemption. No new exemptions in tool_name_guardrail.rs are needed because 'vibe' and 'mistral' do not appear in core/cli/tui source files (the adapter lives in adapters/ which is not scanned by the guardrail).\nOut of scope: Changing the guardrail test logic. Adding new is_allowed_occurrence() entries (only if needed — verify first). Any changes to existing denylist entries.\nSuccess criteria: scripts/ui-denylist.txt contains 'vibe' and 'mistral' entries. Running cargo test -p macc-core -- guardrail_no_tool_names_in_core_cli_tui passes with no violations. No is_allowed_occurrence() changes are required.",
+      "objective": "Maintain tool-agnosticism enforcement by adding vibe/mistral to the guardrail denylist.",
+      "result": "scripts/ui-denylist.txt has two new entries: vibe and mistral. The guardrail test passes. No new exceptions needed in tool_name_guardrail.rs.",
+      "steps": [
+        "Open scripts/ui-denylist.txt and append two new lines: 'vibe' and 'mistral' (lowercase, no quotes in file).",
+        "Run: grep -r 'vibe\\|mistral' core/src cli/src tui/src --include='*.rs' | grep -v '#\\[cfg(test)\\]' — confirm zero violations.",
+        "Run cargo test -p macc-core -- guardrail_no_tool_names_in_core_cli_tui.",
+        "If any violation is found: inspect the is_allowed_occurrence() function to see if an exemption is needed, or fix the violation in the source file."
+      ],
+      "notes": "This task is independent of all Rust adapter tasks and can run in parallel with any of them. The guardrail test scans core/src, cli/src, tui/src — not adapters/. The vibe adapter code in adapters/vibe/ is intentionally not covered by the guardrail (adapters ARE the tool-specific layer and are allowed to use tool names). The denylist applies only to the tool-agnostic layers.",
+      "exclusive_resources": [
+        "scripts/ui-denylist.txt"
+      ],
+      "dependencies": [],
+      "priority": "2",
+      "routing_hints": {
+        "execution_mode": "micro",
+        "reasoning_depth": "light",
+        "context_scope": "local",
+        "risk_level": "low",
+        "validation_profile": "standard"
+      }
+    }
+  ]
+}

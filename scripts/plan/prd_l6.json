@@ -1,0 +1,631 @@
+{
+  "lot": "Lot 6 - Multi-Client Process Ownership & Shared Observation",
+  "version": "1.0",
+  "generated_at": "2026-05-18",
+  "timezone": "Europe/Paris",
+  "priority_mapping": {
+    "0": "P0 / Not parallel-safe — must run alone",
+    "1": "P1 / Must-have — feature foundation",
+    "2": "P2 / Should-have — integration layer",
+    "3": "P3 / Nice-to-have or preparatory",
+    "4": "P4 / Lowest priority"
+  },
+  "routing_hints_mapping": {
+    "execution_mode": "micro | standard | structural",
+    "reasoning_depth": "light | standard | deep",
+    "context_scope": "local | module | cross-cutting",
+    "risk_level": "low | medium | high",
+    "validation_profile": "light | standard | heavy"
+  },
+  "assumptions": [
+    "core = business logic; Rust API (Engine trait) = facade; CLI/TUI/WEB = thin clients. No client logic leaks into core.",
+    "Ownership state persists to disk at .macc/state/process_ownership.json using the atomic temp-file+rename pattern already established in MACC (crate::atomic_write). No new locking primitives needed.",
+    "ProcessOwnershipGuard and ProcessViewerGuard follow the CoordinatorPidGuard pattern (runtime.rs:250-299): constructor claims/registers, Drop() releases/unregisters. Callers store guards; Rust lifetimes enforce cleanup.",
+    "Ownership events are appended to the existing events.jsonl via append_coordinator_event_with_severity(). TUI (tick poll) and WEB (SSE) receive ownership events without any new transport layer.",
+    "tui/src/state.rs (4667 lines) is well above the 800-line anti-god-file threshold. All ownership logic goes into the new tui/src/ownership.rs companion file. state.rs additions are limited to field declarations and one-line delegation calls.",
+    "core/src/engine.rs (1787 lines) grows by ~80 lines of default-impl trait methods. This is acceptable given the existing pattern. All implementations delegate to core/src/service/process_ownership.rs.",
+    "core/src/lib.rs (2354 lines) receives only: one pub mod process_ownership; declaration. This is a single line addition.",
+    "The web frontend (web/src/) is built with React+TypeScript. Ownership UI uses existing component patterns (status badges, toast notifications) already present in the frontend.",
+    "ProcessKind enum covers: Coordinator, Supervisor, WebServer, TerminalSession. Performers are managed by the coordinator and not independently owned by clients.",
+    "First-connect-takes-ownership rule: if the ownership record has no owner and no pending takeover, the first caller to process_ownership_claim() becomes owner. Subsequent callers receive Viewer status.",
+    "Stale-client eviction: heartbeat TTL defaults to 60s (2x the 30s heartbeat interval). Eviction runs on every OwnershipStore::load() — lazy eviction, no background thread needed in core.",
+    "The web client identity is a per-browser-session UUID generated on first load and persisted in sessionStorage. The web server does not impersonate web clients; it registers a separate WebServer process identity for its own process.",
+    "L6-START-001 and L6-START-002 touch different process startup paths and can run in parallel after L6-ENG-001. L6-START-003 serializes before L6-WEB-002 because both touch cli/src/commands/web/mod.rs.",
+    "L6-TUI-002 (state.rs additions) serializes before L6-TUI-003 (render additions in lib.rs / ownership.rs) because the render references the new state fields.",
+    "All existing MACC functionality must continue to work — ownership is an additive layer. If the ownership store is missing or corrupt, all operations degrade gracefully to unowned mode."
+  ],
+  "tasks": [
+    {
+      "id": "L6-OWN-001",
+      "title": "Define process ownership domain types",
+      "category": "own-core",
+      "description": "Problem/Goal: No shared vocabulary exists for multi-client process ownership. All downstream tasks (store, events, engine, TUI, WEB) need a stable contract before implementation begins.\nKey actions: Create core/src/process_ownership/mod.rs (module root with pub use re-exports). Create core/src/process_ownership/types.rs with: ClientKind enum (Tui, Web, Cli), ClientIdentity struct (client_id: String UUID, kind: ClientKind, connected_at: String ISO-8601), ProcessKind enum (Coordinator, Supervisor, WebServer, TerminalSession), ProcessHandle struct (kind: ProcessKind, project_root: PathBuf, pid: Option<i32>), OwnershipStatus enum (Owner, Viewer, Unregistered), OwnershipRecord struct (process: ProcessHandle, owner: Option<ClientIdentity>, viewers: Vec<ClientIdentity>, takeover_request: Option<TakeoverRequest>, started_at: String), TakeoverRequest struct (request_id: String, requester: ClientIdentity, requested_at: String). Add pub mod process_ownership; to core/src/lib.rs. All types derive Serialize, Deserialize, Debug, Clone, PartialEq.\nOut of scope: Store implementation, events, Engine trait, any behavior.\nSuccess criteria: core/src/process_ownership/types.rs compiles with all types, derives, and no dead-code warnings. lib.rs declares the module. No logic, only types.",
+      "objective": "Establish the shared vocabulary for multi-client ownership that all other L6 tasks depend on.",
+      "result": "core/src/process_ownership/mod.rs and core/src/process_ownership/types.rs exist and compile. core/src/lib.rs declares pub mod process_ownership.",
+      "steps": [
+        "Create core/src/process_ownership/ directory.",
+        "Create types.rs with ClientKind, ClientIdentity, ProcessKind, ProcessHandle, OwnershipStatus, OwnershipRecord, TakeoverRequest structs/enums.",
+        "Create mod.rs re-exporting all public types from types.rs.",
+        "Add pub mod process_ownership; to core/src/lib.rs.",
+        "Run cargo check — no errors, no dead-code warnings on types."
+      ],
+      "notes": "Contracts-first task. Keep it pure — no behavior, no file I/O, no events. ProcessHandle.pid is Option<i32> because the handle can be constructed before a process has a PID (e.g., during startup before execve). client_id is a String (UUID v4) so it can be generated without pulling in uuid crate if not already present — use format!(\"{:x}\", rand_u128) or existing uuid dependency.",
+      "exclusive_resources": [
+        "core/src/process_ownership/",
+        "core/src/lib.rs"
+      ],
+      "dependencies": [],
+      "priority": "1",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "low",
+        "validation_profile": "light"
+      }
+    },
+    {
+      "id": "L6-OWN-002",
+      "title": "Implement OwnershipStore: file-backed process ownership persistence",
+      "category": "own-core",
+      "description": "Problem/Goal: Ownership state must survive process restarts and be visible across CLI, TUI, and WEB processes without in-process shared memory.\nKey actions: Create core/src/process_ownership/store.rs. OwnershipStore holds an in-memory Vec<OwnershipRecord>. File path: {project_root}/.macc/state/process_ownership.json. Methods: load(repo_root) -> Result<OwnershipStore> (reads and deserializes file, creates empty store if file missing, runs lazy stale-eviction on load), save(&self, repo_root) -> Result<()> (serializes to temp file + renames atomically, following existing crate::atomic_write pattern), get_record(handle) -> Option<&OwnershipRecord>, upsert_record(record), remove_record(handle). load_and_modify(repo_root, fn(store) -> Result<T>) -> Result<T> helper: loads, applies closure, saves atomically — callers use this to avoid TOCTOU. Update mod.rs to pub use store::OwnershipStore.\nOut of scope: Claim/release/viewer logic (service layer, L6-OWN-005). Events. Heartbeat eviction details (L6-OWN-004).\nSuccess criteria: OwnershipStore can round-trip a full OwnershipRecord to/from JSON. load() returns empty store when file does not exist. save() is atomic (uses temp+rename). load_and_modify() serializes concurrent modifications correctly in unit tests.",
+      "objective": "Provide a reliable, atomic, file-backed store for process ownership state shared across all MACC client processes.",
+      "result": "core/src/process_ownership/store.rs compiles with OwnershipStore, round-trip unit tests pass, atomic write verified.",
+      "steps": [
+        "Create store.rs with OwnershipStore struct holding Vec<OwnershipRecord>.",
+        "Implement load(): read JSON from .macc/state/process_ownership.json; return empty store on NotFound; surface other IO errors as MaccError::Io.",
+        "Implement save(): serialize to serde_json::to_string_pretty, write to .macc/state/process_ownership.json.tmp, rename to final path — matching existing atomic_write pattern.",
+        "Implement get_record(), upsert_record(), remove_record() helper methods.",
+        "Implement load_and_modify() convenience wrapper.",
+        "Write unit tests: empty file round-trip, record upsert/remove, atomic write (verify temp file is gone after save).",
+        "Update mod.rs to pub use store::OwnershipStore."
+      ],
+      "notes": "Do not use crate::atomic_write directly — that function expects a ProjectPaths reference. Mirror the pattern (temp path = final path + '.tmp', rename). Stale-eviction is called from load() via the heartbeat module (L6-OWN-004); use a no-op stub for now with a TODO comment so this task can be parallel with L6-OWN-004.",
+      "exclusive_resources": [
+        "core/src/process_ownership/store.rs"
+      ],
+      "dependencies": [
+        "L6-OWN-001"
+      ],
+      "priority": "1",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "medium",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L6-OWN-003",
+      "title": "Implement OwnershipEventBroadcaster: emit ownership events to events.jsonl",
+      "category": "own-core",
+      "description": "Problem/Goal: TUI (tick poll) and WEB (SSE) already consume events.jsonl for coordinator status. Ownership events must flow through the same transport so clients receive ownership state changes without a new notification channel.\nKey actions: Create core/src/process_ownership/events.rs. Define OwnershipEventBroadcaster with a single method: emit(repo_root, event_type, handle, payload_fields) -> () (infallible — ownership events are best-effort, never block the caller). Internally calls append_coordinator_event_with_severity with task_id=\"-\", phase=\"ownership\", severity=\"info\". Implement a helper for each event type as free functions: emit_ownership_claimed, emit_ownership_released, emit_viewer_joined, emit_viewer_left, emit_takeover_requested, emit_takeover_accepted, emit_takeover_rejected, emit_owner_stale. Each function encodes the ClientIdentity and ProcessHandle into the message string as structured JSON. Update mod.rs to pub use events::*.\nOut of scope: New transport mechanism. Changing events.jsonl schema. Any reads from events.jsonl.\nSuccess criteria: emit_ownership_claimed() appends a valid JSON line to events.jsonl. All helper functions compile. Calling emit on a repo with no events.jsonl creates it (follows existing append behavior).",
+      "objective": "Pipe ownership state-change notifications through events.jsonl so existing TUI poll and WEB SSE consumers receive them without new infrastructure.",
+      "result": "core/src/process_ownership/events.rs with OwnershipEventBroadcaster and typed helper functions. Events appear in events.jsonl when called.",
+      "steps": [
+        "Create events.rs, import append_coordinator_event_with_severity from crate::coordinator::helpers.",
+        "Implement emit() as the base method: maps handle+payload to the append call.",
+        "Implement typed helper functions (emit_ownership_claimed etc.) each calling emit() with the correct event_type string and a JSON payload including client_id, process_kind, pid.",
+        "All emit functions are infallible (return ()) — log warnings internally on failure but do not propagate errors.",
+        "Write a unit test that calls emit_ownership_claimed on a temp repo and verifies the resulting events.jsonl line is valid JSON with expected fields.",
+        "Update mod.rs to re-export helper functions."
+      ],
+      "notes": "Event type strings must be stable: 'ownership_claimed', 'ownership_released', 'viewer_joined', 'viewer_left', 'takeover_requested', 'takeover_accepted', 'takeover_rejected', 'owner_stale'. These will be parsed by TUI and WEB. Keep them lowercase_snake_case matching existing coordinator event_type conventions.",
+      "exclusive_resources": [
+        "core/src/process_ownership/events.rs"
+      ],
+      "dependencies": [
+        "L6-OWN-001"
+      ],
+      "priority": "1",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "low",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L6-OWN-004",
+      "title": "Implement stale-client heartbeat eviction",
+      "category": "own-core",
+      "description": "Problem/Goal: A client that disconnects without cleanup leaves a stale ownership or viewer entry that blocks other clients from claiming ownership. Lazy eviction on store load keeps the store clean without background threads.\nKey actions: Create core/src/process_ownership/heartbeat.rs. Define HeartbeatConfig { ttl_seconds: u64 } with default 60s. Implement evict_stale_clients(store: &mut OwnershipStore, config: &HeartbeatConfig) which: for each OwnershipRecord, removes viewer entries whose connected_at (parsed as ISO-8601) is older than ttl_seconds from now; if the owner entry is stale, clears owner, emits emit_owner_stale, promotes oldest non-stale viewer to owner if any viewer exists. Call evict_stale_clients from OwnershipStore::load() before returning (replace the TODO stub from L6-OWN-002). Update mod.rs. Update OwnershipRecord.owner/viewers entries to carry last_heartbeat: String ISO-8601 in addition to connected_at — heartbeat updates this field. Update types.rs accordingly (ClientIdentity gains last_heartbeat: String).\nOut of scope: Background eviction loop. Changing heartbeat send logic (service layer).\nSuccess criteria: evict_stale_clients() removes entries with last_heartbeat older than ttl_seconds. Stale owner triggers emit_owner_stale and promotes a viewer. Unit tests cover: all-fresh (no eviction), stale-viewer-removed, stale-owner-promotes-viewer, stale-owner-no-viewers-clears-owner.",
+      "objective": "Prevent stale client entries from blocking ownership claims by lazily evicting them whenever the store is loaded.",
+      "result": "core/src/process_ownership/heartbeat.rs with evict_stale_clients(). OwnershipStore::load() calls it. Unit tests pass.",
+      "steps": [
+        "Add last_heartbeat: String field to ClientIdentity in types.rs.",
+        "Create heartbeat.rs with HeartbeatConfig and evict_stale_clients().",
+        "Parse last_heartbeat as chrono::DateTime<Utc>; compare to Utc::now() - Duration::seconds(config.ttl_seconds).",
+        "For stale owner: clear owner field, emit emit_owner_stale, find oldest-by-connected_at non-stale viewer, promote to owner, remove from viewers list.",
+        "Wire evict_stale_clients into OwnershipStore::load() replacing the TODO stub.",
+        "Write unit tests: fresh entries untouched, stale viewer removed, stale owner promotes viewer.",
+        "Update mod.rs re-exports."
+      ],
+      "notes": "ClientIdentity.last_heartbeat is set equal to connected_at on creation, then updated by process_heartbeat() in the service layer (L6-OWN-005). Use chrono (already a MACC dependency) for timestamp parsing and comparison.",
+      "exclusive_resources": [
+        "core/src/process_ownership/heartbeat.rs",
+        "core/src/process_ownership/types.rs",
+        "core/src/process_ownership/store.rs"
+      ],
+      "dependencies": [
+        "L6-OWN-002"
+      ],
+      "priority": "1",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "medium",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L6-OWN-005",
+      "title": "Implement process ownership service layer and guard types",
+      "category": "own-service",
+      "description": "Problem/Goal: The Engine trait and process startup hooks need a well-defined service API for all ownership operations. The guard pattern (RAII) ensures cleanup on process exit matches the established CoordinatorPidGuard pattern.\nKey actions: Create core/src/service/process_ownership.rs with the following functions, all taking repo_root: &Path: claim_owner(repo_root, handle, identity) -> Result<OwnershipStatus> — loads store via load_and_modify, first-connect-takes-ownership rule: if no owner present, set identity as owner, emit_ownership_claimed, return Owner; if caller is already owner, return Owner; else register as viewer, emit_viewer_joined, return Viewer. release_owner(repo_root, handle, client_id) -> Result<()> — removes owner entry, emits emit_ownership_released. register_viewer(repo_root, handle, identity) -> Result<()> — adds viewer if not already present, emits emit_viewer_joined. unregister_viewer(repo_root, handle, client_id) -> Result<()> — removes viewer entry, emits emit_viewer_left. request_takeover(repo_root, handle, requester) -> Result<String> — sets takeover_request field, emits emit_takeover_requested, returns request_id UUID. respond_takeover(repo_root, handle, owner_client_id, request_id, accept: bool) -> Result<()> — validates owner_client_id is current owner, clears takeover_request, if accepted: transfers owner to requester + emits emit_takeover_accepted; if rejected: emits emit_takeover_rejected. heartbeat(repo_root, handle, client_id) -> Result<()> — updates last_heartbeat on matching owner or viewer entry. get_record(repo_root, handle) -> Result<Option<OwnershipRecord>>. list_records(repo_root) -> Result<Vec<OwnershipRecord>>. Define ProcessOwnershipGuard { repo_root, handle, client_id } with Drop calling release_owner(). Define ProcessViewerGuard { repo_root, handle, client_id } with Drop calling unregister_viewer().\nOut of scope: Engine trait wiring (L6-ENG-001). Process startup hooks (L6-START-*).\nSuccess criteria: All service functions compile. ProcessOwnershipGuard::drop() calls release_owner(). ProcessViewerGuard::drop() calls unregister_viewer(). Unit tests: claim by first client returns Owner, claim by second client returns Viewer, takeover accepted transfers owner, takeover rejected keeps original owner.",
+      "objective": "Provide the complete service API for ownership operations, with guard types that enforce cleanup via Rust drop semantics.",
+      "result": "core/src/service/process_ownership.rs with all service functions, ProcessOwnershipGuard, ProcessViewerGuard. Unit tests pass.",
+      "steps": [
+        "Create core/src/service/process_ownership.rs.",
+        "Implement claim_owner() with first-connect-takes-ownership logic.",
+        "Implement release_owner(), register_viewer(), unregister_viewer(), request_takeover(), respond_takeover(), heartbeat(), get_record(), list_records().",
+        "Define ProcessOwnershipGuard struct; implement Drop calling release_owner() (infallible in Drop — log on error).",
+        "Define ProcessViewerGuard struct; implement Drop calling unregister_viewer() (infallible in Drop).",
+        "Add pub mod process_ownership; to core/src/service/mod.rs (or equivalent registration point).",
+        "Write unit tests covering first-connect-takes-ownership, second-client-becomes-viewer, takeover-accepted, takeover-rejected."
+      ],
+      "notes": "All load_and_modify calls are the serialization point for concurrent store access. claim_owner() must generate a fresh last_heartbeat = now() for the new identity entry. ProcessOwnershipGuard and ProcessViewerGuard are the primary API for callers — direct service function calls are for edge cases (CLI recovery, tests).",
+      "exclusive_resources": [
+        "core/src/service/process_ownership.rs"
+      ],
+      "dependencies": [
+        "L6-OWN-003",
+        "L6-OWN-004"
+      ],
+      "priority": "1",
+      "routing_hints": {
+        "execution_mode": "structural",
+        "reasoning_depth": "deep",
+        "context_scope": "cross-cutting",
+        "risk_level": "high",
+        "validation_profile": "heavy"
+      }
+    },
+    {
+      "id": "L6-ENG-001",
+      "title": "Add process ownership methods to the Engine trait",
+      "category": "engine",
+      "description": "Problem/Goal: TUI, WEB, and CLI are clients of the Engine trait. All ownership operations must be accessible through the same facade pattern used for coordinator operations, without clients importing service internals directly.\nKey actions: Add the following default-impl methods to the Engine trait in core/src/engine.rs, each delegating to core::service::process_ownership::\n  process_ownership_claim(&self, repo_root, handle, identity) -> Result<(OwnershipStatus, ProcessOwnershipGuard)> — calls service::process_ownership::claim_owner(), returns status + guard.\n  process_ownership_release(&self, repo_root, handle, client_id) — calls release_owner().\n  process_ownership_status(&self, repo_root, handle) -> Result<Option<OwnershipRecord>> — calls get_record().\n  process_ownership_request_takeover(&self, repo_root, handle, requester) -> Result<String> — calls request_takeover().\n  process_ownership_respond_takeover(&self, repo_root, handle, owner_client_id, request_id, accept) -> Result<()>.\n  process_register_viewer(&self, repo_root, handle, identity) -> Result<ProcessViewerGuard> — calls register_viewer() + constructs guard.\n  process_heartbeat(&self, repo_root, handle, client_id) -> Result<()> — calls heartbeat().\n  process_list_running(&self, repo_root) -> Result<Vec<OwnershipRecord>> — calls list_records().\nAll are default implementations; no override needed in MaccEngine.\nOut of scope: Changing any existing Engine method. Modifying any coordinator, worktree, or config methods.\nSuccess criteria: All new methods are present in the trait with default implementations. cargo check passes. Calling engine.process_ownership_claim() from a test compiles and returns the expected result.",
+      "objective": "Expose the complete process ownership API through the Engine facade so CLI/TUI/WEB access it uniformly without importing service internals.",
+      "result": "core/src/engine.rs has 8 new default-impl ownership methods. Existing tests unaffected. cargo check passes.",
+      "steps": [
+        "Add use crate::process_ownership::{OwnershipRecord, OwnershipStatus, ProcessHandle, ClientIdentity}; and use crate::service::process_ownership::{ProcessOwnershipGuard, ProcessViewerGuard}; to engine.rs imports.",
+        "Add process_ownership_claim() default impl calling service::process_ownership::claim_owner().",
+        "Add process_register_viewer() returning ProcessViewerGuard directly.",
+        "Add remaining 6 methods (release, status, request_takeover, respond_takeover, heartbeat, list_running) as default impls.",
+        "Verify cargo check passes with no new warnings on the trait definition.",
+        "Write a smoke test: create a temp repo, call engine.process_ownership_claim() twice with different identities, verify first is Owner and second is Viewer."
+      ],
+      "notes": "Engine trait is 1787 lines. Add the new methods in a clearly delimited section with a // --- Process Ownership --- comment header, following the existing section-comment pattern. The methods return ProcessOwnershipGuard / ProcessViewerGuard so callers hold them — the guard's Drop handles release. MaccEngine (the concrete type) gets these methods for free via the default impl.",
+      "exclusive_resources": [
+        "core/src/engine.rs"
+      ],
+      "dependencies": [
+        "L6-OWN-005"
+      ],
+      "priority": "1",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "medium",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L6-START-001",
+      "title": "Wire coordinator startup auto-claim and exit ownership release",
+      "category": "startup",
+      "description": "Problem/Goal: When the coordinator subprocess starts, it should atomically claim ownership of its process handle so TUI and WEB clients see it as owned and can register as viewers.\nKey actions: In core/src/coordinator/runtime.rs, add a ProcessOwnershipGuard field to CoordinatorRunState alongside the existing coordinator_pid_guard: Option<CoordinatorPidGuard>. In ensure_performer_ipc_listener() (or the coordinator startup path that already creates CoordinatorPidGuard::new()), after the PidGuard is created: construct ProcessHandle { kind: ProcessKind::Coordinator, project_root: repo_root.to_path_buf(), pid: Some(process::id() as i32) }, call service::process_ownership::claim_owner(repo_root, handle, identity) with a Cli identity (the coordinator subprocess is launched by the CLI), store the resulting ProcessOwnershipGuard in CoordinatorRunState. The guard's Drop releases ownership when the coordinator exits. Generate the client_id as format!(\"coordinator-{}\", std::process::id()).\nOut of scope: Handling takeover requests inside the coordinator loop (that is a TUI concern). Viewer registration (done by TUI/WEB clients after connecting).\nSuccess criteria: After coordinator startup, .macc/state/process_ownership.json contains an entry for ProcessKind::Coordinator with an owner entry. On coordinator exit, the owner entry is cleared (guard Drop fires). Unit test: start coordinator (mocked), verify record exists; drop state, verify record cleared.",
+      "objective": "Make the coordinator atomically claim process ownership on startup so clients can discover and observe it.",
+      "result": "CoordinatorRunState holds Option<ProcessOwnershipGuard>. Coordinator startup writes ownership record. Coordinator exit clears it.",
+      "steps": [
+        "Add ownership_guard: Option<ProcessOwnershipGuard> to CoordinatorRunState in runtime.rs.",
+        "After CoordinatorPidGuard::new() succeeds, construct ProcessHandle for Coordinator kind.",
+        "Call service::process_ownership::claim_owner() and store the returned guard in state.ownership_guard.",
+        "Log ownership_claimed event on success (the broadcaster handles this internally).",
+        "Verify the guard's Drop fires by writing a unit test that drops CoordinatorRunState and checks the store is cleared."
+      ],
+      "notes": "The coordinator subprocess is a CLI-spawned process, so its client_identity.kind = ClientKind::Cli. This is correct — the process itself is not a TUI or WEB client. TUI will register as viewer (L6-TUI-002) after connecting. Do not panic if claim_owner fails (e.g., previous stale entry) — log warning and continue.",
+      "exclusive_resources": [
+        "core/src/coordinator/runtime.rs"
+      ],
+      "dependencies": [
+        "L6-ENG-001"
+      ],
+      "priority": "1",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "medium",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L6-START-002",
+      "title": "Wire supervisor startup auto-claim and exit ownership release",
+      "category": "startup",
+      "description": "Problem/Goal: The supervisor is a long-running daemon. When it starts, it should claim ownership of its process handle so clients can discover and observe it.\nKey actions: In core/src/supervisor/ (specifically the supervisor startup path in coordinator_supervisor.rs or mode_b.rs startup), after the supervisor PID file is written: construct ProcessHandle { kind: ProcessKind::Supervisor, project_root, pid: Some(id()) }, call service::process_ownership::claim_owner(), store the resulting ProcessOwnershipGuard in the supervisor's long-lived state struct. Guard Drop fires when the supervisor exits.\nOut of scope: Takeover or viewer logic inside the supervisor. Changing supervisor watchdog behavior.\nSuccess criteria: Supervisor startup writes Supervisor ownership record. On supervisor exit, record cleared. Integration test: start supervisor, check record, stop supervisor, check record gone.",
+      "objective": "Make the supervisor claim ownership on startup so it appears in process_list_running() for clients.",
+      "result": "Supervisor startup state holds ProcessOwnershipGuard. Record written on start, cleared on exit.",
+      "steps": [
+        "Identify supervisor startup struct (likely WatchdogState or equivalent in coordinator_supervisor.rs).",
+        "Add ownership_guard: Option<ProcessOwnershipGuard> field.",
+        "After supervisor PID is written, claim ownership with ProcessKind::Supervisor.",
+        "Verify guard Drop fires via a short test (create + drop supervisor state struct)."
+      ],
+      "notes": "Keep changes minimal — only the field addition, one claim_owner call after startup, and the guard Drop. Do not change supervisor watchdog interval or recovery logic.",
+      "exclusive_resources": [
+        "core/src/supervisor/coordinator_supervisor.rs"
+      ],
+      "dependencies": [
+        "L6-ENG-001"
+      ],
+      "priority": "2",
+      "routing_hints": {
+        "execution_mode": "micro",
+        "reasoning_depth": "standard",
+        "context_scope": "local",
+        "risk_level": "low",
+        "validation_profile": "light"
+      }
+    },
+    {
+      "id": "L6-START-003",
+      "title": "Wire web server startup auto-claim and add ownership routes to web router",
+      "category": "startup",
+      "description": "Problem/Goal: The web server is a long-running process. On startup it should claim ProcessKind::WebServer ownership, and the router must expose all ownership API endpoints so WEB clients can register, query, and request takeover.\nKey actions: (A) Startup hook — in cli/src/commands/web/mod.rs, WebState gains ownership_guard: Option<Arc<ProcessOwnershipGuard>> (Arc because WebState is Clone + shared across Axum handlers). In WebCommand::run(), after binding the listener: construct ProcessHandle { kind: ProcessKind::WebServer, project_root: paths.root, pid: Some(process::id() as i32) }, call engine.process_ownership_claim() via state.engine, store guard in state.ownership_guard. On server shutdown the Arc drops and releases ownership. (B) Routes — add new ownership routes to build_web_router(): GET /api/v1/processes, GET /api/v1/processes/:handle/ownership, POST /api/v1/processes/:handle/claim, POST /api/v1/processes/:handle/release, POST /api/v1/processes/:handle/viewer, DELETE /api/v1/processes/:handle/viewer, POST /api/v1/processes/:handle/takeover/request, POST /api/v1/processes/:handle/takeover/respond, POST /api/v1/processes/:handle/heartbeat — all routed to handlers in cli/src/commands/web/ownership.rs (L6-WEB-001).\nOut of scope: Implementing the handler bodies (L6-WEB-001). Frontend (L6-WEB-003).\nSuccess criteria: build_web_router() compiles with all new routes. WebState holds ownership_guard. Server startup writes WebServer ownership record. cargo check passes.",
+      "objective": "Ensure the web server claims its process ownership on startup and the API surface for ownership operations is declared in the router.",
+      "result": "cli/src/commands/web/mod.rs: WebState.ownership_guard added, startup claim wired, 9 new routes declared. Compiles cleanly.",
+      "steps": [
+        "Add ownership_guard: Option<Arc<ProcessOwnershipGuard>> to WebState in mod.rs.",
+        "In WebCommand::run(), after bind: construct ProcessHandle, call engine.process_ownership_claim(), store guard.",
+        "Add 9 ownership routes to build_web_router() pointing to ownership:: handlers.",
+        "Add mod ownership; use statement to web/mod.rs.",
+        "Run cargo check — route declarations may show unused handler warnings until L6-WEB-001 is merged."
+      ],
+      "notes": "This task touches cli/src/commands/web/mod.rs which L6-WEB-001 and L6-WEB-002 also depend on. L6-WEB-001 (handler implementations) must be completed before or alongside this task to avoid dangling route references. Alternatively, declare stub handlers in ownership.rs as part of this task if L6-WEB-001 is not yet merged.",
+      "exclusive_resources": [
+        "cli/src/commands/web/mod.rs"
+      ],
+      "dependencies": [
+        "L6-ENG-001"
+      ],
+      "priority": "1",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "medium",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L6-TUI-001",
+      "title": "Create tui/src/ownership.rs: TUI ownership state types and render helpers",
+      "category": "tui",
+      "description": "Problem/Goal: tui/src/state.rs is already 4667 lines, well above the anti-god-file threshold. All TUI-specific ownership types and rendering logic must live in a companion module to prevent further growth of state.rs.\nKey actions: Create tui/src/ownership.rs. Define TuiOwnershipState struct: { record: Option<OwnershipRecord>, is_owner: bool, pending_incoming_request: Option<TakeoverRequest>, last_refresh: Instant }. Implement TuiOwnershipState::is_owner(&self, client_id) -> bool. Define OwnershipBannerProps for rendering: { owner_label: String, viewer_count: usize, is_owner: bool, has_pending_request: bool }. Implement render_ownership_banner(f: &mut Frame, area: Rect, props: &OwnershipBannerProps) using ratatui primitives: single-line banner showing owner client_id (truncated), viewer count, ownership status indicator, 'T' hint if is_owner=false. Implement render_takeover_modal(f: &mut Frame, area: Rect, request: &TakeoverRequest) showing requester info and A/R keybindings. Add pub mod ownership; to tui/src/lib.rs.\nOut of scope: AppState integration (L6-TUI-002). Key binding wiring (L6-TUI-003). Any Engine calls.\nSuccess criteria: ownership.rs compiles without warnings. TuiOwnershipState, OwnershipBannerProps, render_ownership_banner, render_takeover_modal are all available from tui::ownership. No dependency on AppState.",
+      "objective": "Establish the TUI ownership companion module to keep all ownership render logic and types outside state.rs.",
+      "result": "tui/src/ownership.rs with TuiOwnershipState, OwnershipBannerProps, render_ownership_banner, render_takeover_modal. Compiles cleanly.",
+      "steps": [
+        "Create tui/src/ownership.rs.",
+        "Define TuiOwnershipState with record, is_owner, pending_incoming_request, last_refresh fields.",
+        "Implement render_ownership_banner() as a ratatui Paragraph widget in a styled block — match existing TUI color conventions.",
+        "Implement render_takeover_modal() as a centered Popup block with requester info and key hints.",
+        "Add pub mod ownership; to tui/src/lib.rs.",
+        "Run cargo check on tui crate."
+      ],
+      "notes": "This task only needs OwnershipRecord and TakeoverRequest types from L6-OWN-001. It has no dependency on Engine or service layer. It can run in parallel with L6-OWN-002 through L6-OWN-005 and L6-ENG-001. Keep render functions stateless — they take props, not AppState.",
+      "exclusive_resources": [
+        "tui/src/ownership.rs",
+        "tui/src/lib.rs"
+      ],
+      "dependencies": [
+        "L6-OWN-001"
+      ],
+      "priority": "1",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "low",
+        "validation_profile": "light"
+      }
+    },
+    {
+      "id": "L6-TUI-002",
+      "title": "Add ownership lifecycle to AppState: fields, startup registration, tick heartbeat, exit cleanup",
+      "category": "tui",
+      "description": "Problem/Goal: AppState must hold the TUI's client identity, track its ownership/viewer status for running processes, send periodic heartbeats, and clean up on exit. All additions to state.rs must be minimal, delegating to tui/src/ownership.rs and the Engine trait.\nKey actions: In tui/src/state.rs: (1) Add fields: client_identity: ClientIdentity (generated in new() as UUID+TUI kind), ownership_state: TuiOwnershipState, ownership_guard: Option<ProcessOwnershipGuard>, viewer_guards: Vec<ProcessViewerGuard>. (2) In new(): generate client_identity; call scan_and_register_as_viewer() (defined below). (3) Add scan_and_register_as_viewer(&mut self): calls engine.process_list_running() for project_paths, for each running process calls engine.process_register_viewer(), stores ProcessViewerGuard in viewer_guards; sets ownership_state.record. (4) In start_managed_coordinator_command(): before spawning, call engine.process_ownership_claim(); if result is Owner, store ProcessOwnershipGuard in self.ownership_guard; if Viewer, the guard from process_register_viewer is already stored. (5) In tick(): every 5 seconds (use a last_ownership_refresh Instant), refresh ownership records by calling engine.process_ownership_status() and update ownership_state; check ownership_state.pending_incoming_request for new takeover requests; call engine.process_heartbeat() for each held guard. (6) In the TUI exit path (load_config cleanup or on TerminalGuard drop signal): drop ownership_guard and viewer_guards explicitly before exit. (7) Add handle_takeover_request_received(&mut self, request: TakeoverRequest) to set ownership_state.pending_incoming_request.\nOut of scope: Rendering (L6-TUI-003). Key binding wiring (L6-TUI-003).\nSuccess criteria: AppState compiles with new fields. Ownership guard is held and released on TUI exit. tick() sends heartbeats. Integration smoke test: TUI starts, coordinator is running, TUI registers as viewer, ownership record shows one viewer.",
+      "objective": "Wire ownership lifecycle into AppState with minimal additions, delegating all logic to the ownership module and Engine trait.",
+      "result": "tui/src/state.rs: 6 new fields, ~60 lines of delegation code total. All compile. Ownership guard released on exit.",
+      "steps": [
+        "Add client_identity, ownership_state, ownership_guard, viewer_guards, last_ownership_refresh fields to AppState struct and initializer.",
+        "Implement scan_and_register_as_viewer() — call engine.process_list_running() and register as viewer for each.",
+        "Modify start_managed_coordinator_command() to call engine.process_ownership_claim() first.",
+        "In tick(): add 5s refresh of ownership records and heartbeat send.",
+        "Add handle_takeover_request_received() to update pending_incoming_request.",
+        "Wire exit cleanup: drop guards on TUI exit (add to the should_quit branch or TerminalGuard Drop callback).",
+        "Run cargo check on tui crate — verify all new fields compile."
+      ],
+      "notes": "Keep each addition to state.rs to a single delegation call. Do not inline event parsing or JSON handling in state.rs — ownership.rs handles that. The tick() ownership refresh runs at most every 5s (use a separate Instant field, not the existing coordinator_events_last_refresh). Use process_ownership_status() for the coordinator process specifically since that is the most visible one to the TUI.",
+      "exclusive_resources": [
+        "tui/src/state.rs"
+      ],
+      "dependencies": [
+        "L6-ENG-001",
+        "L6-TUI-001"
+      ],
+      "priority": "1",
+      "routing_hints": {
+        "execution_mode": "structural",
+        "reasoning_depth": "deep",
+        "context_scope": "cross-cutting",
+        "risk_level": "high",
+        "validation_profile": "heavy"
+      }
+    },
+    {
+      "id": "L6-TUI-003",
+      "title": "Add ownership banner and takeover modal to CoordinatorLive screen",
+      "category": "tui",
+      "description": "Problem/Goal: The CoordinatorLive screen is where users most directly interact with a running coordinator. It must display ownership status (owner/viewer indicator) and support takeover request/response via keyboard shortcuts.\nKey actions: In the CoordinatorLive render path (locate via grep for CoordinatorLive in tui/src/lib.rs or tui/src/ui*.rs): (1) Call render_ownership_banner() from tui::ownership with props derived from state.ownership_state. Place the banner as a thin row at the top of the CoordinatorLive layout, above the existing status content. (2) If state.ownership_state.pending_incoming_request is Some, call render_takeover_modal() centered over the screen. (3) In handle_key() in tui/src/lib.rs, add to the CoordinatorLive screen branch: KeyCode::Char('T') when !is_owner: calls state.engine.process_ownership_request_takeover() with state.client_identity; KeyCode::Char('a') when pending_incoming_request is Some: calls engine.process_ownership_respond_takeover(..., accept=true); KeyCode::Char('r') when pending_incoming_request is Some: calls engine.process_ownership_respond_takeover(..., accept=false). (4) In tick() ownership event scan: when events.jsonl contains 'takeover_requested' event addressed to this TUI's project, parse requester identity, call handle_takeover_request_received().\nOut of scope: Any other screen. Any backend logic.\nSuccess criteria: CoordinatorLive renders ownership banner. Pressing T when viewer sends takeover request (visible in store). Owner sees modal when request arrives. A/r keys accept/reject. All existing CoordinatorLive tests pass.",
+      "objective": "Surface process ownership status in the CoordinatorLive screen and wire the takeover request/accept/reject keyboard flow.",
+      "result": "CoordinatorLive shows ownership banner. T/A/R keys work. Render functions from ownership.rs are called correctly.",
+      "steps": [
+        "Locate CoordinatorLive render function — add ownership banner row to layout split.",
+        "Call render_ownership_banner() with OwnershipBannerProps built from state.ownership_state.",
+        "Add conditional render_takeover_modal() when pending_incoming_request is Some.",
+        "Add T, A, r key handlers in handle_key() for Screen::CoordinatorLive.",
+        "Add takeover_requested event detection in tick() events scan (check event_type field).",
+        "Run all tui tests — verify CoordinatorLive tests still pass."
+      ],
+      "notes": "Use 'T' (uppercase) for request-takeover to avoid conflict with existing lowercase 't' (Tools screen navigation). Use 'a' for accept and 'r' for reject — check existing CoordinatorLive keys first and adjust if collision. The modal should be dismissible with Esc (sets pending_incoming_request = None without responding — the request stays pending until explicitly accepted/rejected or times out via stale eviction).",
+      "exclusive_resources": [
+        "tui/src/lib.rs"
+      ],
+      "dependencies": [
+        "L6-TUI-002"
+      ],
+      "priority": "1",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "medium",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L6-WEB-001",
+      "title": "Implement web ownership API handlers",
+      "category": "web",
+      "description": "Problem/Goal: WEB clients need REST endpoints to register as viewers, query ownership, request takeover, and respond. Handlers follow the existing ApiError/WebState pattern.\nKey actions: Create cli/src/commands/web/ownership.rs. Implement Axum handlers for each route declared in L6-START-003: get_processes_handler (GET /api/v1/processes) — calls engine.process_list_running() → Vec<ApiOwnershipRecord>. get_ownership_handler (GET /api/v1/processes/:handle/ownership) — deserializes ProcessHandle from path, calls engine.process_ownership_status(). post_claim_handler (POST /api/v1/processes/:handle/claim) — body: ClientIdentity JSON, calls engine.process_ownership_claim() → ApiOwnershipResult. post_release_handler (POST /api/v1/processes/:handle/release) — body: { client_id }, calls engine.process_ownership_release(). post_register_viewer_handler (POST /api/v1/processes/:handle/viewer) — body: ClientIdentity, calls engine.process_register_viewer(). delete_unregister_viewer_handler (DELETE /api/v1/processes/:handle/viewer) — body: { client_id }. post_takeover_request_handler (POST /api/v1/processes/:handle/takeover/request). post_takeover_respond_handler (POST /api/v1/processes/:handle/takeover/respond) — body: { owner_client_id, request_id, accept: bool }. post_heartbeat_handler (POST /api/v1/processes/:handle/heartbeat) — body: { client_id }. Define ApiOwnershipRecord, ApiOwnershipResult serializable response types mirroring OwnershipRecord but with camelCase field names. ProcessHandle path param deserialization: encode handle as URL-safe base64 of JSON-serialized ProcessHandle OR use a flat query param encoding (kind + project_root + pid). Choose the simpler approach — query params are fine: GET /api/v1/processes?kind=Coordinator.\nOut of scope: Frontend (L6-WEB-003). Route registration (L6-START-003).\nSuccess criteria: All handlers compile against WebState. Unit tests (existing web tests pattern in cli/src/commands/web/tests.rs) cover: list processes (empty), claim (first caller = owner), register viewer, heartbeat. HTTP 404 on unknown handle, 409 on double-claim attempt that returns Viewer.",
+      "objective": "Provide the complete WEB API surface for process ownership so browser clients can observe and interact with ownership state.",
+      "result": "cli/src/commands/web/ownership.rs with 9 handlers, ApiOwnershipRecord/ApiOwnershipResult types. Unit tests pass.",
+      "steps": [
+        "Create cli/src/commands/web/ownership.rs.",
+        "Define ApiOwnershipRecord and ApiOwnershipResult response types with serde Serialize.",
+        "Decide and implement ProcessHandle encoding in URL path/query (recommend: query params kind=Coordinator&pid=1234&root=/path).",
+        "Implement all 9 handlers following the existing ApiError + State<WebState> pattern.",
+        "Write unit tests in web/tests.rs for ownership endpoints using the existing test infrastructure.",
+        "Add pub mod ownership; to cli/src/commands/web/mod.rs (or confirm L6-START-003 already did this)."
+      ],
+      "notes": "ProcessHandle path encoding: avoid base64 for simplicity. Use query params: GET /api/v1/processes/ownership?kind=Coordinator&root=%2Fhome%2Fbrand%2Fcgui&pid=1234. This matches the flat query param pattern already used in other MACC web endpoints. The handlers use state.engine (Engine trait) exclusively — no direct service imports in web handlers.",
+      "exclusive_resources": [
+        "cli/src/commands/web/ownership.rs"
+      ],
+      "dependencies": [
+        "L6-ENG-001"
+      ],
+      "priority": "1",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "medium",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L6-WEB-002",
+      "title": "Wire web server heartbeat loop and web client identity persistence",
+      "category": "web",
+      "description": "Problem/Goal: WEB clients (browser tabs) need a persistent identity and a mechanism to keep their viewer/ownership entries alive. The web server should send heartbeats on behalf of connected web client sessions.\nKey actions: (A) Browser-side client identity — in the frontend's API layer (web/src/api/ or equivalent), on first app load generate a UUID (crypto.randomUUID()) and persist it to sessionStorage as macc_client_id. Include this client_id in every ownership API request body. Register beforeunload handler to call DELETE /api/v1/processes/:handle/viewer. (B) Server-side heartbeat proxy — add a background task in the Axum server (tokio::spawn in WebCommand::run() after server is started) that every 30s calls engine.process_heartbeat() for each active process × each web client that has registered a viewer via the ownership store. (C) On SSE events_handler: when a new SSE connection is established, call engine.process_register_viewer() with a Web client identity whose client_id is taken from a query param or header (?client_id=UUID). Return the viewer guard as part of the SSE stream context (drop it when the stream ends — SSE disconnection auto-releases).\nOut of scope: Frontend UI components (L6-WEB-003).\nSuccess criteria: SSE connection registers web client as viewer. SSE disconnect triggers unregister_viewer (guard drop). Server heartbeat loop updates last_heartbeat in ownership store. Client identity persists in sessionStorage.",
+      "objective": "Keep web client ownership entries alive via server-side heartbeat loop and auto-release them on SSE/page disconnect.",
+      "result": "Web server heartbeat task runs every 30s. SSE connection registers viewer guard. SSE disconnect releases it. Frontend persists client_id in sessionStorage.",
+      "steps": [
+        "Add ?client_id=UUID query param parsing to events_handler in sse.rs.",
+        "In events_handler: call engine.process_register_viewer() for each running process; hold ProcessViewerGuard in stream closure (auto-drop on disconnect).",
+        "Add background tokio::spawn heartbeat task in WebCommand::run() that iterates ownership store and calls process_heartbeat().",
+        "In web frontend: add crypto.randomUUID() client_id generation + sessionStorage persistence + beforeunload handler.",
+        "Update mod.rs to spawn the heartbeat task."
+      ],
+      "notes": "The SSE stream closure already runs until the client disconnects (see existing sse.rs stream! macro). The ProcessViewerGuard can be moved into the closure — it drops when the stream ends. The background heartbeat task needs access to engine + paths (already in WebState). Pass WebState.clone() to the spawned task.",
+      "exclusive_resources": [
+        "cli/src/commands/web/sse.rs",
+        "cli/src/commands/web/mod.rs"
+      ],
+      "dependencies": [
+        "L6-START-003",
+        "L6-WEB-001"
+      ],
+      "priority": "2",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "medium",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L6-WEB-003",
+      "title": "Add ownership status badge, takeover button, and accept/reject toast to frontend",
+      "category": "web",
+      "description": "Problem/Goal: WEB users must be able to see process ownership status and trigger takeover from the Dashboard and Ops/Console screens.\nKey actions: (1) New ownership store in web/src/stores/ownershipStore.ts (or equivalent state management) — fetches GET /api/v1/processes on mount, polls every 10s, stores list of OwnershipRecord. (2) OwnershipBadge component (web/src/components/OwnershipBadge.tsx) — shows 'Owner' / 'Viewer' indicator + owner client_id (first 8 chars) + viewer count. Small badge, placed in Dashboard header and Ops/Console header. (3) RequestTakeoverButton — visible when current client is Viewer; POST /api/v1/processes/:handle/takeover/request on click. (4) TakeoverNotificationToast — shown when ownership events.jsonl delivers a 'takeover_requested' event via SSE matching this client's process. Shows requester info + Accept/Reject buttons. POST /api/v1/processes/:handle/takeover/respond on click. (5) Wire all new components into existing Dashboard and Ops/Console page layouts.\nOut of scope: New pages. Changing coordinator command buttons. Backend changes.\nSuccess criteria: Dashboard shows ownership badge. Viewer sees Request Takeover button. Owner receives toast on incoming takeover request. Accept/Reject buttons call correct endpoints. Existing frontend tests pass (npm test).",
+      "objective": "Surface process ownership state visually in the WEB frontend and enable takeover interaction from the browser.",
+      "result": "OwnershipBadge on Dashboard+Console. RequestTakeoverButton visible for viewers. TakeoverNotificationToast for owners. Frontend tests pass.",
+      "steps": [
+        "Create ownershipStore.ts with fetch+poll logic (10s interval) and subscribe pattern matching existing frontend stores.",
+        "Create OwnershipBadge.tsx component using the store.",
+        "Add RequestTakeoverButton to Dashboard and Console pages — visible only when ownershipStore shows current client is Viewer.",
+        "Add TakeoverNotificationToast — subscribe to SSE events, filter for takeover_requested with matching process, show modal.",
+        "Wire Accept/Reject to POST /api/v1/processes/:handle/takeover/respond.",
+        "Run npm test — verify no regressions."
+      ],
+      "notes": "The frontend client_id (from sessionStorage, established in L6-WEB-002) is used to determine owner/viewer status: if OwnershipRecord.owner.client_id === sessionStorage.getItem('macc_client_id'), show Owner badge. Match existing frontend patterns for store/component structure — do not introduce a new state management library.",
+      "exclusive_resources": [
+        "web/src/stores/",
+        "web/src/components/",
+        "web/src/pages/"
+      ],
+      "dependencies": [
+        "L6-WEB-002"
+      ],
+      "priority": "2",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "low",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L6-CLI-001",
+      "title": "Add macc process CLI subcommand for ownership inspection and recovery",
+      "category": "cli",
+      "description": "Problem/Goal: Operators and scripts need a CLI interface to inspect process ownership state, force-claim after a crashed client, or release a stale owner without starting the TUI or web server.\nKey actions: Create cli/src/commands/process.rs with ProcessCommand and ProcessCommands enum: List (macc process list — tabular output of all OwnershipRecords: process kind, PID, owner client_id, viewer count), Ownership { kind, pid } (macc process ownership --kind Coordinator --pid 1234 — detailed record JSON), Claim { kind, pid } (macc process claim — claim ownership with a Cli identity, print result), Release { kind, pid, client_id } (macc process release — release ownership for specified client_id). All commands use app.project_paths() (find_project_root, no auto-create) and app.engine. Wire into cli/src/main.rs: add Commands::Process { process_command } variant, map to ProcessCommand::new(app, process_command).run().\nOut of scope: Changing existing coordinator, worktree, or config commands. Adding heartbeat send to CLI (one-shot operations do not need heartbeats).\nSuccess criteria: macc process list prints a table with no owned processes on a fresh project (empty store). macc process claim returns 'Owner' on an empty store. macc process release clears the owner entry. macc help shows process subcommand. All existing CLI tests pass.",
+      "objective": "Provide operator-friendly CLI access to process ownership for inspection and recovery scenarios.",
+      "result": "cli/src/commands/process.rs with List, Ownership, Claim, Release subcommands. Wired into main.rs. All compile and work.",
+      "steps": [
+        "Create cli/src/commands/process.rs with ProcessCommand, ProcessCommands enum.",
+        "Implement list: call engine.process_list_running(), format as ASCII table (process_kind | pid | owner | viewers).",
+        "Implement ownership: call engine.process_ownership_status(), print as JSON.",
+        "Implement claim: construct ClientIdentity { kind: Cli, client_id: format!(\"cli-{}\", process::id()) }, call engine.process_ownership_claim(), print status.",
+        "Implement release: call engine.process_ownership_release(), confirm deletion.",
+        "Add Commands::Process variant to cli/src/main.rs and map to ProcessCommand.",
+        "Run existing CLI test suite — verify no regressions."
+      ],
+      "notes": "ProcessHandle construction for CLI: --kind Coordinator --pid 1234 flags, with --root defaulting to absolute_cwd. Use existing print_checks() / table formatting patterns from cli/src/main.rs or commands/doctor.rs for consistent output style.",
+      "exclusive_resources": [
+        "cli/src/commands/process.rs",
+        "cli/src/main.rs"
+      ],
+      "dependencies": [
+        "L6-ENG-001"
+      ],
+      "priority": "2",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "low",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L6-TEST-001",
+      "title": "Unit tests for OwnershipStore concurrent safety and stale eviction",
+      "category": "test",
+      "description": "Problem/Goal: The OwnershipStore is the single shared state file for all client processes. Correctness under concurrent load_and_modify() calls and correctness of stale eviction are critical to the ownership feature's reliability.\nKey actions: In core/src/process_ownership/store.rs (or a dedicated tests module), add: (1) Concurrent write test: spawn 10 threads each calling load_and_modify() on the same temp repo path with different claims; verify final state is consistent (exactly one owner per record, no duplicate entries). (2) Stale eviction test: create a store with an owner entry whose last_heartbeat is 120s in the past; call load(); verify the owner is evicted and ownership_guard is None. (3) Stale viewer eviction test: create a store with 3 viewers — 2 stale, 1 fresh; call load(); verify 2 stale viewers removed, 1 remains. (4) Stale owner promotes viewer test: create store with stale owner + 1 fresh viewer; call load(); verify viewer is promoted to owner. (5) Round-trip test: serialize + deserialize OwnershipRecord with all fields populated; verify equality.\nOut of scope: TUI or WEB integration. Network behavior.\nSuccess criteria: All 5 test cases pass. cargo test on core crate passes including new tests. No data races (test with --test-threads=1 if needed for fs tests).",
+      "objective": "Verify OwnershipStore correctness under concurrent access and validate the stale-eviction logic that underpins the first-connect-takes-ownership rule.",
+      "result": "5 new unit tests in store.rs or process_ownership tests module. All pass. No regressions in existing core tests.",
+      "steps": [
+        "Add concurrent-write test using std::thread::spawn (10 threads, same temp dir).",
+        "Add stale-owner-eviction test with fabricated timestamp 120s in past.",
+        "Add stale-viewer-removal test (2 stale + 1 fresh).",
+        "Add stale-owner-promotes-viewer test.",
+        "Add round-trip serialization test.",
+        "Run cargo test core -- --include-ignored."
+      ],
+      "notes": "Use tempfile::TempDir for isolation. For concurrent tests, use a Mutex<()> or file-system locks if needed — the load_and_modify pattern serializes writes but multiple threads may still race on the outer load. Fabricate stale timestamps using chrono::Utc::now() - Duration::seconds(120).to_rfc3339() for last_heartbeat.",
+      "exclusive_resources": [
+        "core/src/process_ownership/store.rs"
+      ],
+      "dependencies": [
+        "L6-OWN-004"
+      ],
+      "priority": "2",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "low",
+        "validation_profile": "heavy"
+      }
+    },
+    {
+      "id": "L6-TEST-002",
+      "title": "End-to-end ownership flow integration tests",
+      "category": "test",
+      "description": "Problem/Goal: The full ownership lifecycle — process startup auto-claim, TUI registers as viewer, TUI requests takeover, original owner responds, events are emitted — must be verified as a complete flow without requiring a live process.\nKey actions: In core tests or cli integration tests, add: (1) Coordinator startup claim test: create a temp repo, construct CoordinatorRunState with ownership_guard wired (use the service layer directly without spawning a real coordinator), verify process_ownership.json has a Coordinator record with owner. Drop state, verify record cleared. (2) First-connect-takes-ownership test: two Cli identities sequentially call claim_owner(); first gets Owner, second gets Viewer. Third call from a Web identity also gets Viewer. (3) Takeover flow test: first client owns, second client calls request_takeover() → pending request stored; first client calls respond_takeover(accept=true) → second client is now owner, first is no longer owner; events.jsonl has takeover_requested + takeover_accepted entries. (4) Takeover rejection test: same setup but respond_takeover(accept=false) → original owner unchanged, takeover_request cleared, events.jsonl has takeover_rejected.\nOut of scope: Real TUI rendering. Real network connections. Real coordinator subprocess.\nSuccess criteria: All 4 integration tests pass. events.jsonl entries are valid JSON with correct event_type fields. No test requires a live process or terminal.",
+      "objective": "Verify the complete ownership lifecycle end-to-end using the service layer, guard types, and event emission without live processes.",
+      "result": "4 integration tests in core/src/process_ownership/ or core/src/ tests. All pass. Events validated.",
+      "steps": [
+        "Write test (1): CoordinatorRunState drop releases ownership.",
+        "Write test (2): first-connect-takes-ownership with 3 sequential callers.",
+        "Write test (3): takeover accepted — verify owner transfer and events.jsonl entries.",
+        "Write test (4): takeover rejected — verify no owner change and events.jsonl entries.",
+        "Run cargo test core — all pass."
+      ],
+      "notes": "Tests (3) and (4) use a temp repo and read events.jsonl after the service calls to verify event emission. Use the existing append_coordinator_event_with_severity test patterns from coordinator/ipc.rs tests for reference. Test (1) requires importing CoordinatorRunState directly — place in core/src/coordinator/runtime.rs tests module or a core integration test.",
+      "exclusive_resources": [],
+      "dependencies": [
+        "L6-OWN-005",
+        "L6-START-001"
+      ],
+      "priority": "2",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "cross-cutting",
+        "risk_level": "medium",
+        "validation_profile": "heavy"
+      }
+    },
+    {
+      "id": "L6-CHECK-001",
+      "title": "check lot 6",
+      "category": "check",
+      "description": "Problem/Goal: The complete implementation of batch 6 'prd_l6.json' needs to be verified : The objective of this prd is to edit MACC to give the possibility of having TUI or WEB clients accessing the same process (for exemple 'macc coordinator') instance at the same time. - The goal is to make the web, TUI clients simple viewers, allowing them to view and modify configurations all process and command. - The TUI is the reference, as it is currently the most functional and complete. - However, if one client launches a process, the others are simply viewers if the client that launched it is still connected. Therefore, only one client can modify the process, and the others are viewers. A client can request and take control, and the other can accept or reject the request. - Even if no client is connected, the processes continue. The first client to connect takes control, not only viewing the processes but also having the right to modify them. Subsequent clients will be mere viewers. - And this is true for all processes in MACC, not just "macc coordinator". - Note that the architecture is of the type: core = business logic, Rust API = facade, CLI/TUI/WEB = clients: 1. It must be tool-agnostic! Use adapters if needed. 2. Scalable 3. Factored as much as possible 4. Modular",
+      "objective": "The complete implementation of batch 6 'prd_l6.json' needs to be verified",
+      "result": "a report file in '.macc/report/' and corrections of discrepancies if possible, and if not a significant exchange.",
+      "steps": [
+        "Check (1): check Goal : read description param and check",
+        "Check (2): check if (core, API, clients, etc.) are tool-agnostic! Use adapters if needed.",
+        "Check (3): check code : Scalable; Factored; Modular",
+        "Check (4): Apply corrections if necessary and if not too significant.",
+        "Run automation integration tests (automat/tests/run.sh)"
+      ],
+      "notes": "Tests (3) and (4) use a temp repo and read events.jsonl after the service calls to verify event emission. Use the existing append_coordinator_event_with_severity test patterns from coordinator/ipc.rs tests for reference. Test (1) requires importing CoordinatorRunState directly — place in core/src/coordinator/runtime.rs tests module or a core integration test.",
+      "exclusive_resources": [],
+      "dependencies": [
+        "L6-TEST-002"
+      ],
+      "priority": "0",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "cross-cutting",
+        "risk_level": "medium",
+        "validation_profile": "heavy"
+      }
+    }
+  ]
+}

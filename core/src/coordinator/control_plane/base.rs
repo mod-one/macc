@@ -1274,34 +1274,6 @@ pub async fn monitor_active_jobs_native(
                         }
                     }
                 }
-                if !completion.should_retry
-                    && (evt.success
-                        || matches!(
-                            completion.completion_kind,
-                            Some(
-                                crate::coordinator::PerformerCompletionKind::SuccessWithChanges
-                                    | crate::coordinator::PerformerCompletionKind::SuccessWithoutChanges
-                                    | crate::coordinator::PerformerCompletionKind::AlreadySatisfied
-                            )
-                        ))
-                {
-                    let sealed = crate::coordinator::session_manager::seal_worktree_scoped_session(
-                        repo_root,
-                        &job.tool,
-                        &job.worktree_path,
-                        &evt.task_id,
-                        &now_iso_coordinator(),
-                    )?;
-                    if sealed.sealed {
-                        if let Some(log) = logger {
-                            let sid = sealed.session_id.as_deref().unwrap_or("unknown");
-                            let _ = log.note(format!(
-                                "- Session sealed task={} tool={} session_id={}",
-                                evt.task_id, job.tool, sid
-                            ));
-                        }
-                    }
-                }
                 if completion.status_label == "auto_retry" {
                     if let Some(log) = logger {
                         let _ = log.note(format!(
@@ -2416,15 +2388,16 @@ mod tests {
         let state_dir = repo.join(".macc/state");
         fs::create_dir_all(&state_dir).expect("create state directory");
 
-        let mut sessions = serde_json::Map::new();
-        sessions.insert(
-            worktree.to_string_lossy().to_string(),
-            serde_json::json!({ "session_id": "codex-session-new" }),
-        );
         let state_payload = serde_json::json!({
             "tools": {
                 "codex": {
-                    "sessions": sessions
+                    "sessions": {
+                        "codex-session-new": {
+                            "status": "available",
+                            "created_at": "2026-04-01T00:00:00Z",
+                            "updated_at": "2026-04-01T00:00:00Z"
+                        }
+                    }
                 }
             }
         });
