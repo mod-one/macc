@@ -426,6 +426,91 @@ pub fn list_saved_sessions(repo_root: &Path) -> Result<Vec<SavedSessionMeta>> {
     Ok(results)
 }
 
+/// At coordinator startup, reset sessions that are stuck "active" because the
+/// performer exited without running its EXIT trap (e.g. SIGKILL, OOM).
+/// Any session whose heartbeat_epoch is 0 or older than `lease_ttl_seconds`
+/// is transitioned to "available" with owner fields cleared.
+/// Returns the number of sessions that were reset.
+pub fn reset_stale_active_sessions(repo_root: &Path, lease_ttl_seconds: u64) -> Result<usize> {
+    let sessions_path = repo_root.join(TOOL_SESSIONS_REL_PATH);
+    if !sessions_path.exists() {
+        return Ok(0);
+    }
+    let lock_dir = sessions_path.with_extension("json.lock");
+    acquire_lock(&lock_dir)?;
+    let result = (|| {
+        let raw = fs::read_to_string(&sessions_path).map_err(|e| MaccError::Io {
+            path: sessions_path.to_string_lossy().into(),
+            action: "read tool sessions for stale reset".into(),
+            source: e,
+        })?;
+        let mut root: Value = serde_json::from_str(&raw).map_err(|e| {
+            MaccError::Validation(format!(
+                "Failed to parse sessions file '{}': {}",
+                sessions_path.display(),
+                e
+            ))
+        })?;
+        let now = chrono::Utc::now().timestamp();
+        let mut reset_count = 0usize;
+        let recovered_at = chrono::Utc::now()
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        if let Some(tools) = root.get_mut("tools").and_then(Value::as_object_mut) {
+            for (_tool_id, tool_val) in tools.iter_mut() {
+                if let Some(sessions) =
+                    tool_val.get_mut("sessions").and_then(Value::as_object_mut)
+                {
+                    for (_sid, entry) in sessions.iter_mut() {
+                        // Skip old-format entries (keyed by worktree path).
+                        if entry.get("session_id").is_some() {
+                            continue;
+                        }
+                        let status = entry
+                            .get("status")
+                            .and_then(Value::as_str)
+                            .unwrap_or("available");
+                        if status != "active" {
+                            continue;
+                        }
+                        let hb = entry
+                            .get("heartbeat_epoch")
+                            .and_then(Value::as_i64)
+                            .unwrap_or(0);
+                        let age = now - hb;
+                        if hb == 0 || age > lease_ttl_seconds as i64 {
+                            if let Some(obj) = entry.as_object_mut() {
+                                obj.insert(
+                                    "status".to_string(),
+                                    Value::String("available".to_string()),
+                                );
+                                obj.remove("owner_worktree");
+                                obj.remove("owner_task_id");
+                                obj.remove("owner_pid");
+                                obj.insert(
+                                    "heartbeat_epoch".to_string(),
+                                    serde_json::Value::Number(0.into()),
+                                );
+                                obj.insert(
+                                    "recovered_at".to_string(),
+                                    Value::String(recovered_at.clone()),
+                                );
+                            }
+                            reset_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+        if reset_count > 0 {
+            persist_sessions_file(&sessions_path, &root)?;
+        }
+        Ok(reset_count)
+    })();
+    release_lock(&lock_dir);
+    result
+}
+
 /// Delete a saved session snapshot.
 pub fn delete_saved_session(repo_root: &Path, name: &str) -> Result<()> {
     let path = snapshot_path(repo_root, name)?;
@@ -749,5 +834,94 @@ mod tests {
         let p = Path::new("/home/user/my project (test)");
         let slug = project_slug(p);
         assert_eq!(slug, "my_project__test_");
+    }
+
+    #[test]
+    fn reset_stale_active_sessions_resets_stale_and_leaves_fresh() {
+        let root = temp_dir("macc_sess_stale_reset");
+        fs::create_dir_all(root.join(".macc/state")).expect("create state dir");
+        let sessions_path = root.join(TOOL_SESSIONS_REL_PATH);
+
+        let now = chrono::Utc::now().timestamp();
+        let fresh_hb = now - 60; // 60 s ago → still within 1800 s TTL
+        let stale_hb = now - 3600; // 1 h ago → beyond 1800 s TTL
+
+        let sessions = json!({
+            "tools": {
+                "codex": {
+                    "sessions": {
+                        "fresh-sid": {
+                            "status": "active",
+                            "created_at": "2026-01-01T00:00:00Z",
+                            "heartbeat_epoch": fresh_hb,
+                            "owner_task_id": "TASK-A",
+                            "owner_pid": "1234"
+                        },
+                        "stale-sid": {
+                            "status": "active",
+                            "created_at": "2026-01-01T00:00:00Z",
+                            "heartbeat_epoch": stale_hb,
+                            "owner_task_id": "TASK-B",
+                            "owner_pid": "5678"
+                        },
+                        "zero-hb-sid": {
+                            "status": "active",
+                            "created_at": "2026-01-01T00:00:00Z",
+                            "heartbeat_epoch": 0,
+                            "owner_task_id": "TASK-C",
+                            "owner_pid": "9999"
+                        },
+                        "already-avail-sid": {
+                            "status": "available",
+                            "created_at": "2026-01-01T00:00:00Z",
+                            "heartbeat_epoch": 0
+                        }
+                    }
+                }
+            }
+        });
+        persist_sessions_file(&sessions_path, &sessions).expect("seed");
+
+        let reset = reset_stale_active_sessions(&root, 1800).expect("reset");
+        assert_eq!(reset, 2, "stale-sid and zero-hb-sid should be reset");
+
+        let after: Value =
+            serde_json::from_str(&fs::read_to_string(&sessions_path).unwrap()).unwrap();
+        let codex = &after["tools"]["codex"]["sessions"];
+
+        // Fresh session untouched.
+        assert_eq!(codex["fresh-sid"]["status"].as_str(), Some("active"));
+        assert_eq!(
+            codex["fresh-sid"]["owner_task_id"].as_str(),
+            Some("TASK-A")
+        );
+
+        // Stale sessions reset.
+        assert_eq!(codex["stale-sid"]["status"].as_str(), Some("available"));
+        assert!(codex["stale-sid"]["owner_task_id"].is_null());
+        assert_eq!(
+            codex["stale-sid"]["heartbeat_epoch"].as_i64(),
+            Some(0)
+        );
+        assert!(codex["stale-sid"]["recovered_at"].as_str().is_some());
+
+        assert_eq!(codex["zero-hb-sid"]["status"].as_str(), Some("available"));
+        assert!(codex["zero-hb-sid"]["owner_pid"].is_null());
+
+        // Already-available session untouched.
+        assert_eq!(
+            codex["already-avail-sid"]["status"].as_str(),
+            Some("available")
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn reset_stale_active_sessions_no_file_returns_zero() {
+        let root = temp_dir("macc_sess_stale_nofile");
+        let reset = reset_stale_active_sessions(&root, 1800).expect("reset");
+        assert_eq!(reset, 0);
+        let _ = fs::remove_dir_all(&root);
     }
 }

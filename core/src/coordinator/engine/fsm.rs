@@ -1749,6 +1749,29 @@ pub async fn run_native_control_plane(
         }
     }
 
+    // Reset sessions that are stuck "active" because a performer exited without
+    // its EXIT trap (SIGKILL, OOM, host crash). 1800 s matches the shell-side
+    // SESSION_LEASE_TTL_SECONDS default in performer_lib.sh.
+    match crate::coordinator::session_manager::reset_stale_active_sessions(repo_root, 1800) {
+        Ok(n) if n > 0 => {
+            if let Some(log) = logger {
+                let _ = log.note(format!(
+                    "- Startup session recovery: reset {} stale active session(s) to available",
+                    n
+                ));
+            }
+        }
+        Ok(_) => {}
+        Err(e) => {
+            if let Some(log) = logger {
+                let _ = log.note(format!(
+                    "- Warning: startup session recovery failed: {}",
+                    e
+                ));
+            }
+        }
+    }
+
     let mut run_state = CoordinatorRunState::new();
     // ── Part D: restore persisted throttle state on startup ─────────────
     {

@@ -84,6 +84,14 @@ session_id_strategy="$(jq -r '.performer.session.id_strategy // "discovered"' "$
 session_state_file="${repo}/.macc/state/tool-sessions.json"
 session_lock_dir="${session_state_file}.lock"
 session_lease_ttl="${SESSION_LEASE_TTL_SECONDS:-1800}"
+# Max age (seconds) for a session to be offered for resume. Sessions whose
+# last_used_at is older than this are skipped; the tool will start fresh.
+# Default 86400 s (24 h). Override via SESSION_MAX_AGE_SECONDS or tool.json.
+session_max_age_seconds="${SESSION_MAX_AGE_SECONDS:-$(jq -r '.performer.session.max_age_seconds // 86400' "$tool_json")}"
+# Maximum number of available (non-active) sessions kept in the pool per tool.
+# Oldest entries are pruned when this cap is exceeded after a new session write.
+# Default 8. Override via SESSION_POOL_CAP or tool.json.
+session_pool_cap="${SESSION_POOL_CAP:-$(jq -r '.performer.session.pool_cap // 8' "$tool_json")}"
 mkdir -p "$(dirname "$session_state_file")"
 
 acquire_session_lock() {
@@ -135,15 +143,34 @@ session_occupied_by_other() {
 }
 
 # Scan the tool's session pool and return the first session that is not
-# currently occupied.  Only considers new-format entries (keyed by session_id);
-# old-format entries (keyed by worktree path, with a nested session_id field)
-# are silently skipped.
+# currently occupied and not too old to be worth resuming.
+# Only considers new-format entries (keyed by session_id); old-format entries
+# (keyed by worktree path, with a nested session_id field) are silently skipped.
+# Sessions whose last use timestamp is older than session_max_age_seconds are
+# also skipped — those are unlikely to be resumable by the tool.
 find_available_session_id() {
   [[ -f "$session_state_file" ]] || { echo ""; return 0; }
+  local now_ts
+  now_ts="$(now_epoch)"
   local sids
-  sids="$(jq -r --arg tool "$tool_id" '
+  sids="$(jq -r --arg tool "$tool_id" \
+      --argjson now "$now_ts" \
+      --argjson max_age "$session_max_age_seconds" '
     (.tools[$tool].sessions // {}) | to_entries[] |
-    select((.value | type) == "object" and (.value.session_id == null)) |
+    select(
+      (.value | type) == "object" and
+      (.value.session_id == null) and
+      (
+        (.value.last_used_at // .value.updated_at // .value.created_at // "") as $ts |
+        if $ts == "" then true
+        else
+          (try ($ts | strptime("%Y-%m-%dT%H:%M:%SZ") | mktime) catch -1) as $epoch |
+          if $epoch < 0 then true
+          else ($now - $epoch) <= $max_age
+          end
+        end
+      )
+    ) |
     .key
   ' "$session_state_file" 2>/dev/null)"
   local sid
@@ -157,8 +184,13 @@ find_available_session_id() {
   echo ""
 }
 
+# Write or update an active lease for session $sid.
+# Optional second argument: creation_reason — recorded only when the session
+# entry is brand-new (no existing entry). Preserved on subsequent writes.
+# use_count is incremented on every acquisition.
 write_active_lease() {
   local sid="$1"
+  local creation_reason="${2:-new}"
   local now ts tmp
   now="$(now_iso)"
   ts="$(now_epoch)"
@@ -172,12 +204,18 @@ write_active_lease() {
       --arg wt "$worktree" \
       --arg tid "$task_id" \
       --arg pid "$$" \
+      --arg reason "$creation_reason" \
       --argjson hb "$ts" '
       .tools = (.tools // {}) |
       .tools[$tool] = (.tools[$tool] // {}) |
       .tools[$tool].sessions = (.tools[$tool].sessions // {}) |
       .tools[$tool].sessions[$sid] = (
-        (.tools[$tool].sessions[$sid] // { created_at: $now }) |
+        (.tools[$tool].sessions[$sid] // {
+          created_at: $now,
+          creation_reason: $reason,
+          use_count: 0
+        }) |
+        .use_count = ((.use_count // 0) + 1) |
         . + {
           status: "active",
           owner_worktree: $wt,
@@ -196,6 +234,7 @@ write_active_lease() {
       --arg wt "$worktree" \
       --arg tid "$task_id" \
       --arg pid "$$" \
+      --arg reason "$creation_reason" \
       --argjson hb "$ts" '{
         tools: {
           ($tool): {
@@ -203,6 +242,8 @@ write_active_lease() {
               ($sid): {
                 status: "active",
                 created_at: $now,
+                creation_reason: $reason,
+                use_count: 1,
                 owner_worktree: $wt,
                 owner_task_id: $tid,
                 owner_pid: $pid,
@@ -216,6 +257,34 @@ write_active_lease() {
   fi
 
   mv "$tmp" "$session_state_file"
+}
+
+# Remove the oldest available (non-active) sessions for this tool so the pool
+# stays under $1 entries. Active sessions are never touched. Old-format entries
+# (with a nested session_id field) are treated as non-prunable and kept.
+prune_pool_available() {
+  local cap="$1"
+  [[ -f "$session_state_file" ]] || return 0
+  local tmp
+  tmp="$(mktemp)"
+  jq --arg tool "$tool_id" --argjson cap "$cap" '
+    .tools[$tool].sessions = (
+      .tools[$tool].sessions // {} |
+      to_entries |
+      ( map(select(
+          .value.session_id != null or
+          (.value.status // "available") == "active"
+        )) ) as $protected |
+      ( map(select(
+          .value.session_id == null and
+          (.value.status // "available") != "active"
+        )) |
+        sort_by(.value.last_used_at // .value.updated_at // .value.created_at // "") |
+        reverse |
+        .[0:$cap] ) as $keep_avail |
+      ($protected + $keep_avail) | from_entries
+    )
+  ' "$session_state_file" >"$tmp" && mv "$tmp" "$session_state_file" || rm -f "$tmp"
 }
 
 mark_lease_status() {
@@ -384,7 +453,7 @@ reserve_generated_session_id() {
       continue
     }
     if ! session_occupied_by_other "$sid"; then
-      write_active_lease "$sid"
+      write_active_lease "$sid" "generated"
       active_session_id="$sid"
       printf "%s" "$sid"
       return 0
@@ -522,10 +591,18 @@ if [[ "$session_enabled" == "true" && -n "$session_resume_command" ]]; then
   fi
   if [[ -n "$new_sid" ]]; then
     if acquire_session_lock; then
-      if ! session_occupied_by_other "$new_sid"; then
+      if [[ -n "$sid" && "$new_sid" != "$sid" ]]; then
+        # The tool created a new session instead of resuming the claimed one
+        # (resume failed or the session had expired on the tool's side).
+        # Release the old claim so it doesn't leak as permanently "active".
+        mark_lease_status "$sid" "available" || true
+        write_active_lease "$new_sid" "resume_failed_fallback"
+        active_session_id="$new_sid"
+      elif ! session_occupied_by_other "$new_sid"; then
         write_active_lease "$new_sid"
         active_session_id="$new_sid"
       fi
+      prune_pool_available "$session_pool_cap"
       release_session_lock
     fi
   fi
