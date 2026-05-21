@@ -65,24 +65,82 @@ export class ApiClientError extends Error {
 }
 
 const WEB_CLIENT_ID_HEADER = 'X-Macc-Client-Id';
-const WEB_CLIENT_ID_STORAGE_KEY = 'macc.webClientId';
+const WEB_CLIENT_ID_STORAGE_KEY = 'macc_client_id';
 const WEB_OWNERSHIP_MODE_STORAGE_KEY = 'macc.webOwnershipMode';
 const OWNERSHIP_MUTATION_PREFIX = '/processes/project/';
+const VIEWER_CLEANUP_PATH = '/processes/project/viewer';
+const VIEWER_CLEANUP_FLAG = '__maccViewerCleanupRegistered';
+
+function getSessionStorage(): Storage | null {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+  return window.sessionStorage;
+}
+
+function cleanupProjectViewerOnUnload(clientId: string): void {
+  void fetch(buildUrl(VIEWER_CLEANUP_PATH), {
+    method: 'DELETE',
+    keepalive: true,
+    headers: {
+      Accept: 'application/json',
+      [WEB_CLIENT_ID_HEADER]: clientId,
+    },
+  }).catch(() => undefined);
+}
+
+function currentStoredWebClientId(): string | null {
+  return getSessionStorage()?.getItem(WEB_CLIENT_ID_STORAGE_KEY) ?? null;
+}
+
+function ensureViewerCleanupRegistered(): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  const viewerCleanupWindow = window as Window & { [VIEWER_CLEANUP_FLAG]?: boolean };
+  if (viewerCleanupWindow[VIEWER_CLEANUP_FLAG]) {
+    return;
+  }
+  viewerCleanupWindow[VIEWER_CLEANUP_FLAG] = true;
+  window.addEventListener('beforeunload', () => {
+    const clientId = currentStoredWebClientId();
+    if (clientId) {
+      cleanupProjectViewerOnUnload(clientId);
+    }
+  });
+}
+
+function resolveOwnershipClientId(options?: ApiRequestOptions): string {
+  return options?.clientId ?? getWebClientId();
+}
+
+function ownershipBody<TBody extends Record<string, unknown>>(
+  options: ApiRequestOptions,
+  body: TBody,
+): TBody & { client_id: string } {
+  return {
+    ...body,
+    client_id: resolveOwnershipClientId(options),
+  };
+}
 
 export function getWebClientId(): string {
-  if (typeof window === 'undefined') {
+  const storage = getSessionStorage();
+  if (!storage) {
     return 'web-server-render';
   }
-  const existing = window.localStorage.getItem(WEB_CLIENT_ID_STORAGE_KEY);
+  const existing = storage.getItem(WEB_CLIENT_ID_STORAGE_KEY);
   if (existing) {
+    ensureViewerCleanupRegistered();
     return existing;
   }
   const suffix =
     typeof crypto !== 'undefined' && 'randomUUID' in crypto
       ? crypto.randomUUID()
       : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  const clientId = `web-${suffix}`;
-  window.localStorage.setItem(WEB_CLIENT_ID_STORAGE_KEY, clientId);
+  const clientId = suffix;
+  storage.setItem(WEB_CLIENT_ID_STORAGE_KEY, clientId);
+  ensureViewerCleanupRegistered();
   return clientId;
 }
 
@@ -332,16 +390,19 @@ export async function claimProjectOwnership(
     '/processes/project/claim',
     'POST',
     options,
-    { pid: null },
+    ownershipBody(options, { pid: null }),
   );
 }
 
 export async function registerProjectViewer(
   options: ApiRequestOptions = {},
 ): Promise<void> {
-  await sendJson<unknown, { pid: null }>('/processes/project/viewer', 'POST', options, {
-    pid: null,
-  });
+  await sendJson<unknown, { pid: null }>(
+    '/processes/project/viewer',
+    'POST',
+    options,
+    ownershipBody(options, { pid: null }),
+  );
 }
 
 export async function requestProjectTakeover(
@@ -351,7 +412,7 @@ export async function requestProjectTakeover(
     '/processes/project/takeover/request',
     'POST',
     options,
-    { pid: null },
+    ownershipBody(options, { pid: null }),
   );
 }
 
@@ -364,16 +425,19 @@ export async function respondProjectTakeover(
     '/processes/project/takeover/respond',
     'POST',
     options,
-    { pid: null, request_id: requestId, accept },
+    ownershipBody(options, { pid: null, request_id: requestId, accept }),
   );
 }
 
 export async function heartbeatProjectOwnership(
   options: ApiRequestOptions = {},
 ): Promise<void> {
-  await sendJson<unknown, { pid: null }>('/processes/project/heartbeat', 'POST', options, {
-    pid: null,
-  });
+  await sendJson<unknown, { pid: null }>(
+    '/processes/project/heartbeat',
+    'POST',
+    options,
+    ownershipBody(options, { pid: null }),
+  );
 }
 
 export async function getConfig(

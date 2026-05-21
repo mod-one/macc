@@ -76,6 +76,8 @@ describe('Logs page', () => {
   beforeEach(() => {
     MockEventSource.instances = [];
     vi.stubGlobal('EventSource', MockEventSource);
+    window.sessionStorage.clear();
+    window.sessionStorage.setItem('macc_client_id', 'logs-client');
   });
 
   afterEach(() => {
@@ -104,7 +106,7 @@ describe('Logs page', () => {
 
     expect(screen.getByText(/waiting for the first event/i)).toBeInTheDocument();
     expect(MockEventSource.instances).toHaveLength(1);
-    expect(MockEventSource.instances[0]?.url).toBe('/api/v1/events');
+    expect(MockEventSource.instances[0]?.url).toBe('/api/v1/events?client_id=logs-client');
 
     const source = MockEventSource.instances[0]!;
     act(() => {
@@ -217,7 +219,9 @@ describe('Logs page', () => {
     });
 
     expect(MockEventSource.instances).toHaveLength(2);
-    expect(MockEventSource.instances[1]?.url).toBe('/api/v1/events?last_event_id=evt-8');
+    expect(MockEventSource.instances[1]?.url).toBe(
+      '/api/v1/events?last_event_id=evt-8&client_id=logs-client',
+    );
     vi.useRealTimers();
   });
 
@@ -309,6 +313,8 @@ describe('Logs page - File Browser tab', () => {
   beforeEach(() => {
     MockEventSource.instances = [];
     vi.stubGlobal('EventSource', MockEventSource);
+    window.sessionStorage.clear();
+    window.sessionStorage.setItem('macc_client_id', 'logs-client');
   });
 
   afterEach(() => {
