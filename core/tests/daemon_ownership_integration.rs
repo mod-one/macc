@@ -309,7 +309,10 @@ fn scenario_3_coordinator_and_supervisor_both_run_unowned() {
     let sup_record = macc_core::service::process_ownership::get_record(&repo_root, &sup_handle)
         .expect("load supervisor record")
         .expect("supervisor inventory record exists");
-    assert!(sup_record.owner.is_none(), "supervisor must have owner=None");
+    assert!(
+        sup_record.owner.is_none(),
+        "supervisor must have owner=None"
+    );
 
     // Project lease was auto-seeded and has no owner.
     let lease = project_lease(&repo_root)
@@ -370,12 +373,20 @@ fn stale_viewer_evicted_and_fresh_client_becomes_owner() {
     register_process(&repo_root, handle.clone()).expect("register coordinator");
 
     // First client becomes owner.
-    claim_owner(&repo_root, &handle, fresh_client("tui-owner", ClientKind::Tui))
-        .expect("owner claim");
+    claim_owner(
+        &repo_root,
+        &handle,
+        fresh_client("tui-owner", ClientKind::Tui),
+    )
+    .expect("owner claim");
 
     // Second client joins as viewer.
-    claim_owner(&repo_root, &handle, fresh_client("web-viewer", ClientKind::Web))
-        .expect("viewer join");
+    claim_owner(
+        &repo_root,
+        &handle,
+        fresh_client("web-viewer", ClientKind::Web),
+    )
+    .expect("viewer join");
 
     // Write stale heartbeats for all clients in the project lease.
     write_all_stale_heartbeats(&repo_root);
@@ -384,8 +395,12 @@ fn stale_viewer_evicted_and_fresh_client_becomes_owner() {
     let _ = list_records(&repo_root).expect("load triggers eviction");
 
     // New client claims ownership.
-    let status = claim_owner(&repo_root, &handle, fresh_client("tui-new", ClientKind::Tui))
-        .expect("new owner claim after eviction");
+    let status = claim_owner(
+        &repo_root,
+        &handle,
+        fresh_client("tui-new", ClientKind::Tui),
+    )
+    .expect("new owner claim after eviction");
     assert_eq!(
         status,
         macc_core::process_ownership::OwnershipStatus::Owner,
