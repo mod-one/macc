@@ -133,7 +133,9 @@ fn score_worktree_session_warmth_from_state(
         let age = match ts_str {
             Some(s) => chrono::DateTime::parse_from_rfc3339(s)
                 .ok()
-                .map(|ts| now_epoch.saturating_sub(ts.with_timezone(&chrono::Utc).timestamp()) as u64)
+                .map(|ts| {
+                    now_epoch.saturating_sub(ts.with_timezone(&chrono::Utc).timestamp()) as u64
+                })
                 .unwrap_or(0),
             None => 0, // no timestamp — freshly created
         };
@@ -421,13 +423,13 @@ fn prepare_reused_worktree_base(
     // Fetch is best-effort: a network failure should not permanently block
     // worktree reuse.  This mirrors the behaviour of prepare_clean_worktree
     // which only hard-fails on fetch when fail_on_fetch_error is set.
-    if crate::git::git_remote_exists(worktree_path, "origin")? {
-        if !crate::git::fetch(worktree_path, "origin")? {
-            tracing::warn!(
-                "prepare_reused_worktree_base: fetch failed for {}, continuing",
-                worktree_path.display()
-            );
-        }
+    if crate::git::git_remote_exists(worktree_path, "origin")?
+        && !crate::git::fetch(worktree_path, "origin")?
+    {
+        tracing::warn!(
+            "prepare_reused_worktree_base: fetch failed for {}, continuing",
+            worktree_path.display()
+        );
     }
     if !crate::git::reset_hard(worktree_path, base_branch)? {
         return Ok((false, false));

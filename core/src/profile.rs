@@ -11,6 +11,10 @@ pub struct ProfileWrapper {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub created_at: String,
+    /// Absolute path of the project this profile was saved from.
+    /// Set by `save_auto`; not set for manually-saved global profiles.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_root: Option<String>,
     pub config: CanonicalConfig,
 }
 
@@ -110,6 +114,7 @@ impl ProfileManager {
             name: name.to_string(),
             description: description.map(|s| s.to_string()),
             created_at: chrono::Utc::now().to_rfc3339(),
+            project_root: None,
             config: sanitized,
         };
 
@@ -150,7 +155,7 @@ impl ProfileManager {
         Ok(wrapper)
     }
 
-    /// List all saved profile names (sorted).
+    /// List all saved profile names, sorted by name.
     pub fn list(&self) -> Result<Vec<ProfileInfo>> {
         if !self.profiles_dir.exists() {
             return Ok(Vec::new());
@@ -171,24 +176,80 @@ impl ProfileManager {
             if path.extension().and_then(|e| e.to_str()) == Some("yaml") {
                 if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                     let name = stem.to_string();
-                    // Try to read metadata
-                    let (description, created_at) = match std::fs::read_to_string(&path) {
-                        Ok(content) => match serde_yaml::from_str::<ProfileWrapper>(&content) {
-                            Ok(w) => (w.description, Some(w.created_at)),
-                            Err(_) => (None, None),
-                        },
-                        Err(_) => (None, None),
-                    };
+                    let (description, created_at, project_root) =
+                        match std::fs::read_to_string(&path) {
+                            Ok(content) => match serde_yaml::from_str::<ProfileWrapper>(&content) {
+                                Ok(w) => (w.description, Some(w.created_at), w.project_root),
+                                Err(_) => (None, None, None),
+                            },
+                            Err(_) => (None, None, None),
+                        };
                     profiles.push(ProfileInfo {
                         name,
                         description,
                         created_at,
+                        project_root,
                     });
                 }
             }
         }
         profiles.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(profiles)
+    }
+
+    /// List profiles that were saved for a specific project root.
+    /// Returns entries sorted by creation date, newest first.
+    pub fn list_for_project(&self, project_root: &Path) -> Result<Vec<ProfileInfo>> {
+        let root_str = project_root.to_string_lossy().to_string();
+        let mut profiles: Vec<ProfileInfo> = self
+            .list()?
+            .into_iter()
+            .filter(|p| p.project_root.as_deref() == Some(root_str.as_str()))
+            .collect();
+        // Newest first so the most relevant option appears first.
+        profiles.sort_by(|a, b| {
+            b.created_at
+                .as_deref()
+                .unwrap_or("")
+                .cmp(a.created_at.as_deref().unwrap_or(""))
+        });
+        Ok(profiles)
+    }
+
+    /// Auto-save the current config as `<project-slug>-auto` linked to the given
+    /// project root. Always overwrites the previous auto-save for this project so
+    /// only one entry accumulates per project.
+    pub fn save_auto(&self, project_root: &Path, config: &CanonicalConfig) -> Result<()> {
+        let slug = profile_project_slug(project_root);
+        let name = format!("{}-auto", slug);
+        let now = chrono::Utc::now().to_rfc3339();
+        let description = format!("Auto-saved after 'macc apply' on {}", &now[..10]);
+
+        let sanitized = sanitize_paths(config.clone());
+        let wrapper = ProfileWrapper {
+            name: name.clone(),
+            description: Some(description),
+            created_at: now,
+            project_root: Some(project_root.to_string_lossy().to_string()),
+            config: sanitized,
+        };
+
+        let yaml = serde_yaml::to_string(&wrapper).map_err(|e| MaccError::Config {
+            path: name.clone(),
+            source: e,
+        })?;
+        std::fs::create_dir_all(&self.profiles_dir).map_err(|e| MaccError::Io {
+            path: self.profiles_dir.to_string_lossy().into(),
+            action: "create profiles directory for auto-save".into(),
+            source: e,
+        })?;
+        let path = self.profile_path(&name);
+        std::fs::write(&path, yaml.as_bytes()).map_err(|e| MaccError::Io {
+            path: path.to_string_lossy().into(),
+            action: "write auto-save profile".into(),
+            source: e,
+        })?;
+        Ok(())
     }
 
     /// Delete a profile by name.
@@ -226,6 +287,23 @@ pub struct ProfileInfo {
     pub name: String,
     pub description: Option<String>,
     pub created_at: Option<String>,
+    pub project_root: Option<String>,
+}
+
+fn profile_project_slug(project_root: &Path) -> String {
+    let name = project_root
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn validate_profile_name(name: &str) -> Result<()> {

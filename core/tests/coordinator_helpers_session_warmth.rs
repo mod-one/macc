@@ -153,7 +153,7 @@ fn warm_slot_is_preferred_over_cold_slot() {
 fn expired_session_is_treated_as_cold() {
     let (repo, _base) = make_clone_with_origin();
     let wt1 = add_pool_worktree(&repo, "worker-01", "L4-SES-COLD-001");
-    let wt2 = add_pool_worktree(&repo, "worker-02", "L4-SES-COLD-002");
+    let _wt2 = add_pool_worktree(&repo, "worker-02", "L4-SES-COLD-002");
     let expired = chrono::Utc::now()
         .checked_sub_signed(chrono::TimeDelta::seconds(3600))
         .expect("expired ts")

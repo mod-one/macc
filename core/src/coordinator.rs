@@ -577,14 +577,13 @@ impl CoordinatorEventRecord {
                     ));
                 }
             }
-            "heartbeat" | "progress" => {
-                if self.status != "running" {
-                    return Err(format!(
-                        "invalid performer event '{}': unexpected status '{}'",
-                        self.event_type, self.status
-                    ));
-                }
+            "heartbeat" | "progress" if self.status != "running" => {
+                return Err(format!(
+                    "invalid performer event '{}': unexpected status '{}'",
+                    self.event_type, self.status
+                ));
             }
+            "heartbeat" | "progress" => {}
             "phase_result" => {
                 if self
                     .phase
@@ -610,16 +609,20 @@ impl CoordinatorEventRecord {
                     ));
                 }
             }
-            "commit_created" => {
+            "commit_created"
                 if self.status != "done"
-                    || !payload_has_non_empty_string_in_sources(self, &normalized_payload, "sha")
-                {
-                    return Err(
-                        "invalid performer event 'commit_created': status=done and payload.sha are required"
-                            .to_string(),
-                    );
-                }
+                    || !payload_has_non_empty_string_in_sources(
+                        self,
+                        &normalized_payload,
+                        "sha",
+                    ) =>
+            {
+                return Err(
+                    "invalid performer event 'commit_created': status=done and payload.sha are required"
+                        .to_string(),
+                );
             }
+            "commit_created" => {}
             "failed" => {}
             _ => {}
         }

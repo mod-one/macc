@@ -280,45 +280,29 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
                 state.refresh_preview_plan();
             }
         }
-        KeyCode::Char('y') => {
-            if current_screen == Screen::CoordinatorLive {
-                state.start_coordinator_command(CoordinatorCommand::SyncRegistry);
-            }
+        KeyCode::Char('y') if current_screen == Screen::CoordinatorLive => {
+            state.start_coordinator_command(CoordinatorCommand::SyncRegistry);
         }
-        KeyCode::Char('c') => {
-            if current_screen == Screen::CoordinatorLive {
-                state.start_coordinator_command(CoordinatorCommand::ReconcileRuntime);
-            }
+        KeyCode::Char('c') if current_screen == Screen::CoordinatorLive => {
+            state.start_coordinator_command(CoordinatorCommand::ReconcileRuntime);
         }
-        KeyCode::Char('u') => {
-            if current_screen == Screen::CoordinatorLive {
-                state.start_coordinator_command(CoordinatorCommand::ResumePausedRun);
-            }
+        KeyCode::Char('u') if current_screen == Screen::CoordinatorLive => {
+            state.start_coordinator_command(CoordinatorCommand::ResumePausedRun);
         }
-        KeyCode::Char('k') => {
-            if current_screen == Screen::CoordinatorLive {
-                state.stop_coordinator_command();
-            }
+        KeyCode::Char('k') if current_screen == Screen::CoordinatorLive => {
+            state.stop_coordinator_command();
         }
-        KeyCode::Char('l') => {
-            if current_screen == Screen::CoordinatorLive {
-                state.refresh_coordinator_snapshot();
-            }
+        KeyCode::Char('l') if current_screen == Screen::CoordinatorLive => {
+            state.refresh_coordinator_snapshot();
         }
-        KeyCode::Char('d') => {
-            if current_screen == Screen::Tools {
-                state.refresh_tool_checks();
-            }
+        KeyCode::Char('d') if current_screen == Screen::Tools => {
+            state.refresh_tool_checks();
         }
-        KeyCode::Char('i') => {
-            if current_screen == Screen::Tools {
-                state.begin_tool_install_confirmation();
-            }
+        KeyCode::Char('i') if current_screen == Screen::Tools => {
+            state.begin_tool_install_confirmation();
         }
-        KeyCode::Char('f') => {
-            if current_screen == Screen::Tools {
-                state.generate_context_for_selected_tool();
-            }
+        KeyCode::Char('f') if current_screen == Screen::Tools => {
+            state.generate_context_for_selected_tool();
         }
         _ => {}
     }

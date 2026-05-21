@@ -167,9 +167,7 @@ pub enum AdvanceTaskAction {
     /// Task is in a merge-ready state but has no branch recorded (e.g. the
     /// worktree was cleared by ghost cleanup before the job-exit was applied).
     /// Block it so the coordinator can make progress instead of spinning.
-    BlockNoBranch {
-        task_id: String,
-    },
+    BlockNoBranch { task_id: String },
 }
 
 /// Task metadata passed to the merge-fix hook so it can resolve conflicts
@@ -1069,7 +1067,7 @@ pub(super) enum BlockOutcome {
     InvalidInput,
     TerminalFailure {
         error: CompletionErrorDetails,
-        tool_error: Option<ToolError>,
+        tool_error: Box<Option<ToolError>>,
         now_ts: u64,
     },
 }
@@ -1748,6 +1746,26 @@ pub async fn run_native_control_plane(
                 "- Startup runtime cleanup fixed {} ghost task(s)",
                 startup_cleaned
             ));
+        }
+    }
+
+    // Reset sessions that are stuck "active" because a performer exited without
+    // its EXIT trap (SIGKILL, OOM, host crash). 1800 s matches the shell-side
+    // SESSION_LEASE_TTL_SECONDS default in performer_lib.sh.
+    match crate::coordinator::session_manager::reset_stale_active_sessions(repo_root, 1800) {
+        Ok(n) if n > 0 => {
+            if let Some(log) = logger {
+                let _ = log.note(format!(
+                    "- Startup session recovery: reset {} stale active session(s) to available",
+                    n
+                ));
+            }
+        }
+        Ok(_) => {}
+        Err(e) => {
+            if let Some(log) = logger {
+                let _ = log.note(format!("- Warning: startup session recovery failed: {}", e));
+            }
         }
     }
 

@@ -212,7 +212,7 @@ fn performer_is_running(pid: Option<u32>) -> bool {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
-        return matches!(status, Ok(s) if s.success());
+        matches!(status, Ok(s) if s.success())
     }
 
     #[cfg(not(unix))]
@@ -369,11 +369,7 @@ impl CrashRecoveryReport {
         fs::create_dir_all(report_dir)?;
 
         // Sanitize the timestamp for use as a filename component.
-        let ts_safe = self
-            .timestamp
-            .replace(':', "-")
-            .replace('.', "-")
-            .replace('+', "-");
+        let ts_safe = self.timestamp.replace([':', '.', '+'], "-");
         let filename = format!("crash-recovery-{}.json", ts_safe);
         let path = report_dir.join(&filename);
 
@@ -498,7 +494,7 @@ impl ModeCRecovery {
         };
 
         // Step 3: Save session snapshot.
-        let ts_safe = ts.replace(':', "-").replace('.', "-").replace('+', "-");
+        let ts_safe = ts.replace([':', '.', '+'], "-");
         let snapshot_name = format!("crash-recovery-pre-restart-{}", ts_safe);
         let session_snapshot_path = match save_session_snapshot(
             &self.config.tool_sessions_path,
@@ -812,14 +808,6 @@ mod tests {
     }
 
     impl MockProcessManager {
-        fn healthy() -> Self {
-            Self {
-                health: Arc::new(Mutex::new(HealthCheckResult::Healthy)),
-                start_result: Arc::new(Mutex::new(Ok(()))),
-                pid: Some(1234),
-            }
-        }
-
         fn crash_then_recover() -> Self {
             // Start as crashed; after start_coordinator(), health returns Healthy.
             let health = Arc::new(Mutex::new(HealthCheckResult::Crashed {
@@ -1252,7 +1240,11 @@ mod tests {
 
     // ── build_supervisor_report: improvement hints ─────────────────────────────
 
-    fn basic_crash_report(max_restarts_exceeded: bool, orphaned: bool, events_empty: bool) -> CrashRecoveryReport {
+    fn basic_crash_report(
+        max_restarts_exceeded: bool,
+        orphaned: bool,
+        events_empty: bool,
+    ) -> CrashRecoveryReport {
         CrashRecoveryReport {
             timestamp: "2026-04-28T00:00:00Z".to_string(),
             crash_evidence: CrashEvidence {

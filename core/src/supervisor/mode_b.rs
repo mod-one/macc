@@ -24,8 +24,7 @@ use crate::supervisor::{
     coordinator_supervisor::{
         CoordinatorEvidence, CoordinatorEvidenceCollector, CoordinatorEvidenceConfig,
     },
-    Finding, FindingCategory, HealthCheckResult, Recommendation, Severity, SupervisorAction,
-    SupervisorReport,
+    SupervisorAction, SupervisorReport,
 };
 use async_trait::async_trait;
 use chrono::Utc;
@@ -466,9 +465,9 @@ pub trait AiAnalysisDispatcher: Send + Sync {
 /// Dispatcher that writes the prompt to a temp file and invokes a CLI AI tool
 /// using its non-interactive (`-p` / `--print`) flag.
 ///
-/// Compatible with `claude -p <file>` and similar patterns.
+/// Compatible with `<tool> -p <file>` and similar patterns.
 pub struct CliToolDispatcher {
-    /// The command to invoke (e.g., `"claude"`).
+    /// The command to invoke (e.g., `"tool"`).
     pub command: String,
     /// Extra arguments inserted before the prompt arg (e.g., `["--output-format", "json"]`).
     pub extra_args: Vec<String>,
@@ -1277,6 +1276,9 @@ fn build_recovery_supervisor_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::supervisor::{
+        Finding, FindingCategory, HealthCheckResult, Recommendation, Severity,
+    };
 
     // ── helpers ───────────────────────────────────────────────────────────────
 

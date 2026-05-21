@@ -154,7 +154,7 @@ impl CoordinatorProcessManager {
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .status();
-            return matches!(status, Ok(s) if s.success());
+            matches!(status, Ok(s) if s.success())
         }
         #[cfg(not(unix))]
         {

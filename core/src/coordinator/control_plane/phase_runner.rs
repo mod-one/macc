@@ -1,10 +1,10 @@
+use super::base::CoordinatorLog;
+use crate::coordinator::helpers::now_iso_coordinator;
+use crate::coordinator::ipc::read_performer_ipc_addr;
 use crate::coordinator::model::TaskRegistry;
 use crate::coordinator::{engine as coordinator_engine, runtime as coordinator_runtime};
-use crate::coordinator::ipc::read_performer_ipc_addr;
-use crate::coordinator::helpers::now_iso_coordinator;
 use crate::{MaccError, Result};
 use std::path::Path;
-use super::base::CoordinatorLog;
 
 pub(super) struct NativePhaseExecutor<'a> {
     pub(super) repo_root: &'a Path,

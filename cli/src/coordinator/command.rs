@@ -68,11 +68,13 @@ impl ProjectContext {
         // Use find_project_root (no auto-create fallback): coordinator commands must
         // run against an existing MACC project. Silent auto-init at the wrong CWD
         // is what caused spurious project creation at $HOME and similar locations.
-        let paths = find_project_root(absolute_cwd).map_err(|_| MaccError::Validation(format!(
-            "No MACC project found in '{}' or any parent directory. \
+        let paths = find_project_root(absolute_cwd).map_err(|_| {
+            MaccError::Validation(format!(
+                "No MACC project found in '{}' or any parent directory. \
              Run 'macc init' in your repository root to initialize.",
-            absolute_cwd.display()
-        )))?;
+                absolute_cwd.display()
+            ))
+        })?;
         let canonical = load_canonical_config(&paths.config_path)?;
         let coordinator_cfg = canonical.automation.coordinator.clone();
         Ok(Self {
@@ -288,17 +290,22 @@ Performers cannot commit without it. Fix this first:\n\
         }
     }
 
-    // Auto-save sessions on graceful stop so they can be restored in future runs.
-    if matches!(command, CoordinatorCommand::Stop { graceful: true, .. }) {
+    // Auto-save sessions after a full coordinator run completes and on graceful
+    // stop, so 'macc init' can offer them on the next fresh checkout.
+    let should_autosave_sessions =
+        matches!(command, CoordinatorCommand::Stop { graceful: true, .. })
+            || matches!(command, CoordinatorCommand::RunControlPlane);
+    if should_autosave_sessions {
         match macc_core::coordinator::session_manager::save_sessions(&paths.root, None) {
             Ok(meta) => {
                 println!(
-                    "Sessions auto-saved as '{}' ({} active, {} archived).",
-                    meta.name, meta.active_session_count, meta.archived_session_count
+                    "Sessions auto-saved as '{}' ({} session(s) across {} tool(s)).",
+                    meta.name, meta.active_session_count, meta.tool_count
                 );
             }
+            Err(e) if e.to_string().contains("Nothing to save") => {}
             Err(e) => {
-                eprintln!("Warning: could not auto-save sessions: {}", e);
+                eprintln!("Note: session auto-save failed: {}", e);
             }
         }
     }

@@ -344,9 +344,15 @@ fn coordinator_reliability_chain_integration() {
             }
         ]
     });
-    let (reused_b, prep_error_b) =
-        find_reusable_worktree_native(&repo_b, &registry_b, "codex", "main", 300, &std::collections::HashMap::new())
-            .expect("reuse abandoned worktree");
+    let (reused_b, prep_error_b) = find_reusable_worktree_native(
+        &repo_b,
+        &registry_b,
+        "codex",
+        "main",
+        300,
+        &std::collections::HashMap::new(),
+    )
+    .expect("reuse abandoned worktree");
     assert!(prep_error_b.is_none());
     assert!(reused_b.is_some());
     let tags_b = run_git_capture(
@@ -463,7 +469,10 @@ fn coordinator_reliability_chain_integration() {
     let registry_e = json!({ "tasks": [] });
     // Give warm_wt recent activity so it wins the tiebreak.
     let mut activity_e = std::collections::HashMap::new();
-    activity_e.insert(warm_wt.to_string_lossy().to_string(), chrono::Utc::now().timestamp() - 10);
+    activity_e.insert(
+        warm_wt.to_string_lossy().to_string(),
+        chrono::Utc::now().timestamp() - 10,
+    );
     let (reused_e, prep_error_e) =
         find_reusable_worktree_native(&repo_e, &registry_e, "codex", "main", 300, &activity_e)
             .expect("reuse scan");

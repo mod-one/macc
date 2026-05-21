@@ -275,7 +275,7 @@ pub fn resolve_fetch_units(
     }
 
     // Sort fetch units by source cache key for determinism
-    fetch_units.sort_by(|a, b| a.source.cache_key().cmp(&b.source.cache_key()));
+    fetch_units.sort_by_key(|a| a.source.cache_key());
 
     Ok(fetch_units)
 }
