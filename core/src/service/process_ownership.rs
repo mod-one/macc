@@ -2,13 +2,37 @@ use crate::process_ownership::{
     emit_ownership_claimed, emit_ownership_released, emit_takeover_accepted,
     emit_takeover_rejected, emit_takeover_requested, emit_viewer_joined, emit_viewer_left,
     ClientIdentity, OwnershipEventBroadcaster, OwnershipRecord, OwnershipStatus, OwnershipStore,
-    ProcessHandle, TakeoverRequest,
+    ProcessHandle, ProcessKind, TakeoverRequest,
 };
 use crate::{MaccError, Result};
 use chrono::Utc;
 use serde_json::Map;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
+
+/// L6-OWN-008: the single project-wide control lease handle.
+/// All claim/release/viewer/takeover/heartbeat operations route through this
+/// handle regardless of which per-process handle the caller passes in.
+fn project_lease_handle(repo_root: &Path) -> ProcessHandle {
+    ProcessHandle {
+        kind: ProcessKind::Project,
+        project_root: repo_root.to_path_buf(),
+        pid: None,
+    }
+}
+
+fn ensure_project_lease_record(store: &mut OwnershipStore, repo_root: &Path) {
+    let handle = project_lease_handle(repo_root);
+    if store.get_record(&handle).is_none() {
+        store.upsert_record(OwnershipRecord {
+            process: handle,
+            owner: None,
+            viewers: Vec::new(),
+            takeover_request: None,
+            started_at: now_rfc3339(),
+        });
+    }
+}
 
 pub fn register_process(repo_root: &Path, handle: ProcessHandle) -> Result<()> {
     let record = OwnershipRecord {
@@ -19,6 +43,9 @@ pub fn register_process(repo_root: &Path, handle: ProcessHandle) -> Result<()> {
         started_at: now_rfc3339(),
     };
     OwnershipStore::load_and_modify(repo_root, |store| {
+        // Always make sure the project-wide lease record exists so the gate can
+        // operate against a stable handle.
+        ensure_project_lease_record(store, repo_root);
         store.upsert_record(record);
         Ok(())
     })?;
@@ -38,10 +65,12 @@ pub fn claim_owner(
     handle: &ProcessHandle,
     identity: ClientIdentity,
 ) -> Result<OwnershipStatus> {
+    // Route to the project lease. The `handle` is preserved purely for event
+    // payload context (so callers see which process the ownership relates to).
+    let lease = project_lease_handle(repo_root);
     let status = OwnershipStore::load_and_modify(repo_root, |store| {
-        let Some(record) = find_record_mut(store, handle) else {
-            return Ok(OwnershipStatus::Unregistered);
-        };
+        ensure_project_lease_record(store, repo_root);
+        let record = find_record_mut(store, &lease).expect("project lease record ensured");
 
         if record.owner.is_none() {
             let owner = refreshed_identity(identity);
@@ -79,8 +108,9 @@ pub fn claim_owner(
 }
 
 pub fn release_owner(repo_root: &Path, handle: &ProcessHandle, client_id: &str) -> Result<()> {
+    let lease = project_lease_handle(repo_root);
     OwnershipStore::load_and_modify(repo_root, |store| {
-        let Some(record) = find_record_mut(store, handle) else {
+        let Some(record) = find_record_mut(store, &lease) else {
             return Ok(());
         };
 
@@ -104,8 +134,10 @@ pub fn register_viewer(
     handle: &ProcessHandle,
     identity: ClientIdentity,
 ) -> Result<()> {
+    let lease = project_lease_handle(repo_root);
     OwnershipStore::load_and_modify(repo_root, |store| {
-        let record = require_registered_record_mut(store, handle)?;
+        ensure_project_lease_record(store, repo_root);
+        let record = find_record_mut(store, &lease).expect("project lease ensured");
         if add_viewer_if_missing(record, identity.clone()) {
             let viewer = record
                 .viewers
@@ -120,8 +152,9 @@ pub fn register_viewer(
 }
 
 pub fn unregister_viewer(repo_root: &Path, handle: &ProcessHandle, client_id: &str) -> Result<()> {
+    let lease = project_lease_handle(repo_root);
     OwnershipStore::load_and_modify(repo_root, |store| {
-        let Some(record) = find_record_mut(store, handle) else {
+        let Some(record) = find_record_mut(store, &lease) else {
             return Ok(());
         };
 
@@ -143,6 +176,7 @@ pub fn request_takeover(
     handle: &ProcessHandle,
     requester: ClientIdentity,
 ) -> Result<String> {
+    let lease = project_lease_handle(repo_root);
     let request_id = Uuid::new_v4().to_string();
     let request = TakeoverRequest {
         request_id: request_id.clone(),
@@ -151,7 +185,8 @@ pub fn request_takeover(
     };
 
     OwnershipStore::load_and_modify(repo_root, |store| {
-        let record = require_registered_record_mut(store, handle)?;
+        ensure_project_lease_record(store, repo_root);
+        let record = find_record_mut(store, &lease).expect("project lease ensured");
         record.takeover_request = Some(request.clone());
         emit_takeover_requested(repo_root, handle, &request.requester, &request.request_id);
         Ok(())
@@ -167,8 +202,11 @@ pub fn respond_takeover(
     request_id: &str,
     accept: bool,
 ) -> Result<()> {
+    let lease = project_lease_handle(repo_root);
     OwnershipStore::load_and_modify(repo_root, |store| {
-        let record = require_registered_record_mut(store, handle)?;
+        let record = find_record_mut(store, &lease).ok_or_else(|| {
+            MaccError::Validation("Project control lease is not registered".to_string())
+        })?;
         let owner = record.owner.as_ref().ok_or_else(|| {
             MaccError::Validation("Cannot respond to takeover without an owner".into())
         })?;
@@ -204,9 +242,10 @@ pub fn respond_takeover(
     })
 }
 
-pub fn heartbeat(repo_root: &Path, handle: &ProcessHandle, client_id: &str) -> Result<()> {
+pub fn heartbeat(repo_root: &Path, _handle: &ProcessHandle, client_id: &str) -> Result<()> {
+    let lease = project_lease_handle(repo_root);
     OwnershipStore::load_and_modify(repo_root, |store| {
-        let Some(record) = find_record_mut(store, handle) else {
+        let Some(record) = find_record_mut(store, &lease) else {
             return Ok(());
         };
 
@@ -242,11 +281,18 @@ pub fn list_records(repo_root: &Path) -> Result<Vec<OwnershipRecord>> {
     Ok(store.records.clone())
 }
 
-pub fn is_current_owner(repo_root: &Path, handle: &ProcessHandle, client_id: &str) -> Result<bool> {
-    let record = get_record(repo_root, handle)?;
+pub fn is_current_owner(repo_root: &Path, _handle: &ProcessHandle, client_id: &str) -> Result<bool> {
+    let lease = project_lease_handle(repo_root);
+    let record = get_record(repo_root, &lease)?;
     Ok(record
         .and_then(|record| record.owner)
         .is_some_and(|owner| owner.client_id == client_id))
+}
+
+/// Returns the current project-wide control lease (or None if no project lease
+/// exists yet — i.e. no client has ever claimed control).
+pub fn project_lease(repo_root: &Path) -> Result<Option<OwnershipRecord>> {
+    get_record(repo_root, &project_lease_handle(repo_root))
 }
 
 #[derive(Debug, Clone)]
@@ -349,18 +395,6 @@ fn find_record_mut<'a>(
         .find(|record| &record.process == handle)
 }
 
-fn require_registered_record_mut<'a>(
-    store: &'a mut OwnershipStore,
-    handle: &ProcessHandle,
-) -> Result<&'a mut OwnershipRecord> {
-    find_record_mut(store, handle).ok_or_else(|| {
-        MaccError::Validation(format!(
-            "Process is not registered for ownership: {:?}",
-            handle
-        ))
-    })
-}
-
 fn add_viewer_if_missing(record: &mut OwnershipRecord, identity: ClientIdentity) -> bool {
     if record
         .viewers
@@ -390,8 +424,8 @@ fn now_rfc3339() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        claim_owner, get_record, list_records, register_process, release_owner, request_takeover,
-        respond_takeover, unregister_process,
+        claim_owner, get_record, list_records, project_lease, register_process, release_owner,
+        request_takeover, respond_takeover, unregister_process,
     };
     use crate::process_ownership::{
         ClientIdentity, ClientKind, OwnershipStatus, ProcessHandle, ProcessKind,
@@ -401,24 +435,28 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
-    fn register_process_creates_record_without_owner() {
+    fn register_process_creates_inventory_record_and_seeds_project_lease() {
         let repo_root = temp_repo_root("register-process");
         let handle = sample_handle(&repo_root, 1001);
 
         register_process(&repo_root, handle.clone()).expect("register process");
 
+        // Per-process record exists with no owner (inventory only).
         let record = get_record(&repo_root, &handle)
             .expect("load record")
             .expect("record exists");
         assert!(record.owner.is_none());
         assert!(record.viewers.is_empty());
-        assert!(record.takeover_request.is_none());
+
+        // Project lease auto-seeded with no owner.
+        let lease = project_lease(&repo_root).expect("load lease").expect("lease exists");
+        assert!(lease.owner.is_none());
 
         cleanup(repo_root);
     }
 
     #[test]
-    fn first_client_claims_registered_process_as_owner() {
+    fn first_client_claims_project_lease_via_any_handle() {
         let repo_root = temp_repo_root("first-owner");
         let handle = sample_handle(&repo_root, 1002);
         register_process(&repo_root, handle.clone()).expect("register process");
@@ -427,11 +465,17 @@ mod tests {
             claim_owner(&repo_root, &handle, sample_client("client-1")).expect("claim ownership");
 
         assert_eq!(status, OwnershipStatus::Owner);
+        // Per-process record stays inventory.
         let record = get_record(&repo_root, &handle)
             .expect("load record")
             .expect("record exists");
+        assert!(record.owner.is_none());
+        // Project lease records the owner.
+        let lease = project_lease(&repo_root)
+            .expect("load lease")
+            .expect("lease exists");
         assert_eq!(
-            record.owner.as_ref().map(|owner| owner.client_id.as_str()),
+            lease.owner.as_ref().map(|o| o.client_id.as_str()),
             Some("client-1")
         );
 
@@ -439,7 +483,7 @@ mod tests {
     }
 
     #[test]
-    fn second_client_becomes_viewer() {
+    fn second_client_becomes_viewer_of_project_lease() {
         let repo_root = temp_repo_root("second-viewer");
         let handle = sample_handle(&repo_root, 1003);
         register_process(&repo_root, handle.clone()).expect("register process");
@@ -449,37 +493,41 @@ mod tests {
             claim_owner(&repo_root, &handle, sample_client("client-2")).expect("claim as viewer");
 
         assert_eq!(status, OwnershipStatus::Viewer);
-        let record = get_record(&repo_root, &handle)
-            .expect("load record")
-            .expect("record exists");
+        let lease = project_lease(&repo_root)
+            .expect("load lease")
+            .expect("lease exists");
         assert_eq!(
-            record.owner.as_ref().map(|owner| owner.client_id.as_str()),
+            lease.owner.as_ref().map(|o| o.client_id.as_str()),
             Some("client-1")
         );
-        assert_eq!(record.viewers.len(), 1);
-        assert_eq!(record.viewers[0].client_id, "client-2");
+        assert_eq!(lease.viewers.len(), 1);
+        assert_eq!(lease.viewers[0].client_id, "client-2");
 
         cleanup(repo_root);
     }
 
     #[test]
-    fn claim_on_unregistered_handle_returns_unregistered() {
+    fn claim_without_registered_process_still_creates_lease() {
         let repo_root = temp_repo_root("unregistered-claim");
         let handle = sample_handle(&repo_root, 1004);
 
         let status = claim_owner(&repo_root, &handle, sample_client("client-1"))
-            .expect("claim unregistered");
+            .expect("claim creates lease");
 
-        assert_eq!(status, OwnershipStatus::Unregistered);
-        assert!(get_record(&repo_root, &handle)
-            .expect("load record")
-            .is_none());
+        assert_eq!(status, OwnershipStatus::Owner);
+        let lease = project_lease(&repo_root)
+            .expect("load lease")
+            .expect("lease exists");
+        assert_eq!(
+            lease.owner.as_ref().map(|o| o.client_id.as_str()),
+            Some("client-1")
+        );
 
         cleanup(repo_root);
     }
 
     #[test]
-    fn release_owner_clears_owner_but_keeps_record() {
+    fn release_owner_clears_project_lease_owner() {
         let repo_root = temp_repo_root("release-owner");
         let handle = sample_handle(&repo_root, 1005);
         register_process(&repo_root, handle.clone()).expect("register process");
@@ -487,16 +535,16 @@ mod tests {
 
         release_owner(&repo_root, &handle, "client-1").expect("release owner");
 
-        let record = get_record(&repo_root, &handle)
-            .expect("load record")
-            .expect("record exists");
-        assert!(record.owner.is_none());
+        let lease = project_lease(&repo_root)
+            .expect("load lease")
+            .expect("lease exists");
+        assert!(lease.owner.is_none());
 
         cleanup(repo_root);
     }
 
     #[test]
-    fn unregister_process_removes_record_entirely() {
+    fn unregister_process_removes_inventory_but_keeps_project_lease() {
         let repo_root = temp_repo_root("unregister-process");
         let handle = sample_handle(&repo_root, 1006);
         register_process(&repo_root, handle.clone()).expect("register process");
@@ -506,13 +554,16 @@ mod tests {
         assert!(get_record(&repo_root, &handle)
             .expect("load record")
             .is_none());
-        assert!(list_records(&repo_root).expect("list records").is_empty());
+        // Project lease is preserved (registers persist controller state).
+        let records = list_records(&repo_root).expect("list records");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].process.kind, ProcessKind::Project);
 
         cleanup(repo_root);
     }
 
     #[test]
-    fn takeover_accepted_transfers_owner() {
+    fn takeover_accepted_transfers_project_lease_owner() {
         let repo_root = temp_repo_root("takeover-accepted");
         let handle = sample_handle(&repo_root, 1007);
         register_process(&repo_root, handle.clone()).expect("register process");
@@ -523,20 +574,20 @@ mod tests {
         respond_takeover(&repo_root, &handle, "owner-1", &request_id, true)
             .expect("accept takeover");
 
-        let record = get_record(&repo_root, &handle)
-            .expect("load record")
-            .expect("record exists");
+        let lease = project_lease(&repo_root)
+            .expect("load lease")
+            .expect("lease exists");
         assert_eq!(
-            record.owner.as_ref().map(|owner| owner.client_id.as_str()),
+            lease.owner.as_ref().map(|o| o.client_id.as_str()),
             Some("requester")
         );
-        assert!(record.takeover_request.is_none());
+        assert!(lease.takeover_request.is_none());
 
         cleanup(repo_root);
     }
 
     #[test]
-    fn takeover_rejected_keeps_original_owner() {
+    fn takeover_rejected_keeps_project_lease_owner() {
         let repo_root = temp_repo_root("takeover-rejected");
         let handle = sample_handle(&repo_root, 1008);
         register_process(&repo_root, handle.clone()).expect("register process");
@@ -547,14 +598,14 @@ mod tests {
         respond_takeover(&repo_root, &handle, "owner-1", &request_id, false)
             .expect("reject takeover");
 
-        let record = get_record(&repo_root, &handle)
-            .expect("load record")
-            .expect("record exists");
+        let lease = project_lease(&repo_root)
+            .expect("load lease")
+            .expect("lease exists");
         assert_eq!(
-            record.owner.as_ref().map(|owner| owner.client_id.as_str()),
+            lease.owner.as_ref().map(|o| o.client_id.as_str()),
             Some("owner-1")
         );
-        assert!(record.takeover_request.is_none());
+        assert!(lease.takeover_request.is_none());
 
         cleanup(repo_root);
     }

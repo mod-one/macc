@@ -30,6 +30,28 @@ pub trait Command {
     fn run(&self) -> Result<()>;
 }
 
+/// L6-OWN-008: CLI-side mutation gate. If the project-wide control lease has an
+/// owner that is not the local CLI identity, the action is rejected.
+/// Read-only / one-shot CLI commands (plan, status, etc.) skip this.
+pub fn gate_cli_mutation(project_root: &std::path::Path) -> Result<()> {
+    use macc_core::process_ownership::{ProcessHandle, ProcessKind};
+    use macc_core::service::process_ownership_gate::{gate_owner_action, ClientContext};
+
+    let client_id = std::env::var("MACC_CLIENT_ID")
+        .unwrap_or_else(|_| format!("cli-{}", std::process::id()));
+    gate_owner_action(
+        &ClientContext {
+            client_id,
+            project_root: project_root.to_path_buf(),
+        },
+        &ProcessHandle {
+            kind: ProcessKind::Project,
+            project_root: project_root.to_path_buf(),
+            pid: None,
+        },
+    )
+}
+
 #[derive(Clone)]
 pub struct AppContext {
     pub cwd: PathBuf,

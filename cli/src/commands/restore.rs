@@ -60,6 +60,9 @@ impl<'a> RestoreCommand<'a> {
 impl<'a> Command for RestoreCommand<'a> {
     fn run(&self) -> Result<()> {
         let paths = self.app.project_paths()?;
+        if !self.dry_run {
+            crate::commands::gate_cli_mutation(&paths.root)?;
+        }
         if !self.latest && self.backup.is_none() {
             return Err(macc_core::MaccError::Validation(
                 "restore requires --latest or --backup <id>".into(),

@@ -601,7 +601,9 @@ mod tests {
                 handle,
                 current_owner,
             } => {
-                assert_eq!(handle, handle_record);
+                // Gate echoes the caller-supplied handle (kind matches; pid may be None).
+                assert_eq!(handle.kind, handle_record.kind);
+                assert_eq!(handle.project_root, handle_record.project_root);
                 assert_eq!(current_owner.as_deref(), Some("client-A"));
             }
             other => panic!("expected NotProcessOwner, got {other:?}"),

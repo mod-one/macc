@@ -16,6 +16,9 @@ impl DoctorCommand {
 impl Command for DoctorCommand {
     fn run(&self) -> Result<()> {
         let paths = self.app.project_paths()?;
+        if self.fix {
+            crate::commands::gate_cli_mutation(&paths.root)?;
+        }
         self.app.engine.project_run_doctor(
             &paths,
             self.fix,

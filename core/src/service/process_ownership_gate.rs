@@ -1,7 +1,7 @@
 use crate::process_ownership::{ProcessHandle, ProcessKind};
 use crate::service::process_ownership;
 use crate::{MaccError, Result};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientContext {
@@ -9,78 +9,38 @@ pub struct ClientContext {
     pub project_root: PathBuf,
 }
 
-/// L6-OWN-008: the project-wide control lease takes precedence over per-process
-/// records. If a `ProcessKind::Project` record exists, the gate checks ownership
-/// against that lease first. The per-process record is consulted only when the
-/// project-wide lease does not exist (backwards compatibility).
+/// L6-OWN-008: a single project-wide control lease (`ProcessKind::Project`)
+/// authoritatively gates all mutating actions for the project.
+///
+/// Behavior:
+/// * If no project lease record exists, the gate passes (no controller present).
+/// * If the lease exists but has no owner, the gate passes (first-client-takes-control).
+/// * If the lease has an owner, only that owner may pass; others get
+///   `MaccError::NotProcessOwner`.
+///
+/// The `handle` is preserved only so the error payload tells callers which
+/// process they were trying to mutate.
 pub fn gate_owner_action(ctx: &ClientContext, handle: &ProcessHandle) -> Result<()> {
     let project_handle = ProcessHandle {
         kind: ProcessKind::Project,
         project_root: ctx.project_root.clone(),
         pid: None,
     };
-    if let Some(project_record) = process_ownership::get_record(&ctx.project_root, &project_handle)?
-    {
-        if project_record
-            .owner
-            .as_ref()
-            .is_some_and(|owner| owner.client_id == ctx.client_id)
-        {
-            return Ok(());
-        }
 
-        if project_record.owner.is_some() {
-            return Err(MaccError::NotProcessOwner {
-                handle: project_handle,
-                current_owner: project_record.owner.map(|owner| owner.client_id),
-            });
-        }
-        // Project record exists but owner is None: fall through to per-process check.
-    }
-
-    let Some(resolved_handle) = resolve_process_handle(&ctx.project_root, handle)? else {
-        // No process record exists for this kind: nothing to gate.
-        // This is the "no controller present" path — mutations are allowed.
+    let Some(record) = process_ownership::get_record(&ctx.project_root, &project_handle)? else {
         return Ok(());
     };
-
-    let record = process_ownership::get_record(&ctx.project_root, &resolved_handle)?;
-    let current_owner = record
-        .as_ref()
-        .and_then(|r| r.owner.as_ref().map(|owner| owner.client_id.clone()));
-
-    // No owner has been claimed: pass-through (first-client-takes-control model).
-    if current_owner.is_none() {
+    let Some(owner) = record.owner else {
         return Ok(());
-    }
-
-    if process_ownership::is_current_owner(&ctx.project_root, &resolved_handle, &ctx.client_id)? {
+    };
+    if owner.client_id == ctx.client_id {
         return Ok(());
     }
 
     Err(MaccError::NotProcessOwner {
-        handle: resolved_handle,
-        current_owner,
+        handle: handle.clone(),
+        current_owner: Some(owner.client_id),
     })
-}
-
-fn resolve_process_handle(
-    repo_root: &Path,
-    handle: &ProcessHandle,
-) -> Result<Option<ProcessHandle>> {
-    if process_ownership::get_record(repo_root, handle)?.is_some() {
-        return Ok(Some(handle.clone()));
-    }
-
-    let records = process_ownership::list_records(repo_root)?;
-    Ok(records
-        .into_iter()
-        .find(|record| {
-            record.process.kind == handle.kind
-                && record.process.project_root == handle.project_root
-                && (handle.pid.is_none() || record.process.pid == handle.pid)
-        })
-        .map(|record| record.process))
 }
 
 #[cfg(test)]
@@ -94,56 +54,25 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
-    fn project_level_lease_overrides_per_process_ownership() {
-        let repo_root = temp_repo_root("project-lease");
-        // Coordinator owner is client-A.
-        let coord_handle = sample_handle(&repo_root, Some(4242));
-        register_process(&repo_root, coord_handle.clone()).expect("register coord");
-        claim_owner(&repo_root, &coord_handle, sample_client("client-A")).expect("claim coord");
-
-        // Project-wide lease is owned by client-B.
-        let project_handle = ProcessHandle {
-            kind: ProcessKind::Project,
-            project_root: repo_root.clone(),
-            pid: None,
-        };
-        register_process(&repo_root, project_handle.clone()).expect("register project");
-        claim_owner(&repo_root, &project_handle, sample_client("client-B")).expect("claim project");
-
-        // client-A used to own the coordinator, but project lease wins.
-        let ctx_a = ClientContext {
+    fn gate_passes_when_no_project_lease_exists() {
+        let repo_root = temp_repo_root("no-lease");
+        let handle = sample_handle(&repo_root, Some(4242));
+        let ctx = ClientContext {
             client_id: "client-A".to_string(),
             project_root: repo_root.clone(),
         };
-        let ctx_b = ClientContext {
-            client_id: "client-B".to_string(),
-            project_root: repo_root.clone(),
-        };
-
-        match gate_owner_action(&ctx_a, &coord_handle) {
-            Err(MaccError::NotProcessOwner {
-                current_owner,
-                handle,
-            }) => {
-                assert_eq!(current_owner.as_deref(), Some("client-B"));
-                assert_eq!(handle.kind, ProcessKind::Project);
-            }
-            other => panic!("expected project-lease rejection, got {other:?}"),
-        }
-        gate_owner_action(&ctx_b, &coord_handle).expect("project owner should pass");
-
+        gate_owner_action(&ctx, &handle).expect("no lease means open mode");
         cleanup(&repo_root);
     }
 
     #[test]
-    fn gate_rejects_non_owner_and_accepts_owner_for_wildcard_handle() {
-        let repo_root = temp_repo_root("owner-gate");
-        let registered_handle = sample_handle(&repo_root, Some(4242));
-        register_process(&repo_root, registered_handle.clone()).expect("register process");
-        claim_owner(&repo_root, &registered_handle, sample_client("client-A"))
-            .expect("claim owner");
+    fn project_level_lease_authoritatively_gates_per_process_actions() {
+        let repo_root = temp_repo_root("project-lease");
+        let coord_handle = sample_handle(&repo_root, Some(4242));
+        register_process(&repo_root, coord_handle.clone()).expect("register coord");
+        // Any claim routes to the project lease.
+        claim_owner(&repo_root, &coord_handle, sample_client("client-A")).expect("claim");
 
-        let wildcard_handle = sample_handle(&repo_root, None);
         let viewer_ctx = ClientContext {
             client_id: "client-B".to_string(),
             project_root: repo_root.clone(),
@@ -153,18 +82,18 @@ mod tests {
             project_root: repo_root.clone(),
         };
 
-        match gate_owner_action(&viewer_ctx, &wildcard_handle) {
+        match gate_owner_action(&viewer_ctx, &coord_handle) {
             Err(MaccError::NotProcessOwner {
                 handle,
                 current_owner,
             }) => {
-                assert_eq!(handle, registered_handle);
+                assert_eq!(handle.kind, ProcessKind::Coordinator);
                 assert_eq!(current_owner.as_deref(), Some("client-A"));
             }
             other => panic!("expected NotProcessOwner, got {other:?}"),
         }
 
-        gate_owner_action(&owner_ctx, &wildcard_handle).expect("owner should pass gate");
+        gate_owner_action(&owner_ctx, &coord_handle).expect("owner should pass gate");
 
         cleanup(&repo_root);
     }

@@ -42,6 +42,7 @@ impl<'a> Command for WorktreeCommand<'a> {
                 allow_user_scope,
             } => {
                 let paths = self.app.project_paths()?;
+                crate::commands::gate_cli_mutation(&paths.root)?;
 
                 let spec = macc_core::WorktreeCreateSpec {
                     slug: slug.clone(),
@@ -206,6 +207,7 @@ impl<'a> Command for WorktreeCommand<'a> {
                 allow_user_scope,
             } => {
                 let paths = self.app.project_paths()?;
+                crate::commands::gate_cli_mutation(&paths.root)?;
                 if *all {
                     let applied = self.app.engine.worktree_apply_all(
                         &CliFetchMaterializer,
@@ -247,10 +249,12 @@ impl<'a> Command for WorktreeCommand<'a> {
             }
             WorktreeCommands::Run { id } => {
                 let paths = self.app.project_paths()?;
+                crate::commands::gate_cli_mutation(&paths.root)?;
                 self.app.engine.worktree_run_task(&paths, id)
             }
             WorktreeCommands::Exec { id, cmd } => {
                 let paths = self.app.project_paths()?;
+                crate::commands::gate_cli_mutation(&paths.root)?;
                 self.app.engine.worktree_exec_task(&paths, id, cmd)
             }
             WorktreeCommands::Remove {
@@ -260,6 +264,7 @@ impl<'a> Command for WorktreeCommand<'a> {
                 remove_branch,
             } => {
                 let paths = self.app.project_paths()?;
+                crate::commands::gate_cli_mutation(&paths.root)?;
                 if *all {
                     let entries = macc_core::list_worktrees(&paths.root)?;
                     let root = paths.root.canonicalize().unwrap_or(paths.root.clone());
@@ -315,6 +320,7 @@ impl<'a> Command for WorktreeCommand<'a> {
             }
             WorktreeCommands::Prune => {
                 let paths = self.app.project_paths()?;
+                crate::commands::gate_cli_mutation(&paths.root)?;
                 macc_core::prune_worktrees(&paths.root)?;
                 println!("Pruned git worktrees.");
                 Ok(())

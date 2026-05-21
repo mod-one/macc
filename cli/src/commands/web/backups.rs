@@ -24,8 +24,10 @@ pub(super) async fn list_backups_handler(
 pub(super) async fn restore_backup_handler(
     State(state): State<WebState>,
     Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
     Json(payload): Json<ApiBackupRestoreRequest>,
 ) -> std::result::Result<Json<ApiBackupRestoreResult>, ApiError> {
+    crate::commands::web::mutation_gate::require_project_owner(&state, &headers)?;
     if !payload.confirmed {
         return Err(ApiError::confirmation_required(
             "Confirmation required",

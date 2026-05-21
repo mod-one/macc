@@ -1240,36 +1240,33 @@ impl AppState {
             self.coordinator_ownership.record = None;
             return;
         };
-        let records = match self.engine.process_list_running(&paths.root) {
-            Ok(records) => records,
-            Err(err) => {
-                let _ = err;
-                return;
-            }
+
+        // L6-OWN-008: claim the project-wide control lease the moment this TUI
+        // is the first connected client. The claim auto-creates the project
+        // lease record if no client has registered yet.
+        let handle = self
+            .coordinator_handle()
+            .unwrap_or_else(|| ProcessHandle {
+                kind: ProcessKind::Project,
+                project_root: paths.root.clone(),
+                pid: None,
+            });
+        let identity = self.coordinator_client_identity();
+        let _ = self
+            .engine
+            .process_ownership_claim(&paths.root, handle, identity);
+
+        // Read the project lease back so banner reflects the authoritative state.
+        let project_handle = ProcessHandle {
+            kind: ProcessKind::Project,
+            project_root: paths.root.clone(),
+            pid: None,
         };
-        let coordinator_record = records
-            .into_iter()
-            .find(|r| matches!(r.process.kind, ProcessKind::Coordinator));
-
-        if let Some(record) = coordinator_record.as_ref() {
-            if record.owner.is_none() {
-                let identity = self.coordinator_client_identity();
-                let _ =
-                    self.engine
-                        .process_ownership_claim(&paths.root, record.process.clone(), identity);
-            }
-        }
-
-        // Re-read after potential claim so banner shows the new owner.
         let record = self
             .engine
-            .process_list_running(&paths.root)
+            .process_ownership_status(&paths.root, &project_handle)
             .ok()
-            .and_then(|records| {
-                records
-                    .into_iter()
-                    .find(|r| matches!(r.process.kind, ProcessKind::Coordinator))
-            });
+            .flatten();
 
         let is_owner = record
             .as_ref()
@@ -1277,14 +1274,9 @@ impl AppState {
             .map(|o| o.client_id == self.coordinator_client_id)
             .unwrap_or(false);
 
-        let pending_request = record.as_ref().and_then(|r| {
-            r.takeover_request.clone().filter(|_| {
-                r.owner
-                    .as_ref()
-                    .map(|o| o.client_id == self.coordinator_client_id)
-                    .unwrap_or(false)
-            })
-        });
+        let pending_request = record
+            .as_ref()
+            .and_then(|r| r.takeover_request.clone().filter(|_| is_owner));
 
         self.coordinator_ownership.record = record;
         self.coordinator_ownership.is_owner = is_owner;
