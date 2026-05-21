@@ -13,6 +13,7 @@ pub mod mcp_json;
 pub mod packages;
 pub mod plan;
 pub mod profile;
+pub mod process_ownership;
 pub mod resolve;
 pub mod security;
 pub mod service;
