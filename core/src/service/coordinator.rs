@@ -1,6 +1,6 @@
 use crate::config::CoordinatorConfig;
 use crate::coordinator::managed_command_registry::{
-    get_managed_command, remove_managed_command, upsert_managed_command,
+    list_managed_commands, remove_managed_command, upsert_managed_command,
 };
 use crate::{ensure_embedded_automation_scripts, MaccError, ProjectPaths, Result};
 use std::collections::HashMap;
@@ -79,8 +79,14 @@ fn local_handles_by_root() -> &'static Mutex<HashMap<String, CoordinatorProcessH
     TABLE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn root_key(paths: &ProjectPaths) -> String {
-    paths.root.to_string_lossy().into_owned()
+fn handle_key(paths: &ProjectPaths, kind: &str) -> String {
+    format!("{}::{kind}", paths.root.to_string_lossy())
+}
+
+fn active_managed_command(
+    paths: &ProjectPaths,
+) -> Result<Option<crate::coordinator::managed_command_registry::ManagedCommandRecord>> {
+    Ok(list_managed_commands(paths)?.into_iter().next())
 }
 
 pub fn coordinator_start_managed_command_process(
@@ -89,11 +95,11 @@ pub fn coordinator_start_managed_command_process(
     args: &[String],
     cfg: Option<&CoordinatorConfig>,
 ) -> Result<()> {
-    let key = root_key(paths);
-    if let Some(existing) = get_managed_command(paths)? {
+    let key = handle_key(paths, command);
+    if let Some(existing) = active_managed_command(paths)? {
         return Err(MaccError::Validation(format!(
             "coordinator command '{}' is already running for this project",
-            existing.command
+            existing.kind
         )));
     }
 
@@ -109,12 +115,12 @@ pub fn coordinator_start_managed_command_process(
 pub fn coordinator_poll_managed_command_process(
     paths: &ProjectPaths,
 ) -> Result<CoordinatorManagedCommandPoll> {
-    let key = root_key(paths);
-    let Some(record) = get_managed_command(paths)? else {
+    let Some(record) = active_managed_command(paths)? else {
         return Ok(CoordinatorManagedCommandPoll::Idle);
     };
-    let command = record.command.clone();
+    let command = record.kind.clone();
     let elapsed_secs = record.elapsed_secs();
+    let key = handle_key(paths, &record.kind);
     let local_handle = local_handles_by_root()
         .lock()
         .map_err(|_| MaccError::Validation("coordinator local handle table lock poisoned".into()))?
@@ -130,7 +136,7 @@ pub fn coordinator_poll_managed_command_process(
                 });
             }
             CoordinatorProcessPoll::Exited { success, code } => {
-                let _ = remove_managed_command(paths)?;
+                let _ = remove_managed_command(paths, &record.kind)?;
                 local_handles_by_root()
                     .lock()
                     .map_err(|_| {
@@ -153,7 +159,7 @@ pub fn coordinator_poll_managed_command_process(
             elapsed_secs,
         })
     } else {
-        let _ = remove_managed_command(paths)?;
+        let _ = remove_managed_command(paths, &record.kind)?;
         Ok(CoordinatorManagedCommandPoll::Exited {
             command,
             success: false,
@@ -161,6 +167,12 @@ pub fn coordinator_poll_managed_command_process(
             elapsed_secs,
         })
     }
+}
+
+pub fn coordinator_managed_command_state(
+    paths: &ProjectPaths,
+) -> Result<CoordinatorManagedCommandState> {
+    coordinator_poll_managed_command_state(paths)
 }
 
 pub fn coordinator_poll_managed_command_state(
@@ -214,12 +226,18 @@ pub fn coordinator_stop_managed_command_process(
     paths: &ProjectPaths,
     graceful: bool,
 ) -> Result<CoordinatorStopResult> {
-    let key = root_key(paths);
+    let Some(record) = active_managed_command(paths)? else {
+        return Ok(CoordinatorStopResult {
+            targets: 0,
+            used_group: false,
+        });
+    };
+    let key = handle_key(paths, &record.kind);
     let local_handle = local_handles_by_root()
         .lock()
         .map_err(|_| MaccError::Validation("coordinator local handle table lock poisoned".into()))?
         .remove(&key);
-    let Some(record) = remove_managed_command(paths)? else {
+    let Some(record) = remove_managed_command(paths, &record.kind)? else {
         return Ok(CoordinatorStopResult {
             targets: 0,
             used_group: false,

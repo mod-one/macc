@@ -634,6 +634,13 @@ pub trait Engine {
         crate::service::coordinator::coordinator_poll_managed_command_process(paths)
     }
 
+    fn coordinator_managed_command_state(
+        &self,
+        paths: &ProjectPaths,
+    ) -> Result<crate::service::coordinator::CoordinatorManagedCommandState> {
+        crate::service::coordinator::coordinator_managed_command_state(paths)
+    }
+
     fn coordinator_poll_managed_command_state(
         &self,
         paths: &ProjectPaths,
