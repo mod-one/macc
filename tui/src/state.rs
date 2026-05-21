@@ -1259,7 +1259,7 @@ impl AppState {
         identity
     }
 
-    fn coordinator_handle(&self) -> Option<ProcessHandle> {
+    pub(crate) fn coordinator_handle(&self) -> Option<ProcessHandle> {
         self.project_paths.as_ref().map(|paths| ProcessHandle {
             kind: ProcessKind::Coordinator,
             project_root: paths.root.clone(),
@@ -1280,6 +1280,8 @@ impl AppState {
         self.coordinator_ownership.is_owner = self.ownership_state.is_owner;
         self.coordinator_ownership.pending_incoming_request =
             self.ownership_state.pending_incoming_request.clone();
+        self.coordinator_ownership.dismissed_request_id =
+            self.ownership_state.dismissed_request_id.clone();
         self.coordinator_ownership.last_refresh = self.ownership_state.last_refresh;
     }
 
@@ -1391,6 +1393,14 @@ impl AppState {
             .map(|o| o.client_id == self.client_identity.client_id)
             .unwrap_or(false);
 
+        let active_request_id = record
+            .as_ref()
+            .and_then(|r| r.takeover_request.as_ref())
+            .map(|request| request.request_id.clone());
+        if self.ownership_state.dismissed_request_id.as_ref() != active_request_id.as_ref() {
+            self.ownership_state.dismissed_request_id = None;
+        }
+
         self.ownership_state.record = record;
         self.ownership_state.is_owner = is_owner;
         self.ownership_state.last_refresh = Instant::now();
@@ -1398,7 +1408,13 @@ impl AppState {
             .ownership_state
             .record
             .as_ref()
-            .and_then(|r| r.takeover_request.clone().filter(|_| is_owner));
+            .and_then(|r| r.takeover_request.as_ref())
+            .filter(|request| {
+                is_owner
+                    && self.ownership_state.dismissed_request_id.as_deref()
+                        != Some(request.request_id.as_str())
+            })
+            .cloned();
         self.last_ownership_refresh = Some(Instant::now());
         self.coordinator_ownership_last_refresh = self.last_ownership_refresh;
         self.sync_coordinator_ownership_view();
@@ -1429,7 +1445,11 @@ impl AppState {
                     .record
                     .as_ref()
                     .and_then(|record| record.takeover_request.clone())
-                    .filter(|_| self.ownership_state.is_owner)
+                    .filter(|request| {
+                        self.ownership_state.is_owner
+                            && self.ownership_state.dismissed_request_id.as_deref()
+                                != Some(request.request_id.as_str())
+                    })
                 {
                     self.handle_takeover_request_received(request);
                 }
@@ -1496,6 +1516,7 @@ impl AppState {
             accept,
         ) {
             Ok(()) => {
+                self.ownership_state.dismissed_request_id = None;
                 let msg = if accept {
                     "Takeover accepted — control transferred."
                 } else {
@@ -1537,6 +1558,7 @@ impl AppState {
         self.ownership_state.record = None;
         self.ownership_state.is_owner = false;
         self.ownership_state.pending_incoming_request = None;
+        self.ownership_state.dismissed_request_id = None;
         self.sync_coordinator_ownership_view();
     }
 
@@ -1700,7 +1722,21 @@ impl AppState {
     }
 
     pub fn handle_takeover_request_received(&mut self, request: TakeoverRequest) {
+        if self.ownership_state.dismissed_request_id.as_deref() == Some(request.request_id.as_str())
+        {
+            return;
+        }
         self.ownership_state.pending_incoming_request = Some(request);
+        self.sync_coordinator_ownership_view();
+    }
+
+    pub fn dismiss_takeover_request_modal(&mut self) {
+        self.ownership_state.dismissed_request_id = self
+            .ownership_state
+            .pending_incoming_request
+            .as_ref()
+            .map(|request| request.request_id.clone());
+        self.ownership_state.pending_incoming_request = None;
         self.sync_coordinator_ownership_view();
     }
 
@@ -1992,7 +2028,75 @@ impl AppState {
             .unwrap_or(true);
         if should_refresh_events {
             self.refresh_coordinator_events();
+            self.scan_for_takeover_requests();
         }
+    }
+
+    fn scan_for_takeover_requests(&mut self) {
+        if !self.ownership_state.is_owner || self.ownership_state.pending_incoming_request.is_some()
+        {
+            return;
+        }
+        let Some(paths) = self.project_paths.as_ref() else {
+            return;
+        };
+        let Some(active_request) = self
+            .ownership_state
+            .record
+            .as_ref()
+            .and_then(|record| record.takeover_request.clone())
+        else {
+            return;
+        };
+        if self.ownership_state.dismissed_request_id.as_deref()
+            == Some(active_request.request_id.as_str())
+        {
+            return;
+        }
+
+        let Ok(events) = self.engine.get_coordinator_events(paths) else {
+            return;
+        };
+        let Some(request) = events
+            .iter()
+            .rev()
+            .filter(|event| event.event_type == "takeover_requested")
+            .find_map(Self::parse_takeover_request_event)
+            .filter(|request| {
+                request.request_id == active_request.request_id
+                    && request.requester.client_id == active_request.requester.client_id
+                    && request.requested_at == active_request.requested_at
+            })
+        else {
+            return;
+        };
+
+        self.handle_takeover_request_received(request);
+    }
+
+    fn parse_takeover_request_event(event: &CoordinatorEvent) -> Option<TakeoverRequest> {
+        let payload = event
+            .raw
+            .get("payload")
+            .and_then(|payload| payload.get("message"))
+            .and_then(Value::as_str)
+            .and_then(|message| serde_json::from_str::<Value>(message).ok())?;
+        let process: ProcessHandle =
+            serde_json::from_value(payload.get("process")?.clone()).ok()?;
+        if !matches!(
+            process.kind,
+            ProcessKind::Coordinator | ProcessKind::Project
+        ) {
+            return None;
+        }
+        let requester: ClientIdentity =
+            serde_json::from_value(payload.get("client")?.clone()).ok()?;
+        let request_id = payload.get("request_id")?.as_str()?.to_string();
+        Some(TakeoverRequest {
+            request_id,
+            requester,
+            requested_at: event.ts.clone().unwrap_or_default(),
+        })
     }
 
     pub fn take_full_clear(&mut self) -> bool {

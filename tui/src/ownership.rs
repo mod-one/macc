@@ -14,6 +14,7 @@ pub struct TuiOwnershipState {
     pub record: Option<OwnershipRecord>,
     pub is_owner: bool,
     pub pending_incoming_request: Option<TakeoverRequest>,
+    pub dismissed_request_id: Option<String>,
     pub last_refresh: Instant,
 }
 
@@ -23,6 +24,7 @@ impl TuiOwnershipState {
             record: None,
             is_owner: false,
             pending_incoming_request: None,
+            dismissed_request_id: None,
             last_refresh: Instant::now(),
         }
     }
@@ -89,7 +91,7 @@ pub fn render_takeover_modal(f: &mut Frame, area: Rect, request: &TakeoverReques
     f.render_widget(Clear, modal_area);
 
     let text = format!(
-        "Takeover requested by: {}\nKind: {:?}\nAt: {}\n\nPress A to accept, R to reject.",
+        "Takeover requested by: {}\nKind: {:?}\nAt: {}\n\nPress a to accept, r to reject, Esc to dismiss.",
         request.requester.client_id, request.requester.kind, request.requested_at,
     );
 
