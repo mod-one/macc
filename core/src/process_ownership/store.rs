@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
-use super::{OwnershipRecord, ProcessHandle};
+use super::{HeartbeatConfig, OwnershipRecord, ProcessHandle, evict_stale_clients};
 
 const STORE_RELATIVE_PATH: &str = ".macc/state/process_ownership.json";
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(10);
@@ -13,7 +13,7 @@ const LOCK_MAX_ATTEMPTS: usize = 200;
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct OwnershipStore {
-    records: Vec<OwnershipRecord>,
+    pub(crate) records: Vec<OwnershipRecord>,
 }
 
 impl OwnershipStore {
@@ -118,7 +118,7 @@ impl OwnershipStore {
     }
 
     fn evict_stale_records(&mut self) {
-        // TODO(L6-OWN-004): replace the no-op stub with heartbeat-based stale eviction.
+        evict_stale_clients(self, &HeartbeatConfig::default());
     }
 }
 
@@ -189,6 +189,7 @@ impl Drop for StoreLockGuard {
 #[cfg(test)]
 mod tests {
     use super::OwnershipStore;
+    use chrono::Utc;
     use crate::process_ownership::{
         ClientIdentity, ClientKind, OwnershipRecord, ProcessHandle, ProcessKind, TakeoverRequest,
     };
@@ -228,7 +229,8 @@ mod tests {
         updated.viewers.push(ClientIdentity {
             client_id: "viewer-extra".into(),
             kind: ClientKind::Cli,
-            connected_at: "2026-05-21T12:10:00Z".into(),
+            connected_at: Utc::now().to_rfc3339(),
+            last_heartbeat: Utc::now().to_rfc3339(),
         });
 
         store.upsert_record(first.clone());
@@ -302,23 +304,26 @@ mod tests {
             owner: Some(ClientIdentity {
                 client_id: format!("owner-{id}"),
                 kind: ClientKind::Tui,
-                connected_at: "2026-05-21T12:00:00Z".into(),
+                connected_at: Utc::now().to_rfc3339(),
+                last_heartbeat: Utc::now().to_rfc3339(),
             }),
             viewers: vec![ClientIdentity {
                 client_id: format!("viewer-{id}"),
                 kind: ClientKind::Web,
-                connected_at: "2026-05-21T12:05:00Z".into(),
+                connected_at: Utc::now().to_rfc3339(),
+                last_heartbeat: Utc::now().to_rfc3339(),
             }],
             takeover_request: Some(TakeoverRequest {
                 request_id: format!("request-{id}"),
                 requester: ClientIdentity {
                     client_id: format!("requester-{id}"),
                     kind: ClientKind::Cli,
-                    connected_at: "2026-05-21T12:06:00Z".into(),
+                    connected_at: Utc::now().to_rfc3339(),
+                    last_heartbeat: Utc::now().to_rfc3339(),
                 },
-                requested_at: "2026-05-21T12:07:00Z".into(),
+                requested_at: Utc::now().to_rfc3339(),
             }),
-            started_at: "2026-05-21T11:59:00Z".into(),
+            started_at: Utc::now().to_rfc3339(),
         }
     }
 }

@@ -13,6 +13,8 @@ pub struct ClientIdentity {
     pub client_id: String,
     pub kind: ClientKind,
     pub connected_at: String,
+    #[serde(default)]
+    pub last_heartbeat: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
