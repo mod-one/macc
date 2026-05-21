@@ -189,21 +189,22 @@ impl Drop for StoreLockGuard {
 #[cfg(test)]
 mod tests {
     use super::OwnershipStore;
-    use chrono::Utc;
+    use chrono::{Duration, Utc};
     use crate::process_ownership::{
         ClientIdentity, ClientKind, OwnershipRecord, ProcessHandle, ProcessKind, TakeoverRequest,
     };
-    use std::fs;
+    use std::collections::HashSet;
     use std::path::{Path, PathBuf};
+    use std::sync::Barrier;
     use std::sync::Arc;
     use std::thread;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use tempfile::TempDir;
 
     #[test]
     fn load_returns_empty_when_file_missing() {
         let repo_root = temp_repo_root("missing");
 
-        let store = OwnershipStore::load(&repo_root).expect("load missing store");
+        let store = OwnershipStore::load(repo_root.path()).expect("load missing store");
 
         assert!(store.records.is_empty());
     }
@@ -215,8 +216,8 @@ mod tests {
         let mut store = OwnershipStore::default();
         store.upsert_record(record.clone());
 
-        store.save(&repo_root).expect("save store");
-        let loaded = OwnershipStore::load(&repo_root).expect("reload store");
+        store.save(repo_root.path()).expect("save store");
+        let loaded = OwnershipStore::load(repo_root.path()).expect("reload store");
 
         assert_eq!(loaded.get_record(&record.process), Some(&record));
     }
@@ -247,30 +248,58 @@ mod tests {
         let mut store = OwnershipStore::default();
         store.upsert_record(sample_record(3));
 
-        store.save(&repo_root).expect("save store");
+        store.save(repo_root.path()).expect("save store");
 
         assert!(!repo_root
+            .path()
             .join(".macc/state/process_ownership.json.tmp")
             .exists());
     }
 
     #[test]
-    fn load_and_modify_serializes_concurrent_updates() {
+    fn load_and_modify_serializes_concurrent_claims_without_duplicates() {
         let repo_root = Arc::new(temp_repo_root("concurrent"));
-        let thread_count = 8;
-        let iterations = 20;
+        let thread_count = 10;
+        let barrier = Arc::new(Barrier::new(thread_count));
         let mut workers = Vec::new();
 
         for worker in 0..thread_count {
             let repo_root = Arc::clone(&repo_root);
+            let barrier = Arc::clone(&barrier);
             workers.push(thread::spawn(move || {
-                for iteration in 0..iterations {
-                    OwnershipStore::load_and_modify(&repo_root, |store| {
-                        let record = sample_record((worker * iterations + iteration) as i32);
-                        store.upsert_record(record);
-                        Ok(())
-                    })?;
-                }
+                let claim = client_with_age(&format!("client-{worker}"), ClientKind::Tui, 0, 0);
+                barrier.wait();
+
+                OwnershipStore::load_and_modify(repo_root.path(), |store| {
+                    let handle = shared_process_handle();
+                    let mut record = store
+                        .get_record(&handle)
+                        .cloned()
+                        .unwrap_or_else(|| OwnershipRecord {
+                            process: handle.clone(),
+                            owner: None,
+                            viewers: Vec::new(),
+                            takeover_request: None,
+                            started_at: Utc::now().to_rfc3339(),
+                        });
+
+                    if record.owner.is_none() {
+                        record.owner = Some(claim.clone());
+                    } else if record
+                        .owner
+                        .as_ref()
+                        .is_some_and(|owner| owner.client_id != claim.client_id)
+                        && !record
+                            .viewers
+                            .iter()
+                            .any(|viewer| viewer.client_id == claim.client_id)
+                    {
+                        record.viewers.push(claim.clone());
+                    }
+
+                    store.upsert_record(record);
+                    Ok(())
+                })?;
 
                 Ok::<(), crate::MaccError>(())
             }));
@@ -280,18 +309,101 @@ mod tests {
             worker.join().expect("worker join").expect("worker update");
         }
 
-        let loaded = OwnershipStore::load(&repo_root).expect("reload store");
-        assert_eq!(loaded.records.len(), thread_count * iterations);
+        let loaded = OwnershipStore::load(repo_root.path()).expect("reload store");
+        assert_eq!(loaded.records.len(), 1);
+
+        let record = loaded
+            .get_record(&shared_process_handle())
+            .expect("shared record to exist");
+        let owner = record.owner.as_ref().expect("owner to be claimed");
+        let unique_clients: HashSet<_> = std::iter::once(owner.client_id.as_str())
+            .chain(record.viewers.iter().map(|viewer| viewer.client_id.as_str()))
+            .collect();
+
+        assert_eq!(unique_clients.len(), thread_count);
+        assert_eq!(record.viewers.len(), thread_count - 1);
     }
 
-    fn temp_repo_root(label: &str) -> PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time drift")
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("macc-ownership-store-{label}-{unique}"));
-        fs::create_dir_all(&path).expect("create temp repo root");
-        path
+    #[test]
+    fn load_evicts_stale_owner() {
+        let repo_root = temp_repo_root("stale-owner");
+        let mut store = OwnershipStore::default();
+        let mut record = sample_record(11);
+        record.owner = Some(client_with_age("owner-stale", ClientKind::Tui, 120, 120));
+        record.viewers.clear();
+        record.takeover_request = None;
+        store.upsert_record(record.clone());
+
+        store.save(repo_root.path()).expect("save store");
+
+        let loaded = OwnershipStore::load(repo_root.path()).expect("load store");
+        let record = loaded
+            .get_record(&record.process)
+            .expect("record after load");
+
+        assert!(record.owner.is_none());
+    }
+
+    #[test]
+    fn load_evicts_only_stale_viewers() {
+        let repo_root = temp_repo_root("stale-viewers");
+        let mut store = OwnershipStore::default();
+        let mut record = sample_record(12);
+        let fresh_viewer = client_with_age("viewer-fresh", ClientKind::Web, 10, 10);
+        record.viewers = vec![
+            client_with_age("viewer-stale-1", ClientKind::Web, 120, 120),
+            fresh_viewer.clone(),
+            client_with_age("viewer-stale-2", ClientKind::Cli, 180, 180),
+        ];
+        store.upsert_record(record.clone());
+
+        store.save(repo_root.path()).expect("save store");
+
+        let loaded = OwnershipStore::load(repo_root.path()).expect("load store");
+        let record = loaded
+            .get_record(&record.process)
+            .expect("record after load");
+
+        assert_eq!(record.viewers, vec![fresh_viewer]);
+    }
+
+    #[test]
+    fn load_promotes_fresh_viewer_when_owner_is_stale() {
+        let repo_root = temp_repo_root("promote-viewer");
+        let mut store = OwnershipStore::default();
+        let mut record = sample_record(13);
+        let promoted_viewer = client_with_age("viewer-fresh", ClientKind::Web, 30, 10);
+        record.owner = Some(client_with_age("owner-stale", ClientKind::Tui, 120, 120));
+        record.viewers = vec![promoted_viewer.clone()];
+        store.upsert_record(record.clone());
+
+        store.save(repo_root.path()).expect("save store");
+
+        let loaded = OwnershipStore::load(repo_root.path()).expect("load store");
+        let record = loaded
+            .get_record(&record.process)
+            .expect("record after load");
+
+        assert_eq!(record.owner.as_ref(), Some(&promoted_viewer));
+        assert!(record.viewers.is_empty());
+    }
+
+    #[test]
+    fn ownership_record_round_trips_through_json_with_all_fields() {
+        let record = sample_record(21);
+
+        let serialized = serde_json::to_string(&record).expect("serialize record");
+        let deserialized: OwnershipRecord =
+            serde_json::from_str(&serialized).expect("deserialize record");
+
+        assert_eq!(deserialized, record);
+    }
+
+    fn temp_repo_root(label: &str) -> TempDir {
+        tempfile::Builder::new()
+            .prefix(&format!("macc-ownership-store-{label}-"))
+            .tempdir()
+            .expect("create temp repo root")
     }
 
     fn sample_record(id: i32) -> OwnershipRecord {
@@ -301,29 +413,41 @@ mod tests {
                 project_root: Path::new("/tmp/project").join(format!("repo-{id}")),
                 pid: Some(1000 + id),
             },
-            owner: Some(ClientIdentity {
-                client_id: format!("owner-{id}"),
-                kind: ClientKind::Tui,
-                connected_at: Utc::now().to_rfc3339(),
-                last_heartbeat: Utc::now().to_rfc3339(),
-            }),
-            viewers: vec![ClientIdentity {
-                client_id: format!("viewer-{id}"),
-                kind: ClientKind::Web,
-                connected_at: Utc::now().to_rfc3339(),
-                last_heartbeat: Utc::now().to_rfc3339(),
-            }],
+            owner: Some(client_with_age(&format!("owner-{id}"), ClientKind::Tui, 0, 0)),
+            viewers: vec![client_with_age(
+                &format!("viewer-{id}"),
+                ClientKind::Web,
+                0,
+                0,
+            )],
             takeover_request: Some(TakeoverRequest {
                 request_id: format!("request-{id}"),
-                requester: ClientIdentity {
-                    client_id: format!("requester-{id}"),
-                    kind: ClientKind::Cli,
-                    connected_at: Utc::now().to_rfc3339(),
-                    last_heartbeat: Utc::now().to_rfc3339(),
-                },
+                requester: client_with_age(&format!("requester-{id}"), ClientKind::Cli, 0, 0),
                 requested_at: Utc::now().to_rfc3339(),
             }),
             started_at: Utc::now().to_rfc3339(),
+        }
+    }
+
+    fn shared_process_handle() -> ProcessHandle {
+        ProcessHandle {
+            kind: ProcessKind::Coordinator,
+            project_root: PathBuf::from("/tmp/project/shared-repo"),
+            pid: Some(4242),
+        }
+    }
+
+    fn client_with_age(
+        client_id: &str,
+        kind: ClientKind,
+        connected_age_seconds: i64,
+        heartbeat_age_seconds: i64,
+    ) -> ClientIdentity {
+        ClientIdentity {
+            client_id: client_id.to_string(),
+            kind,
+            connected_at: (Utc::now() - Duration::seconds(connected_age_seconds)).to_rfc3339(),
+            last_heartbeat: (Utc::now() - Duration::seconds(heartbeat_age_seconds)).to_rfc3339(),
         }
     }
 }
