@@ -13,6 +13,7 @@ mod errors;
 mod git;
 #[allow(clippy::result_large_err)]
 mod logs;
+mod mutation_gate;
 mod ownership;
 mod plan;
 #[allow(clippy::result_large_err)]
@@ -63,6 +64,7 @@ struct WebState {
     assets_mode: WebAssetsMode,
     tail_stream_limiter: logs::TailStreamLimiter,
     terminal_sessions: terminal::TerminalSessionStore,
+    #[allow(dead_code)]
     registered_process_guard: Option<Arc<RegisteredProcessGuard>>,
 }
 
@@ -267,31 +269,31 @@ fn build_web_router(state: WebState) -> Router {
             get(ownership::list_processes_handler),
         )
         .route(
-            "/api/v1/processes/:handle/ownership",
+            "/api/v1/processes/:kind/ownership",
             get(ownership::get_process_ownership_handler),
         )
         .route(
-            "/api/v1/processes/:handle/claim",
+            "/api/v1/processes/:kind/claim",
             post(ownership::claim_ownership_handler),
         )
         .route(
-            "/api/v1/processes/:handle/release",
+            "/api/v1/processes/:kind/release",
             post(ownership::release_ownership_handler),
         )
         .route(
-            "/api/v1/processes/:handle/viewer",
+            "/api/v1/processes/:kind/viewer",
             post(ownership::add_viewer_handler).delete(ownership::remove_viewer_handler),
         )
         .route(
-            "/api/v1/processes/:handle/takeover/request",
+            "/api/v1/processes/:kind/takeover/request",
             post(ownership::request_takeover_handler),
         )
         .route(
-            "/api/v1/processes/:handle/takeover/respond",
+            "/api/v1/processes/:kind/takeover/respond",
             post(ownership::respond_takeover_handler),
         )
         .route(
-            "/api/v1/processes/:handle/heartbeat",
+            "/api/v1/processes/:kind/heartbeat",
             post(ownership::heartbeat_handler),
         )
         .fallback(get(assets::spa_handler))

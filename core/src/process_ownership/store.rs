@@ -118,8 +118,32 @@ impl OwnershipStore {
     }
 
     fn evict_stale_records(&mut self) {
-        evict_stale_clients(self, &HeartbeatConfig::default());
+        // L6-OWN-007: takeover timeout / default response come from project config.
+        let mut cfg = HeartbeatConfig::default();
+        if let Some(record) = self.records.first() {
+            let repo_root = record.process.project_root.clone();
+            if let Some((timeout, response)) = load_takeover_policy(&repo_root) {
+                cfg.takeover_timeout_seconds = timeout;
+                cfg.takeover_default_response = response;
+            }
+        }
+        evict_stale_clients(self, &cfg);
     }
+}
+
+fn load_takeover_policy(
+    repo_root: &Path,
+) -> Option<(u64, crate::process_ownership::TakeoverDefaultResponse)> {
+    let config_path = repo_root.join(".macc/macc.yaml");
+    let config = crate::load_canonical_config(&config_path).ok()?;
+    let coordinator = config.automation.coordinator.as_ref()?;
+    let timeout = coordinator.takeover_timeout_seconds.unwrap_or(60);
+    let response = coordinator
+        .takeover_default_response
+        .as_deref()
+        .map(crate::process_ownership::TakeoverDefaultResponse::from_str_lossy)
+        .unwrap_or(crate::process_ownership::TakeoverDefaultResponse::Deny);
+    Some((timeout, response))
 }
 
 fn store_path(repo_root: &Path) -> PathBuf {

@@ -67,6 +67,53 @@ impl<'a> Command for ProcessCommand<'a> {
                 );
                 Ok(())
             }
+            ProcessCommands::Takeover { takeover_command } => match takeover_command {
+                TakeoverCommands::Request { kind, pid } => {
+                    let handle = build_handle(&paths.root, *kind, *pid);
+                    let identity = cli_identity();
+                    let request_id = self.app.engine.process_ownership_request_takeover(
+                        &paths.root,
+                        &handle,
+                        identity,
+                    )?;
+                    println!("Takeover requested. request_id: {request_id}");
+                    Ok(())
+                }
+                TakeoverCommands::Accept {
+                    kind,
+                    pid,
+                    owner_client_id,
+                    request_id,
+                } => {
+                    let handle = build_handle(&paths.root, *kind, *pid);
+                    self.app.engine.process_ownership_respond_takeover(
+                        &paths.root,
+                        &handle,
+                        owner_client_id,
+                        request_id,
+                        true,
+                    )?;
+                    println!("Takeover accepted.");
+                    Ok(())
+                }
+                TakeoverCommands::Reject {
+                    kind,
+                    pid,
+                    owner_client_id,
+                    request_id,
+                } => {
+                    let handle = build_handle(&paths.root, *kind, *pid);
+                    self.app.engine.process_ownership_respond_takeover(
+                        &paths.root,
+                        &handle,
+                        owner_client_id,
+                        request_id,
+                        false,
+                    )?;
+                    println!("Takeover rejected.");
+                    Ok(())
+                }
+            },
         }
     }
 }
@@ -98,6 +145,44 @@ pub enum ProcessCommands {
         #[arg(long)]
         client_id: String,
     },
+    /// Request, accept, or reject a process takeover.
+    Takeover {
+        #[command(subcommand)]
+        takeover_command: TakeoverCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum TakeoverCommands {
+    /// Request to become the owner of a process currently owned by another client.
+    Request {
+        #[arg(long, value_enum)]
+        kind: ProcessKindArg,
+        #[arg(long)]
+        pid: i32,
+    },
+    /// Accept a pending takeover request (only the current owner may accept).
+    Accept {
+        #[arg(long, value_enum)]
+        kind: ProcessKindArg,
+        #[arg(long)]
+        pid: i32,
+        #[arg(long)]
+        owner_client_id: String,
+        #[arg(long)]
+        request_id: String,
+    },
+    /// Reject a pending takeover request (only the current owner may reject).
+    Reject {
+        #[arg(long, value_enum)]
+        kind: ProcessKindArg,
+        #[arg(long)]
+        pid: i32,
+        #[arg(long)]
+        owner_client_id: String,
+        #[arg(long)]
+        request_id: String,
+    },
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -106,6 +191,7 @@ pub enum ProcessKindArg {
     Supervisor,
     WebServer,
     TerminalSession,
+    Project,
 }
 
 impl From<ProcessKindArg> for ProcessKind {
@@ -115,6 +201,7 @@ impl From<ProcessKindArg> for ProcessKind {
             ProcessKindArg::Supervisor => Self::Supervisor,
             ProcessKindArg::WebServer => Self::WebServer,
             ProcessKindArg::TerminalSession => Self::TerminalSession,
+            ProcessKindArg::Project => Self::Project,
         }
     }
 }
@@ -178,6 +265,7 @@ fn format_process_kind(kind: &ProcessKind) -> &'static str {
         ProcessKind::Supervisor => "Supervisor",
         ProcessKind::WebServer => "WebServer",
         ProcessKind::TerminalSession => "TerminalSession",
+        ProcessKind::Project => "Project",
     }
 }
 

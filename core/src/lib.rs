@@ -58,7 +58,7 @@ pub enum MaccError {
     Validation(String),
 
     #[error(
-        "Operation rejected: client is not the owner of this process. Current owner: {}. Request takeover with 'macc process takeover request'.",
+        "Operation rejected: client is not the owner of this process. Current owner: {}. Request takeover with 'macc process takeover request --kind <kind> --pid <pid>'.",
         .current_owner.as_deref().unwrap_or("none")
     )]
     NotProcessOwner {

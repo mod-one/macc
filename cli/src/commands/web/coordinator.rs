@@ -198,7 +198,9 @@ pub(super) async fn status_handler(
 
 pub(super) async fn coordinator_run_handler(
     State(state): State<WebState>,
+    headers: axum::http::HeaderMap,
 ) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
+    crate::commands::web::mutation_gate::require_project_owner(&state, &headers)?;
     let _ = state.engine.project_ensure_coordinator_run_id();
     let paths = state.paths.clone();
     let engine = state.engine.clone();
@@ -216,7 +218,9 @@ pub(super) async fn coordinator_run_handler(
 
 pub(super) async fn coordinator_stop_handler(
     State(state): State<WebState>,
+    headers: axum::http::HeaderMap,
 ) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
+    crate::commands::web::mutation_gate::require_project_owner(&state, &headers)?;
     let paths = state.paths.clone();
     let engine = state.engine.clone();
     tokio::task::spawn_blocking(move || engine.coordinator_stop(&paths.root, "web api stop"))
@@ -229,7 +233,9 @@ pub(super) async fn coordinator_stop_handler(
 
 pub(super) async fn coordinator_cleanup_handler(
     State(state): State<WebState>,
+    headers: axum::http::HeaderMap,
 ) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
+    crate::commands::web::mutation_gate::require_project_owner(&state, &headers)?;
     let paths = state.paths.clone();
     let engine = state.engine.clone();
     tokio::task::spawn_blocking(move || engine.coordinator_cleanup(&paths))
@@ -242,7 +248,9 @@ pub(super) async fn coordinator_cleanup_handler(
 
 pub(super) async fn coordinator_dispatch_handler(
     State(state): State<WebState>,
+    headers: axum::http::HeaderMap,
 ) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
+    crate::commands::web::mutation_gate::require_project_owner(&state, &headers)?;
     let paths = state.paths.clone();
     let engine = state.engine.clone();
     let result = tokio::task::spawn_blocking(move || {
@@ -266,7 +274,9 @@ pub(super) async fn coordinator_dispatch_handler(
 
 pub(super) async fn coordinator_advance_handler(
     State(state): State<WebState>,
+    headers: axum::http::HeaderMap,
 ) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
+    crate::commands::web::mutation_gate::require_project_owner(&state, &headers)?;
     let paths = state.paths.clone();
     let engine = state.engine.clone();
     let result = tokio::task::spawn_blocking(move || {
@@ -289,7 +299,9 @@ pub(super) async fn coordinator_advance_handler(
 
 pub(super) async fn coordinator_reconcile_handler(
     State(state): State<WebState>,
+    headers: axum::http::HeaderMap,
 ) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
+    crate::commands::web::mutation_gate::require_project_owner(&state, &headers)?;
     let paths = state.paths.clone();
     let engine = state.engine.clone();
     let result = tokio::task::spawn_blocking(move || {
@@ -312,7 +324,9 @@ pub(super) async fn coordinator_reconcile_handler(
 
 pub(super) async fn coordinator_resume_handler(
     State(state): State<WebState>,
+    headers: axum::http::HeaderMap,
 ) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
+    crate::commands::web::mutation_gate::require_project_owner(&state, &headers)?;
     let paths = state.paths.clone();
     let engine = state.engine.clone();
     let result = tokio::task::spawn_blocking(move || {
@@ -330,7 +344,9 @@ pub(super) async fn coordinator_resume_handler(
 
 pub(super) async fn coordinator_sync_handler(
     State(state): State<WebState>,
+    headers: axum::http::HeaderMap,
 ) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
+    crate::commands::web::mutation_gate::require_project_owner(&state, &headers)?;
     let paths = state.paths.clone();
     let engine = state.engine.clone();
     let result = tokio::task::spawn_blocking(move || {

@@ -185,6 +185,7 @@ fn test_web_state(
         assets_mode,
         tail_stream_limiter: logs::TailStreamLimiter::default(),
         terminal_sessions: terminal::TerminalSessionStore::default(),
+        registered_process_guard: None,
     }
 }
 

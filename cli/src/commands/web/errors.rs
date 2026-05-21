@@ -32,6 +32,7 @@ pub(super) const WEB_ERR_REGISTRY_VALIDATION: &str = "MACC-WEB-1005";
 const WEB_ERR_TOOLSPEC: &str = "MACC-WEB-1006";
 pub(super) const WEB_ERR_LOG_VALIDATION: &str = "MACC-WEB-1007";
 const WEB_ERR_AUTH_SCOPE: &str = "MACC-WEB-3000";
+const WEB_ERR_NOT_PROCESS_OWNER: &str = "not_process_owner";
 pub(super) const WEB_ERR_REGISTRY_CONFLICT: &str = "MACC-WEB-3001";
 pub(super) const WEB_ERR_WORKTREE_CONFLICT: &str = "MACC-WEB-3002";
 const WEB_ERR_PROJECT_ROOT_NOT_FOUND: &str = "MACC-WEB-2000";
@@ -277,7 +278,7 @@ impl From<MaccError> for ApiError {
                 current_owner,
             } => ApiError::new(
                 StatusCode::FORBIDDEN,
-                WEB_ERR_AUTH_SCOPE,
+                WEB_ERR_NOT_PROCESS_OWNER,
                 "Auth",
                 "Client is not the owner of this process.".to_string(),
                 false,

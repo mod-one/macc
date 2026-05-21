@@ -10,7 +10,7 @@ use macc_core::coordinator_storage::{
 use macc_core::doctor::ToolCheck;
 use macc_core::engine::CoordinatorEvent;
 use macc_core::plan::{render_diff, ActionPlan, DiffView, PlannedOp, Scope};
-use macc_core::process_ownership::{ProcessHandle, ProcessKind};
+use macc_core::process_ownership::{ClientIdentity, ClientKind, ProcessHandle, ProcessKind};
 use macc_core::resolve::{resolve, resolve_fetch_units, CliOverrides};
 use macc_core::service::coordinator::CoordinatorManagedCommandState;
 use macc_core::service::coordinator_workflow::{
@@ -222,6 +222,10 @@ pub struct AppState {
     pub coordinator_throttled_tools: Vec<ThrottledToolInfo>,
     /// RL-TUI-007: (effective, original) max_parallel from concurrency_adjusted events.
     pub coordinator_effective_max_parallel: Option<(usize, usize)>,
+    /// L6-TUI-002: ownership state for Coordinator process (banner/modal/gate input).
+    pub coordinator_ownership: crate::ownership::TuiOwnershipState,
+    coordinator_ownership_last_heartbeat: Option<Instant>,
+    coordinator_ownership_last_refresh: Option<Instant>,
 }
 
 impl AppState {
@@ -317,6 +321,9 @@ impl AppState {
             coordinator_pause_next_action: None,
             coordinator_throttled_tools: Vec::new(),
             coordinator_effective_max_parallel: None,
+            coordinator_ownership: crate::ownership::TuiOwnershipState::new(),
+            coordinator_ownership_last_heartbeat: None,
+            coordinator_ownership_last_refresh: None,
         };
 
         state.refresh_tools();
@@ -1210,6 +1217,197 @@ impl AppState {
         )
     }
 
+    fn coordinator_client_identity(&self) -> ClientIdentity {
+        let now = chrono::Utc::now().to_rfc3339();
+        ClientIdentity {
+            client_id: self.coordinator_client_id.clone(),
+            kind: ClientKind::Tui,
+            connected_at: now.clone(),
+            last_heartbeat: now,
+        }
+    }
+
+    fn coordinator_handle(&self) -> Option<ProcessHandle> {
+        self.project_paths.as_ref().map(|paths| ProcessHandle {
+            kind: ProcessKind::Coordinator,
+            project_root: paths.root.clone(),
+            pid: None,
+        })
+    }
+
+    pub fn refresh_ownership_state(&mut self) {
+        let Some(paths) = self.project_paths.clone() else {
+            self.coordinator_ownership.record = None;
+            return;
+        };
+        let records = match self.engine.process_list_running(&paths.root) {
+            Ok(records) => records,
+            Err(err) => {
+                let _ = err;
+                return;
+            }
+        };
+        let coordinator_record = records
+            .into_iter()
+            .find(|r| matches!(r.process.kind, ProcessKind::Coordinator));
+
+        if let Some(record) = coordinator_record.as_ref() {
+            if record.owner.is_none() {
+                let identity = self.coordinator_client_identity();
+                let _ =
+                    self.engine
+                        .process_ownership_claim(&paths.root, record.process.clone(), identity);
+            }
+        }
+
+        // Re-read after potential claim so banner shows the new owner.
+        let record = self
+            .engine
+            .process_list_running(&paths.root)
+            .ok()
+            .and_then(|records| {
+                records
+                    .into_iter()
+                    .find(|r| matches!(r.process.kind, ProcessKind::Coordinator))
+            });
+
+        let is_owner = record
+            .as_ref()
+            .and_then(|r| r.owner.as_ref())
+            .map(|o| o.client_id == self.coordinator_client_id)
+            .unwrap_or(false);
+
+        let pending_request = record.as_ref().and_then(|r| {
+            r.takeover_request.clone().filter(|_| {
+                r.owner
+                    .as_ref()
+                    .map(|o| o.client_id == self.coordinator_client_id)
+                    .unwrap_or(false)
+            })
+        });
+
+        self.coordinator_ownership.record = record;
+        self.coordinator_ownership.is_owner = is_owner;
+        self.coordinator_ownership.pending_incoming_request = pending_request;
+        self.coordinator_ownership.last_refresh = Instant::now();
+        self.coordinator_ownership_last_refresh = Some(Instant::now());
+    }
+
+    pub fn tick_ownership(&mut self) {
+        let Some(paths) = self.project_paths.clone() else {
+            return;
+        };
+        let Some(handle) = self.coordinator_handle() else {
+            return;
+        };
+
+        let now = Instant::now();
+        let should_refresh = self
+            .coordinator_ownership_last_refresh
+            .map(|t| now.duration_since(t) >= Duration::from_secs(2))
+            .unwrap_or(true);
+        if should_refresh {
+            self.refresh_ownership_state();
+        }
+
+        let should_heartbeat = self
+            .coordinator_ownership_last_heartbeat
+            .map(|t| now.duration_since(t) >= Duration::from_secs(15))
+            .unwrap_or(true);
+        if should_heartbeat {
+            if let Err(err) =
+                self.engine
+                    .process_heartbeat(&paths.root, &handle, &self.coordinator_client_id)
+            {
+                let _ = err;
+            }
+            self.coordinator_ownership_last_heartbeat = Some(now);
+        }
+    }
+
+    pub fn ownership_request_takeover(&mut self) {
+        let Some(paths) = self.project_paths.clone() else {
+            return;
+        };
+        let Some(handle) = self.coordinator_handle() else {
+            return;
+        };
+        let identity = self.coordinator_client_identity();
+        match self
+            .engine
+            .process_ownership_request_takeover(&paths.root, &handle, identity)
+        {
+            Ok(_request_id) => {
+                self.set_status(
+                    UiStatusLevel::Info,
+                    "Takeover request sent to current owner.",
+                    Some(Duration::from_secs(4)),
+                );
+                self.refresh_ownership_state();
+            }
+            Err(err) => {
+                self.set_status(
+                    UiStatusLevel::Warning,
+                    format!("Failed to request takeover: {err}"),
+                    Some(Duration::from_secs(5)),
+                );
+            }
+        }
+    }
+
+    pub fn ownership_respond_takeover(&mut self, accept: bool) {
+        let Some(paths) = self.project_paths.clone() else {
+            return;
+        };
+        let Some(handle) = self.coordinator_handle() else {
+            return;
+        };
+        let Some(request) = self.coordinator_ownership.pending_incoming_request.clone() else {
+            return;
+        };
+        match self.engine.process_ownership_respond_takeover(
+            &paths.root,
+            &handle,
+            &self.coordinator_client_id,
+            &request.request_id,
+            accept,
+        ) {
+            Ok(()) => {
+                let msg = if accept {
+                    "Takeover accepted — control transferred."
+                } else {
+                    "Takeover rejected."
+                };
+                self.set_status(UiStatusLevel::Info, msg, Some(Duration::from_secs(4)));
+                self.refresh_ownership_state();
+            }
+            Err(err) => {
+                self.set_status(
+                    UiStatusLevel::Warning,
+                    format!("Failed to respond to takeover: {err}"),
+                    Some(Duration::from_secs(5)),
+                );
+            }
+        }
+    }
+
+    pub fn release_ownership_on_exit(&mut self) {
+        let Some(paths) = self.project_paths.clone() else {
+            return;
+        };
+        let Some(handle) = self.coordinator_handle() else {
+            return;
+        };
+        let _ = self
+            .engine
+            .process_ownership_release(&paths.root, &handle, &self.coordinator_client_id);
+        let _ = macc_core::service::process_ownership::unregister_viewer(
+            &paths.root,
+            &handle,
+            &self.coordinator_client_id,
+        );
+    }
+
     fn ensure_working_copy(&mut self) {
         if self.working_copy.is_none() {
             self.working_copy = Some(CanonicalConfig::default());
@@ -1233,6 +1431,7 @@ impl AppState {
                 self.refresh_worktree_status();
                 self.refresh_coordinator_snapshot();
                 self.refresh_coordinator_events();
+                self.refresh_ownership_state();
                 match self.engine.load_canonical_config(&paths) {
                     Ok(config) => {
                         self.config = Some(config.clone());
@@ -1474,6 +1673,7 @@ impl AppState {
 
     pub fn tick(&mut self) {
         self.refresh_coordinator_pause_state();
+        self.tick_ownership();
         // Advance spinner globally so live task animation also moves when
         // observing a coordinator process started outside this TUI instance.
         self.coordinator_spinner_tick = self.coordinator_spinner_tick.wrapping_add(1);

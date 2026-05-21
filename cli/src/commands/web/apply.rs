@@ -17,8 +17,10 @@ pub(super) enum ApplyEndpointResponse {
 
 pub(super) async fn run_apply_handler(
     State(state): State<WebState>,
+    headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> std::result::Result<Json<ApplyEndpointResponse>, ApiError> {
+    crate::commands::web::mutation_gate::require_project_owner(&state, &headers)?;
     let request: ApiApplyRequest = serde_json::from_slice(&body).map_err(|err| {
         ApiError::from(MaccError::Validation(format!(
             "Invalid apply request body: {}",

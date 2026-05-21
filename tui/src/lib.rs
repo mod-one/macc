@@ -7,7 +7,7 @@ use crossterm::{
 use macc_core::service::coordinator_workflow::CoordinatorCommand;
 use ratatui::{
     backend::{Backend, CrosstermBackend},
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
@@ -89,6 +89,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, state: &mut AppState) -> io::
             }
         }
         if state.should_quit {
+            state.release_ownership_on_exit();
             return Ok(());
         }
     }
@@ -295,6 +296,27 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
         }
         KeyCode::Char('l') if current_screen == Screen::CoordinatorLive => {
             state.refresh_coordinator_snapshot();
+        }
+        KeyCode::Char('T') if current_screen == Screen::CoordinatorLive => {
+            state.ownership_request_takeover();
+        }
+        KeyCode::Char('A')
+            if current_screen == Screen::CoordinatorLive
+                && state
+                    .coordinator_ownership
+                    .pending_incoming_request
+                    .is_some() =>
+        {
+            state.ownership_respond_takeover(true);
+        }
+        KeyCode::Char('R')
+            if current_screen == Screen::CoordinatorLive
+                && state
+                    .coordinator_ownership
+                    .pending_incoming_request
+                    .is_some() =>
+        {
+            state.ownership_respond_takeover(false);
         }
         KeyCode::Char('d') if current_screen == Screen::Tools => {
             state.refresh_tool_checks();
@@ -1187,10 +1209,16 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             f.render_widget(detail_para, body_chunks[1]);
         }
         Screen::CoordinatorLive => {
+            // L6-TUI-003: ownership banner row above the main split.
+            let live_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(3), Constraint::Min(0)])
+                .split(chunks[1]);
+            render_coordinator_ownership_banner(f, live_chunks[0], state);
             let body_chunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
-                .split(chunks[1]);
+                .split(live_chunks[1]);
             let right_chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
@@ -1583,6 +1611,15 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
     if state.has_coordinator_pause_prompt() {
         render_coordinator_pause_overlay(f, state);
     }
+    if let Some(req) = state
+        .coordinator_ownership
+        .pending_incoming_request
+        .as_ref()
+    {
+        if state.current_screen() == Screen::CoordinatorLive {
+            crate::ownership::render_takeover_modal(f, f.size(), req);
+        }
+    }
     if state.help_open {
         render_help_overlay(f, state);
     }
@@ -1649,6 +1686,37 @@ fn render_help_overlay(f: &mut Frame, state: &AppState) {
         .wrap(Wrap { trim: true });
 
     f.render_widget(help_para, area);
+}
+
+fn render_coordinator_ownership_banner(f: &mut Frame, area: Rect, state: &AppState) {
+    use crate::ownership::{render_ownership_banner, OwnershipBannerProps};
+
+    let (owner_label, viewer_count) = match state.coordinator_ownership.record.as_ref() {
+        Some(r) => {
+            let owner = r
+                .owner
+                .as_ref()
+                .map(|o| o.client_id.clone())
+                .unwrap_or_else(|| "<none>".to_string());
+            (owner, r.viewers.len())
+        }
+        None => ("<no coordinator process>".to_string(), 0usize),
+    };
+    let has_pending_request = state
+        .coordinator_ownership
+        .pending_incoming_request
+        .is_some();
+
+    render_ownership_banner(
+        f,
+        area,
+        &OwnershipBannerProps {
+            owner_label,
+            viewer_count,
+            is_owner: state.coordinator_ownership.is_owner,
+            has_pending_request,
+        },
+    );
 }
 
 fn render_coordinator_pause_overlay(f: &mut Frame, state: &AppState) {

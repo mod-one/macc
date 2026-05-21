@@ -23,6 +23,10 @@ pub enum ProcessKind {
     Supervisor,
     WebServer,
     TerminalSession,
+    /// L6-OWN-008: project-wide control lease. A single `Project` record per
+    /// `project_root` holds the cross-process owner/viewers. Other ProcessKind
+    /// records remain as observable runtime inventory.
+    Project,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
