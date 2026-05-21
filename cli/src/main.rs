@@ -220,6 +220,9 @@ enum Commands {
         /// Coordinator command (run, control-plane-run, dispatch, advance, resume, sync, sync-prd, audit-prd, status, reconcile, unlock, cleanup, retry-phase, cutover-gate, stop, sessions, validate-transition, validate-runtime-transition, runtime-status-from-event, storage-import, storage-export, events-export, storage-verify, storage-sync, select-ready-task, state-apply-transition, state-set-runtime, state-task-field, state-task-exists, state-counts, state-locks, state-set-merge-pending, state-set-merge-processed, state-increment-retries, state-upsert-slo-warning, state-slo-metric)
         #[arg(default_value = "run")]
         command_name: String,
+        /// Execute coordinator mutations as this client identity
+        #[arg(long)]
+        as_client: Option<String>,
         /// Disable TUI live view for `macc coordinator run`
         #[arg(long)]
         no_tui: bool,
@@ -745,6 +748,7 @@ fn init_tracing(verbose: bool) {
 fn get_exit_code(err: &MaccError) -> i32 {
     match err {
         MaccError::Validation(_) => 1,
+        MaccError::NotProcessOwner { .. } => 14,
         MaccError::UserScopeNotAllowed(_) => 2,
         MaccError::Io { .. } => 3,
         MaccError::ProjectRootNotFound { .. } => 4,
@@ -950,6 +954,7 @@ fn run_with_engine_provider(
         }
         Some(Commands::Coordinator {
             command_name,
+            as_client,
             no_tui,
             supervisor,
             graceful,
@@ -992,6 +997,9 @@ fn run_with_engine_provider(
             app.clone(),
             coordinator::command::CoordinatorCommandInput {
                 command_name: command_name.clone(),
+                client_id: as_client
+                    .clone()
+                    .unwrap_or_else(|| format!("cli-{}", std::process::id())),
                 no_tui: *no_tui,
                 supervisor: *supervisor,
                 graceful: *graceful,
@@ -2394,6 +2402,7 @@ fi
                 web_port: None,
                 command: Some(Commands::Coordinator {
                     command_name: "stop".to_string(),
+                    as_client: None,
                     no_tui: true,
                     supervisor: false,
                     graceful: true,

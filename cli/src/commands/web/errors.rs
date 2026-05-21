@@ -272,6 +272,24 @@ impl From<MaccError> for ApiError {
                 None,
                 None,
             ),
+            MaccError::NotProcessOwner {
+                handle,
+                current_owner,
+            } => ApiError::new(
+                StatusCode::FORBIDDEN,
+                WEB_ERR_AUTH_SCOPE,
+                "Auth",
+                "Client is not the owner of this process.".to_string(),
+                false,
+                Some("Request process takeover, then retry the modifying action".to_string()),
+                Some(serde_json::json!({
+                    "process_kind": format!("{:?}", handle.kind),
+                    "project_root": handle.project_root,
+                    "pid": handle.pid,
+                    "current_owner": current_owner,
+                })),
+                None,
+            ),
             MaccError::ToolSpec {
                 path,
                 line,

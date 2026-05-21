@@ -10,11 +10,13 @@ use macc_core::coordinator_storage::{
 use macc_core::doctor::ToolCheck;
 use macc_core::engine::CoordinatorEvent;
 use macc_core::plan::{render_diff, ActionPlan, DiffView, PlannedOp, Scope};
+use macc_core::process_ownership::{ProcessHandle, ProcessKind};
 use macc_core::resolve::{resolve, resolve_fetch_units, CliOverrides};
 use macc_core::service::coordinator::CoordinatorManagedCommandState;
 use macc_core::service::coordinator_workflow::{
     coordinator_command_display_name, CoordinatorCommand, CoordinatorCommandRequest,
 };
+use macc_core::service::process_ownership_gate::{gate_owner_action, ClientContext};
 use macc_core::tool::{ActionKind, FieldDefault, FieldKind, ToolDescriptor, ToolField};
 use macc_core::{find_project_root, Engine, ProjectPaths};
 use serde_json::{Map, Value};
@@ -128,6 +130,18 @@ enum CoordinatorPauseNextAction {
     ResumeRun,
 }
 
+fn requires_owner_gate(command: &CoordinatorCommand) -> bool {
+    matches!(
+        command,
+        CoordinatorCommand::Stop { .. }
+            | CoordinatorCommand::ResumePausedRun
+            | CoordinatorCommand::Unlock { .. }
+            | CoordinatorCommand::DispatchReadyTasks
+            | CoordinatorCommand::AdvanceTasks
+            | CoordinatorCommand::CleanupMaintenance
+    )
+}
+
 pub struct AppState {
     pub engine: Arc<dyn Engine>,
     pub project_paths: Option<ProjectPaths>,
@@ -201,6 +215,7 @@ pub struct AppState {
     pub search_editing: bool,
     pub undo_stack: Vec<CanonicalConfig>,
     pub redo_stack: Vec<CanonicalConfig>,
+    coordinator_client_id: String,
     coordinator_running_elapsed_secs: Option<u64>,
     coordinator_pause_next_action: Option<CoordinatorPauseNextAction>,
     /// RL-TUI-007: tools currently throttled due to rate-limiting.
@@ -297,6 +312,7 @@ impl AppState {
             search_editing: false,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            coordinator_client_id: format!("tui-{}", std::process::id()),
             coordinator_running_elapsed_secs: None,
             coordinator_pause_next_action: None,
             coordinator_throttled_tools: Vec::new(),
@@ -935,6 +951,25 @@ impl AppState {
             );
             return;
         };
+        if matches!(
+            command,
+            CoordinatorCommand::DispatchReadyTasks
+                | CoordinatorCommand::AdvanceTasks
+                | CoordinatorCommand::CleanupMaintenance
+        ) {
+            if let Err(err) = self.gate_coordinator_action(&command) {
+                self.set_status(
+                    UiStatusLevel::Error,
+                    format!(
+                        "Failed to run '{}': {}",
+                        command_name,
+                        format_actionable_error(&err.to_string())
+                    ),
+                    Some(Duration::from_secs(6)),
+                );
+                return;
+            }
+        }
         self.coordinator_pause_error = None;
         self.coordinator_pause_command = None;
         self.coordinator_pause_task_id = None;
@@ -980,6 +1015,20 @@ impl AppState {
 
     fn execute_coordinator_command(&mut self, command: CoordinatorCommand) {
         let action = coordinator_command_display_name(&command).to_string();
+        if matches!(command, CoordinatorCommand::ResumePausedRun) {
+            if let Err(err) = self.gate_coordinator_action(&command) {
+                self.set_status(
+                    UiStatusLevel::Error,
+                    format!(
+                        "Failed to run '{}': {}",
+                        action,
+                        format_actionable_error(&err.to_string())
+                    ),
+                    Some(Duration::from_secs(6)),
+                );
+                return;
+            }
+        }
         let Some(paths) = self.project_paths.as_ref() else {
             self.set_status(
                 UiStatusLevel::Error,
@@ -1075,6 +1124,22 @@ impl AppState {
             );
             return;
         };
+        if let Err(err) = self.gate_coordinator_action(&CoordinatorCommand::Stop {
+            graceful: false,
+            remove_worktrees: false,
+            remove_branches: false,
+            reason: "tui stop".to_string(),
+        }) {
+            self.set_status(
+                UiStatusLevel::Error,
+                format!(
+                    "Failed to run 'stop': {}",
+                    format_actionable_error(&err.to_string())
+                ),
+                Some(Duration::from_secs(6)),
+            );
+            return;
+        }
 
         let stop_result = self
             .engine
@@ -1121,6 +1186,28 @@ impl AppState {
                 );
             }
         }
+    }
+
+    fn gate_coordinator_action(&self, command: &CoordinatorCommand) -> macc_core::Result<()> {
+        if !requires_owner_gate(command) {
+            return Ok(());
+        }
+
+        let Some(paths) = self.project_paths.as_ref() else {
+            return Ok(());
+        };
+
+        gate_owner_action(
+            &ClientContext {
+                client_id: self.coordinator_client_id.clone(),
+                project_root: paths.root.clone(),
+            },
+            &ProcessHandle {
+                kind: ProcessKind::Coordinator,
+                project_root: paths.root.clone(),
+                pid: None,
+            },
+        )
     }
 
     fn ensure_working_copy(&mut self) {
@@ -3802,7 +3889,11 @@ fn format_number(value: f64) -> String {
 mod tests {
     use super::*;
     use macc_core::plan::{PlannedOpKind, PlannedOpMetadata, Scope};
+    use macc_core::process_ownership::{ClientIdentity, ClientKind, ProcessHandle, ProcessKind};
+    use macc_core::service::process_ownership::{claim_owner, register_process};
+    use macc_core::tool::ToolDiagnostic;
     use macc_core::{MaccEngine, ToolRegistry};
+    use std::cell::RefCell;
     use std::fs;
     use tempfile::tempdir;
 
@@ -3812,6 +3903,74 @@ mod tests {
 
     fn fixture_engine(ids: &[String]) -> Arc<macc_core::TestEngine> {
         Arc::new(macc_core::TestEngine::with_fixtures_for_ids(ids))
+    }
+
+    #[derive(Default)]
+    struct NoopEngine {
+        stop_calls: RefCell<usize>,
+    }
+
+    impl Engine for NoopEngine {
+        fn list_tools(&self, _paths: &ProjectPaths) -> (Vec<ToolDescriptor>, Vec<ToolDiagnostic>) {
+            (Vec::new(), Vec::new())
+        }
+
+        fn doctor(&self, _paths: &ProjectPaths) -> Vec<ToolCheck> {
+            Vec::new()
+        }
+
+        fn plan(
+            &self,
+            _paths: &ProjectPaths,
+            _config: &CanonicalConfig,
+            _materialized_units: &[macc_core::resolve::MaterializedFetchUnit],
+            _overrides: &macc_core::resolve::CliOverrides,
+        ) -> macc_core::Result<ActionPlan> {
+            Ok(ActionPlan::default())
+        }
+
+        fn plan_operations(&self, _paths: &ProjectPaths, _plan: &ActionPlan) -> Vec<PlannedOp> {
+            Vec::new()
+        }
+
+        fn apply(
+            &self,
+            _paths: &ProjectPaths,
+            _plan: &mut ActionPlan,
+            _allow_user_scope: bool,
+        ) -> macc_core::Result<macc_core::ApplyReport> {
+            Ok(macc_core::ApplyReport::default())
+        }
+
+        fn builtin_skills(&self) -> Vec<Skill> {
+            Vec::new()
+        }
+
+        fn builtin_agents(&self) -> Vec<Agent> {
+            Vec::new()
+        }
+
+        fn coordinator_stop_managed_command_process(
+            &self,
+            _paths: &ProjectPaths,
+            _graceful: bool,
+        ) -> macc_core::Result<macc_core::service::coordinator::CoordinatorStopResult> {
+            *self.stop_calls.borrow_mut() += 1;
+            Ok(macc_core::service::coordinator::CoordinatorStopResult {
+                targets: 0,
+                used_group: false,
+            })
+        }
+    }
+
+    fn sample_cli_client(client_id: &str) -> ClientIdentity {
+        let now = Utc::now().to_rfc3339();
+        ClientIdentity {
+            client_id: client_id.to_string(),
+            kind: ClientKind::Cli,
+            connected_at: now.clone(),
+            last_heartbeat: now,
+        }
     }
 
     #[test]
@@ -3943,6 +4102,31 @@ mod tests {
         state.notices.clear();
         state.save_config();
         assert!(state.notices[0].contains("unchanged"));
+    }
+
+    #[test]
+    fn stop_coordinator_command_shows_not_owner_error_for_viewer() {
+        let dir = tempdir().expect("tempdir");
+        let handle = ProcessHandle {
+            kind: ProcessKind::Coordinator,
+            project_root: dir.path().to_path_buf(),
+            pid: Some(4242),
+        };
+        register_process(dir.path(), handle.clone()).expect("register process");
+        claim_owner(dir.path(), &handle, sample_cli_client("client-A")).expect("claim owner");
+
+        let engine = Arc::new(NoopEngine::default());
+        let mut state = AppState::with_engine(engine.clone());
+        state.project_paths = Some(ProjectPaths::from_root(dir.path()));
+        state.coordinator_client_id = "client-B".to_string();
+
+        state.stop_coordinator_command();
+
+        let status = state.ui_status.expect("status");
+        assert_eq!(status.level, UiStatusLevel::Error);
+        assert!(status.message.contains("Failed to run 'stop'"));
+        assert!(status.message.contains("not the owner of this process"));
+        assert_eq!(*engine.stop_calls.borrow(), 0);
     }
 
     #[test]
