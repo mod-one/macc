@@ -354,6 +354,7 @@ fn spawn_attached_supervisor(project_root: &Path) -> Result<()> {
     let coordinator_pid = std::process::id();
     let status = ProcessCommand::new(current_exe)
         .current_dir(project_root)
+        .env("MACC_INTERNAL_INVOCATION", "1")
         .arg("--cwd")
         .arg(project_root)
         .arg("supervisor")

@@ -33,9 +33,22 @@ pub trait Command {
 /// L6-OWN-008: CLI-side mutation gate. If the project-wide control lease has an
 /// owner that is not the local CLI identity, the action is rejected.
 /// Read-only / one-shot CLI commands (plan, status, etc.) skip this.
+///
+/// Control-plane internal subprocesses (the coordinator spawning `macc worktree
+/// apply`, the supervisor spawning the coordinator, etc.) set
+/// `MACC_INTERNAL_INVOCATION=1` to bypass the gate. The parent process has
+/// already been authorized by the owner; its children act on the same
+/// authority.
 pub fn gate_cli_mutation(project_root: &std::path::Path) -> Result<()> {
     use macc_core::process_ownership::{ProcessHandle, ProcessKind};
     use macc_core::service::process_ownership_gate::{gate_owner_action, ClientContext};
+
+    if std::env::var("MACC_INTERNAL_INVOCATION")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
 
     let client_id =
         std::env::var("MACC_CLIENT_ID").unwrap_or_else(|_| format!("cli-{}", std::process::id()));

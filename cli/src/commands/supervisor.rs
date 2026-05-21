@@ -82,6 +82,7 @@ impl<'a> SupervisorCommand<'a> {
                         .unwrap_or_default(),
                 )
                 .env(SUPERVISOR_DAEMON_CHILD_ENV, "1")
+                .env("MACC_INTERNAL_INVOCATION", "1")
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())

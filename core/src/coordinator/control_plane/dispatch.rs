@@ -339,6 +339,7 @@ pub(super) async fn launch_performer(
     })?);
     apply_cmd
         .current_dir(repo_root)
+        .env("MACC_INTERNAL_INVOCATION", "1")
         .arg("--cwd")
         .arg(repo_root)
         .arg("worktree")

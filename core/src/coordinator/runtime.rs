@@ -1140,6 +1140,7 @@ pub fn spawn_performer_job(
     );
     run_cmd
         .current_dir(repo_root)
+        .env("MACC_INTERNAL_INVOCATION", "1")
         .env(
             "COORDINATOR_RUN_ID",
             std::env::var("COORDINATOR_RUN_ID").unwrap_or_else(|_| {

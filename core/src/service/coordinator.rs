@@ -284,7 +284,9 @@ fn coordinator_start_command_process_with_pid(
         cmd
     };
 
-    cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    cmd.env("MACC_INTERNAL_INVOCATION", "1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     let child = cmd.spawn().map_err(|e| MaccError::Io {
         path: root.to_string_lossy().into(),
         action: format!("spawn coordinator command '{}'", command),
