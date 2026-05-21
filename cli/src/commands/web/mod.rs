@@ -13,6 +13,7 @@ mod errors;
 mod git;
 #[allow(clippy::result_large_err)]
 mod logs;
+mod ownership;
 mod plan;
 #[allow(clippy::result_large_err)]
 mod prd;
@@ -35,8 +36,11 @@ use axum::routing::{delete, get, post, put};
 use axum::Json;
 use axum::Router;
 use macc_core::config::WebAssetsMode;
+use macc_core::process_ownership::{ProcessHandle, ProcessKind};
+use macc_core::service::process_ownership::RegisteredProcessGuard;
 use macc_core::{MaccError, ProjectPaths, Result};
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 
 pub struct WebCommand {
     app: AppContext,
@@ -59,6 +63,7 @@ struct WebState {
     assets_mode: WebAssetsMode,
     tail_stream_limiter: logs::TailStreamLimiter,
     terminal_sessions: terminal::TerminalSessionStore,
+    registered_process_guard: Option<Arc<RegisteredProcessGuard>>,
 }
 
 impl WebCommand {
@@ -99,12 +104,22 @@ impl WebCommand {
 impl Command for WebCommand {
     fn run(&self) -> Result<()> {
         let config = self.server_config()?;
+        let paths = self.app.project_paths()?;
+
+        let handle = ProcessHandle {
+            kind: ProcessKind::WebServer,
+            project_root: paths.root.clone(),
+            pid: Some(std::process::id() as i32),
+        };
+        let guard = self.app.engine.process_register(&paths.root, handle)?;
+
         let state = WebState {
             engine: self.app.engine.clone(),
-            paths: self.app.project_paths()?,
+            paths,
             assets_mode: config.assets_mode,
             tail_stream_limiter: logs::TailStreamLimiter::default(),
             terminal_sessions: terminal::TerminalSessionStore::default(),
+            registered_process_guard: Some(Arc::new(guard)),
         };
         let app = build_web_router(state);
 
@@ -247,6 +262,38 @@ fn build_web_router(state: WebState) -> Router {
         )
         .route("/api/v1/prd", get(prd::get_prd_handler))
         .route("/api/v1/prd", put(prd::update_prd_handler))
+        .route(
+            "/api/v1/processes",
+            get(ownership::list_processes_handler),
+        )
+        .route(
+            "/api/v1/processes/:handle/ownership",
+            get(ownership::get_process_ownership_handler),
+        )
+        .route(
+            "/api/v1/processes/:handle/claim",
+            post(ownership::claim_ownership_handler),
+        )
+        .route(
+            "/api/v1/processes/:handle/release",
+            post(ownership::release_ownership_handler),
+        )
+        .route(
+            "/api/v1/processes/:handle/viewer",
+            post(ownership::add_viewer_handler).delete(ownership::remove_viewer_handler),
+        )
+        .route(
+            "/api/v1/processes/:handle/takeover/request",
+            post(ownership::request_takeover_handler),
+        )
+        .route(
+            "/api/v1/processes/:handle/takeover/respond",
+            post(ownership::respond_takeover_handler),
+        )
+        .route(
+            "/api/v1/processes/:handle/heartbeat",
+            post(ownership::heartbeat_handler),
+        )
         .fallback(get(assets::spa_handler))
         .layer(from_fn_with_state(audit_state, audit::audit_middleware))
         .with_state(state)
