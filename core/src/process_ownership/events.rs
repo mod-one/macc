@@ -191,6 +191,7 @@ mod tests {
             client_id: "client-1".to_string(),
             kind: ClientKind::Cli,
             connected_at: "2026-05-18T12:00:00Z".to_string(),
+            last_heartbeat: "2026-05-18T12:00:00Z".to_string(),
         };
 
         emit_ownership_claimed(&repo_root, &handle, &client);
