@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
-use super::{HeartbeatConfig, OwnershipRecord, ProcessHandle, evict_stale_clients};
+use super::{evict_stale_clients, HeartbeatConfig, OwnershipRecord, ProcessHandle};
 
 const STORE_RELATIVE_PATH: &str = ".macc/state/process_ownership.json";
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(10);
@@ -189,10 +189,10 @@ impl Drop for StoreLockGuard {
 #[cfg(test)]
 mod tests {
     use super::OwnershipStore;
-    use chrono::Utc;
     use crate::process_ownership::{
         ClientIdentity, ClientKind, OwnershipRecord, ProcessHandle, ProcessKind, TakeoverRequest,
     };
+    use chrono::Utc;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
