@@ -4,6 +4,7 @@ use crate::coordinator::rate_limit::ToolThrottleRegistry;
 use crate::coordinator::{CoordinatorEventRecord, PerformerCompletionKind};
 use crate::coordinator_storage::CoordinatorStorage;
 use crate::git;
+use crate::service::process_ownership::RegisteredProcessGuard;
 use crate::{MaccError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -235,6 +236,7 @@ pub struct CoordinatorRunState {
     pub performer_ipc_listener_started: bool,
     pub performer_ipc_listener_alive: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub coordinator_pid_guard: Option<CoordinatorPidGuard>,
+    pub registered_process_guard: Option<RegisteredProcessGuard>,
     /// Last dispatch failure message (shown in no-progress diagnostics).
     pub last_dispatch_failure: Option<String>,
     // RL-ROUTE-005: per-tool throttle state
@@ -346,6 +348,7 @@ impl CoordinatorRunState {
                 false,
             )),
             coordinator_pid_guard: None,
+            registered_process_guard: None,
             last_dispatch_failure: None,
             throttle_registry: ToolThrottleRegistry::default(),
             normalizer_registry:
