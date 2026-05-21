@@ -1262,6 +1262,15 @@ pub trait Engine {
         ))
     }
 
+    fn process_unregister_viewer(
+        &self,
+        repo_root: &Path,
+        handle: &ProcessHandle,
+        client_id: &str,
+    ) -> Result<()> {
+        crate::service::process_ownership::unregister_viewer(repo_root, handle, client_id)
+    }
+
     fn process_heartbeat(
         &self,
         repo_root: &Path,
@@ -1810,7 +1819,7 @@ fields: []
 
     #[test]
     fn engine_trait_method_count_guard() {
-        const EXPECTED_METHOD_COUNT: usize = 120;
+        const EXPECTED_METHOD_COUNT: usize = 121;
         let source = include_str!("engine.rs");
         let trait_start = source
             .find("pub trait Engine {")

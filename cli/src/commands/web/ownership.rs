@@ -6,11 +6,86 @@ use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use axum::Json;
 use macc_core::process_ownership::{
-    ClientIdentity, ClientKind, OwnershipRecord, OwnershipStatus, ProcessHandle, ProcessKind,
+    ClientIdentity, ClientKind, ClientKind as ApiClientKind, OwnershipRecord, OwnershipStatus,
+    ProcessHandle, ProcessKind, TakeoverRequest,
 };
 use serde::{Deserialize, Serialize};
 
 const WEB_CLIENT_HEADER: &str = "X-Macc-Client-Id";
+
+// --- API response types ---
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiOwnershipRecord {
+    kind: String,
+    project_root: String,
+    pid: Option<i32>,
+    started_at: String,
+    owner: Option<ApiClientIdentity>,
+    viewers: Vec<ApiClientIdentity>,
+    takeover_request: Option<ApiTakeoverRequest>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiClientIdentity {
+    client_id: String,
+    kind: String,
+    connected_at: String,
+    last_heartbeat: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiTakeoverRequest {
+    request_id: String,
+    requester: ApiClientIdentity,
+    requested_at: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApiOwnershipResult {
+    status: String,
+}
+
+impl From<OwnershipRecord> for ApiOwnershipRecord {
+    fn from(record: OwnershipRecord) -> Self {
+        Self {
+            kind: kind_label(&record.process.kind),
+            project_root: record.process.project_root.to_string_lossy().into_owned(),
+            pid: record.process.pid,
+            started_at: record.started_at,
+            owner: record.owner.map(ApiClientIdentity::from),
+            viewers: record.viewers.into_iter().map(ApiClientIdentity::from).collect(),
+            takeover_request: record.takeover_request.map(ApiTakeoverRequest::from),
+        }
+    }
+}
+
+impl From<ClientIdentity> for ApiClientIdentity {
+    fn from(identity: ClientIdentity) -> Self {
+        Self {
+            client_id: identity.client_id,
+            kind: client_kind_label(&identity.kind),
+            connected_at: identity.connected_at,
+            last_heartbeat: identity.last_heartbeat,
+        }
+    }
+}
+
+impl From<TakeoverRequest> for ApiTakeoverRequest {
+    fn from(req: TakeoverRequest) -> Self {
+        Self {
+            request_id: req.request_id,
+            requester: ApiClientIdentity::from(req.requester),
+            requested_at: req.requested_at,
+        }
+    }
+}
+
+// --- Request payload types ---
 
 #[derive(Debug, Deserialize)]
 pub(super) struct HandleQuery {
@@ -57,32 +132,35 @@ pub(super) struct HeartbeatPayload {
 }
 
 #[derive(Debug, Serialize)]
-pub(super) struct ClaimResponse {
-    status: String,
-}
-
-#[derive(Debug, Serialize)]
 pub(super) struct TakeoverRequestResponse {
     request_id: String,
 }
 
+// --- Handlers ---
+
 pub async fn list_processes_handler(
     State(state): State<WebState>,
-) -> Result<Json<Vec<OwnershipRecord>>, ApiError> {
+) -> Result<Json<Vec<ApiOwnershipRecord>>, ApiError> {
     let records = state.engine.process_list_running(&state.paths.root)?;
-    Ok(Json(records))
+    Ok(Json(records.into_iter().map(ApiOwnershipRecord::from).collect()))
 }
 
 pub async fn get_process_ownership_handler(
     State(state): State<WebState>,
     Path(kind): Path<String>,
     Query(query): Query<HandleQuery>,
-) -> Result<Json<Option<OwnershipRecord>>, ApiError> {
+) -> Result<Json<ApiOwnershipRecord>, ApiError> {
     let handle = build_handle(&state, &kind, query.pid)?;
     let record = state
         .engine
-        .process_ownership_status(&state.paths.root, &handle)?;
-    Ok(Json(record))
+        .process_ownership_status(&state.paths.root, &handle)?
+        .ok_or_else(|| {
+            ApiError::not_found(
+                format!("No process record found for kind '{kind}'"),
+                None,
+            )
+        })?;
+    Ok(Json(ApiOwnershipRecord::from(record)))
 }
 
 pub async fn claim_ownership_handler(
@@ -90,14 +168,14 @@ pub async fn claim_ownership_handler(
     Path(kind): Path<String>,
     headers: HeaderMap,
     Json(req): Json<ClaimRequest>,
-) -> Result<Json<ClaimResponse>, ApiError> {
+) -> Result<Json<ApiOwnershipResult>, ApiError> {
     let identity = client_identity(&headers)?;
     let handle = build_handle(&state, &kind, req.pid)?;
     let (status, _owner_guard, _viewer_guard) =
         state
             .engine
             .process_ownership_claim(&state.paths.root, handle, identity)?;
-    Ok(Json(ClaimResponse {
+    Ok(Json(ApiOwnershipResult {
         status: status_label(status),
     }))
 }
@@ -138,11 +216,9 @@ pub async fn remove_viewer_handler(
 ) -> Result<axum::http::StatusCode, ApiError> {
     let client_id = client_id_from_headers(&headers)?;
     let handle = build_handle(&state, &kind, query.pid)?;
-    macc_core::service::process_ownership::unregister_viewer(
-        &state.paths.root,
-        &handle,
-        &client_id,
-    )?;
+    state
+        .engine
+        .process_unregister_viewer(&state.paths.root, &handle, &client_id)?;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
@@ -193,6 +269,8 @@ pub async fn heartbeat_handler(
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
+// --- Helpers ---
+
 fn build_handle(state: &WebState, kind: &str, pid: Option<i32>) -> Result<ProcessHandle, ApiError> {
     let kind = parse_kind(kind)?;
     Ok(ProcessHandle {
@@ -214,6 +292,24 @@ fn parse_kind(raw: &str) -> Result<ProcessKind, ApiError> {
         other => Err(ApiError::validation(format!(
             "Unknown process kind '{other}'. Expected one of: coordinator, supervisor, webserver, terminalsession, project"
         ))),
+    }
+}
+
+fn kind_label(kind: &ProcessKind) -> String {
+    match kind {
+        ProcessKind::Coordinator => "Coordinator".to_string(),
+        ProcessKind::Supervisor => "Supervisor".to_string(),
+        ProcessKind::WebServer => "WebServer".to_string(),
+        ProcessKind::TerminalSession => "TerminalSession".to_string(),
+        ProcessKind::Project => "Project".to_string(),
+    }
+}
+
+fn client_kind_label(kind: &ApiClientKind) -> String {
+    match kind {
+        ClientKind::Tui => "Tui".to_string(),
+        ClientKind::Web => "Web".to_string(),
+        ClientKind::Cli => "Cli".to_string(),
     }
 }
 
