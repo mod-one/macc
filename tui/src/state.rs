@@ -10,20 +10,24 @@ use macc_core::coordinator_storage::{
 use macc_core::doctor::ToolCheck;
 use macc_core::engine::CoordinatorEvent;
 use macc_core::plan::{render_diff, ActionPlan, DiffView, PlannedOp, Scope};
-use macc_core::process_ownership::{ClientIdentity, ClientKind, ProcessHandle, ProcessKind};
+use macc_core::process_ownership::{
+    ClientIdentity, ClientKind, OwnershipStatus, ProcessHandle, ProcessKind, TakeoverRequest,
+};
 use macc_core::resolve::{resolve, resolve_fetch_units, CliOverrides};
 use macc_core::service::coordinator::CoordinatorManagedCommandState;
 use macc_core::service::coordinator_workflow::{
     coordinator_command_display_name, CoordinatorCommand, CoordinatorCommandRequest,
 };
+use macc_core::service::process_ownership::{ProcessOwnershipGuard, ProcessViewerGuard};
 use macc_core::service::process_ownership_gate::{gate_owner_action, ClientContext};
 use macc_core::tool::{ActionKind, FieldDefault, FieldKind, ToolDescriptor, ToolField};
-use macc_core::{find_project_root, Engine, ProjectPaths};
+use macc_core::{find_project_root, Engine, MaccError, ProjectPaths};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -223,6 +227,12 @@ pub struct AppState {
     pub coordinator_throttled_tools: Vec<ThrottledToolInfo>,
     /// RL-TUI-007: (effective, original) max_parallel from concurrency_adjusted events.
     pub coordinator_effective_max_parallel: Option<(usize, usize)>,
+    pub client_identity: ClientIdentity,
+    pub ownership_state: crate::ownership::TuiOwnershipState,
+    ownership_guard: Option<ProcessOwnershipGuard>,
+    viewer_guards: Vec<ProcessViewerGuard>,
+    pub client_context: ClientContext,
+    last_ownership_refresh: Option<Instant>,
     /// L6-TUI-002: ownership state for Coordinator process (banner/modal/gate input).
     pub coordinator_ownership: crate::ownership::TuiOwnershipState,
     coordinator_ownership_last_heartbeat: Option<Instant>,
@@ -241,11 +251,11 @@ impl AppState {
     pub fn new(engine: Arc<dyn Engine>) -> Self {
         let mut state = Self::with_engine(engine);
         state.load_config(None);
-        state.refresh_tool_checks();
         state
     }
 
     pub fn with_engine(engine: Arc<dyn Engine>) -> Self {
+        let client_identity = Self::new_client_identity();
         let mut state = Self {
             engine,
             project_paths: None,
@@ -317,11 +327,20 @@ impl AppState {
             search_editing: false,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
-            coordinator_client_id: format!("tui-{}", std::process::id()),
+            coordinator_client_id: client_identity.client_id.clone(),
             coordinator_running_elapsed_secs: None,
             coordinator_pause_next_action: None,
             coordinator_throttled_tools: Vec::new(),
             coordinator_effective_max_parallel: None,
+            client_identity: client_identity.clone(),
+            ownership_state: crate::ownership::TuiOwnershipState::new(),
+            ownership_guard: None,
+            viewer_guards: Vec::new(),
+            client_context: ClientContext {
+                client_id: client_identity.client_id.clone(),
+                project_root: PathBuf::new(),
+            },
+            last_ownership_refresh: None,
             coordinator_ownership: crate::ownership::TuiOwnershipState::new(),
             coordinator_ownership_last_heartbeat: None,
             coordinator_ownership_last_refresh: None,
@@ -335,6 +354,25 @@ impl AppState {
         state.agents = state.engine.builtin_agents();
 
         state
+    }
+
+    fn new_client_identity() -> ClientIdentity {
+        let now = chrono::Utc::now().to_rfc3339();
+        ClientIdentity {
+            client_id: format!("tui-{}", Self::uuid_v4_like()),
+            kind: ClientKind::Tui,
+            connected_at: now.clone(),
+            last_heartbeat: now,
+        }
+    }
+
+    fn uuid_v4_like() -> String {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let since_epoch = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time went backwards");
+        format!("{:x}", since_epoch.as_nanos())
     }
 
     pub fn refresh_tools(&mut self) {
@@ -985,6 +1023,11 @@ impl AppState {
             coordinator_cfg,
         ) {
             Ok(()) => {
+                self.wait_for_coordinator_registration(Duration::from_secs(2));
+                if let Some(handle) = self.coordinator_handle() {
+                    self.claim_process_ownership(handle);
+                    self.refresh_ownership_state();
+                }
                 self.coordinator_running_command = Some(command_name.clone());
                 self.coordinator_running_elapsed_secs = Some(0);
                 self.coordinator_last_result = Some(if command_name == "run" {
@@ -1194,49 +1237,26 @@ impl AppState {
             return Ok(());
         }
 
-        let Some(paths) = self.project_paths.as_ref() else {
+        let Some(handle) = self.coordinator_handle() else {
             return Ok(());
         };
 
-        gate_owner_action(
-            &ClientContext {
-                client_id: self.coordinator_client_id.clone(),
-                project_root: paths.root.clone(),
-            },
-            &ProcessHandle {
-                kind: ProcessKind::Coordinator,
-                project_root: paths.root.clone(),
-                pid: None,
-            },
-        )
+        gate_owner_action(&self.client_context, &handle)
     }
 
     fn gate_project_mutation(&self) -> macc_core::Result<()> {
-        let Some(paths) = self.project_paths.as_ref() else {
+        let Some(handle) = self.project_handle() else {
             return Ok(());
         };
 
-        gate_owner_action(
-            &ClientContext {
-                client_id: self.coordinator_client_id.clone(),
-                project_root: paths.root.clone(),
-            },
-            &ProcessHandle {
-                kind: ProcessKind::Project,
-                project_root: paths.root.clone(),
-                pid: None,
-            },
-        )
+        gate_owner_action(&self.client_context, &handle)
     }
 
     fn coordinator_client_identity(&self) -> ClientIdentity {
-        let now = chrono::Utc::now().to_rfc3339();
-        ClientIdentity {
-            client_id: self.coordinator_client_id.clone(),
-            kind: ClientKind::Tui,
-            connected_at: now.clone(),
-            last_heartbeat: now,
-        }
+        let mut identity = self.client_identity.clone();
+        identity.client_id = self.coordinator_client_id.clone();
+        identity.last_heartbeat = chrono::Utc::now().to_rfc3339();
+        identity
     }
 
     fn coordinator_handle(&self) -> Option<ProcessHandle> {
@@ -1247,81 +1267,182 @@ impl AppState {
         })
     }
 
-    pub fn refresh_ownership_state(&mut self) {
+    fn project_handle(&self) -> Option<ProcessHandle> {
+        self.project_paths.as_ref().map(|paths| ProcessHandle {
+            kind: ProcessKind::Project,
+            project_root: paths.root.clone(),
+            pid: None,
+        })
+    }
+
+    fn sync_coordinator_ownership_view(&mut self) {
+        self.coordinator_ownership.record = self.ownership_state.record.clone();
+        self.coordinator_ownership.is_owner = self.ownership_state.is_owner;
+        self.coordinator_ownership.pending_incoming_request =
+            self.ownership_state.pending_incoming_request.clone();
+        self.coordinator_ownership.last_refresh = self.ownership_state.last_refresh;
+    }
+
+    fn claim_process_ownership(&mut self, handle: ProcessHandle) {
         let Some(paths) = self.project_paths.clone() else {
-            self.coordinator_ownership.record = None;
             return;
         };
 
-        // L6-OWN-008: claim the project-wide control lease the moment this TUI
-        // is the first connected client. The claim auto-creates the project
-        // lease record if no client has registered yet.
-        let handle = self.coordinator_handle().unwrap_or_else(|| ProcessHandle {
-            kind: ProcessKind::Project,
-            project_root: paths.root.clone(),
-            pid: None,
-        });
         let identity = self.coordinator_client_identity();
-        let _ = self
+        match self
             .engine
-            .process_ownership_claim(&paths.root, handle, identity);
+            .process_ownership_claim(&paths.root, handle.clone(), identity.clone())
+        {
+            Ok((OwnershipStatus::Owner, owner_guard, _)) => {
+                if self.ownership_guard.is_none() {
+                    self.ownership_guard = Some(owner_guard.unwrap_or_else(|| {
+                        ProcessOwnershipGuard::new(&paths.root, handle, identity.client_id.clone())
+                    }));
+                }
+            }
+            Ok((OwnershipStatus::Viewer, _, viewer_guard)) => {
+                self.viewer_guards.push(viewer_guard.unwrap_or_else(|| {
+                    ProcessViewerGuard::new(&paths.root, handle, identity.client_id.clone())
+                }));
+            }
+            Ok((OwnershipStatus::Unregistered, _, _)) | Err(_) => {}
+        }
+    }
 
-        // Read the project lease back so banner reflects the authoritative state.
-        let project_handle = ProcessHandle {
-            kind: ProcessKind::Project,
-            project_root: paths.root.clone(),
-            pid: None,
+    fn wait_for_coordinator_registration(&self, timeout: Duration) -> bool {
+        let Some(paths) = self.project_paths.as_ref() else {
+            return false;
         };
-        let record = self
-            .engine
-            .process_ownership_status(&paths.root, &project_handle)
-            .ok()
-            .flatten();
+        let Some(handle) = self.coordinator_handle() else {
+            return false;
+        };
+
+        let deadline = Instant::now() + timeout;
+        while Instant::now() <= deadline {
+            match self.engine.process_ownership_status(&paths.root, &handle) {
+                Ok(Some(_)) => return true,
+                Ok(None) | Err(_) => thread::sleep(Duration::from_millis(100)),
+            }
+        }
+
+        false
+    }
+
+    fn cleanup_ownership_guards(&mut self) {
+        self.ownership_guard = None;
+        self.viewer_guards.clear();
+    }
+
+    pub fn scan_and_attach_to_running_processes(&mut self) {
+        let Some(paths) = self.project_paths.clone() else {
+            self.cleanup_ownership_guards();
+            self.ownership_state.record = None;
+            self.ownership_state.is_owner = false;
+            self.ownership_state.pending_incoming_request = None;
+            self.sync_coordinator_ownership_view();
+            return;
+        };
+
+        self.cleanup_ownership_guards();
+
+        if let Ok(records) = self.engine.process_list_running(&paths.root) {
+            for record in records {
+                if matches!(record.process.kind, ProcessKind::Project) {
+                    continue;
+                }
+                self.claim_process_ownership(record.process);
+            }
+        }
+
+        self.refresh_ownership_state();
+    }
+
+    pub fn refresh_ownership_state(&mut self) {
+        let Some(paths) = self.project_paths.clone() else {
+            self.ownership_state.record = None;
+            self.ownership_state.is_owner = false;
+            self.ownership_state.pending_incoming_request = None;
+            self.sync_coordinator_ownership_view();
+            return;
+        };
+
+        let mut record = self
+            .coordinator_handle()
+            .and_then(|handle| {
+                self.engine
+                    .process_ownership_status(&paths.root, &handle)
+                    .ok()
+                    .flatten()
+            })
+            .filter(|record| record.owner.is_some() || record.takeover_request.is_some());
+
+        if record.is_none() {
+            record = self.project_handle().and_then(|handle| {
+                self.engine
+                    .process_ownership_status(&paths.root, &handle)
+                    .ok()
+                    .flatten()
+            });
+        }
 
         let is_owner = record
             .as_ref()
             .and_then(|r| r.owner.as_ref())
-            .map(|o| o.client_id == self.coordinator_client_id)
+            .map(|o| o.client_id == self.client_identity.client_id)
             .unwrap_or(false);
 
-        let pending_request = record
+        self.ownership_state.record = record;
+        self.ownership_state.is_owner = is_owner;
+        self.ownership_state.last_refresh = Instant::now();
+        self.ownership_state.pending_incoming_request = self
+            .ownership_state
+            .record
             .as_ref()
             .and_then(|r| r.takeover_request.clone().filter(|_| is_owner));
-
-        self.coordinator_ownership.record = record;
-        self.coordinator_ownership.is_owner = is_owner;
-        self.coordinator_ownership.pending_incoming_request = pending_request;
-        self.coordinator_ownership.last_refresh = Instant::now();
-        self.coordinator_ownership_last_refresh = Some(Instant::now());
+        self.last_ownership_refresh = Some(Instant::now());
+        self.coordinator_ownership_last_refresh = self.last_ownership_refresh;
+        self.sync_coordinator_ownership_view();
     }
 
     pub fn tick_ownership(&mut self) {
         let Some(paths) = self.project_paths.clone() else {
             return;
         };
-        let Some(handle) = self.coordinator_handle() else {
+        let Some(handle) = self.coordinator_handle().or_else(|| self.project_handle()) else {
             return;
         };
 
         let now = Instant::now();
         let should_refresh = self
-            .coordinator_ownership_last_refresh
-            .map(|t| now.duration_since(t) >= Duration::from_secs(2))
+            .last_ownership_refresh
+            .map(|t| now.duration_since(t) >= Duration::from_secs(5))
             .unwrap_or(true);
         if should_refresh {
             self.refresh_ownership_state();
-        }
+            if self.ownership_state.is_owner && self.ownership_guard.is_none() {
+                self.claim_process_ownership(handle.clone());
+            }
 
-        let should_heartbeat = self
-            .coordinator_ownership_last_heartbeat
-            .map(|t| now.duration_since(t) >= Duration::from_secs(15))
-            .unwrap_or(true);
-        if should_heartbeat {
-            if let Err(err) =
-                self.engine
-                    .process_heartbeat(&paths.root, &handle, &self.coordinator_client_id)
-            {
-                let _ = err;
+            if self.ownership_state.pending_incoming_request.is_none() {
+                if let Some(request) = self
+                    .ownership_state
+                    .record
+                    .as_ref()
+                    .and_then(|record| record.takeover_request.clone())
+                    .filter(|_| self.ownership_state.is_owner)
+                {
+                    self.handle_takeover_request_received(request);
+                }
+            }
+
+            let heartbeat_count =
+                usize::from(self.ownership_guard.is_some()) + self.viewer_guards.len();
+            for _ in 0..heartbeat_count {
+                let _ = self.engine.process_heartbeat(
+                    &paths.root,
+                    &handle,
+                    &self.client_identity.client_id,
+                );
             }
             self.coordinator_ownership_last_heartbeat = Some(now);
         }
@@ -1364,13 +1485,13 @@ impl AppState {
         let Some(handle) = self.coordinator_handle() else {
             return;
         };
-        let Some(request) = self.coordinator_ownership.pending_incoming_request.clone() else {
+        let Some(request) = self.ownership_state.pending_incoming_request.clone() else {
             return;
         };
         match self.engine.process_ownership_respond_takeover(
             &paths.root,
             &handle,
-            &self.coordinator_client_id,
+            &self.client_identity.client_id,
             &request.request_id,
             accept,
         ) {
@@ -1395,21 +1516,28 @@ impl AppState {
 
     pub fn release_ownership_on_exit(&mut self) {
         let Some(paths) = self.project_paths.clone() else {
+            self.cleanup_ownership_guards();
             return;
         };
-        let Some(handle) = self.coordinator_handle() else {
+        let Some(handle) = self.coordinator_handle().or_else(|| self.project_handle()) else {
+            self.cleanup_ownership_guards();
             return;
         };
+        self.cleanup_ownership_guards();
         let _ = self.engine.process_ownership_release(
             &paths.root,
             &handle,
-            &self.coordinator_client_id,
+            &self.client_identity.client_id,
         );
         let _ = macc_core::service::process_ownership::unregister_viewer(
             &paths.root,
             &handle,
-            &self.coordinator_client_id,
+            &self.client_identity.client_id,
         );
+        self.ownership_state.record = None;
+        self.ownership_state.is_owner = false;
+        self.ownership_state.pending_incoming_request = None;
+        self.sync_coordinator_ownership_view();
     }
 
     fn ensure_working_copy(&mut self) {
@@ -1419,6 +1547,8 @@ impl AppState {
     }
 
     pub fn load_config(&mut self, start_dir: Option<&std::path::Path>) {
+        self.release_ownership_on_exit();
+
         let current_dir = if let Some(d) = start_dir {
             d.to_path_buf()
         } else {
@@ -1428,6 +1558,7 @@ impl AppState {
         match find_project_root(&current_dir) {
             Ok(paths) => {
                 self.project_paths = Some(paths.clone());
+                self.client_context.project_root = paths.root.clone();
                 self.refresh_tools();
                 self.refresh_skills();
                 self.refresh_mcp_entries();
@@ -1435,7 +1566,7 @@ impl AppState {
                 self.refresh_worktree_status();
                 self.refresh_coordinator_snapshot();
                 self.refresh_coordinator_events();
-                self.refresh_ownership_state();
+                self.scan_and_attach_to_running_processes();
                 match self.engine.load_canonical_config(&paths) {
                     Ok(config) => {
                         self.config = Some(config.clone());
@@ -1451,6 +1582,7 @@ impl AppState {
                     "MACC project not found. Run 'macc init' in your repository root to start."
                         .to_string(),
                 );
+                self.client_context.project_root = current_dir;
                 self.worktree_status = None;
                 self.refresh_logs();
             }
@@ -1565,6 +1697,39 @@ impl AppState {
 
     pub fn has_coordinator_pause_prompt(&self) -> bool {
         self.coordinator_pause_error.is_some()
+    }
+
+    pub fn handle_takeover_request_received(&mut self, request: TakeoverRequest) {
+        self.ownership_state.pending_incoming_request = Some(request);
+        self.sync_coordinator_ownership_view();
+    }
+
+    pub fn try_owner_action<F>(&mut self, handle: &ProcessHandle, f: F) -> bool
+    where
+        F: FnOnce(&mut Self),
+    {
+        match gate_owner_action(&self.client_context, handle) {
+            Ok(()) => {
+                f(self);
+                true
+            }
+            Err(MaccError::NotProcessOwner { .. }) => {
+                self.set_status(
+                    UiStatusLevel::Warning,
+                    "Viewer mode — press T to request takeover",
+                    Some(Duration::from_secs(4)),
+                );
+                false
+            }
+            Err(err) => {
+                self.set_status(
+                    UiStatusLevel::Error,
+                    format_actionable_error(&err.to_string()),
+                    Some(Duration::from_secs(6)),
+                );
+                false
+            }
+        }
     }
 
     pub fn is_coordinator_paused(&self) -> bool {
@@ -1722,6 +1887,7 @@ impl AppState {
                     self.refresh_coordinator_snapshot();
                     self.refresh_coordinator_events();
                     if self.coordinator_run_auto_quit {
+                        self.release_ownership_on_exit();
                         self.should_quit = true;
                     }
                 }
@@ -4203,6 +4369,12 @@ mod tests {
         }
     }
 
+    fn sample_project(dir: &std::path::Path) {
+        let macc_dir = dir.join(".macc");
+        fs::create_dir_all(&macc_dir).expect("create .macc");
+        fs::write(macc_dir.join("macc.yaml"), "tools:\n  enabled: []\n").expect("write config");
+    }
+
     #[test]
     fn test_navigation_stack() {
         let engine = Arc::new(MaccEngine::new(ToolRegistry::new()));
@@ -4337,6 +4509,7 @@ mod tests {
     #[test]
     fn stop_coordinator_command_shows_not_owner_error_for_viewer() {
         let dir = tempdir().expect("tempdir");
+        sample_project(dir.path());
         let handle = ProcessHandle {
             kind: ProcessKind::Coordinator,
             project_root: dir.path().to_path_buf(),
@@ -4349,6 +4522,11 @@ mod tests {
         let mut state = AppState::with_engine(engine.clone());
         state.project_paths = Some(ProjectPaths::from_root(dir.path()));
         state.coordinator_client_id = "client-B".to_string();
+        state.client_identity.client_id = "client-B".to_string();
+        state.client_context = ClientContext {
+            client_id: "client-B".to_string(),
+            project_root: dir.path().to_path_buf(),
+        };
 
         state.stop_coordinator_command();
 
@@ -4357,6 +4535,57 @@ mod tests {
         assert!(status.message.contains("Failed to run 'stop'"));
         assert!(status.message.contains("not the owner of this process"));
         assert_eq!(*engine.stop_calls.borrow(), 0);
+    }
+
+    #[test]
+    fn scan_and_attach_to_running_processes_claims_unowned_running_coordinator() {
+        let dir = tempdir().expect("tempdir");
+        sample_project(dir.path());
+        let handle = ProcessHandle {
+            kind: ProcessKind::Coordinator,
+            project_root: dir.path().to_path_buf(),
+            pid: Some(4242),
+        };
+        register_process(dir.path(), handle).expect("register process");
+
+        let engine = Arc::new(NoopEngine::default());
+        let mut state = AppState::with_engine(engine);
+        state.project_paths = Some(ProjectPaths::from_root(dir.path()));
+        state.client_context.project_root = dir.path().to_path_buf();
+
+        state.scan_and_attach_to_running_processes();
+
+        assert!(state.ownership_guard.is_some());
+        assert!(state.ownership_state.is_owner);
+        assert!(state.viewer_guards.is_empty());
+    }
+
+    #[test]
+    fn second_tui_attaches_as_viewer_when_owner_already_exists() {
+        let dir = tempdir().expect("tempdir");
+        sample_project(dir.path());
+        let handle = ProcessHandle {
+            kind: ProcessKind::Coordinator,
+            project_root: dir.path().to_path_buf(),
+            pid: Some(4242),
+        };
+        register_process(dir.path(), handle).expect("register process");
+
+        let engine = Arc::new(NoopEngine::default());
+        let mut first = AppState::with_engine(engine.clone());
+        first.project_paths = Some(ProjectPaths::from_root(dir.path()));
+        first.client_context.project_root = dir.path().to_path_buf();
+        first.scan_and_attach_to_running_processes();
+        assert!(first.ownership_state.is_owner);
+
+        let mut second = AppState::with_engine(engine);
+        second.project_paths = Some(ProjectPaths::from_root(dir.path()));
+        second.client_context.project_root = dir.path().to_path_buf();
+        second.scan_and_attach_to_running_processes();
+
+        assert!(!second.ownership_state.is_owner);
+        assert!(second.ownership_guard.is_none());
+        assert_eq!(second.viewer_guards.len(), 1);
     }
 
     #[test]
