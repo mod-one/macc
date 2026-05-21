@@ -90,9 +90,7 @@ pub fn render_takeover_modal(f: &mut Frame, area: Rect, request: &TakeoverReques
 
     let text = format!(
         "Takeover requested by: {}\nKind: {:?}\nAt: {}\n\nPress A to accept, R to reject.",
-        request.requester.client_id,
-        request.requester.kind,
-        request.requested_at,
+        request.requester.client_id, request.requester.kind, request.requested_at,
     );
 
     let modal = Paragraph::new(text)

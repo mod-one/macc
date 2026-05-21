@@ -189,14 +189,14 @@ impl Drop for StoreLockGuard {
 #[cfg(test)]
 mod tests {
     use super::OwnershipStore;
-    use chrono::{Duration, Utc};
     use crate::process_ownership::{
         ClientIdentity, ClientKind, OwnershipRecord, ProcessHandle, ProcessKind, TakeoverRequest,
     };
+    use chrono::{Duration, Utc};
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
-    use std::sync::Barrier;
     use std::sync::Arc;
+    use std::sync::Barrier;
     use std::thread;
     use tempfile::TempDir;
 
@@ -272,16 +272,17 @@ mod tests {
 
                 OwnershipStore::load_and_modify(repo_root.path(), |store| {
                     let handle = shared_process_handle();
-                    let mut record = store
-                        .get_record(&handle)
-                        .cloned()
-                        .unwrap_or_else(|| OwnershipRecord {
-                            process: handle.clone(),
-                            owner: None,
-                            viewers: Vec::new(),
-                            takeover_request: None,
-                            started_at: Utc::now().to_rfc3339(),
-                        });
+                    let mut record =
+                        store
+                            .get_record(&handle)
+                            .cloned()
+                            .unwrap_or_else(|| OwnershipRecord {
+                                process: handle.clone(),
+                                owner: None,
+                                viewers: Vec::new(),
+                                takeover_request: None,
+                                started_at: Utc::now().to_rfc3339(),
+                            });
 
                     if record.owner.is_none() {
                         record.owner = Some(claim.clone());
@@ -317,7 +318,12 @@ mod tests {
             .expect("shared record to exist");
         let owner = record.owner.as_ref().expect("owner to be claimed");
         let unique_clients: HashSet<_> = std::iter::once(owner.client_id.as_str())
-            .chain(record.viewers.iter().map(|viewer| viewer.client_id.as_str()))
+            .chain(
+                record
+                    .viewers
+                    .iter()
+                    .map(|viewer| viewer.client_id.as_str()),
+            )
             .collect();
 
         assert_eq!(unique_clients.len(), thread_count);
@@ -413,7 +419,12 @@ mod tests {
                 project_root: Path::new("/tmp/project").join(format!("repo-{id}")),
                 pid: Some(1000 + id),
             },
-            owner: Some(client_with_age(&format!("owner-{id}"), ClientKind::Tui, 0, 0)),
+            owner: Some(client_with_age(
+                &format!("owner-{id}"),
+                ClientKind::Tui,
+                0,
+                0,
+            )),
             viewers: vec![client_with_age(
                 &format!("viewer-{id}"),
                 ClientKind::Web,
