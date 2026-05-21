@@ -15,6 +15,7 @@ use ratatui::{
 };
 use std::{collections::BTreeMap, io, time::Duration};
 
+pub mod ownership;
 pub mod screen;
 pub mod state;
 pub mod ui;
