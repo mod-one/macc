@@ -133,12 +133,19 @@ pub(crate) fn emit_owner_stale(_record: &OwnershipRecord, _owner: &ClientIdentit
 }
 
 pub(crate) fn emit_takeover_timeout(
-    _record: &OwnershipRecord,
-    _request: &super::TakeoverRequest,
-    _policy: &str,
+    record: &OwnershipRecord,
+    request: &super::TakeoverRequest,
+    policy: &str,
 ) {
+    super::events::emit_takeover_timeout(
+        &record.process.project_root,
+        &record.process,
+        &request.requester,
+        &request.request_id,
+        policy,
+    );
     #[cfg(test)]
-    test_support::record_takeover_timeout(_record, _request, _policy);
+    test_support::record_takeover_timeout(record, request, policy);
 }
 
 #[cfg(test)]

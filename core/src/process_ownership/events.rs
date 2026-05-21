@@ -119,6 +119,22 @@ pub fn emit_owner_stale(repo_root: &Path, handle: &ProcessHandle, client: &Clien
     OwnershipEventBroadcaster::emit(repo_root, "owner_stale", handle, client_payload(client));
 }
 
+pub fn emit_takeover_timeout(
+    repo_root: &Path,
+    handle: &ProcessHandle,
+    requester: &ClientIdentity,
+    request_id: &str,
+    policy: &str,
+) {
+    let mut payload = client_payload(requester);
+    payload.insert(
+        "request_id".to_string(),
+        Value::String(request_id.to_string()),
+    );
+    payload.insert("policy".to_string(), Value::String(policy.to_string()));
+    OwnershipEventBroadcaster::emit(repo_root, "takeover_timeout", handle, payload);
+}
+
 fn client_payload(client: &ClientIdentity) -> Map<String, Value> {
     let mut payload = Map::new();
     payload.insert("client".to_string(), serde_json::json!(client));
