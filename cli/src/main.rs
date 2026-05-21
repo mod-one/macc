@@ -214,6 +214,11 @@ enum Commands {
         #[command(subcommand)]
         supervisor_command: SupervisorCommands,
     },
+    /// Inspect and recover process ownership state
+    Process {
+        #[command(subcommand)]
+        process_command: commands::process::ProcessCommands,
+    },
     /// Run the project coordinator automation script
     #[command(trailing_var_arg = true)]
     Coordinator {
@@ -948,6 +953,9 @@ fn run_with_engine_provider(
         Some(Commands::Supervisor { supervisor_command }) => {
             commands::supervisor::SupervisorCommand::new(app.clone(), supervisor_command).run()
         }
+        Some(Commands::Process { process_command }) => {
+            commands::process::ProcessCommand::new(app.clone(), process_command).run()
+        }
         Some(Commands::Coordinator {
             command_name,
             no_tui,
@@ -1621,6 +1629,39 @@ mod tests {
             }
             _ => panic!("unexpected command"),
         }
+    }
+
+    #[test]
+    fn test_parse_process_claim_command() {
+        let cli = Cli::try_parse_from([
+            "macc",
+            "process",
+            "claim",
+            "--kind",
+            "coordinator",
+            "--pid",
+            "1234",
+        ])
+        .expect("parse process claim command");
+        match cli.command {
+            Some(Commands::Process { process_command }) => match process_command {
+                commands::process::ProcessCommands::Claim { kind, pid } => {
+                    assert_eq!(kind, commands::process::ProcessKindArg::Coordinator);
+                    assert_eq!(pid, 1234);
+                }
+                _ => panic!("unexpected process command"),
+            },
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn test_help_includes_process_subcommand() {
+        use clap::CommandFactory;
+
+        let mut command = Cli::command();
+        let help = command.render_long_help().to_string();
+        assert!(help.contains("process"));
     }
 
     #[test]

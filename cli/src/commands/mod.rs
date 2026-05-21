@@ -18,6 +18,7 @@ pub mod lifecycle_support;
 pub mod logs;
 pub mod migrate;
 pub mod plan;
+pub mod process;
 pub mod quickstart;
 pub mod restore;
 pub mod supervisor;
