@@ -1,5 +1,5 @@
 import React from 'react';
-import { buildUrl } from '../api/client';
+import { buildUrl, getWebClientId } from '../api/client';
 import { resolveApiBaseUrl } from '../api/config';
 import type { ApiEventPayload, ApiEventStreamMessage, ApiEventStreamName } from '../api/models';
 
@@ -71,6 +71,7 @@ function buildEventSourceUrl(
   } else {
     url.searchParams.delete('last_event_id');
   }
+  url.searchParams.set('client_id', getWebClientId());
 
   if (!resolvedBaseUrl) {
     return `${url.pathname}${url.search}`;

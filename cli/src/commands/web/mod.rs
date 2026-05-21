@@ -37,11 +37,14 @@ use axum::routing::{delete, get, post, put};
 use axum::Json;
 use axum::Router;
 use macc_core::config::WebAssetsMode;
-use macc_core::process_ownership::{ProcessHandle, ProcessKind};
+use macc_core::process_ownership::{ClientKind, ProcessHandle, ProcessKind};
 use macc_core::service::process_ownership::RegisteredProcessGuard;
 use macc_core::{MaccError, ProjectPaths, Result};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
+
+const WEB_VIEWER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 
 pub struct WebCommand {
     app: AppContext,
@@ -123,7 +126,7 @@ impl Command for WebCommand {
             terminal_sessions: terminal::TerminalSessionStore::default(),
             registered_process_guard: Some(Arc::new(guard)),
         };
-        let app = build_web_router(state);
+        let app = build_web_router(state.clone());
 
         println!("Web server starting on http://{}...", config.bind_addr());
 
@@ -142,6 +145,7 @@ impl Command for WebCommand {
                         action: "bind web server".into(),
                         source: e,
                     })?;
+            tokio::spawn(run_web_viewer_heartbeat_loop(state));
             axum::serve(listener, app)
                 .await
                 .map_err(|e| MaccError::Validation(format!("web server failed: {}", e)))
@@ -296,6 +300,51 @@ fn build_web_router(state: WebState) -> Router {
         .fallback(get(assets::spa_handler))
         .layer(from_fn_with_state(audit_state, audit::audit_middleware))
         .with_state(state)
+}
+
+async fn run_web_viewer_heartbeat_loop(state: WebState) {
+    let mut tick = tokio::time::interval(WEB_VIEWER_HEARTBEAT_INTERVAL);
+    tick.tick().await;
+
+    loop {
+        tick.tick().await;
+        heartbeat_web_viewers_once(&state);
+    }
+}
+
+fn heartbeat_web_viewers_once(state: &WebState) {
+    let records = match state.engine.process_list_running(&state.paths.root) {
+        Ok(records) => records,
+        Err(err) => {
+            tracing::warn!(
+                "failed to list process ownership records for web heartbeats: {}",
+                err
+            );
+            return;
+        }
+    };
+
+    for record in records {
+        let handle = record.process.clone();
+        for viewer in record.viewers {
+            if viewer.kind != ClientKind::Web {
+                continue;
+            }
+            if let Err(err) =
+                state
+                    .engine
+                    .process_heartbeat(&state.paths.root, &handle, &viewer.client_id)
+            {
+                tracing::warn!(
+                    process_kind = ?handle.kind,
+                    pid = handle.pid,
+                    client_id = viewer.client_id,
+                    "failed to refresh web viewer heartbeat: {}",
+                    err
+                );
+            }
+        }
+    }
 }
 
 async fn health_handler(
