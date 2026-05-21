@@ -12,8 +12,10 @@ use macc_core::process_ownership::{
     ClientIdentity, ClientKind, OwnershipStore, ProcessHandle, ProcessKind,
 };
 use macc_core::service::process_ownership::{
-    claim_owner, list_records, project_lease, register_process, unregister_process,
+    claim_owner, is_current_owner, list_records, project_lease, register_process,
+    request_takeover, respond_takeover, unregister_process,
 };
+use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -109,6 +111,25 @@ fn write_all_stale_heartbeats(repo_root: &std::path::Path) {
         Ok(())
     })
     .expect("write all stale heartbeats");
+}
+
+fn coordinator_event_types(repo_root: &std::path::Path) -> Vec<String> {
+    let events_path = repo_root
+        .join(".macc")
+        .join("log")
+        .join("coordinator")
+        .join("events.jsonl");
+    let raw = fs::read_to_string(events_path).expect("read events.jsonl");
+    raw.lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("valid event json"))
+        .map(|event| {
+            event
+                .get("type")
+                .and_then(Value::as_str)
+                .expect("event type")
+                .to_string()
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -379,4 +400,141 @@ fn stale_viewer_evicted_and_fresh_client_becomes_owner() {
         Some("tui-new"),
     );
     assert!(lease.viewers.is_empty());
+}
+
+#[test]
+fn first_connect_takes_ownership_and_later_clients_become_viewers() {
+    let repo_root = unique_repo_root("first-connect");
+    let handle = coordinator_handle(&repo_root);
+
+    register_process(&repo_root, handle.clone()).expect("register coordinator");
+
+    let first_status = claim_owner(&repo_root, &handle, fresh_client("cli-owner", ClientKind::Cli))
+        .expect("first cli claims ownership");
+    let second_status =
+        claim_owner(&repo_root, &handle, fresh_client("cli-viewer", ClientKind::Cli))
+            .expect("second cli joins as viewer");
+    let third_status = claim_owner(&repo_root, &handle, fresh_client("web-viewer", ClientKind::Web))
+        .expect("web joins as viewer");
+
+    assert_eq!(first_status, macc_core::process_ownership::OwnershipStatus::Owner);
+    assert_eq!(
+        second_status,
+        macc_core::process_ownership::OwnershipStatus::Viewer
+    );
+    assert_eq!(
+        third_status,
+        macc_core::process_ownership::OwnershipStatus::Viewer
+    );
+
+    let lease = project_lease(&repo_root)
+        .expect("load lease")
+        .expect("lease exists");
+    assert_eq!(
+        lease.owner.as_ref().map(|owner| owner.client_id.as_str()),
+        Some("cli-owner")
+    );
+    assert_eq!(lease.viewers.len(), 2);
+    assert_eq!(lease.viewers[0].client_id, "cli-viewer");
+    assert_eq!(lease.viewers[0].kind, ClientKind::Cli);
+    assert_eq!(lease.viewers[1].client_id, "web-viewer");
+    assert_eq!(lease.viewers[1].kind, ClientKind::Web);
+}
+
+#[test]
+fn takeover_acceptance_transfers_ownership_and_emits_events() {
+    let repo_root = unique_repo_root("takeover-accept");
+    let handle = coordinator_handle(&repo_root);
+
+    register_process(&repo_root, handle.clone()).expect("register coordinator");
+    claim_owner(&repo_root, &handle, fresh_client("cli-owner", ClientKind::Cli))
+        .expect("owner claim");
+    let viewer_status =
+        claim_owner(&repo_root, &handle, fresh_client("cli-requester", ClientKind::Cli))
+            .expect("requester joins as viewer");
+    assert_eq!(
+        viewer_status,
+        macc_core::process_ownership::OwnershipStatus::Viewer
+    );
+
+    let request_id = request_takeover(
+        &repo_root,
+        &handle,
+        fresh_client("cli-requester", ClientKind::Cli),
+    )
+    .expect("request takeover");
+    let pending = project_lease(&repo_root)
+        .expect("load pending lease")
+        .expect("lease exists");
+    assert_eq!(
+        pending
+            .takeover_request
+            .as_ref()
+            .map(|request| request.request_id.as_str()),
+        Some(request_id.as_str())
+    );
+
+    respond_takeover(&repo_root, &handle, "cli-owner", &request_id, true)
+        .expect("accept takeover");
+
+    let lease = project_lease(&repo_root)
+        .expect("load final lease")
+        .expect("lease exists");
+    assert_eq!(
+        lease.owner.as_ref().map(|owner| owner.client_id.as_str()),
+        Some("cli-requester")
+    );
+    assert!(lease.takeover_request.is_none());
+    assert!(
+        !is_current_owner(&repo_root, &handle, "cli-owner").expect("check old owner")
+    );
+    assert!(is_current_owner(&repo_root, &handle, "cli-requester").expect("check new owner"));
+
+    let event_types = coordinator_event_types(&repo_root);
+    assert!(event_types.iter().any(|event| event == "takeover_requested"));
+    assert!(event_types.iter().any(|event| event == "takeover_accepted"));
+}
+
+#[test]
+fn takeover_rejection_keeps_owner_and_emits_rejection_event() {
+    let repo_root = unique_repo_root("takeover-reject");
+    let handle = coordinator_handle(&repo_root);
+
+    register_process(&repo_root, handle.clone()).expect("register coordinator");
+    claim_owner(&repo_root, &handle, fresh_client("cli-owner", ClientKind::Cli))
+        .expect("owner claim");
+    let viewer_status =
+        claim_owner(&repo_root, &handle, fresh_client("cli-requester", ClientKind::Cli))
+            .expect("requester joins as viewer");
+    assert_eq!(
+        viewer_status,
+        macc_core::process_ownership::OwnershipStatus::Viewer
+    );
+
+    let request_id = request_takeover(
+        &repo_root,
+        &handle,
+        fresh_client("cli-requester", ClientKind::Cli),
+    )
+    .expect("request takeover");
+
+    respond_takeover(&repo_root, &handle, "cli-owner", &request_id, false)
+        .expect("reject takeover");
+
+    let lease = project_lease(&repo_root)
+        .expect("load final lease")
+        .expect("lease exists");
+    assert_eq!(
+        lease.owner.as_ref().map(|owner| owner.client_id.as_str()),
+        Some("cli-owner")
+    );
+    assert!(lease.takeover_request.is_none());
+    assert!(is_current_owner(&repo_root, &handle, "cli-owner").expect("check owner"));
+    assert!(
+        !is_current_owner(&repo_root, &handle, "cli-requester").expect("check requester")
+    );
+
+    let event_types = coordinator_event_types(&repo_root);
+    assert!(event_types.iter().any(|event| event == "takeover_requested"));
+    assert!(event_types.iter().any(|event| event == "takeover_rejected"));
 }
