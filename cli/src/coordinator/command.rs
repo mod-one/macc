@@ -5,10 +5,12 @@ use crate::coordinator::render::print_status_summary;
 use macc_core::coordinator::engine as coordinator_engine;
 use macc_core::coordinator::types::CoordinatorEnvConfig;
 use macc_core::coordinator_storage::CoordinatorStorageMode;
+use macc_core::process_ownership::{ProcessHandle, ProcessKind};
 use macc_core::service::coordinator_workflow::{
     coordinator_command_emits_runtime_events, coordinator_command_from_name, CoordinatorCommand,
     CoordinatorCommandRequest,
 };
+use macc_core::service::process_ownership_gate::{gate_owner_action, ClientContext};
 use macc_core::{find_project_root, load_canonical_config, MaccError, Result};
 use std::path::Path;
 use std::process::{Command as ProcessCommand, Stdio};
@@ -45,6 +47,7 @@ impl macc_core::coordinator::control_plane::CoordinatorLog for LoggerAdapter<'_>
 #[derive(Debug, Clone)]
 pub struct CoordinatorCommandInput {
     pub command_name: String,
+    pub client_id: String,
     pub no_tui: bool,
     pub supervisor: bool,
     pub graceful: bool,
@@ -107,6 +110,14 @@ pub fn handle(
         input.remove_worktrees,
         input.remove_branches,
     )?;
+    let client_ctx = ClientContext {
+        client_id: input.client_id.clone(),
+        project_root: paths.root.clone(),
+    };
+
+    if command_requires_owner_gate(&command) {
+        gate_owner_action(&client_ctx, &coordinator_process_handle(&paths.root))?;
+    }
 
     if input.supervisor && input.command_name == "run" {
         spawn_attached_supervisor(&context.paths.root)?;
@@ -311,6 +322,26 @@ Performers cannot commit without it. Fix this first:\n\
     }
 
     Ok(())
+}
+
+fn command_requires_owner_gate(command: &CoordinatorCommand) -> bool {
+    matches!(
+        command,
+        CoordinatorCommand::Stop { .. }
+            | CoordinatorCommand::ResumePausedRun
+            | CoordinatorCommand::Unlock { .. }
+            | CoordinatorCommand::DispatchReadyTasks
+            | CoordinatorCommand::AdvanceTasks
+            | CoordinatorCommand::CleanupMaintenance
+    )
+}
+
+fn coordinator_process_handle(project_root: &Path) -> ProcessHandle {
+    ProcessHandle {
+        kind: ProcessKind::Coordinator,
+        project_root: project_root.to_path_buf(),
+        pid: None,
+    }
 }
 
 fn spawn_attached_supervisor(project_root: &Path) -> Result<()> {
@@ -527,5 +558,204 @@ fn format_duration_human(secs: u64) -> String {
         format!("{}m{}s", m, s)
     } else {
         format!("{}s", secs)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{handle, CoordinatorCommandInput};
+    use crate::services::engine_provider::SharedEngine;
+    use macc_core::config::CanonicalConfig;
+    use macc_core::coordinator::types::CoordinatorEnvConfig;
+    use macc_core::plan::{ActionPlan, PlannedOp};
+    use macc_core::process_ownership::{ClientIdentity, ClientKind, ProcessHandle, ProcessKind};
+    use macc_core::resolve::{CliOverrides, MaterializedFetchUnit};
+    use macc_core::service::coordinator_workflow::{
+        CoordinatorCommand, CoordinatorCommandRequest, CoordinatorCommandResult,
+    };
+    use macc_core::service::process_ownership::{claim_owner, register_process};
+    use macc_core::tool::{ToolDescriptor, ToolDiagnostic};
+    use macc_core::{ApplyReport, Engine, MaccError, ProjectPaths, TestEngine};
+    use std::fs;
+    use std::path::Path;
+    use std::sync::{Arc, Mutex};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn stop_rejects_non_owner_before_engine_dispatch() {
+        let dir = temp_project_root();
+        let handle_record = coordinator_record_handle(&dir, Some(4242));
+        register_process(&dir, handle_record.clone()).expect("register");
+        claim_owner(&dir, &handle_record, sample_client("client-A")).expect("claim owner");
+
+        let engine = Arc::new(RecordingEngine::default());
+        let err = handle(
+            &dir,
+            &(Arc::clone(&engine) as SharedEngine),
+            coordinator_input("stop", "client-B"),
+        )
+        .expect_err("viewer should be rejected");
+
+        match err {
+            MaccError::NotProcessOwner {
+                handle,
+                current_owner,
+            } => {
+                assert_eq!(handle, handle_record);
+                assert_eq!(current_owner.as_deref(), Some("client-A"));
+            }
+            other => panic!("expected NotProcessOwner, got {other:?}"),
+        }
+        assert_eq!(engine.execute_calls(), 0);
+    }
+
+    #[test]
+    fn stop_allows_owner_and_dispatches_engine_command() {
+        let dir = temp_project_root();
+        let handle_record = coordinator_record_handle(&dir, Some(4242));
+        register_process(&dir, handle_record.clone()).expect("register");
+        claim_owner(&dir, &handle_record, sample_client("client-A")).expect("claim owner");
+
+        let engine = Arc::new(RecordingEngine::default());
+        handle(
+            &dir,
+            &(Arc::clone(&engine) as SharedEngine),
+            coordinator_input("stop", "client-A"),
+        )
+        .expect("owner should pass");
+
+        assert_eq!(engine.execute_calls(), 1);
+        assert_eq!(
+            engine.last_command(),
+            Some(CoordinatorCommand::Stop {
+                graceful: false,
+                remove_worktrees: false,
+                remove_branches: false,
+                reason: "manual stop".to_string(),
+            })
+        );
+    }
+
+    struct RecordingEngine {
+        inner: TestEngine,
+        execute_calls: Mutex<usize>,
+        last_command: Mutex<Option<CoordinatorCommand>>,
+    }
+
+    impl Default for RecordingEngine {
+        fn default() -> Self {
+            Self {
+                inner: TestEngine::with_fixtures(),
+                execute_calls: Mutex::new(0),
+                last_command: Mutex::new(None),
+            }
+        }
+    }
+
+    impl RecordingEngine {
+        fn execute_calls(&self) -> usize {
+            *self.execute_calls.lock().expect("lock")
+        }
+
+        fn last_command(&self) -> Option<CoordinatorCommand> {
+            self.last_command.lock().expect("lock").clone()
+        }
+    }
+
+    impl Engine for RecordingEngine {
+        fn list_tools(&self, paths: &ProjectPaths) -> (Vec<ToolDescriptor>, Vec<ToolDiagnostic>) {
+            self.inner.list_tools(paths)
+        }
+
+        fn doctor(&self, paths: &ProjectPaths) -> Vec<macc_core::doctor::ToolCheck> {
+            self.inner.doctor(paths)
+        }
+
+        fn plan(
+            &self,
+            paths: &ProjectPaths,
+            config: &CanonicalConfig,
+            materialized_units: &[MaterializedFetchUnit],
+            overrides: &CliOverrides,
+        ) -> macc_core::Result<ActionPlan> {
+            self.inner
+                .plan(paths, config, materialized_units, overrides)
+        }
+
+        fn plan_operations(&self, paths: &ProjectPaths, plan: &ActionPlan) -> Vec<PlannedOp> {
+            self.inner.plan_operations(paths, plan)
+        }
+
+        fn apply(
+            &self,
+            paths: &ProjectPaths,
+            plan: &mut ActionPlan,
+            allow_user_scope: bool,
+        ) -> macc_core::Result<ApplyReport> {
+            self.inner.apply(paths, plan, allow_user_scope)
+        }
+
+        fn builtin_skills(&self) -> Vec<macc_core::catalog::Skill> {
+            self.inner.builtin_skills()
+        }
+
+        fn builtin_agents(&self) -> Vec<macc_core::catalog::Agent> {
+            self.inner.builtin_agents()
+        }
+
+        fn coordinator_execute_command(
+            &self,
+            _paths: &ProjectPaths,
+            command: CoordinatorCommand,
+            _request: CoordinatorCommandRequest<'_>,
+        ) -> macc_core::Result<CoordinatorCommandResult> {
+            *self.execute_calls.lock().expect("lock") += 1;
+            *self.last_command.lock().expect("lock") = Some(command);
+            Ok(CoordinatorCommandResult::default())
+        }
+    }
+
+    fn coordinator_input(command_name: &str, client_id: &str) -> CoordinatorCommandInput {
+        CoordinatorCommandInput {
+            command_name: command_name.to_string(),
+            client_id: client_id.to_string(),
+            no_tui: true,
+            supervisor: false,
+            graceful: false,
+            remove_worktrees: false,
+            remove_branches: false,
+            env_cfg: CoordinatorEnvConfig::default(),
+            extra_args: Vec::new(),
+        }
+    }
+
+    fn coordinator_record_handle(project_root: &Path, pid: Option<i32>) -> ProcessHandle {
+        ProcessHandle {
+            kind: ProcessKind::Coordinator,
+            project_root: project_root.to_path_buf(),
+            pid,
+        }
+    }
+
+    fn sample_client(client_id: &str) -> ClientIdentity {
+        let now = chrono::Utc::now().to_rfc3339();
+        ClientIdentity {
+            client_id: client_id.to_string(),
+            kind: ClientKind::Cli,
+            connected_at: now.clone(),
+            last_heartbeat: now,
+        }
+    }
+
+    fn temp_project_root() -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("macc-cli-owner-gate-{unique}"));
+        let macc_dir = dir.join(".macc");
+        fs::create_dir_all(&macc_dir).expect("create .macc");
+        fs::write(macc_dir.join("macc.yaml"), "tools:\n  enabled: []\n").expect("write config");
+        dir
     }
 }
