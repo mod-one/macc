@@ -281,7 +281,11 @@ pub fn list_records(repo_root: &Path) -> Result<Vec<OwnershipRecord>> {
     Ok(store.records.clone())
 }
 
-pub fn is_current_owner(repo_root: &Path, _handle: &ProcessHandle, client_id: &str) -> Result<bool> {
+pub fn is_current_owner(
+    repo_root: &Path,
+    _handle: &ProcessHandle,
+    client_id: &str,
+) -> Result<bool> {
     let lease = project_lease_handle(repo_root);
     let record = get_record(repo_root, &lease)?;
     Ok(record
@@ -449,7 +453,9 @@ mod tests {
         assert!(record.viewers.is_empty());
 
         // Project lease auto-seeded with no owner.
-        let lease = project_lease(&repo_root).expect("load lease").expect("lease exists");
+        let lease = project_lease(&repo_root)
+            .expect("load lease")
+            .expect("lease exists");
         assert!(lease.owner.is_none());
 
         cleanup(repo_root);

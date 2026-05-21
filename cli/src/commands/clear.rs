@@ -15,6 +15,7 @@ impl ClearCommand {
 impl Command for ClearCommand {
     fn run(&self) -> Result<()> {
         let paths = self.app.project_paths()?;
+        crate::commands::gate_cli_mutation(&paths.root)?;
         let _ = self
             .app
             .engine

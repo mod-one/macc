@@ -467,6 +467,7 @@ pub fn init(paths: &ProjectPaths, force: bool) -> Result<()> {
             selections: None,
             automation: config::AutomationConfig::default(),
             settings: config::SettingsConfig::default(),
+            process_ownership: None,
             mcp_templates: config::builtin_mcp_templates(),
         };
         let yaml = default_config.to_yaml().map_err(|e| {

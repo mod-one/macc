@@ -133,7 +133,8 @@ enum CoordinatorPauseNextAction {
 fn requires_owner_gate(command: &CoordinatorCommand) -> bool {
     matches!(
         command,
-        CoordinatorCommand::Stop { .. }
+        CoordinatorCommand::Run
+            | CoordinatorCommand::Stop { .. }
             | CoordinatorCommand::ResumePausedRun
             | CoordinatorCommand::Unlock { .. }
             | CoordinatorCommand::DispatchReadyTasks
@@ -958,24 +959,17 @@ impl AppState {
             );
             return;
         };
-        if matches!(
-            command,
-            CoordinatorCommand::DispatchReadyTasks
-                | CoordinatorCommand::AdvanceTasks
-                | CoordinatorCommand::CleanupMaintenance
-        ) {
-            if let Err(err) = self.gate_coordinator_action(&command) {
-                self.set_status(
-                    UiStatusLevel::Error,
-                    format!(
-                        "Failed to run '{}': {}",
-                        command_name,
-                        format_actionable_error(&err.to_string())
-                    ),
-                    Some(Duration::from_secs(6)),
-                );
-                return;
-            }
+        if let Err(err) = self.gate_coordinator_action(&command) {
+            self.set_status(
+                UiStatusLevel::Error,
+                format!(
+                    "Failed to run '{}': {}",
+                    command_name,
+                    format_actionable_error(&err.to_string())
+                ),
+                Some(Duration::from_secs(6)),
+            );
+            return;
         }
         self.coordinator_pause_error = None;
         self.coordinator_pause_command = None;
@@ -1217,6 +1211,24 @@ impl AppState {
         )
     }
 
+    fn gate_project_mutation(&self) -> macc_core::Result<()> {
+        let Some(paths) = self.project_paths.as_ref() else {
+            return Ok(());
+        };
+
+        gate_owner_action(
+            &ClientContext {
+                client_id: self.coordinator_client_id.clone(),
+                project_root: paths.root.clone(),
+            },
+            &ProcessHandle {
+                kind: ProcessKind::Project,
+                project_root: paths.root.clone(),
+                pid: None,
+            },
+        )
+    }
+
     fn coordinator_client_identity(&self) -> ClientIdentity {
         let now = chrono::Utc::now().to_rfc3339();
         ClientIdentity {
@@ -1244,13 +1256,11 @@ impl AppState {
         // L6-OWN-008: claim the project-wide control lease the moment this TUI
         // is the first connected client. The claim auto-creates the project
         // lease record if no client has registered yet.
-        let handle = self
-            .coordinator_handle()
-            .unwrap_or_else(|| ProcessHandle {
-                kind: ProcessKind::Project,
-                project_root: paths.root.clone(),
-                pid: None,
-            });
+        let handle = self.coordinator_handle().unwrap_or_else(|| ProcessHandle {
+            kind: ProcessKind::Project,
+            project_root: paths.root.clone(),
+            pid: None,
+        });
         let identity = self.coordinator_client_identity();
         let _ = self
             .engine
@@ -1390,9 +1400,11 @@ impl AppState {
         let Some(handle) = self.coordinator_handle() else {
             return;
         };
-        let _ = self
-            .engine
-            .process_ownership_release(&paths.root, &handle, &self.coordinator_client_id);
+        let _ = self.engine.process_ownership_release(
+            &paths.root,
+            &handle,
+            &self.coordinator_client_id,
+        );
         let _ = macc_core::service::process_ownership::unregister_viewer(
             &paths.root,
             &handle,
@@ -3367,6 +3379,19 @@ impl AppState {
     }
 
     pub fn save_config(&mut self) {
+        if let Err(err) = self.gate_project_mutation() {
+            self.errors.push(format!("Config save blocked: {}", err));
+            self.set_status(
+                UiStatusLevel::Error,
+                format!(
+                    "Save blocked: {}",
+                    format_actionable_error(&err.to_string())
+                ),
+                Some(Duration::from_secs(6)),
+            );
+            return;
+        }
+
         let paths = match &self.project_paths {
             Some(p) => p.clone(),
             None => {
@@ -3679,6 +3704,19 @@ impl AppState {
     }
 
     pub fn attempt_apply(&mut self) {
+        if let Err(err) = self.gate_project_mutation() {
+            self.apply_error = Some(format!(
+                "Apply blocked: {}",
+                format_actionable_error(&err.to_string())
+            ));
+            self.set_status(
+                UiStatusLevel::Error,
+                "Apply blocked by project ownership.",
+                Some(Duration::from_secs(6)),
+            );
+            return;
+        }
+
         let paths = match &self.project_paths {
             Some(paths) => paths,
             None => {

@@ -1,11 +1,14 @@
 use crate::config::CoordinatorConfig;
+use crate::coordinator::managed_command_registry::{
+    get_managed_command, remove_managed_command, upsert_managed_command,
+};
 use crate::{ensure_embedded_automation_scripts, MaccError, ProjectPaths, Result};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CoordinatorProcessHandle(pub u64);
@@ -61,12 +64,6 @@ struct ManagedCoordinatorProcess {
     child: Child,
 }
 
-struct ManagedCoordinatorCommand {
-    handle: CoordinatorProcessHandle,
-    command: String,
-    started_at: Instant,
-}
-
 fn process_table() -> &'static Mutex<HashMap<u64, ManagedCoordinatorProcess>> {
     static TABLE: OnceLock<Mutex<HashMap<u64, ManagedCoordinatorProcess>>> = OnceLock::new();
     TABLE.get_or_init(|| Mutex::new(HashMap::new()))
@@ -77,8 +74,8 @@ fn process_id_gen() -> &'static AtomicU64 {
     ID.get_or_init(|| AtomicU64::new(1))
 }
 
-fn managed_commands_by_root() -> &'static Mutex<HashMap<String, ManagedCoordinatorCommand>> {
-    static TABLE: OnceLock<Mutex<HashMap<String, ManagedCoordinatorCommand>>> = OnceLock::new();
+fn local_handles_by_root() -> &'static Mutex<HashMap<String, CoordinatorProcessHandle>> {
+    static TABLE: OnceLock<Mutex<HashMap<String, CoordinatorProcessHandle>>> = OnceLock::new();
     TABLE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -93,37 +90,19 @@ pub fn coordinator_start_managed_command_process(
     cfg: Option<&CoordinatorConfig>,
 ) -> Result<()> {
     let key = root_key(paths);
-    {
-        let mut table = managed_commands_by_root().lock().map_err(|_| {
-            MaccError::Validation("coordinator managed commands table lock poisoned".into())
-        })?;
-        if let Some(existing) = table.get(&key) {
-            match coordinator_poll_command_process(existing.handle)? {
-                CoordinatorProcessPoll::Running => {
-                    return Err(MaccError::Validation(format!(
-                        "coordinator command '{}' is already running for this project",
-                        existing.command
-                    )));
-                }
-                CoordinatorProcessPoll::Exited { .. } => {
-                    table.remove(&key);
-                }
-            }
-        }
+    if let Some(existing) = get_managed_command(paths)? {
+        return Err(MaccError::Validation(format!(
+            "coordinator command '{}' is already running for this project",
+            existing.command
+        )));
     }
 
-    let handle = coordinator_start_command_process(paths, command, args, cfg)?;
-    let mut table = managed_commands_by_root().lock().map_err(|_| {
-        MaccError::Validation("coordinator managed commands table lock poisoned".into())
-    })?;
-    table.insert(
-        key,
-        ManagedCoordinatorCommand {
-            handle,
-            command: command.to_string(),
-            started_at: Instant::now(),
-        },
-    );
+    let (handle, pid) = coordinator_start_command_process_with_pid(paths, command, args, cfg)?;
+    upsert_managed_command(paths, command, pid)?;
+    local_handles_by_root()
+        .lock()
+        .map_err(|_| MaccError::Validation("coordinator local handle table lock poisoned".into()))?
+        .insert(key, handle);
     Ok(())
 }
 
@@ -131,29 +110,56 @@ pub fn coordinator_poll_managed_command_process(
     paths: &ProjectPaths,
 ) -> Result<CoordinatorManagedCommandPoll> {
     let key = root_key(paths);
-    let mut table = managed_commands_by_root().lock().map_err(|_| {
-        MaccError::Validation("coordinator managed commands table lock poisoned".into())
-    })?;
-    let Some(entry) = table.get(&key) else {
+    let Some(record) = get_managed_command(paths)? else {
         return Ok(CoordinatorManagedCommandPoll::Idle);
     };
-    let handle = entry.handle;
-    let command = entry.command.clone();
-    let elapsed_secs = entry.started_at.elapsed().as_secs();
-    match coordinator_poll_command_process(handle)? {
-        CoordinatorProcessPoll::Running => Ok(CoordinatorManagedCommandPoll::Running {
+    let command = record.command.clone();
+    let elapsed_secs = record.elapsed_secs();
+    let local_handle = local_handles_by_root()
+        .lock()
+        .map_err(|_| MaccError::Validation("coordinator local handle table lock poisoned".into()))?
+        .get(&key)
+        .copied();
+
+    if let Some(handle) = local_handle {
+        match coordinator_poll_command_process(handle)? {
+            CoordinatorProcessPoll::Running => {
+                return Ok(CoordinatorManagedCommandPoll::Running {
+                    command,
+                    elapsed_secs,
+                });
+            }
+            CoordinatorProcessPoll::Exited { success, code } => {
+                let _ = remove_managed_command(paths)?;
+                local_handles_by_root()
+                    .lock()
+                    .map_err(|_| {
+                        MaccError::Validation("coordinator local handle table lock poisoned".into())
+                    })?
+                    .remove(&key);
+                return Ok(CoordinatorManagedCommandPoll::Exited {
+                    command,
+                    success,
+                    code,
+                    elapsed_secs,
+                });
+            }
+        }
+    }
+
+    if pid_is_alive(record.pid) {
+        Ok(CoordinatorManagedCommandPoll::Running {
             command,
             elapsed_secs,
-        }),
-        CoordinatorProcessPoll::Exited { success, code } => {
-            table.remove(&key);
-            Ok(CoordinatorManagedCommandPoll::Exited {
-                command,
-                success,
-                code,
-                elapsed_secs,
-            })
-        }
+        })
+    } else {
+        let _ = remove_managed_command(paths)?;
+        Ok(CoordinatorManagedCommandPoll::Exited {
+            command,
+            success: false,
+            code: None,
+            elapsed_secs,
+        })
     }
 }
 
@@ -209,16 +215,25 @@ pub fn coordinator_stop_managed_command_process(
     graceful: bool,
 ) -> Result<CoordinatorStopResult> {
     let key = root_key(paths);
-    let mut table = managed_commands_by_root().lock().map_err(|_| {
-        MaccError::Validation("coordinator managed commands table lock poisoned".into())
-    })?;
-    let Some(entry) = table.remove(&key) else {
+    let local_handle = local_handles_by_root()
+        .lock()
+        .map_err(|_| MaccError::Validation("coordinator local handle table lock poisoned".into()))?
+        .remove(&key);
+    let Some(record) = remove_managed_command(paths)? else {
         return Ok(CoordinatorStopResult {
             targets: 0,
             used_group: false,
         });
     };
-    coordinator_stop_command_process(entry.handle, graceful)
+    if let Some(handle) = local_handle {
+        coordinator_stop_command_process(handle, graceful)
+    } else {
+        let (targets, used_group) = stop_coordinator_process_group_or_tree(record.pid)?;
+        Ok(CoordinatorStopResult {
+            targets,
+            used_group,
+        })
+    }
 }
 
 pub fn coordinator_start_command_process(
@@ -227,6 +242,15 @@ pub fn coordinator_start_command_process(
     args: &[String],
     _cfg: Option<&CoordinatorConfig>,
 ) -> Result<CoordinatorProcessHandle> {
+    coordinator_start_command_process_with_pid(paths, command, args, _cfg).map(|(handle, _)| handle)
+}
+
+fn coordinator_start_command_process_with_pid(
+    paths: &ProjectPaths,
+    command: &str,
+    args: &[String],
+    _cfg: Option<&CoordinatorConfig>,
+) -> Result<(CoordinatorProcessHandle, i32)> {
     let root = &paths.root;
     let mut cmd = if command == "run" {
         let current_exe = std::env::current_exe().map_err(|e| MaccError::Io {
@@ -266,6 +290,7 @@ pub fn coordinator_start_command_process(
         action: format!("spawn coordinator command '{}'", command),
         source: e,
     })?;
+    let pid = child.id() as i32;
 
     let id = process_id_gen().fetch_add(1, Ordering::Relaxed);
     let handle = CoordinatorProcessHandle(id);
@@ -273,7 +298,7 @@ pub fn coordinator_start_command_process(
         .lock()
         .map_err(|_| MaccError::Validation("coordinator process table lock poisoned".into()))?;
     table.insert(id, ManagedCoordinatorProcess { child });
-    Ok(handle)
+    Ok((handle, pid))
 }
 
 pub fn coordinator_poll_command_process(

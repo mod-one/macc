@@ -57,7 +57,8 @@ pub fn evict_stale_clients(store: &mut OwnershipStore, config: &HeartbeatConfig)
                             emit_takeover_timeout(record, req, "deny");
                             record.takeover_request = None;
                         }
-                        TakeoverDefaultResponse::AutoAccept | TakeoverDefaultResponse::AdminTakeover => {
+                        TakeoverDefaultResponse::AutoAccept
+                        | TakeoverDefaultResponse::AdminTakeover => {
                             let policy = if matches!(
                                 config.takeover_default_response,
                                 TakeoverDefaultResponse::AutoAccept

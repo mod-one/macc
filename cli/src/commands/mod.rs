@@ -37,8 +37,8 @@ pub fn gate_cli_mutation(project_root: &std::path::Path) -> Result<()> {
     use macc_core::process_ownership::{ProcessHandle, ProcessKind};
     use macc_core::service::process_ownership_gate::{gate_owner_action, ClientContext};
 
-    let client_id = std::env::var("MACC_CLIENT_ID")
-        .unwrap_or_else(|_| format!("cli-{}", std::process::id()));
+    let client_id =
+        std::env::var("MACC_CLIENT_ID").unwrap_or_else(|_| format!("cli-{}", std::process::id()));
     gate_owner_action(
         &ClientContext {
             client_id,

@@ -637,6 +637,7 @@ mod tests {
             selections: None,
             automation: crate::config::AutomationConfig::default(),
             settings: crate::config::SettingsConfig::default(),
+            process_ownership: None,
             mcp_templates: CanonicalConfig::default().mcp_templates,
         };
 

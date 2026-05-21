@@ -136,6 +136,15 @@ fn load_takeover_policy(
 ) -> Option<(u64, crate::process_ownership::TakeoverDefaultResponse)> {
     let config_path = repo_root.join(".macc/macc.yaml");
     let config = crate::load_canonical_config(&config_path).ok()?;
+    if let Some(process_ownership) = config.process_ownership.as_ref() {
+        let timeout = process_ownership.takeover_timeout_seconds.unwrap_or(60);
+        let response = process_ownership
+            .takeover_default_response
+            .as_deref()
+            .map(crate::process_ownership::TakeoverDefaultResponse::from_str_lossy)
+            .unwrap_or(crate::process_ownership::TakeoverDefaultResponse::Deny);
+        return Some((timeout, response));
+    }
     let coordinator = config.automation.coordinator.as_ref()?;
     let timeout = coordinator.takeover_timeout_seconds.unwrap_or(60);
     let response = coordinator

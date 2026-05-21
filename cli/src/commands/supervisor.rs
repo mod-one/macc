@@ -106,7 +106,11 @@ impl<'a> SupervisorCommand<'a> {
             project_root: paths.root.to_path_buf(),
             pid: Some(process_id as i32),
         };
-        let _supervisor_process_guard = match self.app.engine.process_register(&paths.root, supervisor_handle) {
+        let _supervisor_process_guard = match self
+            .app
+            .engine
+            .process_register(&paths.root, supervisor_handle)
+        {
             Ok(guard) => {
                 tracing::info!("supervisor: registered process handle");
                 Some(guard)

@@ -46,6 +46,7 @@ impl<'a> Command for CatalogCommand<'a> {
                     reference,
                     checksum,
                 } => {
+                    crate::commands::gate_cli_mutation(&paths.root)?;
                     let mut catalog = SkillsCatalog::load(&paths.skills_catalog_path())?;
                     self.app.engine.catalog_add_skill(
                         &paths,
@@ -63,6 +64,7 @@ impl<'a> Command for CatalogCommand<'a> {
                     )
                 }
                 crate::CatalogSubCommands::Remove { id } => {
+                    crate::commands::gate_cli_mutation(&paths.root)?;
                     let mut catalog = SkillsCatalog::load(&paths.skills_catalog_path())?;
                     self.app.engine.catalog_remove_skill(
                         &paths,
@@ -94,6 +96,7 @@ impl<'a> Command for CatalogCommand<'a> {
                     reference,
                     checksum,
                 } => {
+                    crate::commands::gate_cli_mutation(&paths.root)?;
                     let mut catalog = McpCatalog::load(&paths.mcp_catalog_path())?;
                     self.app.engine.catalog_add_mcp(
                         &paths,
@@ -111,6 +114,7 @@ impl<'a> Command for CatalogCommand<'a> {
                     )
                 }
                 crate::CatalogSubCommands::Remove { id } => {
+                    crate::commands::gate_cli_mutation(&paths.root)?;
                     let mut catalog = McpCatalog::load(&paths.mcp_catalog_path())?;
                     self.app.engine.catalog_remove_mcp(
                         &paths,
@@ -127,17 +131,20 @@ impl<'a> Command for CatalogCommand<'a> {
                 name,
                 description,
                 tags,
-            } => self.app.engine.catalog_import_url(
-                &paths,
-                kind,
-                id.clone(),
-                url.clone(),
-                name.clone(),
-                description.clone(),
-                tags.clone(),
-                &CliCatalogUrlParser,
-                &CliCatalogUi,
-            ),
+            } => {
+                crate::commands::gate_cli_mutation(&paths.root)?;
+                self.app.engine.catalog_import_url(
+                    &paths,
+                    kind,
+                    id.clone(),
+                    url.clone(),
+                    name.clone(),
+                    description.clone(),
+                    tags.clone(),
+                    &CliCatalogUrlParser,
+                    &CliCatalogUi,
+                )
+            }
             CatalogCommands::SearchRemote {
                 api,
                 kind,

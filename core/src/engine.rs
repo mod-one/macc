@@ -1198,28 +1198,11 @@ pub trait Engine {
     )> {
         let status =
             crate::service::process_ownership::claim_owner(repo_root, &handle, identity.clone())?;
-        let ownership = match status {
-            OwnershipStatus::Owner => (
-                OwnershipStatus::Owner,
-                Some(ProcessOwnershipGuard::new(
-                    repo_root,
-                    handle,
-                    identity.client_id.clone(),
-                )),
-                None,
-            ),
-            OwnershipStatus::Viewer => (
-                OwnershipStatus::Viewer,
-                None,
-                Some(ProcessViewerGuard::new(
-                    repo_root,
-                    handle,
-                    identity.client_id.clone(),
-                )),
-            ),
-            OwnershipStatus::Unregistered => (OwnershipStatus::Unregistered, None, None),
-        };
-        Ok(ownership)
+        let _ = (repo_root, handle, identity);
+        // Claims are durable client leases. Returning short-lived RAII guards here
+        // caused CLI/Web/TUI callers to immediately release ownership when the
+        // tuple was dropped at the end of the request/tick.
+        Ok((status, None, None))
     }
 
     fn process_ownership_release(
@@ -1943,14 +1926,16 @@ fields: []
         let (owner_status, owner_guard, owner_viewer_guard) =
             engine.process_ownership_claim(&paths.root, handle.clone(), owner_identity)?;
         let (viewer_status, viewer_owner_guard, viewer_guard) =
-            engine.process_ownership_claim(&paths.root, handle, viewer_identity)?;
+            engine.process_ownership_claim(&paths.root, handle.clone(), viewer_identity)?;
 
         assert_eq!(owner_status, OwnershipStatus::Owner);
-        assert!(owner_guard.is_some());
+        assert!(owner_guard.is_none());
         assert!(owner_viewer_guard.is_none());
         assert_eq!(viewer_status, OwnershipStatus::Viewer);
         assert!(viewer_owner_guard.is_none());
-        assert!(viewer_guard.is_some());
+        assert!(viewer_guard.is_none());
+        assert!(engine.process_is_current_owner(&paths.root, &handle, "owner-client")?);
+        assert!(!engine.process_is_current_owner(&paths.root, &handle, "viewer-client")?);
 
         drop(viewer_guard);
         drop(viewer_owner_guard);

@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 use super::errors::ApiError;
 use super::WebState;
 use axum::http::HeaderMap;
@@ -21,23 +23,22 @@ pub(super) fn require_project_owner(
     state: &WebState,
     headers: &HeaderMap,
 ) -> std::result::Result<(), ApiError> {
-    let client_id = match client_id_from_headers(headers) {
-        Some(id) => id,
-        // Missing client identity is treated as "no controller present", which
-        // matches single-user CLI parity. Mutations are allowed.
-        None => return Ok(()),
-    };
     let handle = ProcessHandle {
         kind: ProcessKind::Project,
         project_root: state.paths.root.clone(),
         pid: None,
     };
     // Skip gate if no project lease has been registered.
-    let record =
-        macc_core::service::process_ownership::get_record(&state.paths.root, &handle)?;
+    let record = macc_core::service::process_ownership::get_record(&state.paths.root, &handle)?;
     if record.is_none() {
         return Ok(());
     }
+    let client_id = client_id_from_headers(headers).ok_or_else(|| {
+        ApiError::validation(format!(
+            "Missing required header '{}' (web client identity) for mutating action.",
+            WEB_CLIENT_HEADER
+        ))
+    })?;
     gate_owner_action(
         &ClientContext {
             client_id,

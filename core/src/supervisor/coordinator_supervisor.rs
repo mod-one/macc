@@ -536,9 +536,7 @@ fn format_failed_tasks(tasks: &[FailedTaskSummary]) -> String {
 mod tests {
     use super::*;
     use crate::process_ownership::{ProcessHandle, ProcessKind};
-    use crate::service::process_ownership::{
-        get_record, register_process, RegisteredProcessGuard,
-    };
+    use crate::service::process_ownership::{get_record, register_process, RegisteredProcessGuard};
     use std::io::Write;
 
     fn temp_dir(prefix: &str) -> PathBuf {
@@ -908,8 +906,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.subsec_nanos())
             .unwrap_or(0);
-        let repo_root =
-            std::env::temp_dir().join(format!("macc-sup-guard-{}", nanos));
+        let repo_root = std::env::temp_dir().join(format!("macc-sup-guard-{}", nanos));
         fs::create_dir_all(&repo_root).expect("create temp dir");
 
         let handle = ProcessHandle {

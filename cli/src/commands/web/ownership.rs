@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 use super::errors::ApiError;
 use super::WebState;
 use axum::extract::{Path, Query, State};

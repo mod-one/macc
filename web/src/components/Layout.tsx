@@ -10,7 +10,17 @@ import { StatusBadge } from './StatusBadge';
 import { useNotificationStore } from '../stores/notificationStore';
 import { useNotificationCenter } from '../hooks/useNotificationCenter';
 import { getHelpSectionForRoute } from '../pages/helpDocs';
-import { getHealth } from '../api/client';
+import {
+  claimProjectOwnership,
+  getHealth,
+  getProjectOwnership,
+  getWebClientId,
+  heartbeatProjectOwnership,
+  requestProjectTakeover,
+  respondProjectTakeover,
+  setWebOwnershipMode,
+} from '../api/client';
+import type { ApiOwnershipRecord } from '../api/models';
 import { useCoordinatorStore } from '../store';
 
 const navGroups = [
@@ -53,12 +63,17 @@ const navGroups = [
 ];
 
 const LAYOUT_REFRESH_MS = 10_000;
+const OWNERSHIP_REFRESH_MS = 2_000;
+const OWNERSHIP_HEARTBEAT_MS = 15_000;
 
 const Layout: React.FC = () => {
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [projectRoot, setProjectRoot] = useState<string | null>(null);
+  const [ownership, setOwnership] = useState<ApiOwnershipRecord | null>(null);
+  const [ownershipMessage, setOwnershipMessage] = useState<string | null>(null);
   const mainRef = useRef<HTMLElement>(null);
+  const webClientId = useRef(getWebClientId());
   const location = useLocation();
   const contextualHelpSection = getHelpSectionForRoute(location.pathname);
   const contextualHelpHref = `/help?section=${encodeURIComponent(contextualHelpSection)}`;
@@ -90,6 +105,57 @@ const Layout: React.FC = () => {
       clearInterval(id);
     };
   }, [loadStatus]);
+
+  useEffect(() => {
+    let disposed = false;
+    const clientId = webClientId.current;
+    const refreshOwnership = async () => {
+      try {
+        await claimProjectOwnership({ clientId });
+        const record = await getProjectOwnership();
+        if (!disposed) {
+          setOwnership(record);
+          setWebOwnershipMode(record?.owner?.client_id === clientId ? 'owner' : 'viewer');
+          setOwnershipMessage(null);
+        }
+      } catch (error) {
+        if (!disposed) {
+          setWebOwnershipMode('unknown');
+          setOwnershipMessage(error instanceof Error ? error.message : 'Ownership refresh failed.');
+        }
+      }
+    };
+
+    void refreshOwnership();
+    const refreshId = window.setInterval(() => void refreshOwnership(), OWNERSHIP_REFRESH_MS);
+    const heartbeatId = window.setInterval(() => {
+      void heartbeatProjectOwnership({ clientId }).catch(() => undefined);
+    }, OWNERSHIP_HEARTBEAT_MS);
+
+    return () => {
+      disposed = true;
+      window.clearInterval(refreshId);
+      window.clearInterval(heartbeatId);
+    };
+  }, []);
+
+  const isOwner = ownership?.owner?.client_id === webClientId.current;
+  const pendingTakeover = ownership?.takeover_request ?? null;
+  const requestTakeover = () => {
+    requestProjectTakeover({ clientId: webClientId.current })
+      .then(() => setOwnershipMessage('Takeover request sent.'))
+      .catch((error) =>
+        setOwnershipMessage(error instanceof Error ? error.message : 'Takeover request failed.'),
+      );
+  };
+  const respondTakeover = (accept: boolean) => {
+    if (!pendingTakeover) return;
+    respondProjectTakeover(pendingTakeover.request_id, accept, { clientId: webClientId.current })
+      .then(() => setOwnershipMessage(accept ? 'Takeover accepted.' : 'Takeover rejected.'))
+      .catch((error) =>
+        setOwnershipMessage(error instanceof Error ? error.message : 'Takeover response failed.'),
+      );
+  };
 
   React.useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -201,6 +267,47 @@ const Layout: React.FC = () => {
           </div>
 
           <div className="flex items-center gap-3">
+            <div className="hidden items-center gap-2 rounded-md border border-[var(--border)] bg-[var(--bg-secondary)] px-2 py-1 text-xs text-[var(--text-secondary)] xl:flex">
+              <span className="uppercase tracking-wide">Control:</span>
+              <StatusBadge
+                className="px-2 py-0.5 text-[10px]"
+                status={isOwner ? 'Owner' : 'Viewer'}
+                tone={isOwner ? 'active' : 'todo'}
+              />
+              <span
+                className="max-w-[180px] truncate font-mono"
+                title={ownership?.owner?.client_id ?? 'unclaimed'}
+              >
+                {ownership?.owner?.client_id ?? 'unclaimed'}
+              </span>
+              {!isOwner && (
+                <button
+                  className="rounded border border-[var(--border)] px-2 py-0.5 text-[11px] text-[var(--text-primary)] hover:border-[var(--accent)]"
+                  onClick={requestTakeover}
+                  type="button"
+                >
+                  Request
+                </button>
+              )}
+              {isOwner && pendingTakeover && (
+                <span className="flex items-center gap-1">
+                  <button
+                    className="rounded border border-emerald-500/50 px-2 py-0.5 text-[11px] text-emerald-300"
+                    onClick={() => respondTakeover(true)}
+                    type="button"
+                  >
+                    Accept
+                  </button>
+                  <button
+                    className="rounded border border-rose-500/50 px-2 py-0.5 text-[11px] text-rose-300"
+                    onClick={() => respondTakeover(false)}
+                    type="button"
+                  >
+                    Reject
+                  </button>
+                </span>
+              )}
+            </div>
             <Link
               aria-label="Open contextual help"
               className="flex h-9 w-9 items-center justify-center rounded-md border border-[var(--border)] bg-[var(--bg-secondary)] text-base font-semibold text-[var(--text-muted)] transition-colors hover:border-[var(--text-muted)] hover:text-[var(--text-primary)]"
@@ -263,6 +370,7 @@ const Layout: React.FC = () => {
                 tone={status ? (status.paused ? 'paused' : status.active > 0 ? 'active' : 'todo') : 'todo'}
               />
             </div>
+            {ownershipMessage && <span className="max-w-[420px] truncate text-amber-300">{ownershipMessage}</span>}
           </div>
           <div className="flex items-center gap-6">
             <div className="flex items-center gap-1.5">

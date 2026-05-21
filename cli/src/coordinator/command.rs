@@ -327,7 +327,8 @@ Performers cannot commit without it. Fix this first:\n\
 fn command_requires_owner_gate(command: &CoordinatorCommand) -> bool {
     matches!(
         command,
-        CoordinatorCommand::Stop { .. }
+        CoordinatorCommand::Run
+            | CoordinatorCommand::Stop { .. }
             | CoordinatorCommand::ResumePausedRun
             | CoordinatorCommand::Unlock { .. }
             | CoordinatorCommand::DispatchReadyTasks

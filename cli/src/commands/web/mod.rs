@@ -264,10 +264,7 @@ fn build_web_router(state: WebState) -> Router {
         )
         .route("/api/v1/prd", get(prd::get_prd_handler))
         .route("/api/v1/prd", put(prd::update_prd_handler))
-        .route(
-            "/api/v1/processes",
-            get(ownership::list_processes_handler),
-        )
+        .route("/api/v1/processes", get(ownership::list_processes_handler))
         .route(
             "/api/v1/processes/:kind/ownership",
             get(ownership::get_process_ownership_handler),
