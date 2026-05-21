@@ -98,7 +98,7 @@ mod tests {
     use chrono::{Duration, Utc};
     use std::path::PathBuf;
 
-    use super::{HeartbeatConfig, evict_stale_clients, test_support::take_owner_stale_events};
+    use super::{evict_stale_clients, test_support::take_owner_stale_events, HeartbeatConfig};
     use crate::process_ownership::{
         ClientIdentity, ClientKind, OwnershipRecord, OwnershipStore, ProcessHandle, ProcessKind,
     };

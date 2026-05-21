@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
-use super::{HeartbeatConfig, OwnershipRecord, ProcessHandle, evict_stale_clients};
+use super::{evict_stale_clients, HeartbeatConfig, OwnershipRecord, ProcessHandle};
 
 const STORE_RELATIVE_PATH: &str = ".macc/state/process_ownership.json";
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(10);
