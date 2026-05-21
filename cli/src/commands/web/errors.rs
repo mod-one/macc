@@ -437,7 +437,9 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use macc_core::process_ownership::{ProcessHandle, ProcessKind};
     use macc_core::MaccError;
+    use std::path::PathBuf;
 
     #[test]
     fn api_error_mapping_validation() {
@@ -494,5 +496,26 @@ mod tests {
         assert_eq!(err.body.error.category, "Internal");
         assert_eq!(err.body.error.retryable, true);
         assert!(err.body.error.recommended_action.is_some());
+    }
+
+    #[test]
+    fn api_error_mapping_not_process_owner() {
+        let handle = ProcessHandle {
+            kind: ProcessKind::Coordinator,
+            project_root: PathBuf::from("/tmp/test-proj"),
+            pid: Some(1234),
+        };
+        let err: ApiError = MaccError::NotProcessOwner {
+            handle,
+            current_owner: Some("other-client".to_string()),
+        }
+        .into();
+        assert_eq!(err.status, axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(err.body.error.code, "not_process_owner");
+        assert_eq!(err.body.error.category, "Auth");
+        assert_eq!(err.body.error.retryable, false);
+        assert!(err.body.error.recommended_action.is_some());
+        let ctx = err.body.error.context.as_ref().expect("context present");
+        assert_eq!(ctx["current_owner"], "other-client");
     }
 }

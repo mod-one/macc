@@ -1269,6 +1269,15 @@ pub trait Engine {
         ))
     }
 
+    fn process_unregister_viewer(
+        &self,
+        repo_root: &Path,
+        handle: &ProcessHandle,
+        client_id: &str,
+    ) -> Result<()> {
+        crate::service::process_ownership::unregister_viewer(repo_root, handle, client_id)
+    }
+
     fn process_heartbeat(
         &self,
         repo_root: &Path,
