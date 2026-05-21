@@ -535,6 +535,10 @@ fn format_failed_tasks(tasks: &[FailedTaskSummary]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::process_ownership::{ProcessHandle, ProcessKind};
+    use crate::service::process_ownership::{
+        get_record, register_process, RegisteredProcessGuard,
+    };
     use std::io::Write;
 
     fn temp_dir(prefix: &str) -> PathBuf {
@@ -894,5 +898,45 @@ mod tests {
         let (result, reason) = parse_coordinator_result(&footer);
         assert!(result.is_none());
         assert!(reason.is_none());
+    }
+
+    // ── Supervisor process registration guard ─────────────────────────────────
+
+    #[test]
+    fn supervisor_guard_drop_removes_record() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let repo_root =
+            std::env::temp_dir().join(format!("macc-sup-guard-{}", nanos));
+        fs::create_dir_all(&repo_root).expect("create temp dir");
+
+        let handle = ProcessHandle {
+            kind: ProcessKind::Supervisor,
+            project_root: repo_root.clone(),
+            pid: Some(std::process::id() as i32),
+        };
+
+        register_process(&repo_root, handle.clone()).expect("register supervisor process");
+
+        let record = get_record(&repo_root, &handle)
+            .expect("load record")
+            .expect("record should exist after registration");
+        assert!(
+            record.owner.is_none(),
+            "supervisor record must have no owner on startup"
+        );
+
+        let guard = RegisteredProcessGuard::new(&repo_root, handle.clone());
+        drop(guard);
+
+        let after = get_record(&repo_root, &handle).expect("load record after drop");
+        assert!(
+            after.is_none(),
+            "supervisor record must be removed when guard is dropped"
+        );
+
+        let _ = fs::remove_dir_all(&repo_root);
     }
 }
