@@ -58,7 +58,20 @@ make_project() {
     local dir
     dir=$(mktemp -d)
     mkdir -p "$dir/.macc"
-    printf 'tools:\n  enabled: []\n' > "$dir/.macc/macc.yaml"
+    (
+        cd "$dir"
+        git init -q
+        git config user.name "MACC Test"
+        git config user.email "macc@example.com"
+    )
+    cat >"$dir/.macc/macc.yaml" <<'EOF'
+tools:
+  enabled:
+    - codex
+EOF
+    cat >"$dir/prd.json" <<'EOF'
+{"tasks":[{"id":"L6-HARNESS-001","title":"blocked harness task","description":"Keeps the coordinator alive long enough for ownership assertions without dispatching any performer.","priority":"1","state":"todo","dependencies":["L6-HARNESS-MISSING"],"tool":"codex"}]}
+EOF
     echo "$dir"
 }
 
@@ -141,6 +154,7 @@ run_scenario_1() {
     # Poll up to 10 s for the ownership store to appear.
     if ! poll_for_file "$store" 10; then
         fail "S1: ownership store not created within 10 s"
+        cleanup_processes "$proj"
         kill "$coord_pid" 2>/dev/null || true
         rm -rf "$proj"
         return
@@ -163,7 +177,8 @@ run_scenario_1() {
         fail "S1: record gained unexpected owner '$owner2' after 3 s"
     fi
 
-    # Stop coordinator.
+    # Stop the registered coordinator child, then the wrapper process.
+    cleanup_processes "$proj"
     kill "$coord_pid" 2>/dev/null || true
     wait "$coord_pid" 2>/dev/null || true
 
@@ -211,6 +226,7 @@ run_scenario_2() {
 
     if ! poll_for_file "$store" 10; then
         fail "S2: ownership store not created within 10 s"
+        cleanup_processes "$proj"
         kill "$coord_pid" 2>/dev/null || true
         rm -rf "$proj"
         return
@@ -253,6 +269,7 @@ run_scenario_2() {
         fail "S2: expected tui-2 as owner, got '$owner2'"
     fi
 
+    cleanup_processes "$proj"
     kill "$coord_pid" 2>/dev/null || true
     wait "$coord_pid" 2>/dev/null || true
     rm -rf "$proj"
@@ -283,6 +300,7 @@ run_scenario_3() {
 
     if ! poll_for_file "$store" 10; then
         fail "S3: ownership store not created within 10 s"
+        cleanup_processes "$proj"
         kill "$coord_pid" 2>/dev/null || true
         rm -rf "$proj"
         return
@@ -304,6 +322,7 @@ run_scenario_3() {
     fi
 
     # Stop coordinator cleanly.
+    cleanup_processes "$proj"
     kill "$coord_pid" 2>/dev/null || true
     wait "$coord_pid" 2>/dev/null || true
 
