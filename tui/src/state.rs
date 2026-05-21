@@ -1858,7 +1858,7 @@ impl AppState {
         let mut finished_message: Option<(UiStatusLevel, String)> = None;
         let mut post_success_action: Option<CoordinatorPauseNextAction> = None;
         if let Some(paths) = self.project_paths.as_ref() {
-            match self.engine.coordinator_poll_managed_command_state(paths) {
+            match self.engine.coordinator_managed_command_state(paths) {
                 Ok(CoordinatorManagedCommandState::Succeeded {
                     command,
                     elapsed_secs: elapsed,
