@@ -13,7 +13,9 @@ pub struct ClientContext {
 /// authoritatively gates all mutating actions for the project.
 ///
 /// Behavior:
-/// * If no project lease record exists, the gate passes (no controller present).
+/// * If no project lease record exists, the gate falls back to the target
+///   process record for backwards compatibility with older per-process stores.
+///   If neither record exists, the gate passes.
 /// * If the lease exists but has no owner, the gate passes (first-client-takes-control).
 /// * If the lease has an owner, only that owner may pass; others get
 ///   `MaccError::NotProcessOwner`.
@@ -27,8 +29,12 @@ pub fn gate_owner_action(ctx: &ClientContext, handle: &ProcessHandle) -> Result<
         pid: None,
     };
 
-    let Some(record) = process_ownership::get_record(&ctx.project_root, &project_handle)? else {
-        return Ok(());
+    let record = match process_ownership::get_record(&ctx.project_root, &project_handle)? {
+        Some(record) => record,
+        None => match process_ownership::get_record(&ctx.project_root, handle)? {
+            Some(record) => record,
+            None => return Ok(()),
+        },
     };
     let Some(owner) = record.owner else {
         return Ok(());
@@ -46,7 +52,9 @@ pub fn gate_owner_action(ctx: &ClientContext, handle: &ProcessHandle) -> Result<
 #[cfg(test)]
 mod tests {
     use super::{gate_owner_action, ClientContext};
-    use crate::process_ownership::{ClientIdentity, ClientKind, ProcessHandle, ProcessKind};
+    use crate::process_ownership::{
+        ClientIdentity, ClientKind, OwnershipRecord, OwnershipStore, ProcessHandle, ProcessKind,
+    };
     use crate::service::process_ownership::{claim_owner, register_process};
     use crate::MaccError;
     use std::fs;
@@ -62,6 +70,48 @@ mod tests {
             project_root: repo_root.clone(),
         };
         gate_owner_action(&ctx, &handle).expect("no lease means open mode");
+        cleanup(&repo_root);
+    }
+
+    #[test]
+    fn gate_falls_back_to_legacy_per_process_owner_when_project_lease_is_missing() {
+        let repo_root = temp_repo_root("legacy-per-process");
+        let handle = sample_handle(&repo_root, Some(4242));
+        let owner = sample_client("client-A");
+        let viewer_ctx = ClientContext {
+            client_id: "client-B".to_string(),
+            project_root: repo_root.clone(),
+        };
+        let owner_ctx = ClientContext {
+            client_id: owner.client_id.clone(),
+            project_root: repo_root.clone(),
+        };
+
+        OwnershipStore::load_and_modify(&repo_root, |store| {
+            store.upsert_record(OwnershipRecord {
+                process: handle.clone(),
+                owner: Some(owner.clone()),
+                viewers: Vec::new(),
+                takeover_request: None,
+                started_at: chrono::Utc::now().to_rfc3339(),
+            });
+            Ok(())
+        })
+        .expect("seed legacy per-process owner");
+
+        match gate_owner_action(&viewer_ctx, &handle) {
+            Err(MaccError::NotProcessOwner {
+                handle,
+                current_owner,
+            }) => {
+                assert_eq!(handle.kind, ProcessKind::Coordinator);
+                assert_eq!(current_owner.as_deref(), Some("client-A"));
+            }
+            other => panic!("expected NotProcessOwner, got {other:?}"),
+        }
+
+        gate_owner_action(&owner_ctx, &handle).expect("legacy owner should pass gate");
+
         cleanup(&repo_root);
     }
 
