@@ -1826,7 +1826,7 @@ fields: []
 
     #[test]
     fn engine_trait_method_count_guard() {
-        const EXPECTED_METHOD_COUNT: usize = 121;
+        const EXPECTED_METHOD_COUNT: usize = 122;
         let source = include_str!("engine.rs");
         let trait_start = source
             .find("pub trait Engine {")
