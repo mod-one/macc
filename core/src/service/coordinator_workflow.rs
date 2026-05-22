@@ -1405,17 +1405,21 @@ pub fn coordinator_sync_prd(
     // Reconcile
     let report = commit_reconciler::reconcile(&snapshot.registry, &commits);
 
-    if report.reconciled.is_empty() {
-        if let Some(log) = logger {
+    if let Some(log) = logger {
+        if !report.external_committed_ids.is_empty() {
             let _ = log.note(format!(
-                "- Sync PRD: {} commits scanned, no tasks to reconcile",
-                report.commits_scanned
+                "- Sync PRD: {} task ID(s) in commit history from prior PRD lots (persisted for cross-PRD dependency resolution): {}",
+                report.external_committed_ids.len(),
+                report.external_committed_ids.join(", ")
             ));
         }
-        return Ok(report);
     }
 
-    // Apply transitions
+    // Persistence path is the same whether or not any in-registry tasks were
+    // transitioned: `apply_reconcile_report` always merges
+    // `external_committed_ids` into `registry.external_merged_task_ids`, so
+    // dispatch on a registry whose tasks are all unmatched (the cross-PRD
+    // case) still gains the persisted dependency-satisfaction set.
     let now = now_iso_coordinator();
     if let Some(log) = logger {
         for entry in &report.reconciled {
@@ -1440,11 +1444,18 @@ pub fn coordinator_sync_prd(
     }
 
     if let Some(log) = logger {
-        let _ = log.note(format!(
-            "- Sync PRD: reconciled {} task(s) from {} commit(s)",
-            report.reconciled.len(),
-            report.commits_scanned
-        ));
+        if report.reconciled.is_empty() {
+            let _ = log.note(format!(
+                "- Sync PRD: {} commits scanned, no in-registry tasks needed reconciliation",
+                report.commits_scanned
+            ));
+        } else {
+            let _ = log.note(format!(
+                "- Sync PRD: reconciled {} task(s) from {} commit(s)",
+                report.reconciled.len(),
+                report.commits_scanned
+            ));
+        }
     }
     Ok(report)
 }
@@ -2512,6 +2523,7 @@ fn parse_select_ready_task_command(args: &[String]) -> Result<CoordinatorCommand
             }),
             throttle_registry: Default::default(),
             rate_limit_fallback_enabled: false,
+            external_merged_ids: std::collections::HashSet::new(),
         },
     })
 }

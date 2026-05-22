@@ -2,7 +2,7 @@ use crate::coordinator::{RuntimeStatus, WorkflowState};
 use crate::{MaccError, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::str::FromStr;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -11,6 +11,13 @@ pub struct TaskRegistry {
     pub tasks: Vec<Task>,
     #[serde(default)]
     pub resource_locks: BTreeMap<String, ResourceLock>,
+    /// Task IDs already delivered (committed + merged) by **prior PRD files
+    /// or earlier coordinator runs** whose tasks are not part of this
+    /// registry's `tasks` array. Populated by `sync-prd` from commit-trailer
+    /// scanning of the reference branch, and consulted by the dispatcher to
+    /// satisfy cross-PRD dependency edges that would otherwise look unmet.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub external_merged_task_ids: BTreeSet<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<String>,
     #[serde(flatten)]

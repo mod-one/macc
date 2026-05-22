@@ -2696,6 +2696,7 @@ mod tests {
             now: chrono::Utc::now().to_rfc3339(),
             throttle_registry: BTreeMap::new(),
             rate_limit_fallback_enabled: false,
+            external_merged_ids: std::collections::HashSet::new(),
         };
         let candidate = select_dispatch_candidate(&registry, &cfg).expect("candidate selected");
         assert_eq!(candidate.task.id, "T-HIGH");

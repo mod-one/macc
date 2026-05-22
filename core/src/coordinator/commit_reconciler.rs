@@ -13,7 +13,7 @@ use crate::coordinator::WorkflowState;
 use crate::git;
 use crate::{MaccError, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 
 // ---------------------------------------------------------------------------
@@ -45,6 +45,12 @@ pub struct ReconcileReport {
     pub reconciled: Vec<ReconciledTask>,
     /// Task IDs found in commits but already in a terminal state.
     pub already_done: Vec<String>,
+    /// Task IDs found in commits that are **not in the current registry** —
+    /// typically tasks delivered in earlier PRD lots. The dispatcher consults
+    /// the same git history to satisfy cross-lot dependency edges; listing
+    /// them here makes that recognition observable in sync output.
+    #[serde(default)]
+    pub external_committed_ids: Vec<String>,
     /// Number of commits scanned.
     pub commits_scanned: usize,
 }
@@ -168,6 +174,26 @@ fn build_task_state_map(registry: &TaskRegistry) -> BTreeMap<String, String> {
         .collect()
 }
 
+/// Discover every MACC task ID that appears in the commit history of `head_ref`.
+///
+/// Scans `git log <head_ref>` for commits whose message carries either the
+/// `[macc:task <id>]` trailer or a structured `<type>: <id> - <title>` subject,
+/// and returns the resulting set. Empty when the ref is unknown.
+///
+/// Use this to recognise dependencies on tasks delivered in earlier PRD lots:
+/// such tasks are not in the current registry's `tasks` array, but their
+/// commits live on the reference branch and should satisfy dependency edges.
+pub fn discover_committed_task_ids(repo_root: &Path, head_ref: &str) -> Result<HashSet<String>> {
+    let commits = read_commit_range(repo_root, None, head_ref)?;
+    let mut ids = HashSet::new();
+    for commit in &commits {
+        if let Some(task_id) = commit_message::parse(&commit.full_message).task_id {
+            ids.insert(task_id);
+        }
+    }
+    Ok(ids)
+}
+
 /// Extract all task IDs found in a list of commits.
 ///
 /// Returns a map of task_id -> (first matching commit sha, subject).
@@ -198,7 +224,12 @@ pub fn reconcile(registry: &TaskRegistry, commits: &[GitCommitInfo]) -> Reconcil
 
     for (task_id, (sha, subject)) in &commit_tasks {
         let Some(current_state) = task_states.get(task_id) else {
-            // Task ID in commit but not in registry — ignore.
+            // Task ID is in commit history but not in the current registry.
+            // This is the cross-lot case: a prior PRD lot delivered the task
+            // and merged it onto the reference branch. Record it so the
+            // dispatcher's external dependency-resolution path is visible to
+            // operators inspecting sync output.
+            report.external_committed_ids.push(task_id.clone());
             continue;
         };
         if is_terminal_state(current_state) {
@@ -222,7 +253,16 @@ pub fn reconcile(registry: &TaskRegistry, commits: &[GitCommitInfo]) -> Reconcil
 /// Apply the reconciliation report to a mutable task registry.
 ///
 /// Transitions reconciled tasks to `merged` and clears their assignment.
+/// Also persists `external_committed_ids` into
+/// `registry.external_merged_task_ids` so the dispatcher can satisfy
+/// cross-PRD dependency edges on later cycles without re-scanning git.
 pub fn apply_reconcile_report(registry: &mut TaskRegistry, report: &ReconcileReport, now: &str) {
+    // Merge (do not replace) the persisted external set. Multiple sync runs
+    // across the lifetime of a project accumulate prior-lot deliveries.
+    registry
+        .external_merged_task_ids
+        .extend(report.external_committed_ids.iter().cloned());
+
     let reconciled_ids: BTreeSet<&str> = report
         .reconciled
         .iter()
@@ -380,6 +420,7 @@ pub fn sync_unmerged_branches(
                     })
                     .collect(),
                 already_done: Vec::new(),
+                external_committed_ids: Vec::new(),
                 commits_scanned: commits.len(),
             };
             let now = crate::coordinator::helpers::now_iso_coordinator();
@@ -538,7 +579,47 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_unknown_task_id_ignored() {
+    fn apply_report_persists_external_committed_ids_into_registry() {
+        // sync-prd must persist cross-PRD task IDs into the registry so a
+        // later dispatch (which only loads the registry, not the git log
+        // again) recognises them as dependency satisfiers.
+        let mut registry = make_registry(vec![make_task("CURRENT", "todo")]);
+        assert!(registry.external_merged_task_ids.is_empty());
+        let report = ReconcileReport {
+            reconciled: vec![],
+            already_done: vec![],
+            external_committed_ids: vec!["PRIOR-LOT-001".into(), "PRIOR-LOT-002".into()],
+            commits_scanned: 2,
+        };
+        apply_reconcile_report(&mut registry, &report, "2026-05-22T13:00:00Z");
+        assert!(registry.external_merged_task_ids.contains("PRIOR-LOT-001"));
+        assert!(registry.external_merged_task_ids.contains("PRIOR-LOT-002"));
+    }
+
+    #[test]
+    fn apply_report_accumulates_external_ids_across_runs() {
+        // Each sync run extends the set rather than replacing it — older
+        // lot deliveries remain recognised after a subsequent sync.
+        let mut registry = make_registry(vec![make_task("CURRENT", "todo")]);
+        registry
+            .external_merged_task_ids
+            .insert("OLDER-LOT-001".into());
+        let report = ReconcileReport {
+            reconciled: vec![],
+            already_done: vec![],
+            external_committed_ids: vec!["NEWER-LOT-001".into()],
+            commits_scanned: 1,
+        };
+        apply_reconcile_report(&mut registry, &report, "2026-05-22T13:01:00Z");
+        assert!(registry.external_merged_task_ids.contains("OLDER-LOT-001"));
+        assert!(registry.external_merged_task_ids.contains("NEWER-LOT-001"));
+    }
+
+    #[test]
+    fn reconcile_unknown_task_id_recorded_as_external() {
+        // Task IDs found in commit history that are not in the current
+        // registry are now captured as `external_committed_ids` so the
+        // dispatcher can recognise cross-lot dependencies as satisfied.
         let registry = make_registry(vec![make_task("WEB-001", "todo")]);
         let commits = vec![make_commit(
             "aaa111",
@@ -547,6 +628,7 @@ mod tests {
         let report = reconcile(&registry, &commits);
         assert_eq!(report.reconciled.len(), 0);
         assert_eq!(report.already_done.len(), 0);
+        assert_eq!(report.external_committed_ids, vec!["UNKNOWN-999"]);
     }
 
     #[test]
@@ -582,6 +664,7 @@ mod tests {
                 matched_commit_subject: "feat: T-1".into(),
             }],
             already_done: vec![],
+            external_committed_ids: vec![],
             commits_scanned: 1,
         };
         apply_reconcile_report(&mut registry, &report, "2026-03-17T12:00:00Z");

@@ -77,13 +77,47 @@ pub(super) struct DispatchPipelineContext<'a> {
     pub(super) cfg: &'a CoordinatorConfigResolved,
 }
 
+/// Return the `external_merged_task_ids` set persisted on the registry by
+/// `sync-prd`, or `None` if the field is missing/empty so the caller can
+/// fall back to a live git scan.
+fn load_persisted_external_merged_ids(
+    registry: &serde_json::Value,
+) -> Option<std::collections::HashSet<String>> {
+    let arr = registry.get("external_merged_task_ids")?.as_array()?;
+    if arr.is_empty() {
+        return None;
+    }
+    Some(
+        arr.iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect(),
+    )
+}
+
 fn build_task_selector_config(
+    repo_root: &Path,
+    registry: &serde_json::Value,
     canonical: &crate::config::CanonicalConfig,
     env_cfg: &CoordinatorEnvConfig,
     cfg: &CoordinatorConfigResolved,
     coordinator: Option<&crate::config::CoordinatorConfig>,
     state: &CoordinatorRunState,
 ) -> crate::coordinator::task_selector::TaskSelectorConfig {
+    let reference_branch = env_cfg
+        .reference_branch
+        .clone()
+        .unwrap_or_else(|| cfg.reference_branch.clone());
+    // Cross-PRD dependency satisfaction: prefer the persisted set written by
+    // `macc coordinator sync(-prd)`. Falls back to a live git scan when the
+    // registry hasn't been synced yet, so a fresh project still dispatches.
+    let external_merged_ids =
+        load_persisted_external_merged_ids(registry).unwrap_or_else(|| {
+            crate::coordinator::commit_reconciler::discover_committed_task_ids(
+                repo_root,
+                &reference_branch,
+            )
+            .unwrap_or_default()
+        });
     crate::coordinator::task_selector::TaskSelectorConfig {
         enabled_tools: canonical.tools.enabled.clone(),
         tool_priority: env_cfg
@@ -108,13 +142,11 @@ fn build_task_selector_config(
             .unwrap_or_else(|| cfg.tool_specializations.clone().into_iter().collect()),
         max_parallel: state.effective_max_parallel,
         default_tool: canonical.tools.enabled.first().cloned().unwrap_or_default(),
-        default_base_branch: env_cfg
-            .reference_branch
-            .clone()
-            .unwrap_or_else(|| cfg.reference_branch.clone()),
+        default_base_branch: reference_branch,
         now: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         throttle_registry: state.throttle_registry.clone(),
         rate_limit_fallback_enabled: resolve_rate_limit_fallback_enabled(env_cfg, coordinator),
+        external_merged_ids,
     }
 }
 
@@ -456,7 +488,15 @@ pub(super) async fn run_dispatch_pipeline(
             repo_root,
             &BTreeMap::new(),
         )?;
-        let config = build_task_selector_config(canonical, env_cfg, cfg, coordinator, state);
+        let config = build_task_selector_config(
+            repo_root,
+            &registry,
+            canonical,
+            env_cfg,
+            cfg,
+            coordinator,
+            state,
+        );
         let Some(candidate) = select_dispatch_candidate(&registry, &config) else {
             break;
         };

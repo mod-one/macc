@@ -23,6 +23,11 @@ pub struct TaskSelectorConfig {
     /// When `true`, `pick_tool()` will skip throttled tools and select the
     /// next available tool in priority order (fallback routing).
     pub rate_limit_fallback_enabled: bool,
+    /// Task IDs known to be merged from outside the current registry — typically
+    /// prior PRD lots whose commits live on the reference branch. Used to
+    /// satisfy cross-lot dependency edges that would otherwise look "unmet"
+    /// because the dependency target isn't part of this registry's `tasks`.
+    pub external_merged_ids: HashSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,7 +95,7 @@ pub fn dispatch_block_reason_typed(
         if task.id.is_empty() || task.priority_rank() != 0 {
             continue;
         }
-        if !dependencies_ready(task, &merged_ids) {
+        if !dependencies_ready(task, &merged_ids, &config.external_merged_ids) {
             continue;
         }
         if !resources_available(task, resource_locks) {
@@ -161,7 +166,7 @@ pub fn select_next_ready_task_typed(
         if task.id.is_empty() {
             continue;
         }
-        if !dependencies_ready(task, &merged_ids) {
+        if !dependencies_ready(task, &merged_ids, &config.external_merged_ids) {
             continue;
         }
         if !resources_available(task, resource_locks) {
@@ -196,10 +201,14 @@ pub fn select_next_ready_task_typed(
         .map(|(_, _, _, selected)| selected)
 }
 
-fn dependencies_ready(task: &Task, merged_ids: &HashSet<String>) -> bool {
+fn dependencies_ready(
+    task: &Task,
+    merged_ids: &HashSet<String>,
+    external_merged_ids: &HashSet<String>,
+) -> bool {
     task.dependency_ids()
         .iter()
-        .all(|dependency| merged_ids.contains(dependency))
+        .all(|dependency| merged_ids.contains(dependency) || external_merged_ids.contains(dependency))
 }
 
 fn resources_available(
@@ -387,6 +396,49 @@ mod tests {
         };
         let selected = select_next_ready_task(&registry, &cfg).expect("selected task");
         assert_eq!(selected.id, "A");
+    }
+
+    #[test]
+    fn external_merged_ids_satisfy_cross_lot_dependency() {
+        // The dep "PRIOR-LOT-001" is not in the current registry (it was
+        // delivered by an earlier PRD lot and lives only as a commit on the
+        // reference branch). With external_merged_ids populated from the
+        // commit-trailer scan, the task must still dispatch.
+        let registry = json!({
+          "tasks": [
+            {"id":"CURRENT","title":"current","state":"todo","priority":"1","dependencies":["PRIOR-LOT-001"],"exclusive_resources":[]}
+          ],
+          "resource_locks": {}
+        });
+        let cfg = TaskSelectorConfig {
+            default_tool: "codex".into(),
+            default_base_branch: "master".into(),
+            max_parallel: 3,
+            external_merged_ids: ["PRIOR-LOT-001".to_string()].into_iter().collect(),
+            ..TaskSelectorConfig::default()
+        };
+        let selected = select_next_ready_task(&registry, &cfg).expect("selected task");
+        assert_eq!(selected.id, "CURRENT");
+    }
+
+    #[test]
+    fn external_merged_ids_empty_still_blocks_unmet_dependency() {
+        // Without external_merged_ids, a dep absent from the registry must
+        // continue to block dispatch — the new feature is additive, not a
+        // loosening of dependency semantics.
+        let registry = json!({
+          "tasks": [
+            {"id":"CURRENT","title":"current","state":"todo","priority":"1","dependencies":["PRIOR-LOT-001"],"exclusive_resources":[]}
+          ],
+          "resource_locks": {}
+        });
+        let cfg = TaskSelectorConfig {
+            default_tool: "codex".into(),
+            default_base_branch: "master".into(),
+            max_parallel: 3,
+            ..TaskSelectorConfig::default()
+        };
+        assert!(select_next_ready_task(&registry, &cfg).is_none());
     }
 
     #[test]
