@@ -110,14 +110,13 @@ fn build_task_selector_config(
     // Cross-PRD dependency satisfaction: prefer the persisted set written by
     // `macc coordinator sync(-prd)`. Falls back to a live git scan when the
     // registry hasn't been synced yet, so a fresh project still dispatches.
-    let external_merged_ids =
-        load_persisted_external_merged_ids(registry).unwrap_or_else(|| {
-            crate::coordinator::commit_reconciler::discover_committed_task_ids(
-                repo_root,
-                &reference_branch,
-            )
-            .unwrap_or_default()
-        });
+    let external_merged_ids = load_persisted_external_merged_ids(registry).unwrap_or_else(|| {
+        crate::coordinator::commit_reconciler::discover_committed_task_ids(
+            repo_root,
+            &reference_branch,
+        )
+        .unwrap_or_default()
+    });
     crate::coordinator::task_selector::TaskSelectorConfig {
         enabled_tools: canonical.tools.enabled.clone(),
         tool_priority: env_cfg

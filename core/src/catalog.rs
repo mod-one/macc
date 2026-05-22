@@ -1,6 +1,6 @@
 use crate::{write_if_changed, MaccError, ProjectPaths, Result as MaccResult};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -34,12 +34,21 @@ impl Source {
             SourceKind::Http => "http",
             SourceKind::Local => "local",
         };
+        let normalized_subpaths = self
+            .subpaths
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(",");
         let input = format!(
-            "{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}",
             kind_str,
             self.url,
             self.reference,
-            self.checksum.as_deref().unwrap_or("")
+            self.checksum.as_deref().unwrap_or(""),
+            normalized_subpaths
         );
         let mut hasher = Sha256::new();
         hasher.update(input.as_bytes());
@@ -791,7 +800,7 @@ mod tests {
     }
 
     #[test]
-    fn test_source_cache_key_with_subpaths_ignored() {
+    fn test_source_cache_key_with_subpaths_normalized() {
         let source1 = Source {
             kind: SourceKind::Git,
             url: "https://github.com/test/test.git".into(),
@@ -811,15 +820,15 @@ mod tests {
         };
         assert_eq!(key1, source2.cache_key());
 
-        // Different subpaths should NOT affect the key
+        // Different subpaths should affect the key
         let mut source3 = source1.clone();
         source3.subpaths = vec!["p1".into()];
-        assert_eq!(key1, source3.cache_key());
+        assert_ne!(key1, source3.cache_key());
 
-        // Empty vs non-empty subpaths should NOT affect the key
+        // Empty vs non-empty subpaths should affect the key
         let mut source4 = source1.clone();
         source4.subpaths = vec![];
-        assert_eq!(key1, source4.cache_key());
+        assert_ne!(key1, source4.cache_key());
     }
 
     #[test]

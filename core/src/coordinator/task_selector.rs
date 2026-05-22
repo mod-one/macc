@@ -206,9 +206,9 @@ fn dependencies_ready(
     merged_ids: &HashSet<String>,
     external_merged_ids: &HashSet<String>,
 ) -> bool {
-    task.dependency_ids()
-        .iter()
-        .all(|dependency| merged_ids.contains(dependency) || external_merged_ids.contains(dependency))
+    task.dependency_ids().iter().all(|dependency| {
+        merged_ids.contains(dependency) || external_merged_ids.contains(dependency)
+    })
 }
 
 fn resources_available(
