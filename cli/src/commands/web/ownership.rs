@@ -58,7 +58,11 @@ impl From<OwnershipRecord> for ApiOwnershipRecord {
             pid: record.process.pid,
             started_at: record.started_at,
             owner: record.owner.map(ApiClientIdentity::from),
-            viewers: record.viewers.into_iter().map(ApiClientIdentity::from).collect(),
+            viewers: record
+                .viewers
+                .into_iter()
+                .map(ApiClientIdentity::from)
+                .collect(),
             takeover_request: record.takeover_request.map(ApiTakeoverRequest::from),
         }
     }
@@ -142,7 +146,9 @@ pub async fn list_processes_handler(
     State(state): State<WebState>,
 ) -> Result<Json<Vec<ApiOwnershipRecord>>, ApiError> {
     let records = state.engine.process_list_running(&state.paths.root)?;
-    Ok(Json(records.into_iter().map(ApiOwnershipRecord::from).collect()))
+    Ok(Json(
+        records.into_iter().map(ApiOwnershipRecord::from).collect(),
+    ))
 }
 
 pub async fn get_process_ownership_handler(
@@ -155,10 +161,7 @@ pub async fn get_process_ownership_handler(
         .engine
         .process_ownership_status(&state.paths.root, &handle)?
         .ok_or_else(|| {
-            ApiError::not_found(
-                format!("No process record found for kind '{kind}'"),
-                None,
-            )
+            ApiError::not_found(format!("No process record found for kind '{kind}'"), None)
         })?;
     Ok(Json(ApiOwnershipRecord::from(record)))
 }
