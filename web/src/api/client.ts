@@ -78,6 +78,18 @@ function getSessionStorage(): Storage | null {
   return window.sessionStorage;
 }
 
+function getLocalStorage(): Storage | null {
+  if (
+    typeof window === 'undefined' ||
+    !window.localStorage ||
+    typeof window.localStorage.getItem !== 'function' ||
+    typeof window.localStorage.setItem !== 'function'
+  ) {
+    return null;
+  }
+  return window.localStorage;
+}
+
 function cleanupProjectViewerOnUnload(clientId: string): void {
   void fetch(buildUrl(VIEWER_CLEANUP_PATH), {
     method: 'DELETE',
@@ -145,13 +157,11 @@ export function getWebClientId(): string {
 }
 
 export function setWebOwnershipMode(mode: 'owner' | 'viewer' | 'unknown'): void {
-  if (typeof window === 'undefined') return;
-  window.localStorage.setItem(WEB_OWNERSHIP_MODE_STORAGE_KEY, mode);
+  getLocalStorage()?.setItem(WEB_OWNERSHIP_MODE_STORAGE_KEY, mode);
 }
 
 function getWebOwnershipMode(): string | null {
-  if (typeof window === 'undefined') return null;
-  return window.localStorage.getItem(WEB_OWNERSHIP_MODE_STORAGE_KEY);
+  return getLocalStorage()?.getItem(WEB_OWNERSHIP_MODE_STORAGE_KEY) ?? null;
 }
 
 function fallbackErrorEnvelope(message: string, cause?: string): ApiErrorEnvelope {

@@ -72,8 +72,8 @@ const Layout: React.FC = () => {
   const [projectRoot, setProjectRoot] = useState<string | null>(null);
   const [ownership, setOwnership] = useState<ApiOwnershipRecord | null>(null);
   const [ownershipMessage, setOwnershipMessage] = useState<string | null>(null);
+  const [webClientId] = useState(() => getWebClientId());
   const mainRef = useRef<HTMLElement>(null);
-  const webClientId = useRef(getWebClientId());
   const location = useLocation();
   const contextualHelpSection = getHelpSectionForRoute(location.pathname);
   const contextualHelpHref = `/help?section=${encodeURIComponent(contextualHelpSection)}`;
@@ -108,7 +108,7 @@ const Layout: React.FC = () => {
 
   useEffect(() => {
     let disposed = false;
-    const clientId = webClientId.current;
+    const clientId = webClientId;
     const refreshOwnership = async () => {
       try {
         await claimProjectOwnership({ clientId });
@@ -137,12 +137,12 @@ const Layout: React.FC = () => {
       window.clearInterval(refreshId);
       window.clearInterval(heartbeatId);
     };
-  }, []);
+  }, [webClientId]);
 
-  const isOwner = ownership?.owner?.client_id === webClientId.current;
+  const isOwner = ownership?.owner?.client_id === webClientId;
   const pendingTakeover = ownership?.takeover_request ?? null;
   const requestTakeover = () => {
-    requestProjectTakeover({ clientId: webClientId.current })
+    requestProjectTakeover({ clientId: webClientId })
       .then(() => setOwnershipMessage('Takeover request sent.'))
       .catch((error) =>
         setOwnershipMessage(error instanceof Error ? error.message : 'Takeover request failed.'),
@@ -150,7 +150,7 @@ const Layout: React.FC = () => {
   };
   const respondTakeover = (accept: boolean) => {
     if (!pendingTakeover) return;
-    respondProjectTakeover(pendingTakeover.request_id, accept, { clientId: webClientId.current })
+    respondProjectTakeover(pendingTakeover.request_id, accept, { clientId: webClientId })
       .then(() => setOwnershipMessage(accept ? 'Takeover accepted.' : 'Takeover rejected.'))
       .catch((error) =>
         setOwnershipMessage(error instanceof Error ? error.message : 'Takeover response failed.'),

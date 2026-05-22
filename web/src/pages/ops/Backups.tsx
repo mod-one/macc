@@ -22,6 +22,10 @@ import {
 import { Icons } from '../../components/NavIcons';
 import { cn } from '../../components/styles';
 
+function errorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error ? error.message : fallback;
+}
+
 const Backups: React.FC = () => {
   const [backups, setBackups] = useState<ApiBackup[]>([]);
   const [loading, setLoading] = useState(true);
@@ -47,8 +51,8 @@ const Backups: React.FC = () => {
       // Sort by timestamp descending
       const sorted = [...data].sort((a, b) => b.timestamp.localeCompare(a.timestamp));
       setBackups(sorted);
-    } catch (err: any) {
-      setError(err.message || 'Failed to load backups');
+    } catch (err) {
+      setError(errorMessage(err, 'Failed to load backups'));
     } finally {
       setLoading(false);
     }
@@ -73,10 +77,10 @@ const Backups: React.FC = () => {
       setRestoreTarget(null);
       // Refresh backups as restore created a new one
       fetchBackups();
-    } catch (err: any) {
+    } catch (err) {
       setToastMessage({
         title: 'Restore failed',
-        desc: err.message || 'An unexpected error occurred during restore.',
+        desc: errorMessage(err, 'An unexpected error occurred during restore.'),
         variant: 'error'
       });
       setToastOpen(true);

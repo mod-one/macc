@@ -44,7 +44,8 @@ pub(super) async fn events_handler(
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned)
     });
-    let viewer_guards = register_web_viewers(&state, web_client_id(&query, &headers))?;
+    let viewer_guards =
+        register_web_viewers(&state, web_client_id(&query, &headers)).map_err(|err| *err)?;
 
     Ok(Sse::new(coordinator_event_stream(
         state,
@@ -112,11 +113,14 @@ fn web_client_id(query: &EventsQuery, headers: &HeaderMap) -> Option<String> {
 fn register_web_viewers(
     state: &WebState,
     client_id: Option<String>,
-) -> Result<Vec<macc_core::service::process_ownership::ProcessViewerGuard>, ApiError> {
+) -> Result<Vec<macc_core::service::process_ownership::ProcessViewerGuard>, Box<ApiError>> {
     let Some(client_id) = client_id else {
         return Ok(Vec::new());
     };
-    let records = state.engine.process_list_running(&state.paths.root)?;
+    let records = state
+        .engine
+        .process_list_running(&state.paths.root)
+        .map_err(|err| Box::new(ApiError::from(err)))?;
     let mut viewer_guards = Vec::with_capacity(records.len());
 
     for record in records {
@@ -134,7 +138,8 @@ fn register_web_viewers(
         };
         let guard = state
             .engine
-            .process_register_viewer(&state.paths.root, handle, identity)?;
+            .process_register_viewer(&state.paths.root, handle, identity)
+            .map_err(|err| Box::new(ApiError::from(err)))?;
         viewer_guards.push(guard);
     }
 

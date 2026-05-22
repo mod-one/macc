@@ -92,12 +92,6 @@ const GitGraphView: React.FC<GitGraphViewProps> = ({ mode }) => {
     };
   }, [refreshLatest]);
 
-  useEffect(() => {
-    if (selectedSha && !commits.some((commit) => commit.sha === selectedSha)) {
-      setSelectedSha(null);
-    }
-  }, [commits, selectedSha]);
-
   const entries = useMemo(
     () => commits.map((commit) => toGitLogEntry(commit, head || 'detached')),
     [commits, head],

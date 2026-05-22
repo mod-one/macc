@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { requestProjectTakeover } from '../api/client';
 import { Button } from './Button';
 

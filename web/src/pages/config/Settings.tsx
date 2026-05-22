@@ -120,18 +120,14 @@ function JsonObjectField({
   placeholder?: string;
   helpText?: string;
 }) {
-  const [rawText, setRawText] = useState(() => JSON.stringify(value, null, 2));
-  const [parseError, setParseError] = useState<string | null>(null);
-  const previousValueRef = useRef(value);
-
-  useEffect(() => {
-    if (previousValueRef.current === value) {
-      return;
-    }
-    previousValueRef.current = value;
-    setRawText(JSON.stringify(value, null, 2));
-    setParseError(null);
-  }, [value]);
+  const [editor, setEditor] = useState(() => ({
+    source: value,
+    rawText: JSON.stringify(value, null, 2),
+    parseError: null as string | null,
+  }));
+  const hasExternalValue = editor.source !== value;
+  const rawText = hasExternalValue ? JSON.stringify(value, null, 2) : editor.rawText;
+  const parseError = hasExternalValue ? null : editor.parseError;
 
   return (
     <label className="flex flex-col gap-1.5">
@@ -146,10 +142,9 @@ function JsonObjectField({
         spellCheck={false}
         onChange={(e) => {
           const nextText = e.target.value;
-          setRawText(nextText);
 
           if (nextText.trim() === '') {
-            setParseError(null);
+            setEditor({ source: value, rawText: nextText, parseError: null });
             onChange({});
             return;
           }
@@ -157,13 +152,21 @@ function JsonObjectField({
           try {
             const parsed = JSON.parse(nextText) as unknown;
             if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-              setParseError('Value must be a JSON object.');
+              setEditor({
+                source: value,
+                rawText: nextText,
+                parseError: 'Value must be a JSON object.',
+              });
               return;
             }
-            setParseError(null);
+            setEditor({ source: value, rawText: nextText, parseError: null });
             onChange(parsed as Record<string, unknown>);
           } catch (error) {
-            setParseError(error instanceof Error ? error.message : 'Invalid JSON');
+            setEditor({
+              source: value,
+              rawText: nextText,
+              parseError: error instanceof Error ? error.message : 'Invalid JSON',
+            });
           }
         }}
       />

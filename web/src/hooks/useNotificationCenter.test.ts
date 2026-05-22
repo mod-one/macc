@@ -3,10 +3,37 @@ import { renderHook } from '@testing-library/react';
 import { useNotificationCenter } from './useNotificationCenter';
 import { useNotificationStore } from '../stores/notificationStore';
 import { useEventSource } from './useEventSource';
+import type { ApiEventPayload, ApiEventStreamMessage } from '../api/models';
 
 vi.mock('./useEventSource', () => ({
   useEventSource: vi.fn(() => ({ events: [] })),
 }));
+
+const mockUseEventSource = vi.mocked(useEventSource);
+
+function event(payload: Partial<ApiEventPayload> & Pick<ApiEventPayload, 'seq' | 'type' | 'status'>): ApiEventStreamMessage {
+  return {
+    stream: 'coordinator_event',
+    eventId: `event-${payload.seq}`,
+    receivedAt: '2026-05-22T00:00:00Z',
+    payload: {
+      schema_version: '1',
+      event_id: `event-${payload.seq}`,
+      ts: '2026-05-22T00:00:00Z',
+      source: 'coordinator',
+      ...payload,
+    },
+  };
+}
+
+function mockEvents(events: ApiEventStreamMessage[]): void {
+  mockUseEventSource.mockReturnValue({
+    connectionState: 'open',
+    events,
+    replayGapDetected: false,
+    reconnectAttempt: 0,
+  });
+}
 
 describe('useNotificationCenter', () => {
   beforeEach(() => {
@@ -16,22 +43,18 @@ describe('useNotificationCenter', () => {
       unreadCount: 0,
       isOpen: false,
     });
-    (useEventSource as any).mockReturnValue({ events: [] });
+    mockEvents([]);
   });
 
   it('maps "failed" event to error notification', () => {
-    (useEventSource as any).mockReturnValue({
-      events: [
-        {
-          payload: {
-            seq: 1,
-            type: 'failed',
-            msg: 'Task failed',
-            status: 'error',
-          },
-        },
-      ],
-    });
+    mockEvents([
+      event({
+        seq: 1,
+        type: 'failed',
+        msg: 'Task failed',
+        status: 'error',
+      }),
+    ]);
 
     renderHook(() => useNotificationCenter());
 
@@ -45,18 +68,14 @@ describe('useNotificationCenter', () => {
   });
 
   it('maps "commit_created" event to success notification', () => {
-    (useEventSource as any).mockReturnValue({
-      events: [
-        {
-          payload: {
-            seq: 2,
-            type: 'commit_created',
-            task_id: 'TASK-1',
-            status: 'success',
-          },
-        },
-      ],
-    });
+    mockEvents([
+      event({
+        seq: 2,
+        type: 'commit_created',
+        task_id: 'TASK-1',
+        status: 'success',
+      }),
+    ]);
 
     renderHook(() => useNotificationCenter());
 
@@ -70,18 +89,14 @@ describe('useNotificationCenter', () => {
   });
 
   it('maps coordinator "paused" status to warning notification', () => {
-    (useEventSource as any).mockReturnValue({
-      events: [
-        {
-          payload: {
-            seq: 3,
-            status: 'paused',
-            msg: 'Manual pause',
-            type: 'coordinator_status',
-          },
-        },
-      ],
-    });
+    mockEvents([
+      event({
+        seq: 3,
+        status: 'paused',
+        msg: 'Manual pause',
+        type: 'coordinator_status',
+      }),
+    ]);
 
     renderHook(() => useNotificationCenter());
 
@@ -98,43 +113,33 @@ describe('useNotificationCenter', () => {
     const { rerender } = renderHook(() => useNotificationCenter());
 
     // First event
-    (useEventSource as any).mockReturnValue({
-      events: [
-        {
-          payload: {
-            seq: 1,
-            type: 'failed',
-            msg: 'Error 1',
-            status: 'error',
-          },
-        },
-      ],
-    });
+    mockEvents([
+      event({
+        seq: 1,
+        type: 'failed',
+        msg: 'Error 1',
+        status: 'error',
+      }),
+    ]);
     rerender();
 
     expect(useNotificationStore.getState().notifications).toHaveLength(1);
 
     // Second event (including the first one)
-    (useEventSource as any).mockReturnValue({
-      events: [
-        {
-          payload: {
-            seq: 2,
-            type: 'failed',
-            msg: 'Error 2',
-            status: 'error',
-          },
-        },
-        {
-          payload: {
-            seq: 1,
-            type: 'failed',
-            msg: 'Error 1',
-            status: 'error',
-          },
-        },
-      ],
-    });
+    mockEvents([
+      event({
+        seq: 2,
+        type: 'failed',
+        msg: 'Error 2',
+        status: 'error',
+      }),
+      event({
+        seq: 1,
+        type: 'failed',
+        msg: 'Error 1',
+        status: 'error',
+      }),
+    ]);
     rerender();
 
     expect(useNotificationStore.getState().notifications).toHaveLength(2);
