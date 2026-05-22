@@ -25,3 +25,7 @@ export { WorktreeCard } from './WorktreeCard';
 export type { WorktreeCardProps } from './WorktreeCard';
 export { NotificationsDrawer } from './NotificationsDrawer';
 export { WorktreeWizard } from './WorktreeWizard';
+export { OwnershipBadge } from './OwnershipBadge';
+export type { OwnershipBadgeProps } from './OwnershipBadge';
+export { RequestTakeoverButton } from './RequestTakeoverButton';
+export { TakeoverNotificationToast } from './TakeoverNotificationToast';

@@ -13,8 +13,11 @@ import type {
 import { Button } from '../components/Button';
 import { KpiCard } from '../components/KpiCard';
 import { StatusBadge, type StatusTone } from '../components/StatusBadge';
+import { OwnershipBadge } from '../components/OwnershipBadge';
+import { TakeoverNotificationToast } from '../components/TakeoverNotificationToast';
 import { useEventSource } from '../hooks/useEventSource';
 import { useCoordinatorStore } from '../store';
+import { useIsOwner } from '../stores/ownershipStore';
 
 type NoticeTone = 'success' | 'error';
 
@@ -63,6 +66,18 @@ function formatApiError(error: unknown): string {
     return error.message;
   }
   return 'Unexpected coordinator error.';
+}
+
+function isOwnershipError(error: unknown): boolean {
+  if (!(error instanceof ApiClientError)) return false;
+  return error.status === 403;
+}
+
+function ownershipErrorMessage(error: unknown): string {
+  if (error instanceof ApiClientError && error.status === 403) {
+    return 'Viewer mode — request takeover to take control, then retry.';
+  }
+  return formatApiError(error);
 }
 
 function formatResultSummary(action: ApiCoordinatorAction, result: ApiCoordinatorCommandResult): string {
@@ -291,6 +306,7 @@ const Dashboard: React.FC = () => {
   const pendingAction = useCoordinatorStore((state) => state.pendingAction);
   const loadStatus = useCoordinatorStore((state) => state.loadStatus);
   const runCoordinatorAction = useCoordinatorStore((state) => state.runAction);
+  const isOwner = useIsOwner();
 
   const { events, connectionState } = useEventSource('/events', { maxEvents: 30 });
 
@@ -356,7 +372,11 @@ const Dashboard: React.FC = () => {
         showNotice('success', formatResultSummary(action, result));
         await refreshDashboard();
       } catch (error) {
-        showNotice('error', formatApiError(error));
+        if (isOwnershipError(error)) {
+          showNotice('error', ownershipErrorMessage(error));
+        } else {
+          showNotice('error', formatApiError(error));
+        }
       }
     },
     [refreshDashboard, runCoordinatorAction, showNotice],
@@ -410,6 +430,7 @@ const Dashboard: React.FC = () => {
 
   return (
     <section className="relative mx-auto flex w-full max-w-7xl flex-col gap-6 text-[var(--text-primary)]">
+      <TakeoverNotificationToast />
       {notice ? (
         <div className="pointer-events-none fixed right-4 top-4 z-20 w-[min(30rem,calc(100vw-2rem))]">
           <div className={`rounded-2xl border px-4 py-3 shadow-lg ${noticeClassName(notice.tone)}`}>
@@ -433,6 +454,7 @@ const Dashboard: React.FC = () => {
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-3">
+            <OwnershipBadge />
             <StatusBadge status={currentStatusLabel} tone={currentStatusTone} />
             <StatusBadge
               status={connectionState === 'open' ? 'SSE live' : connectionState}
@@ -519,6 +541,10 @@ const Dashboard: React.FC = () => {
           <div className="mt-5 space-y-3">
             {ACTIONS.map((config) => {
               const isPending = pendingAction === config.action;
+              const viewerDisabled = !isOwner;
+              const viewerTitle = viewerDisabled
+                ? 'Viewer mode — click Request Takeover to take control'
+                : undefined;
               return (
                 <article
                   className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-4"
@@ -528,7 +554,8 @@ const Dashboard: React.FC = () => {
                   <p className="mt-1 text-sm text-[var(--text-secondary)]">{config.description}</p>
                   <Button
                     className={`mt-3 w-full ${actionClassName(config.emphasis)}`}
-                    disabled={isBusy || isLoadingStatus || isLoadingAux}
+                    disabled={isBusy || isLoadingStatus || isLoadingAux || viewerDisabled}
+                    title={viewerTitle}
                     onClick={() => {
                       void handleAction(config.action);
                     }}
