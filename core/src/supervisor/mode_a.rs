@@ -47,9 +47,8 @@ fn default_registry_path() -> PathBuf {
 }
 
 fn default_ai_tool() -> String {
-    "vibe".to_string()
+    "".to_string()
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WatchdogConfig {
@@ -376,7 +375,8 @@ pub struct SupervisorWatchdog<P> {
     fsm_state: SupervisorFsmState,
     crash_check_count: u32,
     recovery: ModeCRecovery,
-    mode_b_supervisor: crate::supervisor::mode_b::ModeBSupervisor<crate::supervisor::mode_b::CliToolDispatcher>,
+    mode_b_supervisor:
+        crate::supervisor::mode_b::ModeBSupervisor<crate::supervisor::mode_b::CliToolDispatcher>,
 }
 
 impl<P> SupervisorWatchdog<P>
@@ -392,14 +392,13 @@ where
         });
         let mode_b_config = crate::supervisor::mode_b::ModeBConfig::default();
         let dispatcher = crate::supervisor::mode_b::CliToolDispatcher::new(config.ai_tool.clone());
-        let repo_root = config.pid_file_path.parent()
+        let repo_root = config
+            .pid_file_path
+            .parent()
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
-        let mode_b_supervisor = crate::supervisor::mode_b::ModeBSupervisor::new(
-            repo_root,
-            mode_b_config,
-            dispatcher,
-        );
+        let mode_b_supervisor =
+            crate::supervisor::mode_b::ModeBSupervisor::new(repo_root, mode_b_config, dispatcher);
 
         Self {
             config,
@@ -510,7 +509,9 @@ where
                 });
             }
             HealthCheckResult::Crashed { exit_code } => {
-                if self.fsm_state == SupervisorFsmState::Healthy || self.fsm_state == SupervisorFsmState::Starting {
+                if self.fsm_state == SupervisorFsmState::Healthy
+                    || self.fsm_state == SupervisorFsmState::Starting
+                {
                     self.crash_check_count = self.crash_check_count.saturating_add(1);
                     let debounce = self.config.crash_debounce_checks.max(1);
                     if self.crash_check_count < debounce {
@@ -550,7 +551,10 @@ where
             .unwrap_or(false))
     }
 
-    async fn trigger_mode_c_recovery(&mut self, exit_code: Option<i32>) -> Result<(), WatchdogError> {
+    async fn trigger_mode_c_recovery(
+        &mut self,
+        exit_code: Option<i32>,
+    ) -> Result<(), WatchdogError> {
         self.recovery
             .run_recovery(&self.process_manager, exit_code)
             .await?;
@@ -558,6 +562,9 @@ where
     }
 
     pub async fn run_mode_b_if_needed(&mut self) -> Result<(), WatchdogError> {
+        if self.config.ai_tool.is_empty() {
+            return Ok(());
+        }
         let registry_path = &self.config.registry_path;
         if !registry_path.exists() {
             return Ok(());
@@ -567,7 +574,10 @@ where
         let registry: crate::coordinator::model::TaskRegistry = serde_json::from_str(&raw)?;
 
         let now = Utc::now();
-        let repo_root = self.config.pid_file_path.parent()
+        let repo_root = self
+            .config
+            .pid_file_path
+            .parent()
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
 
@@ -576,10 +586,12 @@ where
             let is_stuck = if task.state == "claimed" || task.state == "in_progress" {
                 let pid = task.task_runtime.pid.map(|p| p as u32);
                 let dead_process = !performer_is_running(pid);
-                
+
                 let too_long = if let Some(ref changed_at) = task.state_changed_at {
                     if let Ok(dt) = DateTime::parse_from_rfc3339(changed_at) {
-                        let age = now.signed_duration_since(dt.with_timezone(&Utc)).num_seconds();
+                        let age = now
+                            .signed_duration_since(dt.with_timezone(&Utc))
+                            .num_seconds();
                         age >= self.config.stall_threshold_seconds as i64
                     } else {
                         false
@@ -594,13 +606,19 @@ where
             };
 
             if is_failed || is_stuck {
-                let worktree_path = if let Some(path_str) = task.worktree.as_ref().and_then(|w| w.worktree_path.as_ref()) {
+                let worktree_path = if let Some(path_str) = task
+                    .worktree
+                    .as_ref()
+                    .and_then(|w| w.worktree_path.as_ref())
+                {
                     PathBuf::from(path_str)
                 } else {
                     repo_root.join(".macc").join("worktrees").join(&task.id)
                 };
 
-                let base_branch = task.worktree.as_ref()
+                let base_branch = task
+                    .worktree
+                    .as_ref()
                     .and_then(|w| w.base_branch.as_ref())
                     .map(|s| s.as_str())
                     .unwrap_or("master");
@@ -608,14 +626,22 @@ where
                 let last_error_code = task.task_runtime.last_error_code.as_deref();
                 let last_error_message = task.task_runtime.last_error.as_deref();
 
-                if let Err(err) = self.mode_b_supervisor.analyse(
-                    &task.id,
-                    &worktree_path,
-                    base_branch,
-                    last_error_code,
-                    last_error_message,
-                ).await {
-                    tracing::warn!("supervisor watchdog Mode B failed for task {}: {}", task.id, err);
+                if let Err(err) = self
+                    .mode_b_supervisor
+                    .analyse(
+                        &task.id,
+                        &worktree_path,
+                        base_branch,
+                        last_error_code,
+                        last_error_message,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        "supervisor watchdog Mode B failed for task {}: {}",
+                        task.id,
+                        err
+                    );
                 }
             }
         }
@@ -846,6 +872,7 @@ mod tests {
             events_log_path: events_path,
             pid_file_path: root.join("coordinator.pid"),
             health_status_path: health_path.clone(),
+            ..WatchdogConfig::default()
         };
 
         let mut watchdog = SupervisorWatchdog::new(
@@ -877,6 +904,7 @@ mod tests {
             events_log_path: events_path,
             pid_file_path: root.join("coordinator.pid"),
             health_status_path: root.join("supervisor-health.json"),
+            ..WatchdogConfig::default()
         };
 
         let mut watchdog = SupervisorWatchdog::new(
@@ -909,6 +937,7 @@ mod tests {
             events_log_path: root.join("events.jsonl"),
             pid_file_path: root.join("coordinator.pid"),
             health_status_path: root.join("supervisor-health.json"),
+            ..WatchdogConfig::default()
         };
 
         let mut watchdog = SupervisorWatchdog::new(

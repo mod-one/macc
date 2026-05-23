@@ -173,7 +173,10 @@ impl<'a> SupervisorCommand<'a> {
                         MaccError::Validation(format!("supervisor attach check failed: {}", err))
                     })?;
 
-                    if matches!(status.health, macc_core::supervisor::HealthCheckResult::Healthy) {
+                    if matches!(
+                        status.health,
+                        macc_core::supervisor::HealthCheckResult::Healthy
+                    ) {
                         recovery = ModeCRecovery::new(ModeCConfig {
                             events_log_path: resolve_project_path(
                                 &paths.root,
@@ -195,7 +198,7 @@ impl<'a> SupervisorCommand<'a> {
                             let result = read_last_coordinator_result(&resolve_project_path(
                                 &paths.root,
                                 &supervisor_cfg.events_log_path,
-                             ))?;
+                            ))?;
                             if matches!(result.as_deref(), Some("success")) {
                                 return Ok(());
                             }
