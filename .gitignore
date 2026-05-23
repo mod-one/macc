@@ -57,5 +57,7 @@ CLAUDE.md
 .gemini/
 GEMINI.md
 .geminiignore
+# agy
+.antigravitycli/
 performer.sh
 worktree.prd.json
