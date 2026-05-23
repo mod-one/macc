@@ -45,8 +45,10 @@ pub(super) async fn list_registry_tasks_handler(
 pub(super) async fn task_action_handler(
     State(state): State<WebState>,
     Path((task_id, action)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
     body: Option<Json<RegistryTaskActionBody>>,
 ) -> std::result::Result<Json<ApiRegistryTask>, ApiError> {
+    crate::commands::web::mutation_gate::require_project_owner(&state, &headers)?;
     let action = action.trim().to_ascii_lowercase();
     let body = body.map(|payload| payload.0).unwrap_or_default();
     if let Some(kind) = body.kind.as_deref() {

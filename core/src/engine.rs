@@ -1,6 +1,10 @@
 use crate::coordinator_storage::{
     CoordinatorSnapshot, CoordinatorStorage, CoordinatorStoragePaths, JsonStorage, SqliteStorage,
 };
+use crate::process_ownership::{ClientIdentity, OwnershipRecord, OwnershipStatus, ProcessHandle};
+use crate::service::process_ownership::{
+    ProcessOwnershipGuard, ProcessViewerGuard, RegisteredProcessGuard,
+};
 use crate::{
     catalog::{self, Agent, Skill},
     config::CanonicalConfig,
@@ -630,6 +634,13 @@ pub trait Engine {
         crate::service::coordinator::coordinator_poll_managed_command_process(paths)
     }
 
+    fn coordinator_managed_command_state(
+        &self,
+        paths: &ProjectPaths,
+    ) -> Result<crate::service::coordinator::CoordinatorManagedCommandState> {
+        crate::service::coordinator::coordinator_managed_command_state(paths)
+    }
+
     fn coordinator_poll_managed_command_state(
         &self,
         paths: &ProjectPaths,
@@ -1170,6 +1181,124 @@ pub trait Engine {
             repo_root, args, resource, clear_all,
         )
     }
+
+    // --- Process Ownership ---
+
+    fn process_register(
+        &self,
+        repo_root: &Path,
+        handle: ProcessHandle,
+    ) -> Result<RegisteredProcessGuard> {
+        crate::service::process_ownership::register_process(repo_root, handle.clone())?;
+        Ok(RegisteredProcessGuard::new(repo_root, handle))
+    }
+
+    fn process_ownership_claim(
+        &self,
+        repo_root: &Path,
+        handle: ProcessHandle,
+        identity: ClientIdentity,
+    ) -> Result<(
+        OwnershipStatus,
+        Option<ProcessOwnershipGuard>,
+        Option<ProcessViewerGuard>,
+    )> {
+        let status =
+            crate::service::process_ownership::claim_owner(repo_root, &handle, identity.clone())?;
+        let _ = (repo_root, handle, identity);
+        // Claims are durable client leases. Returning short-lived RAII guards here
+        // caused CLI/Web/TUI callers to immediately release ownership when the
+        // tuple was dropped at the end of the request/tick.
+        Ok((status, None, None))
+    }
+
+    fn process_ownership_release(
+        &self,
+        repo_root: &Path,
+        handle: &ProcessHandle,
+        client_id: &str,
+    ) -> Result<()> {
+        crate::service::process_ownership::release_owner(repo_root, handle, client_id)
+    }
+
+    fn process_ownership_status(
+        &self,
+        repo_root: &Path,
+        handle: &ProcessHandle,
+    ) -> Result<Option<OwnershipRecord>> {
+        crate::service::process_ownership::get_record(repo_root, handle)
+    }
+
+    fn process_ownership_request_takeover(
+        &self,
+        repo_root: &Path,
+        handle: &ProcessHandle,
+        requester: ClientIdentity,
+    ) -> Result<String> {
+        crate::service::process_ownership::request_takeover(repo_root, handle, requester)
+    }
+
+    fn process_ownership_respond_takeover(
+        &self,
+        repo_root: &Path,
+        handle: &ProcessHandle,
+        owner_client_id: &str,
+        request_id: &str,
+        accept: bool,
+    ) -> Result<()> {
+        crate::service::process_ownership::respond_takeover(
+            repo_root,
+            handle,
+            owner_client_id,
+            request_id,
+            accept,
+        )
+    }
+
+    fn process_register_viewer(
+        &self,
+        repo_root: &Path,
+        handle: ProcessHandle,
+        identity: ClientIdentity,
+    ) -> Result<ProcessViewerGuard> {
+        crate::service::process_ownership::register_viewer(repo_root, &handle, identity.clone())?;
+        Ok(ProcessViewerGuard::new(
+            repo_root,
+            handle,
+            identity.client_id.clone(),
+        ))
+    }
+
+    fn process_unregister_viewer(
+        &self,
+        repo_root: &Path,
+        handle: &ProcessHandle,
+        client_id: &str,
+    ) -> Result<()> {
+        crate::service::process_ownership::unregister_viewer(repo_root, handle, client_id)
+    }
+
+    fn process_heartbeat(
+        &self,
+        repo_root: &Path,
+        handle: &ProcessHandle,
+        client_id: &str,
+    ) -> Result<()> {
+        crate::service::process_ownership::heartbeat(repo_root, handle, client_id)
+    }
+
+    fn process_list_running(&self, repo_root: &Path) -> Result<Vec<OwnershipRecord>> {
+        crate::service::process_ownership::list_records(repo_root)
+    }
+
+    fn process_is_current_owner(
+        &self,
+        repo_root: &Path,
+        handle: &ProcessHandle,
+        client_id: &str,
+    ) -> Result<bool> {
+        crate::service::process_ownership::is_current_owner(repo_root, handle, client_id)
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1592,6 +1721,7 @@ impl Engine for TestEngine {
 mod tests {
     use super::*;
     use crate::config::ToolsConfig;
+    use crate::process_ownership::{ClientKind, ProcessKind};
     use std::fs;
 
     fn create_test_paths() -> (ProjectPaths, PathBuf) {
@@ -1696,7 +1826,7 @@ fields: []
 
     #[test]
     fn engine_trait_method_count_guard() {
-        const EXPECTED_METHOD_COUNT: usize = 110;
+        const EXPECTED_METHOD_COUNT: usize = 122;
         let source = include_str!("engine.rs");
         let trait_start = source
             .find("pub trait Engine {")
@@ -1781,6 +1911,53 @@ fields: []
             &plan::ActionStatus::Created
         );
 
+        fs::remove_dir_all(&temp_dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn test_engine_process_ownership_facade_smoke() -> Result<()> {
+        let (paths, temp_dir) = create_test_paths();
+        let engine = MaccEngine::new(ToolRegistry::default_registry());
+        let handle = ProcessHandle {
+            kind: ProcessKind::Coordinator,
+            project_root: paths.root.clone(),
+            pid: Some(4242),
+        };
+
+        let _registered = engine.process_register(&paths.root, handle.clone())?;
+        let owner_identity = ClientIdentity {
+            client_id: "owner-client".into(),
+            kind: ClientKind::Cli,
+            connected_at: "2026-05-21T00:00:00Z".into(),
+            last_heartbeat: String::new(),
+        };
+        let viewer_identity = ClientIdentity {
+            client_id: "viewer-client".into(),
+            kind: ClientKind::Tui,
+            connected_at: "2026-05-21T00:00:01Z".into(),
+            last_heartbeat: String::new(),
+        };
+
+        let (owner_status, owner_guard, owner_viewer_guard) =
+            engine.process_ownership_claim(&paths.root, handle.clone(), owner_identity)?;
+        let (viewer_status, viewer_owner_guard, viewer_guard) =
+            engine.process_ownership_claim(&paths.root, handle.clone(), viewer_identity)?;
+
+        assert_eq!(owner_status, OwnershipStatus::Owner);
+        assert!(owner_guard.is_none());
+        assert!(owner_viewer_guard.is_none());
+        assert_eq!(viewer_status, OwnershipStatus::Viewer);
+        assert!(viewer_owner_guard.is_none());
+        assert!(viewer_guard.is_none());
+        assert!(engine.process_is_current_owner(&paths.root, &handle, "owner-client")?);
+        assert!(!engine.process_is_current_owner(&paths.root, &handle, "viewer-client")?);
+
+        drop(viewer_guard);
+        drop(viewer_owner_guard);
+        drop(owner_viewer_guard);
+        drop(owner_guard);
+        drop(_registered);
         fs::remove_dir_all(&temp_dir).ok();
         Ok(())
     }

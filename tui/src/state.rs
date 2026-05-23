@@ -10,18 +10,24 @@ use macc_core::coordinator_storage::{
 use macc_core::doctor::ToolCheck;
 use macc_core::engine::CoordinatorEvent;
 use macc_core::plan::{render_diff, ActionPlan, DiffView, PlannedOp, Scope};
+use macc_core::process_ownership::{
+    ClientIdentity, ClientKind, OwnershipStatus, ProcessHandle, ProcessKind, TakeoverRequest,
+};
 use macc_core::resolve::{resolve, resolve_fetch_units, CliOverrides};
 use macc_core::service::coordinator::CoordinatorManagedCommandState;
 use macc_core::service::coordinator_workflow::{
     coordinator_command_display_name, CoordinatorCommand, CoordinatorCommandRequest,
 };
+use macc_core::service::process_ownership::{ProcessOwnershipGuard, ProcessViewerGuard};
+use macc_core::service::process_ownership_gate::{gate_owner_action, ClientContext};
 use macc_core::tool::{ActionKind, FieldDefault, FieldKind, ToolDescriptor, ToolField};
-use macc_core::{find_project_root, Engine, ProjectPaths};
+use macc_core::{find_project_root, Engine, MaccError, ProjectPaths};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -128,6 +134,19 @@ enum CoordinatorPauseNextAction {
     ResumeRun,
 }
 
+fn requires_owner_gate(command: &CoordinatorCommand) -> bool {
+    matches!(
+        command,
+        CoordinatorCommand::Run
+            | CoordinatorCommand::Stop { .. }
+            | CoordinatorCommand::ResumePausedRun
+            | CoordinatorCommand::Unlock { .. }
+            | CoordinatorCommand::DispatchReadyTasks
+            | CoordinatorCommand::AdvanceTasks
+            | CoordinatorCommand::CleanupMaintenance
+    )
+}
+
 pub struct AppState {
     pub engine: Arc<dyn Engine>,
     pub project_paths: Option<ProjectPaths>,
@@ -201,12 +220,23 @@ pub struct AppState {
     pub search_editing: bool,
     pub undo_stack: Vec<CanonicalConfig>,
     pub redo_stack: Vec<CanonicalConfig>,
+    coordinator_client_id: String,
     coordinator_running_elapsed_secs: Option<u64>,
     coordinator_pause_next_action: Option<CoordinatorPauseNextAction>,
     /// RL-TUI-007: tools currently throttled due to rate-limiting.
     pub coordinator_throttled_tools: Vec<ThrottledToolInfo>,
     /// RL-TUI-007: (effective, original) max_parallel from concurrency_adjusted events.
     pub coordinator_effective_max_parallel: Option<(usize, usize)>,
+    pub client_identity: ClientIdentity,
+    pub ownership_state: crate::ownership::TuiOwnershipState,
+    ownership_guard: Option<ProcessOwnershipGuard>,
+    viewer_guards: Vec<ProcessViewerGuard>,
+    pub client_context: ClientContext,
+    last_ownership_refresh: Option<Instant>,
+    /// L6-TUI-002: ownership state for Coordinator process (banner/modal/gate input).
+    pub coordinator_ownership: crate::ownership::TuiOwnershipState,
+    coordinator_ownership_last_heartbeat: Option<Instant>,
+    coordinator_ownership_last_refresh: Option<Instant>,
 }
 
 impl AppState {
@@ -221,11 +251,11 @@ impl AppState {
     pub fn new(engine: Arc<dyn Engine>) -> Self {
         let mut state = Self::with_engine(engine);
         state.load_config(None);
-        state.refresh_tool_checks();
         state
     }
 
     pub fn with_engine(engine: Arc<dyn Engine>) -> Self {
+        let client_identity = Self::new_client_identity();
         let mut state = Self {
             engine,
             project_paths: None,
@@ -297,10 +327,23 @@ impl AppState {
             search_editing: false,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            coordinator_client_id: client_identity.client_id.clone(),
             coordinator_running_elapsed_secs: None,
             coordinator_pause_next_action: None,
             coordinator_throttled_tools: Vec::new(),
             coordinator_effective_max_parallel: None,
+            client_identity: client_identity.clone(),
+            ownership_state: crate::ownership::TuiOwnershipState::new(),
+            ownership_guard: None,
+            viewer_guards: Vec::new(),
+            client_context: ClientContext {
+                client_id: client_identity.client_id.clone(),
+                project_root: PathBuf::new(),
+            },
+            last_ownership_refresh: None,
+            coordinator_ownership: crate::ownership::TuiOwnershipState::new(),
+            coordinator_ownership_last_heartbeat: None,
+            coordinator_ownership_last_refresh: None,
         };
 
         state.refresh_tools();
@@ -311,6 +354,25 @@ impl AppState {
         state.agents = state.engine.builtin_agents();
 
         state
+    }
+
+    fn new_client_identity() -> ClientIdentity {
+        let now = chrono::Utc::now().to_rfc3339();
+        ClientIdentity {
+            client_id: format!("tui-{}", Self::uuid_v4_like()),
+            kind: ClientKind::Tui,
+            connected_at: now.clone(),
+            last_heartbeat: now,
+        }
+    }
+
+    fn uuid_v4_like() -> String {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let since_epoch = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time went backwards");
+        format!("{:x}", since_epoch.as_nanos())
     }
 
     pub fn refresh_tools(&mut self) {
@@ -935,6 +997,18 @@ impl AppState {
             );
             return;
         };
+        if let Err(err) = self.gate_coordinator_action(&command) {
+            self.set_status(
+                UiStatusLevel::Error,
+                format!(
+                    "Failed to run '{}': {}",
+                    command_name,
+                    format_actionable_error(&err.to_string())
+                ),
+                Some(Duration::from_secs(6)),
+            );
+            return;
+        }
         self.coordinator_pause_error = None;
         self.coordinator_pause_command = None;
         self.coordinator_pause_task_id = None;
@@ -949,6 +1023,11 @@ impl AppState {
             coordinator_cfg,
         ) {
             Ok(()) => {
+                self.wait_for_coordinator_registration(Duration::from_secs(2));
+                if let Some(handle) = self.coordinator_handle() {
+                    self.claim_process_ownership(handle);
+                    self.refresh_ownership_state();
+                }
                 self.coordinator_running_command = Some(command_name.clone());
                 self.coordinator_running_elapsed_secs = Some(0);
                 self.coordinator_last_result = Some(if command_name == "run" {
@@ -980,6 +1059,20 @@ impl AppState {
 
     fn execute_coordinator_command(&mut self, command: CoordinatorCommand) {
         let action = coordinator_command_display_name(&command).to_string();
+        if matches!(command, CoordinatorCommand::ResumePausedRun) {
+            if let Err(err) = self.gate_coordinator_action(&command) {
+                self.set_status(
+                    UiStatusLevel::Error,
+                    format!(
+                        "Failed to run '{}': {}",
+                        action,
+                        format_actionable_error(&err.to_string())
+                    ),
+                    Some(Duration::from_secs(6)),
+                );
+                return;
+            }
+        }
         let Some(paths) = self.project_paths.as_ref() else {
             self.set_status(
                 UiStatusLevel::Error,
@@ -1075,6 +1168,22 @@ impl AppState {
             );
             return;
         };
+        if let Err(err) = self.gate_coordinator_action(&CoordinatorCommand::Stop {
+            graceful: false,
+            remove_worktrees: false,
+            remove_branches: false,
+            reason: "tui stop".to_string(),
+        }) {
+            self.set_status(
+                UiStatusLevel::Error,
+                format!(
+                    "Failed to run 'stop': {}",
+                    format_actionable_error(&err.to_string())
+                ),
+                Some(Duration::from_secs(6)),
+            );
+            return;
+        }
 
         let stop_result = self
             .engine
@@ -1123,6 +1232,336 @@ impl AppState {
         }
     }
 
+    fn gate_coordinator_action(&self, command: &CoordinatorCommand) -> macc_core::Result<()> {
+        if !requires_owner_gate(command) {
+            return Ok(());
+        }
+
+        let Some(handle) = self.coordinator_handle() else {
+            return Ok(());
+        };
+
+        gate_owner_action(&self.client_context, &handle)
+    }
+
+    fn gate_project_mutation(&self) -> macc_core::Result<()> {
+        let Some(handle) = self.project_handle() else {
+            return Ok(());
+        };
+
+        gate_owner_action(&self.client_context, &handle)
+    }
+
+    fn coordinator_client_identity(&self) -> ClientIdentity {
+        let mut identity = self.client_identity.clone();
+        identity.client_id = self.coordinator_client_id.clone();
+        identity.last_heartbeat = chrono::Utc::now().to_rfc3339();
+        identity
+    }
+
+    pub(crate) fn coordinator_handle(&self) -> Option<ProcessHandle> {
+        self.project_paths.as_ref().map(|paths| ProcessHandle {
+            kind: ProcessKind::Coordinator,
+            project_root: paths.root.clone(),
+            pid: None,
+        })
+    }
+
+    fn project_handle(&self) -> Option<ProcessHandle> {
+        self.project_paths.as_ref().map(|paths| ProcessHandle {
+            kind: ProcessKind::Project,
+            project_root: paths.root.clone(),
+            pid: None,
+        })
+    }
+
+    fn sync_coordinator_ownership_view(&mut self) {
+        self.coordinator_ownership.record = self.ownership_state.record.clone();
+        self.coordinator_ownership.is_owner = self.ownership_state.is_owner;
+        self.coordinator_ownership.pending_incoming_request =
+            self.ownership_state.pending_incoming_request.clone();
+        self.coordinator_ownership.dismissed_request_id =
+            self.ownership_state.dismissed_request_id.clone();
+        self.coordinator_ownership.last_refresh = self.ownership_state.last_refresh;
+    }
+
+    fn claim_process_ownership(&mut self, handle: ProcessHandle) {
+        let Some(paths) = self.project_paths.clone() else {
+            return;
+        };
+
+        let identity = self.coordinator_client_identity();
+        match self
+            .engine
+            .process_ownership_claim(&paths.root, handle.clone(), identity.clone())
+        {
+            Ok((OwnershipStatus::Owner, owner_guard, _)) => {
+                if self.ownership_guard.is_none() {
+                    self.ownership_guard = Some(owner_guard.unwrap_or_else(|| {
+                        ProcessOwnershipGuard::new(&paths.root, handle, identity.client_id.clone())
+                    }));
+                }
+            }
+            Ok((OwnershipStatus::Viewer, _, viewer_guard)) => {
+                self.viewer_guards.push(viewer_guard.unwrap_or_else(|| {
+                    ProcessViewerGuard::new(&paths.root, handle, identity.client_id.clone())
+                }));
+            }
+            Ok((OwnershipStatus::Unregistered, _, _)) | Err(_) => {}
+        }
+    }
+
+    fn wait_for_coordinator_registration(&self, timeout: Duration) -> bool {
+        let Some(paths) = self.project_paths.as_ref() else {
+            return false;
+        };
+        let Some(handle) = self.coordinator_handle() else {
+            return false;
+        };
+
+        let deadline = Instant::now() + timeout;
+        while Instant::now() <= deadline {
+            match self.engine.process_ownership_status(&paths.root, &handle) {
+                Ok(Some(_)) => return true,
+                Ok(None) | Err(_) => thread::sleep(Duration::from_millis(100)),
+            }
+        }
+
+        false
+    }
+
+    fn cleanup_ownership_guards(&mut self) {
+        self.ownership_guard = None;
+        self.viewer_guards.clear();
+    }
+
+    pub fn scan_and_attach_to_running_processes(&mut self) {
+        let Some(paths) = self.project_paths.clone() else {
+            self.cleanup_ownership_guards();
+            self.ownership_state.record = None;
+            self.ownership_state.is_owner = false;
+            self.ownership_state.pending_incoming_request = None;
+            self.sync_coordinator_ownership_view();
+            return;
+        };
+
+        self.cleanup_ownership_guards();
+
+        if let Ok(records) = self.engine.process_list_running(&paths.root) {
+            for record in records {
+                if matches!(record.process.kind, ProcessKind::Project) {
+                    continue;
+                }
+                self.claim_process_ownership(record.process);
+            }
+        }
+
+        self.refresh_ownership_state();
+    }
+
+    pub fn refresh_ownership_state(&mut self) {
+        let Some(paths) = self.project_paths.clone() else {
+            self.ownership_state.record = None;
+            self.ownership_state.is_owner = false;
+            self.ownership_state.pending_incoming_request = None;
+            self.sync_coordinator_ownership_view();
+            return;
+        };
+
+        let mut record = self
+            .coordinator_handle()
+            .and_then(|handle| {
+                self.engine
+                    .process_ownership_status(&paths.root, &handle)
+                    .ok()
+                    .flatten()
+            })
+            .filter(|record| record.owner.is_some() || record.takeover_request.is_some());
+
+        if record.is_none() {
+            record = self.project_handle().and_then(|handle| {
+                self.engine
+                    .process_ownership_status(&paths.root, &handle)
+                    .ok()
+                    .flatten()
+            });
+        }
+
+        let is_owner = record
+            .as_ref()
+            .and_then(|r| r.owner.as_ref())
+            .map(|o| o.client_id == self.client_identity.client_id)
+            .unwrap_or(false);
+
+        let active_request_id = record
+            .as_ref()
+            .and_then(|r| r.takeover_request.as_ref())
+            .map(|request| request.request_id.clone());
+        if self.ownership_state.dismissed_request_id.as_ref() != active_request_id.as_ref() {
+            self.ownership_state.dismissed_request_id = None;
+        }
+
+        self.ownership_state.record = record;
+        self.ownership_state.is_owner = is_owner;
+        self.ownership_state.last_refresh = Instant::now();
+        self.ownership_state.pending_incoming_request = self
+            .ownership_state
+            .record
+            .as_ref()
+            .and_then(|r| r.takeover_request.as_ref())
+            .filter(|request| {
+                is_owner
+                    && self.ownership_state.dismissed_request_id.as_deref()
+                        != Some(request.request_id.as_str())
+            })
+            .cloned();
+        self.last_ownership_refresh = Some(Instant::now());
+        self.coordinator_ownership_last_refresh = self.last_ownership_refresh;
+        self.sync_coordinator_ownership_view();
+    }
+
+    pub fn tick_ownership(&mut self) {
+        let Some(paths) = self.project_paths.clone() else {
+            return;
+        };
+        let Some(handle) = self.coordinator_handle().or_else(|| self.project_handle()) else {
+            return;
+        };
+
+        let now = Instant::now();
+        let should_refresh = self
+            .last_ownership_refresh
+            .map(|t| now.duration_since(t) >= Duration::from_secs(5))
+            .unwrap_or(true);
+        if should_refresh {
+            self.refresh_ownership_state();
+            if self.ownership_state.is_owner && self.ownership_guard.is_none() {
+                self.claim_process_ownership(handle.clone());
+            }
+
+            if self.ownership_state.pending_incoming_request.is_none() {
+                if let Some(request) = self
+                    .ownership_state
+                    .record
+                    .as_ref()
+                    .and_then(|record| record.takeover_request.clone())
+                    .filter(|request| {
+                        self.ownership_state.is_owner
+                            && self.ownership_state.dismissed_request_id.as_deref()
+                                != Some(request.request_id.as_str())
+                    })
+                {
+                    self.handle_takeover_request_received(request);
+                }
+            }
+
+            let heartbeat_count =
+                usize::from(self.ownership_guard.is_some()) + self.viewer_guards.len();
+            for _ in 0..heartbeat_count {
+                let _ = self.engine.process_heartbeat(
+                    &paths.root,
+                    &handle,
+                    &self.client_identity.client_id,
+                );
+            }
+            self.coordinator_ownership_last_heartbeat = Some(now);
+        }
+    }
+
+    pub fn ownership_request_takeover(&mut self) {
+        let Some(paths) = self.project_paths.clone() else {
+            return;
+        };
+        let Some(handle) = self.coordinator_handle() else {
+            return;
+        };
+        let identity = self.coordinator_client_identity();
+        match self
+            .engine
+            .process_ownership_request_takeover(&paths.root, &handle, identity)
+        {
+            Ok(_request_id) => {
+                self.set_status(
+                    UiStatusLevel::Info,
+                    "Takeover request sent to current owner.",
+                    Some(Duration::from_secs(4)),
+                );
+                self.refresh_ownership_state();
+            }
+            Err(err) => {
+                self.set_status(
+                    UiStatusLevel::Warning,
+                    format!("Failed to request takeover: {err}"),
+                    Some(Duration::from_secs(5)),
+                );
+            }
+        }
+    }
+
+    pub fn ownership_respond_takeover(&mut self, accept: bool) {
+        let Some(paths) = self.project_paths.clone() else {
+            return;
+        };
+        let Some(handle) = self.coordinator_handle() else {
+            return;
+        };
+        let Some(request) = self.ownership_state.pending_incoming_request.clone() else {
+            return;
+        };
+        match self.engine.process_ownership_respond_takeover(
+            &paths.root,
+            &handle,
+            &self.client_identity.client_id,
+            &request.request_id,
+            accept,
+        ) {
+            Ok(()) => {
+                self.ownership_state.dismissed_request_id = None;
+                let msg = if accept {
+                    "Takeover accepted — control transferred."
+                } else {
+                    "Takeover rejected."
+                };
+                self.set_status(UiStatusLevel::Info, msg, Some(Duration::from_secs(4)));
+                self.refresh_ownership_state();
+            }
+            Err(err) => {
+                self.set_status(
+                    UiStatusLevel::Warning,
+                    format!("Failed to respond to takeover: {err}"),
+                    Some(Duration::from_secs(5)),
+                );
+            }
+        }
+    }
+
+    pub fn release_ownership_on_exit(&mut self) {
+        let Some(paths) = self.project_paths.clone() else {
+            self.cleanup_ownership_guards();
+            return;
+        };
+        let Some(handle) = self.coordinator_handle().or_else(|| self.project_handle()) else {
+            self.cleanup_ownership_guards();
+            return;
+        };
+        self.cleanup_ownership_guards();
+        let _ = self.engine.process_ownership_release(
+            &paths.root,
+            &handle,
+            &self.client_identity.client_id,
+        );
+        let _ = macc_core::service::process_ownership::unregister_viewer(
+            &paths.root,
+            &handle,
+            &self.client_identity.client_id,
+        );
+        self.ownership_state.record = None;
+        self.ownership_state.is_owner = false;
+        self.ownership_state.pending_incoming_request = None;
+        self.ownership_state.dismissed_request_id = None;
+        self.sync_coordinator_ownership_view();
+    }
+
     fn ensure_working_copy(&mut self) {
         if self.working_copy.is_none() {
             self.working_copy = Some(CanonicalConfig::default());
@@ -1130,6 +1569,8 @@ impl AppState {
     }
 
     pub fn load_config(&mut self, start_dir: Option<&std::path::Path>) {
+        self.release_ownership_on_exit();
+
         let current_dir = if let Some(d) = start_dir {
             d.to_path_buf()
         } else {
@@ -1139,6 +1580,7 @@ impl AppState {
         match find_project_root(&current_dir) {
             Ok(paths) => {
                 self.project_paths = Some(paths.clone());
+                self.client_context.project_root = paths.root.clone();
                 self.refresh_tools();
                 self.refresh_skills();
                 self.refresh_mcp_entries();
@@ -1146,6 +1588,7 @@ impl AppState {
                 self.refresh_worktree_status();
                 self.refresh_coordinator_snapshot();
                 self.refresh_coordinator_events();
+                self.scan_and_attach_to_running_processes();
                 match self.engine.load_canonical_config(&paths) {
                     Ok(config) => {
                         self.config = Some(config.clone());
@@ -1161,6 +1604,7 @@ impl AppState {
                     "MACC project not found. Run 'macc init' in your repository root to start."
                         .to_string(),
                 );
+                self.client_context.project_root = current_dir;
                 self.worktree_status = None;
                 self.refresh_logs();
             }
@@ -1277,6 +1721,53 @@ impl AppState {
         self.coordinator_pause_error.is_some()
     }
 
+    pub fn handle_takeover_request_received(&mut self, request: TakeoverRequest) {
+        if self.ownership_state.dismissed_request_id.as_deref() == Some(request.request_id.as_str())
+        {
+            return;
+        }
+        self.ownership_state.pending_incoming_request = Some(request);
+        self.sync_coordinator_ownership_view();
+    }
+
+    pub fn dismiss_takeover_request_modal(&mut self) {
+        self.ownership_state.dismissed_request_id = self
+            .ownership_state
+            .pending_incoming_request
+            .as_ref()
+            .map(|request| request.request_id.clone());
+        self.ownership_state.pending_incoming_request = None;
+        self.sync_coordinator_ownership_view();
+    }
+
+    pub fn try_owner_action<F>(&mut self, handle: &ProcessHandle, f: F) -> bool
+    where
+        F: FnOnce(&mut Self),
+    {
+        match gate_owner_action(&self.client_context, handle) {
+            Ok(()) => {
+                f(self);
+                true
+            }
+            Err(MaccError::NotProcessOwner { .. }) => {
+                self.set_status(
+                    UiStatusLevel::Warning,
+                    "Viewer mode — press T to request takeover",
+                    Some(Duration::from_secs(4)),
+                );
+                false
+            }
+            Err(err) => {
+                self.set_status(
+                    UiStatusLevel::Error,
+                    format_actionable_error(&err.to_string()),
+                    Some(Duration::from_secs(6)),
+                );
+                false
+            }
+        }
+    }
+
     pub fn is_coordinator_paused(&self) -> bool {
         self.coordinator_paused
     }
@@ -1387,6 +1878,7 @@ impl AppState {
 
     pub fn tick(&mut self) {
         self.refresh_coordinator_pause_state();
+        self.tick_ownership();
         // Advance spinner globally so live task animation also moves when
         // observing a coordinator process started outside this TUI instance.
         self.coordinator_spinner_tick = self.coordinator_spinner_tick.wrapping_add(1);
@@ -1402,7 +1894,7 @@ impl AppState {
         let mut finished_message: Option<(UiStatusLevel, String)> = None;
         let mut post_success_action: Option<CoordinatorPauseNextAction> = None;
         if let Some(paths) = self.project_paths.as_ref() {
-            match self.engine.coordinator_poll_managed_command_state(paths) {
+            match self.engine.coordinator_managed_command_state(paths) {
                 Ok(CoordinatorManagedCommandState::Succeeded {
                     command,
                     elapsed_secs: elapsed,
@@ -1431,6 +1923,7 @@ impl AppState {
                     self.refresh_coordinator_snapshot();
                     self.refresh_coordinator_events();
                     if self.coordinator_run_auto_quit {
+                        self.release_ownership_on_exit();
                         self.should_quit = true;
                     }
                 }
@@ -1535,7 +2028,75 @@ impl AppState {
             .unwrap_or(true);
         if should_refresh_events {
             self.refresh_coordinator_events();
+            self.scan_for_takeover_requests();
         }
+    }
+
+    fn scan_for_takeover_requests(&mut self) {
+        if !self.ownership_state.is_owner || self.ownership_state.pending_incoming_request.is_some()
+        {
+            return;
+        }
+        let Some(paths) = self.project_paths.as_ref() else {
+            return;
+        };
+        let Some(active_request) = self
+            .ownership_state
+            .record
+            .as_ref()
+            .and_then(|record| record.takeover_request.clone())
+        else {
+            return;
+        };
+        if self.ownership_state.dismissed_request_id.as_deref()
+            == Some(active_request.request_id.as_str())
+        {
+            return;
+        }
+
+        let Ok(events) = self.engine.get_coordinator_events(paths) else {
+            return;
+        };
+        let Some(request) = events
+            .iter()
+            .rev()
+            .filter(|event| event.event_type == "takeover_requested")
+            .find_map(Self::parse_takeover_request_event)
+            .filter(|request| {
+                request.request_id == active_request.request_id
+                    && request.requester.client_id == active_request.requester.client_id
+                    && request.requested_at == active_request.requested_at
+            })
+        else {
+            return;
+        };
+
+        self.handle_takeover_request_received(request);
+    }
+
+    fn parse_takeover_request_event(event: &CoordinatorEvent) -> Option<TakeoverRequest> {
+        let payload = event
+            .raw
+            .get("payload")
+            .and_then(|payload| payload.get("message"))
+            .and_then(Value::as_str)
+            .and_then(|message| serde_json::from_str::<Value>(message).ok())?;
+        let process: ProcessHandle =
+            serde_json::from_value(payload.get("process")?.clone()).ok()?;
+        if !matches!(
+            process.kind,
+            ProcessKind::Coordinator | ProcessKind::Project
+        ) {
+            return None;
+        }
+        let requester: ClientIdentity =
+            serde_json::from_value(payload.get("client")?.clone()).ok()?;
+        let request_id = payload.get("request_id")?.as_str()?.to_string();
+        Some(TakeoverRequest {
+            request_id,
+            requester,
+            requested_at: event.ts.clone().unwrap_or_default(),
+        })
     }
 
     pub fn take_full_clear(&mut self) -> bool {
@@ -3088,6 +3649,19 @@ impl AppState {
     }
 
     pub fn save_config(&mut self) {
+        if let Err(err) = self.gate_project_mutation() {
+            self.errors.push(format!("Config save blocked: {}", err));
+            self.set_status(
+                UiStatusLevel::Error,
+                format!(
+                    "Save blocked: {}",
+                    format_actionable_error(&err.to_string())
+                ),
+                Some(Duration::from_secs(6)),
+            );
+            return;
+        }
+
         let paths = match &self.project_paths {
             Some(p) => p.clone(),
             None => {
@@ -3400,6 +3974,19 @@ impl AppState {
     }
 
     pub fn attempt_apply(&mut self) {
+        if let Err(err) = self.gate_project_mutation() {
+            self.apply_error = Some(format!(
+                "Apply blocked: {}",
+                format_actionable_error(&err.to_string())
+            ));
+            self.set_status(
+                UiStatusLevel::Error,
+                "Apply blocked by project ownership.",
+                Some(Duration::from_secs(6)),
+            );
+            return;
+        }
+
         let paths = match &self.project_paths {
             Some(paths) => paths,
             None => {
@@ -3802,7 +4389,11 @@ fn format_number(value: f64) -> String {
 mod tests {
     use super::*;
     use macc_core::plan::{PlannedOpKind, PlannedOpMetadata, Scope};
+    use macc_core::process_ownership::{ClientIdentity, ClientKind, ProcessHandle, ProcessKind};
+    use macc_core::service::process_ownership::{claim_owner, register_process};
+    use macc_core::tool::ToolDiagnostic;
     use macc_core::{MaccEngine, ToolRegistry};
+    use std::cell::RefCell;
     use std::fs;
     use tempfile::tempdir;
 
@@ -3812,6 +4403,80 @@ mod tests {
 
     fn fixture_engine(ids: &[String]) -> Arc<macc_core::TestEngine> {
         Arc::new(macc_core::TestEngine::with_fixtures_for_ids(ids))
+    }
+
+    #[derive(Default)]
+    struct NoopEngine {
+        stop_calls: RefCell<usize>,
+    }
+
+    impl Engine for NoopEngine {
+        fn list_tools(&self, _paths: &ProjectPaths) -> (Vec<ToolDescriptor>, Vec<ToolDiagnostic>) {
+            (Vec::new(), Vec::new())
+        }
+
+        fn doctor(&self, _paths: &ProjectPaths) -> Vec<ToolCheck> {
+            Vec::new()
+        }
+
+        fn plan(
+            &self,
+            _paths: &ProjectPaths,
+            _config: &CanonicalConfig,
+            _materialized_units: &[macc_core::resolve::MaterializedFetchUnit],
+            _overrides: &macc_core::resolve::CliOverrides,
+        ) -> macc_core::Result<ActionPlan> {
+            Ok(ActionPlan::default())
+        }
+
+        fn plan_operations(&self, _paths: &ProjectPaths, _plan: &ActionPlan) -> Vec<PlannedOp> {
+            Vec::new()
+        }
+
+        fn apply(
+            &self,
+            _paths: &ProjectPaths,
+            _plan: &mut ActionPlan,
+            _allow_user_scope: bool,
+        ) -> macc_core::Result<macc_core::ApplyReport> {
+            Ok(macc_core::ApplyReport::default())
+        }
+
+        fn builtin_skills(&self) -> Vec<Skill> {
+            Vec::new()
+        }
+
+        fn builtin_agents(&self) -> Vec<Agent> {
+            Vec::new()
+        }
+
+        fn coordinator_stop_managed_command_process(
+            &self,
+            _paths: &ProjectPaths,
+            _graceful: bool,
+        ) -> macc_core::Result<macc_core::service::coordinator::CoordinatorStopResult> {
+            *self.stop_calls.borrow_mut() += 1;
+            Ok(macc_core::service::coordinator::CoordinatorStopResult {
+                targets: 0,
+                used_group: false,
+            })
+        }
+    }
+
+    fn sample_cli_client(client_id: &str) -> ClientIdentity {
+        let now = Utc::now().to_rfc3339();
+        ClientIdentity {
+            client_id: client_id.to_string(),
+            kind: ClientKind::Cli,
+            connected_at: now.clone(),
+            last_heartbeat: now,
+        }
+    }
+
+    fn sample_project(dir: &std::path::Path) {
+        let macc_dir = dir.join(".macc");
+        fs::create_dir_all(&macc_dir).expect("create .macc");
+        fs::write(macc_dir.join("macc.yaml"), "tools:\n  enabled: []\n").expect("write config");
     }
 
     #[test]
@@ -3943,6 +4608,88 @@ mod tests {
         state.notices.clear();
         state.save_config();
         assert!(state.notices[0].contains("unchanged"));
+    }
+
+    #[test]
+    fn stop_coordinator_command_shows_not_owner_error_for_viewer() {
+        let dir = tempdir().expect("tempdir");
+        sample_project(dir.path());
+        let handle = ProcessHandle {
+            kind: ProcessKind::Coordinator,
+            project_root: dir.path().to_path_buf(),
+            pid: Some(4242),
+        };
+        register_process(dir.path(), handle.clone()).expect("register process");
+        claim_owner(dir.path(), &handle, sample_cli_client("client-A")).expect("claim owner");
+
+        let engine = Arc::new(NoopEngine::default());
+        let mut state = AppState::with_engine(engine.clone());
+        state.project_paths = Some(ProjectPaths::from_root(dir.path()));
+        state.coordinator_client_id = "client-B".to_string();
+        state.client_identity.client_id = "client-B".to_string();
+        state.client_context = ClientContext {
+            client_id: "client-B".to_string(),
+            project_root: dir.path().to_path_buf(),
+        };
+
+        state.stop_coordinator_command();
+
+        let status = state.ui_status.expect("status");
+        assert_eq!(status.level, UiStatusLevel::Error);
+        assert!(status.message.contains("Failed to run 'stop'"));
+        assert!(status.message.contains("not the owner of this process"));
+        assert_eq!(*engine.stop_calls.borrow(), 0);
+    }
+
+    #[test]
+    fn scan_and_attach_to_running_processes_claims_unowned_running_coordinator() {
+        let dir = tempdir().expect("tempdir");
+        sample_project(dir.path());
+        let handle = ProcessHandle {
+            kind: ProcessKind::Coordinator,
+            project_root: dir.path().to_path_buf(),
+            pid: Some(4242),
+        };
+        register_process(dir.path(), handle).expect("register process");
+
+        let engine = Arc::new(NoopEngine::default());
+        let mut state = AppState::with_engine(engine);
+        state.project_paths = Some(ProjectPaths::from_root(dir.path()));
+        state.client_context.project_root = dir.path().to_path_buf();
+
+        state.scan_and_attach_to_running_processes();
+
+        assert!(state.ownership_guard.is_some());
+        assert!(state.ownership_state.is_owner);
+        assert!(state.viewer_guards.is_empty());
+    }
+
+    #[test]
+    fn second_tui_attaches_as_viewer_when_owner_already_exists() {
+        let dir = tempdir().expect("tempdir");
+        sample_project(dir.path());
+        let handle = ProcessHandle {
+            kind: ProcessKind::Coordinator,
+            project_root: dir.path().to_path_buf(),
+            pid: Some(4242),
+        };
+        register_process(dir.path(), handle).expect("register process");
+
+        let engine = Arc::new(NoopEngine::default());
+        let mut first = AppState::with_engine(engine.clone());
+        first.project_paths = Some(ProjectPaths::from_root(dir.path()));
+        first.client_context.project_root = dir.path().to_path_buf();
+        first.scan_and_attach_to_running_processes();
+        assert!(first.ownership_state.is_owner);
+
+        let mut second = AppState::with_engine(engine);
+        second.project_paths = Some(ProjectPaths::from_root(dir.path()));
+        second.client_context.project_root = dir.path().to_path_buf();
+        second.scan_and_attach_to_running_processes();
+
+        assert!(!second.ownership_state.is_owner);
+        assert!(second.ownership_guard.is_none());
+        assert_eq!(second.viewer_guards.len(), 1);
     }
 
     #[test]

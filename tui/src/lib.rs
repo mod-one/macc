@@ -7,7 +7,7 @@ use crossterm::{
 use macc_core::service::coordinator_workflow::CoordinatorCommand;
 use ratatui::{
     backend::{Backend, CrosstermBackend},
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
@@ -15,6 +15,7 @@ use ratatui::{
 };
 use std::{collections::BTreeMap, io, time::Duration};
 
+pub mod ownership;
 pub mod screen;
 pub mod state;
 pub mod ui;
@@ -88,6 +89,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, state: &mut AppState) -> io::
             }
         }
         if state.should_quit {
+            state.release_ownership_on_exit();
             return Ok(());
         }
     }
@@ -136,6 +138,16 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
     }
 
     let current_screen = state.current_screen();
+    let has_pending_takeover = current_screen == Screen::CoordinatorLive
+        && state
+            .coordinator_ownership
+            .pending_incoming_request
+            .is_some();
+
+    if has_pending_takeover && matches!(key, KeyCode::Esc) {
+        state.dismiss_takeover_request_modal();
+        return;
+    }
 
     if current_screen == Screen::ToolSettings && state.is_tool_field_editing() {
         match key {
@@ -252,7 +264,9 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
             state.navigate_toggle();
         }
         KeyCode::Char('a') => {
-            if current_screen == Screen::Skills {
+            if has_pending_takeover {
+                state.ownership_respond_takeover(true);
+            } else if current_screen == Screen::Skills {
                 state.select_all_skills();
             } else if current_screen == Screen::Agents {
                 state.select_all_agents();
@@ -272,8 +286,16 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
             }
         }
         KeyCode::Char('r') => {
-            if current_screen == Screen::CoordinatorLive {
-                state.start_coordinator_command(CoordinatorCommand::Run);
+            if has_pending_takeover {
+                state.ownership_respond_takeover(false);
+            } else if current_screen == Screen::CoordinatorLive {
+                if let Some(handle) = state.coordinator_handle() {
+                    state.try_owner_action(&handle, |state| {
+                        state.start_coordinator_command(CoordinatorCommand::Run);
+                    });
+                } else {
+                    state.start_coordinator_command(CoordinatorCommand::Run);
+                }
             } else if current_screen == Screen::Logs {
                 state.refresh_logs();
             } else if current_screen == Screen::Preview {
@@ -281,19 +303,49 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
             }
         }
         KeyCode::Char('y') if current_screen == Screen::CoordinatorLive => {
-            state.start_coordinator_command(CoordinatorCommand::SyncRegistry);
+            if let Some(handle) = state.coordinator_handle() {
+                state.try_owner_action(&handle, |state| {
+                    state.start_coordinator_command(CoordinatorCommand::SyncRegistry);
+                });
+            } else {
+                state.start_coordinator_command(CoordinatorCommand::SyncRegistry);
+            }
         }
         KeyCode::Char('c') if current_screen == Screen::CoordinatorLive => {
-            state.start_coordinator_command(CoordinatorCommand::ReconcileRuntime);
+            if let Some(handle) = state.coordinator_handle() {
+                state.try_owner_action(&handle, |state| {
+                    state.start_coordinator_command(CoordinatorCommand::ReconcileRuntime);
+                });
+            } else {
+                state.start_coordinator_command(CoordinatorCommand::ReconcileRuntime);
+            }
         }
         KeyCode::Char('u') if current_screen == Screen::CoordinatorLive => {
-            state.start_coordinator_command(CoordinatorCommand::ResumePausedRun);
+            if let Some(handle) = state.coordinator_handle() {
+                state.try_owner_action(&handle, |state| {
+                    state.start_coordinator_command(CoordinatorCommand::ResumePausedRun);
+                });
+            } else {
+                state.start_coordinator_command(CoordinatorCommand::ResumePausedRun);
+            }
         }
         KeyCode::Char('k') if current_screen == Screen::CoordinatorLive => {
-            state.stop_coordinator_command();
+            if let Some(handle) = state.coordinator_handle() {
+                state.try_owner_action(&handle, |state| {
+                    state.stop_coordinator_command();
+                });
+            } else {
+                state.stop_coordinator_command();
+            }
         }
         KeyCode::Char('l') if current_screen == Screen::CoordinatorLive => {
             state.refresh_coordinator_snapshot();
+        }
+        KeyCode::Char('T')
+            if current_screen == Screen::CoordinatorLive
+                && !state.coordinator_ownership.is_owner =>
+        {
+            state.ownership_request_takeover();
         }
         KeyCode::Char('d') if current_screen == Screen::Tools => {
             state.refresh_tool_checks();
@@ -1186,10 +1238,16 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             f.render_widget(detail_para, body_chunks[1]);
         }
         Screen::CoordinatorLive => {
+            // L6-TUI-003: ownership banner row above the main split.
+            let live_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(3), Constraint::Min(0)])
+                .split(chunks[1]);
+            render_coordinator_ownership_banner(f, live_chunks[0], state);
             let body_chunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
-                .split(chunks[1]);
+                .split(live_chunks[1]);
             let right_chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
@@ -1543,8 +1601,6 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
     }
 
     // Footer
-    let footer_bindings = current_screen.help_keybindings();
-    let help_text = compact_help_line(footer_bindings, chunks[2].width.saturating_sub(20) as usize);
     let badges = state.status_badges().join(" | ");
     let search = if state.search_editing {
         format!("search> {}_", state.search_query)
@@ -1568,19 +1624,22 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 chunks[2].width.saturating_sub(9) as usize,
             )),
         ]),
-        Line::from(vec![
-            Span::styled("Hints: ", Style::default().fg(theme.muted)),
-            Span::raw(help_text),
-            Span::raw("  "),
-            Span::styled("Press ?", Style::default().fg(theme.accent)),
-            Span::raw(" for help"),
-        ]),
+        footer_hints_line(state, &theme, chunks[2].width.saturating_sub(20) as usize),
     ])
     .block(panel("Navigation"));
     f.render_widget(footer, chunks[2]);
 
     if state.has_coordinator_pause_prompt() {
         render_coordinator_pause_overlay(f, state);
+    }
+    if let Some(req) = state
+        .coordinator_ownership
+        .pending_incoming_request
+        .as_ref()
+    {
+        if state.current_screen() == Screen::CoordinatorLive {
+            crate::ownership::render_takeover_modal(f, f.size(), req);
+        }
     }
     if state.help_open {
         render_help_overlay(f, state);
@@ -1648,6 +1707,225 @@ fn render_help_overlay(f: &mut Frame, state: &AppState) {
         .wrap(Wrap { trim: true });
 
     f.render_widget(help_para, area);
+}
+
+fn render_coordinator_ownership_banner(f: &mut Frame, area: Rect, state: &AppState) {
+    use crate::ownership::{render_ownership_banner, OwnershipBannerProps};
+
+    let (owner_label, viewer_count) = match state.coordinator_ownership.record.as_ref() {
+        Some(r) => {
+            let owner = r
+                .owner
+                .as_ref()
+                .map(|o| o.client_id.clone())
+                .unwrap_or_else(|| "<none>".to_string());
+            (owner, r.viewers.len())
+        }
+        None => ("<no coordinator process>".to_string(), 0usize),
+    };
+    let has_pending_request = state
+        .coordinator_ownership
+        .pending_incoming_request
+        .is_some();
+
+    render_ownership_banner(
+        f,
+        area,
+        &OwnershipBannerProps {
+            owner_label,
+            viewer_count,
+            is_owner: state.coordinator_ownership.is_owner,
+            has_pending_request,
+        },
+    );
+}
+
+fn footer_hints_line(state: &AppState, theme: &ui::Theme, max_chars: usize) -> Line<'static> {
+    if state.current_screen() != Screen::CoordinatorLive {
+        return Line::from(vec![
+            Span::styled("Hints: ", Style::default().fg(theme.muted)),
+            Span::raw(compact_help_line(
+                state.current_screen().help_keybindings(),
+                max_chars,
+            )),
+            Span::raw("  "),
+            Span::styled("Press ?", Style::default().fg(theme.accent)),
+            Span::raw(" for help"),
+        ]);
+    }
+
+    let is_viewer = !state.coordinator_ownership.is_owner;
+    let has_pending = state
+        .coordinator_ownership
+        .pending_incoming_request
+        .is_some();
+    let bindings = vec![
+        ("r", "Run Full Cycle", is_viewer),
+        ("y", "Sync Registry", is_viewer),
+        ("c", "Reconcile", is_viewer),
+        ("u", "Resume Paused Run", is_viewer),
+        ("k", "Stop Coordinator", is_viewer),
+        ("l", "Refresh Live Status", false),
+        ("T", "Request Takeover", !is_viewer),
+        ("a/r", "Accept / Reject", !has_pending),
+    ];
+
+    let mut spans = Vec::new();
+    let mut used = 0usize;
+    for (idx, (key, desc, disabled)) in bindings.into_iter().enumerate() {
+        let chunk = if idx == 0 {
+            format!("{key}: {desc}")
+        } else {
+            format!(" | {key}: {desc}")
+        };
+        let chunk_len = chunk.chars().count();
+        if used + chunk_len > max_chars {
+            break;
+        }
+        if idx > 0 {
+            spans.push(Span::raw(" | "));
+        }
+        let style = if disabled {
+            Style::default().fg(theme.muted)
+        } else {
+            Style::default()
+        };
+        spans.push(Span::styled(key.to_string(), style));
+        spans.push(Span::styled(": ", style));
+        spans.push(Span::styled(desc.to_string(), style));
+        used += chunk_len;
+    }
+
+    spans.push(Span::raw("  "));
+    spans.push(Span::styled("Press ?", Style::default().fg(theme.accent)));
+    spans.push(Span::raw(" for help"));
+
+    let mut with_label = vec![Span::styled("Hints: ", Style::default().fg(theme.muted))];
+    with_label.extend(spans);
+    Line::from(with_label)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::handle_key;
+    use crate::screen::Screen;
+    use crate::state::{AppState, UiStatusLevel};
+    use crossterm::event::KeyCode;
+    use macc_core::catalog::{Agent, Skill};
+    use macc_core::config::CanonicalConfig;
+    use macc_core::doctor::ToolCheck;
+    use macc_core::plan::{ActionPlan, PlannedOp};
+    use macc_core::process_ownership::{ClientIdentity, ClientKind, ProcessHandle, ProcessKind};
+    use macc_core::resolve::MaterializedFetchUnit;
+    use macc_core::service::process_ownership::{claim_owner, register_process};
+    use macc_core::tool::{ToolDescriptor, ToolDiagnostic};
+    use macc_core::{Engine, ProjectPaths};
+    use std::cell::RefCell;
+    use std::fs;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    #[derive(Default)]
+    struct ViewerGateEngine {
+        stop_calls: RefCell<usize>,
+    }
+
+    impl Engine for ViewerGateEngine {
+        fn list_tools(&self, _paths: &ProjectPaths) -> (Vec<ToolDescriptor>, Vec<ToolDiagnostic>) {
+            (Vec::new(), Vec::new())
+        }
+
+        fn doctor(&self, _paths: &ProjectPaths) -> Vec<ToolCheck> {
+            Vec::new()
+        }
+
+        fn plan(
+            &self,
+            _paths: &ProjectPaths,
+            _config: &CanonicalConfig,
+            _materialized_units: &[MaterializedFetchUnit],
+            _overrides: &macc_core::resolve::CliOverrides,
+        ) -> macc_core::Result<ActionPlan> {
+            Ok(ActionPlan::default())
+        }
+
+        fn plan_operations(&self, _paths: &ProjectPaths, _plan: &ActionPlan) -> Vec<PlannedOp> {
+            Vec::new()
+        }
+
+        fn apply(
+            &self,
+            _paths: &ProjectPaths,
+            _plan: &mut ActionPlan,
+            _allow_user_scope: bool,
+        ) -> macc_core::Result<macc_core::ApplyReport> {
+            Ok(macc_core::ApplyReport::default())
+        }
+
+        fn builtin_skills(&self) -> Vec<Skill> {
+            Vec::new()
+        }
+
+        fn builtin_agents(&self) -> Vec<Agent> {
+            Vec::new()
+        }
+
+        fn coordinator_stop_managed_command_process(
+            &self,
+            _paths: &ProjectPaths,
+            _graceful: bool,
+        ) -> macc_core::Result<macc_core::service::coordinator::CoordinatorStopResult> {
+            *self.stop_calls.borrow_mut() += 1;
+            Ok(macc_core::service::coordinator::CoordinatorStopResult {
+                targets: 0,
+                used_group: false,
+            })
+        }
+    }
+
+    fn sample_cli_client(client_id: &str) -> ClientIdentity {
+        let now = chrono::Utc::now().to_rfc3339();
+        ClientIdentity {
+            client_id: client_id.to_string(),
+            kind: ClientKind::Cli,
+            connected_at: now.clone(),
+            last_heartbeat: now,
+        }
+    }
+
+    fn sample_project(dir: &std::path::Path) {
+        let macc_dir = dir.join(".macc");
+        fs::create_dir_all(&macc_dir).expect("create .macc");
+        fs::write(macc_dir.join("macc.yaml"), "tools:\n  enabled: []\n").expect("write config");
+    }
+
+    #[test]
+    fn coordinator_live_viewer_key_shows_viewer_mode_toast() {
+        let dir = tempdir().expect("tempdir");
+        sample_project(dir.path());
+        let handle = ProcessHandle {
+            kind: ProcessKind::Coordinator,
+            project_root: dir.path().to_path_buf(),
+            pid: Some(4242),
+        };
+        register_process(dir.path(), handle.clone()).expect("register process");
+        claim_owner(dir.path(), &handle, sample_cli_client("client-A")).expect("claim owner");
+
+        let engine = Arc::new(ViewerGateEngine::default());
+        let mut state = AppState::with_engine(engine.clone());
+        state.project_paths = Some(ProjectPaths::from_root(dir.path()));
+        state.client_identity.client_id = "client-B".to_string();
+        state.client_context.client_id = "client-B".to_string();
+        state.client_context.project_root = dir.path().to_path_buf();
+        state.goto_screen(Screen::CoordinatorLive);
+
+        handle_key(&mut state, KeyCode::Char('k'));
+
+        let status = state.ui_status.expect("status");
+        assert_eq!(status.level, UiStatusLevel::Warning);
+        assert_eq!(status.message, "Viewer mode — press T to request takeover");
+        assert_eq!(*engine.stop_calls.borrow(), 0);
+    }
 }
 
 fn render_coordinator_pause_overlay(f: &mut Frame, state: &AppState) {

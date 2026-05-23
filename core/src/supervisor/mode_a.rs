@@ -216,7 +216,8 @@ impl ProcessManager for CoordinatorProcessManager {
         if command.len() > 1 {
             cmd.args(&command[1..]);
         }
-        cmd.stdin(Stdio::null())
+        cmd.env("MACC_INTERNAL_INVOCATION", "1")
+            .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         let child = cmd

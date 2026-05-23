@@ -15,6 +15,8 @@ import type {
   ApiHealthResponse,
   ApiLogContent,
   ApiLogFile,
+  ApiOwnershipClaimResponse,
+  ApiOwnershipRecord,
   ApiPrdResponse,
   ApiPrdUpdateRequest,
   ApiPlanRequest,
@@ -27,6 +29,7 @@ import type {
   ApiStandardsPreviewRequest,
   ApiStandardsPreviewResponse,
   ApiToolDescriptor,
+  ApiTakeoverRequestResponse,
   ApiWorktree,
   ApiWorktreeCreateRequest,
   GitCommit,
@@ -59,6 +62,106 @@ export class ApiClientError extends Error {
     this.status = status;
     this.envelope = envelope;
   }
+}
+
+const WEB_CLIENT_ID_HEADER = 'X-Macc-Client-Id';
+const WEB_CLIENT_ID_STORAGE_KEY = 'macc_client_id';
+const WEB_OWNERSHIP_MODE_STORAGE_KEY = 'macc.webOwnershipMode';
+const OWNERSHIP_MUTATION_PREFIX = '/processes/project/';
+const VIEWER_CLEANUP_PATH = '/processes/project/viewer';
+const VIEWER_CLEANUP_FLAG = '__maccViewerCleanupRegistered';
+
+function getSessionStorage(): Storage | null {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+  return window.sessionStorage;
+}
+
+function getLocalStorage(): Storage | null {
+  if (
+    typeof window === 'undefined' ||
+    !window.localStorage ||
+    typeof window.localStorage.getItem !== 'function' ||
+    typeof window.localStorage.setItem !== 'function'
+  ) {
+    return null;
+  }
+  return window.localStorage;
+}
+
+function cleanupProjectViewerOnUnload(clientId: string): void {
+  void fetch(buildUrl(VIEWER_CLEANUP_PATH), {
+    method: 'DELETE',
+    keepalive: true,
+    headers: {
+      Accept: 'application/json',
+      [WEB_CLIENT_ID_HEADER]: clientId,
+    },
+  }).catch(() => undefined);
+}
+
+function currentStoredWebClientId(): string | null {
+  return getSessionStorage()?.getItem(WEB_CLIENT_ID_STORAGE_KEY) ?? null;
+}
+
+function ensureViewerCleanupRegistered(): void {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  const viewerCleanupWindow = window as Window & { [VIEWER_CLEANUP_FLAG]?: boolean };
+  if (viewerCleanupWindow[VIEWER_CLEANUP_FLAG]) {
+    return;
+  }
+  viewerCleanupWindow[VIEWER_CLEANUP_FLAG] = true;
+  window.addEventListener('beforeunload', () => {
+    const clientId = currentStoredWebClientId();
+    if (clientId) {
+      cleanupProjectViewerOnUnload(clientId);
+    }
+  });
+}
+
+function resolveOwnershipClientId(options?: ApiRequestOptions): string {
+  return options?.clientId ?? getWebClientId();
+}
+
+function ownershipBody<TBody extends Record<string, unknown>>(
+  options: ApiRequestOptions,
+  body: TBody,
+): TBody & { client_id: string } {
+  return {
+    ...body,
+    client_id: resolveOwnershipClientId(options),
+  };
+}
+
+export function getWebClientId(): string {
+  const storage = getSessionStorage();
+  if (!storage) {
+    return 'web-server-render';
+  }
+  const existing = storage.getItem(WEB_CLIENT_ID_STORAGE_KEY);
+  if (existing) {
+    ensureViewerCleanupRegistered();
+    return existing;
+  }
+  const suffix =
+    typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const clientId = suffix;
+  storage.setItem(WEB_CLIENT_ID_STORAGE_KEY, clientId);
+  ensureViewerCleanupRegistered();
+  return clientId;
+}
+
+export function setWebOwnershipMode(mode: 'owner' | 'viewer' | 'unknown'): void {
+  getLocalStorage()?.setItem(WEB_OWNERSHIP_MODE_STORAGE_KEY, mode);
+}
+
+function getWebOwnershipMode(): string | null {
+  return getLocalStorage()?.getItem(WEB_OWNERSHIP_MODE_STORAGE_KEY) ?? null;
 }
 
 function fallbackErrorEnvelope(message: string, cause?: string): ApiErrorEnvelope {
@@ -141,6 +244,7 @@ async function requestJson<T>(
 export interface ApiRequestOptions {
   baseUrl?: string;
   signal?: AbortSignal;
+  clientId?: string;
 }
 
 type QueryValue = string | number | boolean | null | undefined;
@@ -171,12 +275,31 @@ async function sendJson<TResponse, TBody = undefined>(
   options: ApiQueryOptions = {},
   body?: TBody,
 ): Promise<TResponse> {
+  if (
+    method !== 'GET' &&
+    !path.startsWith(OWNERSHIP_MUTATION_PREFIX) &&
+    getWebOwnershipMode() === 'viewer'
+  ) {
+    throw new ApiClientError(403, {
+      error: {
+        code: 'MACC-WEB-OWNERSHIP',
+        category: 'Auth',
+        message: 'This Web client is currently a viewer. Request project control before mutating.',
+        retryable: false,
+        recommended_action: 'Use the Control banner to request ownership, then retry.',
+      },
+    });
+  }
+
   const headers: HeadersInit = {
     Accept: 'application/json',
   };
 
   if (body !== undefined) {
     headers['Content-Type'] = 'application/json';
+  }
+  if (method !== 'GET') {
+    headers[WEB_CLIENT_ID_HEADER] = options.clientId ?? getWebClientId();
   }
 
   return requestJson<TResponse>(
@@ -255,13 +378,75 @@ export async function postCoordinatorAction(
   action: ApiCoordinatorAction,
   options: ApiRequestOptions = {},
 ): Promise<ApiCoordinatorCommandResult> {
-  return requestJson<ApiCoordinatorCommandResult>(
-    `/coordinator/${action}`,
-    {
-      method: 'POST',
-      signal: options.signal,
-    },
-    options.baseUrl,
+  return sendJson<ApiCoordinatorCommandResult>(`/coordinator/${action}`, 'POST', options);
+}
+
+export async function listProcessOwnership(
+  options: ApiRequestOptions = {},
+): Promise<ApiOwnershipRecord[]> {
+  return sendJson<ApiOwnershipRecord[]>('/processes', 'GET', options);
+}
+
+export async function getProjectOwnership(
+  options: ApiRequestOptions = {},
+): Promise<ApiOwnershipRecord | null> {
+  return sendJson<ApiOwnershipRecord | null>('/processes/project/ownership', 'GET', options);
+}
+
+export async function claimProjectOwnership(
+  options: ApiRequestOptions = {},
+): Promise<ApiOwnershipClaimResponse> {
+  return sendJson<ApiOwnershipClaimResponse, { pid: null }>(
+    '/processes/project/claim',
+    'POST',
+    options,
+    ownershipBody(options, { pid: null }),
+  );
+}
+
+export async function registerProjectViewer(
+  options: ApiRequestOptions = {},
+): Promise<void> {
+  await sendJson<unknown, { pid: null }>(
+    '/processes/project/viewer',
+    'POST',
+    options,
+    ownershipBody(options, { pid: null }),
+  );
+}
+
+export async function requestProjectTakeover(
+  options: ApiRequestOptions = {},
+): Promise<ApiTakeoverRequestResponse> {
+  return sendJson<ApiTakeoverRequestResponse, { pid: null }>(
+    '/processes/project/takeover/request',
+    'POST',
+    options,
+    ownershipBody(options, { pid: null }),
+  );
+}
+
+export async function respondProjectTakeover(
+  requestId: string,
+  accept: boolean,
+  options: ApiRequestOptions = {},
+): Promise<void> {
+  await sendJson<unknown, { pid: null; request_id: string; accept: boolean }>(
+    '/processes/project/takeover/respond',
+    'POST',
+    options,
+    ownershipBody(options, { pid: null, request_id: requestId, accept }),
+  );
+}
+
+export async function heartbeatProjectOwnership(
+  options: ApiRequestOptions = {},
+): Promise<void> {
+  await sendJson<unknown, { pid: null }>(
+    '/processes/project/heartbeat',
+    'POST',
+    options,
+    ownershipBody(options, { pid: null }),
   );
 }
 

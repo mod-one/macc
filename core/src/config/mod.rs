@@ -18,6 +18,8 @@ pub struct CanonicalConfig {
     pub automation: AutomationConfig,
     #[serde(default)]
     pub settings: SettingsConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process_ownership: Option<ProcessOwnershipConfig>,
     #[serde(default = "default_mcp_templates")]
     pub mcp_templates: Vec<McpTemplateDefinition>,
 }
@@ -40,6 +42,19 @@ pub struct SettingsConfig {
 pub enum WebAssetsMode {
     Dist,
     Embedded,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessOwnershipConfig {
+    /// Seconds before a pending project-control takeover request expires.
+    /// `0` disables the timeout. Default: 60.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub takeover_timeout_seconds: Option<u64>,
+    /// Default response applied when a takeover request times out:
+    /// "deny" (default), "auto_accept", or "admin_takeover".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub takeover_default_response: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
@@ -229,6 +244,16 @@ pub struct CoordinatorConfig {
         skip_serializing_if = "is_default_max_salvage_attempts"
     )]
     pub max_salvage_attempts_per_task: u32,
+
+    /// Seconds before a pending process-ownership takeover request expires.
+    /// `0` disables the timeout (request stays pending forever).  Default: 60.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub takeover_timeout_seconds: Option<u64>,
+
+    /// Default response applied when a takeover request times out:
+    /// "deny" (default), "auto_accept", or "admin_takeover".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub takeover_default_response: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -354,6 +379,8 @@ impl Default for CoordinatorConfig {
             sync_unmerged_branches: true,
             salvage_merge_timeout_seconds: 120,
             max_salvage_attempts_per_task: 1,
+            takeover_timeout_seconds: None,
+            takeover_default_response: None,
         }
     }
 }
@@ -778,6 +805,7 @@ impl Default for CanonicalConfig {
             selections: None,
             automation: AutomationConfig::default(),
             settings: SettingsConfig::default(),
+            process_ownership: None,
             mcp_templates: default_mcp_templates(),
         }
     }
@@ -1243,6 +1271,7 @@ settings:
             selections: None,
             automation: AutomationConfig::default(),
             settings: SettingsConfig::default(),
+            process_ownership: None,
             mcp_templates: Vec::new(),
         };
 

@@ -4,6 +4,7 @@ use crate::coordinator::rate_limit::ToolThrottleRegistry;
 use crate::coordinator::{CoordinatorEventRecord, PerformerCompletionKind};
 use crate::coordinator_storage::CoordinatorStorage;
 use crate::git;
+use crate::service::process_ownership::RegisteredProcessGuard;
 use crate::{MaccError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -235,6 +236,7 @@ pub struct CoordinatorRunState {
     pub performer_ipc_listener_started: bool,
     pub performer_ipc_listener_alive: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub coordinator_pid_guard: Option<CoordinatorPidGuard>,
+    pub registered_process_guard: Option<RegisteredProcessGuard>,
     /// Last dispatch failure message (shown in no-progress diagnostics).
     pub last_dispatch_failure: Option<String>,
     // RL-ROUTE-005: per-tool throttle state
@@ -346,6 +348,7 @@ impl CoordinatorRunState {
                 false,
             )),
             coordinator_pid_guard: None,
+            registered_process_guard: None,
             last_dispatch_failure: None,
             throttle_registry: ToolThrottleRegistry::default(),
             normalizer_registry:
@@ -384,6 +387,8 @@ impl Default for CoordinatorRunState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::process_ownership::{ProcessHandle, ProcessKind};
+    use crate::service::process_ownership::{get_record, project_lease, register_process};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -441,6 +446,41 @@ mod tests {
         // original_max_parallel == 0 → restore is a no-op
         s.effective_max_parallel = 0;
         assert_eq!(s.restore_parallel(), 0);
+    }
+
+    #[test]
+    fn registered_process_guard_in_run_state_unregisters_on_drop() {
+        let root = temp_root("ownership-guard");
+        fs::create_dir_all(root.join(".macc").join("state")).expect("create state dir");
+        let handle = ProcessHandle {
+            kind: ProcessKind::Coordinator,
+            project_root: root.clone(),
+            pid: Some(4242),
+        };
+
+        register_process(&root, handle.clone()).expect("register process");
+
+        let mut state = CoordinatorRunState::new();
+        state.registered_process_guard = Some(RegisteredProcessGuard::new(&root, handle.clone()));
+
+        let record = get_record(&root, &handle)
+            .expect("load registered record")
+            .expect("coordinator record exists");
+        assert!(record.owner.is_none());
+        assert!(record.viewers.is_empty());
+
+        let lease = project_lease(&root)
+            .expect("load project lease")
+            .expect("project lease exists");
+        assert!(lease.owner.is_none());
+        assert!(lease.viewers.is_empty());
+
+        drop(state);
+
+        assert!(get_record(&root, &handle)
+            .expect("load record after drop")
+            .is_none());
+        let _ = fs::remove_dir_all(root);
     }
 
     // ---- L4-EVENTS-001: reliability event kind roundtrip tests ----
@@ -1137,6 +1177,7 @@ pub fn spawn_performer_job(
     );
     run_cmd
         .current_dir(repo_root)
+        .env("MACC_INTERNAL_INVOCATION", "1")
         .env(
             "COORDINATOR_RUN_ID",
             std::env::var("COORDINATOR_RUN_ID").unwrap_or_else(|_| {

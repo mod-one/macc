@@ -9,6 +9,8 @@ pub mod interaction;
 pub mod lifecycle;
 pub mod logs;
 pub mod migrate;
+pub mod process_ownership;
+pub mod process_ownership_gate;
 pub mod project;
 pub mod task_runner;
 pub mod tooling;

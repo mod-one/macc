@@ -40,6 +40,9 @@ impl<'a> Command for ConfigCommand<'a> {
                 description,
                 only,
             } => {
+                if let Ok(paths) = self.app.project_paths() {
+                    crate::commands::gate_cli_mutation(&paths.root)?;
+                }
                 let config = self.app.canonical_config()?;
                 let sections = match only {
                     Some(csv) => Some(parse_sections(csv)?),
@@ -51,6 +54,7 @@ impl<'a> Command for ConfigCommand<'a> {
             }
             ConfigAction::Restore { name, only } => {
                 let paths = self.app.project_paths()?;
+                crate::commands::gate_cli_mutation(&paths.root)?;
                 let config = self.app.canonical_config()?;
                 let sections = match only {
                     Some(csv) => Some(parse_sections(csv)?),
@@ -91,6 +95,9 @@ impl<'a> Command for ConfigCommand<'a> {
                 Ok(())
             }
             ConfigAction::Delete { name } => {
+                if let Ok(paths) = self.app.project_paths() {
+                    crate::commands::gate_cli_mutation(&paths.root)?;
+                }
                 mgr.delete(name)?;
                 println!("Profile '{}' deleted.", name);
                 Ok(())

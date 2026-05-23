@@ -1,8 +1,8 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import { useCoordinatorStore } from '../../store';
-import { getRegistryTasks } from '../../api/client';
-import type { 
-  ApiCoordinatorAction, 
+import { getRegistryTasks, ApiClientError } from '../../api/client';
+import type {
+  ApiCoordinatorAction,
   ApiRegistryTask
 } from '../../api/models';
 import { useEventSource } from '../../hooks/useEventSource';
@@ -12,9 +12,12 @@ import { StatusBadge, type StatusTone } from '../../components/StatusBadge';
 import { Button } from '../../components/Button';
 import { ConfirmDialog } from '../../components/ConfirmDialog';
 import { ToolCooldownPanel } from '../../components/ToolCooldownPanel';
+import { OwnershipBadge } from '../../components/OwnershipBadge';
+import { TakeoverNotificationToast } from '../../components/TakeoverNotificationToast';
 import * as Icons from '../../components/icons';
 import { Icons as NavIcons } from '../../components/NavIcons';
 import { cn } from '../../components/styles';
+import { useIsOwner } from '../../stores/ownershipStore';
 
 // --- Types ---
 
@@ -54,12 +57,14 @@ const Console: React.FC = () => {
   const runAction = useCoordinatorStore((state) => state.runAction);
   const pendingAction = useCoordinatorStore((state) => state.pendingAction);
   
+  const isOwner = useIsOwner();
   const [tasks, setTasks] = useState<ApiRegistryTask[]>([]);
   const [isLoadingTasks, setIsLoadingTasks] = useState(false);
   const [startTime] = useState<number>(Date.now());
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [activeWorktrees, setActiveWorktrees] = useState<Record<string, ActiveWorktree>>({});
   const [showEmergencyStop, setShowEmergencyStop] = useState(false);
+  const [ownershipErrorMsg, setOwnershipErrorMsg] = useState<string | null>(null);
 
   // --- Real-time Events ---
   const { events } = useEventSource('/coordinator_event', { maxEvents: 100 });
@@ -161,7 +166,12 @@ const Console: React.FC = () => {
     try {
       await runAction(action);
     } catch (err) {
-      console.error(`Action ${action} failed:`, err);
+      if (err instanceof ApiClientError && err.status === 403) {
+        setOwnershipErrorMsg('Viewer mode — request takeover to take control, then retry.');
+        setTimeout(() => setOwnershipErrorMsg(null), 5000);
+      } else {
+        console.error(`Action ${action} failed:`, err);
+      }
     }
   };
 
@@ -172,8 +182,13 @@ const Console: React.FC = () => {
 
   const isBusy = pendingAction !== null;
 
+  const viewerTooltip = !isOwner
+    ? 'Viewer mode — click Request Takeover to take control'
+    : undefined;
+
   return (
     <div className="flex flex-col gap-8 pb-12">
+      <TakeoverNotificationToast />
       {/* --- Header & KPIs --- */}
       <section className="space-y-6">
         <header className="flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
@@ -189,8 +204,8 @@ const Console: React.FC = () => {
                     Syncing
                   </span>
                 )}
-                <StatusBadge 
-                  status={status?.paused ? 'Paused' : (status?.active ?? 0) > 0 ? 'Running' : 'Idle'} 
+                <StatusBadge
+                  status={status?.paused ? 'Paused' : (status?.active ?? 0) > 0 ? 'Running' : 'Idle'}
                   tone={status?.paused ? 'paused' : (status?.active ?? 0) > 0 ? 'active' : 'todo'}
                 />
                 {status?.throttled_tools && status.throttled_tools.length > 0 && (
@@ -205,17 +220,24 @@ const Console: React.FC = () => {
             </p>
           </div>
 
-          <div className="flex flex-wrap gap-3">
+          <div className="flex flex-wrap items-center gap-3">
+            <OwnershipBadge />
             <Button
               className="bg-rose-600 hover:bg-rose-700 text-white font-bold h-12 px-6 shadow-lg shadow-rose-500/20"
               onClick={() => setShowEmergencyStop(true)}
-              disabled={isBusy}
+              disabled={isBusy || !isOwner}
+              title={viewerTooltip}
             >
               <Icons.AlertTriangleIcon className="mr-2 h-5 w-5" />
               Emergency Stop
             </Button>
           </div>
         </header>
+        {ownershipErrorMsg && (
+          <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-400">
+            {ownershipErrorMsg}
+          </div>
+        )}
 
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <KpiCard label="Status" value={status ? (status.paused ? 'PAUSED' : 'ACTIVE') : 'OFFLINE'} tone={status?.paused ? 'warning' : 'accent'} />
@@ -259,7 +281,12 @@ const Console: React.FC = () => {
           <section className="space-y-4">
             <div className="flex items-center justify-between">
               <h2 className="text-xl font-bold text-[var(--text-primary)]">Task Registry</h2>
-              <Button className="h-8 px-3 text-xs" onClick={() => handleAction('sync')}>
+              <Button
+                className="h-8 px-3 text-xs"
+                disabled={!isOwner}
+                title={viewerTooltip}
+                onClick={() => handleAction('sync')}
+              >
                 Sync Registry
               </Button>
             </div>
@@ -299,14 +326,14 @@ const Console: React.FC = () => {
           <section className="rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] p-6 shadow-sm">
             <h3 className="mb-4 text-sm font-bold uppercase tracking-wider text-[var(--text-muted)]">Quick Actions</h3>
             <div className="grid grid-cols-2 gap-2">
-              <ActionButton label="Run" icon={<Icons.PlayIcon className="h-4 w-4" />} onClick={() => handleAction('run')} disabled={isBusy} primary />
-              <ActionButton label="Stop" icon={<Icons.XCircleIcon className="h-4 w-4" />} onClick={() => handleAction('stop')} disabled={isBusy} />
-              <ActionButton label="Resume" icon={<Icons.RefreshIcon className="h-4 w-4" />} onClick={() => handleAction('resume')} disabled={isBusy} />
-              <ActionButton label="Dispatch" icon={<Icons.ArrowUpIcon className="h-4 w-4" />} onClick={() => handleAction('dispatch')} disabled={isBusy} />
-              <ActionButton label="Advance" icon={<NavIcons.ChevronRight />} onClick={() => handleAction('advance')} disabled={isBusy} />
-              <ActionButton label="Reconcile" icon={<Icons.RefreshIcon className="h-4 w-4" />} onClick={() => handleAction('reconcile')} disabled={isBusy} />
-              <ActionButton label="Cleanup" icon={<Icons.XCircleIcon className="h-4 w-4" />} onClick={() => handleAction('cleanup')} disabled={isBusy} />
-              <ActionButton label="Audit PRD" icon={<NavIcons.Search />} onClick={() => handleAction('audit-prd')} disabled={isBusy} />
+              <ActionButton label="Run" icon={<Icons.PlayIcon className="h-4 w-4" />} onClick={() => handleAction('run')} disabled={isBusy || !isOwner} title={viewerTooltip} primary />
+              <ActionButton label="Stop" icon={<Icons.XCircleIcon className="h-4 w-4" />} onClick={() => handleAction('stop')} disabled={isBusy || !isOwner} title={viewerTooltip} />
+              <ActionButton label="Resume" icon={<Icons.RefreshIcon className="h-4 w-4" />} onClick={() => handleAction('resume')} disabled={isBusy || !isOwner} title={viewerTooltip} />
+              <ActionButton label="Dispatch" icon={<Icons.ArrowUpIcon className="h-4 w-4" />} onClick={() => handleAction('dispatch')} disabled={isBusy || !isOwner} title={viewerTooltip} />
+              <ActionButton label="Advance" icon={<NavIcons.ChevronRight />} onClick={() => handleAction('advance')} disabled={isBusy || !isOwner} title={viewerTooltip} />
+              <ActionButton label="Reconcile" icon={<Icons.RefreshIcon className="h-4 w-4" />} onClick={() => handleAction('reconcile')} disabled={isBusy || !isOwner} title={viewerTooltip} />
+              <ActionButton label="Cleanup" icon={<Icons.XCircleIcon className="h-4 w-4" />} onClick={() => handleAction('cleanup')} disabled={isBusy || !isOwner} title={viewerTooltip} />
+              <ActionButton label="Audit PRD" icon={<NavIcons.Search />} onClick={() => handleAction('audit-prd')} disabled={isBusy || !isOwner} title={viewerTooltip} />
             </div>
           </section>
 
@@ -370,16 +397,18 @@ const KpiCard: React.FC<{ label: string; value: string | number; tone?: 'default
   </article>
 );
 
-const ActionButton: React.FC<{ 
-  label: string; 
-  icon: React.ReactNode; 
-  onClick: () => void; 
+const ActionButton: React.FC<{
+  label: string;
+  icon: React.ReactNode;
+  onClick: () => void;
   disabled?: boolean;
   primary?: boolean;
-}> = ({ label, icon, onClick, disabled, primary }) => (
+  title?: string;
+}> = ({ label, icon, onClick, disabled, primary, title }) => (
   <button
     onClick={onClick}
     disabled={disabled}
+    title={title}
     className={cn(
       "flex flex-col items-center justify-center gap-2 rounded-xl border p-3 text-center transition-all",
       "hover:scale-[1.02] active:scale-[0.98] disabled:opacity-50 disabled:hover:scale-100",

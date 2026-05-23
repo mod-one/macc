@@ -358,6 +358,7 @@ fn extract_sections(source: &CanonicalConfig, sections: &[ProfileSection]) -> Ca
         } else {
             def.settings
         },
+        process_ownership: def.process_ownership,
         mcp_templates: if sections.contains(&ProfileSection::McpTemplates) {
             source.mcp_templates.clone()
         } else {
@@ -460,6 +461,7 @@ mod tests {
                 quiet: true,
                 ..Default::default()
             },
+            process_ownership: None,
             mcp_templates: Vec::new(),
         }
     }

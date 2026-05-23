@@ -32,6 +32,7 @@ pub(super) const WEB_ERR_REGISTRY_VALIDATION: &str = "MACC-WEB-1005";
 const WEB_ERR_TOOLSPEC: &str = "MACC-WEB-1006";
 pub(super) const WEB_ERR_LOG_VALIDATION: &str = "MACC-WEB-1007";
 const WEB_ERR_AUTH_SCOPE: &str = "MACC-WEB-3000";
+const WEB_ERR_NOT_PROCESS_OWNER: &str = "not_process_owner";
 pub(super) const WEB_ERR_REGISTRY_CONFLICT: &str = "MACC-WEB-3001";
 pub(super) const WEB_ERR_WORKTREE_CONFLICT: &str = "MACC-WEB-3002";
 const WEB_ERR_PROJECT_ROOT_NOT_FOUND: &str = "MACC-WEB-2000";
@@ -272,6 +273,24 @@ impl From<MaccError> for ApiError {
                 None,
                 None,
             ),
+            MaccError::NotProcessOwner {
+                handle,
+                current_owner,
+            } => ApiError::new(
+                StatusCode::FORBIDDEN,
+                WEB_ERR_NOT_PROCESS_OWNER,
+                "Auth",
+                "Client is not the owner of this process.".to_string(),
+                false,
+                Some("Request process takeover, then retry the modifying action".to_string()),
+                Some(serde_json::json!({
+                    "process_kind": format!("{:?}", handle.kind),
+                    "project_root": handle.project_root,
+                    "pid": handle.pid,
+                    "current_owner": current_owner,
+                })),
+                None,
+            ),
             MaccError::ToolSpec {
                 path,
                 line,
@@ -418,7 +437,9 @@ impl IntoResponse for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use macc_core::process_ownership::{ProcessHandle, ProcessKind};
     use macc_core::MaccError;
+    use std::path::PathBuf;
 
     #[test]
     fn api_error_mapping_validation() {
@@ -475,5 +496,26 @@ mod tests {
         assert_eq!(err.body.error.category, "Internal");
         assert_eq!(err.body.error.retryable, true);
         assert!(err.body.error.recommended_action.is_some());
+    }
+
+    #[test]
+    fn api_error_mapping_not_process_owner() {
+        let handle = ProcessHandle {
+            kind: ProcessKind::Coordinator,
+            project_root: PathBuf::from("/tmp/test-proj"),
+            pid: Some(1234),
+        };
+        let err: ApiError = MaccError::NotProcessOwner {
+            handle,
+            current_owner: Some("other-client".to_string()),
+        }
+        .into();
+        assert_eq!(err.status, axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(err.body.error.code, "not_process_owner");
+        assert_eq!(err.body.error.category, "Auth");
+        assert_eq!(err.body.error.retryable, false);
+        assert!(err.body.error.recommended_action.is_some());
+        let ctx = err.body.error.context.as_ref().expect("context present");
+        assert_eq!(ctx["current_owner"], "other-client");
     }
 }

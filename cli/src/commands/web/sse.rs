@@ -1,20 +1,32 @@
 use super::errors::ApiError;
 use super::WebState;
 use async_stream::stream;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::response::sse::{Event, Sse};
 use macc_core::coordinator::COORDINATOR_EVENT_SCHEMA_VERSION;
 use macc_core::engine::CoordinatorEvent;
+use macc_core::process_ownership::{ClientIdentity, ClientKind, ProcessHandle};
+use serde::Deserialize;
 use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const SSE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const SSE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+const WEB_CLIENT_HEADER: &str = "X-Macc-Client-Id";
+
+#[derive(Debug, Default, Deserialize)]
+pub(super) struct EventsQuery {
+    #[serde(default)]
+    pub(super) last_event_id: Option<String>,
+    #[serde(default)]
+    pub(super) client_id: Option<String>,
+}
 
 pub(super) async fn events_handler(
     State(state): State<WebState>,
+    Query(query): Query<EventsQuery>,
     headers: HeaderMap,
 ) -> std::result::Result<
     Sse<impl tokio_stream::Stream<Item = std::result::Result<Event, Infallible>>>,
@@ -24,17 +36,22 @@ pub(super) async fn events_handler(
         .engine
         .get_coordinator_events(&state.paths)
         .map_err(ApiError::from)?;
-    let last_event_id = headers
-        .get("last-event-id")
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned);
+    let last_event_id = query.last_event_id.clone().or_else(|| {
+        headers
+            .get("last-event-id")
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    });
+    let viewer_guards =
+        register_web_viewers(&state, web_client_id(&query, &headers)).map_err(|err| *err)?;
 
     Ok(Sse::new(coordinator_event_stream(
         state,
         initial_events,
         last_event_id,
+        viewer_guards,
         SSE_POLL_INTERVAL,
         SSE_HEARTBEAT_INTERVAL,
     )))
@@ -44,10 +61,12 @@ pub(super) fn coordinator_event_stream(
     state: WebState,
     initial_events: Vec<CoordinatorEvent>,
     last_event_id: Option<String>,
+    viewer_guards: Vec<macc_core::service::process_ownership::ProcessViewerGuard>,
     poll_interval: Duration,
     heartbeat_interval: Duration,
 ) -> impl tokio_stream::Stream<Item = std::result::Result<Event, Infallible>> {
     stream! {
+        let _viewer_guards = viewer_guards;
         let mut source_seq_cursor = resolve_source_seq_cursor(&initial_events, last_event_id.as_deref());
         let mut pending_events = pending_events_after(&initial_events, source_seq_cursor);
         let mut poll_tick = tokio::time::interval(poll_interval);
@@ -78,6 +97,53 @@ pub(super) fn coordinator_event_stream(
             }
         }
     }
+}
+
+fn web_client_id(query: &EventsQuery, headers: &HeaderMap) -> Option<String> {
+    query.client_id.clone().or_else(|| {
+        headers
+            .get(WEB_CLIENT_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    })
+}
+
+fn register_web_viewers(
+    state: &WebState,
+    client_id: Option<String>,
+) -> Result<Vec<macc_core::service::process_ownership::ProcessViewerGuard>, Box<ApiError>> {
+    let Some(client_id) = client_id else {
+        return Ok(Vec::new());
+    };
+    let records = state
+        .engine
+        .process_list_running(&state.paths.root)
+        .map_err(|err| Box::new(ApiError::from(err)))?;
+    let mut viewer_guards = Vec::with_capacity(records.len());
+
+    for record in records {
+        let now = chrono::Utc::now().to_rfc3339();
+        let identity = ClientIdentity {
+            client_id: client_id.clone(),
+            kind: ClientKind::Web,
+            connected_at: now.clone(),
+            last_heartbeat: now,
+        };
+        let handle = ProcessHandle {
+            kind: record.process.kind,
+            project_root: record.process.project_root,
+            pid: record.process.pid,
+        };
+        let guard = state
+            .engine
+            .process_register_viewer(&state.paths.root, handle, identity)
+            .map_err(|err| Box::new(ApiError::from(err)))?;
+        viewer_guards.push(guard);
+    }
+
+    Ok(viewer_guards)
 }
 
 fn pending_events_after(

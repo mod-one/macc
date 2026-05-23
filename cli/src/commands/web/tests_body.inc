@@ -2305,6 +2305,7 @@ async fn coordinator_event_stream_delivers_new_events_after_connect() {
         state,
         Vec::new(),
         None,
+        Vec::new(),
         Duration::from_millis(10),
         Duration::from_millis(100),
     ))
@@ -2323,6 +2324,135 @@ async fn coordinator_event_stream_delivers_new_events_after_connect() {
 }
 
 #[tokio::test]
+async fn events_endpoint_registers_and_releases_web_viewers_from_client_id_query() {
+    let root = temp_root("events-viewer-registration");
+    fs::create_dir_all(&root).expect("create root");
+    let engine = Arc::new(WebTestEngine::with_event_snapshots(vec![vec![
+        coordinator_event(44, "evt-44", "task_transition"),
+    ]]));
+    let handle = macc_core::process_ownership::ProcessHandle {
+        kind: macc_core::process_ownership::ProcessKind::Coordinator,
+        project_root: root.clone(),
+        pid: Some(4242),
+    };
+    let lease_handle = macc_core::process_ownership::ProcessHandle {
+        kind: macc_core::process_ownership::ProcessKind::Project,
+        project_root: root.clone(),
+        pid: None,
+    };
+    let _process_guard =
+        macc_core::engine::Engine::process_register(engine.as_ref(), &root, handle.clone())
+            .expect("register process");
+    let state = test_web_state(&root, engine.clone(), WebAssetsMode::Embedded);
+    let stream = sse::events_handler(
+        axum::extract::State(state),
+        axum::extract::Query(sse::EventsQuery {
+            last_event_id: None,
+            client_id: Some("web-client-1".to_string()),
+        }),
+        axum::http::HeaderMap::new(),
+    )
+    .await
+    .expect("sse response");
+    let response = stream.into_response();
+    let mut body = response.into_body();
+
+    let frame = tokio::time::timeout(Duration::from_secs(1), body.frame())
+        .await
+        .expect("frame timeout")
+        .expect("frame")
+        .expect("body frame");
+    let text = String::from_utf8(frame.into_data().expect("data frame").to_vec()).expect("utf8");
+    assert!(text.contains("id: evt-44"), "{text}");
+
+    let ownership = macc_core::engine::Engine::process_ownership_status(
+        engine.as_ref(),
+        &root,
+        &lease_handle,
+    )
+    .expect("ownership status")
+    .expect("ownership record");
+    assert_eq!(ownership.viewers.len(), 1);
+    assert_eq!(ownership.viewers[0].client_id, "web-client-1");
+
+    drop(body);
+    tokio::task::yield_now().await;
+
+    let ownership = macc_core::engine::Engine::process_ownership_status(
+        engine.as_ref(),
+        &root,
+        &lease_handle,
+    )
+    .expect("ownership status")
+    .expect("ownership record");
+    assert!(ownership.viewers.is_empty());
+}
+
+#[tokio::test]
+async fn web_viewer_heartbeat_updates_registered_web_viewers() {
+    let root = temp_root("web-viewer-heartbeat");
+    fs::create_dir_all(&root).expect("create root");
+    let engine = Arc::new(TestEngine::with_fixtures());
+    let handle = macc_core::process_ownership::ProcessHandle {
+        kind: macc_core::process_ownership::ProcessKind::Coordinator,
+        project_root: root.clone(),
+        pid: Some(5252),
+    };
+    let lease_handle = macc_core::process_ownership::ProcessHandle {
+        kind: macc_core::process_ownership::ProcessKind::Project,
+        project_root: root.clone(),
+        pid: None,
+    };
+    let _process_guard =
+        macc_core::engine::Engine::process_register(engine.as_ref(), &root, handle.clone())
+            .expect("register process");
+    let viewer = macc_core::process_ownership::ClientIdentity {
+        client_id: "web-viewer-1".to_string(),
+        kind: macc_core::process_ownership::ClientKind::Web,
+        connected_at: "2026-03-19T10:00:00Z".to_string(),
+        last_heartbeat: "2026-03-19T10:00:00Z".to_string(),
+    };
+    let _viewer_guard = macc_core::engine::Engine::process_register_viewer(
+        engine.as_ref(),
+        &root,
+        handle.clone(),
+        viewer,
+    )
+    .expect("register viewer");
+
+    let state = test_web_state(&root, engine.clone(), WebAssetsMode::Embedded);
+    let before = macc_core::engine::Engine::process_ownership_status(
+        engine.as_ref(),
+        &root,
+        &lease_handle,
+    )
+    .expect("ownership status")
+    .expect("ownership record")
+    .viewers
+    .into_iter()
+    .find(|viewer| viewer.client_id == "web-viewer-1")
+    .expect("viewer exists")
+    .last_heartbeat;
+
+    heartbeat_web_viewers_once(&state);
+
+    let after = macc_core::engine::Engine::process_ownership_status(
+        engine.as_ref(),
+        &root,
+        &lease_handle,
+    )
+    .expect("ownership status")
+    .expect("ownership record")
+    .viewers
+    .into_iter()
+    .find(|viewer| viewer.client_id == "web-viewer-1")
+    .expect("viewer exists")
+    .last_heartbeat;
+
+    assert_ne!(after, before);
+}
+
+#[tokio::test]
 async fn coordinator_event_stream_emits_heartbeat_records() {
     let root = temp_root("events-heartbeat");
     fs::create_dir_all(&root).expect("create root");
@@ -2335,6 +2465,7 @@ async fn coordinator_event_stream_emits_heartbeat_records() {
         state,
         Vec::new(),
         None,
+        Vec::new(),
         Duration::from_millis(50),
         Duration::from_millis(10),
     ))
@@ -2366,6 +2497,7 @@ async fn coordinator_event_stream_waits_for_heartbeat_interval() {
         state,
         Vec::new(),
         None,
+        Vec::new(),
         Duration::from_millis(10),
         Duration::from_millis(120),
     ))
@@ -4770,4 +4902,209 @@ async fn terminal_session_limit_is_enforced() {
         .to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&payload).expect("json");
     assert_eq!(json["error"]["code"], "MACC-WEB-3003");
+}
+
+// --- Ownership endpoint tests ---
+
+#[tokio::test]
+async fn ownership_list_processes_returns_empty_array() {
+    let root = temp_root("ownership-list-empty");
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/processes")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(payload, serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn ownership_claim_first_caller_becomes_owner() {
+    let root = temp_root("ownership-claim-owner");
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/processes/coordinator/claim")
+                .method("POST")
+                .header("X-Macc-Client-Id", "client-owner-1")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(payload["status"], "owner");
+}
+
+#[tokio::test]
+async fn ownership_register_viewer_returns_no_content() {
+    let root = temp_root("ownership-register-viewer");
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/processes/coordinator/viewer")
+                .method("POST")
+                .header("X-Macc-Client-Id", "viewer-client-1")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn ownership_heartbeat_returns_no_content() {
+    let root = temp_root("ownership-heartbeat");
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/processes/coordinator/heartbeat")
+                .method("POST")
+                .header("X-Macc-Client-Id", "heartbeat-client")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{}"))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn ownership_get_invalid_kind_returns_400() {
+    let root = temp_root("ownership-unknown-kind");
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/processes/unknownkind/ownership")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn ownership_get_unregistered_handle_returns_404() {
+    let root = temp_root("ownership-not-found");
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/processes/coordinator/ownership")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn coordinator_stop_propagates_not_process_owner_as_403() {
+    let root = temp_root("ownership-not-owner-403");
+    let handle = macc_core::process_ownership::ProcessHandle {
+        kind: macc_core::process_ownership::ProcessKind::Coordinator,
+        project_root: root.clone(),
+        pid: Some(1234),
+    };
+    let state = test_web_state(
+        &root,
+        Arc::new(WebTestEngine::with_stop_result(Err(
+            MaccError::NotProcessOwner {
+                handle,
+                current_owner: Some("other-client".to_string()),
+            },
+        ))),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/coordinator/stop")
+                .method("POST")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"reason":"test"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(payload["error"]["code"], "not_process_owner");
+    assert_eq!(payload["error"]["category"], "Auth");
 }

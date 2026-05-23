@@ -27,8 +27,10 @@ pub(super) async fn get_doctor_handler(
 
 pub(super) async fn run_doctor_fix_handler(
     State(state): State<WebState>,
+    headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> std::result::Result<Json<ApiDoctorFixResponse>, ApiError> {
+    crate::commands::web::mutation_gate::require_project_owner(&state, &headers)?;
     let request = parse_fix_request(&body)?;
     if request.issue_codes.is_some() {
         return Err(ApiError::from(MaccError::Validation(

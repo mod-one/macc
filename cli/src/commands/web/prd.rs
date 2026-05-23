@@ -81,8 +81,10 @@ pub(crate) async fn get_prd_handler(
 pub(crate) async fn update_prd_handler(
     State(state): State<WebState>,
     Query(query): Query<PrdQuery>,
+    headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> Result<Json<ApiPrdResponse>, ApiError> {
+    crate::commands::web::mutation_gate::require_project_owner(&state, &headers)?;
     let prd_path = resolve_prd_path(&state, query.path.as_deref())?;
     let payload: ApiPrdUpdateRequest = serde_json::from_slice(&body)
         .map_err(|err| MaccError::Validation(format!("Invalid PRD request body: {}", err)))?;

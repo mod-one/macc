@@ -25,6 +25,45 @@ export interface ApiHealthResponse {
   project_root?: string;
 }
 
+export type ApiClientKind = 'Tui' | 'Web' | 'Cli';
+export type ApiProcessKind = 'Coordinator' | 'Supervisor' | 'WebServer' | 'TerminalSession' | 'Project';
+export type ApiOwnershipStatus = 'owner' | 'viewer' | 'unregistered';
+
+export interface ApiClientIdentity {
+  client_id: string;
+  kind: ApiClientKind;
+  connected_at: string;
+  last_heartbeat: string;
+}
+
+export interface ApiProcessHandle {
+  kind: ApiProcessKind;
+  project_root: string;
+  pid: number | null;
+}
+
+export interface ApiTakeoverRequest {
+  request_id: string;
+  requester: ApiClientIdentity;
+  requested_at: string;
+}
+
+export interface ApiOwnershipRecord {
+  process: ApiProcessHandle;
+  owner: ApiClientIdentity | null;
+  viewers: ApiClientIdentity[];
+  takeover_request: ApiTakeoverRequest | null;
+  started_at: string;
+}
+
+export interface ApiOwnershipClaimResponse {
+  status: ApiOwnershipStatus;
+}
+
+export interface ApiTakeoverRequestResponse {
+  request_id: string;
+}
+
 export interface ApiGitCommit {
   sha: string;
   short_sha: string;

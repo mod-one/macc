@@ -89,6 +89,8 @@ describe('useEventSource', () => {
   beforeEach(() => {
     MockEventSource.instances = [];
     vi.stubGlobal('EventSource', MockEventSource);
+    window.sessionStorage.clear();
+    window.sessionStorage.setItem('macc_client_id', 'event-source-client');
   });
 
   afterEach(() => {
@@ -100,7 +102,7 @@ describe('useEventSource', () => {
     render(<HookHarness />);
 
     expect(MockEventSource.instances).toHaveLength(1);
-    expect(MockEventSource.instances[0]?.url).toBe('/api/v1/events');
+    expect(MockEventSource.instances[0]?.url).toBe('/api/v1/events?client_id=event-source-client');
 
     act(() => {
       MockEventSource.instances[0]?.emitOpen();
@@ -154,7 +156,9 @@ describe('useEventSource', () => {
     });
 
     expect(MockEventSource.instances).toHaveLength(2);
-    expect(MockEventSource.instances[1]?.url).toBe('/api/v1/events?last_event_id=evt-8');
+    expect(MockEventSource.instances[1]?.url).toBe(
+      '/api/v1/events?last_event_id=evt-8&client_id=event-source-client',
+    );
     vi.useRealTimers();
   });
 

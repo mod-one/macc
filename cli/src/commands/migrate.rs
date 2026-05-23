@@ -17,6 +17,9 @@ impl MigrateCommand {
 impl Command for MigrateCommand {
     fn run(&self) -> Result<()> {
         let paths = self.app.project_paths()?;
+        if self.apply {
+            crate::commands::gate_cli_mutation(&paths.root)?;
+        }
         let canonical = self.app.canonical_config()?;
 
         let (descriptors, diagnostics) = self.app.engine.list_tools(&paths);

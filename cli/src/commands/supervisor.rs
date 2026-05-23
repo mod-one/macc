@@ -1,6 +1,7 @@
 use crate::commands::AppContext;
 use crate::commands::Command;
 use crate::SupervisorCommands;
+use macc_core::process_ownership::{ProcessHandle, ProcessKind};
 use macc_core::supervisor::mode_a::{
     CoordinatorProcessManager, SupervisorHealthStatus, SupervisorWatchdog, WatchdogConfig,
     WatchdogError,
@@ -81,6 +82,7 @@ impl<'a> SupervisorCommand<'a> {
                         .unwrap_or_default(),
                 )
                 .env(SUPERVISOR_DAEMON_CHILD_ENV, "1")
+                .env("MACC_INTERNAL_INVOCATION", "1")
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -99,6 +101,27 @@ impl<'a> SupervisorCommand<'a> {
 
         let process_id = std::process::id();
         write_pid_file(&supervisor_pid_path, process_id)?;
+
+        let supervisor_handle = ProcessHandle {
+            kind: ProcessKind::Supervisor,
+            project_root: paths.root.to_path_buf(),
+            pid: Some(process_id as i32),
+        };
+        let _supervisor_process_guard = match self
+            .app
+            .engine
+            .process_register(&paths.root, supervisor_handle)
+        {
+            Ok(guard) => {
+                tracing::info!("supervisor: registered process handle");
+                Some(guard)
+            }
+            Err(err) => {
+                tracing::warn!("supervisor: failed to register process handle: {}", err);
+                None
+            }
+        };
+
         if let Some(pid) = coordinator_pid {
             write_pid_file(&watchdog_cfg.pid_file_path, pid)?;
         }

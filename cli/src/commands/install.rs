@@ -18,6 +18,7 @@ impl<'a> InstallCommand<'a> {
 impl<'a> Command for InstallCommand<'a> {
     fn run(&self) -> Result<()> {
         let paths = self.app.project_paths()?;
+        crate::commands::gate_cli_mutation(&paths.root)?;
         let backend = CliCatalogInstallBackend { app: &self.app };
         match self.command {
             InstallCommands::Skill { tool, id } => {

@@ -1158,6 +1158,7 @@ impl CoordinatorStorage for SqliteStorage {
             let TaskRegistry {
                 tasks: meta_tasks,
                 resource_locks: meta_resource_locks,
+                external_merged_task_ids: meta_external_merged_task_ids,
                 updated_at: meta_updated_at,
                 extra: meta_extra,
             } = meta;
@@ -1167,6 +1168,7 @@ impl CoordinatorStorage for SqliteStorage {
                 registry = TaskRegistry {
                     tasks: meta_tasks,
                     resource_locks: meta_resource_locks,
+                    external_merged_task_ids: meta_external_merged_task_ids,
                     updated_at: meta_updated_at,
                     extra: meta_extra,
                 };
@@ -1174,6 +1176,9 @@ impl CoordinatorStorage for SqliteStorage {
                 if registry.resource_locks.is_empty() && !meta_resource_locks.is_empty() {
                     registry.resource_locks = meta_resource_locks;
                 }
+                registry
+                    .external_merged_task_ids
+                    .extend(meta_external_merged_task_ids);
                 registry.updated_at = meta_updated_at.or(registry.updated_at);
                 for (key, value) in meta_extra {
                     registry.extra.insert(key, value);

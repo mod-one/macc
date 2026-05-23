@@ -104,8 +104,10 @@ pub(super) async fn list_worktrees_handler(
 
 pub(super) async fn create_worktree_handler(
     State(state): State<WebState>,
+    headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> std::result::Result<Json<Vec<ApiWorktree>>, ApiError> {
+    crate::commands::web::mutation_gate::require_project_owner(&state, &headers)?;
     let request: ApiWorktreeCreateRequest = serde_json::from_slice(&body).map_err(|err| {
         ApiError::from(MaccError::Validation(format!(
             "Invalid worktree create request body: {}",
@@ -172,8 +174,10 @@ pub(super) async fn delete_worktree_handler(
     State(state): State<WebState>,
     Path(id): Path<String>,
     Query(query): Query<DeleteWorktreeQuery>,
+    headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> std::result::Result<Json<serde_json::Value>, ApiError> {
+    crate::commands::web::mutation_gate::require_project_owner(&state, &headers)?;
     let body = if body.is_empty() {
         DeleteWorktreeBody::default()
     } else {
@@ -254,7 +258,9 @@ pub(super) async fn delete_worktree_handler(
 pub(super) async fn run_worktree_handler(
     State(state): State<WebState>,
     Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
 ) -> std::result::Result<(StatusCode, Json<WorktreeRunResponse>), ApiError> {
+    crate::commands::web::mutation_gate::require_project_owner(&state, &headers)?;
     let worktree_path = resolve_existing_worktree_path(&state, &id)?;
     let worktree_key = canonicalize_path_fallback(&worktree_path);
 

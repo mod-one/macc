@@ -19,6 +19,7 @@ impl<'a> Command for ToolCommand<'a> {
         let reporter = crate::services::interaction::CliInteraction;
         match self.command {
             ToolCommands::Install { tool_id, yes } => {
+                crate::commands::gate_cli_mutation(&paths.root)?;
                 self.app
                     .engine
                     .tooling_install_tool(&paths, tool_id, *yes, &reporter)?;
@@ -33,6 +34,9 @@ impl<'a> Command for ToolCommand<'a> {
                 force,
                 rollback_on_fail,
             } => {
+                if !*check {
+                    crate::commands::gate_cli_mutation(&paths.root)?;
+                }
                 self.app.engine.tooling_update_tools(
                     &paths,
                     macc_core::service::tooling::ToolUpdateCommandOptions {

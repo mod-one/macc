@@ -680,6 +680,106 @@
       }
     },
     {
+      "id": "L6-OWN-007",
+      "title": "Implement takeover-timeout policy with configurable default response",
+      "category": "ownership",
+      "description": "Problem/Goal: Without a timeout, a pending takeover request can sit indefinitely if the current owner never responds (e.g. crashed client, AFK operator). The spec mandates a configurable timeout with three default-response policies: deny (status quo: drop request), auto_accept (transfer ownership to requester), admin_takeover (transfer ownership; emit an admin event). Key actions: (A) Add `automation.coordinator.takeover_timeout_seconds: Option<u64>` (default 60, 0 disables) and `automation.coordinator.takeover_default_response: Option<String>` (deny|auto_accept|admin_takeover, default deny) to CoordinatorConfig in core/src/config/mod.rs. (B) Add `TakeoverDefaultResponse` enum and extend `HeartbeatConfig` with `takeover_timeout_seconds`/`takeover_default_response` fields in core/src/process_ownership/heartbeat.rs. (C) In `evict_stale_clients`, evaluate `record.takeover_request.requested_at`: if older than the timeout, resolve per policy (`deny` clears the request; `auto_accept`/`admin_takeover` set `record.owner = requester` and clear viewer entry). (D) Emit a `takeover_timeout` event (broadcaster + jsonl) for observability. (E) Have `OwnershipStore::load`'s lazy-eviction read the project's `.macc/macc.yaml` and feed the timeout/policy into the heartbeat config (load failures fall back to defaults). Out of scope: scheduled background tick — lazy evaluation on every store load is sufficient because mutation/heartbeat paths trigger reloads.",
+      "objective": "Resolve stale takeover requests automatically with a configurable policy so they cannot block ownership lifecycle.",
+      "result": "Pending takeovers older than `takeover_timeout_seconds` are resolved per policy on next store load; appropriate event is emitted; tests cover deny + auto_accept policies.",
+      "steps": [
+        "Extend CoordinatorConfig with takeover_timeout_seconds and takeover_default_response fields (Option, serde_skip_none).",
+        "Add TakeoverDefaultResponse enum (Deny|AutoAccept|AdminTakeover) + from_str_lossy in heartbeat.rs.",
+        "Extend HeartbeatConfig and evict_stale_clients to apply the policy and emit takeover_timeout via emit_takeover_timeout(emit). ",
+        "Have OwnershipStore::evict_stale_records read .macc/macc.yaml when records exist to populate the policy at lazy-eviction time.",
+        "Add unit tests: deny clears request and preserves owner; auto_accept transfers ownership to requester."
+      ],
+      "notes": "Lazy eviction on store load avoids the cost/complexity of a background tick — every claim/heartbeat/list call goes through `load_and_modify`, which already runs eviction.",
+      "exclusive_resources": [
+        "core/src/config/mod.rs",
+        "core/src/process_ownership/heartbeat.rs",
+        "core/src/process_ownership/store.rs",
+        "core/src/process_ownership/events.rs"
+      ],
+      "dependencies": [
+        "L6-OWN-004"
+      ],
+      "priority": "2",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "module",
+        "risk_level": "low",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L6-OWN-008",
+      "title": "Project-level control lease (single lease per project, not per process)",
+      "category": "ownership",
+      "description": "Problem/Goal: The original spec says 'One control lease per project, not per tool.' The current model is per-process (each ProcessKind has its own owner). Without a project-level lease, a client can be coordinator-owner and a separate client web-server-owner — they can mutate the same project from different processes simultaneously, defeating the single-controller intent. Key actions: (A) Add `ProcessKind::Project` to core/src/process_ownership/types.rs. (B) Extend `gate_owner_action` to check the `Project` lease first: if it exists with an owner, only that owner passes the gate (the per-process record is consulted only if no Project lease exists — backwards-compatible fallback). (C) Expose `ProcessKindArg::Project` in the CLI so operators can claim/release it via `macc process claim --kind project --pid <pid>`. (D) Extend web `/api/v1/processes/:kind/...` to accept `project` as a kind. (E) Make the project-mutation gate (Phase 7 mutation_gate.rs) check the Project lease via `require_project_owner` — backwards-compatible: no lease → gate passes (single-user mode). Out of scope: auto-registering a Project record on first MACC connection — that lands in a follow-up UX task.",
+      "objective": "Move single-controller enforcement to a project-wide lease so it spans all running processes in the project.",
+      "result": "A `ProcessKind::Project` lease, when present, overrides per-process ownership for the modification gate. CLI + web + TUI all honor the lease.",
+      "steps": [
+        "Add ProcessKind::Project variant + exhaustive-match updates wherever ProcessKind is matched.",
+        "Update gate_owner_action to check the Project lease first; fall back to per-process check.",
+        "Expose Project in ProcessKindArg (CLI) and parse_kind (web ownership.rs).",
+        "Add Phase 7 mutation gate (cli/src/commands/web/mutation_gate.rs::require_project_owner) that consults the Project lease.",
+        "Add unit test: project-level lease overrides per-process owner."
+      ],
+      "notes": "Per-process records remain useful for observability — they track which processes are actually running. The Project lease tracks who has control.",
+      "exclusive_resources": [
+        "core/src/process_ownership/types.rs",
+        "core/src/service/process_ownership_gate.rs",
+        "cli/src/commands/process.rs",
+        "cli/src/commands/web/ownership.rs",
+        "cli/src/commands/web/mutation_gate.rs"
+      ],
+      "dependencies": [
+        "L6-OWN-005",
+        "L6-OWN-006"
+      ],
+      "priority": "1",
+      "routing_hints": {
+        "execution_mode": "standard",
+        "reasoning_depth": "standard",
+        "context_scope": "cross-cutting",
+        "risk_level": "medium",
+        "validation_profile": "standard"
+      }
+    },
+    {
+      "id": "L6-OWN-009",
+      "title": "Centralize managed-process state in durable store (replace per-process static maps)",
+      "category": "ownership",
+      "description": "Problem/Goal: Today `managed_commands_by_root()` in core/src/service/coordinator.rs:70 is a static `Mutex<HashMap<...>>` living inside whichever OS process happens to host the CLI/TUI. A second client (TUI or web) connecting after the launcher cannot observe or interact with the same managed-command state — it only sees what the ownership file persists. This violates the spec's 'clients accessing the same process instance' requirement at the runtime-control layer (vs the ownership layer, which the OwnershipStore already covers). Key actions: (A) Introduce a `ManagedCommandRegistry` abstraction in core/src/coordinator/managed_command_registry.rs (or service/coordinator_runtime.rs) that exposes upsert/get/remove/list keyed by `(project_root, command_kind)`. (B) Back it with a file-locked JSON store at `.macc/state/managed_commands.json` analogous to OwnershipStore (mkdir lock + atomic rename + lazy stale-eviction by PID liveness check). (C) Replace `managed_commands_by_root()` callers (start/stop/poll/clear) with the durable store. Keep PID/heartbeat/elapsed semantics. (D) Have the ownership Engine facade expose `coordinator_managed_command_state(paths)` that reads the durable store. (E) On `tick()` the TUI reads the durable store instead of the in-memory map. Out of scope: changing the IPC protocol — the durable store is a sidecar to whatever IPC remains for live events.",
+      "objective": "Move managed-command lifecycle state out of in-process statics so any client (TUI, web, CLI) can observe and interact with the same runtime through the ownership/state files.",
+      "result": "All managed-command lookups go through the durable registry; multiple clients see consistent state; tests cover upsert/list/remove/stale-PID eviction.",
+      "steps": [
+        "Define ManagedCommandRecord (project_root, kind, pid, started_at, last_heartbeat, elapsed_secs) and ManagedCommandRegistry trait/struct.",
+        "Implement file-backed store with mkdir lock + atomic rename mirroring OwnershipStore.",
+        "Add lazy stale-eviction: if the PID is dead (kill(pid, 0) errors), drop the entry.",
+        "Migrate every caller of managed_commands_by_root() to the durable registry.",
+        "Add unit tests: concurrent upsert deduplicates by (project_root, kind); dead PID is evicted on next load."
+      ],
+      "notes": "This depends on the project-wide control lease (L6-OWN-008) so the registry is meaningful — the lease decides who controls, the registry says what is running.",
+      "exclusive_resources": [
+        "core/src/service/coordinator.rs",
+        "core/src/coordinator/managed_command_registry.rs",
+        "core/src/state/managed_commands.json"
+      ],
+      "dependencies": [
+        "L6-OWN-008"
+      ],
+      "priority": "1",
+      "routing_hints": {
+        "execution_mode": "extended",
+        "reasoning_depth": "deeper",
+        "context_scope": "cross-cutting",
+        "risk_level": "high",
+        "validation_profile": "heavy"
+      }
+    },
+    {
       "id": "L6-CHECK-001",
       "title": "check lot 6",
       "category": "check",
@@ -697,7 +797,10 @@
       "exclusive_resources": [],
       "dependencies": [
         "L6-TEST-002",
-        "L6-DAEMON-001"
+        "L6-DAEMON-001",
+        "L6-OWN-007",
+        "L6-OWN-008",
+        "L6-OWN-009"
       ],
       "priority": "0",
       "routing_hints": {

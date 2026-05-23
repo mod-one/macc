@@ -36,8 +36,10 @@ pub(super) async fn get_tool_descriptors_handler(
 
 pub(super) async fn update_config_handler(
     State(state): State<WebState>,
+    headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> std::result::Result<Json<ApiConfigResponse>, ApiError> {
+    crate::commands::web::mutation_gate::require_project_owner(&state, &headers)?;
     let request: ApiConfigUpdateRequest = serde_json::from_slice(&body).map_err(|err| {
         ApiError::from(macc_core::MaccError::Validation(format!(
             "Invalid config request body: {}",

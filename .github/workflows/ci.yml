@@ -11,6 +11,13 @@ on:
         required: false
         default: "false"
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   quality-linux:
     name: Quality (Linux)
@@ -21,6 +28,13 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
 
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
@@ -36,6 +50,9 @@ jobs:
 
       - name: Test
         run: make test
+
+      - name: Web quality
+        run: make web-ci
 
       - name: Tool-agnostic guardrail
         run: make check-generic
@@ -61,8 +78,19 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
+
+      - name: Build web assets
+        working-directory: web
+        run: npm ci && npm run build
 
       - name: Build CLI
         run: cargo build -p macc-cli --locked

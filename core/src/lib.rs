@@ -12,6 +12,7 @@ pub use config::migrate;
 pub mod mcp_json;
 pub mod packages;
 pub mod plan;
+pub mod process_ownership;
 pub mod profile;
 pub mod resolve;
 pub mod security;
@@ -55,6 +56,15 @@ pub enum MaccError {
 
     #[error("Validation error: {0}")]
     Validation(String),
+
+    #[error(
+        "Operation rejected: client is not the owner of this process. Current owner: {}. Request takeover with 'macc process takeover request --kind <kind> --pid <pid>'.",
+        .current_owner.as_deref().unwrap_or("none")
+    )]
+    NotProcessOwner {
+        handle: crate::process_ownership::ProcessHandle,
+        current_owner: Option<String>,
+    },
 
     #[error("ToolSpec error in {path}: {message}")]
     ToolSpec {
@@ -457,6 +467,7 @@ pub fn init(paths: &ProjectPaths, force: bool) -> Result<()> {
             selections: None,
             automation: config::AutomationConfig::default(),
             settings: config::SettingsConfig::default(),
+            process_ownership: None,
             mcp_templates: config::builtin_mcp_templates(),
         };
         let yaml = default_config.to_yaml().map_err(|e| {

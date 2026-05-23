@@ -347,6 +347,7 @@ mod tests {
             }),
             automation: crate::config::AutomationConfig::default(),
             settings: SettingsConfig::default(),
+            process_ownership: None,
             mcp_templates: Vec::new(),
         };
 
@@ -383,6 +384,7 @@ mod tests {
             }),
             automation: crate::config::AutomationConfig::default(),
             settings: SettingsConfig::default(),
+            process_ownership: None,
             mcp_templates: Vec::new(),
         };
 
@@ -405,6 +407,7 @@ mod tests {
             selections: None,
             automation: crate::config::AutomationConfig::default(),
             settings: SettingsConfig::default(),
+            process_ownership: None,
             mcp_templates: Vec::new(),
         };
 
@@ -470,6 +473,7 @@ mod tests {
             selections: None,
             automation: crate::config::AutomationConfig::default(),
             settings: SettingsConfig::default(),
+            process_ownership: None,
             mcp_templates: Vec::new(),
         };
 
@@ -483,6 +487,7 @@ mod tests {
             selections: None,
             automation: crate::config::AutomationConfig::default(),
             settings: SettingsConfig::default(),
+            process_ownership: None,
             mcp_templates: Vec::new(),
         };
 

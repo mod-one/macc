@@ -3,6 +3,8 @@ use crate::coordinator::runtime::{
     raw_event_identity, raw_event_to_runtime_event, CoordinatorPidGuard, CoordinatorRunState,
 };
 use crate::coordinator_storage;
+use crate::process_ownership::{ProcessHandle, ProcessKind};
+use crate::service::process_ownership::{self, RegisteredProcessGuard};
 use crate::{MaccError, ProjectPaths, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -79,6 +81,28 @@ pub async fn ensure_performer_ipc_listener(
     })?;
     if state.coordinator_pid_guard.is_none() {
         state.coordinator_pid_guard = Some(CoordinatorPidGuard::new(repo_root)?);
+    }
+    if state.registered_process_guard.is_none() {
+        let handle = ProcessHandle {
+            kind: ProcessKind::Coordinator,
+            project_root: repo_root.to_path_buf(),
+            pid: Some(std::process::id() as i32),
+        };
+        match process_ownership::register_process(repo_root, handle.clone()) {
+            Ok(()) => {
+                state.registered_process_guard =
+                    Some(RegisteredProcessGuard::new(repo_root, handle));
+            }
+            Err(err) => {
+                if let Some(log) = logger {
+                    let _ = log.note(format!(
+                        "- WARNING: failed to register coordinator process ownership: {}",
+                        err
+                    ));
+                }
+                tracing::warn!("failed to register coordinator process ownership: {}", err);
+            }
+        }
     }
     let local_addr = listener.local_addr().map_err(|e| {
         MaccError::Validation(format!("Failed to resolve coordinator IPC address: {}", e))
@@ -252,8 +276,11 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::process_ipc_event;
+    use super::{ensure_performer_ipc_listener, process_ipc_event};
+    use crate::coordinator::runtime::CoordinatorRunState;
     use crate::coordinator_storage::CoordinatorStorage;
+    use crate::process_ownership::{ProcessHandle, ProcessKind};
+    use crate::service::process_ownership::get_record;
     use crate::ProjectPaths;
     use std::fs;
     use std::process::Command;
@@ -480,6 +507,35 @@ jq -nc \
             event.payload_result_kind(),
             Some(crate::coordinator::PerformerCompletionKind::AlreadySatisfied)
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn ensure_performer_ipc_listener_registers_and_unregisters_coordinator_process() {
+        let root = temp_root("coordinator-registration");
+        fs::create_dir_all(root.join(".macc").join("state")).expect("create state dir");
+        let mut state = CoordinatorRunState::new();
+
+        ensure_performer_ipc_listener(&root, &mut state, None)
+            .await
+            .expect("start listener");
+
+        let handle = ProcessHandle {
+            kind: ProcessKind::Coordinator,
+            project_root: root.clone(),
+            pid: Some(std::process::id() as i32),
+        };
+        let record = get_record(&root, &handle)
+            .expect("read ownership record")
+            .expect("coordinator record exists");
+        assert!(record.owner.is_none());
+        assert!(record.viewers.is_empty());
+
+        drop(state);
+
+        assert!(get_record(&root, &handle)
+            .expect("read ownership after drop")
+            .is_none());
         let _ = fs::remove_dir_all(root);
     }
 }

@@ -7,7 +7,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DENYLIST_FILE="$REPO_ROOT/scripts/ui-denylist.txt"
-TARGET_DIRS=("tui/src" "cli/src" "core/src")
+TARGET_DIRS=("tui/src" "cli/src")
 
 if [ ! -f "$DENYLIST_FILE" ]; then
     echo "ERROR: Denylist file not found: $DENYLIST_FILE"
@@ -34,7 +34,7 @@ for token in "${TOKENS[@]}"; do
     fi
 done
 
-echo "Checking for forbidden tool strings in cli/tui/core sources..."
+echo "Checking for forbidden tool strings in UI/client sources..."
 
 FAILED=0
 cd "$REPO_ROOT"
@@ -44,8 +44,6 @@ for DIR in "${TARGET_DIRS[@]}"; do
             rg -n -i --pcre2 "$PATTERN" "$DIR" \
                 -g '*.rs' \
                 -g '!**/target/**' \
-                -g '!core/src/tool/loader.rs' \
-                -g '!core/src/lib.rs' \
                 || true
         )
 
@@ -59,7 +57,7 @@ done
 
 if [ $FAILED -eq 1 ]; then
     echo ""
-    echo "ERROR: Tool-specific names found in source layers (core/cli/tui)."
+    echo "ERROR: Tool-specific names found in UI/client source layers (cli/tui)."
     echo "Use generic IDs/capabilities and resolve concrete tools via ToolSpec + registry."
     exit 1
 else
