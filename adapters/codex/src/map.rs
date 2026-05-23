@@ -2,6 +2,7 @@ use macc_core::resolve::ResolvedConfig;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct CodexConfig {
     pub standards_inline: BTreeMap<String, String>,

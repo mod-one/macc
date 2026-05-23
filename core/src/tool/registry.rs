@@ -3,6 +3,16 @@ use crate::resolve::PlanningContext;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectContextSection {
+    pub heading: String,
+    pub content: String,
+}
+
+pub static AGENTS_MD_ORCHESTRATOR: std::sync::OnceLock<
+    fn(&crate::resolve::ResolvedConfig, &[ProjectContextSection]) -> String,
+> = std::sync::OnceLock::new();
+
 /// Trait that all tool adapters must implement.
 pub trait ToolAdapter: Send + Sync {
     /// Unique identifier for the tool.
@@ -10,6 +20,14 @@ pub trait ToolAdapter: Send + Sync {
 
     /// Produces an ActionPlan based on the resolved configuration.
     fn plan(&self, ctx: &PlanningContext) -> crate::Result<ActionPlan>;
+
+    /// Returns context file section fragments (e.g. for AGENTS.md).
+    fn context_file_sections(
+        &self,
+        _ctx: &PlanningContext,
+    ) -> crate::Result<Vec<ProjectContextSection>> {
+        Ok(Vec::new())
+    }
 }
 
 /// A registration entry for a tool adapter, used by the `inventory` crate.

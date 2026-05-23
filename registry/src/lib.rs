@@ -20,6 +20,9 @@ pub fn default_registry() -> ToolRegistry {
         macc_adapter_vibe::VibeAdapter,
     );
 
+    let _ = macc_core::tool::AGENTS_MD_ORCHESTRATOR
+        .get_or_init(|| macc_adapter_shared::render::agents_md::orchestrate_agents_md);
+
     ToolRegistry::from_inventory()
 }
 

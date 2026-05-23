@@ -1,10 +1,10 @@
 use crate::emit::config_toml;
 use crate::map::VibeConfig;
-use macc_adapter_shared::render::agents_md::render_shared_agents_md;
 use macc_core::mcp_json;
 use macc_core::plan::builders as plan_builders;
 use macc_core::plan::ActionPlan;
 use macc_core::resolve::{PlanningContext, SelectionKind};
+use macc_core::tool::ProjectContextSection;
 use macc_core::ToolAdapter;
 use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, BTreeSet};
@@ -26,15 +26,7 @@ impl ToolAdapter for VibeAdapter {
         let config = VibeConfig::from_resolved(ctx.resolved);
         let mut plan = ActionPlan::new();
 
-        // 1. Write shared AGENTS.md context instructions
-        let agents_content = render_shared_agents_md(
-            &ctx.resolved.tools.enabled,
-            &config.standards_inline,
-            config.standards_path.as_deref(),
-        );
-        plan_builders::write_text(&mut plan, "AGENTS.md", &agents_content);
-
-        // 2. Write Vibe .vibe/config.toml settings
+        // 1. Write Vibe .vibe/config.toml settings
         let config_toml_content = config_toml::render_config_toml(&config);
         plan_builders::write_text(&mut plan, ".vibe/config.toml", &config_toml_content);
 
@@ -56,6 +48,17 @@ impl ToolAdapter for VibeAdapter {
         }
 
         Ok(plan)
+    }
+
+    fn context_file_sections(
+        &self,
+        _ctx: &PlanningContext,
+    ) -> macc_core::Result<Vec<ProjectContextSection>> {
+        let sections = vec![ProjectContextSection {
+            heading: "Vibe Skills".to_string(),
+            content: "- Use `explore` for codebase exploration.\n- Use custom slash commands via the skills system.\n".to_string(),
+        }];
+        Ok(sections)
     }
 }
 

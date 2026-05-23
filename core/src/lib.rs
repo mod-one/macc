@@ -595,12 +595,28 @@ pub fn build_plan(
         materialized_units,
     };
 
+    let mut context_sections = Vec::new();
+
     for tool_id in &resolved.tools.enabled {
         if let Some(adapter) = registry.get(tool_id) {
             let tool_plan = adapter.plan(&ctx)?;
             for action in tool_plan.actions {
                 total_plan.add_action(action);
             }
+            if let Ok(sections) = adapter.context_file_sections(&ctx) {
+                context_sections.extend(sections);
+            }
+        }
+    }
+
+    if !context_sections.is_empty() {
+        if let Some(orchestrator) = crate::tool::registry::AGENTS_MD_ORCHESTRATOR.get() {
+            let content = orchestrator(resolved, &context_sections);
+            total_plan.add_action(plan::Action::WriteFile {
+                path: "AGENTS.md".to_string(),
+                content: content.into_bytes(),
+                scope: plan::Scope::Project,
+            });
         }
     }
 

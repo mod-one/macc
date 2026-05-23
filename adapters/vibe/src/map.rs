@@ -3,6 +3,7 @@ use serde::Deserialize;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::collections::{BTreeMap, BTreeSet};
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct VibeConfig {
     pub language: String,

@@ -1378,6 +1378,7 @@ dependencies = [
  "macc-adapter-claude",
  "macc-adapter-codex",
  "macc-adapter-gemini",
+ "macc-adapter-shared",
  "macc-adapter-vibe",
  "macc-core",
  "serde_json",
