@@ -48,7 +48,7 @@ fields:
     label: Model
     kind:
       type: enum
-      options: [mistral-medium-3.5, mistral-large-latest, mistral-small-latest, mistral-medium-3]
+      options: [mistral-medium-3.5, devstral-small, devstral-2]
     help: Mistral model id (e.g., mistral-medium-3.5).
     pointer: /tools/config/vibe/model
     default: "mistral-medium-3.5"
