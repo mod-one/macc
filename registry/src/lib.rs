@@ -76,10 +76,18 @@ mod tests {
         assert!(ids.contains(&"test".to_string()));
 
         let mut expected_len = 1; // "test" is built-in core mock
-        if cfg!(feature = "claude") { expected_len += 1; }
-        if cfg!(feature = "codex") { expected_len += 1; }
-        if cfg!(feature = "gemini") { expected_len += 1; }
-        if cfg!(feature = "vibe") { expected_len += 1; }
+        if cfg!(feature = "claude") {
+            expected_len += 1;
+        }
+        if cfg!(feature = "codex") {
+            expected_len += 1;
+        }
+        if cfg!(feature = "gemini") {
+            expected_len += 1;
+        }
+        if cfg!(feature = "vibe") {
+            expected_len += 1;
+        }
 
         // IDs should be sorted (list_ids handles this)
         assert_eq!(ids.len(), expected_len);

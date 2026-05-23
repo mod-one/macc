@@ -152,29 +152,13 @@ impl ToolSpecLoader {
     }
 }
 
+include!(concat!(env!("OUT_DIR"), "/embedded_tool_specs.rs"));
+
 fn embedded_tool_specs() -> (Vec<ToolSpec>, Vec<ToolDiagnostic>) {
     let mut specs = Vec::new();
     let mut diags = Vec::new();
-    let embedded = [
-        (
-            "embedded:claude.tool.yaml",
-            include_str!("../../../registry/tools.d/claude.tool.yaml"),
-        ),
-        (
-            "embedded:codex.tool.yaml",
-            include_str!("../../../registry/tools.d/codex.tool.yaml"),
-        ),
-        (
-            "embedded:gemini.tool.yaml",
-            include_str!("../../../registry/tools.d/gemini.tool.yaml"),
-        ),
-        (
-            "embedded:vibe.tool.yaml",
-            include_str!("../../../registry/tools.d/vibe.tool.yaml"),
-        ),
-    ];
 
-    for (name, content) in embedded {
+    for (name, content) in EMBEDDED_TOOL_SPECS {
         match ToolSpec::from_yaml(content) {
             Ok(spec) => specs.push(spec),
             Err(e) => diags.push(ToolDiagnostic {

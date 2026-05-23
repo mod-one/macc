@@ -3947,7 +3947,16 @@ async fn standards_preview_endpoint_uses_adapter_rendering() {
     let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
 
     assert_eq!(payload["cards"].as_array().expect("cards").len(), 4);
-    let claude = &payload["cards"][1]["content"];
+
+    let cards = payload["cards"].as_array().expect("cards array");
+    let find_card = |id: &str| {
+        cards
+            .iter()
+            .find(|c| c["id"].as_str() == Some(id))
+            .unwrap_or_else(|| panic!("card '{id}' not found"))
+    };
+
+    let claude = &find_card("claude")["content"];
     assert!(
         claude
             .as_str()
@@ -3960,7 +3969,7 @@ async fn standards_preview_endpoint_uses_adapter_rendering() {
             .expect("claude preview")
             .contains("- **Language**: Spanish")
     );
-    let codex = payload["cards"][0]["content"].as_str().expect("codex preview");
+    let codex = find_card("codex")["content"].as_str().expect("codex preview");
     assert!(
         codex.contains("AGENTS.md is not generated when codex.rules_enabled is false."),
         "unexpected codex preview: {}",

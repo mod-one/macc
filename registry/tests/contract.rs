@@ -194,11 +194,29 @@ fn contract_embedded_toolspecs_match_registered_adapters() {
     let mut expected_spec_ids = BTreeSet::new();
     for spec_id in spec_ids {
         match spec_id.as_str() {
-            "claude" => { if cfg!(feature = "claude") { expected_spec_ids.insert(spec_id); } }
-            "codex" => { if cfg!(feature = "codex") { expected_spec_ids.insert(spec_id); } }
-            "gemini" => { if cfg!(feature = "gemini") { expected_spec_ids.insert(spec_id); } }
-            "vibe" => { if cfg!(feature = "vibe") { expected_spec_ids.insert(spec_id); } }
-            other => { expected_spec_ids.insert(other.to_string()); }
+            "claude" => {
+                if cfg!(feature = "claude") {
+                    expected_spec_ids.insert(spec_id);
+                }
+            }
+            "codex" => {
+                if cfg!(feature = "codex") {
+                    expected_spec_ids.insert(spec_id);
+                }
+            }
+            "gemini" => {
+                if cfg!(feature = "gemini") {
+                    expected_spec_ids.insert(spec_id);
+                }
+            }
+            "vibe" => {
+                if cfg!(feature = "vibe") {
+                    expected_spec_ids.insert(spec_id);
+                }
+            }
+            other => {
+                expected_spec_ids.insert(other.to_string());
+            }
         }
     }
 

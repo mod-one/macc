@@ -17,6 +17,14 @@ impl ToolAdapter for GeminiAdapter {
         "gemini".to_string()
     }
 
+    fn context_file_target(&self) -> Option<String> {
+        Some("GEMINI.md".to_string()) // macc:allow-tool-name
+    }
+
+    fn context_file_fallback(&self) -> Option<String> {
+        Some("GEMINI.md preview unavailable.\n".to_string()) // macc:allow-tool-name
+    }
+
     fn plan(&self, ctx: &PlanningContext) -> macc_core::Result<ActionPlan> {
         let mut config = GeminiConfig::from_resolved(ctx.resolved);
         let mut plan = ActionPlan::new();

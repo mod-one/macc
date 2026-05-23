@@ -28,6 +28,19 @@ pub trait ToolAdapter: Send + Sync {
     ) -> crate::Result<Vec<ProjectContextSection>> {
         Ok(Vec::new())
     }
+
+    /// Returns the path (relative to project root) of the primary context file this adapter
+    /// writes. Used by the web preview renderer to locate the rendered file inside the plan
+    /// without knowing the tool name.
+    fn context_file_target(&self) -> Option<String> {
+        None
+    }
+
+    /// Returns a human-readable fallback string displayed in the standards preview when the
+    /// primary context file is not present in the generated plan.
+    fn context_file_fallback(&self) -> Option<String> {
+        None
+    }
 }
 
 /// A registration entry for a tool adapter, used by the `inventory` crate.

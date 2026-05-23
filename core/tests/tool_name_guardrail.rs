@@ -123,16 +123,6 @@ fn load_forbidden_tokens(repo_root: &Path) -> Vec<String> {
 fn is_allowed_occurrence(file: &Path, token: &str, line: &str) -> bool {
     let path = file.to_string_lossy().replace('\\', "/");
 
-    // Built-in ToolSpec embedding references concrete spec filenames.
-    if path.ends_with("core/src/tool/loader.rs") {
-        if line.contains("registry/tools.d/") && line.contains(".tool.yaml") {
-            return true;
-        }
-        if line.contains("embedded:") && line.contains(".tool.yaml") {
-            return true;
-        }
-    }
-
     // Existing clear tests use pre-existing CLAUDE.md fixtures.
     if path.ends_with("core/src/lib.rs") && token == "claude" && line.contains("claude.md") {
         return true;

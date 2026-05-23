@@ -14,6 +14,14 @@ impl ToolAdapter for CodexAdapter {
         "codex".to_string()
     }
 
+    fn context_file_target(&self) -> Option<String> {
+        Some("AGENTS.md".to_string())
+    }
+
+    fn context_file_fallback(&self) -> Option<String> {
+        Some("AGENTS.md is not generated when codex.rules_enabled is false.\n".to_string())
+    }
+
     fn plan(&self, ctx: &PlanningContext) -> macc_core::Result<ActionPlan> {
         let config = CodexConfig::from_resolved(ctx.resolved);
         let mut plan = ActionPlan::new();

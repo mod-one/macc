@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 fn main() {
     println!("cargo:rerun-if-changed=../adapters");
+    println!("cargo:rerun-if-changed=../registry/tools.d");
 
     let manifest_dir =
         PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR missing"));
@@ -33,6 +34,39 @@ fn main() {
     generated.push_str("];\n");
 
     fs::write(dest_path, generated).expect("failed to write embedded_automation_runners.rs");
+
+    // Dynamically embed tool specifications from registry/tools.d/
+    let tools_d_dir = repo_root.join("registry").join("tools.d");
+    let mut spec_paths = Vec::new();
+    if let Ok(entries) = fs::read_dir(&tools_d_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if name.ends_with(".tool.yaml") || name.ends_with(".tool.json") {
+                    spec_paths.push(path);
+                }
+            }
+        }
+    }
+    spec_paths.sort();
+
+    let mut specs_gen = String::from("pub const EMBEDDED_TOOL_SPECS: &[(&str, &str)] = &[\n");
+    for path in spec_paths {
+        let rel = path.strip_prefix(repo_root).unwrap();
+        let rel_str = path_to_forward_slashes(rel);
+        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap();
+        let name_lit = format!("embedded:{}", file_name);
+
+        specs_gen.push_str(&format!(
+            "    ({:?}, include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/../{}\"))),\n",
+            name_lit, rel_str
+        ));
+    }
+    specs_gen.push_str("];\n");
+
+    let dest_specs_path = out_dir.join("embedded_tool_specs.rs");
+    fs::write(dest_specs_path, specs_gen).expect("failed to write embedded_tool_specs.rs");
 }
 
 fn collect_runner_paths(adapters_dir: &Path) -> Vec<PathBuf> {

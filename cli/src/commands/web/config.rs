@@ -92,17 +92,19 @@ fn render_preview_cards(
         materialized_units: &materialized_units,
     };
     let registry = ToolRegistry::from_inventory();
-    let preferred_ids = preview_tool_ids();
     let mut cards = Vec::new();
 
-    for tool_id in preferred_ids {
+    for tool_id in registry.list_ids() {
         let Some(adapter) = registry.get(&tool_id) else {
             continue;
         };
-        let plan = adapter.plan(&planning_ctx)?;
-        let Some((target, fallback)) = preview_target_and_fallback(&tool_id) else {
+        let Some(target) = adapter.context_file_target() else {
             continue;
         };
+        let fallback = adapter
+            .context_file_fallback()
+            .unwrap_or_else(|| format!("{target} preview unavailable.\n"));
+        let plan = adapter.plan(&planning_ctx)?;
         cards.push(ApiStandardsPreviewCard {
             id: tool_id.clone(),
             title: format!("{} - {} (rendered)", tool_title(&tool_id), target),
@@ -123,47 +125,6 @@ fn find_rendered_file(plan: &ActionPlan, target: &str, fallback: &str) -> String
     }
 
     fallback.to_string()
-}
-
-fn preview_tool_ids() -> Vec<String> {
-    vec![
-        "codex".to_string(),  // macc:allow-tool-name
-        "claude".to_string(), // macc:allow-tool-name
-        "gemini".to_string(), // macc:allow-tool-name
-        "vibe".to_string(),   // macc:allow-tool-name
-    ]
-}
-
-fn preview_target_and_fallback(tool_id: &str) -> Option<(String, String)> {
-    let first_tool_id = "codex"; // macc:allow-tool-name
-    if tool_id == first_tool_id {
-        return Some((
-            "AGENTS.md".to_string(),
-            "AGENTS.md is not generated when codex.rules_enabled is false.\n".to_string(), // macc:allow-tool-name
-        ));
-    }
-
-    let second_tool_id = "claude"; // macc:allow-tool-name
-    if tool_id == second_tool_id {
-        let target = "CLAUDE.md".to_string(); // macc:allow-tool-name
-        return Some((target.clone(), format!("{target} preview unavailable.\n")));
-    }
-
-    let third_tool_id = "gemini"; // macc:allow-tool-name
-    if tool_id == third_tool_id {
-        let target = "GEMINI.md".to_string(); // macc:allow-tool-name
-        return Some((target.clone(), format!("{target} preview unavailable.\n")));
-    }
-
-    let fourth_tool_id = "vibe"; // macc:allow-tool-name
-    if tool_id == fourth_tool_id {
-        return Some((
-            "AGENTS.md".to_string(),
-            "AGENTS.md is not generated when vibe is disabled.\n".to_string(), // macc:allow-tool-name
-        ));
-    }
-
-    None
 }
 
 fn tool_title(tool_id: &str) -> String {
