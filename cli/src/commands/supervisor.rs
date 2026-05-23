@@ -56,6 +56,7 @@ impl<'a> SupervisorCommand<'a> {
             stall_threshold_seconds: supervisor_cfg.log_analysis_window_seconds.max(1),
             crash_debounce_checks: supervisor_cfg.crash_debounce_checks.max(1),
             events_log_path: resolve_project_path(&paths.root, &supervisor_cfg.events_log_path),
+            max_restart_attempts: supervisor_cfg.max_restart_attempts,
             ..WatchdogConfig::default()
         };
         watchdog_cfg.health_status_path = paths.root.join(SUPERVISOR_HEALTH_REL_PATH);
@@ -158,27 +159,46 @@ impl<'a> SupervisorCommand<'a> {
 
         let result = runtime.block_on(async {
             if attach {
+                let mut recovery = ModeCRecovery::new(ModeCConfig {
+                    events_log_path: resolve_project_path(
+                        &paths.root,
+                        &supervisor_cfg.events_log_path,
+                    ),
+                    max_restart_attempts: supervisor_cfg.max_restart_attempts,
+                    ..ModeCConfig::default()
+                });
+
                 loop {
                     let status = watchdog.check_once().await.map_err(|err| {
                         MaccError::Validation(format!("supervisor attach check failed: {}", err))
                     })?;
+
+                    if matches!(status.health, macc_core::supervisor::HealthCheckResult::Healthy) {
+                        recovery = ModeCRecovery::new(ModeCConfig {
+                            events_log_path: resolve_project_path(
+                                &paths.root,
+                                &supervisor_cfg.events_log_path,
+                            ),
+                            max_restart_attempts: supervisor_cfg.max_restart_attempts,
+                            ..ModeCConfig::default()
+                        });
+                    }
+
+                    if status.health.is_running() {
+                        if let Err(err) = watchdog.run_mode_b_if_needed().await {
+                            tracing::warn!("supervisor attach: Mode B analysis failed: {}", err);
+                        }
+                    }
 
                     if let Some(pid) = status.coordinator_pid {
                         if !is_pid_running(pid) {
                             let result = read_last_coordinator_result(&resolve_project_path(
                                 &paths.root,
                                 &supervisor_cfg.events_log_path,
-                            ))?;
+                             ))?;
                             if matches!(result.as_deref(), Some("success")) {
                                 return Ok(());
                             }
-                            let mut recovery = ModeCRecovery::new(ModeCConfig {
-                                events_log_path: resolve_project_path(
-                                    &paths.root,
-                                    &supervisor_cfg.events_log_path,
-                                ),
-                                ..ModeCConfig::default()
-                            });
                             let exit_code = match status.health {
                                 macc_core::supervisor::HealthCheckResult::Crashed { exit_code } => {
                                     exit_code
@@ -194,7 +214,6 @@ impl<'a> SupervisorCommand<'a> {
                                         err
                                     ))
                                 })?;
-                            return Ok(());
                         }
                     } else {
                         let result = read_last_coordinator_result(&resolve_project_path(
@@ -205,13 +224,6 @@ impl<'a> SupervisorCommand<'a> {
                             return Ok(());
                         }
                         if matches!(result.as_deref(), Some("failed")) {
-                            let mut recovery = ModeCRecovery::new(ModeCConfig {
-                                events_log_path: resolve_project_path(
-                                    &paths.root,
-                                    &supervisor_cfg.events_log_path,
-                                ),
-                                ..ModeCConfig::default()
-                            });
                             let exit_code = match status.health {
                                 macc_core::supervisor::HealthCheckResult::Crashed { exit_code } => {
                                     exit_code
@@ -227,7 +239,6 @@ impl<'a> SupervisorCommand<'a> {
                                         err
                                     ))
                                 })?;
-                            return Ok(());
                         }
                     }
                     tokio::time::sleep(Duration::from_secs(
