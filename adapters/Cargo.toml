@@ -4,5 +4,6 @@ members = [
     "gemini",
     "claude",
     "codex",
+    "vibe",
 ]
 resolver = "2"

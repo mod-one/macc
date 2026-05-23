@@ -75,6 +75,11 @@ const EMPTY_PREVIEW_CARDS: PreviewCard[] = [
     title: 'Gemini - GEMINI.md (rendered)',
     content: 'Loading preview...',
   },
+  {
+    id: 'vibe',
+    title: 'Vibe - AGENTS.md (rendered)',
+    content: 'Loading preview...',
+  },
 ];
 
 function formatError(error: unknown): string {

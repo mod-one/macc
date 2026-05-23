@@ -17,6 +17,7 @@ pub fn default_registry() -> ToolRegistry {
         macc_adapter_claude::ClaudeAdapter,
         macc_adapter_codex::CodexAdapter,
         macc_adapter_gemini::GeminiAdapter,
+        macc_adapter_vibe::VibeAdapter,
     );
 
     ToolRegistry::from_inventory()
@@ -62,10 +63,11 @@ mod tests {
         assert!(ids.contains(&"claude".to_string()));
         assert!(ids.contains(&"codex".to_string()));
         assert!(ids.contains(&"gemini".to_string()));
+        assert!(ids.contains(&"vibe".to_string()));
         assert!(ids.contains(&"test".to_string()));
 
         // IDs should be sorted (list_ids handles this)
-        assert_eq!(ids.len(), 4);
+        assert_eq!(ids.len(), 5);
     }
 
     #[test]
@@ -81,6 +83,7 @@ mod tests {
         assert!(descriptors.iter().any(|d| d.id == "claude"));
         assert!(descriptors.iter().any(|d| d.id == "gemini"));
         assert!(descriptors.iter().any(|d| d.id == "codex"));
+        assert!(descriptors.iter().any(|d| d.id == "vibe"));
     }
 
     #[test]

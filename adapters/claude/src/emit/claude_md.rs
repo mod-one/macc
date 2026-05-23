@@ -23,6 +23,11 @@ pub fn render_claude_md(config: &ClaudeConfig) -> String {
     md.push_str("- Always run tests before committing.\n");
     md.push_str("- Use English for code, docs, and commit messages.\n");
 
+    md.push_str("\n## Skills\n");
+    md.push_str("- use `macc-performer` to perform a tasck\n");
+    md.push_str("- use `macc-prd-planner` to create or edit a prd file\n");
+    md.push_str("- use `macc-reviewer` to perform a review\n");
+
     md.push_str("\n## Common commands\n");
     md.push_str("- Install: `pnpm i`\n");
     md.push_str("- Lint: `pnpm lint`\n");

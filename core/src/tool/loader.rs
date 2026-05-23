@@ -168,6 +168,10 @@ fn embedded_tool_specs() -> (Vec<ToolSpec>, Vec<ToolDiagnostic>) {
             "embedded:gemini.tool.yaml",
             include_str!("../../../registry/tools.d/gemini.tool.yaml"),
         ),
+        (
+            "embedded:vibe.tool.yaml",
+            include_str!("../../../registry/tools.d/vibe.tool.yaml"),
+        ),
     ];
 
     for (name, content) in embedded {

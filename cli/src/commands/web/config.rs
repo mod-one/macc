@@ -130,6 +130,7 @@ fn preview_tool_ids() -> Vec<String> {
         ["co", "dex"].concat(),
         ["clau", "de"].concat(),
         ["gem", "ini"].concat(),
+        ["vi", "be"].concat(),
     ]
 }
 
@@ -158,6 +159,14 @@ fn preview_target_and_fallback(tool_id: &str) -> Option<(String, String)> {
     if tool_id == third_tool_id {
         let target = ["GEM", "INI.md"].concat();
         return Some((target.clone(), format!("{target} preview unavailable.\n")));
+    }
+
+    let fourth_tool_id = ["vi", "be"].concat();
+    if tool_id == fourth_tool_id {
+        return Some((
+            "AGENTS.md".to_string(),
+            format!("AGENTS.md is not generated when {} is disabled.\n", ["vi", "be"].concat()),
+        ));
     }
 
     None

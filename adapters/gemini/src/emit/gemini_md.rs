@@ -23,6 +23,11 @@ pub fn render_gemini_md(config: &GeminiConfig) -> String {
     md.push_str("- Run tests before committing.\n");
     md.push_str("- Use English for code, docs, and commit messages.\n");
 
+    md.push_str("\n## Skills\n");
+    md.push_str("- use `macc-performer` to perform a tasck\n");
+    md.push_str("- use `macc-prd-planner` to create or edit a prd file\n");
+    md.push_str("- use `macc-reviewer` to perform a review\n");
+
     md.push_str("\n## MACC Commands\n");
     md.push_str("- Use `/validate` to run the standard validation pipeline.\n");
     md.push_str("- Use `/implement` for full implementation workflow.\n");

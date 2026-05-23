@@ -1,0 +1,73 @@
+api_version: v1
+id: vibe
+display_name: Vibe
+description: Project instructions for Mistral Vibe CLI.
+gitignore:
+  - .vibe/
+  - AGENTS.md
+performer:
+  runner: adapters/vibe/vibe.performer.sh
+  command: vibe
+  args: ["--agent", "auto-approve", "--output", "text"]
+  prompt:
+    mode: arg
+    arg: "--prompt"
+  session:
+    enabled: true
+    scope: worktree
+    init_prompt: "Hello"
+    id_strategy: generated
+    resume:
+      command: vibe
+      args: ["--resume", "{session_id}", "--agent", "auto-approve", "--output", "text"]
+  retry:
+    command: vibe
+    args: ["--resume", "{session_id}", "--agent", "auto-approve", "--output", "text"]
+defaults:
+  model: mistral-medium-3.5
+  agent: auto-approve
+install:
+  confirm_message: "Mistral Vibe install requires a Mistral API key. Continue?"
+  commands:
+    - command: uv
+      args: ["tool", "install", "mistral-vibe"]
+  post_install:
+    command: vibe
+    args: ["--help"]
+update:
+  confirm_message: "Mistral Vibe update may change behavior. Continue?"
+  commands:
+    - command: uv
+      args: ["tool", "install", "--upgrade", "mistral-vibe"]
+version_check:
+  current:
+    command: vibe
+    args: ["--version"]
+fields:
+  - id: model
+    label: Model
+    kind:
+      type: enum
+      options: [mistral-medium-3.5, mistral-large-latest, mistral-small-latest, mistral-medium-3]
+    help: Mistral model id (e.g., mistral-medium-3.5).
+    pointer: /tools/config/vibe/model
+    default: "mistral-medium-3.5"
+  - id: agent
+    label: Agent
+    kind:
+      type: enum
+      options: [default, plan, accept-edits, auto-approve]
+    help: Vibe agent profile (e.g., auto-approve, plan).
+    pointer: /tools/config/vibe/agent
+    default: "auto-approve"
+  - id: skills
+    label: Skills
+    kind:
+      type: action
+      action: open_skills
+      target_pointer: /tools/config/vibe/skills
+    help: Open Vibe skills selector.
+doctor:
+  - kind: which
+    value: vibe
+    severity: error

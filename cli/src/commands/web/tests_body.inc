@@ -3946,7 +3946,7 @@ async fn standards_preview_endpoint_uses_adapter_rendering() {
         .to_bytes();
     let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
 
-    assert_eq!(payload["cards"].as_array().expect("cards").len(), 3);
+    assert_eq!(payload["cards"].as_array().expect("cards").len(), 4);
     let claude = &payload["cards"][1]["content"];
     assert!(
         claude

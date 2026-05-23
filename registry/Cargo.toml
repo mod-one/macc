@@ -8,6 +8,7 @@ macc-core = { path = "../core" }
 macc-adapter-claude = { path = "../adapters/claude" }
 macc-adapter-codex = { path = "../adapters/codex" }
 macc-adapter-gemini = { path = "../adapters/gemini" }
+macc-adapter-vibe = { path = "../adapters/vibe" }
 
 [dev-dependencies]
 serde_json = "1.0"

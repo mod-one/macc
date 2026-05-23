@@ -1,4 +1,4 @@
-use crate::emit::{agents_md, config_toml, rules};
+use crate::emit::{config_toml, rules};
 use crate::map::CodexConfig;
 use macc_core::plan::builders as plan_builders;
 use macc_core::plan::ActionPlan;
@@ -18,10 +18,15 @@ impl ToolAdapter for CodexAdapter {
         let mut plan = ActionPlan::new();
 
         if config.tool_config.rules_enabled.unwrap_or(false) {
+            let agents_content = macc_adapter_shared::render::agents_md::render_shared_agents_md(
+                &ctx.resolved.tools.enabled,
+                &config.standards_inline,
+                config.standards_path.as_deref(),
+            );
             plan_builders::write_text(
                 &mut plan,
                 "AGENTS.md",
-                &agents_md::render_agents_md(&config),
+                &agents_content,
             );
         }
         plan_builders::write_text(
