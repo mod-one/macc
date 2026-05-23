@@ -1396,6 +1396,12 @@ mod tests {
     use std::io;
     use std::net::TcpListener;
     use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    fn env_test_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
 
     fn bind_loopback() -> Option<(TcpListener, u16)> {
         match TcpListener::bind("127.0.0.1:0") {
@@ -1882,6 +1888,7 @@ mod tests {
 
     #[test]
     fn test_plan_with_tools_override() -> macc_core::Result<()> {
+        let _guard = env_test_lock();
         let temp_base = std::env::temp_dir().join(format!("macc_tools_test_{}", uuid_v4_like()));
         std::fs::create_dir_all(&temp_base).unwrap();
         let temp_home = temp_base.join("home");
@@ -3426,6 +3433,7 @@ fi
 
     #[test]
     fn test_install_skill_multi_git_cli() -> macc_core::Result<()> {
+        let _guard = env_test_lock();
         let temp_base =
             std::env::temp_dir().join(format!("macc_install_multi_git_test_{}", uuid_v4_like()));
         std::fs::create_dir_all(&temp_base).unwrap();
