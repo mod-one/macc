@@ -698,7 +698,7 @@ fn map_entry_to_api(
     let (id, slug, branch, tool, base_branch, scope, feature) = if let Some(metadata) = metadata {
         (
             metadata.id.clone(),
-            derive_slug_from_id(&metadata.id),
+            Some(metadata.slug.clone()),
             Some(metadata.branch),
             Some(metadata.tool),
             Some(metadata.base),
@@ -746,7 +746,7 @@ fn map_created_to_api(
 
     Ok(ApiWorktree {
         id: entry.id.clone(),
-        slug: derive_slug_from_id(&entry.id),
+        slug: metadata.as_ref().map(|m| m.slug.clone()),
         branch: Some(entry.branch.clone()),
         tool: metadata.as_ref().map(|value| value.tool.clone()),
         status: Some(if dirty { "dirty" } else { "clean" }.to_string()),
@@ -778,23 +778,6 @@ fn derive_worktree_status(entry: &WorktreeEntry, dirty: bool) -> String {
     } else {
         "clean".to_string()
     }
-}
-
-fn derive_slug_from_id(id: &str) -> Option<String> {
-    let trimmed = id
-        .rsplit_once('-')
-        .map(|(prefix, suffix)| {
-            if suffix.len() == 2 && suffix.chars().all(|ch| ch.is_ascii_digit()) {
-                prefix
-            } else {
-                id
-            }
-        })
-        .unwrap_or(id);
-    trimmed
-        .rsplit_once('-')
-        .map(|(slug, _)| slug.to_string())
-        .filter(|slug| !slug.is_empty())
 }
 
 fn fallback_worktree_id(path: &StdPath) -> String {

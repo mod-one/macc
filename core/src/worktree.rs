@@ -34,6 +34,7 @@ pub struct WorktreeCreateResult {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WorktreeMetadata {
     pub id: String,
+    pub slug: String,
     pub tool: String,
     pub scope: Option<String>,
     pub feature: Option<String>,
@@ -67,12 +68,11 @@ pub fn create_worktrees(
     })?;
 
     let mut results = Vec::new();
-    let suffix = generate_suffix();
     for idx in 1..=spec.count {
         let id = if spec.count == 1 {
-            format!("{}-{}", spec.slug, suffix)
+            spec.slug.clone()
         } else {
-            format!("{}-{}-{:02}", spec.slug, suffix, idx)
+            format!("{}-{:02}", spec.slug, idx)
         };
         let branch = format!("ai/{}/{}", spec.tool, id);
         let path = base_dir.join(&id);
@@ -83,6 +83,7 @@ pub fn create_worktrees(
             &path,
             WorktreeMetadata {
                 id: id.clone(),
+                slug: spec.slug.clone(),
                 tool: spec.tool.clone(),
                 scope: spec.scope.clone(),
                 feature: spec.feature.clone(),
@@ -566,15 +567,6 @@ fn write_scope_file(path: &Path, scope: &str) -> Result<()> {
         source: e,
     })?;
     Ok(())
-}
-
-fn generate_suffix() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    format!("{:x}", nanos)
 }
 
 #[cfg(test)]

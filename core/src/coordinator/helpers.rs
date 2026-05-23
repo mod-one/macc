@@ -668,22 +668,26 @@ pub fn find_reusable_worktree_native(
         }
         let last_commit = crate::git::head_commit(&entry.path).unwrap_or_default();
 
-        let existing =
-            crate::read_worktree_metadata(&entry.path)?.unwrap_or(crate::WorktreeMetadata {
-                id: entry
-                    .path
-                    .file_name()
-                    .and_then(|v| v.to_str())
-                    .unwrap_or("worker")
-                    .to_string(),
+        let existing = crate::read_worktree_metadata(&entry.path)?.unwrap_or_else(|| {
+            let folder_name = entry
+                .path
+                .file_name()
+                .and_then(|v| v.to_str())
+                .unwrap_or("worker")
+                .to_string();
+            crate::WorktreeMetadata {
+                id: folder_name.clone(),
+                slug: folder_name,
                 tool: tool.to_string(),
                 scope: None,
                 feature: None,
                 base: base_branch.to_string(),
                 branch: branch.clone(),
-            });
+            }
+        });
         let updated = crate::WorktreeMetadata {
             id: existing.id,
+            slug: existing.slug,
             tool: tool.to_string(),
             scope: existing.scope,
             feature: existing.feature,
