@@ -13,12 +13,14 @@ pub fn default_registry() -> ToolRegistry {
     // and keeps the adapter's registration logic inside the adapter crate.
 
     // Force linking of adapter crates so they can register themselves via inventory
-    let _ = (
-        macc_adapter_claude::ClaudeAdapter,
-        macc_adapter_codex::CodexAdapter,
-        macc_adapter_gemini::GeminiAdapter,
-        macc_adapter_vibe::VibeAdapter,
-    );
+    #[cfg(feature = "claude")]
+    let _ = macc_adapter_claude::ClaudeAdapter;
+    #[cfg(feature = "codex")]
+    let _ = macc_adapter_codex::CodexAdapter;
+    #[cfg(feature = "gemini")]
+    let _ = macc_adapter_gemini::GeminiAdapter;
+    #[cfg(feature = "vibe")]
+    let _ = macc_adapter_vibe::VibeAdapter;
 
     let _ = macc_core::tool::AGENTS_MD_ORCHESTRATOR
         .get_or_init(|| macc_adapter_shared::render::agents_md::orchestrate_agents_md);
@@ -62,15 +64,25 @@ mod tests {
         let registry = default_registry();
         let ids = registry.list_ids();
 
-        // Should contain all our adapters
+        // Should contain all our enabled adapters
+        #[cfg(feature = "claude")]
         assert!(ids.contains(&"claude".to_string()));
+        #[cfg(feature = "codex")]
         assert!(ids.contains(&"codex".to_string()));
+        #[cfg(feature = "gemini")]
         assert!(ids.contains(&"gemini".to_string()));
+        #[cfg(feature = "vibe")]
         assert!(ids.contains(&"vibe".to_string()));
         assert!(ids.contains(&"test".to_string()));
 
+        let mut expected_len = 1; // "test" is built-in core mock
+        if cfg!(feature = "claude") { expected_len += 1; }
+        if cfg!(feature = "codex") { expected_len += 1; }
+        if cfg!(feature = "gemini") { expected_len += 1; }
+        if cfg!(feature = "vibe") { expected_len += 1; }
+
         // IDs should be sorted (list_ids handles this)
-        assert_eq!(ids.len(), 5);
+        assert_eq!(ids.len(), expected_len);
     }
 
     #[test]
