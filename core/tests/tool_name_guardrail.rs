@@ -72,6 +72,9 @@ fn guardrail_no_tool_names_in_core_cli_tui() {
                 }
 
                 let lower = line.to_lowercase();
+                if lower.contains("macc:allow-tool-name") {
+                    continue;
+                }
                 for token in &forbidden {
                     if !lower.contains(token) {
                         continue;

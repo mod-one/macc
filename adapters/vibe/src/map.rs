@@ -47,7 +47,9 @@ impl VibeConfig {
             .or_else(|| resolved.standards.inline.get("language").cloned())
             .unwrap_or_else(|| "English".to_string());
 
-        let model = source.model.unwrap_or_else(|| "mistral-medium-3.5".to_string());
+        let model = source
+            .model
+            .unwrap_or_else(|| "mistral-medium-3.5".to_string());
         let agent = source.agent.unwrap_or_else(|| "auto-approve".to_string());
 
         let mut skills_set = BTreeSet::new();
@@ -82,7 +84,9 @@ impl VibeConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use macc_core::resolve::{ResolvedConfig, ResolvedSelectionsConfig, ResolvedStandardsConfig, ResolvedToolsConfig};
+    use macc_core::resolve::{
+        ResolvedConfig, ResolvedSelectionsConfig, ResolvedStandardsConfig, ResolvedToolsConfig,
+    };
     use serde_json::json;
 
     fn base_resolved() -> ResolvedConfig {
@@ -119,9 +123,12 @@ mod tests {
     fn test_skills_merged() {
         let mut resolved = base_resolved();
         resolved.selections.skills = vec!["global-skill".to_string()];
-        resolved.tools.specific.insert("vibe".to_string(), json!({
-            "skills": ["local-skill"]
-        }));
+        resolved.tools.specific.insert(
+            "vibe".to_string(),
+            json!({
+                "skills": ["local-skill"]
+            }),
+        );
 
         let config = VibeConfig::from_resolved(&resolved);
         assert_eq!(config.skills, vec!["global-skill", "local-skill"]);

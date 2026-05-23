@@ -23,11 +23,7 @@ impl ToolAdapter for CodexAdapter {
                 &config.standards_inline,
                 config.standards_path.as_deref(),
             );
-            plan_builders::write_text(
-                &mut plan,
-                "AGENTS.md",
-                &agents_content,
-            );
+            plan_builders::write_text(&mut plan, "AGENTS.md", &agents_content);
         }
         plan_builders::write_text(
             &mut plan,

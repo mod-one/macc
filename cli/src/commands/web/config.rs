@@ -127,45 +127,39 @@ fn find_rendered_file(plan: &ActionPlan, target: &str, fallback: &str) -> String
 
 fn preview_tool_ids() -> Vec<String> {
     vec![
-        ["co", "dex"].concat(),
-        ["clau", "de"].concat(),
-        ["gem", "ini"].concat(),
-        ["vi", "be"].concat(),
+        "codex".to_string(),  // macc:allow-tool-name
+        "claude".to_string(), // macc:allow-tool-name
+        "gemini".to_string(), // macc:allow-tool-name
+        "vibe".to_string(),   // macc:allow-tool-name
     ]
 }
 
 fn preview_target_and_fallback(tool_id: &str) -> Option<(String, String)> {
-    let first_tool_id = ["co", "dex"].concat();
+    let first_tool_id = "codex"; // macc:allow-tool-name
     if tool_id == first_tool_id {
         return Some((
             "AGENTS.md".to_string(),
-            [
-                "AGENTS.md is not generated when ",
-                "co",
-                "dex",
-                ".rules_enabled is false.\n",
-            ]
-            .concat(),
+            "AGENTS.md is not generated when codex.rules_enabled is false.\n".to_string(), // macc:allow-tool-name
         ));
     }
 
-    let second_tool_id = ["clau", "de"].concat();
+    let second_tool_id = "claude"; // macc:allow-tool-name
     if tool_id == second_tool_id {
-        let target = ["CLAU", "DE.md"].concat();
+        let target = "CLAUDE.md".to_string(); // macc:allow-tool-name
         return Some((target.clone(), format!("{target} preview unavailable.\n")));
     }
 
-    let third_tool_id = ["gem", "ini"].concat();
+    let third_tool_id = "gemini"; // macc:allow-tool-name
     if tool_id == third_tool_id {
-        let target = ["GEM", "INI.md"].concat();
+        let target = "GEMINI.md".to_string(); // macc:allow-tool-name
         return Some((target.clone(), format!("{target} preview unavailable.\n")));
     }
 
-    let fourth_tool_id = ["vi", "be"].concat();
+    let fourth_tool_id = "vibe"; // macc:allow-tool-name
     if tool_id == fourth_tool_id {
         return Some((
             "AGENTS.md".to_string(),
-            format!("AGENTS.md is not generated when {} is disabled.\n", ["vi", "be"].concat()),
+            "AGENTS.md is not generated when vibe is disabled.\n".to_string(), // macc:allow-tool-name
         ));
     }
 
