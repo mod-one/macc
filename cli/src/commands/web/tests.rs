@@ -39,10 +39,13 @@ fn temp_root(label: &str) -> std::path::PathBuf {
 
 fn apply_test_guard() -> MutexGuard<'static, ()> {
     static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+    // Use unwrap_or_else so that a panic in one test does not poison the mutex
+    // and cascade failures into every subsequent test that acquires this guard.
+    // Mutex<()> has no meaningful protected state, so recovery is always safe.
     GUARD
         .get_or_init(|| Mutex::new(()))
         .lock()
-        .expect("apply test guard")
+        .unwrap_or_else(|e| e.into_inner())
 }
 
 fn write_test_config(root: &std::path::Path) {

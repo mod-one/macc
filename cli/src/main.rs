@@ -3561,7 +3561,7 @@ fi
                             tags: None,
                             subpath: "skills/b".into(),
                             kind: "git".into(),
-                            url: repo_url,
+                            url: repo_url.clone(),
                             reference: "main".into(),
                             checksum: None,
                         },
@@ -3597,7 +3597,10 @@ fi
         let skill_b_dir = project_path.join(format!(".{}/skills/skill-b", tool_one));
         assert!(!skill_b_dir.exists(), "Skill B should NOT be installed");
 
-        // 6. Verify sparse checkout in cache (project cache or shared user cache)
+        // 6. Verify sparse checkout in cache (project cache or shared user cache).
+        // Only count cache entries whose git remote URL matches this test's repo_url, so that
+        // unrelated entries (e.g. from a concurrent test or a previous run that wasn't fully
+        // cleaned up) don't trigger a spurious assertion failure.
         let mut found_cache = false;
         let mut found_sparse_match = false;
         let mut cache_roots = vec![project_path.join(".macc/cache")];
@@ -3608,16 +3611,31 @@ fi
             if let Ok(entries) = std::fs::read_dir(cache_dir) {
                 for entry in entries.flatten() {
                     let repo_dir = entry.path().join("repo");
-                    if repo_dir.exists() {
-                        found_cache = true;
-                        // Look for the cache entry matching this test's sparse checkout.
-                        if repo_dir.join("skills/a").exists() {
-                            assert!(
-                                !repo_dir.join("skills/b").exists(),
-                                "skills/b should NOT be materialized in sparse checkout"
-                            );
-                            found_sparse_match = true;
-                        }
+                    if !repo_dir.exists() {
+                        continue;
+                    }
+                    // Verify this entry belongs to our test's remote repo, not some other
+                    // concurrent or stale cache entry that happens to have a 'repo' subdir.
+                    // Route through the macc_core::git facade to avoid direct git invocation.
+                    let remote_url = macc_core::git::run_git_output_mapped(
+                        &repo_dir,
+                        &["remote", "get-url", "origin"],
+                        "get git remote url",
+                    )
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+                    if remote_url.as_deref() != Some(&repo_url) {
+                        continue;
+                    }
+                    found_cache = true;
+                    // Look for the cache entry matching this test's sparse checkout.
+                    if repo_dir.join("skills/a").exists() {
+                        assert!(
+                            !repo_dir.join("skills/b").exists(),
+                            "skills/b should NOT be materialized in sparse checkout"
+                        );
+                        found_sparse_match = true;
                     }
                 }
             }
