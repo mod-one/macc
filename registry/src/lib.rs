@@ -21,6 +21,8 @@ pub fn default_registry() -> ToolRegistry {
     let _ = macc_adapter_gemini::GeminiAdapter;
     #[cfg(feature = "vibe")]
     let _ = macc_adapter_vibe::VibeAdapter;
+    #[cfg(feature = "agy")]
+    let _ = macc_adapter_agy::AgyAdapter;
 
     let _ = macc_core::tool::AGENTS_MD_ORCHESTRATOR
         .get_or_init(|| macc_adapter_shared::render::agents_md::orchestrate_agents_md);
@@ -73,6 +75,8 @@ mod tests {
         assert!(ids.contains(&"gemini".to_string()));
         #[cfg(feature = "vibe")]
         assert!(ids.contains(&"vibe".to_string()));
+        #[cfg(feature = "agy")]
+        assert!(ids.contains(&"agy".to_string()));
         assert!(ids.contains(&"test".to_string()));
 
         let mut expected_len = 1; // "test" is built-in core mock
@@ -86,6 +90,9 @@ mod tests {
             expected_len += 1;
         }
         if cfg!(feature = "vibe") {
+            expected_len += 1;
+        }
+        if cfg!(feature = "agy") {
             expected_len += 1;
         }
 
@@ -107,6 +114,7 @@ mod tests {
         assert!(descriptors.iter().any(|d| d.id == "gemini"));
         assert!(descriptors.iter().any(|d| d.id == "codex"));
         assert!(descriptors.iter().any(|d| d.id == "vibe"));
+        assert!(descriptors.iter().any(|d| d.id == "agy"));
     }
 
     #[test]

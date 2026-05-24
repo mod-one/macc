@@ -1250,6 +1250,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "macc-adapter-agy"
+version = "0.1.0"
+dependencies = [
+ "inventory",
+ "macc-adapter-shared",
+ "macc-core",
+ "regex",
+ "serde",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
 name = "macc-adapter-claude"
 version = "0.1.0"
 dependencies = [
@@ -1326,6 +1339,7 @@ dependencies = [
  "clap",
  "futures-util",
  "http-body-util",
+ "macc-adapter-agy",
  "macc-adapter-claude",
  "macc-adapter-codex",
  "macc-adapter-gemini",
@@ -1375,6 +1389,7 @@ name = "macc-registry"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "macc-adapter-agy",
  "macc-adapter-claude",
  "macc-adapter-codex",
  "macc-adapter-gemini",

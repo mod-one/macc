@@ -8,3 +8,5 @@ google
 openai
 vibe
 mistral
+agy
+antigravity
