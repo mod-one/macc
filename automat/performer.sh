@@ -23,6 +23,10 @@ performer_log_dir=""
 task_log_file=""
 EVENT_FILE="${COORD_EVENTS_FILE:-}"
 EVENT_IPC_ADDR="${MACC_COORDINATOR_IPC_ADDR:-}"
+# Path to the coordinator's well-known IPC address file.  Used for
+# coordinator-restart reconnection: when IPC fails, performer re-reads
+# this file and retries with the new address.
+EVENT_IPC_ADDR_FILE="${MACC_COORDINATOR_IPC_ADDR_FILE:-}"
 EVENT_SOURCE="${MACC_EVENT_SOURCE:-}"
 EVENT_TASK_ID="${MACC_EVENT_TASK_ID:-}"
 EVENT_RUN_ID="${COORDINATOR_RUN_ID:-$(date +%s%N)-$$}"
@@ -377,6 +381,23 @@ PY
     return $py_rc
   fi
   LAST_IPC_ERROR="tcp ipc failed: addr=${addr_display} event_id_extracted=true preview=\"${preview}\""
+  # IPC failed with the baked-in address. If the coordinator was restarted
+  # (e.g., after SSH disconnect), the address file may have a new address.
+  # Read it and retry once so performers survive coordinator restarts.
+  if [[ -n "$EVENT_IPC_ADDR_FILE" && -f "$EVENT_IPC_ADDR_FILE" ]]; then
+    local new_addr
+    new_addr="$(< "$EVENT_IPC_ADDR_FILE" tr -d '[:space:]')"
+    if [[ -n "$new_addr" && "$new_addr" != "$EVENT_IPC_ADDR" ]]; then
+      local old_addr="$EVENT_IPC_ADDR"
+      EVENT_IPC_ADDR="$new_addr"
+      if send_event_via_ipc "$event_line"; then
+        # Successfully reconnected to restarted coordinator.
+        return 0
+      fi
+      # Retry with new addr also failed — restore original for error context.
+      EVENT_IPC_ADDR="$old_addr"
+    fi
+  fi
   return $rc
 }
 

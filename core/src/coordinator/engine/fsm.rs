@@ -1356,11 +1356,36 @@ struct NativeControlPlaneBackend<'a> {
     ghost_heartbeat_grace_seconds: i64,
     last_logged_counts: Option<CoordinatorCounts>,
     last_cycle_progressed: bool,
+    /// Timestamp of the last coordinator-alive heartbeat event emitted to SQLite.
+    /// Used to throttle periodic heartbeats to once every 30 seconds so that
+    /// viewer TUIs always see recent activity even while performers are running.
+    last_sqlite_heartbeat_at: Option<std::time::Instant>,
 }
 
 #[async_trait]
 impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
     async fn on_cycle_start(&mut self, _cycle: usize) -> Result<()> {
+        // Emit a periodic coordinator-alive heartbeat so viewer TUIs always
+        // see recent activity even while performers are long-running.
+        // Throttled to once every 30 seconds.
+        const HEARTBEAT_INTERVAL_SECS: u64 = 30;
+        let should_emit_heartbeat = self
+            .last_sqlite_heartbeat_at
+            .map(|last| last.elapsed().as_secs() >= HEARTBEAT_INTERVAL_SECS)
+            .unwrap_or(true);
+        if should_emit_heartbeat {
+            let _ = crate::coordinator::helpers::append_coordinator_event_with_severity(
+                self.repo_root,
+                "coordinator_heartbeat",
+                "",
+                "run",
+                "ok",
+                "coordinator is running",
+                "info",
+            );
+            self.last_sqlite_heartbeat_at = Some(std::time::Instant::now());
+        }
+
         crate::coordinator::control_plane::sync_registry_from_prd_native(
             self.repo_root,
             &self.prd_file,
@@ -1812,6 +1837,7 @@ pub async fn run_native_control_plane(
         ghost_heartbeat_grace_seconds,
         last_logged_counts: None,
         last_cycle_progressed: false,
+        last_sqlite_heartbeat_at: None,
     };
 
     let timeout_seconds = env_cfg.timeout_seconds.unwrap_or(cfg.timeout_seconds);

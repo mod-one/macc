@@ -27,6 +27,13 @@ fn performer_ipc_addr_path(repo_root: &Path) -> std::path::PathBuf {
     repo_root.join(COORDINATOR_IPC_ADDR_REL_PATH)
 }
 
+/// Public accessor for the well-known IPC address file path, so callers
+/// (e.g., task runner) can pass it to performers as an env var for
+/// reconnection after coordinator restarts.
+pub fn performer_ipc_addr_path_pub(repo_root: &Path) -> std::path::PathBuf {
+    performer_ipc_addr_path(repo_root)
+}
+
 fn write_performer_ipc_addr(repo_root: &Path, addr: &str) -> Result<()> {
     let path = performer_ipc_addr_path(repo_root);
     if let Some(parent) = path.parent() {

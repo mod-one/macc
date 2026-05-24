@@ -3946,7 +3946,8 @@ async fn standards_preview_endpoint_uses_adapter_rendering() {
         .to_bytes();
     let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
 
-    assert_eq!(payload["cards"].as_array().expect("cards").len(), 4);
+    // Number of adapter cards grows as new tools are registered; assert minimum.
+    assert!(payload["cards"].as_array().expect("cards").len() >= 4);
 
     let cards = payload["cards"].as_array().expect("cards array");
     let find_card = |id: &str| {

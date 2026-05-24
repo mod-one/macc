@@ -1339,6 +1339,7 @@ dependencies = [
  "clap",
  "futures-util",
  "http-body-util",
+ "libc",
  "macc-adapter-agy",
  "macc-adapter-claude",
  "macc-adapter-codex",

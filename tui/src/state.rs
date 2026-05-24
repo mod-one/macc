@@ -802,6 +802,10 @@ impl AppState {
                 | "concurrency_adjusted"
                 | "tool_fallback"
                 | "quota_exhausted"
+                // Periodic coordinator-alive signal (emitted every 30s while the
+                // coordinator is running, so viewer TUIs see activity even when
+                // no task lifecycle events are occurring).
+                | "coordinator_heartbeat"
         )
     }
 

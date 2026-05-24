@@ -1199,6 +1199,13 @@ pub fn spawn_performer_job(
     if let Some(ipc_addr) = effective_ipc_addr.as_deref() {
         run_cmd.env(crate::coordinator::ipc::COORDINATOR_IPC_ADDR_ENV, ipc_addr);
     }
+    // Pass the well-known IPC address file path so the performer can re-read
+    // the current coordinator address on IPC failure and reconnect after a
+    // coordinator restart (e.g., from SSH disconnect or supervisor recovery).
+    run_cmd.env(
+        "MACC_COORDINATOR_IPC_ADDR_FILE",
+        crate::coordinator::ipc::performer_ipc_addr_path_pub(repo_root),
+    );
     let mut child = run_cmd.spawn().map_err(|e| MaccError::Io {
         path: worktree_path.to_string_lossy().into(),
         action: "spawn performer process".into(),

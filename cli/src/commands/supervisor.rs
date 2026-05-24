@@ -14,6 +14,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 use std::time::{Duration, Instant};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 const SUPERVISOR_PID_REL_PATH: &str = ".macc/state/supervisor.pid";
 const SUPERVISOR_HEALTH_REL_PATH: &str = ".macc/state/supervisor-health.json";
@@ -70,7 +72,8 @@ impl<'a> SupervisorCommand<'a> {
                 source: e,
             })?;
 
-            let child = ProcessCommand::new(current_exe)
+            let mut daemon_cmd = ProcessCommand::new(current_exe);
+            daemon_cmd
                 .current_dir(&paths.root)
                 .arg("--cwd")
                 .arg(&paths.root)
@@ -86,7 +89,24 @@ impl<'a> SupervisorCommand<'a> {
                 .env("MACC_INTERNAL_INVOCATION", "1")
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
+                .stderr(Stdio::null());
+
+            // UNIX daemonization: call setsid() in the child after fork but before
+            // exec so the daemon gets its own session with no controlling terminal.
+            // Without this, SIGHUP from terminal close propagates to the entire
+            // original session and kills the supervisor together with the coordinator.
+            #[cfg(unix)]
+            // SAFETY: setsid(2) is async-signal-safe. The only restriction is that
+            // the calling process must not be a process-group leader, which is
+            // always true for a freshly forked child.
+            unsafe {
+                daemon_cmd.pre_exec(|| {
+                    libc::setsid();
+                    Ok(())
+                });
+            }
+
+            let child = daemon_cmd
                 .spawn()
                 .map_err(|e| MaccError::Io {
                     path: paths.root.to_string_lossy().into(),

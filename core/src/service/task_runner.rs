@@ -104,6 +104,14 @@ pub fn worktree_run_task(paths: &ProjectPaths, id: &str) -> Result<()> {
     if let Some(ipc_addr) = performer_ipc_addr {
         cmd.env("MACC_COORDINATOR_IPC_ADDR", ipc_addr);
     }
+    // Also pass the well-known path to the coordinator IPC address file.
+    // When the coordinator restarts (e.g., after SSH disconnect), this lets
+    // the performer re-read the new address and reconnect rather than failing
+    // permanently with a stale baked-in address.
+    cmd.env(
+        "MACC_COORDINATOR_IPC_ADDR_FILE",
+        crate::coordinator::ipc::performer_ipc_addr_path_pub(&paths.root),
+    );
 
     let status = cmd.status().map_err(|e| MaccError::Io {
         path: performer_path.to_string_lossy().into(),
