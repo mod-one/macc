@@ -121,6 +121,63 @@ fn resets_time_regex() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"(?i)resets\s+(\d{1,2})(am|pm)\s*\(UTC\)").unwrap())
 }
 
+/// Regex for the absolute-timestamp "try again at <Month> <Day>, <Year>
+/// <HH>:<MM> [AP]M" form, which `detect_tool_limit_exit()` may embed in the
+/// MACC_TOOL_LIMIT line when the underlying tool emits this format.
+fn try_again_at_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)try again at (?P<month>[A-Za-z]+) (?P<day>\d+)[a-z]*, (?P<year>\d{4}) (?P<hour>\d{1,2}):(?P<min>\d{2}) (?P<ampm>[AaPp][Mm])",
+        )
+        .unwrap()
+    })
+}
+
+/// Parse an absolute "try again at …" timestamp into seconds from now.
+fn parse_try_again_at_seconds(text: &str) -> Option<u64> {
+    let caps = try_again_at_regex().captures(text)?;
+    let month_str = caps.name("month")?.as_str();
+    let day: u32 = caps.name("day")?.as_str().parse().ok()?;
+    let year: i32 = caps.name("year")?.as_str().parse().ok()?;
+    let hour_raw: u32 = caps.name("hour")?.as_str().parse().ok()?;
+    let min: u32 = caps.name("min")?.as_str().parse().ok()?;
+    let ampm = caps.name("ampm")?.as_str().to_ascii_uppercase();
+
+    let month = match month_str.to_ascii_lowercase().as_str() {
+        "january" | "jan" => 1,
+        "february" | "feb" => 2,
+        "march" | "mar" => 3,
+        "april" | "apr" => 4,
+        "may" => 5,
+        "june" | "jun" => 6,
+        "july" | "jul" => 7,
+        "august" | "aug" => 8,
+        "september" | "sep" | "sept" => 9,
+        "october" | "oct" => 10,
+        "november" | "nov" => 11,
+        "december" | "dec" => 12,
+        _ => return None,
+    };
+
+    let hour = match ampm.as_str() {
+        "AM" if hour_raw == 12 => 0,
+        "AM" => hour_raw,
+        "PM" if hour_raw == 12 => 12,
+        "PM" => hour_raw + 12,
+        _ => return None,
+    };
+
+    use chrono::{TimeZone as _, Utc};
+    let retry_dt = Utc.with_ymd_and_hms(year, month, day, hour, min, 0).single()?;
+    let now_ts = Utc::now().timestamp();
+    let retry_ts = retry_dt.timestamp();
+    if retry_ts <= now_ts {
+        return Some(60);
+    }
+    Some((retry_ts - now_ts) as u64)
+}
+
 /// Parse "resets Xam/pm (UTC)" into seconds from now until that reset time.
 /// Returns None if the pattern is not found or the time is invalid.
 fn parse_reset_time_as_seconds(text: &str) -> Option<u64> {
@@ -188,14 +245,18 @@ impl ErrorNormalizer for ClaudeErrorNormalizer {
             .find(&combined)
             .map(|m| m.as_str().to_string());
 
-        // Extract retry-after hint if present.  First try the standard
-        // "retry-after: N" header, then fall back to parsing the human-readable
-        // "resets Xam/pm (UTC)" reset time from quota exhaustion messages.
+        // Extract retry-after hint if present.
+        // Priority:
+        //   1. Standard "retry-after: N" header (seconds)
+        //   2. "resets Xam/pm (UTC)" — human-readable daily reset
+        //   3. "try again at <Month> <Day>, <Year> <HH>:<MM> [AP]M" — absolute
+        //      timestamp embedded by detect_tool_limit_exit() in MACC_TOOL_LIMIT
         let retry_after_seconds = retry_after_regex()
             .captures(&combined)
             .and_then(|caps| caps.get(1))
             .and_then(|m| m.as_str().parse::<u64>().ok())
-            .or_else(|| parse_reset_time_as_seconds(&combined));
+            .or_else(|| parse_reset_time_as_seconds(&combined))
+            .or_else(|| parse_try_again_at_seconds(&combined));
 
         let error_code = canonical_to_error_code(&class).to_string();
         let retryable = is_retryable(&class);

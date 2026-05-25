@@ -529,6 +529,57 @@ override_rc_for_success_marker() {
   fi
 }
 
+# RL-PERFORMER-010: Detect tool-reported quota/session-limit errors that the
+# tool emits as human-readable text but exits 0 (a tool-level bug/design quirk).
+#
+# When detected on a zero exit code:
+#   - Prints a structured MACC_TOOL_LIMIT line to stderr so the coordinator
+#     log and the per-adapter error normalizer can classify it as E602
+#     (QuotaExhausted / not retryable).
+#   - Returns exit code 1 so the runtime sees a failure and invokes the
+#     normalizer (normalizer_input is only populated on !success).
+#   - Optionally extracts and emits a retry-after hint from the message.
+#
+# Patterns covered:
+#   Codex:  "ERROR: You've hit your usage limit. ... try again at <DATE>"
+#   Claude: "You've hit your session limit · resets <TIME>"
+detect_tool_limit_exit() {
+  local rc="$1"
+  [[ "$rc" -ne 0 ]] && { echo "$rc"; return; }
+  [[ -f "$output_capture" ]] || { echo "$rc"; return; }
+
+  # Match the usage/session limit phrases both tools emit.
+  if ! grep -qiE \
+      "(you.ve hit your (usage|session) limit|hit your usage limit|your usage limit)" \
+      "$output_capture" 2>/dev/null; then
+    echo "$rc"
+    return
+  fi
+
+  # Try to extract an absolute "try again at <DATE>" hint (codex format).
+  # Also handle "resets <TIME>" form (claude format). Emit as a raw string for
+  # the normalizer / log — converting to epoch here would require locale-aware
+  # date parsing which is fragile across distros.
+  local retry_hint=""
+  retry_hint="$(grep -oiE \
+      "(try again at [A-Za-z]+ [0-9]+[a-z]*, [0-9]+ [0-9]+:[0-9]+ [AaPp][Mm]([^.]*)?|resets [0-9]+:[0-9]+[AaPp][Mm]([^)]*)?)" \
+      "$output_capture" 2>/dev/null | head -1 || true)"
+
+  # Emit a structured notification that appears in the performer log and is
+  # picked up as the tail text by the normalizer path.
+  {
+    echo ""
+    echo "MACC_TOOL_LIMIT: quota_exhausted tool=${tool_id}${retry_hint:+ retry_hint=\"${retry_hint}\"}"
+    echo "The tool '${tool_id}' has exhausted its usage quota and exited 0 without doing any work."
+    echo "This is treated as an error (E602) so the coordinator can handle it correctly."
+    if [[ -n "$retry_hint" ]]; then
+      echo "Retry hint from tool: ${retry_hint}"
+    fi
+  } >&2
+
+  echo 1
+}
+
 if [[ "$session_enabled" == "true" && -n "$session_resume_command" ]]; then
   sid=""
   rc=0
@@ -606,9 +657,13 @@ if [[ "$session_enabled" == "true" && -n "$session_resume_command" ]]; then
       release_session_lock
     fi
   fi
+  # Apply limit detection before the success-marker override so that a tool
+  # that emits a quota error but exits 0 is not silently treated as done.
+  rc="$(detect_tool_limit_exit "$rc")"
   exit "$(override_rc_for_success_marker "$rc")"
 else
   rc=0
   run_default_call || rc=$?
+  rc="$(detect_tool_limit_exit "$rc")"
   exit "$(override_rc_for_success_marker "$rc")"
 fi
