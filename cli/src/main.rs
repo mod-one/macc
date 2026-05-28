@@ -258,6 +258,9 @@ enum Commands {
         /// Per-tool concurrency cap JSON (e.g. {"tool-a":3,"tool-b":2})
         #[arg(long)]
         max_parallel_per_tool_json: Option<String>,
+        /// Preset configurations (conservative, balanced, throughput)
+        #[arg(long)]
+        preset: Option<String>,
         /// Category->tools routing JSON (e.g. {"frontend":["tool-b","tool-c"]})
         #[arg(long)]
         tool_specializations_json: Option<String>,
@@ -343,7 +346,46 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         extra_args: Vec<String>,
     },
+    /// Guided onboarding and task startup entry point
+    Start {
+        /// Select the startup intent
+        #[arg(long)]
+        intent: Option<String>,
+        /// Run in dry-run mode (no changes written to disk)
+        #[arg(long)]
+        dry_run: bool,
+        /// Launch the web client/server
+        #[arg(long)]
+        web: bool,
+        /// Open the TUI dashboard
+        #[arg(long)]
+        tui: bool,
+        /// Profile to restore or use
+        #[arg(long)]
+        profile: Option<String>,
+        /// Preset configurations (conservative, balanced, throughput)
+        #[arg(long)]
+        preset: Option<String>,
+    },
+    /// Audit and display repository Trust and safety parameters
+    Trust,
+    /// Manage environment reproducibility and macc.lock.yaml
+    Lock {
+        #[command(subcommand)]
+        lock_command: commands::lock::LockCommands,
+    },
+    /// Diagnostics and recovery for failed tasks
+    Failure {
+        #[command(subcommand)]
+        failure_command: commands::failure::FailureCommands,
+    },
+    /// Manage progressive settings and presets
+    Settings {
+        #[command(subcommand)]
+        settings_command: commands::settings::SettingsCommands,
+    },
 }
+
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 enum WebAssetsArg {
@@ -960,6 +1002,34 @@ fn run_with_engine_provider(
         Some(Commands::Process { process_command }) => {
             commands::process::ProcessCommand::new(app.clone(), process_command).run()
         }
+        Some(Commands::Start {
+            intent,
+            dry_run,
+            web,
+            tui,
+            profile,
+            preset,
+        }) => commands::start::StartCommand::new(
+            app.clone(),
+            intent.clone(),
+            *dry_run,
+            *web,
+            *tui,
+            profile.clone(),
+            preset.clone(),
+        )
+        .run(),
+        Some(Commands::Trust) => commands::trust::TrustCommand::new(app.clone()).run(),
+        Some(Commands::Lock { lock_command }) => {
+            commands::lock::LockCommand::new(app.clone(), lock_command.clone()).run()
+        }
+        Some(Commands::Failure { failure_command }) => {
+            commands::failure::FailureCommand::new(app.clone(), failure_command.clone()).run()
+        }
+        Some(Commands::Settings { settings_command }) => {
+            commands::settings::SettingsCommand::new(app.clone(), settings_command.clone()).run()
+        }
+
         Some(Commands::Coordinator {
             command_name,
             as_client,
@@ -973,6 +1043,7 @@ fn run_with_engine_provider(
             reference_branch,
             tool_priority,
             max_parallel_per_tool_json,
+            preset,
             tool_specializations_json,
             max_dispatch,
             max_parallel,
@@ -1001,60 +1072,66 @@ fn run_with_engine_provider(
             force_kill_grace_seconds,
             max_review_cycles,
             extra_args,
-        }) => commands::coordinator::CoordinatorCommand::new(
-            app.clone(),
-            coordinator::command::CoordinatorCommandInput {
-                command_name: command_name.clone(),
-                client_id: as_client
-                    .clone()
-                    .unwrap_or_else(|| format!("cli-{}", std::process::id())),
-                no_tui: *no_tui,
-                supervisor: *supervisor,
-                graceful: *graceful,
-                remove_worktrees: *remove_worktrees,
-                remove_branches: *remove_branches,
-                env_cfg: CoordinatorEnvConfig {
-                    prd: prd.clone(),
-                    coordinator_tool: coordinator_tool.clone(),
-                    reference_branch: reference_branch.clone(),
-                    tool_priority: tool_priority.clone(),
-                    max_parallel_per_tool_json: max_parallel_per_tool_json.clone(),
-                    tool_specializations_json: tool_specializations_json.clone(),
-                    max_dispatch: *max_dispatch,
-                    max_parallel: *max_parallel,
-                    timeout_seconds: *timeout_seconds,
-                    phase_runner_max_attempts: *phase_runner_max_attempts,
-                    log_flush_lines: *log_flush_lines,
-                    log_flush_ms: *log_flush_ms,
-                    mirror_json_debounce_ms: *mirror_json_debounce_ms,
-                    stale_claimed_seconds: *stale_claimed_seconds,
-                    stale_in_progress_seconds: *stale_in_progress_seconds,
-                    stale_changes_requested_seconds: *stale_changes_requested_seconds,
-                    stale_action: stale_action.clone(),
-                    storage_mode: storage_mode.clone(),
-                    merge_ai_fix: *merge_ai_fix,
-                    merge_job_timeout_seconds: *merge_job_timeout_seconds,
-                    merge_hook_timeout_seconds: *merge_hook_timeout_seconds,
-                    ghost_heartbeat_grace_seconds: *ghost_heartbeat_grace_seconds,
-                    dispatch_cooldown_seconds: *dispatch_cooldown_seconds,
-                    json_compat: *json_compat,
-                    legacy_json_fallback: *legacy_json_fallback,
-                    error_code_retry_list: error_code_retry_list.clone(),
-                    error_code_retry_max: *error_code_retry_max,
-                    cutover_gate_window_events: *cutover_gate_window_events,
-                    cutover_gate_max_blocked_ratio: *cutover_gate_max_blocked_ratio,
-                    cutover_gate_max_stale_ratio: *cutover_gate_max_stale_ratio,
-                    rate_limit_backoff_base_seconds: None,
-                    rate_limit_backoff_max_seconds: None,
-                    rate_limit_fallback_enabled: None,
-                    rate_limit_throttle_parallel: None,
-                    force_kill_grace_seconds: *force_kill_grace_seconds,
-                    max_review_cycles: *max_review_cycles,
+        }) => {
+            let mut env_cfg = CoordinatorEnvConfig {
+                prd: prd.clone(),
+                coordinator_tool: coordinator_tool.clone(),
+                reference_branch: reference_branch.clone(),
+                tool_priority: tool_priority.clone(),
+                max_parallel_per_tool_json: max_parallel_per_tool_json.clone(),
+                tool_specializations_json: tool_specializations_json.clone(),
+                max_dispatch: *max_dispatch,
+                max_parallel: *max_parallel,
+                timeout_seconds: *timeout_seconds,
+                phase_runner_max_attempts: *phase_runner_max_attempts,
+                log_flush_lines: *log_flush_lines,
+                log_flush_ms: *log_flush_ms,
+                mirror_json_debounce_ms: *mirror_json_debounce_ms,
+                stale_claimed_seconds: *stale_claimed_seconds,
+                stale_in_progress_seconds: *stale_in_progress_seconds,
+                stale_changes_requested_seconds: *stale_changes_requested_seconds,
+                stale_action: stale_action.clone(),
+                storage_mode: storage_mode.clone(),
+                merge_ai_fix: *merge_ai_fix,
+                merge_job_timeout_seconds: *merge_job_timeout_seconds,
+                merge_hook_timeout_seconds: *merge_hook_timeout_seconds,
+                ghost_heartbeat_grace_seconds: *ghost_heartbeat_grace_seconds,
+                dispatch_cooldown_seconds: *dispatch_cooldown_seconds,
+                json_compat: *json_compat,
+                legacy_json_fallback: *legacy_json_fallback,
+                error_code_retry_list: error_code_retry_list.clone(),
+                error_code_retry_max: *error_code_retry_max,
+                cutover_gate_window_events: *cutover_gate_window_events,
+                cutover_gate_max_blocked_ratio: *cutover_gate_max_blocked_ratio,
+                cutover_gate_max_stale_ratio: *cutover_gate_max_stale_ratio,
+                rate_limit_backoff_base_seconds: None,
+                rate_limit_backoff_max_seconds: None,
+                rate_limit_fallback_enabled: None,
+                rate_limit_throttle_parallel: None,
+                force_kill_grace_seconds: *force_kill_grace_seconds,
+                max_review_cycles: *max_review_cycles,
+            };
+            if let Some(ref p) = preset {
+                macc_core::ops_motif::apply_preset_to_env_cfg(&mut env_cfg, p)?;
+            }
+            commands::coordinator::CoordinatorCommand::new(
+                app.clone(),
+                coordinator::command::CoordinatorCommandInput {
+                    command_name: command_name.clone(),
+                    client_id: as_client
+                        .clone()
+                        .unwrap_or_else(|| format!("cli-{}", std::process::id())),
+                    no_tui: *no_tui,
+                    supervisor: *supervisor,
+                    graceful: *graceful,
+                    remove_worktrees: *remove_worktrees,
+                    remove_branches: *remove_branches,
+                    env_cfg,
+                    extra_args: extra_args.clone(),
                 },
-                extra_args: extra_args.clone(),
-            },
-        )
-        .run(),
+            )
+            .run()
+        }
         None => {
             let paths = engine.project_ensure_initialized_paths(&absolute_cwd)?;
             std::env::set_current_dir(&paths.root).map_err(|e| MaccError::Io {
@@ -1640,6 +1717,43 @@ mod tests {
             }) => {
                 assert_eq!(command_name, "run");
                 assert!(supervisor);
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_settings_and_preset_args() {
+        let cli = Cli::try_parse_from(["macc", "settings", "show", "--advanced", "--admin"])
+            .expect("parse settings show");
+        match cli.command {
+            Some(Commands::Settings { settings_command }) => match settings_command {
+                commands::settings::SettingsCommands::Show { advanced, admin } => {
+                    assert!(advanced);
+                    assert!(admin);
+                }
+                _ => panic!("expected Show"),
+            },
+            _ => panic!("unexpected command"),
+        }
+
+        let cli2 = Cli::try_parse_from(["macc", "settings", "preset", "balanced"])
+            .expect("parse settings preset");
+        match cli2.command {
+            Some(Commands::Settings { settings_command }) => match settings_command {
+                commands::settings::SettingsCommands::Preset { name } => {
+                    assert_eq!(name, "balanced");
+                }
+                _ => panic!("expected Preset"),
+            },
+            _ => panic!("unexpected command"),
+        }
+
+        let cli3 = Cli::try_parse_from(["macc", "coordinator", "run", "--preset", "throughput"])
+            .expect("parse coordinator run --preset");
+        match cli3.command {
+            Some(Commands::Coordinator { preset, .. }) => {
+                assert_eq!(preset, Some("throughput".to_string()));
             }
             _ => panic!("unexpected command"),
         }
@@ -2461,6 +2575,7 @@ fi
                     reference_branch: None,
                     tool_priority: None,
                     max_parallel_per_tool_json: None,
+                    preset: None,
                     tool_specializations_json: None,
                     max_dispatch: None,
                     max_parallel: None,

@@ -23,6 +23,7 @@ pub mod supervisor;
 pub mod tool;
 pub mod user_backup;
 pub mod worktree;
+pub mod ops_motif;
 
 pub use automation::{embedded_runner_path_for_ref, ensure_embedded_automation_scripts};
 pub use catalog::{McpCatalog, McpEntry, Selector, SkillEntry, SkillsCatalog, Source, SourceKind};

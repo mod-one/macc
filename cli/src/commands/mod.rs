@@ -25,6 +25,11 @@ pub mod supervisor;
 pub mod tool;
 pub mod web;
 pub mod worktree;
+pub mod start;
+pub mod trust;
+pub mod lock;
+pub mod failure;
+pub mod settings;
 
 pub trait Command {
     fn run(&self) -> Result<()>;

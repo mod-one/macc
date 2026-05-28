@@ -1138,7 +1138,16 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             let overview_para = wrapped_paragraph(overview, "Overview");
             f.render_widget(overview_para, body_chunks[0]);
 
-            let next_steps = "Quick actions:\n\n- Press 't' to configure tools\n- Press 'o' to configure automation settings\n- Press 'e' for global settings\n- Press 'v' for Coordinator Live monitor\n- Press 'm' to select MCP servers\n- Press 'p' to preview changes\n- Press 'x' to apply changes\n- Press 's' to save\n\nTip: Use '?' anywhere for full keybindings.";
+            let next_steps = "Intent Presets:\n\n\
+                              [1] Configure Tools\n\
+                                  Detect assistants & MCP templates (Press 't')\n\n\
+                              [2] Run One Task\n\
+                                  Prepare worktree and execute task (Press 'v')\n\n\
+                              [3] Run a Batch\n\
+                                  Validate PRD and run tasks (Press 'v')\n\n\
+                              [4] Inspect Project\n\
+                                  Open status, config, and logs (Press 'g'/'o')\n\n\
+                              Tip: Use '?' anywhere for full keybindings.";
             let steps_para = wrapped_paragraph(next_steps, "Next Steps");
             f.render_widget(steps_para, body_chunks[1]);
         }

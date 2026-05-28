@@ -410,6 +410,11 @@ All commands support these global flags:
 - `macc backups open <id>|--latest [--user] [--editor <cmd>]`: print/open a backup set location.
 - `macc restore --latest [--user] [--dry-run] [-y]` (or `--backup <id>`): restore files from a backup set.
 - `macc clear`: asks confirmation, removes all non-root worktrees with force, then removes MACC-managed files/directories in the current project.
+- `macc start [--intent <configure-tools|run-one-task|run-batch|inspect-project>] [--preset <conservative|balanced|throughput>] [--web] [--tui] [--dry-run]`: guided cockpit startup entry point composing detect -> resolve -> preview -> confirm -> apply -> launch.
+- `macc trust`: audit repository safety state (local-only, terminal permissions, backups, catalog pinning, secrets).
+- `macc lock <generate|check|diff|explain>`: manage build reproducibility lock manifest (`.macc/macc.lock.yaml`).
+- `macc failure <list|show <id>|retry <id>|salvage <id>|restore <id>|inspect-diff <id>`: guided recovery for task failures.
+- `macc settings <show [--advanced] [--admin]|preset <name>>`: manage progressive settings and presets (conservative, balanced, throughput).
 - `macc migrate [--apply]`: migrate legacy config to current format.
 - `macc doctor [--fix]`: actionable diagnostics (tools, paths/permissions, worktrees/sessions, cache health). `--fix` applies safe fixes only (create missing dirs, add `.macc/cache/` to `.gitignore`, repair session state file when corrupt).
 

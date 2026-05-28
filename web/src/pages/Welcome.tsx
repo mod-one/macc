@@ -16,25 +16,32 @@ interface SetupCard {
 
 const SETUP_CARDS: SetupCard[] = [
   {
-    title: 'Detect & Install Adapters',
-    description: 'Scan the project for supported AI coding tools and install the MACC adapter for each.',
+    title: 'Configure Tools',
+    description: 'Detect assistants, generate config, install selected skills/MCP templates.',
     href: '/config/tools',
     icon: Icons.Wrench,
-    cta: 'Go to Tools',
+    cta: 'Configure Tools',
   },
   {
-    title: 'Configure Project',
-    description: 'Run the initialization wizard to create .macc/macc.yaml and set project-level defaults.',
-    href: '/init',
-    icon: Icons.Settings,
-    cta: 'Open Wizard',
-  },
-  {
-    title: 'Import Skills',
-    description: 'Browse and install agent skills from the catalog to extend coordinator capabilities.',
-    href: '/config/skills',
+    title: 'Run One Task',
+    description: 'Create or select a PRD task, prepare one worktree, run with supervision.',
+    href: '/prd',
     icon: Icons.Brain,
-    cta: 'Open Catalog',
+    cta: 'Run Task',
+  },
+  {
+    title: 'Run a Batch',
+    description: 'Prepare coordinator settings, validate PRD, run multiple tasks with dashboard.',
+    href: '/dashboard',
+    icon: Icons.Settings,
+    cta: 'Run Batch',
+  },
+  {
+    title: 'Inspect Project',
+    description: 'Open status, backups, diagnostics, config, and logs without writing.',
+    href: '/ops/console',
+    icon: Icons.Activity,
+    cta: 'Inspect Project',
   },
 ];
 
