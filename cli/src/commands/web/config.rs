@@ -260,6 +260,8 @@ impl From<CanonicalConfig> for ApiConfigResponse {
                 .as_ref()
                 .and_then(|cfg| cfg.force_kill_grace_seconds),
             max_review_cycles: coordinator.as_ref().and_then(|cfg| cfg.max_review_cycles),
+            safety_policy: coordinator.as_ref().and_then(|cfg| cfg.safety_policy.clone()),
+            destructive_actions: coordinator.as_ref().and_then(|cfg| cfg.destructive_actions.clone()),
             requirements_detected: false,
             managed_environment_warnings: Vec::new(),
         }
@@ -473,6 +475,12 @@ fn apply_coordinator_update(config: &mut CanonicalConfig, request: &ApiConfigUpd
     if let Some(value) = request.max_review_cycles {
         coordinator.max_review_cycles = Some(value);
     }
+    if let Some(value) = &request.safety_policy {
+        coordinator.safety_policy = Some(value.clone());
+    }
+    if let Some(value) = &request.destructive_actions {
+        coordinator.destructive_actions = Some(value.clone());
+    }
 }
 
 fn has_coordinator_updates(request: &ApiConfigUpdateRequest) -> bool {
@@ -513,6 +521,8 @@ fn has_coordinator_updates(request: &ApiConfigUpdateRequest) -> bool {
         || request.rate_limit_throttle_parallel.is_some()
         || request.force_kill_grace_seconds.is_some()
         || request.max_review_cycles.is_some()
+        || request.safety_policy.is_some()
+        || request.destructive_actions.is_some()
 }
 
 fn default_ralph_config() -> RalphConfig {

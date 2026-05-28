@@ -5,7 +5,6 @@ import type { ApiConfigResponse, ApiConfigUpdateRequest } from '../../api/models
 import { Button, ErrorBanner, LoadingSpinner, Toast } from '../../components';
 import { cn } from '../../components/styles';
 
-type SettingsTab = 'general' | 'coordinator' | 'advanced';
 
 interface ToastState {
   open: boolean;
@@ -215,57 +214,212 @@ function SectionHeading({ children }: { children: React.ReactNode }) {
 /*  Tab: General                                                       */
 /* ------------------------------------------------------------------ */
 
-function GeneralTab({
+/* ------------------------------------------------------------------ */
+/*  Tab Components & Helpers                                           */
+/* ------------------------------------------------------------------ */
+
+function WarningBanner({ message }: { message: string }) {
+  return (
+    <div className="mb-6 rounded-lg border border-[var(--warning)]/30 bg-[var(--warning)]/10 px-4 py-3 text-xs text-[var(--warning)] flex items-start gap-2">
+      <span className="font-semibold select-none">⚠️</span>
+      <div>{message}</div>
+    </div>
+  );
+}
+
+function SelectField({
+  label,
+  value,
+  onChange,
+  options,
+  helpText,
+}: {
+  label: string;
+  value: string | null;
+  onChange: (v: string) => void;
+  options: { value: string; label: string }[];
+  helpText?: string;
+}) {
+  return (
+    <label className="flex flex-col gap-1.5">
+      <span className="text-xs font-medium text-[var(--text-secondary)]">{label}</span>
+      <select
+        className="rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
+        value={value ?? ''}
+        onChange={(e) => onChange(e.target.value)}
+      >
+        {options.map((opt) => (
+          <option key={opt.value} value={opt.value}>
+            {opt.label}
+          </option>
+        ))}
+      </select>
+      {helpText && <span className="text-[10px] text-[var(--text-muted)]">{helpText}</span>}
+    </label>
+  );
+}
+
+function PresetSelector({
+  onApplyPreset,
+}: {
+  onApplyPreset: (preset: 'conservative' | 'balanced' | 'throughput') => void;
+}) {
+  return (
+    <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-secondary)] p-4 mb-6">
+      <h4 className="text-xs font-semibold text-[var(--text-primary)] mb-1">Configuration Presets</h4>
+      <p className="text-[10px] text-[var(--text-muted)] mb-3">
+        Apply predefined performance and safety profiles. This overrides individual settings below.
+      </p>
+      <div className="flex gap-2">
+        <Button
+          onClick={() => onApplyPreset('conservative')}
+          className="text-xs px-3 py-1.5 border border-[var(--border)] bg-[var(--bg-card)] hover:bg-[var(--bg-hover)] text-[var(--text-primary)]"
+        >
+          Conservative
+        </Button>
+        <Button
+          onClick={() => onApplyPreset('balanced')}
+          className="text-xs px-3 py-1.5 border border-[var(--border)] bg-[var(--bg-card)] hover:bg-[var(--bg-hover)] text-[var(--text-primary)]"
+        >
+          Balanced
+        </Button>
+        <Button
+          onClick={() => onApplyPreset('throughput')}
+          className="text-xs px-3 py-1.5 border border-[var(--border)] bg-[var(--bg-card)] hover:bg-[var(--bg-hover)] text-[var(--text-primary)]"
+        >
+          Throughput
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Tab: Basic settings                                                */
+/* ------------------------------------------------------------------ */
+
+function BasicTab({
   draft,
   update,
 }: {
   draft: ApiConfigResponse;
   update: (patch: Partial<ApiConfigUpdateRequest>) => void;
 }) {
+  const handleApplyPreset = (preset: 'conservative' | 'balanced' | 'throughput') => {
+    switch (preset) {
+      case 'conservative':
+        update({
+          maxParallel: 1,
+          rateLimitFallbackEnabled: false,
+          rateLimitThrottleParallel: false,
+          mergeAiFix: false,
+          safetyPolicy: 'strict',
+          destructiveActions: 'double_confirm',
+        });
+        break;
+      case 'balanced':
+        update({
+          maxParallel: 3,
+          rateLimitFallbackEnabled: true,
+          rateLimitThrottleParallel: false,
+          mergeAiFix: true,
+          safetyPolicy: 'standard',
+          destructiveActions: 'double_confirm',
+        });
+        break;
+      case 'throughput':
+        update({
+          maxParallel: 6,
+          rateLimitFallbackEnabled: true,
+          rateLimitThrottleParallel: true,
+          mergeAiFix: true,
+          safetyPolicy: 'standard',
+          destructiveActions: 'double_confirm',
+        });
+        break;
+    }
+  };
+
   return (
     <div className="flex flex-col gap-6">
-      <SectionHeading>General</SectionHeading>
+      <PresetSelector onApplyPreset={handleApplyPreset} />
+
+      <SectionHeading>General Settings</SectionHeading>
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <NumberField
-          label="Web Port"
+          label="Web Interface Port"
           value={draft.webPort}
           onChange={(v) => update({ webPort: v })}
           placeholder="3450"
-          helpText="Port for the web interface."
+          helpText="Port the local dashboard Axum server binds to."
         />
         <BooleanField
           label="Offline Mode"
           value={draft.offline}
           onChange={(v) => update({ offline: v })}
-          helpText="Disable all network operations."
+          helpText="Prevent all remote network requests and catalog checking."
         />
         <BooleanField
           label="Quiet Mode"
           value={draft.quiet}
           onChange={(v) => update({ quiet: v })}
-          helpText="Suppress non-essential output."
+          helpText="Suppress non-essential stdout output from the CLI."
         />
       </div>
 
-      <SectionHeading>Reference</SectionHeading>
+      <SectionHeading>Task Execution &amp; Routing</SectionHeading>
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <TextField
-          label="Reference Branch"
-          value={draft.referenceBranch}
-          onChange={(v) => update({ referenceBranch: v })}
-          placeholder="main"
-        />
-        <TextField
-          label="PRD File"
-          value={draft.prdFile}
-          onChange={(v) => update({ prdFile: v })}
-          placeholder="prd.json"
-        />
         <TextField
           label="Coordinator Tool"
           value={draft.coordinatorTool}
           onChange={(v) => update({ coordinatorTool: v })}
-          placeholder="claude"
+          placeholder="Auto-select"
+          helpText="AI tool used for coordinator processes (e.g. review, prd-audit)."
+        />
+        <NumberField
+          label="Max Parallel"
+          value={draft.maxParallel}
+          onChange={(v) => update({ maxParallel: v })}
+          placeholder="3"
+          helpText="Maximum tasks the coordinator can run in parallel."
+        />
+        <NumberField
+          label="Timeout (seconds)"
+          value={draft.timeoutSeconds}
+          onChange={(v) => update({ timeoutSeconds: v })}
+          placeholder="0"
+          helpText="Global wall-clock timeout (0 is unlimited)."
+        />
+        <TextField
+          label="Reference Branch"
+          value={draft.referenceBranch}
+          onChange={(v) => update({ referenceBranch: v })}
+          placeholder="master"
+          helpText="Branch where completed task worktrees are merged."
+        />
+      </div>
+
+      <SectionHeading>Safety &amp; Confirmation</SectionHeading>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <SelectField
+          label="Safety Policy"
+          value={draft.safetyPolicy}
+          onChange={(v) => update({ safetyPolicy: v })}
+          options={[
+            { value: 'standard', label: 'Standard (Verify modifications)' },
+            { value: 'strict', label: 'Strict (Strict sandbox constraints)' },
+          ]}
+          helpText="Verification policy applied to tool write operations."
+        />
+        <SelectField
+          label="Destructive Actions"
+          value={draft.destructiveActions}
+          onChange={(v) => update({ destructiveActions: v })}
+          options={[
+            { value: 'double_confirm', label: 'Double Confirm (Prompt twice)' },
+            { value: 'single_confirm', label: 'Single Confirm (Prompt once)' },
+          ]}
+          helpText="Prompt confirmation rules for forced updates/checkouts."
         />
       </div>
     </div>
@@ -273,10 +427,10 @@ function GeneralTab({
 }
 
 /* ------------------------------------------------------------------ */
-/*  Tab: Coordinator                                                   */
+/*  Tab: Advanced settings                                             */
 /* ------------------------------------------------------------------ */
 
-function CoordinatorTab({
+function AdvancedTab({
   draft,
   update,
 }: {
@@ -285,8 +439,23 @@ function CoordinatorTab({
 }) {
   return (
     <div className="flex flex-col gap-6">
-      <SectionHeading>Coordinator Routing</SectionHeading>
+      <WarningBanner message="Advanced Settings: These controls adjust low-level task scheduling, staleness checks, and retry mechanisms. Misconfiguration can affect stability or rate limits." />
+
+      <SectionHeading>Routing &amp; Priorities</SectionHeading>
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <TextField
+          label="Tool Priority"
+          value={draft.toolPriority.length > 0 ? draft.toolPriority.join(', ') : null}
+          onChange={(v) =>
+            update({
+              toolPriority: v
+                ? v.split(',').map((s) => s.trim()).filter(Boolean)
+                : [],
+            })
+          }
+          placeholder="claude, codex, gemini"
+          helpText="Comma-separated list of tools in priority order."
+        />
         <JsonObjectField
           label="Max Parallel Per Tool"
           value={draft.maxParallelPerTool}
@@ -301,44 +470,12 @@ function CoordinatorTab({
           placeholder='{"frontend": ["claude", "codex"]}'
           helpText="Category routing as a JSON object mapping category to tool lists."
         />
-      </div>
-
-      <SectionHeading>Dispatch &amp; Parallelism</SectionHeading>
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        <NumberField
-          label="Max Dispatch"
-          value={draft.maxDispatch}
-          onChange={(v) => update({ maxDispatch: v })}
-          placeholder="10"
-          helpText="Maximum tasks dispatched per run. Empty uses default 10. 0 means no cap."
-        />
-        <NumberField
-          label="Max Parallel"
-          value={draft.maxParallel}
-          onChange={(v) => update({ maxParallel: v })}
-          placeholder="3"
-          helpText="Maximum concurrent workers. Empty uses default 3."
-        />
-        <NumberField
-          label="Timeout (seconds)"
-          value={draft.timeoutSeconds}
-          onChange={(v) => update({ timeoutSeconds: v })}
-          placeholder="0"
-          helpText="Task execution timeout. 0 disables timeout."
-        />
-        <NumberField
-          label="Phase Runner Max Attempts"
-          value={draft.phaseRunnerMaxAttempts}
-          onChange={(v) => update({ phaseRunnerMaxAttempts: v })}
-          placeholder="1"
-          helpText="Max attempts for phase runner fallback. Empty uses default 1."
-        />
-        <NumberField
-          label="Dispatch Cooldown (seconds)"
-          value={draft.dispatchCooldownSeconds}
-          onChange={(v) => update({ dispatchCooldownSeconds: v })}
-          placeholder="2"
-          helpText="Wait between dispatch cycles. Empty uses default 2."
+        <TextField
+          label="PRD File"
+          value={draft.prdFile}
+          onChange={(v) => update({ prdFile: v })}
+          placeholder="prd.json"
+          helpText="Path to the task sequence definition file."
         />
       </div>
 
@@ -348,17 +485,19 @@ function CoordinatorTab({
           label="Stale Claimed (seconds)"
           value={draft.staleClaimedSeconds}
           onChange={(v) => update({ staleClaimedSeconds: v })}
+          helpText="Auto-stale timeout for claimed tasks (0 disables)."
         />
         <NumberField
           label="In-Progress Timeout (seconds)"
           value={draft.staleInProgressSeconds}
           onChange={(v) => update({ staleInProgressSeconds: v })}
-          helpText="Hard kill timeout for the performer process. 0 = disabled (no limit). Sends SIGTERM then SIGKILL after force_kill_grace_seconds."
+          helpText="Hard kill timeout for performer processes (0 disables)."
         />
         <NumberField
           label="Stale Changes-Requested (seconds)"
           value={draft.staleChangesRequestedSeconds}
           onChange={(v) => update({ staleChangesRequestedSeconds: v })}
+          helpText="Auto-stale timeout for changes-requested tasks (0 disables)."
         />
         <TextField
           label="Stale Action"
@@ -366,72 +505,6 @@ function CoordinatorTab({
           onChange={(v) => update({ staleAction: v })}
           placeholder="block"
           helpText="Action on stale task: block | retry | requeue"
-        />
-      </div>
-
-      <SectionHeading>Coordinator Runtime</SectionHeading>
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        <NumberField
-          label="Log Flush Lines"
-          value={draft.logFlushLines}
-          onChange={(v) => update({ logFlushLines: v })}
-          helpText="Flush coordinator logs every N lines. 0 uses runtime default."
-        />
-        <NumberField
-          label="Log Flush Milliseconds"
-          value={draft.logFlushMs}
-          onChange={(v) => update({ logFlushMs: v })}
-          helpText="Flush coordinator logs every N milliseconds. 0 uses runtime default."
-        />
-        <NumberField
-          label="Mirror JSON Debounce (ms)"
-          value={draft.mirrorJsonDebounceMs}
-          onChange={(v) => update({ mirrorJsonDebounceMs: v })}
-          helpText="Debounce SQLite-to-JSON compatibility export. 0 disables debounce."
-        />
-        <BooleanField
-          label="Merge AI Fix"
-          value={draft.mergeAiFix}
-          onChange={(v) => update({ mergeAiFix: v })}
-          helpText="Enable AI-driven resolution for merge conflicts."
-        />
-        <NumberField
-          label="Merge Job Timeout (seconds)"
-          value={draft.mergeJobTimeoutSeconds}
-          onChange={(v) => update({ mergeJobTimeoutSeconds: v })}
-          helpText="Timeout for git merge operations."
-        />
-        <NumberField
-          label="Merge Hook Timeout (seconds)"
-          value={draft.mergeHookTimeoutSeconds}
-          onChange={(v) => update({ mergeHookTimeoutSeconds: v })}
-          placeholder="90"
-          helpText="Timeout for the AI merge-fix hook. Empty uses default 90."
-        />
-        <NumberField
-          label="Ghost Heartbeat Grace (seconds)"
-          value={draft.ghostHeartbeatGraceSeconds}
-          onChange={(v) => update({ ghostHeartbeatGraceSeconds: v })}
-          placeholder="30"
-          helpText="Grace period before a dead process is treated as a ghost. Empty uses default 30."
-        />
-        <BooleanField
-          label="JSON Compatibility"
-          value={draft.jsonCompat}
-          onChange={(v) => update({ jsonCompat: v })}
-          helpText="Enable JSON snapshot export for external tool compatibility."
-        />
-        <BooleanField
-          label="Legacy JSON Fallback"
-          value={draft.legacyJsonFallback}
-          onChange={(v) => update({ legacyJsonFallback: v })}
-          helpText="Fallback to the JSON task registry if SQLite is missing or corrupted."
-        />
-        <NumberField
-          label="Force-Kill Grace (seconds)"
-          value={draft.forceKillGraceSeconds ?? null}
-          onChange={(v) => update({ forceKillGraceSeconds: v === null ? null : Math.max(0, v) })}
-          helpText="Wait after IPC failure before force-killing a performer."
         />
       </div>
 
@@ -449,25 +522,25 @@ function CoordinatorTab({
           value={draft.errorCodeRetryMax}
           onChange={(v) => update({ errorCodeRetryMax: v })}
           placeholder="2"
-          helpText="Maximum retry attempts per task. Empty uses default 2."
+          helpText="Maximum retry attempts per task."
         />
       </div>
 
-      <SectionHeading>Rate Limit</SectionHeading>
+      <SectionHeading>Rate Limiting</SectionHeading>
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
         <NumberField
           label="Backoff Base (seconds)"
           value={draft.rateLimitBackoffBaseSeconds}
           onChange={(v) => update({ rateLimitBackoffBaseSeconds: v })}
           placeholder="30"
-          helpText="Initial E601 backoff delay. Empty uses default 30."
+          helpText="Initial E601 backoff delay."
         />
         <NumberField
           label="Backoff Max (seconds)"
           value={draft.rateLimitBackoffMaxSeconds}
           onChange={(v) => update({ rateLimitBackoffMaxSeconds: v })}
           placeholder="300"
-          helpText="Backoff cap for E601 exponential growth. Empty uses default 300."
+          helpText="Backoff cap for exponential growth."
         />
         <BooleanField
           label="Fallback Enabled"
@@ -483,20 +556,70 @@ function CoordinatorTab({
         />
       </div>
 
-      <SectionHeading>Tool Priority</SectionHeading>
-      <div className="grid grid-cols-1 gap-4">
-        <TextField
-          label="Tool Priority"
-          value={draft.toolPriority.length > 0 ? draft.toolPriority.join(', ') : null}
-          onChange={(v) =>
-            update({
-              toolPriority: v
-                ? v.split(',').map((s) => s.trim()).filter(Boolean)
-                : [],
-            })
-          }
-          placeholder="claude, codex, gemini"
-          helpText="Comma-separated list of tools in priority order."
+      <SectionHeading>Merge Behavior</SectionHeading>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <BooleanField
+          label="Merge AI Fix"
+          value={draft.mergeAiFix}
+          onChange={(v) => update({ mergeAiFix: v })}
+          helpText="Enable AI-driven resolution for merge conflicts."
+        />
+        <NumberField
+          label="Merge Job Timeout (seconds)"
+          value={draft.mergeJobTimeoutSeconds}
+          onChange={(v) => update({ mergeJobTimeoutSeconds: v })}
+          helpText="Timeout for git merge operations."
+        />
+        <NumberField
+          label="Merge Hook Timeout (seconds)"
+          value={draft.mergeHookTimeoutSeconds}
+          onChange={(v) => update({ mergeHookTimeoutSeconds: v })}
+          placeholder="90"
+          helpText="Timeout for AI merge-fix hook execution."
+        />
+      </div>
+
+      <SectionHeading>Process Lifecycle</SectionHeading>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <NumberField
+          label="Ghost Heartbeat Grace (seconds)"
+          value={draft.ghostHeartbeatGraceSeconds}
+          onChange={(v) => update({ ghostHeartbeatGraceSeconds: v })}
+          placeholder="30"
+          helpText="Grace period before treating a dead process as a ghost."
+        />
+        <NumberField
+          label="Dispatch Cooldown (seconds)"
+          value={draft.dispatchCooldownSeconds}
+          onChange={(v) => update({ dispatchCooldownSeconds: v })}
+          placeholder="2"
+          helpText="Wait between dispatch cycles."
+        />
+        <NumberField
+          label="Force-Kill Grace (seconds)"
+          value={draft.forceKillGraceSeconds}
+          onChange={(v) => update({ forceKillGraceSeconds: v })}
+          helpText="Wait after IPC failure before force-killing a performer."
+        />
+        <NumberField
+          label="Max Review Cycles"
+          value={draft.maxReviewCycles}
+          onChange={(v) => update({ maxReviewCycles: v })}
+          helpText="Max review loop cycles per task (0 to skip review)."
+        />
+        <NumberField
+          label="Max Dispatch"
+          value={draft.maxDispatch}
+          onChange={(v) => update({ maxDispatch: v })}
+          placeholder="10"
+          helpText="Maximum tasks dispatched per run (0 is unlimited)."
+        />
+        <NumberField
+          label="Phase Runner Max Attempts"
+          value={draft.phaseRunnerMaxAttempts}
+          onChange={(v) => update({ phaseRunnerMaxAttempts: v })}
+          placeholder="1"
+          helpText="Max attempts for phase runner fallback."
         />
       </div>
     </div>
@@ -504,10 +627,109 @@ function CoordinatorTab({
 }
 
 /* ------------------------------------------------------------------ */
-/*  Tab: Advanced (raw JSON editor)                                    */
+/*  Tab: Admin settings                                                */
 /* ------------------------------------------------------------------ */
 
-function AdvancedTab({
+function AdminTab({
+  draft,
+  update,
+}: {
+  draft: ApiConfigResponse;
+  update: (patch: Partial<ApiConfigUpdateRequest>) => void;
+}) {
+  return (
+    <div className="flex flex-col gap-6">
+      <WarningBanner message="Administrative Settings: These settings control raw storage engines, migration layers, and low-level runtime gates. Modifying these is recommended only for systems administrators or developers debugging internal runner state." />
+
+      <SectionHeading>Database &amp; Storage</SectionHeading>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <TextField
+          label="Storage Mode"
+          value={draft.storageMode}
+          onChange={(v) => update({ storageMode: v })}
+          placeholder="json"
+          helpText="Coordinator storage engine mode: json | sqlite"
+        />
+        <TextField
+          label="Task Registry File"
+          value={draft.taskRegistryFile}
+          onChange={(v) => update({ taskRegistryFile: v })}
+          placeholder=".macc/automation/task/task_registry.json"
+          helpText="Underlying file path for local task registry state."
+        />
+      </div>
+
+      <SectionHeading>Flush Behavior</SectionHeading>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <NumberField
+          label="Log Flush Lines"
+          value={draft.logFlushLines}
+          onChange={(v) => update({ logFlushLines: v })}
+          helpText="Flush logs every N lines. 0 uses runtime default."
+        />
+        <NumberField
+          label="Log Flush Milliseconds"
+          value={draft.logFlushMs}
+          onChange={(v) => update({ logFlushMs: v })}
+          helpText="Flush logs every N ms. 0 uses runtime default."
+        />
+      </div>
+
+      <SectionHeading>Compatibility Flags</SectionHeading>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <BooleanField
+          label="JSON Compatibility"
+          value={draft.jsonCompat}
+          onChange={(v) => update({ jsonCompat: v })}
+          helpText="Enable JSON snapshot export for external tool compatibility."
+        />
+        <BooleanField
+          label="Legacy JSON Fallback"
+          value={draft.legacyJsonFallback}
+          onChange={(v) => update({ legacyJsonFallback: v })}
+          helpText="Fallback to JSON registry if SQLite is corrupted."
+        />
+        <NumberField
+          label="Mirror JSON Debounce (ms)"
+          value={draft.mirrorJsonDebounceMs}
+          onChange={(v) => update({ mirrorJsonDebounceMs: v })}
+          helpText="Debounce SQLite-to-JSON compatibility export."
+        />
+      </div>
+
+      <SectionHeading>Cutover Controls</SectionHeading>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <NumberField
+          label="Cutover Gate Window Events"
+          value={draft.cutoverGateWindowEvents}
+          onChange={(v) => update({ cutoverGateWindowEvents: v })}
+          placeholder="2000"
+          helpText="Recent events inspected by cutover gate to assess storage health."
+        />
+        <NumberField
+          label="Max Blocked Ratio"
+          value={draft.cutoverGateMaxBlockedRatio}
+          onChange={(v) => update({ cutoverGateMaxBlockedRatio: v })}
+          placeholder="0.25"
+          helpText="Maximum ratio of blocked events allowed before cutover block."
+        />
+        <NumberField
+          label="Max Stale Ratio"
+          value={draft.cutoverGateMaxStaleRatio}
+          onChange={(v) => update({ cutoverGateMaxStaleRatio: v })}
+          placeholder="0.25"
+          helpText="Maximum ratio of stale events allowed before cutover block."
+        />
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Tab: Raw (raw JSON editor)                                         */
+/* ------------------------------------------------------------------ */
+
+function RawTab({
   config,
   onApplyRaw,
 }: {
@@ -519,7 +741,6 @@ function AdvancedTab({
   const [prevConfig, setPrevConfig] = useState(config);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // Sync rawText when config reference changes (React-idiomatic state adjustment during render)
   if (config !== prevConfig) {
     setPrevConfig(config);
     setRawText(JSON.stringify(config, null, 2));
@@ -569,10 +790,13 @@ function AdvancedTab({
 /*  Main Settings Page                                                 */
 /* ------------------------------------------------------------------ */
 
+type SettingsTab = 'basic' | 'advanced' | 'admin' | 'raw';
+
 const TABS: { key: SettingsTab; label: string }[] = [
-  { key: 'general', label: 'General' },
-  { key: 'coordinator', label: 'Coordinator' },
+  { key: 'basic', label: 'Basic' },
   { key: 'advanced', label: 'Advanced' },
+  { key: 'admin', label: 'Admin' },
+  { key: 'raw', label: 'Raw JSON' },
 ];
 
 const Settings: React.FC = () => {
@@ -581,7 +805,7 @@ const Settings: React.FC = () => {
   const [saving, setSaving] = useState(false);
   const [config, setConfig] = useState<ApiConfigResponse | null>(null);
   const [draft, setDraft] = useState<ApiConfigResponse | null>(null);
-  const [activeTab, setActiveTab] = useState<SettingsTab>('general');
+  const [activeTab, setActiveTab] = useState<SettingsTab>('basic');
   const [focusedSettingKey, setFocusedSettingKey] = useState<string | null>(null);
   const [toast, setToast] = useState<ToastState>({ open: false, title: '', variant: 'success' });
   const location = useLocation();
@@ -620,44 +844,33 @@ const Settings: React.FC = () => {
 
     setFocusedSettingKey(state.highlightSettingKey);
 
-    const generalKeys = [
+    const basicKeys = [
       'webPort',
       'offline',
       'quiet',
-      'referenceBranch',
-      'prdFile',
       'coordinatorTool',
-      'enabledTools',
-      'selectedSkills',
-      'selectedAgents',
-      'selectedMcp',
-      'toolConfig',
-      'toolSettings',
-      'standardsPath',
-      'standardsInline',
-      'toolPriority',
+      'maxParallel',
+      'timeoutSeconds',
+      'safetyPolicy',
+      'destructiveActions',
+      'referenceBranch',
     ];
-    const coordinatorKeys = [
+    const advancedKeys = [
+      'prdFile',
+      'toolPriority',
       'maxParallelPerTool',
       'toolSpecializations',
       'maxDispatch',
-      'maxParallel',
-      'timeoutSeconds',
       'phaseRunnerMaxAttempts',
-      'logFlushLines',
-      'logFlushMs',
-      'mirrorJsonDebounceMs',
-      'mergeAiFix',
-      'mergeJobTimeoutSeconds',
-      'mergeHookTimeoutSeconds',
-      'ghostHeartbeatGraceSeconds',
       'dispatchCooldownSeconds',
       'staleClaimedSeconds',
       'staleInProgressSeconds',
       'staleChangesRequestedSeconds',
       'staleAction',
-      'jsonCompat',
-      'legacyJsonFallback',
+      'mergeAiFix',
+      'mergeJobTimeoutSeconds',
+      'mergeHookTimeoutSeconds',
+      'ghostHeartbeatGraceSeconds',
       'errorCodeRetryList',
       'errorCodeRetryMax',
       'rateLimitBackoffBaseSeconds',
@@ -665,19 +878,38 @@ const Settings: React.FC = () => {
       'rateLimitFallbackEnabled',
       'rateLimitThrottleParallel',
       'forceKillGraceSeconds',
+      'maxReviewCycles',
+    ];
+    const adminKeys = [
+      'storageMode',
+      'taskRegistryFile',
+      'logFlushLines',
+      'logFlushMs',
+      'mirrorJsonDebounceMs',
+      'jsonCompat',
+      'legacyJsonFallback',
+      'cutoverGateWindowEvents',
+      'cutoverGateMaxBlockedRatio',
+      'cutoverGateMaxStaleRatio',
     ];
 
-    if (generalKeys.some((prefix) => state.highlightSettingKey?.startsWith(prefix))) {
-      setActiveTab('general');
+    const key = state.highlightSettingKey;
+    if (basicKeys.some((prefix) => key.startsWith(prefix))) {
+      setActiveTab('basic');
       return;
     }
 
-    if (coordinatorKeys.some((prefix) => state.highlightSettingKey?.startsWith(prefix))) {
-      setActiveTab('coordinator');
+    if (advancedKeys.some((prefix) => key.startsWith(prefix))) {
+      setActiveTab('advanced');
       return;
     }
 
-    setActiveTab('advanced');
+    if (adminKeys.some((prefix) => key.startsWith(prefix))) {
+      setActiveTab('admin');
+      return;
+    }
+
+    setActiveTab('raw');
   }, [location.state]);
 
   /* Patch draft */
@@ -747,7 +979,7 @@ const Settings: React.FC = () => {
         <div>
           <h1 className="text-3xl font-semibold tracking-tight text-[var(--text-primary)]">Settings</h1>
           <p className="mt-1 text-sm text-[var(--text-secondary)]">
-            General, coordinator, and advanced configuration.
+            Basic, advanced, and administrative configuration.
           </p>
           {focusedSettingKey && (
             <p className="mt-3 inline-flex rounded-full border border-[var(--accent)]/30 bg-[var(--accent)]/10 px-3 py-1 text-xs font-medium text-[var(--accent)]">
@@ -804,9 +1036,10 @@ const Settings: React.FC = () => {
 
       {/* Tab content */}
       <div className="rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-card)] p-6 shadow-[var(--shadow-soft)]">
-        {activeTab === 'general' && <GeneralTab draft={draft} update={updateDraft} />}
-        {activeTab === 'coordinator' && <CoordinatorTab draft={draft} update={updateDraft} />}
-        {activeTab === 'advanced' && <AdvancedTab config={draft} onApplyRaw={handleApplyRaw} />}
+        {activeTab === 'basic' && <BasicTab draft={draft} update={updateDraft} />}
+        {activeTab === 'advanced' && <AdvancedTab draft={draft} update={updateDraft} />}
+        {activeTab === 'admin' && <AdminTab draft={draft} update={updateDraft} />}
+        {activeTab === 'raw' && <RawTab config={draft} onApplyRaw={handleApplyRaw} />}
       </div>
 
       {/* Toast */}

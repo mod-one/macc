@@ -95,13 +95,13 @@ describe('Settings page', () => {
     updateConfigMock.mockReset();
   });
 
-  it('shows loading spinner then renders General tab by default', async () => {
+  it('shows loading spinner then renders Basic tab by default', async () => {
     getConfigMock.mockResolvedValue(buildConfig());
     renderPage();
 
     expect(screen.getByText('Loading settings...')).toBeInTheDocument();
     await screen.findByText('Settings');
-    expect(screen.getByText('Web Port')).toBeInTheDocument();
+    expect(screen.getByText('Web Interface Port')).toBeInTheDocument();
     expect(screen.getByText('Offline Mode')).toBeInTheDocument();
     expect(screen.getByText('Quiet Mode')).toBeInTheDocument();
   });
@@ -113,23 +113,16 @@ describe('Settings page', () => {
     await screen.findByText('Network failure');
   });
 
-  it('switches to Coordinator tab and shows coordinator fields', async () => {
+  it('switches to Advanced tab and shows advanced fields', async () => {
     getConfigMock.mockResolvedValue(buildConfig());
     renderPage();
 
     await screen.findByText('Settings');
-    fireEvent.click(screen.getByRole('button', { name: 'Coordinator' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Advanced' }));
 
     expect(screen.getByText('Max Dispatch')).toBeInTheDocument();
-    expect(screen.getByText('Max Parallel')).toBeInTheDocument();
-    expect(screen.getByText('Timeout (seconds)')).toBeInTheDocument();
     expect(screen.getByText('Max Parallel Per Tool')).toBeInTheDocument();
     expect(screen.getByText('Tool Specializations')).toBeInTheDocument();
-    expect(screen.getByText('Log Flush Lines')).toBeInTheDocument();
-    expect(screen.getByText('Mirror JSON Debounce (ms)')).toBeInTheDocument();
-    expect(screen.getByText('Merge AI Fix')).toBeInTheDocument();
-    expect(screen.getByText('JSON Compatibility')).toBeInTheDocument();
-    expect(screen.getByText('Force-Kill Grace (seconds)')).toBeInTheDocument();
     expect(screen.getByText('Error Code Retry List')).toBeInTheDocument();
     expect(screen.getByText('Backoff Base (seconds)')).toBeInTheDocument();
   });
@@ -152,15 +145,15 @@ describe('Settings page', () => {
 
     await screen.findByText('Settings');
     expect(screen.getByText('Focused key: maxParallel')).toBeInTheDocument();
-    expect(screen.getByText('Dispatch & Parallelism')).toBeInTheDocument();
+    expect(screen.getByText('Task Execution & Routing')).toBeInTheDocument();
   });
 
-  it('switches to Advanced tab and shows raw JSON editor', async () => {
+  it('switches to Raw JSON tab and shows raw JSON editor', async () => {
     getConfigMock.mockResolvedValue(buildConfig());
     renderPage();
 
     await screen.findByText('Settings');
-    fireEvent.click(screen.getByRole('button', { name: 'Advanced' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Raw JSON' }));
 
     expect(screen.getByText('Raw Configuration (JSON)')).toBeInTheDocument();
     const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;
@@ -238,7 +231,7 @@ describe('Settings page', () => {
     renderPage();
 
     await screen.findByText('Settings');
-    fireEvent.click(screen.getByRole('button', { name: 'Coordinator' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Advanced' }));
     expect(screen.getByPlaceholderText('claude, codex, gemini')).toBeInTheDocument();
   });
 
@@ -247,7 +240,7 @@ describe('Settings page', () => {
     renderPage();
 
     await screen.findByText('Settings');
-    fireEvent.click(screen.getByRole('button', { name: 'Coordinator' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Advanced' }));
 
     const fields = screen.getAllByRole('textbox');
     const maxParallelPerToolEditor = fields.find((field) =>
@@ -265,7 +258,7 @@ describe('Settings page', () => {
     renderPage();
 
     await screen.findByText('Settings');
-    fireEvent.click(screen.getByRole('button', { name: 'Advanced' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Raw JSON' }));
 
     const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;
     const modified = JSON.parse(textarea.value);
@@ -273,8 +266,8 @@ describe('Settings page', () => {
     fireEvent.change(textarea, { target: { value: JSON.stringify(modified, null, 2) } });
     fireEvent.click(screen.getByRole('button', { name: 'Apply JSON' }));
 
-    // Switch to General tab — the webPort field should reflect the new value
-    fireEvent.click(screen.getByRole('button', { name: 'General' }));
+    // Switch to Basic tab — the webPort field should reflect the new value
+    fireEvent.click(screen.getByRole('button', { name: 'Basic' }));
     const portInput = screen.getByDisplayValue('9999');
     expect(portInput).toBeInTheDocument();
   });
@@ -284,7 +277,7 @@ describe('Settings page', () => {
     renderPage();
 
     await screen.findByText('Settings');
-    fireEvent.click(screen.getByRole('button', { name: 'Advanced' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Raw JSON' }));
 
     const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;
     fireEvent.change(textarea, { target: { value: '{invalid' } });

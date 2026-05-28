@@ -197,6 +197,10 @@ pub struct CoordinatorConfig {
     /// N = up to N review→fix→review loops.  Default: None (unlimited).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_review_cycles: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub safety_policy: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destructive_actions: Option<String>,
 
     // ── Reliability feature toggles ──────────────────────────────────────────
     /// Attempt to salvage partial work before retrying a failed task.
@@ -381,6 +385,8 @@ impl Default for CoordinatorConfig {
             max_salvage_attempts_per_task: 1,
             takeover_timeout_seconds: None,
             takeover_default_response: None,
+            safety_policy: None,
+            destructive_actions: None,
         }
     }
 }
@@ -620,6 +626,14 @@ pub struct CoordinatorConfigResolved {
     /// Maximum salvage attempts per task before giving up and hard-failing.
     /// Default: `1`.
     pub max_salvage_attempts_per_task: u32,
+
+    /// Permitted tool write scopes and validations.
+    /// Default: `"standard"`.
+    pub safety_policy: String,
+
+    /// Risk policy for destructive actions.
+    /// Default: `"double_confirm"`.
+    pub destructive_actions: String,
 }
 
 impl CoordinatorConfigResolved {
@@ -737,6 +751,12 @@ impl CoordinatorConfigResolved {
             max_salvage_attempts_per_task: config
                 .map(|c| c.max_salvage_attempts_per_task)
                 .unwrap_or(1),
+            safety_policy: config
+                .and_then(|c| c.safety_policy.clone())
+                .unwrap_or_else(|| "standard".to_string()),
+            destructive_actions: config
+                .and_then(|c| c.destructive_actions.clone())
+                .unwrap_or_else(|| "double_confirm".to_string()),
         }
     }
 }

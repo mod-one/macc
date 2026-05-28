@@ -18,6 +18,9 @@ pub enum SettingsCommands {
         /// Show administrative settings
         #[arg(long)]
         admin: bool,
+        /// Reference profile to trace values from
+        #[arg(long)]
+        profile: Option<String>,
     },
     /// Apply preset config
     Preset {
@@ -38,7 +41,7 @@ impl Command for SettingsCommand {
         let mut config = self.app.canonical_config()?;
 
         match &self.subcommand {
-            SettingsCommands::Show { advanced, admin } => {
+            SettingsCommands::Show { advanced, admin, profile } => {
                 let max_category = if *admin {
                     SettingCategory::Admin
                 } else if *advanced {
@@ -46,6 +49,49 @@ impl Command for SettingsCommand {
                 } else {
                     SettingCategory::Basic
                 };
+
+                // Read raw yaml to check which keys are explicitly in the project config
+                let raw_yaml: Option<serde_yaml::Value> = if paths.config_path.exists() {
+                    if let Ok(content) = fs::read_to_string(&paths.config_path) {
+                        serde_yaml::from_str(&content).ok()
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                // Read raw profile yaml if a profile name is supplied
+                let raw_profile_yaml: Option<serde_yaml::Value> = if let Some(ref p) = profile {
+                    let mgr = macc_core::profile::ProfileManager::new().ok();
+                    if let Some(m) = mgr {
+                        let path = m.profile_path(p);
+                        if path.exists() {
+                            if let Ok(content) = fs::read_to_string(&path) {
+                                serde_yaml::from_str::<serde_yaml::Value>(&content)
+                                    .ok()
+                                    .and_then(|v| v.get("config").cloned())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                // Restore profile in-memory to resolve its values
+                if let Some(ref p) = profile {
+                    let mgr = macc_core::profile::ProfileManager::new()?;
+                    config = mgr.restore(p, &config, None)?;
+                }
+
+                // Resolve the config to avoid hardcoded fallbacks
+                let resolved = macc_core::config::CoordinatorConfigResolved::resolve(config.automation.coordinator.as_ref());
 
                 println!("====================================================");
                 println!("                MACC SETTINGS                       ");
@@ -65,45 +111,58 @@ impl Command for SettingsCommand {
                             "quiet" => config.settings.quiet.to_string(),
                             "offline" => config.settings.offline.to_string(),
                             "web_port" => config.settings.web_port.unwrap_or(3450).to_string(),
-                            "coordinator_tool" => config.automation.coordinator.as_ref()
-                                .and_then(|c| c.coordinator_tool.clone())
-                                .unwrap_or_else(|| "Auto-select".to_string()),
-                            "reference_branch" => config.automation.coordinator.as_ref()
-                                .and_then(|c| c.reference_branch.clone())
-                                .unwrap_or_else(|| "master".to_string()),
-                            "max_parallel" => config.automation.coordinator.as_ref()
-                                .and_then(|c| c.max_parallel)
-                                .unwrap_or(3).to_string(),
-                            "timeout_seconds" => config.automation.coordinator.as_ref()
-                                .and_then(|c| c.timeout_seconds)
-                                .unwrap_or(0).to_string(),
-                            "prd_file" => config.automation.coordinator.as_ref()
-                                .and_then(|c| c.prd_file.clone())
-                                .unwrap_or_else(|| "prd.json".to_string()),
-                            "max_dispatch" => config.automation.coordinator.as_ref()
-                                .and_then(|c| c.max_dispatch)
-                                .unwrap_or(10).to_string(),
-                            "phase_runner_max_attempts" => config.automation.coordinator.as_ref()
-                                .and_then(|c| c.phase_runner_max_attempts)
-                                .unwrap_or(1).to_string(),
-                            "merge_ai_fix" => config.automation.coordinator.as_ref()
-                                .and_then(|c| c.merge_ai_fix)
-                                .unwrap_or(false).to_string(),
-                            "storage_mode" => config.automation.coordinator.as_ref()
-                                .and_then(|c| c.storage_mode.clone())
-                                .unwrap_or_else(|| "json".to_string()),
-                            "task_registry_file" => config.automation.coordinator.as_ref()
-                                .and_then(|c| c.task_registry_file.clone())
-                                .unwrap_or_else(|| ".macc/automation/task/task_registry.json".to_string()),
+                            "coordinator_tool" => resolved.coordinator_tool.clone().unwrap_or_else(|| "Auto-select".to_string()),
+                            "reference_branch" => resolved.reference_branch.clone(),
+                            "max_parallel" => resolved.max_parallel.to_string(),
+                            "timeout_seconds" => resolved.timeout_seconds.to_string(),
+                            "prd_file" => resolved.prd_file.clone().unwrap_or_else(|| "prd.json".to_string()),
+                            "max_dispatch" => resolved.max_dispatch.to_string(),
+                            "phase_runner_max_attempts" => resolved.phase_runner_max_attempts.to_string(),
+                            "merge_ai_fix" => resolved.merge_ai_fix.to_string(),
+                            "safety_policy" => resolved.safety_policy.clone(),
+                            "destructive_actions" => resolved.destructive_actions.clone(),
+                            "storage_mode" => resolved.storage_mode.clone(),
+                            "task_registry_file" => resolved.task_registry_file.clone().unwrap_or_else(|| ".macc/automation/task/task_registry.json".to_string()),
                             _ => desc.default_value.clone(),
+                        };
+
+                        // Determine source of value
+                        let source = {
+                            let name = desc.name.as_str();
+                            let overrides = &self.app.overrides;
+                            if name == "quiet" && overrides.quiet.is_some() {
+                                "CLI override"
+                            } else if name == "offline" && overrides.offline.is_some() {
+                                "CLI override"
+                            } else if raw_profile_yaml.as_ref().map(|py| {
+                                if name == "quiet" || name == "offline" || name == "web_port" {
+                                    py.get("settings").and_then(|s| s.get(name)).is_some()
+                                } else {
+                                    py.get("automation").and_then(|a| a.get("coordinator")).and_then(|c| c.get(name)).is_some()
+                                }
+                            }).unwrap_or(false) {
+                                "profile"
+                            } else if raw_yaml.as_ref().map(|y| {
+                                if name == "quiet" || name == "offline" || name == "web_port" {
+                                    y.get("settings").and_then(|s| s.get(name)).is_some()
+                                } else {
+                                    y.get("automation").and_then(|a| a.get("coordinator")).and_then(|c| c.get(name)).is_some()
+                                }
+                            }).unwrap_or(false) {
+                                "project config"
+                            } else {
+                                "default"
+                            }
                         };
 
                         println!("Name:           {}", desc.name);
                         println!("Category:       {:?}", desc.category);
                         println!("Value:          {}", val);
+                        println!("Source:         {}", source);
                         println!("Description:    {}", desc.description);
                         println!("Impact:         {}", desc.impact_summary);
                         println!("Restart Req:    {}", desc.restart_required);
+                        println!("Examples:       {}", desc.examples.join(", "));
                         println!("----------------------------------------------------");
                     }
                 }

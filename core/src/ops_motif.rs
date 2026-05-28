@@ -27,6 +27,7 @@ pub struct SettingDescriptor {
     pub default_value: String,
     pub impact_summary: String,
     pub restart_required: bool,
+    pub examples: Vec<String>,
 }
 
 pub fn get_setting_descriptors() -> Vec<SettingDescriptor> {
@@ -39,6 +40,7 @@ pub fn get_setting_descriptors() -> Vec<SettingDescriptor> {
             default_value: "false".to_string(),
             impact_summary: "Reduces console noise; only errors and vital confirmations will show.".to_string(),
             restart_required: false,
+            examples: vec!["true".to_string(), "false".to_string()],
         },
         SettingDescriptor {
             name: "offline".to_string(),
@@ -48,6 +50,7 @@ pub fn get_setting_descriptors() -> Vec<SettingDescriptor> {
             default_value: "false".to_string(),
             impact_summary: "Forces coordinator and tools to run locally only, using cached dependencies.".to_string(),
             restart_required: false,
+            examples: vec!["true".to_string(), "false".to_string()],
         },
         SettingDescriptor {
             name: "web_port".to_string(),
@@ -57,6 +60,7 @@ pub fn get_setting_descriptors() -> Vec<SettingDescriptor> {
             default_value: "3450".to_string(),
             impact_summary: "Configures network socket bind target. Requires restart of the server.".to_string(),
             restart_required: true,
+            examples: vec!["3450".to_string(), "8080".to_string()],
         },
         SettingDescriptor {
             name: "coordinator_tool".to_string(),
@@ -66,6 +70,7 @@ pub fn get_setting_descriptors() -> Vec<SettingDescriptor> {
             default_value: "Auto-select".to_string(),
             impact_summary: "Changes which model evaluates PRD tasks and performs review phases.".to_string(),
             restart_required: false,
+            examples: vec!["claude".to_string(), "gemini".to_string()], // macc:allow-tool-name
         },
         SettingDescriptor {
             name: "reference_branch".to_string(),
@@ -75,6 +80,7 @@ pub fn get_setting_descriptors() -> Vec<SettingDescriptor> {
             default_value: "master".to_string(),
             impact_summary: "Affects the reference branch target during git worktree preparation and reconciliation.".to_string(),
             restart_required: false,
+            examples: vec!["master".to_string(), "main".to_string(), "develop".to_string()],
         },
         SettingDescriptor {
             name: "max_parallel".to_string(),
@@ -84,6 +90,7 @@ pub fn get_setting_descriptors() -> Vec<SettingDescriptor> {
             default_value: "3".to_string(),
             impact_summary: "Controls concurrent worktree allocation and tool usage density.".to_string(),
             restart_required: false,
+            examples: vec!["1".to_string(), "3".to_string(), "6".to_string()],
         },
         SettingDescriptor {
             name: "timeout_seconds".to_string(),
@@ -93,6 +100,7 @@ pub fn get_setting_descriptors() -> Vec<SettingDescriptor> {
             default_value: "0".to_string(),
             impact_summary: "Stops the entire coordinator run if execution exceeds this threshold.".to_string(),
             restart_required: false,
+            examples: vec!["0".to_string(), "3600".to_string()],
         },
         SettingDescriptor {
             name: "prd_file".to_string(),
@@ -102,6 +110,7 @@ pub fn get_setting_descriptors() -> Vec<SettingDescriptor> {
             default_value: "prd.json".to_string(),
             impact_summary: "Changes the task description and sequence file read by the coordinator.".to_string(),
             restart_required: false,
+            examples: vec!["prd.json".to_string(), "docs/prd.json".to_string()],
         },
         SettingDescriptor {
             name: "max_dispatch".to_string(),
@@ -111,6 +120,7 @@ pub fn get_setting_descriptors() -> Vec<SettingDescriptor> {
             default_value: "10".to_string(),
             impact_summary: "Controls task count limits to restrain API consumption and risk bounds.".to_string(),
             restart_required: false,
+            examples: vec!["5".to_string(), "10".to_string()],
         },
         SettingDescriptor {
             name: "phase_runner_max_attempts".to_string(),
@@ -120,6 +130,7 @@ pub fn get_setting_descriptors() -> Vec<SettingDescriptor> {
             default_value: "1".to_string(),
             impact_summary: "Determines retry patience on transient performer/reviewer execution errors.".to_string(),
             restart_required: false,
+            examples: vec!["1".to_string(), "3".to_string()],
         },
         SettingDescriptor {
             name: "merge_ai_fix".to_string(),
@@ -129,6 +140,27 @@ pub fn get_setting_descriptors() -> Vec<SettingDescriptor> {
             default_value: "false".to_string(),
             impact_summary: "Allows automated self-healing of merge blocks without stopping workflow.".to_string(),
             restart_required: false,
+            examples: vec!["true".to_string(), "false".to_string()],
+        },
+        SettingDescriptor {
+            name: "safety_policy".to_string(),
+            category: SettingCategory::Advanced,
+            value_type: "string".to_string(),
+            description: "Permitted tool write scopes and validations (strict, standard).".to_string(),
+            default_value: "standard".to_string(),
+            impact_summary: "Binds model capability safety validations under strict compliance.".to_string(),
+            restart_required: false,
+            examples: vec!["standard".to_string(), "strict".to_string()],
+        },
+        SettingDescriptor {
+            name: "destructive_actions".to_string(),
+            category: SettingCategory::Advanced,
+            value_type: "string".to_string(),
+            description: "risk policy for destructive actions (single_confirm, double_confirm).".to_string(),
+            default_value: "double_confirm".to_string(),
+            impact_summary: "Restricts forced checkouts and updates through user validation prompt.".to_string(),
+            restart_required: false,
+            examples: vec!["double_confirm".to_string(), "single_confirm".to_string()],
         },
         SettingDescriptor {
             name: "storage_mode".to_string(),
@@ -138,6 +170,7 @@ pub fn get_setting_descriptors() -> Vec<SettingDescriptor> {
             default_value: "json".to_string(),
             impact_summary: "Changes the database backend for task FSM state and logs.".to_string(),
             restart_required: true,
+            examples: vec!["json".to_string(), "sqlite".to_string()],
         },
         SettingDescriptor {
             name: "task_registry_file".to_string(),
@@ -147,6 +180,7 @@ pub fn get_setting_descriptors() -> Vec<SettingDescriptor> {
             default_value: ".macc/automation/task/task_registry.json".to_string(),
             impact_summary: "Configures where low-level state is persisted. Hard restart required.".to_string(),
             restart_required: true,
+            examples: vec![".macc/automation/task/task_registry.json".to_string()],
         },
     ]
 }
@@ -411,17 +445,26 @@ pub fn apply_preset_to_config(config: &mut CanonicalConfig, preset_name: &str) -
         "conservative" => {
             coordinator.max_parallel = Some(1);
             coordinator.rate_limit_fallback_enabled = Some(false);
+            coordinator.rate_limit_throttle_parallel = Some(false);
             coordinator.merge_ai_fix = Some(false);
+            coordinator.safety_policy = Some("strict".to_string());
+            coordinator.destructive_actions = Some("double_confirm".to_string());
         }
         "balanced" => {
             coordinator.max_parallel = Some(3);
             coordinator.rate_limit_fallback_enabled = Some(true);
+            coordinator.rate_limit_throttle_parallel = Some(false);
             coordinator.merge_ai_fix = Some(true);
+            coordinator.safety_policy = Some("standard".to_string());
+            coordinator.destructive_actions = Some("double_confirm".to_string());
         }
         "throughput" => {
             coordinator.max_parallel = Some(6);
             coordinator.rate_limit_fallback_enabled = Some(true);
+            coordinator.rate_limit_throttle_parallel = Some(true);
             coordinator.merge_ai_fix = Some(true);
+            coordinator.safety_policy = Some("standard".to_string());
+            coordinator.destructive_actions = Some("double_confirm".to_string());
         }
         _ => return Err(MaccError::Validation(format!(
             "Unknown preset '{}'. Choose from conservative, balanced, throughput.",
@@ -436,17 +479,26 @@ pub fn apply_preset_to_env_cfg(env_cfg: &mut CoordinatorEnvConfig, preset_name: 
         "conservative" => {
             env_cfg.max_parallel = Some(1);
             env_cfg.rate_limit_fallback_enabled = Some(false);
+            env_cfg.rate_limit_throttle_parallel = Some(false);
             env_cfg.merge_ai_fix = Some(false);
+            env_cfg.safety_policy = Some("strict".to_string());
+            env_cfg.destructive_actions = Some("double_confirm".to_string());
         }
         "balanced" => {
             env_cfg.max_parallel = Some(3);
             env_cfg.rate_limit_fallback_enabled = Some(true);
+            env_cfg.rate_limit_throttle_parallel = Some(false);
             env_cfg.merge_ai_fix = Some(true);
+            env_cfg.safety_policy = Some("standard".to_string());
+            env_cfg.destructive_actions = Some("double_confirm".to_string());
         }
         "throughput" => {
             env_cfg.max_parallel = Some(6);
             env_cfg.rate_limit_fallback_enabled = Some(true);
+            env_cfg.rate_limit_throttle_parallel = Some(true);
             env_cfg.merge_ai_fix = Some(true);
+            env_cfg.safety_policy = Some("standard".to_string());
+            env_cfg.destructive_actions = Some("double_confirm".to_string());
         }
         _ => return Err(MaccError::Validation(format!(
             "Unknown preset '{}'. Choose from conservative, balanced, throughput.",

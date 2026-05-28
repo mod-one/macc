@@ -1110,6 +1110,8 @@ fn run_with_engine_provider(
                 rate_limit_throttle_parallel: None,
                 force_kill_grace_seconds: *force_kill_grace_seconds,
                 max_review_cycles: *max_review_cycles,
+                safety_policy: None,
+                destructive_actions: None,
             };
             if let Some(ref p) = preset {
                 macc_core::ops_motif::apply_preset_to_env_cfg(&mut env_cfg, p)?;
@@ -1728,7 +1730,7 @@ mod tests {
             .expect("parse settings show");
         match cli.command {
             Some(Commands::Settings { settings_command }) => match settings_command {
-                commands::settings::SettingsCommands::Show { advanced, admin } => {
+                commands::settings::SettingsCommands::Show { advanced, admin, .. } => {
                     assert!(advanced);
                     assert!(admin);
                 }

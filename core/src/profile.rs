@@ -88,7 +88,7 @@ impl ProfileManager {
         Self { profiles_dir: dir }
     }
 
-    fn profile_path(&self, name: &str) -> PathBuf {
+    pub fn profile_path(&self, name: &str) -> PathBuf {
         self.profiles_dir.join(format!("{}.yaml", name))
     }
 

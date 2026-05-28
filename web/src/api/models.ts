@@ -260,6 +260,8 @@ export interface ApiConfigResponse {
   rateLimitFallbackEnabled: boolean | null;
   rateLimitThrottleParallel: boolean | null;
   forceKillGraceSeconds: number | null;
+  safetyPolicy: string | null;
+  destructiveActions: string | null;
   requirementsDetected: boolean;
   managedEnvironmentWarnings: string[];
 }
@@ -318,6 +320,8 @@ export interface ApiConfigUpdateRequest {
   rateLimitFallbackEnabled?: boolean | null;
   rateLimitThrottleParallel?: boolean | null;
   forceKillGraceSeconds?: number | null;
+  safetyPolicy?: string | null;
+  destructiveActions?: string | null;
 }
 
 export interface ApiToolInstallDescriptor {

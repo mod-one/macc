@@ -240,7 +240,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    const AUTOMATION_FIELD_COUNT: usize = 32;
+    const AUTOMATION_FIELD_COUNT: usize = 34;
     const COORDINATOR_EVENTS_EWMA_ALPHA: f64 = 0.30;
     const COORDINATOR_PAUSE_REL_PATH: &'static str = ".macc/automation/task/coordinator.pause.json";
 
@@ -2485,38 +2485,40 @@ impl AppState {
 
     pub fn automation_field_label(&self, index: usize) -> &'static str {
         match index {
-            0 => "Coordinator Tool",
-            1 => "Reference Branch",
-            2 => "PRD File",
-            3 => "Tool Priority (CSV)",
-            4 => "Max Parallel Per Tool (JSON)",
-            5 => "Tool Specializations (JSON)",
-            6 => "Max Dispatch",
-            7 => "Max Parallel",
-            8 => "Timeout Seconds",
-            9 => "Phase Runner Max Attempts",
-            10 => "Stale Claimed Seconds",
-            11 => "Stale In Progress Seconds",
-            12 => "Stale Changes Requested Seconds",
-            13 => "Stale Action",
-            14 => "Log Flush Lines",
-            15 => "Log Flush Interval (ms)",
-            16 => "JSON Export Debounce (ms)",
-            17 => "Merge AI Fix",
-            18 => "Merge Job Timeout (s)",
-            19 => "Merge Hook Timeout (s)",
-            20 => "Ghost Heartbeat Grace (s)",
-            21 => "Dispatch Cooldown (s)",
-            22 => "JSON Compatibility",
-            23 => "Retry Error Codes (CSV)",
-            24 => "Max Auto Retries",
-            25 => "Legacy JSON Fallback",
-            26 => "RL Backoff Base (s)",
-            27 => "RL Backoff Max (s)",
-            28 => "RL Fallback Enabled",
-            29 => "RL Throttle Parallel",
-            30 => "Force-Kill Grace (s)",
-            31 => "Max Review Cycles",
+            0 => "[Basic] Coordinator Tool",
+            1 => "[Basic] Reference Branch",
+            2 => "[Advanced] PRD File",
+            3 => "[Basic] Tool Priority (CSV)",
+            4 => "[Advanced] Max Parallel Per Tool (JSON)",
+            5 => "[Advanced] Tool Specializations (JSON)",
+            6 => "[Advanced] Max Dispatch",
+            7 => "[Basic] Max Parallel",
+            8 => "[Basic] Timeout Seconds",
+            9 => "[Advanced] Phase Runner Max Attempts",
+            10 => "[Advanced] Stale Claimed Seconds",
+            11 => "[Advanced] Stale In Progress Seconds",
+            12 => "[Advanced] Stale Changes Requested Seconds",
+            13 => "[Advanced] Stale Action",
+            14 => "[Admin] Log Flush Lines",
+            15 => "[Admin] Log Flush Interval (ms)",
+            16 => "[Admin] JSON Export Debounce (ms)",
+            17 => "[Advanced] Merge AI Fix",
+            18 => "[Advanced] Merge Job Timeout (s)",
+            19 => "[Advanced] Merge Hook Timeout (s)",
+            20 => "[Advanced] Ghost Heartbeat Grace (s)",
+            21 => "[Advanced] Dispatch Cooldown (s)",
+            22 => "[Admin] JSON Compatibility",
+            23 => "[Advanced] Retry Error Codes (CSV)",
+            24 => "[Advanced] Max Auto Retries",
+            25 => "[Admin] Legacy JSON Fallback",
+            26 => "[Advanced] RL Backoff Base (s)",
+            27 => "[Advanced] RL Backoff Max (s)",
+            28 => "[Advanced] RL Fallback Enabled",
+            29 => "[Advanced] RL Throttle Parallel",
+            30 => "[Advanced] Force-Kill Grace (s)",
+            31 => "[Advanced] Max Review Cycles",
+            32 => "[Basic] Safety Policy",
+            33 => "[Basic] Destructive Actions",
             _ => "",
         }
     }
@@ -2555,6 +2557,8 @@ impl AppState {
             29 => "Reduce effective_max_parallel by 1 on each E601; restore on recovery.",
             30 => "Seconds to wait after a performer signals failure via IPC before force-killing it (default: 30).",
             31 => "Max review cycles per task. 0=skip review, 1=one review+fix (no loopback), N=N loops. Empty=unlimited.",
+            32 => "Permitted tool write scopes and validations (strict, standard).",
+            33 => "Risk policy for destructive actions (single_confirm, double_confirm).",
             _ => "",
         }
     }
@@ -2691,6 +2695,12 @@ impl AppState {
                 .and_then(|c| c.max_review_cycles)
                 .map(|v| v.to_string())
                 .unwrap_or_default(),
+            32 => coordinator
+                .and_then(|c| c.safety_policy.clone())
+                .unwrap_or_else(|| "standard".to_string()),
+            33 => coordinator
+                .and_then(|c| c.destructive_actions.clone())
+                .unwrap_or_else(|| "double_confirm".to_string()),
             _ => String::new(),
         }
     }
@@ -2701,9 +2711,9 @@ impl AppState {
 
     pub fn settings_field_label(&self, index: usize) -> &'static str {
         match index {
-            0 => "Silent Mode",
-            1 => "Offline Mode",
-            2 => "Web Interface Port",
+            0 => "[Basic] Silent Mode",
+            1 => "[Basic] Offline Mode",
+            2 => "[Basic] Web Interface Port",
             _ => "",
         }
     }
@@ -2852,6 +2862,24 @@ impl AppState {
             self.set_automation_field_string(13, next.to_string());
             return;
         }
+        if self.automation_field_index == 32 {
+            let current = self.automation_field_display_value(32);
+            let next = match current.as_str() {
+                "standard" => "strict",
+                _ => "standard",
+            };
+            self.set_automation_field_string(32, next.to_string());
+            return;
+        }
+        if self.automation_field_index == 33 {
+            let current = self.automation_field_display_value(33);
+            let next = match current.as_str() {
+                "double_confirm" => "single_confirm",
+                _ => "double_confirm",
+            };
+            self.set_automation_field_string(33, next.to_string());
+            return;
+        }
         if matches!(self.automation_field_index, 17 | 22 | 25 | 28 | 29) {
             let current =
                 self.automation_field_display_value(self.automation_field_index) == "true";
@@ -2873,6 +2901,24 @@ impl AppState {
                     Err("Value cannot be empty.".to_string())
                 } else {
                     self.set_automation_field_string(idx, input);
+                    Ok(())
+                }
+            }
+            32 => {
+                let val = input.to_lowercase();
+                if !matches!(val.as_str(), "standard" | "strict") {
+                    Err("safety_policy must be standard or strict.".to_string())
+                } else {
+                    self.set_automation_field_string(32, val);
+                    Ok(())
+                }
+            }
+            33 => {
+                let val = input.to_lowercase();
+                if !matches!(val.as_str(), "single_confirm" | "double_confirm") {
+                    Err("destructive_actions must be single_confirm or double_confirm.".to_string())
+                } else {
+                    self.set_automation_field_string(33, val);
                     Ok(())
                 }
             }
@@ -2962,6 +3008,8 @@ impl AppState {
                 2 => coordinator.prd_file = Some(value),
                 13 => coordinator.stale_action = Some(value),
                 23 => coordinator.error_code_retry_list = Some(value),
+                32 => coordinator.safety_policy = Some(value),
+                33 => coordinator.destructive_actions = Some(value),
                 _ => {}
             }
         }
