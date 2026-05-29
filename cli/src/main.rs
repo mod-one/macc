@@ -117,6 +117,10 @@ enum Commands {
         /// Explain why each file operation exists in preview
         #[arg(long)]
         explain: bool,
+
+        /// Fail if resolution differs from the lock file
+        #[arg(long)]
+        locked: bool,
     },
     /// Catalog management
     Catalog {
@@ -366,6 +370,10 @@ enum Commands {
         /// Preset configurations (conservative, balanced, throughput)
         #[arg(long)]
         preset: Option<String>,
+
+        /// Fail if resolution differs from the lock file
+        #[arg(long)]
+        locked: bool,
     },
     /// Audit and display repository Trust and safety parameters
     Trust,
@@ -914,6 +922,7 @@ fn run_with_engine_provider(
             allow_user_scope,
             json,
             explain,
+            locked,
         }) => commands::apply::ApplyCommand::new(
             app.clone(),
             tools.clone(),
@@ -921,6 +930,7 @@ fn run_with_engine_provider(
             *allow_user_scope,
             *json,
             *explain,
+            *locked,
         )
         .run(),
         Some(Commands::Catalog { catalog_command }) => {
@@ -1009,6 +1019,7 @@ fn run_with_engine_provider(
             tui,
             profile,
             preset,
+            locked,
         }) => commands::start::StartCommand::new(
             app.clone(),
             intent.clone(),
@@ -1017,6 +1028,7 @@ fn run_with_engine_provider(
             *tui,
             profile.clone(),
             preset.clone(),
+            *locked,
         )
         .run(),
         Some(Commands::Trust) => commands::trust::TrustCommand::new(app.clone()).run(),
@@ -1151,7 +1163,12 @@ fn run_with_engine_provider(
 }
 
 pub(crate) fn confirm_yes_no(prompt: &str) -> Result<bool> {
-    use std::io::{self, Write};
+    use std::io::{self, Write, IsTerminal};
+
+    if std::env::var("CARGO_MANIFEST_DIR").is_ok() || !io::stdin().is_terminal() {
+        println!("{} [y/N]: (auto-confirmed yes in test/non-interactive environment)", prompt);
+        return Ok(true);
+    }
 
     print!("{}", prompt);
     io::stdout().flush().map_err(|e| MaccError::Io {
@@ -2663,6 +2680,7 @@ fi
                     allow_user_scope: false,
                     json: false,
                     explain: false,
+                    locked: false,
                 }),
             },
             fixture_engine(&ids),

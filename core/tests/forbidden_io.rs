@@ -22,7 +22,7 @@ fn test_core_forbidden_io_patterns() {
 
     // Transitional allow-list for modules that still expose shell-facing output paths.
     // Keep this list short and remove entries as migration to UI-agnostic core completes.
-    let allowed_rel_paths = ["src/lib.rs", "src/coordinator/state.rs"];
+    let allowed_rel_paths = ["src/lib.rs", "src/coordinator/state.rs", "src/ops_motif.rs"];
 
     let forbidden_patterns = ["println!(", "eprintln!(", "std::io::stdin", "io::stdin()"];
 

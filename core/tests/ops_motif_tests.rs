@@ -49,7 +49,7 @@ fn test_lock_manifest_generation_and_drift_detection() {
     fs::create_dir_all(&paths.macc_dir).unwrap();
     fs::write(&paths.config_path, "settings:\n  offline: true\ntools:\n  enabled: [\"gemini\"]\n").unwrap();
     
-    let config = CanonicalConfig::default();
+    let config = macc_core::config::load_canonical_config(&paths.config_path).unwrap();
     let lock = generate_lock_manifest(&paths, &config).unwrap();
     
     assert_eq!(lock.lock_version, 1);

@@ -201,6 +201,8 @@ pub struct CoordinatorConfig {
     pub safety_policy: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub destructive_actions: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
 
     // ── Reliability feature toggles ──────────────────────────────────────────
     /// Attempt to salvage partial work before retrying a failed task.
@@ -387,6 +389,7 @@ impl Default for CoordinatorConfig {
             takeover_default_response: None,
             safety_policy: None,
             destructive_actions: None,
+            preset: None,
         }
     }
 }

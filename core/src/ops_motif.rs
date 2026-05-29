@@ -212,24 +212,74 @@ pub struct TrustSummary {
     pub audit_log: String,
 }
 
-fn check_catalogs_pinned(paths: &ProjectPaths) -> bool {
-    if let Ok(skills) = crate::catalog::load_effective_skills_catalog(paths) {
-        for entry in skills.entries {
-            if entry.source.kind != crate::catalog::SourceKind::Local {
-                if entry.source.checksum.is_none() || entry.source.checksum.as_deref() == Some("") {
-                    return false;
-                }
+fn is_pinned_git_ref(r: &str) -> bool {
+    r.len() == 40 && r.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn get_catalog_id_from_url(url: &str) -> String {
+    if let Some(pos) = url.find("://") {
+        let rest = &url[pos + 3..];
+        if let Some(slash_pos) = rest.find('/') {
+            let host = &rest[..slash_pos];
+            let path = &rest[slash_pos..];
+            let clean_host = host.replace('.', "-");
+            let clean_path = path.trim_matches('/').replace('/', "-");
+            if clean_path.is_empty() {
+                clean_host
+            } else {
+                format!("{}-{}", clean_host, clean_path)
             }
+        } else {
+            rest.replace('.', "-")
         }
+    } else {
+        "remote-source".to_string()
     }
-    if let Ok(mcp) = crate::catalog::load_effective_mcp_catalog(paths) {
-        for entry in mcp.entries {
-            if entry.source.kind != crate::catalog::SourceKind::Local {
-                if entry.source.checksum.is_none() || entry.source.checksum.as_deref() == Some("") {
-                    return false;
+}
+
+fn check_catalogs_pinned(paths: &ProjectPaths) -> bool {
+    let check_file = |path: &std::path::Path| -> bool {
+        if !path.exists() {
+            return true;
+        }
+        if let Ok(content) = std::fs::read_to_string(path) {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(entries) = val.get("entries").and_then(|e| e.as_array()) {
+                    for entry in entries {
+                        if let Some(source) = entry.get("source") {
+                            let kind = source.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+                            if kind != "local" {
+                                if kind == "git" {
+                                    let reference = source.get("ref").and_then(|r| r.as_str()).unwrap_or("");
+                                    if !is_pinned_git_ref(reference) {
+                                        return false;
+                                    }
+                                } else if kind == "http" {
+                                    let checksum = source.get("checksum").and_then(|c| c.as_str()).unwrap_or("");
+                                    if checksum.is_empty() {
+                                        return false;
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
+        true
+    };
+
+    if !check_file(&paths.skills_catalog_path()) {
+        return false;
+    }
+    if !check_file(&paths.project_skills_catalog_path()) {
+        return false;
+    }
+    if !check_file(&paths.mcp_catalog_path()) {
+        return false;
+    }
+    if !check_file(&paths.project_mcp_catalog_path()) {
+        return false;
     }
     true
 }
@@ -326,6 +376,7 @@ pub struct LockManifest {
     pub catalogs: Vec<LockedCatalog>,
     pub packages: Vec<LockedPackage>,
     pub runtime: BTreeMap<String, String>,
+    pub coordinator: LockedCoordinator,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -369,53 +420,277 @@ pub struct LockedInstalledTarget {
     pub sha256: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LockedCoordinator {
+    pub storage_mode: String,
+    pub max_parallel: usize,
+    pub retry_policy_hash: String,
+    pub rate_limit_policy_hash: String,
+}
+
 pub fn generate_lock_manifest(paths: &ProjectPaths, config: &CanonicalConfig) -> Result<LockManifest> {
+    use crate::tool::registry::ToolRegistry;
+    use crate::tool::loader::ToolSpecLoader;
+    use crate::resolve::{PlanningContext, resolve_fetch_units, SelectionKind};
+
     let now = chrono::Utc::now().to_rfc3339();
     
     let config_content = fs::read_to_string(&paths.config_path).unwrap_or_default();
-    let config_sha256 = format!("{:x}", Sha256::digest(config_content.as_bytes()));
+    let config_sha256 = format!("sha256:{:x}", Sha256::digest(config_content.as_bytes()));
 
+    // 1. Macc version & binary hash
+    let macc_version = env!("CARGO_PKG_VERSION").to_string();
+    let macc_binary_sha256 = std::env::current_exe()
+        .ok()
+        .and_then(|path| fs::read(&path).ok())
+        .map(|bytes| format!("sha256:{:x}", Sha256::digest(&bytes)))
+        .unwrap_or_else(|| "sha256:test".to_string());
+
+    // 2. Git URL and commit fingerprint
+    let repo_url = crate::git::run_git_output_mapped(paths.root.as_ref(), &["config", "--get", "remote.origin.url"], "get git remote URL")
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .unwrap_or_else(|_| "local".to_string());
+    let commit_hash = crate::git::run_git_output_mapped(paths.root.as_ref(), &["rev-parse", "HEAD"], "get git HEAD commit")
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+    let project_root_fingerprint = format!("git:{}#{}", repo_url, commit_hash);
+
+    // 3. Runtime versions
     let mut runtime = BTreeMap::new();
     runtime.insert("os".to_string(), std::env::consts::OS.to_string());
     runtime.insert("arch".to_string(), std::env::consts::ARCH.to_string());
+    let get_cmd_version = |cmd: &str, args: &[&str]| -> Option<String> {
+        std::process::Command::new(cmd)
+            .args(args)
+            .output()
+            .ok()
+            .and_then(|out| {
+                if out.status.success() {
+                    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    if !s.is_empty() {
+                        return Some(s);
+                    }
+                }
+                None
+            })
+    };
+    if let Some(v) = get_cmd_version("git", &["--version"]) {
+        runtime.insert("git_version".to_string(), v);
+    }
+    if let Some(v) = get_cmd_version("node", &["--version"]) {
+        runtime.insert("node_version".to_string(), v);
+    }
+    if let Some(v) = get_cmd_version("pnpm", &["--version"]) {
+        runtime.insert("pnpm_version".to_string(), v);
+    }
+    if let Some(v) = get_cmd_version("rustc", &["--version"]) {
+        runtime.insert("rust_version".to_string(), v);
+    }
+
+    // 4. Locked tools & generated files
+    let registry = ToolRegistry::from_inventory();
+    let resolved = crate::resolve::resolve(config, &Default::default());
+    let planning_ctx = PlanningContext {
+        paths,
+        resolved: &resolved,
+        materialized_units: &[],
+    };
+
+    let spec_loader = ToolSpecLoader::new(ToolSpecLoader::default_search_paths(&paths.root));
+    let (specs, _) = spec_loader.load_all_with_embedded();
 
     let mut locked_tools = Vec::new();
-    for tool in &config.tools.enabled {
-        let (file_path, file_sha) = match tool.as_str() {
-            "gemini" => ("GEMINI.md", "abc"), // macc:allow-tool-name
-            "agy" => ("GEMINI.md", "abc"), // macc:allow-tool-name
-            _ => ("AGENTS.md", "xyz"),
-        };
+    for tool_id in &config.tools.enabled {
+        let detected_version = specs.iter()
+            .find(|s| &s.id == tool_id)
+            .and_then(|spec| spec.version_check.as_ref())
+            .and_then(|vc| crate::service::tooling::run_version_command(&vc.current))
+            .unwrap_or_else(|| "0.1.0".to_string());
+        
+        let adapter_version = env!("CARGO_PKG_VERSION").to_string();
+
+        let model = config.tools.config.get(tool_id)
+            .and_then(|v| v.as_object())
+            .and_then(|obj| obj.get("model"))
+            .and_then(|m| m.as_str())
+            .unwrap_or("default")
+            .to_string();
+
+        let mut generated_files = Vec::new();
+        if let Some(adapter) = registry.get(tool_id) {
+            if let Ok(plan) = adapter.plan(&planning_ctx) {
+                for action in plan.actions {
+                    if let crate::plan::Action::WriteFile { path, content, .. } = action {
+                        let sha256 = format!("sha256:{:x}", Sha256::digest(&content));
+                        generated_files.push(LockedFile { path, sha256 });
+                    }
+                }
+            }
+        }
+
         locked_tools.push(LockedTool {
-            id: tool.clone(),
-            detected_version: "0.1.0".to_string(),
-            adapter_version: "0.1.0".to_string(),
-            model: "default".to_string(),
-            generated_files: vec![LockedFile {
-                path: file_path.to_string(),
-                sha256: file_sha.to_string(),
-            }],
+            id: tool_id.clone(),
+            detected_version,
+            adapter_version,
+            model,
+            generated_files,
         });
     }
 
-    let catalogs = Vec::new();
+    // 5. Catalogs
+    let mut catalogs = Vec::new();
+    let mut catalog_map = std::collections::HashMap::new();
+
+    if let Ok(skills_cat) = crate::catalog::load_effective_skills_catalog(paths) {
+        for entry in skills_cat.entries {
+            if entry.source.kind != crate::catalog::SourceKind::Local {
+                catalog_map.insert(entry.source.url.clone(), entry.source.clone());
+            }
+        }
+    }
+    if let Ok(mcp_cat) = crate::catalog::load_effective_mcp_catalog(paths) {
+        for entry in mcp_cat.entries {
+            if entry.source.kind != crate::catalog::SourceKind::Local {
+                catalog_map.insert(entry.source.url.clone(), entry.source.clone());
+            }
+        }
+    }
+
+    for (url, source) in catalog_map {
+        let kind = match source.kind {
+            crate::catalog::SourceKind::Git => "git".to_string(),
+            crate::catalog::SourceKind::Http => "http".to_string(),
+            crate::catalog::SourceKind::Local => "local".to_string(),
+        };
+        // Generate a nice ID
+        let id = get_catalog_id_from_url(&url);
+        
+        catalogs.push(LockedCatalog {
+            id,
+            kind,
+            url,
+            rev: Some(source.reference.clone()),
+            checksum: source.checksum.clone(),
+        });
+    }
+
+    // 6. Packages
+    let mut packages = Vec::new();
+    if let Ok(fetch_units) = resolve_fetch_units(paths, &resolved) {
+        for unit in fetch_units {
+            // Find corresponding source_id from catalogs
+            let source_id = catalogs.iter()
+                .find(|c| c.url == unit.source.url)
+                .map(|c| c.id.clone())
+                .unwrap_or_else(|| "default-source".to_string());
+
+            for selection in unit.selections {
+                let package_type = match selection.kind {
+                    SelectionKind::Skill => "skill".to_string(),
+                    SelectionKind::Mcp => "mcp".to_string(),
+                };
+
+                let mut manifest_sha256 = "sha256:unknown".to_string();
+                let mut installed_targets = Vec::new();
+
+                if selection.kind == SelectionKind::Skill {
+                    for tool in &config.tools.enabled {
+                        let skill_dir = paths.root.join(format!(".{}", tool)).join("skills").join(&selection.id);
+                        let manifest_path = skill_dir.join("macc.package.json");
+                        if manifest_path.exists() {
+                            if let Ok(content) = fs::read(&manifest_path) {
+                                manifest_sha256 = format!("sha256:{:x}", Sha256::digest(&content));
+                            }
+                        }
+                        if skill_dir.is_dir() {
+                            if let Ok(entries) = fs::read_dir(&skill_dir) {
+                                for entry in entries.flatten() {
+                                    let path = entry.path();
+                                    if path.is_file() {
+                                        if let Ok(content) = fs::read(&path) {
+                                            let sha256 = format!("sha256:{:x}", Sha256::digest(&content));
+                                            let rel_path = path.strip_prefix(&paths.root)
+                                                .map(|p| p.to_string_lossy().into_owned())
+                                                .unwrap_or_else(|_| path.to_string_lossy().into_owned());
+                                            installed_targets.push(LockedInstalledTarget {
+                                                tool: tool.clone(),
+                                                path: rel_path,
+                                                sha256,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    let mcp_dir = paths.macc_dir.join("mcp").join(&selection.id);
+                    let manifest_path = mcp_dir.join("macc.package.json");
+                    if manifest_path.exists() {
+                        if let Ok(content) = fs::read(&manifest_path) {
+                            manifest_sha256 = format!("sha256:{:x}", Sha256::digest(&content));
+                        }
+                    }
+                }
+
+                packages.push(LockedPackage {
+                    id: selection.id.clone(),
+                    package_type,
+                    source_id: source_id.clone(),
+                    subpath: selection.subpath,
+                    manifest_sha256,
+                    installed_targets,
+                });
+            }
+        }
+    }
+
+    // 7. Coordinator hashes
+    let coord = config.automation.coordinator.as_ref();
+    let max_parallel = coord.and_then(|c| c.max_parallel).unwrap_or(0);
+    
+    let retry_input = format!(
+        "{:?}|{:?}",
+        coord.and_then(|c| c.error_code_retry_list.as_ref()),
+        coord.and_then(|c| c.error_code_retry_max)
+    );
+    let retry_policy_hash = format!("sha256:{:x}", Sha256::digest(retry_input.as_bytes()));
+
+    let rate_input = format!(
+        "{:?}|{:?}|{:?}|{:?}",
+        coord.and_then(|c| c.rate_limit_backoff_base_seconds),
+        coord.and_then(|c| c.rate_limit_backoff_max_seconds),
+        coord.and_then(|c| c.rate_limit_fallback_enabled),
+        coord.and_then(|c| c.rate_limit_throttle_parallel)
+    );
+    let rate_limit_policy_hash = format!("sha256:{:x}", Sha256::digest(rate_input.as_bytes()));
+
+    let coordinator = LockedCoordinator {
+        storage_mode: coord.and_then(|c| c.storage_mode.clone()).unwrap_or_else(|| "sqlite".to_string()),
+        max_parallel,
+        retry_policy_hash,
+        rate_limit_policy_hash,
+    };
 
     Ok(LockManifest {
         lock_version: 1,
         created_at: now,
-        macc_version: "0.5.0".to_string(),
-        macc_binary_sha256: "sha256:test".to_string(),
-        project_root_fingerprint: "git:local".to_string(),
+        macc_version,
+        macc_binary_sha256,
+        project_root_fingerprint,
         reference_branch: config.automation.coordinator.as_ref()
             .and_then(|c| c.reference_branch.clone())
             .unwrap_or_else(|| "master".to_string()),
         config_sha256,
         active_profile: "default".to_string(),
-        preset: "balanced".to_string(),
+        preset: config.automation.coordinator.as_ref()
+            .and_then(|c| c.preset.clone())
+            .unwrap_or_else(|| "balanced".to_string()),
         tools: locked_tools,
         catalogs,
-        packages: vec![],
+        packages,
         runtime,
+        coordinator,
     })
 }
 
@@ -426,13 +701,177 @@ pub struct LockCheckReport {
 }
 
 pub fn verify_lock_manifest(paths: &ProjectPaths, lock: &LockManifest) -> Result<LockCheckReport> {
+    use crate::tool::loader::ToolSpecLoader;
+    use crate::resolve::resolve_fetch_units;
+
     let mut drift = Vec::new();
     
-    // Check config hash
+    // 1. Check config hash
     let config_content = fs::read_to_string(&paths.config_path).unwrap_or_default();
-    let config_sha256 = format!("{:x}", Sha256::digest(config_content.as_bytes()));
+    let config_sha256 = format!("sha256:{:x}", Sha256::digest(config_content.as_bytes()));
     if config_sha256 != lock.config_sha256 {
         drift.push(format!("Config file drift: current sha {} != locked {}", config_sha256, lock.config_sha256));
+    }
+
+    // Load active config to compare other sections
+    if let Ok(config) = crate::load_canonical_config(&paths.config_path) {
+        let resolved = crate::resolve::resolve(&config, &Default::default());
+
+        let spec_loader = ToolSpecLoader::new(ToolSpecLoader::default_search_paths(&paths.root));
+        let (specs, _) = spec_loader.load_all_with_embedded();
+
+        // 2. Verify tools & versions & generated files
+        for locked_tool in &lock.tools {
+            if !config.tools.enabled.contains(&locked_tool.id) {
+                drift.push(format!("Tool '{}' is locked but currently disabled in config", locked_tool.id));
+                continue;
+            }
+
+            let current_detected = specs.iter()
+                .find(|s| s.id == locked_tool.id)
+                .and_then(|spec| spec.version_check.as_ref())
+                .and_then(|vc| crate::service::tooling::run_version_command(&vc.current))
+                .unwrap_or_else(|| "0.1.0".to_string());
+
+            if current_detected != locked_tool.detected_version {
+                drift.push(format!("Tool '{}' version mismatch: current detected '{}' != locked '{}'", 
+                    locked_tool.id, current_detected, locked_tool.detected_version));
+            }
+
+            // Verify generated files & hashes
+            for locked_file in &locked_tool.generated_files {
+                let file_path = paths.root.join(&locked_file.path);
+                if !file_path.exists() {
+                    drift.push(format!("Generated file '{}' for tool '{}' is missing from disk", locked_file.path, locked_tool.id));
+                } else if let Ok(content) = fs::read(&file_path) {
+                    let sha256 = format!("sha256:{:x}", Sha256::digest(&content));
+                    if sha256 != locked_file.sha256 {
+                        drift.push(format!("Generated file '{}' hash drift: current '{}' != locked '{}'", 
+                            locked_file.path, sha256, locked_file.sha256));
+                    }
+                }
+            }
+        }
+
+        // Check if any tool is enabled in config but missing from lock
+        for enabled_tool in &config.tools.enabled {
+            if !lock.tools.iter().any(|t| &t.id == enabled_tool) {
+                drift.push(format!("Tool '{}' is enabled in config but missing from lockfile", enabled_tool));
+            }
+        }
+
+        // 3. Verify catalogs
+        let mut current_catalogs = std::collections::HashMap::new();
+        if let Ok(skills_cat) = crate::catalog::load_effective_skills_catalog(paths) {
+            for entry in skills_cat.entries {
+                if entry.source.kind != crate::catalog::SourceKind::Local {
+                    current_catalogs.insert(entry.source.url.clone(), entry.source.clone());
+                }
+            }
+        }
+        if let Ok(mcp_cat) = crate::catalog::load_effective_mcp_catalog(paths) {
+            for entry in mcp_cat.entries {
+                if entry.source.kind != crate::catalog::SourceKind::Local {
+                    current_catalogs.insert(entry.source.url.clone(), entry.source.clone());
+                }
+            }
+        }
+
+        for locked_cat in &lock.catalogs {
+            if let Some(source) = current_catalogs.get(&locked_cat.url) {
+                if let Some(ref locked_rev) = locked_cat.rev {
+                    if &source.reference != locked_rev {
+                        drift.push(format!("Catalog '{}' revision drift: current '{}' != locked '{}'", 
+                            locked_cat.id, source.reference, locked_rev));
+                    }
+                }
+                if locked_cat.checksum != source.checksum {
+                    drift.push(format!("Catalog '{}' checksum drift: current '{:?}' != locked '{:?}'", 
+                        locked_cat.id, source.checksum, locked_cat.checksum));
+                }
+            } else {
+                drift.push(format!("Catalog '{}' (url: {}) in lockfile is missing from current effective catalogs", locked_cat.id, locked_cat.url));
+            }
+        }
+
+        // 4. Verify packages
+        if let Ok(fetch_units) = resolve_fetch_units(paths, &resolved) {
+            for unit in fetch_units {
+                for selection in unit.selections {
+                    if let Some(locked_pkg) = lock.packages.iter().find(|p| p.id == selection.id) {
+                        // Compare subpath
+                        if locked_pkg.subpath != selection.subpath {
+                            drift.push(format!("Package '{}' subpath mismatch: current '{}' != locked '{}'", 
+                                selection.id, selection.subpath, locked_pkg.subpath));
+                        }
+                        // Verify target files' hashes
+                        for target in &locked_pkg.installed_targets {
+                            let target_path = paths.root.join(&target.path);
+                            if !target_path.exists() {
+                                drift.push(format!("Package target file '{}' is missing from disk", target.path));
+                            } else if let Ok(content) = fs::read(&target_path) {
+                                let sha256 = format!("sha256:{:x}", Sha256::digest(&content));
+                                if sha256 != target.sha256 {
+                                    drift.push(format!("Package target file '{}' hash drift: current '{}' != locked '{}'", 
+                                        target.path, sha256, target.sha256));
+                                }
+                            }
+                        }
+                    } else {
+                        drift.push(format!("Package '{}' is currently selected but missing from lockfile", selection.id));
+                    }
+                }
+            }
+        }
+
+        // 5. Verify coordinator configuration
+        let coord = config.automation.coordinator.as_ref();
+        let max_parallel = coord.and_then(|c| c.max_parallel).unwrap_or(0);
+        if max_parallel != lock.coordinator.max_parallel {
+            drift.push(format!("Coordinator max_parallel drift: current {} != locked {}", max_parallel, lock.coordinator.max_parallel));
+        }
+
+        let current_storage_mode = coord.and_then(|c| c.storage_mode.clone()).unwrap_or_else(|| "sqlite".to_string());
+        if current_storage_mode != lock.coordinator.storage_mode {
+            drift.push(format!("Coordinator storage_mode drift: current '{}' != locked '{}'", current_storage_mode, lock.coordinator.storage_mode));
+        }
+
+        let retry_input = format!(
+            "{:?}|{:?}",
+            coord.and_then(|c| c.error_code_retry_list.as_ref()),
+            coord.and_then(|c| c.error_code_retry_max)
+        );
+        let current_retry_hash = format!("sha256:{:x}", Sha256::digest(retry_input.as_bytes()));
+        if current_retry_hash != lock.coordinator.retry_policy_hash {
+            drift.push(format!("Coordinator retry policy drift from lockfile"));
+        }
+
+        let rate_input = format!(
+            "{:?}|{:?}|{:?}|{:?}",
+            coord.and_then(|c| c.rate_limit_backoff_base_seconds),
+            coord.and_then(|c| c.rate_limit_backoff_max_seconds),
+            coord.and_then(|c| c.rate_limit_fallback_enabled),
+            coord.and_then(|c| c.rate_limit_throttle_parallel)
+        );
+        let current_rate_hash = format!("sha256:{:x}", Sha256::digest(rate_input.as_bytes()));
+        if current_rate_hash != lock.coordinator.rate_limit_policy_hash {
+            drift.push(format!("Coordinator rate limit policy drift from lockfile"));
+        }
+
+        // 6. Verify runtime
+        for (key, val) in &lock.runtime {
+            if key == "os" {
+                let current_os = std::env::consts::OS.to_string();
+                if &current_os != val {
+                    drift.push(format!("Runtime OS mismatch: current '{}' != locked '{}'", current_os, val));
+                }
+            } else if key == "arch" {
+                let current_arch = std::env::consts::ARCH.to_string();
+                if &current_arch != val {
+                    drift.push(format!("Runtime arch mismatch: current '{}' != locked '{}'", current_arch, val));
+                }
+            }
+        }
     }
 
     Ok(LockCheckReport {
@@ -497,6 +936,7 @@ pub fn get_failure_summary(task_id: &str) -> FailureSummary {
 
 pub fn apply_preset_to_config(config: &mut CanonicalConfig, preset_name: &str) -> Result<()> {
     let coordinator = config.automation.coordinator.get_or_insert_with(Default::default);
+    coordinator.preset = Some(preset_name.to_string());
     match preset_name {
         "conservative" => {
             coordinator.max_parallel = Some(1);

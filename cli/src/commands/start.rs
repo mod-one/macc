@@ -12,6 +12,7 @@ pub struct StartCommand {
     tui: bool,
     profile: Option<String>,
     preset: Option<String>,
+    locked: bool,
 }
 
 impl StartCommand {
@@ -23,6 +24,7 @@ impl StartCommand {
         tui: bool,
         profile: Option<String>,
         preset: Option<String>,
+        locked: bool,
     ) -> Self {
         Self {
             app,
@@ -32,6 +34,7 @@ impl StartCommand {
             tui,
             profile,
             preset,
+            locked,
         }
     }
 }
@@ -41,6 +44,37 @@ impl Command for StartCommand {
         println!("MACC Cockpit guided entry point [macc start]");
 
         let paths = self.app.project_paths()?;
+        if self.locked {
+            let lock_path = paths.macc_dir.join("macc.lock.yaml");
+            if !lock_path.exists() {
+                return Err(macc_core::MaccError::Validation(
+                    "Lock file not found. Cannot proceed under --locked.".to_string(),
+                ));
+            }
+            let lock_str = std::fs::read_to_string(&lock_path)
+                .map_err(|e| macc_core::MaccError::Io {
+                    path: lock_path.to_string_lossy().into(),
+                    action: "read macc.lock.yaml".into(),
+                    source: e,
+                })?;
+            let lock: macc_core::ops_motif::LockManifest = serde_yaml::from_str(&lock_str)
+                .map_err(|e| macc_core::MaccError::Config {
+                    path: lock_path.to_string_lossy().into(),
+                    source: e,
+                })?;
+            let report = macc_core::ops_motif::verify_lock_manifest(&paths, &lock)?;
+            if !report.matches {
+                eprintln!("Lock verification: DRIFT DETECTED.");
+                for d in report.drift {
+                    eprintln!("  - {}", d);
+                }
+                return Err(macc_core::MaccError::Validation(
+                    "Lock file check failed due to drift under --locked constraint.".to_string(),
+                ));
+            }
+            println!("Lock verification: SUCCESS. Environment matches lock perfectly.");
+        }
+
         let mut planned_writes = Vec::new();
 
         // =====================================================================
