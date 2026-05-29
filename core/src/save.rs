@@ -317,6 +317,18 @@ fn parse_duration_to_seconds(s: &str) -> u64 {
     }
 }
 
+fn compute_manifest_payload_hash(content: &str) -> String {
+    let mut hasher = Sha256::new();
+    for line in content.lines() {
+        if line.contains("manifest_payload:") {
+            continue;
+        }
+        hasher.update(line.as_bytes());
+        hasher.update(b"\n");
+    }
+    format!("sha256:{:x}", hasher.finalize())
+}
+
 fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> std::io::Result<()> {
     fs::create_dir_all(&dst)?;
     for entry in fs::read_dir(src)? {
@@ -589,22 +601,16 @@ pub fn create_save_bundle(paths: &ProjectPaths, name: &str, opts: &SaveOptions) 
         },
     };
 
+    // Calculate manifest payload hash by serializing with empty payload first
+    let manifest_str = serde_yaml::to_string(&manifest).map_err(|e| MaccError::Validation(e.to_string()))?;
+    let payload_hash = compute_manifest_payload_hash(&manifest_str);
+    manifest.hashes.manifest_payload = payload_hash;
+
+    // Write final manifest with the calculated payload hash
     let manifest_str = serde_yaml::to_string(&manifest).map_err(|e| MaccError::Validation(e.to_string()))?;
     fs::write(&manifest_path, manifest_str).map_err(|e| MaccError::Io {
         path: manifest_path.to_string_lossy().into(),
-        action: "write manifest".into(),
-        source: e,
-    })?;
-
-    // Calculate manifest payload hash
-    let manifest_payload = compute_file_sha256(&manifest_path).unwrap();
-    manifest.hashes.manifest_payload = manifest_payload;
-
-    // Rewrite manifest with its own hash updated
-    let manifest_str = serde_yaml::to_string(&manifest).map_err(|e| MaccError::Validation(e.to_string()))?;
-    fs::write(&manifest_path, manifest_str).map_err(|e| MaccError::Io {
-        path: manifest_path.to_string_lossy().into(),
-        action: "rewrite manifest with hashes".into(),
+        action: "write final manifest".into(),
         source: e,
     })?;
 
@@ -648,9 +654,16 @@ pub fn restore_save_bundle(paths: &ProjectPaths, name: &str, opts: &RestoreOptio
         source: e,
     })?;
 
+    // Verify manifest payload integrity
+    let computed_payload_hash = compute_manifest_payload_hash(&manifest_str);
+
     let manifest: SaveBundleManifest = serde_yaml::from_str(&manifest_str).map_err(|e| {
         MaccError::Validation(format!("MACC-RESTORE-2001: Unsupported or malformed manifest: {}", e))
     })?;
+
+    if computed_payload_hash != manifest.hashes.manifest_payload {
+        return Err(MaccError::Validation("MACC-RESTORE-2003: Checksum mismatch. Manifest payload integrity verification failed.".to_string()));
+    }
 
     // Repository match validation
     let current_repo = get_repository_identity(&paths.root);
