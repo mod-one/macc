@@ -167,6 +167,10 @@ pub fn apply(
     let mut plan = engine.plan(&paths, &canonical, &materialized_units, &overrides)?;
     let ops = engine.plan_operations(&paths, &plan);
     if !json {
+        crate::ops_motif::print_trust_review_card(&paths, &plan, allow_user_scope);
+        if !ui.confirm_yes_no("Proceed with apply [y/N]? ")? {
+            return Err(crate::MaccError::Validation("Apply cancelled by user".to_string()));
+        }
         ui.print_pre_apply_summary(&paths, &plan, &ops);
         if explain {
             ui.print_pre_apply_explanations(&ops);

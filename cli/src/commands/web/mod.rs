@@ -165,6 +165,7 @@ fn build_web_router(state: WebState) -> Router {
     let audit_state = state.clone();
     Router::new()
         .route("/api/v1/health", get(health_handler))
+        .route("/api/v1/trust", get(trust_handler))
         .route("/api/v1/doctor", get(doctor::get_doctor_handler))
         .route("/api/v1/doctor/fix", post(doctor::run_doctor_fix_handler))
         .route(
@@ -354,6 +355,14 @@ async fn health_handler(
         "status": "ok",
         "project_root": state.paths.root.to_string_lossy()
     }))
+}
+
+async fn trust_handler(
+    axum::extract::State(state): axum::extract::State<WebState>,
+) -> std::result::Result<Json<macc_core::ops_motif::TrustSummary>, errors::ApiError> {
+    let config = state.engine.load_canonical_config(&state.paths).map_err(errors::ApiError::from)?;
+    let trust = macc_core::ops_motif::calculate_trust_summary(&state.paths, &config);
+    Ok(Json(trust))
 }
 
 #[cfg(debug_assertions)]

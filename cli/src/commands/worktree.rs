@@ -268,6 +268,14 @@ impl<'a> Command for WorktreeCommand<'a> {
                 if *all {
                     let entries = macc_core::list_worktrees(&paths.root)?;
                     let root = paths.root.canonicalize().unwrap_or(paths.root.clone());
+                    if !*force {
+                        let dummy_plan = macc_core::plan::ActionPlan::new();
+                        macc_core::ops_motif::print_trust_review_card(&paths, &dummy_plan, false);
+                        if !crate::confirm_yes_no("Proceed with removing all worktrees [y/N]? ")? {
+                            println!("Worktree removal cancelled.");
+                            return Ok(());
+                        }
+                    }
                     let mut removed = 0;
                     for entry in entries {
                         if entry.path == root {
@@ -307,6 +315,14 @@ impl<'a> Command for WorktreeCommand<'a> {
                     .iter()
                     .find(|entry| entry.path == worktree_path)
                     .and_then(|entry| entry.branch.clone());
+                if !*force {
+                    let dummy_plan = macc_core::plan::ActionPlan::new();
+                    macc_core::ops_motif::print_trust_review_card(&paths, &dummy_plan, false);
+                    if !crate::confirm_yes_no(&format!("Proceed with removing worktree {} [y/N]? ", id))? {
+                        println!("Worktree removal cancelled.");
+                        return Ok(());
+                    }
+                }
                 macc_core::remove_worktree(&paths.root, &worktree_path, *force)?;
                 if *remove_branch {
                     macc_core::service::worktree::delete_branch(

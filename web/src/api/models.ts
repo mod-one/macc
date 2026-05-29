@@ -260,8 +260,9 @@ export interface ApiConfigResponse {
   rateLimitFallbackEnabled: boolean | null;
   rateLimitThrottleParallel: boolean | null;
   forceKillGraceSeconds: number | null;
-  safetyPolicy: string | null;
-  destructiveActions: string | null;
+  safetyPolicy?: string | null;
+  destructiveActions?: string | null;
+  maxReviewCycles?: number | null;
   requirementsDetected: boolean;
   managedEnvironmentWarnings: string[];
 }
@@ -322,6 +323,7 @@ export interface ApiConfigUpdateRequest {
   forceKillGraceSeconds?: number | null;
   safetyPolicy?: string | null;
   destructiveActions?: string | null;
+  maxReviewCycles?: number | null;
 }
 
 export interface ApiToolInstallDescriptor {
@@ -652,4 +654,17 @@ export interface ApiActionResult {
   status?: string;
   message?: string;
   [key: string]: JsonValue | undefined;
+}
+
+export interface ApiTrustSummary {
+  state: 'trusted' | 'caution' | 'risky' | 'blocked';
+  local_only: boolean;
+  terminal_enabled: boolean;
+  user_level_writes: number;
+  backups_ready: boolean;
+  catalog_pinned: boolean;
+  secrets_redacted: boolean;
+  server_exposure: string;
+  allowed_roots: string[];
+  audit_log: string;
 }

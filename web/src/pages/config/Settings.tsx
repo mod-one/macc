@@ -403,7 +403,7 @@ function BasicTab({
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <SelectField
           label="Safety Policy"
-          value={draft.safetyPolicy}
+          value={draft.safetyPolicy ?? null}
           onChange={(v) => update({ safetyPolicy: v })}
           options={[
             { value: 'standard', label: 'Standard (Verify modifications)' },
@@ -413,7 +413,7 @@ function BasicTab({
         />
         <SelectField
           label="Destructive Actions"
-          value={draft.destructiveActions}
+          value={draft.destructiveActions ?? null}
           onChange={(v) => update({ destructiveActions: v })}
           options={[
             { value: 'double_confirm', label: 'Double Confirm (Prompt twice)' },
@@ -603,7 +603,7 @@ function AdvancedTab({
         />
         <NumberField
           label="Max Review Cycles"
-          value={draft.maxReviewCycles}
+          value={draft.maxReviewCycles ?? null}
           onChange={(v) => update({ maxReviewCycles: v })}
           helpText="Max review loop cycles per task (0 to skip review)."
         />

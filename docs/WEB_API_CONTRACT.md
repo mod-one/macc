@@ -755,6 +755,28 @@ Response 200:
 }
 ```
 
+### GET `/api/v1/trust`
+
+Purpose: retrieve the dynamic trust status and safety parameters of the project workspace.
+
+Response 200:
+```json
+{
+  "state": "trusted",
+  "local_only": true,
+  "terminal_enabled": false,
+  "user_level_writes": 0,
+  "backups_ready": true,
+  "catalog_pinned": true,
+  "secrets_redacted": true,
+  "server_exposure": "127.0.0.1:3450",
+  "allowed_roots": [
+    "/repo"
+  ],
+  "audit_log": "/repo/.macc/log/coordinator/coordinator.log"
+}
+```
+
 ## Registry
 
 ### GET `/api/v1/registry/tasks`

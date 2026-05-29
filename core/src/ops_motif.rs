@@ -209,35 +209,90 @@ pub struct TrustSummary {
     pub secrets_redacted: bool,
     pub server_exposure: String,
     pub allowed_roots: Vec<String>,
+    pub audit_log: String,
+}
+
+fn check_catalogs_pinned(paths: &ProjectPaths) -> bool {
+    if let Ok(skills) = crate::catalog::load_effective_skills_catalog(paths) {
+        for entry in skills.entries {
+            if entry.source.kind != crate::catalog::SourceKind::Local {
+                if entry.source.checksum.is_none() || entry.source.checksum.as_deref() == Some("") {
+                    return false;
+                }
+            }
+        }
+    }
+    if let Ok(mcp) = crate::catalog::load_effective_mcp_catalog(paths) {
+        for entry in mcp.entries {
+            if entry.source.kind != crate::catalog::SourceKind::Local {
+                if entry.source.checksum.is_none() || entry.source.checksum.as_deref() == Some("") {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+fn check_secrets_redacted(paths: &ProjectPaths) -> bool {
+    if paths.config_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&paths.config_path) {
+            let findings = crate::security::scan_bytes(&paths.config_path.to_string_lossy(), content.as_bytes());
+            findings.iter().all(|f| f.severity != crate::security::Severity::Error)
+        } else {
+            true
+        }
+    } else {
+        true
+    }
+}
+
+fn check_user_level_writes(paths: &ProjectPaths, config: &CanonicalConfig) -> usize {
+    let registry = crate::tool::ToolRegistry::from_inventory();
+    let resolved = crate::resolve::resolve(config, &Default::default());
+    if let Ok(plan) = crate::build_plan(paths, &resolved, &[], &registry) {
+        plan.actions.iter().filter(|action| action.scope() == crate::plan::Scope::User).count()
+    } else {
+        0
+    }
 }
 
 pub fn calculate_trust_summary(paths: &ProjectPaths, config: &CanonicalConfig) -> TrustSummary {
     let local_only = config.settings.offline;
     
-    // Check if terminal disabled in tools
     let terminal_enabled = config.tools.enabled.iter().any(|t| t == "terminal" || t == "shell");
     
-    // Scan if any settings point outside project root
-    let user_level_writes = if config.settings.web_assets.is_some() { 0 } else { 0 };
+    let user_level_writes = check_user_level_writes(paths, config);
 
     let backups_ready = paths.macc_dir.join("backups").exists();
     
-    let catalog_pinned = true;
+    let catalog_pinned = check_catalogs_pinned(paths);
 
-    let secrets_redacted = true;
+    let secrets_redacted = check_secrets_redacted(paths);
     
     let bind_addr = config.settings.web_port.unwrap_or(3450);
     let server_exposure = format!("127.0.0.1:{}", bind_addr);
     let allowed_roots = vec![paths.root.to_string_lossy().into_owned()];
+    let audit_log = paths.macc_dir.join("log/coordinator/coordinator.log").to_string_lossy().into_owned();
+
+    let resolved_safety = config.automation.coordinator.as_ref()
+        .and_then(|c| c.safety_policy.clone())
+        .unwrap_or_else(|| "standard".to_string());
 
     let mut state = TrustState::Trusted;
     if !local_only {
         state = TrustState::Caution;
     }
-    if terminal_enabled {
+    if terminal_enabled || user_level_writes > 0 || !catalog_pinned {
+        state = TrustState::Caution;
+    }
+    if !secrets_redacted || !backups_ready {
         state = TrustState::Risky;
     }
-    
+    if resolved_safety == "strict" && (user_level_writes > 0 || !catalog_pinned || !secrets_redacted) {
+        state = TrustState::Blocked;
+    }
+
     TrustSummary {
         state,
         local_only,
@@ -248,6 +303,7 @@ pub fn calculate_trust_summary(paths: &ProjectPaths, config: &CanonicalConfig) -
         secrets_redacted,
         server_exposure,
         allowed_roots,
+        audit_log,
     }
 }
 
@@ -506,5 +562,88 @@ pub fn apply_preset_to_env_cfg(env_cfg: &mut CoordinatorEnvConfig, preset_name: 
         ))),
     }
     Ok(())
+}
+
+pub fn print_trust_review_card(paths: &ProjectPaths, plan: &crate::plan::ActionPlan, allowed_user_scope: bool) {
+    let has_user_level = plan.actions.iter().any(|a| a.scope() == crate::plan::Scope::User);
+    let scope_str = if has_user_level || allowed_user_scope { "user-level write" } else { "project-level write" };
+    let files_to_change = plan.actions.iter().filter(|a| matches!(a, crate::plan::Action::WriteFile { .. } | crate::plan::Action::MergeJson { .. })).count();
+    let user_files = plan.actions.iter().filter(|a| a.scope() == crate::plan::Scope::User && matches!(a, crate::plan::Action::WriteFile { .. } | crate::plan::Action::MergeJson { .. })).count();
+
+    let backups_dir = paths.macc_dir.join("backups");
+    let mut backup_str = "not found (will create)".to_string();
+    if backups_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(&backups_dir) {
+            let mut latest = None;
+            for entry in entries.flatten() {
+                if let Ok(meta) = entry.metadata() {
+                    if meta.is_dir() {
+                        let name = entry.file_name().to_string_lossy().into_owned();
+                        if latest.is_none() || name > latest.clone().unwrap() {
+                            latest = Some(name);
+                        }
+                    }
+                }
+            }
+            if let Some(l) = latest {
+                backup_str = format!(".macc/backups/{}", l);
+            } else {
+                backup_str = "ready".to_string();
+            }
+        } else {
+            backup_str = "ready".to_string();
+        }
+    }
+
+    let mut pinned = 0;
+    let mut unpinned = 0;
+    if let Ok(skills) = crate::catalog::load_effective_skills_catalog(paths) {
+        for entry in skills.entries {
+            if entry.source.kind != crate::catalog::SourceKind::Local {
+                if entry.source.checksum.is_some() && entry.source.checksum.as_deref() != Some("") {
+                    pinned += 1;
+                } else {
+                    unpinned += 1;
+                }
+            }
+        }
+    }
+    if let Ok(mcp) = crate::catalog::load_effective_mcp_catalog(paths) {
+        for entry in mcp.entries {
+            if entry.source.kind != crate::catalog::SourceKind::Local {
+                if entry.source.checksum.is_some() && entry.source.checksum.as_deref() != Some("") {
+                    pinned += 1;
+                } else {
+                    unpinned += 1;
+                }
+            }
+        }
+    }
+
+    let mut secrets_count = 0;
+    for action in &plan.actions {
+        match action {
+            crate::plan::Action::WriteFile { path, content, .. } => {
+                let findings = crate::security::scan_bytes(path, content);
+                secrets_count += findings.iter().filter(|f| f.severity == crate::security::Severity::Error).count();
+            }
+            crate::plan::Action::MergeJson { path, patch, .. } => {
+                let content = serde_json::to_vec(patch).unwrap_or_default();
+                let findings = crate::security::scan_bytes(path, &content);
+                secrets_count += findings.iter().filter(|f| f.severity == crate::security::Severity::Error).count();
+            }
+            _ => {}
+        }
+    }
+    let secrets_str = if secrets_count == 0 { "none".to_string() } else { format!("{} detected", secrets_count) };
+
+    println!("\nTrust Review");
+    println!("Scope:            {}", scope_str);
+    println!("Files to change:  {}", files_to_change);
+    println!("User-level files: {}", user_files);
+    println!("Backups:          {}", backup_str);
+    println!("Remote inputs:    {} pinned, {} unpinned", pinned, unpinned);
+    println!("Secrets detected: {}", secrets_str);
+    println!("Rollback:         macc restore --backup <id>\n");
 }
 

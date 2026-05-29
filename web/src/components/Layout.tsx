@@ -51,6 +51,7 @@ const navGroups = [
       { path: '/ops/logs', label: 'Logs', icon: Icons.AlignLeft },
       { path: '/ops/backups', label: 'Backups', icon: Icons.Archive },
       { path: '/ops/git', label: 'Git Graph', icon: Icons.Activity },
+      { path: '/ops/trust', label: 'Trust & Safety', icon: Icons.Shield },
     ]
   },
   {

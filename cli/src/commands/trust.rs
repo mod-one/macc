@@ -29,6 +29,7 @@ impl Command for TrustCommand {
         println!("Backups Status  : {}", if trust.backups_ready { "READY (Restorables found)" } else { "MISSING (.macc/backups/ does not exist)" });
         println!("Catalog Pinned  : {}", if trust.catalog_pinned { "YES (Deterministic catalogs)" } else { "NO (Caution: Dynamic catalogs in use)" });
         println!("Secrets Redacted: {}", if trust.secrets_redacted { "YES (Redaction scanner active)" } else { "NO" });
+        println!("Audit Log File  : {}", trust.audit_log);
         println!("----------------------------------------------------");
         println!("Allowed Roots:");
         for root in &trust.allowed_roots {

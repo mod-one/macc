@@ -368,7 +368,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(6), // Title + status badges
+            Constraint::Length(7), // Title + status badges + trust strip
             Constraint::Min(0),    // Body
             Constraint::Length(4), // Footer / Navigation help
         ])
@@ -396,6 +396,20 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             "warn"
         }
     );
+    let trust_strip = if let (Some(paths), Some(config)) = (&state.project_paths, state.working_copy.as_ref()) {
+        let trust = macc_core::ops_motif::calculate_trust_summary(paths, config);
+        let local_only = if trust.local_only { "yes" } else { "no" };
+        let terminal = if trust.terminal_enabled { "enabled" } else { "disabled" };
+        let backups = if trust.backups_ready { "ready" } else { "missing" };
+        let catalog = if trust.catalog_pinned { "pinned" } else { "unpinned" };
+        let secrets = if trust.secrets_redacted { "redacted" } else { "unredacted" };
+        Some(format!(
+            "Local only: {} | Terminal: {} | User writes: {} | Backups: {} | Catalog: {} | Secrets: {}",
+            local_only, terminal, trust.user_level_writes, backups, catalog, secrets
+        ))
+    } else {
+        None
+    };
     let header_ctx = HeaderContext {
         app_name: "[M][A][C][C]",
         screen_title: current_screen.title(),
@@ -408,6 +422,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
         coordinator_command: state.coordinator_running_command.as_deref(),
         status: state.status_line(),
         width: chunks[0].width,
+        trust_strip,
     };
     let title = Paragraph::new(header_lines(&header_ctx, &theme)).block(panel("MACC"));
     f.render_widget(title, chunks[0]);

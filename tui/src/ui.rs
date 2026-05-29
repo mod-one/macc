@@ -119,6 +119,7 @@ pub struct HeaderContext<'a> {
     pub coordinator_command: Option<&'a str>,
     pub status: Option<(UiStatusLevel, String)>,
     pub width: u16,
+    pub trust_strip: Option<String>,
 }
 
 pub fn header_lines(ctx: &HeaderContext<'_>, t: &Theme) -> Vec<Line<'static>> {
@@ -174,6 +175,14 @@ pub fn header_lines(ctx: &HeaderContext<'_>, t: &Theme) -> Vec<Line<'static>> {
             ),
         ]),
     ];
+
+    if let Some(strip) = &ctx.trust_strip {
+        lines.push(Line::from(vec![
+            Span::styled("trust  ", Style::default().fg(t.muted)),
+            Span::raw(": "),
+            Span::raw(strip.clone()),
+        ]));
+    }
 
     if let Some((lvl, msg)) = &ctx.status {
         lines.push(Line::from(vec![

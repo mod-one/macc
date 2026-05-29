@@ -32,6 +32,7 @@ import type {
   ApiTakeoverRequestResponse,
   ApiWorktree,
   ApiWorktreeCreateRequest,
+  ApiTrustSummary,
   GitCommit,
   GitGraphResponse,
 } from './models';
@@ -722,4 +723,9 @@ export async function clearToolCooldown(
     'DELETE',
     options,
   );
+}
+export async function getTrust(
+  options: ApiRequestOptions = {},
+): Promise<ApiTrustSummary> {
+  return sendJson<ApiTrustSummary>('/trust', 'GET', options);
 }
