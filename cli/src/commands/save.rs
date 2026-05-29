@@ -55,9 +55,54 @@ impl Command for SaveCommand {
                 redact_logs,
                 dry_run,
             } => {
+                let mut name = name.clone();
+                let mut overwrite = *overwrite;
+
+                let saves_dir = macc_core::save::user_saves_dir();
+                if let Some(ref dir) = saves_dir {
+                    let target_save_dir = dir.join(&name);
+                    if target_save_dir.exists() && !overwrite {
+                        use std::io::IsTerminal;
+                        let term_interactive = std::io::stdin().is_terminal() && std::env::var("CARGO_MANIFEST_DIR").is_err();
+                        if term_interactive {
+                            println!("Save \"{}\" already exists.\n", name);
+                            println!("Choose:");
+                            println!("  [O] Overwrite");
+                            println!("  [N] Create a new save name");
+                            println!("  [A] Abort");
+
+                            use std::io::{self, Write};
+                            print!("> ");
+                            io::stdout().flush().ok();
+                            let mut input = String::new();
+                            io::stdin().read_line(&mut input).ok();
+                            let choice = input.trim().to_lowercase();
+
+                            if choice == "o" || choice == "overwrite" {
+                                overwrite = true;
+                            } else if choice == "n" || choice == "new" {
+                                print!("Enter new save name: ");
+                                io::stdout().flush().ok();
+                                let mut new_name = String::new();
+                                io::stdin().read_line(&mut new_name).ok();
+                                let trimmed = new_name.trim().to_string();
+                                if !trimmed.is_empty() {
+                                    name = trimmed;
+                                } else {
+                                    println!("Save aborted: Empty name provided.");
+                                    return Ok(());
+                                }
+                            } else {
+                                println!("Save aborted.");
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+
                 let opts = macc_core::save::SaveOptions {
                     description: description.clone(),
-                    overwrite: *overwrite,
+                    overwrite,
                     only: only.clone(),
                     no_sessions: *no_sessions,
                     include_logs: *include_logs,
@@ -69,7 +114,7 @@ impl Command for SaveCommand {
                     include_state: false,
                 };
 
-                let manifest = macc_core::save::create_save_bundle(&paths, name, &opts)?;
+                let manifest = macc_core::save::create_save_bundle(&paths, &name, &opts)?;
                 println!("Saved MACC bundle \"{}\".\n", manifest.name);
                 println!("Included:");
                 println!("  {} config", if manifest.includes.config { "✓" } else { "-" });
