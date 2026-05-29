@@ -329,19 +329,25 @@ fn compute_manifest_payload_hash(content: &str) -> String {
     format!("sha256:{:x}", hasher.finalize())
 }
 
-fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> std::io::Result<()> {
+fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>, paths: &ProjectPaths) -> std::io::Result<()> {
     fs::create_dir_all(&dst)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;
-        let ty = entry.file_type()?;
-        if ty.is_dir() {
-            let name = entry.file_name().to_string_lossy().to_lowercase();
-            if name == "cache" || name == "download" || name == "installed" || name == "worktree" || name == "worktrees" {
+        let path = entry.path();
+
+        let kind = crate::classify_path(&path, paths);
+        match kind {
+            crate::ManagedPathKind::Cache | crate::ManagedPathKind::Worktree | crate::ManagedPathKind::RuntimeState | crate::ManagedPathKind::Generated | crate::ManagedPathKind::Secret => {
                 continue;
             }
-            copy_dir_all(entry.path(), dst.as_ref().join(entry.file_name()))?;
+            _ => {}
+        }
+
+        let ty = entry.file_type()?;
+        if ty.is_dir() {
+            copy_dir_all(&path, dst.as_ref().join(entry.file_name()), paths)?;
         } else {
-            fs::copy(entry.path(), dst.as_ref().join(entry.file_name()))?;
+            fs::copy(&path, dst.as_ref().join(entry.file_name()))?;
         }
     }
     Ok(())
@@ -455,7 +461,7 @@ pub fn create_save_bundle(paths: &ProjectPaths, name: &str, opts: &SaveOptions) 
     // 3. Copy catalogs
     if include_catalogs && paths.project_catalog_dir().exists() {
         let catalogs_dest = tmp_save_dir.join("catalogs");
-        if let Err(e) = copy_dir_all(&paths.project_catalog_dir(), &catalogs_dest) {
+        if let Err(e) = copy_dir_all(&paths.project_catalog_dir(), &catalogs_dest, paths) {
             fs::remove_dir_all(&tmp_save_dir).ok();
             return Err(MaccError::Io {
                 path: catalogs_dest.to_string_lossy().into(),
@@ -471,7 +477,7 @@ pub fn create_save_bundle(paths: &ProjectPaths, name: &str, opts: &SaveOptions) 
     if (include_prd || include_state) && registry_src.exists() {
         let registry_dest = tmp_save_dir.join("automation").join("task");
         fs::create_dir_all(registry_dest.parent().unwrap()).ok();
-        if let Err(e) = copy_dir_all(&registry_src, &registry_dest) {
+        if let Err(e) = copy_dir_all(&registry_src, &registry_dest, paths) {
             fs::remove_dir_all(&tmp_save_dir).ok();
             return Err(MaccError::Io {
                 path: registry_dest.to_string_lossy().into(),
@@ -762,7 +768,7 @@ pub fn restore_save_bundle(paths: &ProjectPaths, name: &str, opts: &RestoreOptio
     if manifest.includes.catalogs {
         let catalogs_src = target_save_dir.join("catalogs");
         if catalogs_src.exists() {
-            let _ = copy_dir_all(&catalogs_src, &paths.project_catalog_dir());
+            let _ = copy_dir_all(&catalogs_src, &paths.project_catalog_dir(), paths);
         }
     }
 
@@ -771,7 +777,7 @@ pub fn restore_save_bundle(paths: &ProjectPaths, name: &str, opts: &RestoreOptio
         let logs_src = target_save_dir.join("logs");
         if logs_src.exists() {
             let restored_logs_dest = paths.macc_dir.join("restored-logs").join(name);
-            let _ = copy_dir_all(&logs_src, &restored_logs_dest);
+            let _ = copy_dir_all(&logs_src, &restored_logs_dest, paths);
         }
     }
 
@@ -780,7 +786,7 @@ pub fn restore_save_bundle(paths: &ProjectPaths, name: &str, opts: &RestoreOptio
         let registry_src = target_save_dir.join("automation").join("task");
         if registry_src.exists() {
             let registry_dest = paths.macc_dir.join("automation").join("task");
-            let _ = copy_dir_all(&registry_src, &registry_dest);
+            let _ = copy_dir_all(&registry_src, &registry_dest, paths);
         }
     }
 

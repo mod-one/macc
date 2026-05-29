@@ -183,6 +183,92 @@ pub struct ClearReport {
     pub skipped: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ManagedPathKind {
+    SourceOfTruth,
+    PortableState,
+    RuntimeState,
+    DiagnosticLog,
+    Generated,
+    Cache,
+    Worktree,
+    Secret,
+    Unknown,
+}
+
+pub fn classify_path<P: AsRef<Path>>(path: P, paths: &ProjectPaths) -> ManagedPathKind {
+    let path = path.as_ref();
+    let abs_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        paths.root.join(path)
+    };
+
+    let clean_path = abs_path.canonicalize().unwrap_or(abs_path);
+
+    if clean_path == paths.config_path {
+        return ManagedPathKind::SourceOfTruth;
+    }
+
+    if let Ok(rel) = clean_path.strip_prefix(&paths.root) {
+        let components: Vec<String> = rel.components()
+            .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
+            .collect();
+
+        if !components.is_empty() && components[0] == ".macc" {
+            if components.len() > 1 {
+                let sub = &components[1];
+                if sub == "cache" || sub == "download" {
+                    return ManagedPathKind::Cache;
+                }
+                if sub == "worktree" || sub == "worktrees" {
+                    return ManagedPathKind::Worktree;
+                }
+                if sub == "log" || sub == "logs" {
+                    return ManagedPathKind::DiagnosticLog;
+                }
+                if sub == "state" {
+                    return ManagedPathKind::PortableState;
+                }
+                if sub == "catalog" {
+                    return ManagedPathKind::PortableState;
+                }
+                if sub == "backups" {
+                    return ManagedPathKind::RuntimeState;
+                }
+                if sub == "tmp" {
+                    return ManagedPathKind::RuntimeState;
+                }
+                if sub == "skills" {
+                    return ManagedPathKind::Generated;
+                }
+                if sub == "automation" {
+                    return ManagedPathKind::Generated;
+                }
+            } else {
+                return ManagedPathKind::PortableState;
+            }
+        }
+
+        for comp in &components {
+            if comp == "cache" || comp == "download" {
+                return ManagedPathKind::Cache;
+            }
+            if comp == "worktree" || comp == "worktrees" || comp == ".worktrees" {
+                return ManagedPathKind::Worktree;
+            }
+            if comp == "node_modules" || comp == "vendor" {
+                return ManagedPathKind::Cache;
+            }
+            if comp == ".tmp" || comp == "tmp" {
+                return ManagedPathKind::RuntimeState;
+            }
+        }
+    }
+
+    ManagedPathKind::Unknown
+}
+
 #[derive(Debug, Clone)]
 pub struct ProjectPaths {
     pub root: PathBuf,
@@ -2398,6 +2484,42 @@ mod tests {
         assert!(!nested.exists());
         assert!(!temp_dir.join("a/b").exists());
         assert!(!temp_dir.join("a").exists());
+
+        fs::remove_dir_all(&temp_dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn test_classify_path_kinds() -> Result<()> {
+        let temp_dir = std::env::temp_dir().join(format!("macc_classify_test_{}", uuid_v4_like()));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let paths = ProjectPaths::from_root(&temp_dir);
+
+        // 1. Config file (SourceOfTruth)
+        assert_eq!(classify_path(&paths.config_path, &paths), ManagedPathKind::SourceOfTruth);
+
+        // 2. Cache dir (Cache)
+        assert_eq!(classify_path(temp_dir.join(".macc/cache"), &paths), ManagedPathKind::Cache);
+        assert_eq!(classify_path(temp_dir.join(".macc/cache/some_file"), &paths), ManagedPathKind::Cache);
+        assert_eq!(classify_path(temp_dir.join("some/nested/node_modules/pkg"), &paths), ManagedPathKind::Cache);
+
+        // 3. Worktree dir (Worktree)
+        assert_eq!(classify_path(temp_dir.join(".macc/worktrees"), &paths), ManagedPathKind::Worktree);
+        assert_eq!(classify_path(temp_dir.join("some/nested/.worktrees"), &paths), ManagedPathKind::Worktree);
+
+        // 4. Log dir (DiagnosticLog)
+        assert_eq!(classify_path(temp_dir.join(".macc/log"), &paths), ManagedPathKind::DiagnosticLog);
+
+        // 5. PortableState (state/catalog)
+        assert_eq!(classify_path(temp_dir.join(".macc/state"), &paths), ManagedPathKind::PortableState);
+        assert_eq!(classify_path(temp_dir.join(".macc/catalog"), &paths), ManagedPathKind::PortableState);
+
+        // 6. RuntimeState (backups/tmp)
+        assert_eq!(classify_path(temp_dir.join(".macc/tmp"), &paths), ManagedPathKind::RuntimeState);
+        assert_eq!(classify_path(temp_dir.join("my_temp_dir/tmp"), &paths), ManagedPathKind::RuntimeState);
+
+        // 7. Unknown
+        assert_eq!(classify_path(temp_dir.join("random_user_file.txt"), &paths), ManagedPathKind::Unknown);
 
         fs::remove_dir_all(&temp_dir).ok();
         Ok(())
