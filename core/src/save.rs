@@ -835,7 +835,9 @@ pub fn detect_matching_saves(paths: &ProjectPaths) -> Result<Vec<(SaveBundleMani
             matches.push((m, strength));
         }
     }
-    matches.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by match strength descending
+    matches.sort_by(|a, b| {
+        b.1.cmp(&a.1).then_with(|| b.0.created_at.cmp(&a.0.created_at))
+    });
     Ok(matches)
 }
 
