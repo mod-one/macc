@@ -5,6 +5,7 @@ use std::fs;
 use crate::{MaccError, ProjectPaths, Result};
 use crate::config::CanonicalConfig;
 use crate::coordinator::types::CoordinatorEnvConfig;
+use crate::coordinator::error_normalizer::CanonicalClass;
 
 // =========================================================================
 // Setting Descriptor Contracts
@@ -884,15 +885,75 @@ pub fn verify_lock_manifest(paths: &ProjectPaths, lock: &LockManifest) -> Result
 // Failure Recovery Summary
 // =========================================================================
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum CanonicalClass {
-    RateLimit,
-    QuotaExhausted,
-    SessionConflict,
-    NetworkError,
-    ParseError,
-    Unknown,
+pub fn load_task_registry(paths: &ProjectPaths, config: &CanonicalConfig) -> Result<crate::coordinator::model::TaskRegistry> {
+    let mut args = std::collections::BTreeMap::new();
+    let coord = config.automation.coordinator.as_ref();
+    if let Some(storage_mode) = coord.and_then(|c| c.storage_mode.as_ref()) {
+        args.insert("storage-mode".to_string(), storage_mode.clone());
+    }
+    if let Some(fallback) = coord.and_then(|c| c.legacy_json_fallback) {
+        if fallback {
+            args.insert("legacy-json-fallback".to_string(), "true".to_string());
+        }
+    }
+    let value = crate::coordinator::state::coordinator_state_registry_load(&paths.root, &args)?;
+    let registry: crate::coordinator::model::TaskRegistry = serde_json::from_value(value).map_err(|e| {
+        MaccError::Validation(format!("Failed to parse registry: {}", e))
+    })?;
+    Ok(registry)
+}
+
+pub fn log_ops_action(paths: &ProjectPaths, action: &str, task_id: &str) -> Result<()> {
+    #[derive(Serialize)]
+    struct AuditRecord {
+        timestamp: String,
+        actor: String,
+        action: String,
+        method: String,
+        path: String,
+        inputs_summary: serde_json::Value,
+        result: AuditResult,
+        duration_ms: u64,
+        log_path: &'static str,
+    }
+    #[derive(Serialize)]
+    struct AuditResult {
+        status_code: u16,
+    }
+
+    let log_path = paths.root.join(".macc/log/ops.jsonl");
+    if let Some(parent) = log_path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+
+    let actor = std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "unknown".to_string());
+
+    let record = AuditRecord {
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        actor,
+        action: format!("cli failure {}", action),
+        method: "CLI".to_string(),
+        path: format!("/failure/{}", action),
+        inputs_summary: serde_json::json!({ "task_id": task_id }),
+        result: AuditResult { status_code: 200 },
+        duration_ms: 0,
+        log_path: ".macc/log/ops.jsonl",
+    };
+
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        if let Ok(line) = serde_json::to_vec(&record) {
+            use std::io::Write;
+            let _ = file.write_all(&line);
+            let _ = file.write_all(b"\n");
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -910,17 +971,47 @@ pub struct FailureSummary {
     pub evidence_refs: Vec<String>,
 }
 
-pub fn get_failure_summary(task_id: &str) -> FailureSummary {
-    FailureSummary {
+pub fn get_failure_summary(paths: &ProjectPaths, config: &CanonicalConfig, task_id: &str) -> Result<FailureSummary> {
+    let registry = load_task_registry(paths, config)?;
+    let task = registry.tasks.iter().find(|t| t.id == task_id)
+        .ok_or_else(|| MaccError::Validation(format!("Task {} not found", task_id)))?;
+    
+    let runtime = &task.task_runtime;
+    let error_code = runtime.last_error_code.clone().unwrap_or_else(|| "E901".to_string());
+    let normalized_cause = crate::coordinator::error_normalizer::error_code_to_canonical_class(&error_code);
+    
+    let retry_policy = crate::coordinator::error_normalizer::retry_policy_for_error_code(&error_code);
+    let retryable = retry_policy == crate::coordinator::error_normalizer::RetryPolicy::Retryable;
+    let user_action_required = retry_policy == crate::coordinator::error_normalizer::RetryPolicy::Conditional || retry_policy == crate::coordinator::error_normalizer::RetryPolicy::NotRetryable;
+    
+    let affected_worktree = task.worktree.as_ref()
+        .and_then(|w| w.worktree_path.clone())
+        .or_else(|| Some(format!(".macc/worktree/{}", task_id)));
+        
+    let last_safe_state = if task.state == "claimed" {
+        "claimed task session initialized".to_string()
+    } else if task.state == "in_progress" {
+        "performer in-progress state snapshot".to_string()
+    } else {
+        "base branch workspace".to_string()
+    };
+    
+    let recommended_action = if retryable {
+        "retry with backoff or switch tool".to_string()
+    } else {
+        "inspect files and resolve conflicts manually".to_string()
+    };
+
+    Ok(FailureSummary {
         task_id: task_id.to_string(),
-        normalized_cause: CanonicalClass::RateLimit,
-        error_code: "E601".to_string(),
-        retryable: true,
-        user_action_required: false,
-        last_safe_state: "committed dev changes, not merged".to_string(),
-        affected_worktree: Some(format!(".macc/worktree/{}", task_id)),
+        normalized_cause,
+        error_code,
+        retryable,
+        user_action_required,
+        last_safe_state,
+        affected_worktree,
         affected_files: vec![],
-        recommended_action: "retry with backoff or switch tool".to_string(),
+        recommended_action,
         guarded_actions: vec![
             "Retry".to_string(),
             "Retry with different tool".to_string(),
@@ -931,7 +1022,7 @@ pub fn get_failure_summary(task_id: &str) -> FailureSummary {
             "Abandon".to_string(),
         ],
         evidence_refs: vec![],
-    }
+    })
 }
 
 pub fn apply_preset_to_config(config: &mut CanonicalConfig, preset_name: &str) -> Result<()> {

@@ -4051,4 +4051,187 @@ fi
             _ => panic!("unexpected command"),
         }
     }
+
+    #[test]
+    fn test_failure_recovery_commands() -> macc_core::Result<()> {
+        let temp_base = std::env::temp_dir().join(format!("macc_failure_test_{}", uuid_v4_like()));
+        std::fs::create_dir_all(&temp_base).unwrap();
+
+        // 1. Initialize MACC
+        run_with_engine(
+            Cli {
+                cwd: temp_base.to_string_lossy().into(),
+                verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
+                command: Some(Commands::Init {
+                    force: false,
+                    wizard: false,
+                    profile: None,
+                }),
+            },
+            TestEngine::with_fixtures(),
+        )?;
+
+        // Set storage_mode to json so JSON registry path is used
+        let config_path = temp_base.join(".macc/macc.yaml");
+        let config_str = std::fs::read_to_string(&config_path).unwrap();
+        let mut config_val: serde_yaml::Value = serde_yaml::from_str(&config_str)
+            .unwrap_or(serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+        if !config_val.is_mapping() {
+            config_val = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+        }
+        let automation = config_val.as_mapping_mut()
+            .unwrap()
+            .entry(serde_yaml::Value::String("automation".to_string()))
+            .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()))
+            .as_mapping_mut()
+            .unwrap();
+        let coordinator = automation
+            .entry(serde_yaml::Value::String("coordinator".to_string()))
+            .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()))
+            .as_mapping_mut()
+            .unwrap();
+        coordinator.insert(
+            serde_yaml::Value::String("storage_mode".to_string()),
+            serde_yaml::Value::String("json".to_string())
+        );
+        let new_config_str = serde_yaml::to_string(&config_val).unwrap();
+        std::fs::write(&config_path, new_config_str).unwrap();
+
+        // 2. Write a mock task registry with a failed task
+        let registry_dir = temp_base.join(".macc/automation/task");
+        std::fs::create_dir_all(&registry_dir).unwrap();
+        let registry_path = registry_dir.join("task_registry.json");
+
+        use macc_core::coordinator::model::{TaskRegistry, Task, TaskRuntime};
+        let mut task = Task::default();
+        task.id = "AUTH-014".to_string();
+        task.title = Some("Add OAuth callback validation".to_string());
+        task.state = "blocked".to_string();
+        
+        let mut runtime = TaskRuntime::default();
+        runtime.status = Some("failed".to_string());
+        runtime.last_error_code = Some("E601".to_string());
+        runtime.last_error_message = Some("Rate limit exceeded".to_string());
+        task.task_runtime = runtime;
+
+        let registry = TaskRegistry {
+            tasks: vec![task],
+            ..Default::default()
+        };
+
+        std::fs::write(&registry_path, serde_json::to_string(&registry).unwrap()).unwrap();
+
+        // 3. Test `macc failure list`
+        run_with_engine(
+            Cli {
+                cwd: temp_base.to_string_lossy().into(),
+                verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
+                command: Some(Commands::Failure {
+                    failure_command: commands::failure::FailureCommands::List,
+                }),
+            },
+            TestEngine::with_fixtures(),
+        )?;
+
+        // 4. Test `macc failure show AUTH-014`
+        run_with_engine(
+            Cli {
+                cwd: temp_base.to_string_lossy().into(),
+                verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
+                command: Some(Commands::Failure {
+                    failure_command: commands::failure::FailureCommands::Show {
+                        task_id: "AUTH-014".to_string(),
+                    },
+                }),
+            },
+            TestEngine::with_fixtures(),
+        )?;
+
+        // 5. Test `macc failure retry AUTH-014`
+        run_with_engine(
+            Cli {
+                cwd: temp_base.to_string_lossy().into(),
+                verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
+                command: Some(Commands::Failure {
+                    failure_command: commands::failure::FailureCommands::Retry {
+                        task_id: "AUTH-014".to_string(),
+                        tool: Some("codex".to_string()),
+                    },
+                }),
+            },
+            TestEngine::with_fixtures(),
+        )?;
+
+        // Verify task state updated to 'todo'
+        let registry_content = std::fs::read_to_string(&registry_path).unwrap();
+        let registry_after_retry: TaskRegistry = serde_json::from_str(&registry_content).unwrap();
+        assert_eq!(registry_after_retry.tasks[0].state, "todo");
+        assert_eq!(registry_after_retry.tasks[0].tool, Some("codex".to_string()));
+
+        // 6. Test `macc failure salvage AUTH-014`
+        run_with_engine(
+            Cli {
+                cwd: temp_base.to_string_lossy().into(),
+                verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
+                command: Some(Commands::Failure {
+                    failure_command: commands::failure::FailureCommands::Salvage {
+                        task_id: "AUTH-014".to_string(),
+                    },
+                }),
+            },
+            TestEngine::with_fixtures(),
+        )?;
+
+        let registry_content = std::fs::read_to_string(&registry_path).unwrap();
+        let registry_after_salvage: TaskRegistry = serde_json::from_str(&registry_content).unwrap();
+        assert_eq!(registry_after_salvage.tasks[0].state, "changes_requested");
+
+        // 7. Test `macc failure abandon AUTH-014`
+        run_with_engine(
+            Cli {
+                cwd: temp_base.to_string_lossy().into(),
+                verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
+                command: Some(Commands::Failure {
+                    failure_command: commands::failure::FailureCommands::Abandon {
+                        task_id: "AUTH-014".to_string(),
+                    },
+                }),
+            },
+            TestEngine::with_fixtures(),
+        )?;
+
+        let registry_content = std::fs::read_to_string(&registry_path).unwrap();
+        let registry_after_abandon: TaskRegistry = serde_json::from_str(&registry_content).unwrap();
+        assert_eq!(registry_after_abandon.tasks[0].state, "abandoned");
+
+        // Verify audit log entries were recorded
+        let ops_log_path = temp_base.join(".macc/log/ops.jsonl");
+        assert!(ops_log_path.exists());
+        let ops_log_content = std::fs::read_to_string(ops_log_path).unwrap();
+        assert!(ops_log_content.contains("cli failure retry"));
+        assert!(ops_log_content.contains("cli failure salvage"));
+        assert!(ops_log_content.contains("cli failure abandon"));
+
+        // Cleanup
+        std::fs::remove_dir_all(&temp_base).ok();
+        Ok(())
+    }
 }
