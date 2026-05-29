@@ -293,6 +293,30 @@ fn parse_size_to_bytes(s: &str) -> u64 {
     }
 }
 
+fn parse_duration_to_seconds(s: &str) -> u64 {
+    let s = s.trim().to_ascii_lowercase();
+    if s.is_empty() {
+        return 7 * 24 * 3600; // Default fallback (7 days)
+    }
+    
+    let (num_part, multiplier) = if s.ends_with('d') {
+        (&s[..s.len() - 1], 24 * 3600)
+    } else if s.ends_with('h') {
+        (&s[..s.len() - 1], 3600)
+    } else if s.ends_with('m') {
+        (&s[..s.len() - 1], 60)
+    } else if s.ends_with('s') {
+        (&s[..s.len() - 1], 1)
+    } else {
+        (s.as_str(), 1)
+    };
+    
+    match num_part.trim().parse::<u64>() {
+        Ok(val) => val * multiplier,
+        Err(_) => 7 * 24 * 3600, // Fallback
+    }
+}
+
 fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> std::io::Result<()> {
     fs::create_dir_all(&dst)?;
     for entry in fs::read_dir(src)? {
@@ -454,8 +478,9 @@ pub fn create_save_bundle(paths: &ProjectPaths, name: &str, opts: &SaveOptions) 
         let logs_dest = tmp_save_dir.join("logs");
         fs::create_dir_all(&logs_dest).ok();
         
-        // Custom copy logs with size limit and redaction
+        // Custom copy logs with size limit, time range, and redaction
         let max_bytes = parse_size_to_bytes(&opts.log_max_size);
+        let max_age_seconds = parse_duration_to_seconds(&opts.log_since);
         let mut total_copied = 0;
 
         let mut read_logs = |dir: &Path| -> std::io::Result<()> {
@@ -465,6 +490,13 @@ pub fn create_save_bundle(paths: &ProjectPaths, name: &str, opts: &SaveOptions) 
                 let path = entry.path();
                 if path.is_file() {
                     let meta = entry.metadata()?;
+                    if let Ok(modified_time) = meta.modified() {
+                        if let Ok(elapsed) = modified_time.elapsed() {
+                            if elapsed.as_secs() > max_age_seconds {
+                                continue;
+                            }
+                        }
+                    }
                     if total_copied + meta.len() > max_bytes {
                         break;
                     }
