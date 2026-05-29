@@ -269,6 +269,30 @@ pub fn redact_secrets_in_text(text: &str) -> String {
     redacted
 }
 
+fn parse_size_to_bytes(s: &str) -> u64 {
+    let s = s.trim().to_ascii_uppercase();
+    if s.is_empty() {
+        return 50 * 1024 * 1024; // Default fallback
+    }
+    
+    let (num_part, multiplier) = if s.ends_with("GB") {
+        (&s[..s.len() - 2], 1024 * 1024 * 1024)
+    } else if s.ends_with("MB") {
+        (&s[..s.len() - 2], 1024 * 1024)
+    } else if s.ends_with("KB") {
+        (&s[..s.len() - 2], 1024)
+    } else if s.ends_with('B') {
+        (&s[..s.len() - 1], 1)
+    } else {
+        (s.as_str(), 1)
+    };
+    
+    match num_part.trim().parse::<u64>() {
+        Ok(val) => val * multiplier,
+        Err(_) => 50 * 1024 * 1024, // Fallback
+    }
+}
+
 fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> std::io::Result<()> {
     fs::create_dir_all(&dst)?;
     for entry in fs::read_dir(src)? {
@@ -431,7 +455,7 @@ pub fn create_save_bundle(paths: &ProjectPaths, name: &str, opts: &SaveOptions) 
         fs::create_dir_all(&logs_dest).ok();
         
         // Custom copy logs with size limit and redaction
-        let max_bytes = if opts.log_max_size == "50MB" { 50 * 1024 * 1024 } else { 50 * 1024 * 1024 }; // Simple fallback
+        let max_bytes = parse_size_to_bytes(&opts.log_max_size);
         let mut total_copied = 0;
 
         let mut read_logs = |dir: &Path| -> std::io::Result<()> {
