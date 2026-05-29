@@ -845,7 +845,7 @@ pub fn is_macc_state_unsaved(paths: &ProjectPaths) -> Result<bool> {
     if !paths.config_path.exists() {
         return Ok(false);
     }
-    let saves = list_save_bundles()?;
+    let saves = detect_matching_saves(paths)?;
     if saves.is_empty() {
         return Ok(true);
     }
@@ -858,7 +858,7 @@ pub fn is_macc_state_unsaved(paths: &ProjectPaths) -> Result<bool> {
         None
     };
 
-    for m in &saves {
+    for (m, _) in &saves {
         let config_matches = match (&config_sha, &m.hashes.config) {
             (Some(c), Some(m_c)) => c == m_c,
             (None, None) => true,
@@ -875,4 +875,54 @@ pub fn is_macc_state_unsaved(paths: &ProjectPaths) -> Result<bool> {
     }
 
     Ok(true)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnsavedStateReport {
+    pub config_changed: bool,
+    pub sessions_changed: bool,
+}
+
+pub fn get_unsaved_state_report(paths: &ProjectPaths) -> Result<UnsavedStateReport> {
+    let mut report = UnsavedStateReport {
+        config_changed: false,
+        sessions_changed: false,
+    };
+    if !paths.config_path.exists() {
+        return Ok(report);
+    }
+
+    let config_sha = compute_file_sha256(&paths.config_path).ok();
+    let sessions_path = paths.macc_dir.join("state").join("tool-sessions.json");
+    let sessions_sha = if sessions_path.exists() {
+        compute_file_sha256(&sessions_path).ok()
+    } else {
+        None
+    };
+
+    let matches = detect_matching_saves(paths)?;
+    if matches.is_empty() {
+        report.config_changed = true;
+        if sessions_path.exists() {
+            report.sessions_changed = true;
+        }
+        return Ok(report);
+    }
+
+    let best_match = &matches[0].0;
+    let config_matches = match (&config_sha, &best_match.hashes.config) {
+        (Some(c), Some(m_c)) => c == m_c,
+        (None, None) => true,
+        _ => false,
+    };
+    let sessions_matches = match (&sessions_sha, &best_match.hashes.coordinator_sessions) {
+        (Some(s), Some(m_s)) => s == m_s,
+        (None, None) => true,
+        _ => false,
+    };
+
+    report.config_changed = !config_matches;
+    report.sessions_changed = !sessions_matches;
+
+    Ok(report)
 }

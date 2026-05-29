@@ -70,8 +70,16 @@ impl Command for ClearCommand {
                         ));
                     }
                 } else {
+                    let unsaved_report = macc_core::save::get_unsaved_state_report(&paths)?;
                     println!("Unsaved MACC setup detected.\n");
-                    println!("Save before clearing?");
+                    println!("The following state has changed since the last save:");
+                    if unsaved_report.config_changed {
+                        println!("  - config");
+                    }
+                    if unsaved_report.sessions_changed {
+                        println!("  - coordinator sessions");
+                    }
+                    println!("\nSave before clearing?");
                     println!("  [Y] Save now");
                     println!("  [N] Continue without saving");
                     println!("  [A] Abort clear");
@@ -84,32 +92,87 @@ impl Command for ClearCommand {
                     let choice = input.trim().to_lowercase();
 
                     if choice.is_empty() || choice == "y" || choice == "yes" {
-                        print!("Save name [default: before-clear]: ");
-                        io::stdout().flush().ok();
-                        let mut name_input = String::new();
-                        io::stdin().read_line(&mut name_input).ok();
-                        let mut save_name = name_input.trim().to_string();
-                        if save_name.is_empty() {
-                            save_name = format!("before-clear-{}", Utc::now().timestamp());
-                        }
+                        let saves = macc_core::save::detect_matching_saves(&paths)?;
+                        let (save_name, overwrite) = if !saves.is_empty() {
+                            println!("Existing saves found for this repository:\n");
+                            for (idx, (m, _)) in saves.iter().enumerate() {
+                                println!("  {}. {}", idx + 1, m.name);
+                                println!("     Saved: {}", m.created_at);
+                                let mut incls = Vec::new();
+                                if m.includes.config { incls.push("config"); }
+                                if m.includes.coordinator_sessions { incls.push("sessions"); }
+                                if m.includes.catalogs { incls.push("catalogs"); }
+                                println!("     Includes: {}", incls.join(", "));
+                            }
+                            println!("\nChoose:");
+                            println!("  [1-{}] Overwrite an existing save", saves.len());
+                            println!("  [N]   Create a new save");
+                            println!("  [S]   Skip saving");
+                            println!("  [A]   Abort clear");
 
-                        let include_logs = crate::confirm_yes_no("Include logs? [y/N] ")?;
+                            print!("> ");
+                            io::stdout().flush().ok();
+                            let mut save_choice = String::new();
+                            io::stdin().read_line(&mut save_choice).ok();
+                            let choice_str = save_choice.trim().to_lowercase();
 
-                        let opts = macc_core::save::SaveOptions {
-                            description: Some("Saved before clear".to_string()),
-                            overwrite: true,
-                            only: None,
-                            no_sessions: false,
-                            include_logs,
-                            log_max_size: "50MB".to_string(),
-                            log_since: "7d".to_string(),
-                            redact_logs: true,
-                            dry_run: self.dry_run,
-                            include_prd: false,
-                            include_state: false,
+                            if choice_str == "s" || choice_str == "skip" {
+                                (None, false)
+                            } else if choice_str == "a" || choice_str == "abort" {
+                                println!("Clear aborted.");
+                                return Ok(());
+                            } else if choice_str == "n" || choice_str == "new" {
+                                print!("Save name [default: before-clear]: ");
+                                io::stdout().flush().ok();
+                                let mut name_input = String::new();
+                                io::stdin().read_line(&mut name_input).ok();
+                                let mut save_name = name_input.trim().to_string();
+                                if save_name.is_empty() {
+                                    save_name = format!("before-clear-{}", Utc::now().timestamp());
+                                }
+                                (Some(save_name), true)
+                            } else if let Ok(idx) = choice_str.parse::<usize>() {
+                                if idx >= 1 && idx <= saves.len() {
+                                    (Some(saves[idx - 1].0.name.clone()), true)
+                                } else {
+                                    println!("Invalid choice. Clear aborted.");
+                                    return Ok(());
+                                }
+                            } else {
+                                println!("Invalid choice. Clear aborted.");
+                                return Ok(());
+                            }
+                        } else {
+                            print!("Save name [default: before-clear]: ");
+                            io::stdout().flush().ok();
+                            let mut name_input = String::new();
+                            io::stdin().read_line(&mut name_input).ok();
+                            let mut save_name = name_input.trim().to_string();
+                            if save_name.is_empty() {
+                                save_name = format!("before-clear-{}", Utc::now().timestamp());
+                            }
+                            (Some(save_name), true)
                         };
-                        macc_core::save::create_save_bundle(&paths, &save_name, &opts)?;
-                        println!("Setup saved successfully.");
+
+                        if let Some(name) = save_name {
+                            let include_logs = crate::confirm_yes_no("Include logs? [y/N] ")?;
+
+                            let opts = macc_core::save::SaveOptions {
+                                description: Some("Saved before clear".to_string()),
+                                overwrite,
+                                only: None,
+                                no_sessions: false,
+                                include_logs,
+                                log_max_size: "50MB".to_string(),
+                                log_since: "7d".to_string(),
+                                redact_logs: true,
+                                dry_run: self.dry_run,
+                                include_prd: false,
+                                include_state: false,
+                            };
+                            macc_core::save::create_save_bundle(&paths, &name, &opts)?;
+                            println!("Setup saved successfully.");
+                        }
                     } else if choice == "a" || choice == "abort" {
                         println!("Clear aborted.");
                         return Ok(());
