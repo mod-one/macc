@@ -50,15 +50,23 @@ fields:
     label: Model
     kind:
       type: enum
-      options: [opus, sonnet, haiku]
+      options: ["sonnet", "sonnet[1m]", "opus", "haiku"]
     help: Claude model alias (e.g., sonnet, opus).
     pointer: /tools/config/claude/model
     default: "sonnet"
+  - id: effortLevel
+    label: effortLevel
+    kind:
+      type: enum
+      options: ["Low", "Medium", "High", "Max"]
+    help: Claude effort adjust (e.g., Low, Medium).
+    pointer: /tools/config/claude/effortLevel
+    default: "Medium"
   - id: language
     label: Language
     kind:
       type: enum
-      options: [English, French, Spanish, German, Japanese]
+      options: ["English", "French", "Spanish", "German", "Japanese"]
     help: Primary language for prompts and output.
     pointer: /tools/config/claude/language
     default: "English"
@@ -66,7 +74,7 @@ fields:
     label: Permissions
     kind:
       type: enum
-      options: [safe, dev, strict]
+      options: ["safe", "dev", "strict"]
     help: Permissions preset for Claude settings.json.
     pointer: /tools/config/claude/permissions
     default: "safe"
