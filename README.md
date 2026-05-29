@@ -12,7 +12,7 @@ They can run on the same project in parallel (using worktrees) repeatedly until 
 - Embedded defaults for ToolSpecs and catalogs so clean machines are usable immediately.
 - Project automation with embedded `coordinator.sh` + `performer.sh` + per-tool runners.
 - Worktree orchestration for parallel task execution.
-- Safe cleanup (`macc clear`) with confirmation: removes worktrees first, then MACC-managed project artifacts.
+- Safe cleanup (`macc clear`) with confirmation: prompts to save unsaved state before cleanup, removes worktrees first, then MACC-managed project artifacts.
 
 ## Installation
 
@@ -385,13 +385,13 @@ macc coordinator stop --graceful
 macc coordinator stop --remove-worktrees --remove-branches
 ```
 
-6. If project state must be reset to pre-MACC managed artifacts:
+6. If project state must be reset to pre-MACC managed artifacts (with optional save before cleanup):
 
 ```bash
-macc clear
+macc clear [--save <name>] [--no-save-prompt]
 ```
 
-`macc clear` asks confirmation, runs forced worktree cleanup first, then removes MACC-managed paths only.
+`macc clear` prompts to save any unsaved setup, asks confirmation, runs forced worktree cleanup first, then removes MACC-managed paths only.
 
 ## Core commands
 
@@ -402,14 +402,18 @@ All commands support these global flags:
 
 ### Project lifecycle
 
-- `macc init [--force] [--wizard] [--profile <name>]`: create/update `.macc/` layout and default config (`--wizard` asks 3 setup questions, `--profile` restores a saved profile after init).
+- `macc init [--force] [--wizard] [--profile <name>] [--fresh] [--restore [<name>]] [--no-restore-prompt] [--apply]`: create/update `.macc/` layout and default config (`--wizard` asks 3 setup questions, `--profile` restores a saved profile, `--fresh` ignores matching saves, `--restore` restores the best matching save or specified save, `--no-restore-prompt` bypasses suggestion prompting, `--apply` runs `macc apply` after restoration/initialization).
 - `macc quickstart [-y|--yes] [--apply] [--no-tui]`: zero-friction happy path (checks prerequisites, initializes, seeds defaults, opens TUI or runs plan+apply).
 - `macc plan [--tools tool1,tool2] [--json] [--explain]`: build preview only (no writes), with machine-readable JSON/explanations when needed.
 - `macc apply [--tools ...] [--dry-run] [--allow-user-scope] [--json] [--explain]`: apply planned writes (`--dry-run` behaves as plan with same preview modes).
 - `macc backups list [--user]`: list available backup sets (project or user-level).
 - `macc backups open <id>|--latest [--user] [--editor <cmd>]`: print/open a backup set location.
-- `macc restore --latest [--user] [--dry-run] [-y]` (or `--backup <id>`): restore files from a backup set.
-- `macc clear`: asks confirmation, removes all non-root worktrees with force, then removes MACC-managed files/directories in the current project.
+- `macc save <name> [--overwrite] [--description <desc>] [--only <sections>] [--no-sessions] [--include-logs] [--log-max-size <size>] [--log-since <duration>] [--redact-logs] [--dry-run]`: save MACC configuration, session mappings, and catalogs as a bundle.
+- `macc save list [--matching]`: list saved MACC bundles (`--matching` lists repository-matching saves only).
+- `macc save show <name>`: show details of a save bundle.
+- `macc save delete <name> [-y|--yes]`: delete a save bundle.
+- `macc restore [<name>] [--latest] [--user] [--backup <id>] [--dry-run] [-y] [--apply] [--config-only] [--sessions] [--no-sessions] [--include-logs]`: restore files from a backup set or a save bundle.
+- `macc clear [--save <name>] [--include-logs] [--no-save-prompt] [--force] [--dry-run]`: prompts to save any unsaved state, asks confirmation, removes all non-root worktrees with force, then removes MACC-managed files/directories in the current project.
 - `macc start [--intent <configure-tools|run-one-task|run-batch|inspect-project>] [--preset <conservative|balanced|throughput>] [--web] [--tui] [--dry-run]`: guided cockpit startup entry point composing detect -> resolve -> preview -> confirm -> apply -> launch.
 - `macc trust`: audit repository safety state (local-only, terminal permissions, backups, catalog pinning, secrets).
 - `macc lock <generate|check|diff|explain>`: manage build reproducibility lock manifest (`.macc/macc.lock.yaml`).
@@ -640,7 +644,7 @@ Performer session management is project-level, tool-aware, and lease-based:
 - Backups are created for changed project files.
 - User-scope writes require explicit `--allow-user-scope` plus an interactive confirmation showing touched paths, backup location, and restore commands.
 - Secret checks block unsafe generated output.
-- `macc clear` is a two-step cleanup: confirm, then run forced worktree cleanup before deleting MACC-managed paths.
+- `macc clear` is a guarded cleanup: prompts to save unsaved configuration/session state, requests confirmation, and runs forced worktree cleanup before deleting MACC-managed paths.
 - Pre-existing project files/directories are preserved; only MACC-managed artifacts are removed.
 
 ## Documentation map
