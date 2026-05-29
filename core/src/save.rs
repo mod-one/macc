@@ -635,7 +635,7 @@ pub fn restore_save_bundle(paths: &ProjectPaths, name: &str, opts: &RestoreOptio
 
     // 1. Restore config
     let config_only = opts.config_only || match_strength == MatchStrength::Weak;
-    if manifest.includes.config && !opts.no_sessions { // check if config-only is set
+    if manifest.includes.config {
         if let Some(config_rel) = &manifest.paths.config {
             let config_src = target_save_dir.join(config_rel);
             if config_src.exists() {

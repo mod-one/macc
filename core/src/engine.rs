@@ -286,9 +286,10 @@ pub trait Engine {
         &self,
         paths: &ProjectPaths,
         force: bool,
+        dry_run: bool,
         ui: &dyn crate::service::interaction::InteractionHandler,
     ) -> Result<crate::service::clear::ClearExecutionReport> {
-        crate::service::clear::clear_project(paths, force, ui)
+        crate::service::clear::clear_project(paths, force, dry_run, ui)
     }
 
     #[allow(clippy::too_many_arguments)]

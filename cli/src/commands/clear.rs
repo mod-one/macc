@@ -121,7 +121,7 @@ impl Command for ClearCommand {
         let _ = self
             .app
             .engine
-            .clear_project(&paths, self.force || self.dry_run, &CliInteraction)?;
+            .clear_project(&paths, self.force, self.dry_run, &CliInteraction)?;
         println!("Project MACC files cleared successfully.");
         Ok(())
     }

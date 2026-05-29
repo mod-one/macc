@@ -1318,6 +1318,37 @@ pub fn clear(paths: &ProjectPaths) -> Result<ClearReport> {
     Ok(report)
 }
 
+pub fn clear_dry_run(paths: &ProjectPaths) -> Result<ClearReport> {
+    let mut managed = load_managed_paths(paths)?;
+
+    if let Some(rel) = relative_to_root(paths, &paths.managed_paths_state_path()) {
+        managed.insert(rel);
+    }
+    if let Some(parent) = paths.managed_paths_state_path().parent() {
+        if let Some(rel) = relative_to_root(paths, parent) {
+            managed.insert(rel);
+        }
+    }
+
+    let mut entries: Vec<String> = managed.into_iter().collect();
+    entries.sort_by(|a, b| {
+        let da = a.split('/').count();
+        let db = b.split('/').count();
+        db.cmp(&da).then_with(|| b.cmp(a))
+    });
+
+    let mut report = ClearReport::default();
+    for rel in entries {
+        let full = paths.root.join(&rel);
+        if !full.exists() {
+            continue;
+        }
+        report.removed += 1;
+    }
+
+    Ok(report)
+}
+
 fn cleanup_empty_parents(paths: &ProjectPaths, removed: &[PathBuf]) {
     let mut candidates: HashSet<PathBuf> = HashSet::new();
     for path in removed {
