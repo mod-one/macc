@@ -30,6 +30,7 @@ pub mod trust;
 pub mod lock;
 pub mod failure;
 pub mod settings;
+pub mod save;
 
 pub trait Command {
     fn run(&self) -> Result<()>;

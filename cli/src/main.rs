@@ -54,6 +54,27 @@ struct Cli {
     command: Option<Commands>,
 }
 
+#[derive(Subcommand, Clone, Debug)]
+enum SaveSubcommands {
+    /// List MACC save bundles
+    List {
+        /// List matching saves only
+        #[arg(long)]
+        matching: bool,
+    },
+    /// Show details of a save bundle
+    Show {
+        name: String,
+    },
+    /// Delete a MACC save bundle
+    Delete {
+        name: String,
+        /// Skip confirmation prompt
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+}
+
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 enum Commands {
@@ -68,6 +89,18 @@ enum Commands {
         /// Restore a saved profile after initialization
         #[arg(long)]
         profile: Option<String>,
+        /// Ignore matching saves and create a new baseline
+        #[arg(long)]
+        fresh: bool,
+        /// Restore the best matching save, or specify a save name
+        #[arg(long, num_args = 0..=1, default_missing_value = "")]
+        restore: Option<String>,
+        /// Do not suggest matching saves
+        #[arg(long)]
+        no_restore_prompt: bool,
+        /// Run macc apply after restoration/initialization
+        #[arg(long)]
+        apply: bool,
     },
     /// Manage saved configuration profiles
     Config {
@@ -183,9 +216,47 @@ enum Commands {
         #[command(subcommand)]
         backups_command: BackupsCommands,
     },
-    /// Restore files from backup sets
+    /// Save MACC setup as a bundle
+    Save {
+        /// Name of the save bundle to create
+        name: Option<String>,
+        /// Overwrite if save already exists
+        #[arg(long)]
+        overwrite: bool,
+        /// Optional description of the save
+        #[arg(long)]
+        description: Option<String>,
+        /// Comma-separated list of sections to save
+        #[arg(long)]
+        only: Option<String>,
+        /// Do not save coordinator sessions
+        #[arg(long)]
+        no_sessions: bool,
+        /// Include redacted logs in the save
+        #[arg(long)]
+        include_logs: bool,
+        /// Maximum size of log files to include
+        #[arg(long, default_value = "50MB")]
+        log_max_size: String,
+        /// Duration of log files to include
+        #[arg(long, default_value = "7d")]
+        log_since: String,
+        /// Redact secret-like patterns from logs
+        #[arg(long, default_value = "true")]
+        redact_logs: bool,
+        /// Show what would be saved without writing
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Save bundle management subcommand
+        #[command(subcommand)]
+        cmd: Option<SaveSubcommands>,
+    },
+    /// Restore MACC setup from a save bundle or safety backup
     Restore {
-        /// Restore the most recent backup set
+        /// Name of the save bundle to restore
+        name: Option<String>,
+        /// Restore the most recent backup set or save bundle
         #[arg(long)]
         latest: bool,
         /// Use user-level backup root (~/.macc/backups) instead of project backup root
@@ -200,9 +271,40 @@ enum Commands {
         /// Skip confirmation prompt
         #[arg(short = 'y', long)]
         yes: bool,
+        /// Run macc apply after restore
+        #[arg(long)]
+        apply: bool,
+        /// Restore only the config file
+        #[arg(long)]
+        config_only: bool,
+        /// Force session restore
+        #[arg(long)]
+        sessions: bool,
+        /// Skip session restore
+        #[arg(long)]
+        no_sessions: bool,
+        /// Restore archived logs to .macc/restored-logs/<name>/
+        #[arg(long)]
+        include_logs: bool,
     },
-    /// Remove files/directories created by MACC in this project
-    Clear,
+    /// Remove MACC-managed project files and optionally save state
+    Clear {
+        /// Save name to backup before clearing
+        #[arg(long)]
+        save: Option<String>,
+        /// Include logs if saving before clearing
+        #[arg(long)]
+        include_logs: bool,
+        /// Do not prompt to save unsaved state
+        #[arg(long)]
+        no_save_prompt: bool,
+        /// Skip confirmation prompts and force clear
+        #[arg(short, long)]
+        force: bool,
+        /// Show what would be cleared without deleting files
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Worktree utilities
     Worktree {
         #[command(subcommand)]
@@ -861,8 +963,21 @@ fn run_with_engine_provider(
             force,
             wizard,
             profile,
+            fresh,
+            restore,
+            no_restore_prompt,
+            apply,
         }) => {
-            commands::init::InitCommand::new(app.clone(), *force, *wizard).run()?;
+            commands::init::InitCommand::new(
+                app.clone(),
+                *force,
+                *wizard,
+                *fresh,
+                restore.clone(),
+                *no_restore_prompt,
+                *apply,
+            )
+            .run()?;
             if let Some(profile_name) = profile {
                 let config_cmd = commands::config::ConfigCommand::new(
                     app.clone(),
@@ -984,22 +1099,93 @@ fn run_with_engine_provider(
         Some(Commands::Backups { backups_command }) => {
             commands::backups::BackupsCommand::new(app.clone(), backups_command).run()
         }
+        Some(Commands::Save {
+            name,
+            overwrite,
+            description,
+            only,
+            no_sessions,
+            include_logs,
+            log_max_size,
+            log_since,
+            redact_logs,
+            dry_run,
+            cmd,
+        }) => {
+            let action = match cmd {
+                Some(SaveSubcommands::List { matching }) => {
+                    commands::save::SaveAction::List { matching: *matching }
+                }
+                Some(SaveSubcommands::Show { name }) => {
+                    commands::save::SaveAction::Show { name: name.clone() }
+                }
+                Some(SaveSubcommands::Delete { name, yes }) => {
+                    commands::save::SaveAction::Delete { name: name.clone(), yes: *yes }
+                }
+                None => {
+                    let n = name.clone().unwrap_or_default();
+                    if n.is_empty() {
+                        commands::save::SaveAction::List { matching: false }
+                    } else {
+                        commands::save::SaveAction::Create {
+                            name: n,
+                            overwrite: *overwrite,
+                            description: description.clone(),
+                            only: only.clone(),
+                            no_sessions: *no_sessions,
+                            include_logs: *include_logs,
+                            log_max_size: log_max_size.clone(),
+                            log_since: log_since.clone(),
+                            redact_logs: *redact_logs,
+                            dry_run: *dry_run,
+                        }
+                    }
+                }
+            };
+            commands::save::SaveCommand::new(app.clone(), action).run()
+        }
         Some(Commands::Restore {
+            name,
             latest,
             user,
             backup,
             dry_run,
             yes,
+            apply,
+            config_only,
+            sessions,
+            no_sessions,
+            include_logs,
         }) => commands::restore::RestoreCommand::new(
             app.clone(),
+            name.clone(),
             *latest,
             *user,
-            backup.as_deref(),
+            backup.clone(),
             *dry_run,
             *yes,
+            *apply,
+            *config_only,
+            *sessions,
+            *no_sessions,
+            *include_logs,
         )
         .run(),
-        Some(Commands::Clear) => commands::clear::ClearCommand::new(app.clone()).run(),
+        Some(Commands::Clear {
+            save,
+            include_logs,
+            no_save_prompt,
+            force,
+            dry_run,
+        }) => commands::clear::ClearCommand::new(
+            app.clone(),
+            save.clone(),
+            *include_logs,
+            *no_save_prompt,
+            *force,
+            *dry_run,
+        )
+        .run(),
         Some(Commands::Worktree { worktree_command }) => {
             commands::worktree::WorktreeCommand::new(app.clone(), worktree_command).run()
         }
@@ -1923,7 +2109,11 @@ mod tests {
                 force: false,
                 wizard: false,
                 profile: None,
-            }),
+                fresh: false,
+                restore: None,
+                no_restore_prompt: true,
+                apply: false,
+}),
         };
 
         run_with_engine(cli, TestEngine::with_fixtures())?;
@@ -1954,7 +2144,11 @@ mod tests {
                 force: false,
                 wizard: false,
                 profile: None,
-            }),
+                fresh: false,
+                restore: None,
+                no_restore_prompt: true,
+                apply: false,
+}),
         };
         run_with_engine(cli, TestEngine::with_fixtures())?;
 
@@ -1978,7 +2172,11 @@ mod tests {
                 force: false,
                 wizard: false,
                 profile: None,
-            }),
+                fresh: false,
+                restore: None,
+                no_restore_prompt: true,
+                apply: false,
+}),
         };
         run_with_engine(cli_idempotent, TestEngine::with_fixtures())?;
 
@@ -1999,7 +2197,11 @@ mod tests {
                 force: true,
                 wizard: false,
                 profile: None,
-            }),
+                fresh: false,
+                restore: None,
+                no_restore_prompt: true,
+                apply: false,
+}),
         };
         run_with_engine(cli_force, TestEngine::with_fixtures())?;
 
@@ -2044,7 +2246,11 @@ mod tests {
                     force: false,
                     wizard: false,
                     profile: None,
-                }),
+                    fresh: false,
+                    restore: None,
+                    no_restore_prompt: true,
+                    apply: false,
+}),
             },
             fixture_engine(&ids),
         )?;
@@ -2529,7 +2735,11 @@ fi
                     force: false,
                     wizard: false,
                     profile: None,
-                }),
+                    fresh: false,
+                    restore: None,
+                    no_restore_prompt: true,
+                    apply: false,
+}),
             },
             fixture_engine(&ids),
         )?;
@@ -2661,7 +2871,11 @@ fi
                     force: false,
                     wizard: false,
                     profile: None,
-                }),
+                    fresh: false,
+                    restore: None,
+                    no_restore_prompt: true,
+                    apply: false,
+}),
             },
             fixture_engine(&ids),
         )?;
@@ -2716,7 +2930,11 @@ fi
                     force: false,
                     wizard: false,
                     profile: None,
-                }),
+                    fresh: false,
+                    restore: None,
+                    no_restore_prompt: true,
+                    apply: false,
+}),
             },
             TestEngine::with_fixtures(),
         )?;
@@ -2768,7 +2986,11 @@ fi
                     force: false,
                     wizard: false,
                     profile: None,
-                }),
+                    fresh: false,
+                    restore: None,
+                    no_restore_prompt: true,
+                    apply: false,
+}),
             },
             TestEngine::with_fixtures(),
         )?;
@@ -2883,7 +3105,11 @@ fi
                     force: false,
                     wizard: false,
                     profile: None,
-                }),
+                    fresh: false,
+                    restore: None,
+                    no_restore_prompt: true,
+                    apply: false,
+}),
             },
             TestEngine::with_fixtures(),
         )?;
@@ -3001,7 +3227,11 @@ fi
                     force: false,
                     wizard: false,
                     profile: None,
-                }),
+                    fresh: false,
+                    restore: None,
+                    no_restore_prompt: true,
+                    apply: false,
+}),
             },
             fixture_engine(&ids),
         )?;
@@ -3109,7 +3339,11 @@ fi
                     force: false,
                     wizard: false,
                     profile: None,
-                }),
+                    fresh: false,
+                    restore: None,
+                    no_restore_prompt: true,
+                    apply: false,
+}),
             },
             TestEngine::with_fixtures(),
         )?;
@@ -3221,7 +3455,11 @@ fi
                     force: false,
                     wizard: false,
                     profile: None,
-                }),
+                    fresh: false,
+                    restore: None,
+                    no_restore_prompt: true,
+                    apply: false,
+}),
             },
             TestEngine::with_fixtures(),
         )?;
@@ -3363,7 +3601,11 @@ fi
                     force: false,
                     wizard: false,
                     profile: None,
-                }),
+                    fresh: false,
+                    restore: None,
+                    no_restore_prompt: true,
+                    apply: false,
+}),
             },
             TestEngine::with_fixtures(),
         )?;
@@ -3499,7 +3741,11 @@ fi
                     force: false,
                     wizard: false,
                     profile: None,
-                }),
+                    fresh: false,
+                    restore: None,
+                    no_restore_prompt: true,
+                    apply: false,
+}),
             },
             fixture_engine(&ids),
         )?;
@@ -3648,7 +3894,11 @@ fi
                     force: false,
                     wizard: false,
                     profile: None,
-                }),
+                    fresh: false,
+                    restore: None,
+                    no_restore_prompt: true,
+                    apply: false,
+}),
             },
             fixture_engine(&ids),
         )?;
@@ -3873,7 +4123,11 @@ fi
                     force: false,
                     wizard: false,
                     profile: None,
-                }),
+                    fresh: false,
+                    restore: None,
+                    no_restore_prompt: true,
+                    apply: false,
+}),
             },
             fixture_engine(&ids),
         )?;
@@ -4069,7 +4323,11 @@ fi
                     force: false,
                     wizard: false,
                     profile: None,
-                }),
+                    fresh: false,
+                    restore: None,
+                    no_restore_prompt: true,
+                    apply: false,
+}),
             },
             TestEngine::with_fixtures(),
         )?;
@@ -4231,6 +4489,271 @@ fi
         assert!(ops_log_content.contains("cli failure abandon"));
 
         // Cleanup
+        std::fs::remove_dir_all(&temp_base).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn test_save_restore_clear_init_workflow() -> macc_core::Result<()> {
+        let _guard = env_test_lock();
+        let temp_base = std::env::temp_dir().join(format!("macc_save_restore_test_{}", uuid_v4_like()));
+        std::fs::create_dir_all(&temp_base).unwrap();
+
+        run_git_ok(&temp_base, &["init"]);
+        run_git_ok(&temp_base, &["config", "user.email", "test@example.com"]);
+        run_git_ok(&temp_base, &["config", "user.name", "Test User"]);
+        std::fs::write(temp_base.join("dummy.txt"), "dummy").unwrap();
+        run_git_ok(&temp_base, &["add", "dummy.txt"]);
+        run_git_ok(&temp_base, &["commit", "-m", "initial commit"]);
+
+        let temp_home = temp_base.join("home");
+        std::fs::create_dir_all(&temp_home).unwrap();
+        let old_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &temp_home);
+
+        // 1. Initialize MACC
+        run_with_engine(
+            Cli {
+                cwd: temp_base.to_string_lossy().into(),
+                verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
+                command: Some(Commands::Init {
+                    force: false,
+                    wizard: false,
+                    profile: None,
+                    fresh: true,
+                    restore: None,
+                    no_restore_prompt: true,
+                    apply: false,
+                }),
+            },
+            TestEngine::with_fixtures(),
+        )?;
+
+        // Verify .macc/macc.yaml exists
+        let config_path = temp_base.join(".macc/macc.yaml");
+        assert!(config_path.exists());
+
+        // Modify config slightly so we have non-default content
+        let original_config = "version: v1\nsettings:\n  test_key: val1";
+        std::fs::write(&config_path, original_config).unwrap();
+
+        // Create a dummy sessions file and a dummy log file
+        let sessions_dir = temp_base.join(".macc/state");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let sessions_path = sessions_dir.join("tool-sessions.json");
+        std::fs::write(&sessions_path, r#"{"session_id": "test-uuid-1234", "pid": 999}"#).unwrap();
+
+        let log_dir = temp_base.join(".macc/log/coordinator");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let log_path = log_dir.join("test.log");
+        std::fs::write(&log_path, "session key is ghp_123456789012345678901234567890123456").unwrap();
+
+        // Create some directories that should be excluded
+        let cache_dir = temp_base.join(".macc/cache");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        std::fs::write(cache_dir.join("should-exclude.txt"), "cached data").unwrap();
+
+        let worktree_dir = temp_base.join(".macc/worktree");
+        std::fs::create_dir_all(&worktree_dir).unwrap();
+        std::fs::write(worktree_dir.join("should-exclude.txt"), "worktree data").unwrap();
+
+        // 2. Save setup to a bundle
+        run_with_engine(
+            Cli {
+                cwd: temp_base.to_string_lossy().into(),
+                verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
+                command: Some(Commands::Save {
+                    name: Some("test-save-1".to_string()),
+                    overwrite: true,
+                    description: Some("Test Description".to_string()),
+                    only: None,
+                    no_sessions: false,
+                    include_logs: true,
+                    log_max_size: "50MB".to_string(),
+                    log_since: "7d".to_string(),
+                    redact_logs: true,
+                    dry_run: false,
+                    cmd: None,
+                }),
+            },
+            TestEngine::with_fixtures(),
+        )?;
+
+        // Verify save files created
+        let save_dir = temp_home.join(".macc/saves/test-save-1");
+        assert!(save_dir.exists());
+        assert!(save_dir.join("manifest.yaml").exists());
+        assert!(save_dir.join("config/macc.yaml").exists());
+        assert!(save_dir.join("state/tool-sessions.json").exists());
+        assert!(save_dir.join("logs/coordinator/test.log").exists());
+
+        // Verify exclusions
+        assert!(!save_dir.join("cache").exists());
+        assert!(!save_dir.join("worktree").exists());
+
+        // Verify log redaction
+        let redacted_log_content = std::fs::read_to_string(save_dir.join("logs/coordinator/test.log")).unwrap();
+        assert!(redacted_log_content.contains("session key is [REDACTED]"));
+        assert!(!redacted_log_content.contains("ghp_"));
+
+        // Verify state is currently saved (not unsaved)
+        let paths = macc_core::ProjectPaths::from_root(temp_base.clone());
+        assert!(!macc_core::save::is_macc_state_unsaved(&paths)?);
+
+        // Modify config so it is now unsaved
+        std::fs::write(&config_path, "version: v1\nsettings:\n  test_key: val2").unwrap();
+        assert!(macc_core::save::is_macc_state_unsaved(&paths)?);
+
+        // 3. Clear project with save gate (using --save flag)
+        run_with_engine(
+            Cli {
+                cwd: temp_base.to_string_lossy().into(),
+                verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
+                command: Some(Commands::Clear {
+                    save: Some("test-save-2".to_string()),
+                    include_logs: false,
+                    no_save_prompt: false,
+                    force: true,
+                    dry_run: false,
+                }),
+            },
+            TestEngine::with_fixtures(),
+        )?;
+
+        // Verify we can delete .macc to test restoration on fresh checkout
+        std::fs::remove_dir_all(temp_base.join(".macc")).unwrap();
+        assert!(!temp_base.join(".macc").exists());
+
+        // Verify test-save-2 was created before clear
+        let save2_dir = temp_home.join(".macc/saves/test-save-2");
+        assert!(save2_dir.exists());
+        assert!(save2_dir.join("config/macc.yaml").exists());
+
+        // 4. Restore test-save-1 during init
+        run_with_engine(
+            Cli {
+                cwd: temp_base.to_string_lossy().into(),
+                verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
+                command: Some(Commands::Init {
+                    force: false,
+                    wizard: false,
+                    profile: None,
+                    fresh: false,
+                    restore: Some("test-save-1".to_string()),
+                    no_restore_prompt: true,
+                    apply: false,
+                }),
+            },
+            TestEngine::with_fixtures(),
+        )?;
+
+        // Verify restored files
+        assert!(config_path.exists());
+        let restored_config = std::fs::read_to_string(&config_path).unwrap();
+        assert_eq!(restored_config, original_config);
+
+        // Verify restored session PID was dropped (normalized)
+        let restored_sessions = std::fs::read_to_string(sessions_path).unwrap();
+        assert!(restored_sessions.contains("test-uuid-1234"));
+        assert!(!restored_sessions.contains("pid"));
+
+        // 5. Test Save list
+        run_with_engine(
+            Cli {
+                cwd: temp_base.to_string_lossy().into(),
+                verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
+                command: Some(Commands::Save {
+                    name: None,
+                    overwrite: false,
+                    description: None,
+                    only: None,
+                    no_sessions: false,
+                    include_logs: false,
+                    log_max_size: "50MB".to_string(),
+                    log_since: "7d".to_string(),
+                    redact_logs: true,
+                    dry_run: false,
+                    cmd: Some(SaveSubcommands::List { matching: false }),
+                }),
+            },
+            TestEngine::with_fixtures(),
+        )?;
+
+        // 6. Test Save show
+        run_with_engine(
+            Cli {
+                cwd: temp_base.to_string_lossy().into(),
+                verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
+                command: Some(Commands::Save {
+                    name: None,
+                    overwrite: false,
+                    description: None,
+                    only: None,
+                    no_sessions: false,
+                    include_logs: false,
+                    log_max_size: "50MB".to_string(),
+                    log_since: "7d".to_string(),
+                    redact_logs: true,
+                    dry_run: false,
+                    cmd: Some(SaveSubcommands::Show { name: "test-save-1".to_string() }),
+                }),
+            },
+            TestEngine::with_fixtures(),
+        )?;
+
+        // 7. Test Save delete
+        run_with_engine(
+            Cli {
+                cwd: temp_base.to_string_lossy().into(),
+                verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
+                command: Some(Commands::Save {
+                    name: None,
+                    overwrite: false,
+                    description: None,
+                    only: None,
+                    no_sessions: false,
+                    include_logs: false,
+                    log_max_size: "50MB".to_string(),
+                    log_since: "7d".to_string(),
+                    redact_logs: true,
+                    dry_run: false,
+                    cmd: Some(SaveSubcommands::Delete { name: "test-save-1".to_string(), yes: true }),
+                }),
+            },
+            TestEngine::with_fixtures(),
+        )?;
+
+        // Verify test-save-1 deleted
+        assert!(!temp_home.join(".macc/saves/test-save-1").exists());
+
+        // Cleanup HOME env var
+        if let Some(h) = old_home {
+            std::env::set_var("HOME", h);
+        } else {
+            std::env::remove_var("HOME");
+        }
+
         std::fs::remove_dir_all(&temp_base).ok();
         Ok(())
     }
