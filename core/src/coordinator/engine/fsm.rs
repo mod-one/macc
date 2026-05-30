@@ -249,24 +249,43 @@ pub fn plan_advance(
     state: WorkflowState,
     max_review_cycles: Option<usize>,
     review_cycles: usize,
+    phases: &crate::config::PhasesConfig,
 ) -> AdvancePlan {
     match state {
         WorkflowState::InProgress => {
-            if max_review_cycles == Some(0) {
-                // No review at all — go straight to merge.
-                return AdvancePlan::Merge;
+            if phases.testing.enabled {
+                AdvancePlan::RunPhase(PhaseTransition {
+                    mode: "test",
+                    next_state: WorkflowState::Testing,
+                    runtime_phase: "test",
+                })
+            } else if phases.review.enabled && max_review_cycles != Some(0) {
+                AdvancePlan::RunPhase(PhaseTransition {
+                    mode: "review",
+                    next_state: WorkflowState::Reviewing,
+                    runtime_phase: "review",
+                })
+            } else {
+                AdvancePlan::Merge
             }
-            AdvancePlan::RunPhase(PhaseTransition {
-                mode: "review",
-                next_state: WorkflowState::PrOpen,
-                runtime_phase: "review",
-            })
         }
-        // Review approved → merge.
+        WorkflowState::Testing => {
+            if phases.review.enabled && max_review_cycles != Some(0) {
+                AdvancePlan::RunPhase(PhaseTransition {
+                    mode: "review",
+                    next_state: WorkflowState::Reviewing,
+                    runtime_phase: "review",
+                })
+            } else {
+                AdvancePlan::Merge
+            }
+        }
+        WorkflowState::Reviewing => {
+            AdvancePlan::Merge
+        }
         WorkflowState::PrOpen => AdvancePlan::Merge,
         WorkflowState::ChangesRequested => {
-            // If we've exhausted the review cycle budget, skip the fix→review
-            // loop and go straight to merge with whatever we have.
+            // If we've exhausted the review cycle budget, skip fix and go to merge.
             if let Some(max) = max_review_cycles {
                 if review_cycles >= max {
                     return AdvancePlan::Merge;
@@ -274,7 +293,13 @@ pub fn plan_advance(
             }
             AdvancePlan::RunPhase(PhaseTransition {
                 mode: "fix",
-                next_state: WorkflowState::PrOpen,
+                next_state: if phases.testing.enabled {
+                    WorkflowState::Testing
+                } else if phases.review.enabled {
+                    WorkflowState::Reviewing
+                } else {
+                    WorkflowState::PrOpen // fallback
+                },
                 runtime_phase: "fix",
             })
         }
@@ -283,27 +308,75 @@ pub fn plan_advance(
     }
 }
 
-fn transition_workflow_state(from: WorkflowState, event: WorkflowEvent) -> Result<WorkflowState> {
+fn transition_workflow_state(
+    from: WorkflowState,
+    event: WorkflowEvent,
+    next_state: Option<WorkflowState>,
+) -> Result<WorkflowState> {
     let to = match (from, event) {
-        (WorkflowState::InProgress, WorkflowEvent::PhaseSucceeded("review")) => {
-            WorkflowState::PrOpen
+        // --- Success transitions ---
+        (WorkflowState::InProgress, WorkflowEvent::PhaseSucceeded("test")) => {
+            WorkflowState::Testing
         }
+        (WorkflowState::InProgress, WorkflowEvent::PhaseSucceeded("review")) => {
+            next_state.unwrap_or(WorkflowState::PrOpen)
+        }
+        (WorkflowState::Testing, WorkflowEvent::PhaseSucceeded("test")) => {
+            next_state.unwrap_or(WorkflowState::Reviewing)
+        }
+        (WorkflowState::Testing, WorkflowEvent::PhaseSucceeded("review")) => {
+            WorkflowState::Reviewing
+        }
+        (WorkflowState::Reviewing, WorkflowEvent::PhaseSucceeded("review")) => {
+            WorkflowState::Merged
+        }
+        (WorkflowState::ChangesRequested, WorkflowEvent::PhaseSucceeded("fix")) => {
+            next_state.unwrap_or(WorkflowState::PrOpen)
+        }
+
+        // --- Review verdict transitions ---
         (WorkflowState::InProgress, WorkflowEvent::ReviewChangesRequested) => {
             WorkflowState::ChangesRequested
         }
-        (WorkflowState::ChangesRequested, WorkflowEvent::PhaseSucceeded("fix")) => {
-            WorkflowState::PrOpen
+        (WorkflowState::Reviewing, WorkflowEvent::ReviewChangesRequested) => {
+            WorkflowState::ChangesRequested
         }
-        (WorkflowState::InProgress, WorkflowEvent::PhaseFailed("review"))
-        | (WorkflowState::ChangesRequested, WorkflowEvent::PhaseFailed("fix"))
-        | (WorkflowState::InProgress, WorkflowEvent::MergeFailed)
-        | (WorkflowState::PrOpen, WorkflowEvent::MergeFailed)
-        | (WorkflowState::ChangesRequested, WorkflowEvent::MergeFailed)
-        | (WorkflowState::Queued, WorkflowEvent::MergeFailed) => WorkflowState::Blocked,
+
+        // --- Failure transitions ---
+        (WorkflowState::InProgress, WorkflowEvent::PhaseFailed("dev")) => {
+            WorkflowState::Blocked
+        }
+        (WorkflowState::InProgress, WorkflowEvent::PhaseFailed("review")) => {
+            WorkflowState::Blocked
+        }
+        (WorkflowState::Testing, WorkflowEvent::PhaseFailed("test")) => {
+            WorkflowState::InProgress
+        }
+        (WorkflowState::Reviewing, WorkflowEvent::PhaseFailed("review")) => {
+            WorkflowState::Blocked
+        }
+        (WorkflowState::ChangesRequested, WorkflowEvent::PhaseFailed("fix")) => {
+            WorkflowState::Blocked
+        }
+
+        // --- Merge transitions ---
         (WorkflowState::InProgress, WorkflowEvent::MergeSucceeded)
+        | (WorkflowState::Testing, WorkflowEvent::MergeSucceeded)
+        | (WorkflowState::Reviewing, WorkflowEvent::MergeSucceeded)
         | (WorkflowState::PrOpen, WorkflowEvent::MergeSucceeded)
         | (WorkflowState::ChangesRequested, WorkflowEvent::MergeSucceeded)
-        | (WorkflowState::Queued, WorkflowEvent::MergeSucceeded) => WorkflowState::Merged,
+        | (WorkflowState::Queued, WorkflowEvent::MergeSucceeded) => {
+            WorkflowState::Merged
+        }
+
+        (WorkflowState::InProgress, WorkflowEvent::MergeFailed)
+        | (WorkflowState::Testing, WorkflowEvent::MergeFailed)
+        | (WorkflowState::Reviewing, WorkflowEvent::MergeFailed)
+        | (WorkflowState::PrOpen, WorkflowEvent::MergeFailed)
+        | (WorkflowState::ChangesRequested, WorkflowEvent::MergeFailed)
+        | (WorkflowState::Queued, WorkflowEvent::MergeFailed) => {
+            WorkflowState::Blocked
+        }
         _ => {
             return Err(MaccError::Coordinator {
                 code: "invalid_transition",
@@ -368,6 +441,7 @@ pub fn build_advance_actions(
     active_merge_jobs: &HashSet<String>,
     now: &str,
     max_review_cycles: Option<usize>,
+    phases: &crate::config::PhasesConfig,
 ) -> Result<Vec<AdvanceTaskAction>> {
     let typed = TaskRegistry::from_value(registry)?;
     let mut actions = Vec::new();
@@ -381,7 +455,7 @@ pub fn build_advance_actions(
         let review_cycles = task.task_runtime.review_cycles.unwrap_or(0);
         let workflow_state = task.workflow_state();
         match workflow_state
-            .map(|s| plan_advance(s, max_review_cycles, review_cycles))
+            .map(|s| plan_advance(s, max_review_cycles, review_cycles, phases))
             .unwrap_or(AdvancePlan::Noop)
         {
             AdvancePlan::RunPhase(transition) => {
@@ -687,7 +761,11 @@ pub(crate) fn apply_phase_success_typed(
     now: &str,
 ) -> Result<()> {
     let from = task_workflow_state_typed(task)?;
-    let to = transition_workflow_state(from, WorkflowEvent::PhaseSucceeded(transition.mode))?;
+    let to = transition_workflow_state(
+        from,
+        WorkflowEvent::PhaseSucceeded(transition.mode),
+        Some(transition.next_state),
+    )?;
     if to != transition.next_state {
         return Err(MaccError::Validation(format!(
             "Coordinator FSM mismatch for mode='{}': expected next={} got {}",
@@ -714,10 +792,10 @@ pub(crate) fn apply_review_phase_success_typed(
     let from = task_workflow_state_typed(task)?;
     let to = match verdict {
         ReviewVerdict::Ok => {
-            transition_workflow_state(from, WorkflowEvent::PhaseSucceeded("review"))?
+            transition_workflow_state(from, WorkflowEvent::PhaseSucceeded("review"), Some(WorkflowState::Merged))?
         }
         ReviewVerdict::ChangesRequested => {
-            transition_workflow_state(from, WorkflowEvent::ReviewChangesRequested)?
+            transition_workflow_state(from, WorkflowEvent::ReviewChangesRequested, Some(WorkflowState::ChangesRequested))?
         }
     };
     task.set_workflow_state(to);
@@ -740,7 +818,7 @@ pub(crate) fn apply_phase_failure_typed(
     now: &str,
 ) -> Result<()> {
     let from = task_workflow_state_typed(task)?;
-    let to = transition_workflow_state(from, WorkflowEvent::PhaseFailed(phase_mode))?;
+    let to = transition_workflow_state(from, WorkflowEvent::PhaseFailed(phase_mode), None)?;
     task.set_workflow_state(to);
     let runtime = task.ensure_runtime();
     runtime.set_status(RuntimeStatus::Failed);
@@ -753,7 +831,7 @@ pub(crate) fn apply_phase_failure_typed(
 
 pub(crate) fn apply_merge_success_typed(task: &mut Task, now: &str) -> Result<()> {
     let from = task_workflow_state_typed(task)?;
-    let to = transition_workflow_state(from, WorkflowEvent::MergeSucceeded)?;
+    let to = transition_workflow_state(from, WorkflowEvent::MergeSucceeded, Some(WorkflowState::Merged))?;
     task.set_workflow_state(to);
     let runtime = task.ensure_runtime();
     runtime.set_status(RuntimeStatus::Idle);
@@ -764,7 +842,7 @@ pub(crate) fn apply_merge_success_typed(task: &mut Task, now: &str) -> Result<()
 
 pub(crate) fn apply_merge_failure_typed(task: &mut Task, reason: &str, now: &str) -> Result<()> {
     let from = task_workflow_state_typed(task)?;
-    let to = transition_workflow_state(from, WorkflowEvent::MergeFailed)?;
+    let to = transition_workflow_state(from, WorkflowEvent::MergeFailed, Some(WorkflowState::Blocked))?;
     task.set_workflow_state(to);
     let runtime = task.ensure_runtime();
     runtime.set_status(RuntimeStatus::Paused);
@@ -2454,73 +2532,133 @@ mod tests {
     }
 
     #[test]
+    fn plan_advance_testing_phase() {
+        let phases_enabled = crate::config::PhasesConfig {
+            testing: crate::config::PhaseConfig { enabled: true, ..Default::default() },
+            review: crate::config::PhaseConfig { enabled: true, ..Default::default() },
+        };
+        let phases_disabled = crate::config::PhasesConfig {
+            testing: crate::config::PhaseConfig { enabled: false, ..Default::default() },
+            review: crate::config::PhaseConfig { enabled: true, ..Default::default() },
+        };
+
+        // When testing is enabled:
+        // InProgress should transition to RunPhase("test") / WorkflowState::Testing
+        assert!(matches!(
+            plan_advance(WorkflowState::InProgress, None, 0, &phases_enabled),
+            AdvancePlan::RunPhase(PhaseTransition { mode: "test", next_state: WorkflowState::Testing, .. })
+        ));
+
+        // Testing should transition to RunPhase("review") / WorkflowState::Reviewing if review enabled
+        assert!(matches!(
+            plan_advance(WorkflowState::Testing, None, 0, &phases_enabled),
+            AdvancePlan::RunPhase(PhaseTransition { mode: "review", next_state: WorkflowState::Reviewing, .. })
+        ));
+
+        // ChangesRequested should transition to RunPhase("fix") with next_state: WorkflowState::Testing
+        assert!(matches!(
+            plan_advance(WorkflowState::ChangesRequested, None, 0, &phases_enabled),
+            AdvancePlan::RunPhase(PhaseTransition { mode: "fix", next_state: WorkflowState::Testing, .. })
+        ));
+
+        // When testing is disabled:
+        // InProgress should transition to RunPhase("review") / WorkflowState::Reviewing if review enabled
+        assert!(matches!(
+            plan_advance(WorkflowState::InProgress, None, 0, &phases_disabled),
+            AdvancePlan::RunPhase(PhaseTransition { mode: "review", next_state: WorkflowState::Reviewing, .. })
+        ));
+
+        // ChangesRequested should transition to RunPhase("fix") with next_state: WorkflowState::Reviewing
+        assert!(matches!(
+            plan_advance(WorkflowState::ChangesRequested, None, 0, &phases_disabled),
+            AdvancePlan::RunPhase(PhaseTransition { mode: "fix", next_state: WorkflowState::Reviewing, .. })
+        ));
+    }
+
+    #[test]
     fn plan_advance_maps_states() {
+        let phases = crate::config::PhasesConfig {
+            testing: crate::config::PhaseConfig { enabled: false, ..Default::default() },
+            review: crate::config::PhaseConfig { enabled: true, ..Default::default() },
+        };
         // Default (unlimited review cycles)
         assert!(matches!(
-            plan_advance(WorkflowState::InProgress, None, 0),
+            plan_advance(WorkflowState::InProgress, None, 0, &phases),
             AdvancePlan::RunPhase(PhaseTransition { mode: "review", .. })
         ));
         assert!(matches!(
-            plan_advance(WorkflowState::PrOpen, None, 0),
+            plan_advance(WorkflowState::PrOpen, None, 0, &phases),
             AdvancePlan::Merge
         ));
         assert!(matches!(
-            plan_advance(WorkflowState::ChangesRequested, None, 0),
+            plan_advance(WorkflowState::ChangesRequested, None, 0, &phases),
             AdvancePlan::RunPhase(PhaseTransition { mode: "fix", .. })
         ));
         assert!(matches!(
-            plan_advance(WorkflowState::Queued, None, 0),
+            plan_advance(WorkflowState::Queued, None, 0, &phases),
             AdvancePlan::Merge
         ));
         assert!(matches!(
-            plan_advance(WorkflowState::Todo, None, 0),
+            plan_advance(WorkflowState::Todo, None, 0, &phases),
             AdvancePlan::Noop
         ));
     }
 
     #[test]
     fn plan_advance_max_review_cycles_zero_skips_review() {
+        let phases = crate::config::PhasesConfig {
+            testing: crate::config::PhaseConfig { enabled: false, ..Default::default() },
+            review: crate::config::PhaseConfig { enabled: true, ..Default::default() },
+        };
         // max_review_cycles=0 → skip review entirely
         assert!(matches!(
-            plan_advance(WorkflowState::InProgress, Some(0), 0),
+            plan_advance(WorkflowState::InProgress, Some(0), 0, &phases),
             AdvancePlan::Merge
         ));
         // ChangesRequested with 0 cycles used but max=0 → merge directly
         assert!(matches!(
-            plan_advance(WorkflowState::ChangesRequested, Some(0), 0),
+            plan_advance(WorkflowState::ChangesRequested, Some(0), 0, &phases),
             AdvancePlan::Merge
         ));
     }
 
     #[test]
     fn plan_advance_max_review_cycles_one_allows_single_fix() {
+        let phases = crate::config::PhasesConfig {
+            testing: crate::config::PhaseConfig { enabled: false, ..Default::default() },
+            review: crate::config::PhaseConfig { enabled: true, ..Default::default() },
+        };
         // max=1, 0 cycles done → allow fix
         assert!(matches!(
-            plan_advance(WorkflowState::ChangesRequested, Some(1), 0),
+            plan_advance(WorkflowState::ChangesRequested, Some(1), 0, &phases),
             AdvancePlan::RunPhase(PhaseTransition { mode: "fix", .. })
         ));
         // max=1, 1 cycle done → exhausted, merge directly
         assert!(matches!(
-            plan_advance(WorkflowState::ChangesRequested, Some(1), 1),
+            plan_advance(WorkflowState::ChangesRequested, Some(1), 1, &phases),
             AdvancePlan::Merge
         ));
     }
 
     #[test]
     fn plan_advance_max_review_cycles_n_caps_loops() {
+        let phases = crate::config::PhasesConfig {
+            testing: crate::config::PhaseConfig { enabled: false, ..Default::default() },
+            review: crate::config::PhaseConfig { enabled: true, ..Default::default() },
+        };
         // max=3, 2 done → allow another
         assert!(matches!(
-            plan_advance(WorkflowState::ChangesRequested, Some(3), 2),
+            plan_advance(WorkflowState::ChangesRequested, Some(3), 2, &phases),
             AdvancePlan::RunPhase(PhaseTransition { mode: "fix", .. })
         ));
         // max=3, 3 done → exhausted, merge
         assert!(matches!(
-            plan_advance(WorkflowState::ChangesRequested, Some(3), 3),
+            plan_advance(WorkflowState::ChangesRequested, Some(3), 3, &phases),
             AdvancePlan::Merge
         ));
         // max=3, 5 done → way past, merge
         assert!(matches!(
-            plan_advance(WorkflowState::ChangesRequested, Some(3), 5),
+            plan_advance(WorkflowState::ChangesRequested, Some(3), 5, &phases),
             AdvancePlan::Merge
         ));
     }
@@ -3091,7 +3229,7 @@ mod tests {
         assert_eq!(completion.status_label, "already_satisfied");
         assert_eq!(registry["tasks"][0]["state"], "merged");
         let actions =
-            build_advance_actions(&registry, &HashSet::new(), "", None).expect("advance actions");
+            build_advance_actions(&registry, &HashSet::new(), "", None, &crate::config::PhasesConfig::default()).expect("advance actions");
         assert!(!actions.iter().any(|action| {
             matches!(
                 action,
@@ -3157,7 +3295,7 @@ mod tests {
         assert_eq!(completion.status_label, "success_without_changes");
         assert_eq!(registry["tasks"][0]["state"], "merged");
         let actions =
-            build_advance_actions(&registry, &HashSet::new(), "", None).expect("advance actions");
+            build_advance_actions(&registry, &HashSet::new(), "", None, &crate::config::PhasesConfig::default()).expect("advance actions");
         assert!(!actions.iter().any(|action| {
             matches!(
                 action,

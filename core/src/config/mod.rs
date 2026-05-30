@@ -723,6 +723,7 @@ pub struct CoordinatorConfigResolved {
     pub event_replay_max_events: usize,
     pub expose_processes_endpoint: bool,
     pub health_include_runtime_summary: bool,
+    pub phases: PhasesConfig,
 }
 
 impl CoordinatorConfigResolved {
@@ -850,6 +851,7 @@ impl CoordinatorConfigResolved {
             event_replay_max_events: config.and_then(|c| c.event_replay_max_events).unwrap_or(10000),
             expose_processes_endpoint: config.and_then(|c| c.expose_processes_endpoint).unwrap_or(true),
             health_include_runtime_summary: config.and_then(|c| c.health_include_runtime_summary).unwrap_or(true),
+            phases: config.map(|c| c.phases.clone()).unwrap_or_default(),
         }
     }
 }

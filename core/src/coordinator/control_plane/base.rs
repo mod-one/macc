@@ -769,6 +769,7 @@ pub async fn advance_tasks_native(
         &active_merge_ids,
         &now,
         max_review_cycles,
+        &cfg.phases,
     )?;
     if !actions.is_empty() {
         if let Some(log) = logger {
