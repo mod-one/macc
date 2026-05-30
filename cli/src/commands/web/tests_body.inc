@@ -1127,7 +1127,7 @@ async fn audit_log_appends_entry_for_post_request() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/api/v1/coordinator/stop")
+                .uri("/api/v1/coordinator/cleanup")
                 .method("POST")
                 .body(Body::empty())
                 .expect("request"),
@@ -1138,8 +1138,42 @@ async fn audit_log_appends_entry_for_post_request() {
     assert_eq!(response.status(), axum::http::StatusCode::OK);
     let entries = read_ops_log_entries(&root);
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0]["action"], "POST /api/v1/coordinator/stop");
+    assert_eq!(entries[0]["action"], "POST /api/v1/coordinator/cleanup");
     assert_eq!(entries[0]["result"]["status_code"], 200);
+    assert!(entries[0]["duration_ms"].is_number());
+}
+
+#[tokio::test]
+async fn audit_log_appends_custom_entry_for_coordinator_stop() {
+    let root = temp_root("audit-stop-custom");
+    fs::create_dir_all(&root).expect("create root");
+    let state = test_web_state(
+        &root,
+        Arc::new(WebTestEngine::with_stop_result(Ok(()))),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/coordinator/stop")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .body(Body::from(r#"{"mode":"force","confirm":"FORCE","cleanup_worktrees":false,"reason":"test-force-stop"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let entries = read_ops_log_entries(&root);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["action"], "coordinator.stop");
+    assert_eq!(entries[0]["client"], "web");
+    assert_eq!(entries[0]["mode"], "force");
+    assert_eq!(entries[0]["cleanup_worktrees"], false);
+    assert_eq!(entries[0]["status"], "ok");
     assert!(entries[0]["duration_ms"].is_number());
 }
 

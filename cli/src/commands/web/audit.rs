@@ -88,7 +88,7 @@ pub(super) async fn audit_middleware(
 
 fn should_skip_request(method: &Method, path: &str) -> bool {
     !matches!(method.as_str(), "POST" | "PUT" | "DELETE")
-        || matches!(path, "/api/v1/health" | "/api/v1/events")
+        || matches!(path, "/api/v1/health" | "/api/v1/events" | "/api/v1/coordinator/stop")
 }
 
 fn summarize_inputs(uri: &Uri, content_type: Option<&str>, body_bytes: &Bytes) -> Option<Value> {
@@ -197,4 +197,33 @@ async fn append_record(state: &WebState, record: &AuditRecord) -> std::io::Resul
 
 fn audit_log_path(state: &WebState) -> PathBuf {
     state.paths.root.join(AUDIT_LOG_PATH)
+}
+
+#[derive(Serialize)]
+pub(super) struct StopAuditRecord {
+    pub timestamp: String,
+    pub client: &'static str,
+    pub action: &'static str,
+    pub mode: String,
+    pub cleanup_worktrees: bool,
+    pub status: String,
+    pub duration_ms: u64,
+}
+
+pub(super) async fn append_stop_record(state: &WebState, record: &StopAuditRecord) -> std::io::Result<()> {
+    let path = audit_log_path(state);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).await?;
+    }
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .await?;
+    let mut line = serde_json::to_vec(record)
+        .map_err(|err| std::io::Error::other(format!("serialize audit record: {}", err)))?;
+    line.push(b'\n');
+    file.write_all(&line).await?;
+    file.flush().await
 }

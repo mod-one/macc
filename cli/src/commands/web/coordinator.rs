@@ -255,6 +255,7 @@ pub(super) async fn coordinator_stop_handler(
         }
     }
 
+    let start_time = std::time::Instant::now();
     let result = tokio::task::spawn_blocking(move || {
         let env_cfg = CoordinatorEnvConfig::default();
         engine.coordinator_execute_command(
@@ -275,10 +276,27 @@ pub(super) async fn coordinator_stop_handler(
             },
         )
     })
-    .await
-    .map_err(|e| ApiError::validation(e.to_string()))??;
+    .await;
 
-    Ok(Json(ApiCoordinatorCommandResult::from(result)))
+    let duration_ms = start_time.elapsed().as_millis() as u64;
+    let status_str = match &result {
+        Ok(Ok(_)) => "ok",
+        _ => "error",
+    };
+
+    let record = crate::commands::web::audit::StopAuditRecord {
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        client: "web",
+        action: "coordinator.stop",
+        mode: mode.to_string(),
+        cleanup_worktrees: remove_worktrees,
+        status: status_str.to_string(),
+        duration_ms,
+    };
+    let _ = crate::commands::web::audit::append_stop_record(&state, &record).await;
+
+    let execute_res = result.map_err(|e| ApiError::validation(e.to_string()))??;
+    Ok(Json(ApiCoordinatorCommandResult::from(execute_res)))
 }
 
 pub(super) async fn coordinator_cleanup_handler(
