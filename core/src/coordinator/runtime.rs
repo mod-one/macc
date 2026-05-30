@@ -2372,3 +2372,25 @@ pub fn report_branch_cleanup_outcome<FE, FW>(
         }
     }
 }
+
+pub fn terminate_process_group_gracefully(pgid: i64, grace_secs: u64) {
+    #[cfg(unix)]
+    {
+        if pgid <= 0 {
+            return;
+        }
+        let _ = std::process::Command::new("kill")
+            .args(["-TERM", "--", &format!("-{}", pgid)])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+
+        std::thread::sleep(std::time::Duration::from_secs(grace_secs));
+
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", "--", &format!("-{}", pgid)])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+}

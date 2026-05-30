@@ -1173,7 +1173,9 @@ impl AppState {
             return;
         };
         if let Err(err) = self.gate_coordinator_action(&CoordinatorCommand::Stop {
+            drain: false,
             graceful: false,
+            force: false,
             remove_worktrees: false,
             remove_branches: false,
             reason: "tui stop".to_string(),

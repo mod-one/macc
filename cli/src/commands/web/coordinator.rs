@@ -6,7 +6,7 @@ use macc_core::coordinator::task_selector::SelectedTask;
 use macc_core::coordinator::types::CoordinatorEnvConfig;
 use macc_core::service::coordinator_workflow::{
     CoordinatorCommand, CoordinatorCommandRequest, CoordinatorCommandResult, CoordinatorStatus,
-    ThrottledToolStatus,
+    ThrottledToolStatus, PsProcessEntry, RecoveryReportEntry,
 };
 use macc_core::service::diagnostic::{FailureKind, FailureReport};
 use serde::{Deserialize, Serialize};
@@ -82,6 +82,10 @@ pub(super) struct ApiCoordinatorCommandResult {
     pub selected_task: Option<ApiSelectedTask>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_cooldowns: Option<Vec<ApiToolCooldownEntry>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub processes: Option<Vec<ApiPsProcessEntry>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_report: Option<Vec<ApiRecoveryReportEntry>>,
 }
 
 impl From<CoordinatorCommandResult> for ApiCoordinatorCommandResult {
@@ -101,6 +105,12 @@ impl From<CoordinatorCommandResult> for ApiCoordinatorCommandResult {
                     .into_iter()
                     .map(ApiToolCooldownEntry::from)
                     .collect()
+            }),
+            processes: result.processes.map(|list| {
+                list.into_iter().map(ApiPsProcessEntry::from).collect()
+            }),
+            recovery_report: result.recovery_report.map(|list| {
+                list.into_iter().map(ApiRecoveryReportEntry::from).collect()
             }),
         }
     }
@@ -219,16 +229,44 @@ pub(super) async fn coordinator_run_handler(
 pub(super) async fn coordinator_stop_handler(
     State(state): State<WebState>,
     headers: axum::http::HeaderMap,
+    req: Option<Json<ApiStopRequest>>,
 ) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
     crate::commands::web::mutation_gate::require_project_owner(&state, &headers)?;
     let paths = state.paths.clone();
     let engine = state.engine.clone();
-    tokio::task::spawn_blocking(move || engine.coordinator_stop(&paths.root, "web api stop"))
-        .await
-        .map_err(|e| ApiError::validation(e.to_string()))??;
-    Ok(Json(ApiCoordinatorCommandResult::from(
-        CoordinatorCommandResult::default(),
-    )))
+
+    let req = req.map(|Json(r)| r).unwrap_or_default();
+    let mode = req.mode.as_deref().unwrap_or("graceful");
+    let drain = mode == "drain";
+    let graceful = mode == "graceful" || mode == "drain";
+    let force = mode == "force" || mode == "force_cleanup";
+    let remove_worktrees = req.cleanup_worktrees.unwrap_or(false);
+    let reason = req.reason.clone().unwrap_or_else(|| "web api stop".to_string());
+
+    let result = tokio::task::spawn_blocking(move || {
+        let env_cfg = CoordinatorEnvConfig::default();
+        engine.coordinator_execute_command(
+            &paths,
+            CoordinatorCommand::Stop {
+                drain,
+                graceful,
+                force,
+                remove_worktrees,
+                remove_branches: remove_worktrees,
+                reason,
+            },
+            CoordinatorCommandRequest {
+                canonical: None,
+                coordinator_cfg: None,
+                env_cfg: &env_cfg,
+                logger: None,
+            },
+        )
+    })
+    .await
+    .map_err(|e| ApiError::validation(e.to_string()))??;
+
+    Ok(Json(ApiCoordinatorCommandResult::from(result)))
 }
 
 pub(super) async fn coordinator_cleanup_handler(
@@ -466,3 +504,120 @@ pub(super) async fn clear_tool_cooldown_handler(
         .map_err(ApiError::from)?;
     Ok(Json(ApiCoordinatorCommandResult::from(result)))
 }
+
+#[derive(Debug, Deserialize, Default)]
+pub(super) struct ApiStopRequest {
+    pub mode: Option<String>,
+    pub cleanup_worktrees: Option<bool>,
+    pub force_grace_seconds: Option<u64>,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub(super) struct ApiRecoverRequest {
+    pub dry_run: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct ApiPsProcessEntry {
+    pub task_id: String,
+    pub claim_id: String,
+    pub tool: String,
+    pub pid: i64,
+    pub pgid: i64,
+    pub status: String,
+    pub heartbeat: String,
+    pub worktree: String,
+}
+
+impl From<PsProcessEntry> for ApiPsProcessEntry {
+    fn from(p: PsProcessEntry) -> Self {
+        Self {
+            task_id: p.task_id,
+            claim_id: p.claim_id,
+            tool: p.tool,
+            pid: p.pid,
+            pgid: p.pgid,
+            status: p.status,
+            heartbeat: p.heartbeat,
+            worktree: p.worktree,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct ApiRecoveryReportEntry {
+    pub task_id: String,
+    pub situation: String,
+    pub classification: String,
+    pub action: String,
+    pub mutated: bool,
+}
+
+impl From<RecoveryReportEntry> for ApiRecoveryReportEntry {
+    fn from(r: RecoveryReportEntry) -> Self {
+        Self {
+            task_id: r.task_id,
+            situation: r.situation,
+            classification: r.classification,
+            action: r.action,
+            mutated: r.mutated,
+        }
+    }
+}
+
+pub(super) async fn coordinator_processes_handler(
+    State(state): State<WebState>,
+) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
+    let paths = state.paths.clone();
+    let engine = state.engine.clone();
+
+    let result = tokio::task::spawn_blocking(move || {
+        let env_cfg = CoordinatorEnvConfig::default();
+        engine.coordinator_execute_command(
+            &paths,
+            CoordinatorCommand::Ps,
+            CoordinatorCommandRequest {
+                canonical: None,
+                coordinator_cfg: None,
+                env_cfg: &env_cfg,
+                logger: None,
+            },
+        )
+    })
+    .await
+    .map_err(|e| ApiError::validation(e.to_string()))??;
+
+    Ok(Json(ApiCoordinatorCommandResult::from(result)))
+}
+
+pub(super) async fn coordinator_recover_handler(
+    State(state): State<WebState>,
+    headers: axum::http::HeaderMap,
+    req: Option<Json<ApiRecoverRequest>>,
+) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
+    crate::commands::web::mutation_gate::require_project_owner(&state, &headers)?;
+    let paths = state.paths.clone();
+    let engine = state.engine.clone();
+    let req = req.map(|Json(r)| r).unwrap_or_default();
+    let dry_run = req.dry_run.unwrap_or(false);
+
+    let result = tokio::task::spawn_blocking(move || {
+        let env_cfg = CoordinatorEnvConfig::default();
+        engine.coordinator_execute_command(
+            &paths,
+            CoordinatorCommand::Recover { dry_run },
+            CoordinatorCommandRequest {
+                canonical: None,
+                coordinator_cfg: None,
+                env_cfg: &env_cfg,
+                logger: None,
+            },
+        )
+    })
+    .await
+    .map_err(|e| ApiError::validation(e.to_string()))??;
+
+    Ok(Json(ApiCoordinatorCommandResult::from(result)))
+}
+

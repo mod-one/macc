@@ -2680,6 +2680,7 @@ async fn coordinator_run_endpoint_returns_envelope() {
         }),
         audit_prd_report: None,
         tool_cooldowns: None,
+        ..CoordinatorCommandResult::default()
     };
     let state = test_web_state(
         &root,
@@ -2832,6 +2833,7 @@ async fn coordinator_dispatch_endpoint_returns_envelope() {
         }),
         audit_prd_report: None,
         tool_cooldowns: None,
+        ..CoordinatorCommandResult::default()
     };
     let state = test_web_state(
         &root,

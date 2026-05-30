@@ -995,3 +995,46 @@ pub fn write_worktree_prd_for_task(
         source: e,
     })
 }
+
+pub fn is_pid_running(pid: i64) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    std::process::Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+pub fn pgrep_pids(pattern: &str) -> Result<Vec<i32>> {
+    let output = std::process::Command::new("pgrep")
+        .arg("-f")
+        .arg(pattern)
+        .output()
+        .map_err(|e| MaccError::Io {
+            path: "pgrep".into(),
+            action: "find performer/coordinator processes".into(),
+            source: e,
+        })?;
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    Ok(text
+        .lines()
+        .filter_map(|line| line.trim().parse::<i32>().ok())
+        .collect())
+}
+
+pub fn pid_in_repo(pid: i32, repo_root: &std::path::Path) -> bool {
+    let proc_cwd = std::path::PathBuf::from(format!("/proc/{}/cwd", pid));
+    let Ok(cwd) = std::fs::read_link(proc_cwd) else {
+        return false;
+    };
+    let cwd = cwd.canonicalize().unwrap_or(cwd);
+    let repo_canon = repo_root.canonicalize().unwrap_or_else(|_| repo_root.to_path_buf());
+    cwd.starts_with(repo_canon)
+}
+

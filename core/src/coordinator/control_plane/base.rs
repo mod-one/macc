@@ -2077,6 +2077,19 @@ pub async fn dispatch_ready_tasks_native(
     state: &mut CoordinatorRunState,
     logger: Option<&dyn CoordinatorLog>,
 ) -> Result<usize> {
+    let storage_paths = crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(
+        &crate::ProjectPaths::from_root(repo_root),
+    );
+    let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
+    if let Ok(Some(ctrl)) = sqlite.get_coordinator_control() {
+        if ctrl.mode != "running" {
+            if let Some(log) = logger {
+                let _ = log.note(format!("- Dispatch skipped: coordinator control mode is {}", ctrl.mode));
+            }
+            return Ok(0);
+        }
+    }
+
     let cfg = CoordinatorConfigResolved::resolve(coordinator);
     ensure_performer_ipc_listener(repo_root, state, logger).await?;
     state

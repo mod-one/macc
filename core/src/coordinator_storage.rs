@@ -3,10 +3,36 @@ use crate::coordinator::{CoordinatorCursor, CoordinatorEventPayload, Coordinator
 use crate::{MaccError, ProjectPaths, Result};
 use chrono::Utc;
 use rusqlite::{params, Connection};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoordinatorControl {
+    pub mode: String,
+    pub requested_at: Option<String>,
+    pub requested_by: Option<String>,
+    pub drain_snapshot_json: Option<String>,
+    pub force_grace_seconds: Option<u64>,
+    pub cleanup_after_force: Option<bool>,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoordinatorRun {
+    pub run_id: String,
+    pub pid: i64,
+    pub hostname: String,
+    pub started_at: String,
+    pub last_tick_at: Option<String>,
+    pub stopped_at: Option<String>,
+    pub status: String,
+    pub epoch: i64,
+    pub version: String,
+    pub stop_reason: Option<String>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoordinatorStorageMode {
@@ -292,7 +318,7 @@ impl CoordinatorStorage for JsonStorage {
 
 #[derive(Debug, Clone)]
 pub struct SqliteStorage {
-    paths: CoordinatorStoragePaths,
+    pub paths: CoordinatorStoragePaths,
 }
 
 impl SqliteStorage {
@@ -498,7 +524,7 @@ impl SqliteStorage {
         Ok(conn)
     }
 
-    fn init_schema(&self, conn: &Connection) -> Result<()> {
+    pub fn init_schema(&self, conn: &Connection) -> Result<()> {
         conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS metadata (
@@ -569,10 +595,197 @@ impl SqliteStorage {
               payload_json TEXT NOT NULL,
               updated_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS coordinator_runs (
+              run_id TEXT PRIMARY KEY,
+              pid INTEGER NOT NULL,
+              hostname TEXT NOT NULL,
+              started_at TEXT NOT NULL,
+              last_tick_at TEXT,
+              stopped_at TEXT,
+              status TEXT NOT NULL,
+              epoch INTEGER NOT NULL,
+              version TEXT NOT NULL,
+              stop_reason TEXT
+            );
+            CREATE TABLE IF NOT EXISTS coordinator_control (
+              id INTEGER PRIMARY KEY CHECK (id = 1),
+              mode TEXT NOT NULL,
+              requested_at TEXT,
+              requested_by TEXT,
+              drain_snapshot_json TEXT,
+              force_grace_seconds INTEGER,
+              cleanup_after_force INTEGER,
+              reason TEXT
+            );
             ",
         )
         .map_err(sql_err)?;
+        conn.execute(
+            "INSERT OR IGNORE INTO coordinator_control (id, mode) VALUES (1, 'running')",
+            [],
+        )
+        .map_err(sql_err)?;
         Ok(())
+    }
+
+    pub fn get_coordinator_control(&self) -> Result<Option<CoordinatorControl>> {
+        let conn = self.open()?;
+        self.init_schema(&conn)?;
+        let mut stmt = conn
+            .prepare("SELECT mode, requested_at, requested_by, drain_snapshot_json, force_grace_seconds, cleanup_after_force, reason FROM coordinator_control WHERE id = 1")
+            .map_err(sql_err)?;
+        let mut rows = stmt.query([]).map_err(sql_err)?;
+        if let Some(row) = rows.next().map_err(sql_err)? {
+            let mode: String = row.get(0).map_err(sql_err)?;
+            let requested_at: Option<String> = row.get(1).map_err(sql_err)?;
+            let requested_by: Option<String> = row.get(2).map_err(sql_err)?;
+            let drain_snapshot_json: Option<String> = row.get(3).map_err(sql_err)?;
+            let force_grace_seconds_i64: Option<i64> = row.get(4).map_err(sql_err)?;
+            let cleanup_after_force_i64: Option<i64> = row.get(5).map_err(sql_err)?;
+            let reason: Option<String> = row.get(6).map_err(sql_err)?;
+            Ok(Some(CoordinatorControl {
+                mode,
+                requested_at,
+                requested_by,
+                drain_snapshot_json,
+                force_grace_seconds: force_grace_seconds_i64.map(|v| v as u64),
+                cleanup_after_force: cleanup_after_force_i64.map(|v| v != 0),
+                reason,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn set_coordinator_control(&self, ctrl: &CoordinatorControl) -> Result<()> {
+        let conn = self.open()?;
+        self.init_schema(&conn)?;
+        conn.execute(
+            "INSERT INTO coordinator_control (id, mode, requested_at, requested_by, drain_snapshot_json, force_grace_seconds, cleanup_after_force, reason)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(id) DO UPDATE SET
+               mode=excluded.mode,
+               requested_at=excluded.requested_at,
+               requested_by=excluded.requested_by,
+               drain_snapshot_json=excluded.drain_snapshot_json,
+               force_grace_seconds=excluded.force_grace_seconds,
+               cleanup_after_force=excluded.cleanup_after_force,
+               reason=excluded.reason",
+            rusqlite::params![
+                ctrl.mode,
+                ctrl.requested_at,
+                ctrl.requested_by,
+                ctrl.drain_snapshot_json,
+                ctrl.force_grace_seconds.map(|v| v as i64),
+                ctrl.cleanup_after_force.map(|v| if v { 1 } else { 0 }),
+                ctrl.reason,
+            ],
+        )
+        .map_err(sql_err)?;
+        Ok(())
+    }
+
+    pub fn get_coordinator_run(&self, run_id: &str) -> Result<Option<CoordinatorRun>> {
+        let conn = self.open()?;
+        self.init_schema(&conn)?;
+        let mut stmt = conn
+            .prepare("SELECT run_id, pid, hostname, started_at, last_tick_at, stopped_at, status, epoch, version, stop_reason FROM coordinator_runs WHERE run_id = ?1")
+            .map_err(sql_err)?;
+        let mut rows = stmt.query([run_id]).map_err(sql_err)?;
+        if let Some(row) = rows.next().map_err(sql_err)? {
+            let run_id: String = row.get(0).map_err(sql_err)?;
+            let pid: i64 = row.get(1).map_err(sql_err)?;
+            let hostname: String = row.get(2).map_err(sql_err)?;
+            let started_at: String = row.get(3).map_err(sql_err)?;
+            let last_tick_at: Option<String> = row.get(4).map_err(sql_err)?;
+            let stopped_at: Option<String> = row.get(5).map_err(sql_err)?;
+            let status: String = row.get(6).map_err(sql_err)?;
+            let epoch: i64 = row.get(7).map_err(sql_err)?;
+            let version: String = row.get(8).map_err(sql_err)?;
+            let stop_reason: Option<String> = row.get(9).map_err(sql_err)?;
+            Ok(Some(CoordinatorRun {
+                run_id,
+                pid,
+                hostname,
+                started_at,
+                last_tick_at,
+                stopped_at,
+                status,
+                epoch,
+                version,
+                stop_reason,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn upsert_coordinator_run(&self, run: &CoordinatorRun) -> Result<()> {
+        let conn = self.open()?;
+        self.init_schema(&conn)?;
+        conn.execute(
+            "INSERT INTO coordinator_runs (run_id, pid, hostname, started_at, last_tick_at, stopped_at, status, epoch, version, stop_reason)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(run_id) DO UPDATE SET
+               pid=excluded.pid,
+               hostname=excluded.hostname,
+               started_at=excluded.started_at,
+               last_tick_at=excluded.last_tick_at,
+               stopped_at=excluded.stopped_at,
+               status=excluded.status,
+               epoch=excluded.epoch,
+               version=excluded.version,
+               stop_reason=excluded.stop_reason",
+            rusqlite::params![
+                run.run_id,
+                run.pid,
+                run.hostname,
+                run.started_at,
+                run.last_tick_at,
+                run.stopped_at,
+                run.status,
+                run.epoch,
+                run.version,
+                run.stop_reason,
+            ],
+        )
+        .map_err(sql_err)?;
+        Ok(())
+    }
+
+    pub fn get_active_coordinator_run(&self) -> Result<Option<CoordinatorRun>> {
+        let conn = self.open()?;
+        self.init_schema(&conn)?;
+        let mut stmt = conn
+            .prepare("SELECT run_id, pid, hostname, started_at, last_tick_at, stopped_at, status, epoch, version, stop_reason FROM coordinator_runs WHERE status = 'running' OR status = 'draining' ORDER BY started_at DESC LIMIT 1")
+            .map_err(sql_err)?;
+        let mut rows = stmt.query([]).map_err(sql_err)?;
+        if let Some(row) = rows.next().map_err(sql_err)? {
+            let run_id: String = row.get(0).map_err(sql_err)?;
+            let pid: i64 = row.get(1).map_err(sql_err)?;
+            let hostname: String = row.get(2).map_err(sql_err)?;
+            let started_at: String = row.get(3).map_err(sql_err)?;
+            let last_tick_at: Option<String> = row.get(4).map_err(sql_err)?;
+            let stopped_at: Option<String> = row.get(5).map_err(sql_err)?;
+            let status: String = row.get(6).map_err(sql_err)?;
+            let epoch: i64 = row.get(7).map_err(sql_err)?;
+            let version: String = row.get(8).map_err(sql_err)?;
+            let stop_reason: Option<String> = row.get(9).map_err(sql_err)?;
+            Ok(Some(CoordinatorRun {
+                run_id,
+                pid,
+                hostname,
+                started_at,
+                last_tick_at,
+                stopped_at,
+                status,
+                epoch,
+                version,
+                stop_reason,
+            }))
+        } else {
+            Ok(None)
+        }
     }
 
     pub fn get_cursor(&self, name: &str) -> Result<Option<(u64, String)>> {
@@ -1131,6 +1344,22 @@ impl SqliteStorage {
             .entry("state_mapping".into())
             .or_insert_with(|| json!({}));
         Ok(registry)
+    }
+
+    pub fn get_running_task_pids(&self) -> Result<Vec<(String, i64)>> {
+        let conn = self.open()?;
+        self.init_schema(&conn)?;
+        let mut stmt = conn
+            .prepare("SELECT task_id, pid FROM task_runtime WHERE status = 'running' AND pid IS NOT NULL")
+            .map_err(sql_err)?;
+        let mut rows = stmt.query([]).map_err(sql_err)?;
+        let mut pids = Vec::new();
+        while let Some(row) = rows.next().map_err(sql_err)? {
+            let task_id: String = row.get(0).map_err(sql_err)?;
+            let pid: i64 = row.get(1).map_err(sql_err)?;
+            pids.push((task_id, pid));
+        }
+        Ok(pids)
     }
 }
 

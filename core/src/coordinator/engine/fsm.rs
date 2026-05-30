@@ -1365,6 +1365,130 @@ struct NativeControlPlaneBackend<'a> {
 #[async_trait]
 impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
     async fn on_cycle_start(&mut self, _cycle: usize) -> Result<()> {
+        let storage_paths = crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(
+            &crate::ProjectPaths::from_root(self.repo_root),
+        );
+        let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
+        
+        let _ = sqlite.get_active_coordinator_run().map(|run_opt| {
+            if let Some(mut r) = run_opt {
+                r.last_tick_at = Some(chrono::Utc::now().to_rfc3339());
+                let _ = sqlite.upsert_coordinator_run(&r);
+            }
+        });
+
+        if let Ok(Some(ctrl)) = sqlite.get_coordinator_control() {
+            if ctrl.mode == "force_stopping" {
+                if let Some(log) = self.logger {
+                    let _ = log.note("- Force stop requested. Terminating all performers...".to_string());
+                }
+                
+                let mut pids_to_kill = std::collections::HashSet::new();
+                if let Ok(db_pids) = sqlite.get_running_task_pids() {
+                    for (task_id, pid) in db_pids {
+                        pids_to_kill.insert(pid);
+                        let _ = crate::coordinator::helpers::append_coordinator_event_with_severity(
+                            self.repo_root,
+                            "task_blocked",
+                            &task_id,
+                            "dev",
+                            "aborted_by_operator",
+                            "Task aborted by operator force-stop",
+                            "warning",
+                        );
+                    }
+                }
+                for (_, job) in &self.run_state.active_jobs {
+                    if let Some(pid) = job.pid {
+                        pids_to_kill.insert(pid);
+                    }
+                }
+                
+                let grace_secs = ctrl.force_grace_seconds.unwrap_or(10);
+                for pid in &pids_to_kill {
+                    if let Some(log) = self.logger {
+                        let _ = log.note(format!("- Sending TERM to performer process group {}", pid));
+                    }
+                    #[cfg(unix)]
+                    let _ = std::process::Command::new("kill")
+                        .args(["-TERM", "--", &format!("-{}", pid)])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status();
+                }
+                if !pids_to_kill.is_empty() {
+                    tokio::time::sleep(std::time::Duration::from_secs(grace_secs)).await;
+                    for pid in &pids_to_kill {
+                        if let Some(log) = self.logger {
+                            let _ = log.note(format!("- Sending KILL to performer process group {}", pid));
+                        }
+                        #[cfg(unix)]
+                        let _ = std::process::Command::new("kill")
+                            .args(["-KILL", "--", &format!("-{}", pid)])
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .status();
+                    }
+                }
+
+                if ctrl.cleanup_after_force.unwrap_or(false) {
+                    if let Some(log) = self.logger {
+                        let _ = log.note("- Cleaning worktrees as requested by force cleanup...".to_string());
+                    }
+                    let _ = crate::service::worktree::remove_all_worktrees(self.repo_root, true);
+                    let _ = crate::prune_worktrees(self.repo_root);
+                }
+
+                let mut stopped_ctrl = ctrl.clone();
+                stopped_ctrl.mode = "stopped".to_string();
+                let _ = sqlite.set_coordinator_control(&stopped_ctrl);
+
+                return Err(MaccError::Validation("force stopped by operator".to_string()));
+            } else if ctrl.mode == "draining" {
+                let mut active_draining_tasks_left = false;
+                if let Some(snapshot_raw) = &ctrl.drain_snapshot_json {
+                    if let Ok(task_ids) = serde_json::from_str::<Vec<String>>(snapshot_raw) {
+                        let registry = crate::coordinator::state::coordinator_state_registry_load(self.repo_root, &std::collections::BTreeMap::new())?;
+                        if let Some(tasks_arr) = registry.get("tasks").and_then(Value::as_array) {
+                            for task_val in tasks_arr {
+                                if let Some(tid) = task_val.get("id").and_then(Value::as_str) {
+                                    if task_ids.contains(&tid.to_string()) {
+                                        if let Some(state_str) = task_val.get("state").and_then(Value::as_str) {
+                                            if state_str == "claimed" || state_str == "in_progress" || state_str == "changes_requested" || state_str == "queued" {
+                                                active_draining_tasks_left = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if !active_draining_tasks_left {
+                    if let Some(log) = self.logger {
+                        let _ = log.note("- All active drain tasks completed. Draining complete.".to_string());
+                    }
+                    let mut stopped_ctrl = ctrl.clone();
+                    stopped_ctrl.mode = "stopped".to_string();
+                    let _ = sqlite.set_coordinator_control(&stopped_ctrl);
+
+                    return Err(MaccError::Validation("draining complete".to_string()));
+                }
+            } else if ctrl.mode == "graceful_stopping" {
+                if self.run_state.active_jobs.is_empty() && self.run_state.active_merge_jobs.is_empty() {
+                    if let Some(log) = self.logger {
+                        let _ = log.note("- Graceful stopping completed. Exiting.".to_string());
+                    }
+                    let mut stopped_ctrl = ctrl.clone();
+                    stopped_ctrl.mode = "stopped".to_string();
+                    let _ = sqlite.set_coordinator_control(&stopped_ctrl);
+
+                    return Err(MaccError::Validation("draining complete".to_string()));
+                }
+            }
+        }
+
         // Emit a periodic coordinator-alive heartbeat so viewer TUIs always
         // see recent activity even while performers are long-running.
         // Throttled to once every 30 seconds.
@@ -1657,6 +1781,55 @@ pub async fn run_native_control_plane(
         generated
     };
 
+    let storage_paths = crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(
+        &crate::ProjectPaths::from_root(repo_root),
+    );
+    let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths.clone());
+    
+    // Register coordinator run and seed control mode
+    let last_run = sqlite.get_active_coordinator_run().unwrap_or(None);
+    let max_epoch = {
+        if let Ok(conn) = rusqlite::Connection::open(&sqlite.paths.sqlite_path) {
+            let _ = sqlite.init_schema(&conn);
+            conn.query_row("SELECT COALESCE(MAX(epoch), 0) FROM coordinator_runs", [], |row| row.get::<_, i64>(0)).unwrap_or(0)
+        } else {
+            0
+        }
+    };
+    let next_epoch = max_epoch + 1;
+    if let Some(mut prev) = last_run {
+        prev.status = "crashed".to_string();
+        prev.stopped_at = Some(chrono::Utc::now().to_rfc3339());
+        prev.stop_reason = Some("coordinator process crashed or exited uncleanly".to_string());
+        let _ = sqlite.upsert_coordinator_run(&prev);
+    }
+    let hostname = std::env::var("HOSTNAME").unwrap_or_else(|_| {
+        std::env::var("COMPUTERNAME").unwrap_or_else(|_| "localhost".to_string())
+    });
+    let current_run = crate::coordinator_storage::CoordinatorRun {
+        run_id: run_id.clone(),
+        pid: std::process::id() as i64,
+        hostname,
+        started_at: chrono::Utc::now().to_rfc3339(),
+        last_tick_at: Some(chrono::Utc::now().to_rfc3339()),
+        stopped_at: None,
+        status: "running".to_string(),
+        epoch: next_epoch,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        stop_reason: None,
+    };
+    let _ = sqlite.upsert_coordinator_run(&current_run);
+
+    let _ = sqlite.set_coordinator_control(&crate::coordinator_storage::CoordinatorControl {
+        mode: "running".to_string(),
+        requested_at: Some(chrono::Utc::now().to_rfc3339()),
+        requested_by: Some("system".to_string()),
+        drain_snapshot_json: None,
+        force_grace_seconds: Some(10),
+        cleanup_after_force: Some(false),
+        reason: None,
+    });
+
     let _ = crate::coordinator::helpers::append_coordinator_event_with_severity(
         repo_root,
         "command_start",
@@ -1890,12 +2063,31 @@ pub async fn run_native_control_plane(
         }
     };
 
+    let mut is_clean_exit = false;
+    let mut final_status = "success".to_string();
+    if let Err(ref err) = run_result {
+        if let MaccError::Validation(ref msg) = err {
+            if msg == "draining complete" || msg == "force stopped by operator" {
+                is_clean_exit = true;
+                final_status = if msg == "draining complete" { "stopped".to_string() } else { "force_stopping".to_string() };
+            }
+        }
+    }
+
+    let run_result = if is_clean_exit {
+        Ok(())
+    } else {
+        run_result
+    };
+
     let result_label = if run_result.is_err() {
         "failed"
     } else {
         let is_shutdown = *shutdown_rx.borrow();
         if is_shutdown {
             "stopped"
+        } else if is_clean_exit {
+            &final_status
         } else if crate::coordinator::state_runtime::read_coordinator_pause_file(repo_root)
             .ok()
             .flatten()
@@ -1914,6 +2106,19 @@ pub async fn run_native_control_plane(
             result_label
         ));
     }
+
+    let _ = sqlite.get_active_coordinator_run().map(|run_opt| {
+        if let Some(mut r) = run_opt {
+            r.status = if is_clean_exit { final_status.clone() } else if run_result.is_err() { "crashed".to_string() } else { "stopped".to_string() };
+            r.stopped_at = Some(chrono::Utc::now().to_rfc3339());
+            if !is_clean_exit && run_result.is_err() {
+                r.stop_reason = Some(format!("{:?}", run_result));
+            } else if is_clean_exit {
+                r.stop_reason = Some(final_status.clone());
+            }
+            let _ = sqlite.upsert_coordinator_run(&r);
+        }
+    });
 
     if run_result.is_err() {
         if let Err(err) = &run_result {

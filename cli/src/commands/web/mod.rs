@@ -40,6 +40,7 @@ use macc_core::config::WebAssetsMode;
 use macc_core::process_ownership::{ClientKind, ProcessHandle, ProcessKind};
 use macc_core::service::process_ownership::RegisteredProcessGuard;
 use macc_core::{MaccError, ProjectPaths, Result};
+use macc_core::coordinator_storage::CoordinatorStorage;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -239,6 +240,14 @@ fn build_web_router(state: WebState) -> Router {
             post(coordinator::coordinator_stop_handler),
         )
         .route(
+            "/api/v1/coordinator/processes",
+            get(coordinator::coordinator_processes_handler),
+        )
+        .route(
+            "/api/v1/coordinator/recover",
+            post(coordinator::coordinator_recover_handler),
+        )
+        .route(
             "/api/v1/coordinator/resume",
             post(coordinator::coordinator_resume_handler),
         )
@@ -351,9 +360,104 @@ fn heartbeat_web_viewers_once(state: &WebState) {
 async fn health_handler(
     axum::extract::State(state): axum::extract::State<WebState>,
 ) -> Json<serde_json::Value> {
+    let paths = state.paths.clone();
+    let status_res = tokio::task::spawn_blocking(move || {
+        let storage_paths = macc_core::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&paths);
+        let sqlite = macc_core::coordinator_storage::SqliteStorage::new(storage_paths);
+        
+        let db_ok = sqlite.load_snapshot().is_ok();
+        let last_run = sqlite.get_active_coordinator_run().unwrap_or(None);
+        let active = last_run.as_ref().map(|r| r.status == "running").unwrap_or(false);
+        let mode = last_run.as_ref().map(|r| r.status.clone()).unwrap_or_else(|| "stopped".to_string());
+        let run_id = last_run.as_ref().map(|r| r.run_id.clone()).unwrap_or_default();
+        let last_tick_at = last_run.as_ref().and_then(|r| r.last_tick_at.clone()).unwrap_or_default();
+        
+        let snapshot = sqlite.load_snapshot().ok();
+        let (active_tasks, stale_tasks, blocked_tasks) = if let Some(ref snap) = snapshot {
+            let mut active_count = 0;
+            let mut stale_count = 0;
+            let mut blocked_count = 0;
+            for t in &snap.registry.tasks {
+                if t.is_active() {
+                    active_count += 1;
+                    if let Some(lh) = t.task_runtime.last_heartbeat.as_deref() {
+                        if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(lh) {
+                            let elapsed = chrono::Utc::now().timestamp() - parsed.with_timezone(&chrono::Utc).timestamp();
+                            if elapsed > 180 {
+                                stale_count += 1;
+                            }
+                        }
+                    }
+                } else if t.state == "blocked" {
+                    blocked_count += 1;
+                }
+            }
+            (active_count, stale_count, blocked_count)
+        } else {
+            (0, 0, 0)
+        };
+        
+        let db_pids: Vec<i64> = if let Some(ref snap) = snapshot {
+            snap.registry.tasks.iter().filter_map(|t| t.runtime_pid()).collect()
+        } else {
+            Vec::new()
+        };
+        
+        let orphaned_processes = if db_ok {
+            let mut candidate_pids = std::collections::HashSet::new();
+            if let Ok(pids) = macc_core::coordinator::helpers::pgrep_pids("performer") {
+                for pid in pids { candidate_pids.insert(pid); }
+            }
+            if let Ok(pids) = macc_core::coordinator::helpers::pgrep_pids("macc") {
+                for pid in pids { candidate_pids.insert(pid); }
+            }
+            let mut count = 0;
+            let current_pid = std::process::id() as i32;
+            for pid in candidate_pids {
+                if pid == current_pid { continue; }
+                if db_pids.contains(&(pid as i64)) { continue; }
+                if macc_core::coordinator::helpers::pid_in_repo(pid, &paths.root) {
+                    count += 1;
+                }
+            }
+            count
+        } else {
+            0
+        };
+
+        let mut status = "ok";
+        if stale_tasks > 0 || orphaned_processes > 0 {
+            status = "degraded";
+        }
+        if !db_ok {
+            status = "unhealthy";
+        }
+
+        (status, db_ok, active, mode, run_id, last_tick_at, active_tasks, stale_tasks, blocked_tasks, orphaned_processes)
+    })
+    .await;
+
+    let (status, db_ok, active, mode, run_id, last_tick_at, active_tasks, stale_tasks, blocked_tasks, orphaned_processes) = match status_res {
+        Ok(val) => val,
+        Err(_) => ("unhealthy", false, false, "stopped".to_string(), "".to_string(), "".to_string(), 0, 0, 0, 0),
+    };
+
     Json(serde_json::json!({
-        "status": "ok",
-        "project_root": state.paths.root.to_string_lossy()
+        "status": status,
+        "version": env!("CARGO_PKG_VERSION"),
+        "uptime_seconds": 0,
+        "db_ok": db_ok,
+        "coordinator": {
+            "active": active,
+            "mode": mode,
+            "run_id": run_id,
+            "last_tick_at": last_tick_at,
+            "last_heartbeat_at": last_tick_at,
+            "active_tasks": active_tasks,
+            "stale_tasks": stale_tasks,
+            "blocked_tasks": blocked_tasks,
+            "orphaned_processes": orphaned_processes
+        }
     }))
 }
 

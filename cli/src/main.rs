@@ -340,12 +340,21 @@ enum Commands {
         /// Start supervisor in daemon+attach mode before running coordinator
         #[arg(long)]
         supervisor: bool,
+        /// Drain stop (disable new dispatch, let active tasks finish)
+        #[arg(long)]
+        drain: bool,
         /// Graceful stop (SIGTERM only, no SIGKILL escalation)
         #[arg(long)]
         graceful: bool,
+        /// Force stop (SIGTERM then SIGKILL process groups)
+        #[arg(long)]
+        force: bool,
         /// When action=stop, remove all project worktrees after coordinator shutdown
         #[arg(long)]
         remove_worktrees: bool,
+        /// Force stop and cleanup worktrees
+        #[arg(long)]
+        cleanup_worktrees: bool,
         /// When action=stop and --remove-worktrees is set, also delete associated branches
         #[arg(long)]
         remove_branches: bool,
@@ -1233,8 +1242,11 @@ fn run_with_engine_provider(
             as_client,
             no_tui,
             supervisor,
+            drain,
             graceful,
+            force,
             remove_worktrees,
+            cleanup_worktrees,
             remove_branches,
             prd,
             coordinator_tool,
@@ -1323,8 +1335,10 @@ fn run_with_engine_provider(
                         .unwrap_or_else(|| format!("cli-{}", std::process::id())),
                     no_tui: *no_tui,
                     supervisor: *supervisor,
+                    drain: *drain,
                     graceful: *graceful,
-                    remove_worktrees: *remove_worktrees,
+                    force: *force,
+                    remove_worktrees: *remove_worktrees || *cleanup_worktrees,
                     remove_branches: *remove_branches,
                     env_cfg,
                     extra_args: extra_args.clone(),
@@ -2796,8 +2810,11 @@ fi
                     as_client: None,
                     no_tui: true,
                     supervisor: false,
+                    drain: false,
                     graceful: true,
+                    force: false,
                     remove_worktrees: true,
+                    cleanup_worktrees: false,
                     remove_branches: true,
                     prd: None,
                     coordinator_tool: None,

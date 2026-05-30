@@ -50,7 +50,9 @@ pub struct CoordinatorCommandInput {
     pub client_id: String,
     pub no_tui: bool,
     pub supervisor: bool,
+    pub drain: bool,
     pub graceful: bool,
+    pub force: bool,
     pub remove_worktrees: bool,
     pub remove_branches: bool,
     pub env_cfg: CoordinatorEnvConfig,
@@ -106,7 +108,9 @@ pub fn handle(
     let command = coordinator_command_from_name(
         &input.command_name,
         &input.extra_args,
+        input.drain,
         input.graceful,
+        input.force,
         input.remove_worktrees,
         input.remove_branches,
     )?;
@@ -178,16 +182,18 @@ Performers cannot commit without it. Fix this first:\n\
         }
     }
 
-    if matches!(command, CoordinatorCommand::Stop { .. }) {
-        // Stop any supervisor that was launched by this coordinator first.
-        // Doing this before killing the coordinator prevents the supervisor's
-        // --attach loop from detecting the coordinator is gone and triggering
-        // an unwanted recovery/restart.
-        stop_attached_supervisor_if_present(&paths.root);
-        let coordinator_path = paths.automation_coordinator_path();
-        let stopped =
-            stop_coordinator_process_groups(&paths.root, &coordinator_path, input.graceful)?;
-        println!("Coordinator process groups signaled: {}", stopped);
+    if let CoordinatorCommand::Stop { drain, .. } = &command {
+        if !*drain {
+            // Stop any supervisor that was launched by this coordinator first.
+            // Doing this before killing the coordinator prevents the supervisor's
+            // --attach loop from detecting the coordinator is gone and triggering
+            // an unwanted recovery/restart.
+            stop_attached_supervisor_if_present(&paths.root);
+            let coordinator_path = paths.automation_coordinator_path();
+            let stopped =
+                stop_coordinator_process_groups(&paths.root, &coordinator_path, input.graceful)?;
+            println!("Coordinator process groups signaled: {}", stopped);
+        }
     }
 
     let logger_action = match command {
@@ -227,6 +233,26 @@ Performers cannot commit without it. Fix this first:\n\
 
     if let Some(status) = response.status {
         print_status_summary(&paths.root, &status);
+    }
+    if let Some(processes) = response.processes {
+        println!("{:<12} {:<12} {:<12} {:>8} {:>8} {:<10} {:<12} {}", "TASK ID", "CLAIM ID", "TOOL", "PID", "PGID", "STATUS", "HEARTBEAT", "WORKTREE");
+        println!("{}", "-".repeat(100));
+        for p in processes {
+            println!(
+                "{:<12} {:<12} {:<12} {:>8} {:>8} {:<10} {:<12} {}",
+                p.task_id, p.claim_id, p.tool, p.pid, p.pgid, p.status, p.heartbeat, p.worktree
+            );
+        }
+    }
+    if let Some(report) = response.recovery_report {
+        println!("{:<12} {:<30} {:<20} {:<30} {}", "TASK ID", "SITUATION", "CLASSIFICATION", "ACTION", "MUTATED");
+        println!("{}", "-".repeat(100));
+        for r in report {
+            println!(
+                "{:<12} {:<30} {:<20} {:<30} {}",
+                r.task_id, r.situation, r.classification, r.action, r.mutated
+            );
+        }
     }
     if let Some(runtime) = response.runtime_status {
         println!("{}", runtime);
@@ -632,7 +658,9 @@ mod tests {
         assert_eq!(
             engine.last_command(),
             Some(CoordinatorCommand::Stop {
+                drain: false,
                 graceful: false,
+                force: false,
                 remove_worktrees: false,
                 remove_branches: false,
                 reason: "manual stop".to_string(),
@@ -725,7 +753,9 @@ mod tests {
             client_id: client_id.to_string(),
             no_tui: true,
             supervisor: false,
+            drain: false,
             graceful: false,
+            force: false,
             remove_worktrees: false,
             remove_branches: false,
             env_cfg: CoordinatorEnvConfig::default(),

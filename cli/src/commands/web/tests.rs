@@ -574,6 +574,14 @@ impl macc_core::engine::Engine for WebTestEngine {
         {
             return execute_coordinator_workflow_command(&self.inner, paths, command, request);
         }
+        if matches!(command, CoordinatorCommand::Stop { .. }) {
+            return self.stop_result
+                .lock()
+                .expect("lock")
+                .take()
+                .unwrap_or(Ok(()))
+                .map(|_| CoordinatorCommandResult::default());
+        }
         self.run_result
             .lock()
             .expect("lock")
