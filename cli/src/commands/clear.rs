@@ -58,9 +58,10 @@ impl Command for ClearCommand {
                     dry_run: self.dry_run,
                     include_prd: false,
                     include_state: false,
+                    handle_secrets: None,
                 };
                 println!("Saving current MACC setup to \"{}\" before clear...", save_name);
-                macc_core::save::create_save_bundle(&paths, save_name, &opts)?;
+                crate::commands::create_save_bundle_interactive(&paths, save_name, opts)?;
             } else {
                 let term_interactive = std::io::stdin().is_terminal() && std::env::var("CARGO_MANIFEST_DIR").is_err();
                 if !term_interactive {
@@ -169,8 +170,9 @@ impl Command for ClearCommand {
                                 dry_run: self.dry_run,
                                 include_prd: false,
                                 include_state: false,
+                                handle_secrets: None,
                             };
-                            macc_core::save::create_save_bundle(&paths, &name, &opts)?;
+                            crate::commands::create_save_bundle_interactive(&paths, &name, opts)?;
                             println!("Setup saved successfully.");
                         }
                     } else if choice == "a" || choice == "abort" {

@@ -4757,4 +4757,207 @@ fi
         std::fs::remove_dir_all(&temp_base).ok();
         Ok(())
     }
+
+    #[cfg(unix)]
+    struct StdinRedirector {
+        orig_stdin: std::os::raw::c_int,
+    }
+
+    #[cfg(unix)]
+    impl StdinRedirector {
+        fn redirect(input: &str) -> Self {
+            use std::io::Write;
+            use std::os::unix::io::FromRawFd;
+
+            unsafe {
+                let orig_stdin = libc::dup(0);
+                let mut fds = [0; 2];
+                libc::pipe(fds.as_mut_ptr());
+                libc::dup2(fds[0], 0);
+                libc::close(fds[0]);
+
+                let mut file = std::fs::File::from_raw_fd(fds[1]);
+                file.write_all(input.as_bytes()).unwrap();
+                file.flush().unwrap();
+
+                Self { orig_stdin }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for StdinRedirector {
+        fn drop(&mut self) {
+            unsafe {
+                libc::dup2(self.orig_stdin, 0);
+                libc::close(self.orig_stdin);
+            }
+        }
+    }
+
+    #[test]
+    fn test_save_handles_secrets_interactively() -> macc_core::Result<()> {
+        let _guard = env_test_lock();
+        let temp_base = std::env::temp_dir().join(format!("macc_secrets_interactive_test_{}", uuid_v4_like()));
+        std::fs::create_dir_all(&temp_base).unwrap();
+
+        run_git_ok(&temp_base, &["init"]);
+        run_git_ok(&temp_base, &["config", "user.email", "test@example.com"]);
+        run_git_ok(&temp_base, &["config", "user.name", "Test User"]);
+        std::fs::write(temp_base.join("dummy.txt"), "dummy").unwrap();
+        run_git_ok(&temp_base, &["add", "dummy.txt"]);
+        run_git_ok(&temp_base, &["commit", "-m", "initial commit"]);
+
+        let temp_home = temp_base.join("home");
+        std::fs::create_dir_all(&temp_home).unwrap();
+        let old_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &temp_home);
+
+        // Set env variable to force interactive mode in tests
+        std::env::set_var("MACC_FORCE_INTERACTIVE", "true");
+
+        // 1. Initialize MACC
+        run_with_engine(
+            Cli {
+                cwd: temp_base.to_string_lossy().into(),
+                verbose: false,
+                quiet: false,
+                offline: false,
+                web_port: None,
+                command: Some(Commands::Init {
+                    force: false,
+                    wizard: false,
+                    profile: None,
+                    fresh: true,
+                    restore: None,
+                    no_restore_prompt: true,
+                    apply: false,
+                }),
+            },
+            TestEngine::with_fixtures(),
+        )?;
+
+        let config_path = temp_base.join(".macc/macc.yaml");
+        assert!(config_path.exists());
+
+        // 2. Put a secret in config file
+        let config_with_secret = "version: v1\nsettings:\n  my_secret: ghp_123456789012345678901234567890123456";
+        std::fs::write(&config_path, config_with_secret).unwrap();
+
+        // Test Case A: User inputs "R" (Redact)
+        {
+            let _redir = StdinRedirector::redirect("R\n");
+
+            run_with_engine(
+                Cli {
+                    cwd: temp_base.to_string_lossy().into(),
+                    verbose: false,
+                    quiet: false,
+                    offline: false,
+                    web_port: None,
+                    command: Some(Commands::Save {
+                        name: Some("test-save-redact".to_string()),
+                        overwrite: true,
+                        description: Some("Test Redaction".to_string()),
+                        only: None,
+                        no_sessions: false,
+                        include_logs: false,
+                        log_max_size: "50MB".to_string(),
+                        log_since: "7d".to_string(),
+                        redact_logs: true,
+                        dry_run: false,
+                        cmd: None,
+                    }),
+                },
+                TestEngine::with_fixtures(),
+            )?;
+
+            // Verify save created and redacted
+            let save_dir = temp_home.join(".macc/saves/test-save-redact");
+            assert!(save_dir.exists());
+            let saved_config = std::fs::read_to_string(save_dir.join("config/macc.yaml")).unwrap();
+            assert!(saved_config.contains("my_secret: [REDACTED]"));
+            assert!(!saved_config.contains("ghp_"));
+        }
+
+        // Test Case B: Exclude
+        {
+            let _redir = StdinRedirector::redirect("E\n");
+
+            run_with_engine(
+                Cli {
+                    cwd: temp_base.to_string_lossy().into(),
+                    verbose: false,
+                    quiet: false,
+                    offline: false,
+                    web_port: None,
+                    command: Some(Commands::Save {
+                        name: Some("test-save-exclude".to_string()),
+                        overwrite: true,
+                        description: Some("Test Exclusion".to_string()),
+                        only: None,
+                        no_sessions: false,
+                        include_logs: false,
+                        log_max_size: "50MB".to_string(),
+                        log_since: "7d".to_string(),
+                        redact_logs: true,
+                        dry_run: false,
+                        cmd: None,
+                    }),
+                },
+                TestEngine::with_fixtures(),
+            )?;
+
+            // Verify save created and config excluded
+            let save_dir = temp_home.join(".macc/saves/test-save-exclude");
+            assert!(save_dir.exists());
+            let manifest_content = std::fs::read_to_string(save_dir.join("manifest.yaml")).unwrap();
+            assert!(manifest_content.contains("config: false")); // config should be false in includes
+            assert!(!save_dir.join("config").exists()); // config dir should be removed
+        }
+
+        // Test Case C: Abort
+        {
+            let _redir = StdinRedirector::redirect("A\n");
+
+            let result = run_with_engine(
+                Cli {
+                    cwd: temp_base.to_string_lossy().into(),
+                    verbose: false,
+                    quiet: false,
+                    offline: false,
+                    web_port: None,
+                    command: Some(Commands::Save {
+                        name: Some("test-save-abort".to_string()),
+                        overwrite: true,
+                        description: Some("Test Abort".to_string()),
+                        only: None,
+                        no_sessions: false,
+                        include_logs: false,
+                        log_max_size: "50MB".to_string(),
+                        log_since: "7d".to_string(),
+                        redact_logs: true,
+                        dry_run: false,
+                        cmd: None,
+                    }),
+                },
+                TestEngine::with_fixtures(),
+            );
+
+            assert!(result.is_err());
+            let err_msg = format!("{:?}", result.err().unwrap());
+            assert!(err_msg.contains("MACC-SAVE-1003"));
+            assert!(!temp_home.join(".macc/saves/test-save-abort").exists());
+        }
+
+        // Cleanup
+        std::env::remove_var("MACC_FORCE_INTERACTIVE");
+        if let Some(h) = old_home {
+            std::env::set_var("HOME", h);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        std::fs::remove_dir_all(&temp_base).ok();
+        Ok(())
+    }
 }

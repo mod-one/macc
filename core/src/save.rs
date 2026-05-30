@@ -108,6 +108,13 @@ pub struct SecretScanMetadata {
     pub redacted_logs: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretHandlingChoice {
+    Abort,
+    Redact,
+    Exclude,
+}
+
 pub struct SaveOptions {
     pub description: Option<String>,
     pub overwrite: bool,
@@ -120,6 +127,7 @@ pub struct SaveOptions {
     pub dry_run: bool,
     pub include_prd: bool,
     pub include_state: bool,
+    pub handle_secrets: Option<SecretHandlingChoice>,
 }
 
 pub struct RestoreOptions {
@@ -572,10 +580,62 @@ pub fn create_save_bundle(paths: &ProjectPaths, name: &str, opts: &SaveOptions) 
         });
     }
 
-    // Abort if secrets were found in config/session files
+    // Abort or redact/exclude if secrets were found in config/session files
     if findings_count > 0 {
-        fs::remove_dir_all(&tmp_save_dir).ok();
-        return Err(MaccError::Validation(format!("MACC-SAVE-1003: Secret scan failed. Found {} potential secrets in save files. Aborted.", findings_count)));
+        match opts.handle_secrets {
+            Some(SecretHandlingChoice::Redact) => {
+                let config_dest = tmp_save_dir.join("config").join("macc.yaml");
+                if config_dest.exists() {
+                    if let Ok(content) = fs::read_to_string(&config_dest) {
+                        let redacted = redact_secrets_in_text(&content);
+                        fs::write(&config_dest, &redacted).ok();
+                        let sha = compute_file_sha256(&config_dest).unwrap();
+                        hashes.config = Some(sha);
+                    }
+                }
+                let sessions_dest = tmp_save_dir.join("state").join("tool-sessions.json");
+                if sessions_dest.exists() {
+                    if let Ok(content) = fs::read_to_string(&sessions_dest) {
+                        let redacted = redact_secrets_in_text(&content);
+                        fs::write(&sessions_dest, &redacted).ok();
+                        let sha = compute_file_sha256(&sessions_dest).unwrap();
+                        hashes.coordinator_sessions = Some(sha);
+                    }
+                }
+                findings_count = 0;
+            }
+            Some(SecretHandlingChoice::Exclude) => {
+                let config_dest = tmp_save_dir.join("config").join("macc.yaml");
+                if config_dest.exists() {
+                    if let Ok(bytes) = fs::read(&config_dest) {
+                        let findings = crate::security::scan_bytes("config/macc.yaml", &bytes);
+                        if findings.iter().any(|f| f.severity == crate::security::Severity::Error) {
+                            fs::remove_dir_all(config_dest.parent().unwrap()).ok();
+                            includes.config = false;
+                            hashes.config = None;
+                            paths_meta.config = None;
+                        }
+                    }
+                }
+                let sessions_dest = tmp_save_dir.join("state").join("tool-sessions.json");
+                if sessions_dest.exists() {
+                    if let Ok(bytes) = fs::read(&sessions_dest) {
+                        let findings = crate::security::scan_bytes("state/tool-sessions.json", &bytes);
+                        if findings.iter().any(|f| f.severity == crate::security::Severity::Error) {
+                            fs::remove_dir_all(sessions_dest.parent().unwrap()).ok();
+                            includes.coordinator_sessions = false;
+                            hashes.coordinator_sessions = None;
+                            paths_meta.coordinator_sessions = None;
+                        }
+                    }
+                }
+                findings_count = 0;
+            }
+            _ => {
+                fs::remove_dir_all(&tmp_save_dir).ok();
+                return Err(MaccError::Validation(format!("MACC-SAVE-1003: Secret scan failed. Found {} potential secrets in config/session files. Choose [R/E/A] to proceed.", findings_count)));
+            }
+        }
     }
 
     // Write manifest
@@ -601,7 +661,7 @@ pub fn create_save_bundle(paths: &ProjectPaths, name: &str, opts: &SaveOptions) 
         security: SaveSecurity {
             secret_scan: SecretScanMetadata {
                 performed: true,
-                findings: 0,
+                findings: findings_count,
                 redacted_logs: opts.redact_logs,
             },
         },

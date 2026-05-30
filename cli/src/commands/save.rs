@@ -112,9 +112,10 @@ impl Command for SaveCommand {
                     dry_run: *dry_run,
                     include_prd: false,
                     include_state: false,
+                    handle_secrets: None,
                 };
 
-                let manifest = macc_core::save::create_save_bundle(&paths, &name, &opts)?;
+                let manifest = crate::commands::create_save_bundle_interactive(&paths, &name, opts)?;
                 println!("Saved MACC bundle \"{}\".\n", manifest.name);
                 println!("Included:");
                 println!("  {} config", if manifest.includes.config { "✓" } else { "-" });
