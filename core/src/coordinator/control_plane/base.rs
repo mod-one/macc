@@ -1,7 +1,7 @@
 use crate::config::CoordinatorConfigResolved;
 use crate::coordinator::helpers::{
-    append_coordinator_event, append_coordinator_event_with_severity, now_iso_coordinator,
-    recompute_resource_locks_from_tasks, set_registry_updated_at,
+    append_coordinator_event, append_coordinator_event_with_severity, append_phase_skipped_event,
+    now_iso_coordinator, recompute_resource_locks_from_tasks, set_registry_updated_at,
 };
 use crate::coordinator::ipc::ensure_performer_ipc_listener;
 use crate::coordinator::model::{PrdInput, Task, TaskRegistry};
@@ -737,6 +737,54 @@ pub fn sync_registry_from_prd_native(
     Ok(())
 }
 
+fn check_and_emit_skipped_phases(
+    repo_root: &Path,
+    task: &mut Task,
+    phases: &crate::config::PhasesConfig,
+) -> Result<bool> {
+    let mut changed = false;
+    let task_id = task.id.clone();
+    let runtime = task.ensure_runtime();
+
+    if !phases.testing.enabled {
+        let already_emitted = runtime.extra
+            .get("test_skipped_emitted")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !already_emitted {
+            let _ = append_phase_skipped_event(
+                repo_root,
+                &task_id,
+                "test",
+                "disabled_by_config",
+                "testing skipped by config",
+            );
+            runtime.extra.insert("test_skipped_emitted".to_string(), serde_json::Value::Bool(true));
+            changed = true;
+        }
+    }
+
+    if !phases.review.enabled {
+        let already_emitted = runtime.extra
+            .get("review_skipped_emitted")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !already_emitted {
+            let _ = append_phase_skipped_event(
+                repo_root,
+                &task_id,
+                "review",
+                "disabled_by_config",
+                "review skipped by config",
+            );
+            runtime.extra.insert("review_skipped_emitted".to_string(), serde_json::Value::Bool(true));
+            changed = true;
+        }
+    }
+
+    Ok(changed)
+}
+
 pub async fn advance_tasks_native(
     repo_root: &Path,
     env_cfg: &CoordinatorEnvConfig,
@@ -749,8 +797,25 @@ pub async fn advance_tasks_native(
     let cfg = CoordinatorConfigResolved::resolve(coordinator);
     let mut registry =
         crate::coordinator::state::coordinator_state_registry_load(repo_root, &BTreeMap::new())?;
+
+    // --- Emit skipped phase events if phases are disabled ---
+    let mut registry_typed = TaskRegistry::from_value(&registry)?;
+    let mut skipped_phases_changed = false;
+    for task in &mut registry_typed.tasks {
+        use crate::coordinator::WorkflowState;
+        let ws = task.workflow_state().unwrap_or(WorkflowState::Todo);
+        if ws != WorkflowState::Todo && ws != WorkflowState::Claimed {
+            if check_and_emit_skipped_phases(repo_root, task, &cfg.phases)? {
+                skipped_phases_changed = true;
+            }
+        }
+    }
+    if skipped_phases_changed {
+        registry = registry_typed.to_value()?;
+    }
+
     let registry_snapshot = TaskRegistry::from_value(&registry)?;
-    let mut progressed = false;
+    let mut progressed = skipped_phases_changed;
     let blocked_merge: Option<(String, String)> = None;
     let now = now_iso_coordinator();
     let merge_timeout = resolve_merge_timeout_seconds(env_cfg, coordinator);
@@ -2241,7 +2306,7 @@ mod tests {
         SanitizeOptions,
     };
     use crate::coordinator::control_plane::sanitize::RollbackWorktreeOptions;
-    use crate::coordinator::model::TaskRegistry;
+    use crate::coordinator::model::{Task, TaskRegistry};
     use crate::coordinator::runtime::CoordinatorRunState;
     use rusqlite::Connection;
     use serde_json::json;
@@ -2904,6 +2969,60 @@ mod tests {
             |row| row.get(0),
         ).unwrap();
         assert_eq!(last_event_id, "evt-3");
+
+        let _ = fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn test_check_and_emit_skipped_phases() {
+        let repo = make_test_repo();
+        let project_paths = crate::ProjectPaths::from_root(&repo);
+        let storage_paths = crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&project_paths);
+        let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths.clone());
+        let conn = sqlite.open().unwrap();
+        sqlite.init_schema(&conn).unwrap();
+
+        // 1. Create a task that has finished dev phase (InProgress workflow state)
+        let mut task = Task {
+            id: "T-SKIP-1".to_string(),
+            state: "in_progress".to_string(),
+            ..Default::default()
+        };
+
+        // 2. Set phase config to have testing disabled and review enabled
+        let phases = crate::config::PhasesConfig {
+            testing: crate::config::PhaseConfig { enabled: false, ..Default::default() },
+            review: crate::config::PhaseConfig { enabled: true, ..Default::default() },
+        };
+
+        // 3. Call check_and_emit_skipped_phases
+        let changed = super::check_and_emit_skipped_phases(&repo, &mut task, &phases).unwrap();
+        assert!(changed);
+
+        // 4. Assert that "test_skipped_emitted" is now true in runtime extra
+        let runtime = task.ensure_runtime();
+        assert_eq!(
+            runtime.extra.get("test_skipped_emitted").unwrap().as_bool(),
+            Some(true)
+        );
+
+        // 5. Calling it again should return changed = false (idempotence)
+        let changed_again = super::check_and_emit_skipped_phases(&repo, &mut task, &phases).unwrap();
+        assert!(!changed_again);
+
+        // 6. Verify the event actually got appended to SQLite storage
+        let mut stmt = conn.prepare("SELECT event_type, phase, status, payload_json FROM events WHERE task_id = 'T-SKIP-1'").unwrap();
+        let mut rows = stmt.query([]).unwrap();
+        let row = rows.next().unwrap().unwrap();
+        let event_type: String = row.get(0).unwrap();
+        let phase: Option<String> = row.get(1).unwrap();
+        let status: String = row.get(2).unwrap();
+        let payload_json: String = row.get(3).unwrap();
+
+        assert_eq!(event_type, "phase_skipped");
+        assert_eq!(phase, Some("test".to_string()));
+        assert_eq!(status, "skipped");
+        assert!(payload_json.contains("testing skipped by config"));
 
         let _ = fs::remove_dir_all(repo);
     }

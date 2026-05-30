@@ -913,6 +913,38 @@ pub fn append_coordinator_event_with_severity(
     Ok(())
 }
 
+pub fn append_phase_skipped_event(
+    repo_root: &Path,
+    task_id: &str,
+    phase: &str,
+    reason: &str,
+    message: &str,
+) -> Result<()> {
+    let run_id = ensure_coordinator_run_id();
+    let now = now_iso_coordinator();
+    let seq = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default() as u64;
+    let payload = serde_json::json!({
+        "schema_version": "1",
+        "event_id": format!("evt-phase_skipped-{}-{}", task_id, seq),
+        "run_id": run_id,
+        "seq": seq,
+        "ts": now,
+        "source": "coordinator:native",
+        "task_id": task_id,
+        "type": "phase_skipped",
+        "phase": phase,
+        "status": "skipped",
+        "reason": reason,
+        "severity": "info",
+        "payload": {
+            "message": message
+        }
+    });
+    let project_paths = crate::ProjectPaths::from_root(repo_root);
+    let _ = append_event_sqlite(&project_paths, &payload)?;
+    Ok(())
+}
+
 pub fn ensure_coordinator_run_id() -> String {
     if let Ok(existing) = std::env::var("COORDINATOR_RUN_ID") {
         let trimmed = existing.trim();
