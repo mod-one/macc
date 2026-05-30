@@ -14,7 +14,8 @@ use crate::coordinator::runtime::{
 };
 use crate::coordinator::state_runtime::{
     cleanup_dead_runtime_tasks, clear_coordinator_pause_file, coordinator_pause_file_path,
-    resume_paused_task_merge, set_task_paused_for_merge, write_coordinator_pause_file,
+    execute_startup_recovery_sweep, resume_paused_task_merge, set_task_paused_for_merge,
+    write_coordinator_pause_file,
 };
 use crate::coordinator::{
     CompletionAuthority, PerformerCompletionKind, RuntimeStatus, WorkflowState,
@@ -1997,6 +1998,64 @@ pub async fn run_native_control_plane(
                 if let Some(log) = logger {
                     let _ = log.note(format!(
                         "- Warning: failed to load persisted throttle state: {}",
+                        e
+                    ));
+                }
+            }
+        }
+    }
+
+    // ── Part E: replay unread events from SQLite on startup ─────────────
+    if let Err(e) = crate::coordinator::control_plane::consume_runtime_events(repo_root, &mut run_state, logger) {
+        if let Some(log) = logger {
+            let _ = log.note(format!("- Warning: startup event replay failed: {}", e));
+        }
+    } else {
+        let _ = crate::coordinator::control_plane::apply_runtime_event_bus_updates(
+            repo_root,
+            env_cfg,
+            coordinator,
+            &mut run_state,
+            logger,
+        );
+    }
+
+    // ── Part F: §11.1 Steps 7-10 — startup recovery sweep ───────────────
+    // Inspects worktree state (step 7), Git branch/merge state (step 8),
+    // runs deterministic PRD reconciliation (step 9), and persists
+    // recovery classifications to SQLite (step 10).
+    // Must complete before any new dispatch (step 11).
+    {
+        let reference_branch: &str = env_cfg
+            .reference_branch
+            .as_deref()
+            .unwrap_or(&cfg.reference_branch);
+        // We cannot cheaply coerce &dyn CoordinatorLog into &dyn Fn(String)
+        // across lifetimes, so we collect the entries and log the summary
+        // ourselves using the coordinator logger.
+        match execute_startup_recovery_sweep(repo_root, reference_branch, None) {
+            Ok(entries) => {
+                let classified = entries.len();
+                let mutated = entries.iter().filter(|e| e.mutated).count();
+                if let Some(log) = logger {
+                    for entry in &entries {
+                        let _ = log.note(format!(
+                            "- Recovery sweep task={} classification={} action=\"{}\"",
+                            entry.task_id, entry.classification, entry.action
+                        ));
+                    }
+                    if classified > 0 {
+                        let _ = log.note(format!(
+                            "- Startup recovery sweep: {} task(s) classified, {} state(s) corrected",
+                            classified, mutated
+                        ));
+                    }
+                }
+            }
+            Err(e) => {
+                if let Some(log) = logger {
+                    let _ = log.note(format!(
+                        "- Warning: startup recovery sweep failed: {}",
                         e
                     ));
                 }

@@ -512,7 +512,7 @@ impl SqliteStorage {
         Ok(inserted > 0)
     }
 
-    fn open(&self) -> Result<Connection> {
+    pub fn open(&self) -> Result<Connection> {
         ensure_parent_dir(&self.paths.sqlite_path)?;
         let conn = Connection::open(&self.paths.sqlite_path).map_err(sql_err)?;
         // WAL mode allows concurrent readers and writers without blocking.

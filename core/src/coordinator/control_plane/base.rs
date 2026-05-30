@@ -1404,7 +1404,7 @@ pub async fn monitor_active_jobs_native(
     Ok(())
 }
 
-fn apply_runtime_event_bus_updates(
+pub fn apply_runtime_event_bus_updates(
     repo_root: &Path,
     env_cfg: &CoordinatorEnvConfig,
     coordinator: Option<&crate::config::CoordinatorConfig>,
@@ -1703,11 +1703,100 @@ pub fn consume_heartbeat_events(
 }
 
 pub fn consume_runtime_events(
-    _repo_root: &Path,
-    _state: &mut CoordinatorRunState,
-    _logger: Option<&dyn CoordinatorLog>,
+    repo_root: &Path,
+    state: &mut CoordinatorRunState,
+    logger: Option<&dyn CoordinatorLog>,
 ) -> Result<usize> {
-    Ok(0)
+    let project_paths = crate::ProjectPaths::from_root(repo_root);
+    let storage_paths = crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&project_paths);
+    let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
+    let conn = sqlite.open()?;
+    sqlite.init_schema(&conn)?;
+
+    let sql_err = |e: rusqlite::Error| MaccError::Storage {
+        backend: "sqlite",
+        message: e.to_string(),
+    };
+
+    let last_event_id: Option<String> = match conn.query_row(
+        "SELECT last_event_id FROM event_cursor WHERE stream = 'coordinator'",
+        [],
+        |row| row.get::<_, String>(0),
+    ) {
+        Ok(id) => Some(id),
+        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(e) => return Err(sql_err(e)),
+    };
+
+    let mut last_seq: Option<i64> = None;
+    if let Some(ref id) = last_event_id {
+        last_seq = match conn.query_row(
+            "SELECT seq FROM events WHERE event_id = ?1",
+            [id],
+            |row| row.get::<_, i64>(0),
+        ) {
+            Ok(seq) => Some(seq),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => return Err(sql_err(e)),
+        };
+    }
+
+    let mut stmt = if let (Some(seq), Some(id)) = (last_seq, &last_event_id) {
+        conn.prepare("SELECT raw_json, event_id FROM events WHERE seq > ?1 OR (seq = ?1 AND event_id > ?2) ORDER BY seq ASC, event_id ASC")
+            .map_err(sql_err)?
+    } else {
+        conn.prepare("SELECT raw_json, event_id FROM events ORDER BY seq ASC, event_id ASC")
+            .map_err(sql_err)?
+    };
+
+    let mut mapped_rows = Vec::new();
+    if let (Some(seq), Some(id)) = (last_seq, &last_event_id) {
+        let mut rows = stmt.query(rusqlite::params![seq, id]).map_err(sql_err)?;
+        while let Some(row) = rows.next().map_err(sql_err)? {
+            let raw: String = row.get(0).map_err(sql_err)?;
+            let event_id: String = row.get(1).map_err(sql_err)?;
+            mapped_rows.push((raw, event_id));
+        }
+    } else {
+        let mut rows = stmt.query([]).map_err(sql_err)?;
+        while let Some(row) = rows.next().map_err(sql_err)? {
+            let raw: String = row.get(0).map_err(sql_err)?;
+            let event_id: String = row.get(1).map_err(sql_err)?;
+            mapped_rows.push((raw, event_id));
+        }
+    }
+
+    let mut count = 0;
+    let mut latest_event_id = None;
+    for (raw, id) in mapped_rows {
+        if let Ok(v) = serde_json::from_str::<crate::coordinator::CoordinatorEventRecord>(&raw) {
+            if let Some(runtime_event) = coordinator_runtime::raw_event_to_runtime_event(&v) {
+                let _ = state.runtime_event_bus_tx.send(runtime_event);
+                count += 1;
+            }
+        }
+        latest_event_id = Some(id);
+    }
+
+    if let Some(ref id) = latest_event_id {
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO event_cursor (stream, last_event_id, last_read_at)
+             VALUES ('coordinator', ?1, ?2)
+             ON CONFLICT(stream) DO UPDATE SET last_event_id = ?1, last_read_at = ?2",
+            [id, &now],
+        )
+        .map_err(sql_err)?;
+
+        if let Some(log) = logger {
+            let _ = log.note(format!(
+                "- Recovery: replayed {} events; updated event_cursor to {}",
+                count, id
+            ));
+        }
+    }
+
+    Ok(count)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2728,5 +2817,93 @@ mod tests {
         };
         let candidate = select_dispatch_candidate(&registry, &cfg).expect("candidate selected");
         assert_eq!(candidate.task.id, "T-HIGH");
+    }
+
+    #[test]
+    fn test_consume_runtime_events_replays_properly() {
+        let repo = make_test_repo();
+        let project_paths = crate::ProjectPaths::from_root(&repo);
+        let storage_paths = crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&project_paths);
+        let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
+        let conn = sqlite.open().unwrap();
+        sqlite.init_schema(&conn).unwrap();
+
+        let e1 = crate::coordinator::CoordinatorEventRecord {
+            schema_version: "1".to_string(),
+            event_id: "evt-1".to_string(),
+            run_id: Some("run-1".to_string()),
+            coordinator_epoch: Some(1),
+            claim_id: Some("claim-1".to_string()),
+            seq: 10,
+            ts: "2026-03-20T12:00:00Z".to_string(),
+            source: "performer".to_string(),
+            task_id: Some("T1".to_string()),
+            event_type: "heartbeat".to_string(),
+            phase: Some("dev".to_string()),
+            status: "ok".to_string(),
+            ..Default::default()
+        };
+        let e2 = crate::coordinator::CoordinatorEventRecord {
+            schema_version: "1".to_string(),
+            event_id: "evt-2".to_string(),
+            run_id: Some("run-1".to_string()),
+            coordinator_epoch: Some(1),
+            claim_id: Some("claim-1".to_string()),
+            seq: 20,
+            ts: "2026-03-20T12:05:00Z".to_string(),
+            source: "performer".to_string(),
+            task_id: Some("T1".to_string()),
+            event_type: "heartbeat".to_string(),
+            phase: Some("dev".to_string()),
+            status: "ok".to_string(),
+            ..Default::default()
+        };
+
+        sqlite.append_event_record(&e1).unwrap();
+        sqlite.append_event_record(&e2).unwrap();
+
+        let mut run_state = CoordinatorRunState::new();
+
+        let replayed = super::consume_runtime_events(&repo, &mut run_state, None).unwrap();
+        assert_eq!(replayed, 2);
+
+        let last_event_id: String = conn.query_row(
+            "SELECT last_event_id FROM event_cursor WHERE stream = 'coordinator'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(last_event_id, "evt-2");
+
+        let replayed_again = super::consume_runtime_events(&repo, &mut run_state, None).unwrap();
+        assert_eq!(replayed_again, 0);
+
+        let e3 = crate::coordinator::CoordinatorEventRecord {
+            schema_version: "1".to_string(),
+            event_id: "evt-3".to_string(),
+            run_id: Some("run-1".to_string()),
+            coordinator_epoch: Some(1),
+            claim_id: Some("claim-1".to_string()),
+            seq: 30,
+            ts: "2026-03-20T12:10:00Z".to_string(),
+            source: "performer".to_string(),
+            task_id: Some("T1".to_string()),
+            event_type: "heartbeat".to_string(),
+            phase: Some("dev".to_string()),
+            status: "ok".to_string(),
+            ..Default::default()
+        };
+        sqlite.append_event_record(&e3).unwrap();
+
+        let replayed_third = super::consume_runtime_events(&repo, &mut run_state, None).unwrap();
+        assert_eq!(replayed_third, 1);
+
+        let last_event_id: String = conn.query_row(
+            "SELECT last_event_id FROM event_cursor WHERE stream = 'coordinator'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(last_event_id, "evt-3");
+
+        let _ = fs::remove_dir_all(repo);
     }
 }
