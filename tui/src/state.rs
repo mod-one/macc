@@ -237,6 +237,10 @@ pub struct AppState {
     pub coordinator_ownership: crate::ownership::TuiOwnershipState,
     coordinator_ownership_last_heartbeat: Option<Instant>,
     coordinator_ownership_last_refresh: Option<Instant>,
+    pub coordinator_stop_dialog_open: bool,
+    pub coordinator_stop_dialog_selection: usize,
+    pub coordinator_recover_dialog_open: bool,
+    pub coordinator_recover_dialog_selection: usize,
 }
 
 impl AppState {
@@ -344,6 +348,10 @@ impl AppState {
             coordinator_ownership: crate::ownership::TuiOwnershipState::new(),
             coordinator_ownership_last_heartbeat: None,
             coordinator_ownership_last_refresh: None,
+            coordinator_stop_dialog_open: false,
+            coordinator_stop_dialog_selection: 0,
+            coordinator_recover_dialog_open: false,
+            coordinator_recover_dialog_selection: 0,
         };
 
         state.refresh_tools();
@@ -1232,6 +1240,196 @@ impl AppState {
                 self.set_status(
                     UiStatusLevel::Warning,
                     "Coordinator stopped, but child cleanup may be incomplete.",
+                    Some(Duration::from_secs(6)),
+                );
+            }
+        }
+    }
+
+    pub fn open_coordinator_stop_dialog(&mut self) {
+        self.coordinator_stop_dialog_open = true;
+        self.coordinator_stop_dialog_selection = 0;
+    }
+
+    pub fn close_coordinator_stop_dialog(&mut self) {
+        self.coordinator_stop_dialog_open = false;
+    }
+
+    pub fn open_coordinator_recover_dialog(&mut self) {
+        self.coordinator_recover_dialog_open = true;
+        self.coordinator_recover_dialog_selection = 0;
+    }
+
+    pub fn close_coordinator_recover_dialog(&mut self) {
+        self.coordinator_recover_dialog_open = false;
+    }
+
+    pub fn stop_coordinator_with_selected_mode(&mut self) {
+        let mode = match self.coordinator_stop_dialog_selection {
+            0 => "drain",
+            1 => "graceful",
+            2 => "force",
+            3 => "force_cleanup",
+            _ => return,
+        };
+        self.close_coordinator_stop_dialog();
+        self.stop_coordinator_command_with_mode(mode);
+    }
+
+    pub fn stop_coordinator_command_with_mode(&mut self, mode: &str) {
+        let Some(paths) = self.project_paths.clone() else {
+            self.set_status(
+                UiStatusLevel::Warning,
+                "No project loaded.",
+                Some(Duration::from_secs(4)),
+            );
+            return;
+        };
+
+        let cmd = match mode {
+            "drain" => CoordinatorCommand::Stop {
+                drain: true,
+                graceful: false,
+                force: false,
+                remove_worktrees: false,
+                remove_branches: false,
+                reason: "tui drain".to_string(),
+            },
+            "graceful" => CoordinatorCommand::Stop {
+                drain: false,
+                graceful: true,
+                force: false,
+                remove_worktrees: false,
+                remove_branches: false,
+                reason: "tui graceful stop".to_string(),
+            },
+            "force" => CoordinatorCommand::Stop {
+                drain: false,
+                graceful: false,
+                force: true,
+                remove_worktrees: false,
+                remove_branches: false,
+                reason: "tui force stop".to_string(),
+            },
+            "force_cleanup" => CoordinatorCommand::Stop {
+                drain: false,
+                graceful: false,
+                force: true,
+                remove_worktrees: true,
+                remove_branches: true,
+                reason: "tui force stop + cleanup".to_string(),
+            },
+            _ => return,
+        };
+
+        if let Err(err) = self.gate_coordinator_action(&cmd) {
+            self.set_status(
+                UiStatusLevel::Error,
+                format!(
+                    "Failed to run '{}': {}",
+                    mode,
+                    format_actionable_error(&err.to_string())
+                ),
+                Some(Duration::from_secs(6)),
+            );
+            return;
+        }
+
+        let env_cfg = self.coordinator_env_cfg();
+        let req = macc_core::service::coordinator_workflow::CoordinatorCommandRequest {
+            canonical: self.config.as_ref(),
+            coordinator_cfg: self.config.as_ref().and_then(|c| c.automation.coordinator.as_ref()),
+            env_cfg: &env_cfg,
+            logger: None,
+        };
+
+        match self.engine.coordinator_execute_command(&paths, cmd, req) {
+            Ok(_) => {
+                self.coordinator_pause_next_action = None;
+                self.coordinator_running_command = None;
+                self.coordinator_running_elapsed_secs = None;
+                let _ = self
+                    .engine
+                    .coordinator_reconcile_workflow(&paths, &env_cfg, None, None);
+                self.refresh_coordinator_snapshot();
+                self.refresh_coordinator_events();
+                self.set_status(
+                    UiStatusLevel::Success,
+                    format!("Stop mode '{}' applied successfully.", mode),
+                    Some(Duration::from_secs(4)),
+                );
+            }
+            Err(err) => {
+                self.set_status(
+                    UiStatusLevel::Error,
+                    format!("Stop command failed: {}", err),
+                    Some(Duration::from_secs(6)),
+                );
+            }
+        }
+    }
+
+    pub fn recover_coordinator_with_selected_mode(&mut self) {
+        let dry_run = match self.coordinator_recover_dialog_selection {
+            0 => false,
+            1 => true,
+            _ => return,
+        };
+        self.close_coordinator_recover_dialog();
+        self.recover_coordinator_command(dry_run);
+    }
+
+    pub fn recover_coordinator_command(&mut self, dry_run: bool) {
+        let Some(paths) = self.project_paths.clone() else {
+            self.set_status(
+                UiStatusLevel::Warning,
+                "No project loaded.",
+                Some(Duration::from_secs(4)),
+            );
+            return;
+        };
+
+        let cmd = CoordinatorCommand::Recover { dry_run };
+
+        if let Err(err) = self.gate_coordinator_action(&cmd) {
+            self.set_status(
+                UiStatusLevel::Error,
+                format!(
+                    "Failed to run recover: {}",
+                    format_actionable_error(&err.to_string())
+                ),
+                Some(Duration::from_secs(6)),
+            );
+            return;
+        }
+
+        let env_cfg = self.coordinator_env_cfg();
+        let req = macc_core::service::coordinator_workflow::CoordinatorCommandRequest {
+            canonical: self.config.as_ref(),
+            coordinator_cfg: self.config.as_ref().and_then(|c| c.automation.coordinator.as_ref()),
+            env_cfg: &env_cfg,
+            logger: None,
+        };
+
+        match self.engine.coordinator_execute_command(&paths, cmd, req) {
+            Ok(res) => {
+                self.refresh_coordinator_snapshot();
+                self.refresh_coordinator_events();
+                let report_msg = if let Some(reports) = res.recovery_report {
+                    format!("Recovery complete: {} tasks classified.", reports.len())
+                } else {
+                    "Recovery command succeeded.".to_string()
+                };
+                self.set_status(
+                    UiStatusLevel::Success,
+                    report_msg,
+                    Some(Duration::from_secs(6)),
+                );
+            }
+            Err(err) => {
+                self.set_status(
+                    UiStatusLevel::Error,
+                    format!("Recovery failed: {}", err),
                     Some(Duration::from_secs(6)),
                 );
             }

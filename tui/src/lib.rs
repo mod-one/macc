@@ -8,7 +8,7 @@ use macc_core::service::coordinator_workflow::CoordinatorCommand;
 use ratatui::{
     backend::{Backend, CrosstermBackend},
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
     Frame, Terminal,
@@ -187,6 +187,46 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
         }
         return;
     }
+    if current_screen == Screen::CoordinatorLive && state.coordinator_stop_dialog_open {
+        match key {
+            KeyCode::Up | KeyCode::Char('k') => {
+                state.coordinator_stop_dialog_selection = state.coordinator_stop_dialog_selection.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if state.coordinator_stop_dialog_selection < 3 {
+                    state.coordinator_stop_dialog_selection += 1;
+                }
+            }
+            KeyCode::Enter => {
+                state.stop_coordinator_with_selected_mode();
+            }
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('n') => {
+                state.close_coordinator_stop_dialog();
+            }
+            _ => {}
+        }
+        return;
+    }
+    if current_screen == Screen::CoordinatorLive && state.coordinator_recover_dialog_open {
+        match key {
+            KeyCode::Up | KeyCode::Char('k') => {
+                state.coordinator_recover_dialog_selection = state.coordinator_recover_dialog_selection.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if state.coordinator_recover_dialog_selection < 1 {
+                    state.coordinator_recover_dialog_selection += 1;
+                }
+            }
+            KeyCode::Enter => {
+                state.recover_coordinator_with_selected_mode();
+            }
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('n') => {
+                state.close_coordinator_recover_dialog();
+            }
+            _ => {}
+        }
+        return;
+    }
 
     match key {
         KeyCode::Char('?') => {
@@ -216,7 +256,7 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
         KeyCode::Char('h') => state.goto_screen(Screen::Home),
         KeyCode::Char('t') => state.push_screen(Screen::Tools),
         KeyCode::Char('o') => state.push_screen(Screen::Automation),
-        KeyCode::Char('v') => state.push_screen(Screen::CoordinatorLive),
+        KeyCode::Char('v') if current_screen != Screen::CoordinatorLive => state.push_screen(Screen::CoordinatorLive),
         KeyCode::Char('m') => state.push_screen(Screen::Mcp),
         KeyCode::Char('g') => state.push_screen(Screen::Logs),
         KeyCode::Char('e') => state.push_screen(Screen::Settings),
@@ -332,10 +372,19 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
         KeyCode::Char('k') if current_screen == Screen::CoordinatorLive => {
             if let Some(handle) = state.coordinator_handle() {
                 state.try_owner_action(&handle, |state| {
-                    state.stop_coordinator_command();
+                    state.open_coordinator_stop_dialog();
                 });
             } else {
-                state.stop_coordinator_command();
+                state.open_coordinator_stop_dialog();
+            }
+        }
+        KeyCode::Char('v') if current_screen == Screen::CoordinatorLive => {
+            if let Some(handle) = state.coordinator_handle() {
+                state.try_owner_action(&handle, |state| {
+                    state.open_coordinator_recover_dialog();
+                });
+            } else {
+                state.open_coordinator_recover_dialog();
             }
         }
         KeyCode::Char('l') if current_screen == Screen::CoordinatorLive => {
@@ -1334,13 +1383,13 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 };
             let runtime = if concurrency_line.is_empty() {
                 format!(
-                    "Coordinator runtime\n\n{}\n{}\n{}\n{}\n{}\n{}\n\n{}\n\nActions:\n- r: run full cycle\n- y: sync registry\n- c: reconcile\n- u: resume paused run\n- k: stop\n- l: refresh status",
+                    "Coordinator runtime\n\n{}\n{}\n{}\n{}\n{}\n{}\n\n{}\n\nActions:\n- r: run full cycle\n- y: sync registry\n- c: reconcile\n- u: resume paused run\n- k: stop options\n- v: recover options\n- l: refresh status",
                     status_line, snapshot_line, refresh_line, events_rate_line, event_age_line,
                     run_id_line, result_line
                 )
             } else {
                 format!(
-                    "Coordinator runtime\n\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n\n{}\n\nActions:\n- r: run full cycle\n- y: sync registry\n- c: reconcile\n- u: resume paused run\n- k: stop\n- l: refresh status",
+                    "Coordinator runtime\n\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n\n{}\n\nActions:\n- r: run full cycle\n- y: sync registry\n- c: reconcile\n- u: resume paused run\n- k: stop options\n- v: recover options\n- l: refresh status",
                     status_line, snapshot_line, concurrency_line, refresh_line, events_rate_line,
                     event_age_line, run_id_line, result_line
                 )
@@ -1665,6 +1714,14 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             crate::ownership::render_takeover_modal(f, f.size(), req);
         }
     }
+    if state.current_screen() == Screen::CoordinatorLive {
+        if state.coordinator_stop_dialog_open {
+            render_coordinator_stop_dialog(f, state);
+        }
+        if state.coordinator_recover_dialog_open {
+            render_coordinator_recover_dialog(f, state);
+        }
+    }
     if state.help_open {
         render_help_overlay(f, state);
     }
@@ -1788,7 +1845,8 @@ fn footer_hints_line(state: &AppState, theme: &ui::Theme, max_chars: usize) -> L
         ("y", "Sync Registry", is_viewer),
         ("c", "Reconcile", is_viewer),
         ("u", "Resume Paused Run", is_viewer),
-        ("k", "Stop Coordinator", is_viewer),
+        ("k", "Stop Options", is_viewer),
+        ("v", "Recover Options", is_viewer),
         ("l", "Refresh Live Status", false),
         ("T", "Request Takeover", !is_viewer),
         ("a/r", "Accept / Reject", !has_pending),
@@ -1995,6 +2053,104 @@ fn render_coordinator_pause_overlay(f: &mut Frame, state: &AppState) {
                 .title(title)
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Red)),
+        )
+        .wrap(Wrap { trim: true });
+    f.render_widget(popup, area);
+}
+
+fn render_coordinator_stop_dialog(f: &mut Frame, state: &AppState) {
+    let area = ui::centered_rect(65, 40, f.size());
+    f.render_widget(Clear, area);
+    let theme = ui::theme();
+
+    let options = [
+        "Drain & Stop: Finish active tasks, then stop.",
+        "Graceful Stop: Stop active performers at next safe boundary.",
+        "Force Stop: Terminate processes immediately.",
+        "Force Stop + Cleanup: Terminate and delete worktrees/branches.",
+    ];
+
+    let mut text = Vec::new();
+    text.push(Line::from("Select a stop mode:"));
+    text.push(Line::from(""));
+
+    for (idx, opt) in options.iter().enumerate() {
+        let style = if idx == state.coordinator_stop_dialog_selection {
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD)
+                .bg(theme.highlight_bg)
+        } else {
+            Style::default()
+        };
+        let prefix = if idx == state.coordinator_stop_dialog_selection {
+            "> "
+        } else {
+            "  "
+        };
+        text.push(Line::from(vec![Span::styled(format!("{}{}", prefix, opt), style)]));
+    }
+
+    text.push(Line::from(""));
+    text.push(Line::from("Controls:"));
+    text.push(Line::from("- Up/Down or k/j: Move selection"));
+    text.push(Line::from("- Enter: Confirm and apply"));
+    text.push(Line::from("- Esc or q/n: Cancel"));
+
+    let popup = Paragraph::new(text)
+        .block(
+            Block::default()
+                .title("Coordinator Stop Modes")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.accent)),
+        )
+        .wrap(Wrap { trim: true });
+    f.render_widget(popup, area);
+}
+
+fn render_coordinator_recover_dialog(f: &mut Frame, state: &AppState) {
+    let area = ui::centered_rect(65, 30, f.size());
+    f.render_widget(Clear, area);
+    let theme = ui::theme();
+
+    let options = [
+        "Recover: Apply full classification and save state changes.",
+        "Recover (Dry Run): Classify tasks and print proposed action report without mutating.",
+    ];
+
+    let mut text = Vec::new();
+    text.push(Line::from("Select recovery mode:"));
+    text.push(Line::from(""));
+
+    for (idx, opt) in options.iter().enumerate() {
+        let style = if idx == state.coordinator_recover_dialog_selection {
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD)
+                .bg(theme.highlight_bg)
+        } else {
+            Style::default()
+        };
+        let prefix = if idx == state.coordinator_recover_dialog_selection {
+            "> "
+        } else {
+            "  "
+        };
+        text.push(Line::from(vec![Span::styled(format!("{}{}", prefix, opt), style)]));
+    }
+
+    text.push(Line::from(""));
+    text.push(Line::from("Controls:"));
+    text.push(Line::from("- Up/Down or k/j: Move selection"));
+    text.push(Line::from("- Enter: Confirm and apply"));
+    text.push(Line::from("- Esc or q/n: Cancel"));
+
+    let popup = Paragraph::new(text)
+        .block(
+            Block::default()
+                .title("Coordinator Recovery Modes")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.accent)),
         )
         .wrap(Wrap { trim: true });
     f.render_widget(popup, area);
