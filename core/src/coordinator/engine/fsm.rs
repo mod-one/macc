@@ -1471,7 +1471,11 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
                                 if let Some(tid) = task_val.get("id").and_then(Value::as_str) {
                                     if task_ids.contains(&tid.to_string()) {
                                         if let Some(state_str) = task_val.get("state").and_then(Value::as_str) {
-                                            if state_str == "claimed" || state_str == "in_progress" || state_str == "changes_requested" || state_str == "queued" {
+                                            if state_str == WorkflowState::Claimed.as_str()
+                                                || state_str == WorkflowState::InProgress.as_str()
+                                                || state_str == WorkflowState::ChangesRequested.as_str()
+                                                || state_str == WorkflowState::Queued.as_str()
+                                            {
                                                 active_draining_tasks_left = true;
                                                 break;
                                             }
