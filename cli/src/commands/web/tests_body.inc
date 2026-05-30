@@ -2988,6 +2988,158 @@ async fn coordinator_stop_endpoint_maps_errors() {
 }
 
 #[tokio::test]
+async fn coordinator_stop_force_without_confirm_returns_confirmation_required() {
+    let root = temp_root("stop-force-no-confirm");
+    fs::create_dir_all(&root).expect("create root");
+    let state = test_web_state(
+        &root,
+        Arc::new(WebTestEngine::with_stop_result(Ok(()))),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/coordinator/stop")
+                .method("POST")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"mode":"force"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(payload["error"]["code"], errors::WEB_ERR_CONFIRMATION_REQUIRED);
+    assert_eq!(payload["error"]["category"], "Validation");
+    assert!(payload["error"]["message"].as_str().unwrap().contains("MACC-launched tool processes"));
+}
+
+#[tokio::test]
+async fn coordinator_stop_force_with_wrong_confirm_returns_confirmation_required() {
+    let root = temp_root("stop-force-wrong-confirm");
+    fs::create_dir_all(&root).expect("create root");
+    let state = test_web_state(
+        &root,
+        Arc::new(WebTestEngine::with_stop_result(Ok(()))),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/coordinator/stop")
+                .method("POST")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"mode":"force","confirm":"WRONG"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(payload["error"]["code"], errors::WEB_ERR_CONFIRMATION_REQUIRED);
+}
+
+#[tokio::test]
+async fn coordinator_stop_force_with_correct_confirm_succeeds() {
+    let root = temp_root("stop-force-correct-confirm");
+    fs::create_dir_all(&root).expect("create root");
+    let state = test_web_state(
+        &root,
+        Arc::new(WebTestEngine::with_stop_result(Ok(()))),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/coordinator/stop")
+                .method("POST")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"mode":"force","confirm":"FORCE"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+}
+
+#[tokio::test]
+async fn coordinator_stop_force_cleanup_without_confirm_returns_confirmation_required() {
+    let root = temp_root("stop-force-cleanup-no-confirm");
+    fs::create_dir_all(&root).expect("create root");
+    let state = test_web_state(
+        &root,
+        Arc::new(WebTestEngine::with_stop_result(Ok(()))),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/coordinator/stop")
+                .method("POST")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"mode":"force_cleanup"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(payload["error"]["code"], errors::WEB_ERR_CONFIRMATION_REQUIRED);
+    assert!(payload["error"]["message"].as_str().unwrap().contains("FORCE CLEANUP"));
+}
+
+#[tokio::test]
+async fn coordinator_stop_force_cleanup_with_correct_confirm_succeeds() {
+    let root = temp_root("stop-force-cleanup-correct-confirm");
+    fs::create_dir_all(&root).expect("create root");
+    let state = test_web_state(
+        &root,
+        Arc::new(WebTestEngine::with_stop_result(Ok(()))),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/coordinator/stop")
+                .method("POST")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"mode":"force_cleanup","confirm":"FORCE CLEANUP"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+}
+
+#[tokio::test]
 async fn coordinator_cleanup_endpoint_returns_envelope() {
     let root = temp_root("cleanup-ok");
     fs::create_dir_all(&root).expect("create root");

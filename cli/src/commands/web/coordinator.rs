@@ -240,8 +240,20 @@ pub(super) async fn coordinator_stop_handler(
     let drain = mode == "drain";
     let graceful = mode == "graceful" || mode == "drain";
     let force = mode == "force" || mode == "force_cleanup";
-    let remove_worktrees = req.cleanup_worktrees.unwrap_or(false);
+    let remove_worktrees = req.cleanup_worktrees.unwrap_or(false) || mode == "force_cleanup";
     let reason = req.reason.clone().unwrap_or_else(|| "web api stop".to_string());
+
+    if force {
+        let expected_confirm = if remove_worktrees { "FORCE CLEANUP" } else { "FORCE" };
+        if req.confirm.as_deref() != Some(expected_confirm) {
+            let msg = if remove_worktrees {
+                "Confirmation required. Type FORCE CLEANUP to terminate active tools and clean MACC-managed worktrees."
+            } else {
+                "Confirmation required. This will terminate all active MACC-launched tool processes. Worktrees will be preserved for inspection."
+            };
+            return Err(ApiError::confirmation_required(msg, None));
+        }
+    }
 
     let result = tokio::task::spawn_blocking(move || {
         let env_cfg = CoordinatorEnvConfig::default();
@@ -511,6 +523,7 @@ pub(super) struct ApiStopRequest {
     pub cleanup_worktrees: Option<bool>,
     pub force_grace_seconds: Option<u64>,
     pub reason: Option<String>,
+    pub confirm: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
