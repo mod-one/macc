@@ -1185,6 +1185,7 @@ where
         runtime.pid = None;
         runtime.set_status(RuntimeStatus::Stale);
         runtime.last_error = Some(format!("runtime pid {} is not running; auto-reset", pid));
+        runtime.last_error_code = Some(crate::coordinator::error_normalizer::E414_PERFORMER_PROCESS_DEAD.to_string());
         let new_state = if old_state == WorkflowState::Claimed.as_str() && phase == "dev" {
             task.set_workflow_state(WorkflowState::Todo);
             task.assignee = None;
@@ -1436,6 +1437,14 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
                             .stdout(std::process::Stdio::null())
                             .stderr(std::process::Stdio::null())
                             .status();
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    for pid in &pids_to_kill {
+                        if crate::coordinator::helpers::is_pid_running(*pid) {
+                            if let Some(log) = self.logger {
+                                let _ = log.note(format!("- Warning: performer process group {} survived SIGKILL [E416]", pid));
+                            }
+                        }
                     }
                 }
 
@@ -1807,6 +1816,18 @@ pub async fn run_native_control_plane(
     let next_epoch = max_epoch + 1;
     std::env::set_var("COORDINATOR_EPOCH", next_epoch.to_string());
     if let Some(mut prev) = last_run {
+        if (prev.status == "running" || prev.status == "draining")
+            && crate::coordinator::helpers::is_pid_running(prev.pid)
+            && prev.pid != std::process::id() as i64
+        {
+            return Err(MaccError::Coordinator {
+                code: crate::coordinator::error_normalizer::E410_COORDINATOR_LEASE_CONFLICT,
+                message: format!(
+                    "Lease conflict: coordinator is already running on host {} under PID {}",
+                    prev.hostname, prev.pid
+                ),
+            });
+        }
         prev.status = "crashed".to_string();
         prev.stopped_at = Some(chrono::Utc::now().to_rfc3339());
         prev.stop_reason = Some("coordinator process crashed or exited uncleanly".to_string());

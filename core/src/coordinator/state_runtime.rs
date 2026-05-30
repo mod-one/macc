@@ -534,21 +534,37 @@ pub fn execute_startup_recovery_sweep(
         entries.push(StartupRecoveryEntry {
             task_id: task.id.clone(),
             situation,
-            classification,
+            classification: classification.clone(),
             action,
             mutated: mutated && !dry_run,
         });
 
         if let Some(act) = proposed_action {
-            proposed_mutations.push((task.id.clone(), act));
+            proposed_mutations.push((task.id.clone(), act, classification.clone()));
         }
     }
 
     // 2. Application Phase (Only runs if !dry_run, applying all mutations to snapshot)
     if !dry_run && !proposed_mutations.is_empty() {
         changed = true;
-        for (task_id, act) in proposed_mutations {
+        for (task_id, act, classification) in proposed_mutations {
             if let Some(task) = snapshot.registry.find_task_mut(&task_id) {
+                let err_code = match classification.as_str() {
+                    "heartbeat_stale" => Some("E413".to_string()),
+                    "process_dead" => Some("E414".to_string()),
+                    "blocked_dirty_worktree" => Some("E417".to_string()),
+                    _ => None,
+                };
+                if let Some(code) = err_code {
+                    let runtime = task.ensure_runtime();
+                    runtime.last_error_code = Some(code.clone());
+                    runtime.last_error = Some(match classification.as_str() {
+                        "heartbeat_stale" => "Performer heartbeat stale".to_string(),
+                        "process_dead" => "Performer process dead".to_string(),
+                        "blocked_dirty_worktree" => "Dirty worktree blocks recovery".to_string(),
+                        _ => "Recovery classification".to_string(),
+                    });
+                }
                 match act {
                     MutationAction::Merge => {
                         task.state = "merged".to_string();
@@ -585,7 +601,7 @@ pub fn execute_startup_recovery_sweep(
     for pid in orphaned_pids {
         if let Some(log) = logger {
             log(format!(
-                "- Recovery sweep pid={} classification=orphaned action=\"Surface and optionally force terminate\"",
+                "- Recovery sweep pid={} classification=orphaned action=\"Surface and optionally force terminate\" [E415]",
                 pid
             ));
         }
@@ -604,12 +620,10 @@ pub fn execute_startup_recovery_sweep(
         snapshot.registry.recompute_resource_locks(&now);
         snapshot.registry.set_updated_at(now);
         if let Err(e) = sqlite.save_snapshot(&snapshot) {
-            if let Some(log) = logger {
-                log(format!(
-                    "- Warning: startup recovery sweep could not persist decisions: {}",
-                    e
-                ));
-            }
+            return Err(MaccError::Coordinator {
+                code: crate::coordinator::error_normalizer::E412_RECOVERY_CLASSIFICATION_FAILED,
+                message: format!("Failed to persist recovery decisions: {}", e),
+            });
         } else if let Some(log) = logger {
             let mutated = entries.iter().filter(|e| e.mutated).count();
             log(format!(

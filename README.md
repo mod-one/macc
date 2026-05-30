@@ -288,6 +288,15 @@ MACC emits structured error codes when a performer or coordinator step fails. Th
   - `E401` Task registry read/write failure
   - `E402` Task state transition invalid
   - `E403` Task state conflict. Retryable (reconcile + retry usually converges).
+  - `E410` Coordinator lease conflict. **Not retryable**.
+  - `E411` Runtime ledger write failed. **Not retryable**.
+  - `E412` Recovery classification failed. **Not retryable**.
+  - `E413` Performer heartbeat stale. Conditional retry (performer failed to report).
+  - `E414` Performer process dead. Conditional retry (process exited or was killed).
+  - `E415` Orphaned performer detected. **Not retryable**.
+  - `E416` Force termination failed. **Not retryable**.
+  - `E417` Dirty worktree blocks recovery. **Not retryable**.
+  - `E418` Stale event rejected. **Not retryable**.
 - `E500` Merge
   - `E501` Merge conflict
   - `E502` Merge worker failed

@@ -2143,9 +2143,9 @@ fn parse_task_runtime_value(task: &Task) -> Value {
 }
 
 fn sql_err(e: rusqlite::Error) -> MaccError {
-    MaccError::Storage {
-        backend: "sqlite",
-        message: format!("SQLite coordinator storage error: {}", e),
+    MaccError::Coordinator {
+        code: "E411",
+        message: format!("SQLite coordinator storage error (Runtime ledger write failed): {}", e),
     }
 }
 

@@ -64,3 +64,17 @@ The API error envelope uses these categories:
 - `MACC-WEB-5000`: Coordinator workflow failure (`MaccError::Coordinator`).
 - `MACC-WEB-5001`: Coordinator storage backend failure (`MaccError::Storage`).
 - `MACC-WEB-5002`: Git subsystem failure (`MaccError::Git`).
+
+## Coordinator Engine Error Codes (E-Series)
+
+These are internal error codes emitted by the coordinator engine (E-series codes). They categorize task failures and determine recovery/retry paths.
+
+- `E410` (Coordinator lease conflict): Another coordinator process holds the lease. **Not retryable**.
+- `E411` (Runtime ledger write failed): Failed to write to the durable runtime ledger. **Not retryable**.
+- `E412` (Recovery classification failed): Failed to analyze prior state for recovery. **Not retryable**.
+- `E413` (Performer heartbeat stale): Performer failed to report heartbeats within the stale window. **Conditional retry**.
+- `E414` (Performer process dead): Performer process exited or was terminated unexpectedly. **Conditional retry**.
+- `E415` (Orphaned performer detected): Untracked performer process found running. **Not retryable**.
+- `E416` (Force termination failed): Failed to kill a performer process/group during force-stop. **Not retryable**.
+- `E417` (Dirty worktree blocks recovery): Worktree has uncommitted local changes blocking clean checkout. **Not retryable**.
+- `E418` (Stale event rejected): Received an out-of-order or expired event/epoch. **Not retryable**.

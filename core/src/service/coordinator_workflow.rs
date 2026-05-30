@@ -1283,7 +1283,17 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
                 reference_branch,
                 dry_run,
                 None,
-            )?;
+            )
+            .map_err(|e| {
+                if matches!(&e, MaccError::Coordinator { code, .. } if *code == crate::coordinator::error_normalizer::E412_RECOVERY_CLASSIFICATION_FAILED) {
+                    e
+                } else {
+                    MaccError::Coordinator {
+                        code: crate::coordinator::error_normalizer::E412_RECOVERY_CLASSIFICATION_FAILED,
+                        message: format!("Startup recovery could not safely classify runtime state: {}", e),
+                    }
+                }
+            })?;
 
             // Map StartupRecoveryEntry → RecoveryReportEntry (identical fields)
             let reports: Vec<RecoveryReportEntry> = sweep_entries
