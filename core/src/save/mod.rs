@@ -119,6 +119,10 @@ pub fn is_macc_state_unsaved(paths: &ProjectPaths) -> Result<bool> {
         return Ok(false);
     }
     let saves = detect_matching_saves(paths)?;
+    let saves: Vec<_> = saves
+        .into_iter()
+        .filter(|(_, strength)| *strength >= MatchStrength::Medium)
+        .collect();
     if saves.is_empty() {
         return Ok(true);
     }
@@ -174,6 +178,10 @@ pub fn get_unsaved_state_report(paths: &ProjectPaths) -> Result<UnsavedStateRepo
     };
 
     let matches = detect_matching_saves(paths)?;
+    let matches: Vec<_> = matches
+        .into_iter()
+        .filter(|(_, strength)| *strength >= MatchStrength::Medium)
+        .collect();
     if matches.is_empty() {
         report.config_changed = true;
         if sessions_path.exists() {
@@ -273,5 +281,85 @@ security:
         assert_eq!(bundles.len(), 1);
         assert_eq!(bundles[0].name, "my-save");
     }
-}
 
+    #[test]
+    fn test_is_macc_state_unsaved_filters_weak_matches() {
+        let temp = tempdir().unwrap();
+        let old_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", temp.path());
+
+        let project_root = temp.path().join("my-project");
+        fs::create_dir_all(&project_root).unwrap();
+        let paths = ProjectPaths::from_root(&project_root);
+        fs::create_dir_all(paths.config_path.parent().unwrap()).unwrap();
+        fs::write(&paths.config_path, "local config").unwrap();
+        let saves_dir = temp.path().join(".macc").join("saves");
+        fs::create_dir_all(&saves_dir).unwrap();
+
+        // Create a bundle that has the same root name ("my-project") but a completely different root_path_hash
+        // and git_remote_url_hash, making it a Weak match.
+        let bundle_dir = saves_dir.join("weak-match-save");
+        fs::create_dir_all(&bundle_dir).unwrap();
+
+        // Calculate hash of config file
+        let config_sha = compute_file_sha256(&paths.config_path).unwrap();
+
+        let manifest_content = format!(
+            r#"
+version: 1
+kind: macc.save_bundle
+name: weak-match-save
+created_at: "2026-01-01T00:00:00Z"
+updated_at: "2026-01-01T00:00:00Z"
+macc_version: "0.1.0"
+repository:
+  root_name: "my-project"
+  root_path_hash: "different-hash"
+  git_remote_url_hash: "different-remote-hash"
+  git_default_branch: "main"
+  git_current_branch: "main"
+  git_head_sha: "different-head"
+  identity_strength: "strong"
+includes:
+  config: true
+  coordinator_sessions: false
+  catalogs: false
+  logs: false
+  prd: false
+  automation_state: false
+excludes:
+  worktrees: true
+  cache: true
+  generated_files: true
+  secrets: true
+paths:
+  config: "config/macc.yaml"
+hashes:
+  config: "{}"
+  manifest_payload: "hash"
+security:
+  secret_scan:
+    performed: false
+    findings: 0
+    redacted_logs: false
+"#,
+            config_sha
+        );
+        fs::write(bundle_dir.join("manifest.yaml"), manifest_content).unwrap();
+
+        // Since the match is Weak, is_macc_state_unsaved should return true (unsaved)
+        // because it ignores the Weak match, despite the config hash matching exactly.
+        let unsaved = is_macc_state_unsaved(&paths).unwrap();
+        let report = get_unsaved_state_report(&paths).unwrap();
+
+        // Restore environment
+        if let Some(h) = old_home {
+            std::env::set_var("HOME", h);
+        } else {
+            std::env::remove_var("HOME");
+        }
+
+        assert!(unsaved);
+        assert!(report.config_changed);
+    }
+}
