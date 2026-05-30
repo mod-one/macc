@@ -398,7 +398,17 @@ pub fn execute_startup_recovery_sweep(
     let mut entries = Vec::new();
     let mut changed = false;
 
-    for task in &mut snapshot.registry.tasks {
+    enum MutationAction {
+        Merge,
+        Stale,
+        Blocked,
+        PhaseDone,
+        Requeue,
+    }
+
+    let mut proposed_mutations = Vec::new();
+
+    for task in &snapshot.registry.tasks {
         if !task.is_active() && task.state != "blocked" {
             continue;
         }
@@ -406,7 +416,7 @@ pub fn execute_startup_recovery_sweep(
         let mut situation = "Process not spawned".to_string();
         let mut classification = "dispatched_without_process".to_string();
         let mut action = "Requeue safely".to_string();
-        let mut task_changed = false;
+        let mut proposed_action = Some(MutationAction::Requeue);
 
         // ── Step 9 check: commit already on base branch? ──────────────────
         let matched_commit = reconcile_report
@@ -421,12 +431,7 @@ pub fn execute_startup_recovery_sweep(
             );
             classification = "merged".to_string();
             action = "Close runtime claim".to_string();
-            if !dry_run {
-                task.state = "merged".to_string();
-                task.task_runtime.status = Some("idle".to_string());
-                task.clear_assignment();
-            }
-            task_changed = true;
+            proposed_action = Some(MutationAction::Merge);
         } else if let Some(pid) = task.runtime_pid() {
             let is_alive = crate::coordinator::helpers::is_pid_running(pid);
             let mut is_stale = false;
@@ -451,14 +456,12 @@ pub fn execute_startup_recovery_sweep(
                     );
                     classification = "heartbeat_stale".to_string();
                     action = "Wait grace period, then block/requeue".to_string();
-                    if !dry_run {
-                        task.task_runtime.status = Some("stale".to_string());
-                    }
-                    task_changed = true;
+                    proposed_action = Some(MutationAction::Stale);
                 } else {
                     situation = "Performer alive and heartbeat fresh".to_string();
                     classification = "adopted".to_string();
                     action = "Continue monitoring".to_string();
+                    proposed_action = None;
                 }
             } else {
                 // ── Steps 7-8: worktree and Git branch/merge inspection ────
@@ -493,36 +496,22 @@ pub fn execute_startup_recovery_sweep(
                     situation = "Git merge in progress".to_string();
                     classification = "blocked_merge_recovery".to_string();
                     action = "Manual intervention required".to_string();
-                    if !dry_run {
-                        task.state = "blocked".to_string();
-                    }
-                    task_changed = true;
+                    proposed_action = Some(MutationAction::Blocked);
                 } else if has_commits {
                     situation = "Performer dead but commit exists".to_string();
                     classification = "phase_done".to_string();
                     action = "Continue FSM advancement".to_string();
-                    if !dry_run {
-                        task.task_runtime.status = Some("phase_done".to_string());
-                    }
-                    task_changed = true;
+                    proposed_action = Some(MutationAction::PhaseDone);
                 } else if is_dirty {
                     situation = "Worktree dirty, no phase result".to_string();
                     classification = "blocked_dirty_worktree".to_string();
                     action = "Require operator review".to_string();
-                    if !dry_run {
-                        task.state = "blocked".to_string();
-                    }
-                    task_changed = true;
+                    proposed_action = Some(MutationAction::Blocked);
                 } else {
                     situation = "Performer dead, no changes".to_string();
                     classification = "process_dead".to_string();
                     action = "Requeue task".to_string();
-                    if !dry_run {
-                        task.state = "todo".to_string();
-                        task.task_runtime.status = Some("idle".to_string());
-                        task.clear_assignment();
-                    }
-                    task_changed = true;
+                    proposed_action = Some(MutationAction::Requeue);
                 }
             }
         } else {
@@ -530,17 +519,10 @@ pub fn execute_startup_recovery_sweep(
             situation = "Claim exists but no process spawned".to_string();
             classification = "dispatched_without_process".to_string();
             action = "Requeue safely".to_string();
-            if !dry_run {
-                task.state = "todo".to_string();
-                task.task_runtime.status = Some("idle".to_string());
-                task.clear_assignment();
-            }
-            task_changed = true;
+            proposed_action = Some(MutationAction::Requeue);
         }
 
-        if task_changed {
-            changed = true;
-        }
+        let mutated = proposed_action.is_some();
 
         if let Some(log) = logger {
             log(format!(
@@ -554,8 +536,42 @@ pub fn execute_startup_recovery_sweep(
             situation,
             classification,
             action,
-            mutated: task_changed && !dry_run,
+            mutated: mutated && !dry_run,
         });
+
+        if let Some(act) = proposed_action {
+            proposed_mutations.push((task.id.clone(), act));
+        }
+    }
+
+    // 2. Application Phase (Only runs if !dry_run, applying all mutations to snapshot)
+    if !dry_run && !proposed_mutations.is_empty() {
+        changed = true;
+        for (task_id, act) in proposed_mutations {
+            if let Some(task) = snapshot.registry.find_task_mut(&task_id) {
+                match act {
+                    MutationAction::Merge => {
+                        task.state = "merged".to_string();
+                        task.task_runtime.status = Some("idle".to_string());
+                        task.clear_assignment();
+                    }
+                    MutationAction::Stale => {
+                        task.task_runtime.status = Some("stale".to_string());
+                    }
+                    MutationAction::Blocked => {
+                        task.state = "blocked".to_string();
+                    }
+                    MutationAction::PhaseDone => {
+                        task.task_runtime.status = Some("phase_done".to_string());
+                    }
+                    MutationAction::Requeue => {
+                        task.state = "todo".to_string();
+                        task.task_runtime.status = Some("idle".to_string());
+                        task.clear_assignment();
+                    }
+                }
+            }
+        }
     }
 
     // ── Step 9b: orphaned processes (no active claim) ─────────────────────
