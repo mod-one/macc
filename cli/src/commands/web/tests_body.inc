@@ -228,6 +228,9 @@ async fn health_endpoint_returns_ok_status() {
         .to_bytes();
     let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
     assert_eq!(payload["status"], "ok");
+    assert!(payload.get("uptime_seconds").is_some());
+    assert!(payload["uptime_seconds"].is_number());
+    assert!(payload["coordinator"]["last_heartbeat_at"].is_string());
 }
 #[tokio::test]
 async fn doctor_endpoint_returns_empty_report_when_all_checks_pass() {

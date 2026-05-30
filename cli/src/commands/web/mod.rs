@@ -371,6 +371,7 @@ async fn health_handler(
         let mode = last_run.as_ref().map(|r| r.status.clone()).unwrap_or_else(|| "stopped".to_string());
         let run_id = last_run.as_ref().map(|r| r.run_id.clone()).unwrap_or_default();
         let last_tick_at = last_run.as_ref().and_then(|r| r.last_tick_at.clone()).unwrap_or_default();
+        let started_at = last_run.as_ref().map(|r| r.started_at.clone()).unwrap_or_default();
         
         let snapshot = sqlite.load_snapshot().ok();
         let (active_tasks, stale_tasks, blocked_tasks) = if let Some(ref snap) = snapshot {
@@ -433,19 +434,34 @@ async fn health_handler(
             status = "unhealthy";
         }
 
-        (status, db_ok, active, mode, run_id, last_tick_at, active_tasks, stale_tasks, blocked_tasks, orphaned_processes)
+        (status, db_ok, active, mode, run_id, last_tick_at, active_tasks, stale_tasks, blocked_tasks, orphaned_processes, started_at)
     })
     .await;
 
-    let (status, db_ok, active, mode, run_id, last_tick_at, active_tasks, stale_tasks, blocked_tasks, orphaned_processes) = match status_res {
+    let (status, db_ok, active, mode, run_id, last_tick_at, active_tasks, stale_tasks, blocked_tasks, orphaned_processes, started_at) = match status_res {
         Ok(val) => val,
-        Err(_) => ("unhealthy", false, false, "stopped".to_string(), "".to_string(), "".to_string(), 0, 0, 0, 0),
+        Err(_) => ("unhealthy", false, false, "stopped".to_string(), "".to_string(), "".to_string(), 0, 0, 0, 0, "".to_string()),
+    };
+
+    let uptime_seconds = if !started_at.is_empty() {
+        if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(&started_at) {
+            let elapsed = chrono::Utc::now().timestamp() - parsed.with_timezone(&chrono::Utc).timestamp();
+            if elapsed > 0 {
+                elapsed as u64
+            } else {
+                0
+            }
+        } else {
+            0
+        }
+    } else {
+        0
     };
 
     Json(serde_json::json!({
         "status": status,
         "version": env!("CARGO_PKG_VERSION"),
-        "uptime_seconds": 0,
+        "uptime_seconds": uptime_seconds,
         "db_ok": db_ok,
         "coordinator": {
             "active": active,
