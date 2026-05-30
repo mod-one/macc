@@ -4592,6 +4592,52 @@ fi
         assert!(save_dir.join("config/macc.yaml").exists());
         assert!(save_dir.join("state/tool-sessions.json").exists());
         assert!(save_dir.join("logs/coordinator/test.log").exists());
+        assert!(save_dir.join("checksums/sha256sums.txt").exists());
+
+        // Verify checksums content
+        let checksums_content = std::fs::read_to_string(save_dir.join("checksums/sha256sums.txt")).unwrap();
+        assert!(checksums_content.contains("manifest.yaml"));
+        assert!(checksums_content.contains("config/macc.yaml"));
+        assert!(checksums_content.contains("state/tool-sessions.json"));
+        assert!(checksums_content.contains("logs/coordinator/test.log"));
+        assert!(!checksums_content.contains("checksums/sha256sums.txt"));
+
+        // Verify corrupted file validation failure on restore
+        {
+            let config_save_path = save_dir.join("config/macc.yaml");
+            let original_config_save_content = std::fs::read_to_string(&config_save_path).unwrap();
+            std::fs::write(&config_save_path, "corrupted content").unwrap();
+
+            let restore_result = run_with_engine(
+                Cli {
+                    cwd: temp_base.to_string_lossy().into(),
+                    verbose: false,
+                    quiet: false,
+                    offline: false,
+                    web_port: None,
+                    command: Some(Commands::Restore {
+                        name: Some("test-save-1".to_string()),
+                        latest: false,
+                        user: false,
+                        backup: None,
+                        dry_run: false,
+                        yes: true,
+                        apply: false,
+                        config_only: false,
+                        sessions: false,
+                        no_sessions: false,
+                        include_logs: false,
+                    }),
+                },
+                TestEngine::with_fixtures(),
+            );
+            assert!(restore_result.is_err());
+            let err_msg = format!("{:?}", restore_result.err().unwrap());
+            assert!(err_msg.contains("MACC-RESTORE-2003")); // Checksum mismatch
+            
+            // Restore original content
+            std::fs::write(&config_save_path, original_config_save_content).unwrap();
+        }
 
         // Verify exclusions
         assert!(!save_dir.join("cache").exists());

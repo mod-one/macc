@@ -170,6 +170,66 @@ fn compute_file_sha256(path: &Path) -> std::io::Result<String> {
     Ok(format!("sha256:{:x}", hasher.finalize()))
 }
 
+fn write_checksums_file(tmp_save_dir: &Path) -> Result<()> {
+    let checksums_dir = tmp_save_dir.join("checksums");
+    fs::create_dir_all(&checksums_dir).map_err(|e| MaccError::Io {
+        path: checksums_dir.to_string_lossy().into(),
+        action: "create checksums directory".into(),
+        source: e,
+    })?;
+
+    let mut files = Vec::new();
+    
+    fn visit_dirs(dir: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
+        if dir.is_dir() {
+            for entry in fs::read_dir(dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.is_dir() {
+                    if path.file_name().map(|n| n == "checksums").unwrap_or(false) {
+                        continue;
+                    }
+                    visit_dirs(&path, files)?;
+                } else {
+                    files.push(path);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    visit_dirs(tmp_save_dir, &mut files).map_err(|e| MaccError::Io {
+        path: tmp_save_dir.to_string_lossy().into(),
+        action: "traverse save bundle files for checksums".into(),
+        source: e,
+    })?;
+
+    files.sort();
+
+    let mut lines = Vec::new();
+    for file_path in files {
+        let sha = compute_file_sha256(&file_path).map_err(|e| MaccError::Io {
+            path: file_path.to_string_lossy().into(),
+            action: "calculate file hash for checksums".into(),
+            source: e,
+        })?;
+        let rel_path = file_path.strip_prefix(tmp_save_dir).unwrap();
+        let rel_path_str = rel_path.to_string_lossy().replace('\\', "/");
+        let clean_sha = sha.strip_prefix("sha256:").unwrap_or(&sha);
+        lines.push(format!("{}  {}", clean_sha, rel_path_str));
+    }
+
+    let checksums_file_path = checksums_dir.join("sha256sums.txt");
+    let checksums_content = lines.join("\n") + "\n";
+    fs::write(&checksums_file_path, checksums_content).map_err(|e| MaccError::Io {
+        path: checksums_file_path.to_string_lossy().into(),
+        action: "write sha256sums.txt file".into(),
+        source: e,
+    })?;
+
+    Ok(())
+}
+
 fn hash_string(s: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(s.as_bytes());
@@ -680,6 +740,9 @@ pub fn create_save_bundle(paths: &ProjectPaths, name: &str, opts: &SaveOptions) 
         source: e,
     })?;
 
+    // Write checksums file (sha256sums.txt)
+    write_checksums_file(&tmp_save_dir)?;
+
     // Atomic move to saves dir
     if target_save_dir.exists() {
         let backup_dir = saves_dir.join(format!("{}.old.{}", name, uuid::Uuid::new_v4()));
@@ -729,6 +792,55 @@ pub fn restore_save_bundle(paths: &ProjectPaths, name: &str, opts: &RestoreOptio
 
     if computed_payload_hash != manifest.hashes.manifest_payload {
         return Err(MaccError::Validation("MACC-RESTORE-2003: Checksum mismatch. Manifest payload integrity verification failed.".to_string()));
+    }
+
+    // Verify standalone checksums/sha256sums.txt if present
+    let checksums_path = target_save_dir.join("checksums").join("sha256sums.txt");
+    if checksums_path.exists() {
+        let content = fs::read_to_string(&checksums_path).map_err(|e| MaccError::Io {
+            path: checksums_path.to_string_lossy().into(),
+            action: "read checksums file for validation".into(),
+            source: e,
+        })?;
+
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let parts: Vec<&str> = line.split("  ").collect();
+            if parts.len() != 2 {
+                return Err(MaccError::Validation(format!(
+                    "MACC-RESTORE-2003: Checksum file format is invalid: {}",
+                    line
+                )));
+            }
+            let expected_sha = parts[0];
+            let rel_path = parts[1];
+
+            let target_path = target_save_dir.join(rel_path.replace('/', &std::path::MAIN_SEPARATOR.to_string()));
+
+            if !target_path.exists() {
+                return Err(MaccError::Validation(format!(
+                    "MACC-RESTORE-2003: Checksum mismatch. File is missing: {}",
+                    rel_path
+                )));
+            }
+
+            let actual_sha = compute_file_sha256(&target_path).map_err(|e| MaccError::Io {
+                path: target_path.to_string_lossy().into(),
+                action: "calculate file hash for validation".into(),
+                source: e,
+            })?;
+            let clean_actual_sha = actual_sha.strip_prefix("sha256:").unwrap_or(&actual_sha);
+
+            if clean_actual_sha != expected_sha {
+                return Err(MaccError::Validation(format!(
+                    "MACC-RESTORE-2003: Checksum mismatch. File is corrupted: {}",
+                    rel_path
+                )));
+            }
+        }
     }
 
     // Repository match validation
