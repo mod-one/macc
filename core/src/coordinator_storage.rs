@@ -542,22 +542,71 @@ impl SqliteStorage {
               updated_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS task_runtime (
-              task_id TEXT PRIMARY KEY,
-              status TEXT,
-              current_phase TEXT,
+              task_id TEXT NOT NULL,
+              claim_id TEXT PRIMARY KEY,
+              run_id TEXT NOT NULL,
+              coordinator_epoch INTEGER NOT NULL,
+              workflow_state TEXT NOT NULL,
+              runtime_status TEXT NOT NULL,
+              phase TEXT,
+              tool TEXT,
+              worktree_slot_id TEXT,
+              worktree_path TEXT,
+              branch TEXT,
+              base_branch TEXT,
               pid INTEGER,
-              last_error TEXT,
-              last_heartbeat TEXT,
-              payload_json TEXT NOT NULL,
-              updated_at TEXT NOT NULL
+              process_group_id INTEGER,
+              started_at TEXT,
+              updated_at TEXT NOT NULL,
+              last_heartbeat_at TEXT,
+              heartbeat_seq INTEGER DEFAULT 0,
+              lease_expires_at TEXT,
+              attempt INTEGER DEFAULT 0,
+              locked_resources_json TEXT,
+              last_error_code TEXT,
+              last_error_message TEXT,
+              payload_json TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS resource_locks (
-              resource TEXT PRIMARY KEY,
-              task_id TEXT,
+              resource TEXT NOT NULL,
+              task_id TEXT NOT NULL,
+              claim_id TEXT NOT NULL,
+              acquired_at TEXT NOT NULL,
+              expires_at TEXT,
               worktree_path TEXT,
               locked_at TEXT,
               payload_json TEXT NOT NULL,
-              updated_at TEXT NOT NULL
+              updated_at TEXT NOT NULL,
+              PRIMARY KEY(resource, claim_id)
+            );
+            CREATE TABLE IF NOT EXISTS worktree_slots (
+              slot_id TEXT PRIMARY KEY,
+              path TEXT NOT NULL,
+              base_branch TEXT NOT NULL,
+              current_branch TEXT,
+              assigned_task_id TEXT,
+              assigned_claim_id TEXT,
+              tool TEXT,
+              status TEXT NOT NULL,
+              last_checked_at TEXT,
+              cleanup_error TEXT
+            );
+            CREATE TABLE IF NOT EXISTS event_cursor (
+              stream TEXT PRIMARY KEY,
+              last_event_id TEXT,
+              last_read_at TEXT
+            );
+            CREATE TABLE IF NOT EXISTS process_registry (
+              process_id TEXT PRIMARY KEY,
+              task_id TEXT,
+              claim_id TEXT,
+              pid INTEGER NOT NULL,
+              process_group_id INTEGER,
+              parent_pid INTEGER,
+              command TEXT,
+              launched_at TEXT,
+              last_seen_at TEXT,
+              status TEXT
             );
             CREATE TABLE IF NOT EXISTS events (
               event_id TEXT PRIMARY KEY,
@@ -903,8 +952,7 @@ impl SqliteStorage {
         )
         .map_err(sql_err)?;
 
-        let runtime = parse_task_runtime_value(&task);
-        self.upsert_task_runtime_row(&tx, &change.task_id, &runtime, &change.now)?;
+        self.upsert_task_runtime_row(&tx, &task, &change.now)?;
         self.recompute_resource_locks(&tx, &change.now)?;
         if let Some(event) = event {
             self.append_event_in_tx(&tx, event)?;
@@ -994,8 +1042,7 @@ impl SqliteStorage {
         )
         .map_err(sql_err)?;
 
-        let runtime = parse_task_runtime_value(&task);
-        self.upsert_task_runtime_row(&tx, &change.task_id, &runtime, &change.now)?;
+        self.upsert_task_runtime_row(&tx, &task, &change.now)?;
         if let Some(event) = event {
             self.append_event_in_tx(&tx, event)?;
         }
@@ -1036,8 +1083,7 @@ impl SqliteStorage {
         )
         .map_err(sql_err)?;
 
-        let runtime = parse_task_runtime_value(&task);
-        self.upsert_task_runtime_row(&tx, &change.task_id, &runtime, &change.now)?;
+        self.upsert_task_runtime_row(&tx, &task, &change.now)?;
         tx.commit().map_err(sql_err)?;
         Ok(())
     }
@@ -1084,8 +1130,7 @@ impl SqliteStorage {
         )
         .map_err(sql_err)?;
 
-        let runtime = parse_task_runtime_value(&task);
-        self.upsert_task_runtime_row(&tx, &change.task_id, &runtime, &change.now)?;
+        self.upsert_task_runtime_row(&tx, &task, &change.now)?;
         tx.commit().map_err(sql_err)?;
         Ok(())
     }
@@ -1119,8 +1164,7 @@ impl SqliteStorage {
             params![change.task_id, state, title, priority, tool, payload, change.now],
         )
         .map_err(sql_err)?;
-        let runtime = parse_task_runtime_value(&task);
-        self.upsert_task_runtime_row(&tx, &change.task_id, &runtime, &change.now)?;
+        self.upsert_task_runtime_row(&tx, &task, &change.now)?;
         tx.commit().map_err(sql_err)?;
         Ok(())
     }
@@ -1160,8 +1204,7 @@ impl SqliteStorage {
             params![change.task_id, state, title, priority, tool, payload, change.now],
         )
         .map_err(sql_err)?;
-        let runtime = parse_task_runtime_value(&task);
-        self.upsert_task_runtime_row(&tx, &change.task_id, &runtime, &change.now)?;
+        self.upsert_task_runtime_row(&tx, &task, &change.now)?;
         tx.commit().map_err(sql_err)?;
         Ok(())
     }
@@ -1169,24 +1212,49 @@ impl SqliteStorage {
     fn upsert_task_runtime_row(
         &self,
         tx: &rusqlite::Transaction<'_>,
-        task_id: &str,
-        runtime: &Value,
+        task: &Task,
         now: &str,
     ) -> Result<()> {
-        let runtime_status = runtime.get("status").and_then(Value::as_str).unwrap_or("");
-        let current_phase = runtime
-            .get("current_phase")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let pid = runtime.get("pid").and_then(Value::as_i64);
-        let last_error = runtime
-            .get("last_error")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let last_heartbeat = runtime
-            .get("last_heartbeat")
-            .and_then(Value::as_str)
-            .unwrap_or("");
+        let task_id = &task.id;
+        let runtime = &task.task_runtime;
+        
+        let claim_id = runtime.claim_id.as_deref()
+            .filter(|s| !s.is_empty())
+            .or(runtime.active_session_id.as_deref())
+            .unwrap_or(&format!("unclaimed-{}", task_id))
+            .to_string();
+            
+        let run_id = runtime.run_id.as_deref().unwrap_or("-");
+        let coordinator_epoch = runtime.coordinator_epoch.unwrap_or(0);
+        let workflow_state = &task.state;
+        let runtime_status = runtime.status.as_deref().unwrap_or("idle");
+        let phase = runtime.current_phase.as_deref();
+        let tool = task.tool.as_deref();
+        
+        let worktree_slot_id = runtime.extra.get("worktree_slot_id").and_then(Value::as_str);
+        
+        let worktree_path = task.worktree.as_ref().and_then(|w| w.worktree_path.as_deref());
+        let branch = task.worktree.as_ref().and_then(|w| w.branch.as_deref());
+        let base_branch = task.worktree.as_ref().and_then(|w| w.base_branch.as_deref());
+        
+        let pid = runtime.pid;
+        let process_group_id = runtime.process_group_id;
+        let started_at = runtime.started_at.as_deref();
+        let last_heartbeat_at = runtime.last_heartbeat.as_deref();
+        let heartbeat_seq = runtime.heartbeat_seq.unwrap_or(0);
+        let lease_expires_at = runtime.lease_expires_at.as_deref();
+        let attempt = runtime.attempt.unwrap_or(0);
+        
+        let locked_resources_json = runtime.locked_resources_json.as_deref()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                serde_json::to_string(&task.exclusive_resources).unwrap_or_else(|_| "[]".to_string())
+            });
+            
+        let last_error_code = runtime.last_error_code.as_deref();
+        let last_error_message = runtime.last_error_message.as_deref()
+            .or(runtime.last_error.as_deref());
+            
         let runtime_raw = serde_json::to_string(runtime).map_err(|e| MaccError::Storage {
             backend: "sqlite",
             message: format!(
@@ -1194,26 +1262,68 @@ impl SqliteStorage {
                 task_id, e
             ),
         })?;
+
+        // Delete any existing row with the same task_id to prevent duplicates when claim_id changes
+        tx.execute("DELETE FROM task_runtime WHERE task_id=?1", params![task_id])
+            .map_err(sql_err)?;
+
         tx.execute(
-            "INSERT INTO task_runtime (task_id, status, current_phase, pid, last_error, last_heartbeat, payload_json, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-             ON CONFLICT(task_id) DO UPDATE SET
-               status=excluded.status,
-               current_phase=excluded.current_phase,
+            "INSERT INTO task_runtime (
+               task_id, claim_id, run_id, coordinator_epoch, workflow_state,
+               runtime_status, phase, tool, worktree_slot_id, worktree_path,
+               branch, base_branch, pid, process_group_id, started_at,
+               updated_at, last_heartbeat_at, heartbeat_seq, lease_expires_at, attempt,
+               locked_resources_json, last_error_code, last_error_message, payload_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
+             ON CONFLICT(claim_id) DO UPDATE SET
+               task_id=excluded.task_id,
+               run_id=excluded.run_id,
+               coordinator_epoch=excluded.coordinator_epoch,
+               workflow_state=excluded.workflow_state,
+               runtime_status=excluded.runtime_status,
+               phase=excluded.phase,
+               tool=excluded.tool,
+               worktree_slot_id=excluded.worktree_slot_id,
+               worktree_path=excluded.worktree_path,
+               branch=excluded.branch,
+               base_branch=excluded.base_branch,
                pid=excluded.pid,
-               last_error=excluded.last_error,
-               last_heartbeat=excluded.last_heartbeat,
-               payload_json=excluded.payload_json,
-               updated_at=excluded.updated_at",
+               process_group_id=excluded.process_group_id,
+               started_at=excluded.started_at,
+               updated_at=excluded.updated_at,
+               last_heartbeat_at=excluded.last_heartbeat_at,
+               heartbeat_seq=excluded.heartbeat_seq,
+               lease_expires_at=excluded.lease_expires_at,
+               attempt=excluded.attempt,
+               locked_resources_json=excluded.locked_resources_json,
+               last_error_code=excluded.last_error_code,
+               last_error_message=excluded.last_error_message,
+               payload_json=excluded.payload_json",
             params![
                 task_id,
+                claim_id,
+                run_id,
+                coordinator_epoch,
+                workflow_state,
                 runtime_status,
-                current_phase,
+                phase,
+                tool,
+                worktree_slot_id,
+                worktree_path,
+                branch,
+                base_branch,
                 pid,
-                last_error,
-                last_heartbeat,
-                runtime_raw,
-                now
+                process_group_id,
+                started_at,
+                now,
+                last_heartbeat_at,
+                heartbeat_seq,
+                lease_expires_at,
+                attempt,
+                locked_resources_json,
+                last_error_code,
+                last_error_message,
+                runtime_raw
             ],
         )
         .map_err(sql_err)?;
@@ -1256,14 +1366,23 @@ impl SqliteStorage {
                 .filter(|v| !v.is_empty())
                 .unwrap_or(now)
                 .to_string();
+            let claim_id = task.task_runtime.claim_id.clone()
+                .filter(|s| !s.is_empty())
+                .or(task.task_runtime.active_session_id.clone())
+                .unwrap_or_else(|| format!("unclaimed-{}", task.id));
+                
+            let expires_at = task.task_runtime.lease_expires_at.clone();
+
             for resource_name in &task.exclusive_resources {
                 if resource_name.is_empty() || existing.contains(resource_name) {
                     continue;
                 }
                 let lock = ResourceLock {
                     task_id: task.id.clone(),
+                    claim_id: claim_id.clone(),
                     worktree_path: worktree_path.clone(),
                     locked_at: locked_at.clone(),
+                    expires_at: expires_at.clone(),
                     extra: Default::default(),
                 };
                 let lock_json = serde_json::to_value(&lock).map_err(|e| MaccError::Storage {
@@ -1282,11 +1401,14 @@ impl SqliteStorage {
                     lock_json
                 };
                 tx.execute(
-                    "INSERT INTO resource_locks (resource, task_id, worktree_path, locked_at, payload_json, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    "INSERT INTO resource_locks (resource, task_id, claim_id, acquired_at, expires_at, worktree_path, locked_at, payload_json, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                     params![
                         resource_name,
                         task.id,
+                        claim_id,
+                        locked_at, // acquired_at
+                        expires_at,
                         worktree_path,
                         locked_at,
                         serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string()),
@@ -1502,44 +1624,12 @@ impl CoordinatorStorage for SqliteStorage {
             )
             .map_err(sql_err)?;
 
-            let runtime = parse_task_runtime_value(task);
-            let runtime_status = runtime.get("status").and_then(Value::as_str).unwrap_or("");
-            let current_phase = runtime
-                .get("current_phase")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let pid = runtime.get("pid").and_then(Value::as_i64);
-            let last_error = runtime
-                .get("last_error")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let last_heartbeat = runtime
-                .get("last_heartbeat")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let runtime_raw = serde_json::to_string(&runtime).map_err(|e| MaccError::Storage {
-                backend: "sqlite",
-                message: format!("Failed to serialize task_runtime payload: {}", e),
-            })?;
-            let runtime_updated = runtime
-                .get("updated_at")
+            let runtime_status = task.task_runtime.status.as_deref().unwrap_or("idle");
+            let pid = task.task_runtime.pid;
+            let runtime_updated = task.task_runtime.extra.get("updated_at")
                 .and_then(Value::as_str)
                 .unwrap_or(task_updated);
-            tx.execute(
-                "INSERT INTO task_runtime (task_id, status, current_phase, pid, last_error, last_heartbeat, payload_json, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    task_id,
-                    runtime_status,
-                    current_phase,
-                    pid,
-                    last_error,
-                    last_heartbeat,
-                    runtime_raw,
-                    runtime_updated
-                ],
-            )
-            .map_err(sql_err)?;
+            self.upsert_task_runtime_row(&tx, task, runtime_updated)?;
 
             if let Some(pid) = pid {
                 let job_payload = json!({
@@ -1562,7 +1652,7 @@ impl CoordinatorStorage for SqliteStorage {
                 )
                 .map_err(sql_err)?;
             }
-            if let Some(merge_pid) = runtime.get("merge_worker_pid").and_then(Value::as_i64) {
+            if let Some(merge_pid) = task.task_runtime.merge_worker_pid {
                 let job_payload = json!({
                     "task_id": task_id,
                     "job_type": "merge_worker",
@@ -1587,16 +1677,32 @@ impl CoordinatorStorage for SqliteStorage {
 
         for (resource, lock_value) in &snapshot.registry.resource_locks {
             let task_id = lock_value.task_id.as_str();
+            let claim_id = if lock_value.claim_id.is_empty() {
+                format!("unclaimed-{}", task_id)
+            } else {
+                lock_value.claim_id.clone()
+            };
             let worktree_path = lock_value.worktree_path.as_str();
             let locked_at = lock_value.locked_at.as_str();
+            let expires_at = lock_value.expires_at.as_deref();
             let lock_raw = serde_json::to_string(lock_value).map_err(|e| MaccError::Storage {
                 backend: "sqlite",
                 message: format!("Failed to serialize resource lock payload: {}", e),
             })?;
             tx.execute(
-                "INSERT INTO resource_locks (resource, task_id, worktree_path, locked_at, payload_json, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![resource, task_id, worktree_path, locked_at, lock_raw, now],
+                "INSERT INTO resource_locks (resource, task_id, claim_id, acquired_at, expires_at, worktree_path, locked_at, payload_json, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    resource,
+                    task_id,
+                    claim_id,
+                    locked_at, // acquired_at
+                    expires_at,
+                    worktree_path,
+                    locked_at,
+                    lock_raw,
+                    now
+                ],
             )
             .map_err(sql_err)?;
         }
