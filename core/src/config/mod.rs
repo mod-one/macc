@@ -260,6 +260,14 @@ pub struct CoordinatorConfig {
     /// "deny" (default), "auto_accept", or "admin_takeover".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub takeover_default_response: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_ledger_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_replay_max_events: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expose_processes_endpoint: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub health_include_runtime_summary: Option<bool>,
 }
 
 fn default_true() -> bool {
@@ -390,6 +398,10 @@ impl Default for CoordinatorConfig {
             safety_policy: None,
             destructive_actions: None,
             preset: None,
+            runtime_ledger_enabled: None,
+            event_replay_max_events: None,
+            expose_processes_endpoint: None,
+            health_include_runtime_summary: None,
         }
     }
 }
@@ -637,6 +649,10 @@ pub struct CoordinatorConfigResolved {
     /// Risk policy for destructive actions.
     /// Default: `"double_confirm"`.
     pub destructive_actions: String,
+    pub runtime_ledger_enabled: bool,
+    pub event_replay_max_events: usize,
+    pub expose_processes_endpoint: bool,
+    pub health_include_runtime_summary: bool,
 }
 
 impl CoordinatorConfigResolved {
@@ -760,6 +776,10 @@ impl CoordinatorConfigResolved {
             destructive_actions: config
                 .and_then(|c| c.destructive_actions.clone())
                 .unwrap_or_else(|| "double_confirm".to_string()),
+            runtime_ledger_enabled: config.and_then(|c| c.runtime_ledger_enabled).unwrap_or(true),
+            event_replay_max_events: config.and_then(|c| c.event_replay_max_events).unwrap_or(10000),
+            expose_processes_endpoint: config.and_then(|c| c.expose_processes_endpoint).unwrap_or(true),
+            health_include_runtime_summary: config.and_then(|c| c.health_include_runtime_summary).unwrap_or(true),
         }
     }
 }
@@ -1509,6 +1529,10 @@ unknown_field: true
         assert!(r.sync_unmerged_branches);
         assert_eq!(r.salvage_merge_timeout_seconds, 120);
         assert_eq!(r.max_salvage_attempts_per_task, 1);
+        assert!(r.runtime_ledger_enabled);
+        assert_eq!(r.event_replay_max_events, 10000);
+        assert!(r.expose_processes_endpoint);
+        assert!(r.health_include_runtime_summary);
     }
 
     #[test]
@@ -1555,6 +1579,10 @@ unknown_field: true
         cfg.sync_unmerged_branches = false;
         cfg.salvage_merge_timeout_seconds = 60;
         cfg.max_salvage_attempts_per_task = 3;
+        cfg.runtime_ledger_enabled = Some(false);
+        cfg.event_replay_max_events = Some(5000);
+        cfg.expose_processes_endpoint = Some(false);
+        cfg.health_include_runtime_summary = Some(false);
 
         let r = CoordinatorConfigResolved::resolve(Some(&cfg));
 
@@ -1599,6 +1627,10 @@ unknown_field: true
         assert!(!r.sync_unmerged_branches);
         assert_eq!(r.salvage_merge_timeout_seconds, 60);
         assert_eq!(r.max_salvage_attempts_per_task, 3);
+        assert!(!r.runtime_ledger_enabled);
+        assert_eq!(r.event_replay_max_events, 5000);
+        assert!(!r.expose_processes_endpoint);
+        assert!(!r.health_include_runtime_summary);
     }
 
     #[test]
