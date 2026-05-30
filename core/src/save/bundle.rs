@@ -292,7 +292,7 @@ pub fn create_save_bundle(paths: &ProjectPaths, name: &str, opts: &super::SaveOp
             description: opts.description.clone(),
             created_at: Utc::now().to_rfc3339(),
             updated_at: Utc::now().to_rfc3339(),
-            macc_version: "0.1.0".to_string(),
+            macc_version: crate::version().to_string(),
             repository: get_repository_identity(&paths.root),
             includes,
             excludes: SaveExcludes {
@@ -380,7 +380,7 @@ pub fn create_save_bundle(paths: &ProjectPaths, name: &str, opts: &super::SaveOp
         description: opts.description.clone(),
         created_at: Utc::now().to_rfc3339(),
         updated_at: Utc::now().to_rfc3339(),
-        macc_version: "0.1.0".to_string(),
+        macc_version: crate::version().to_string(),
         repository: get_repository_identity(&paths.root),
         includes,
         excludes: SaveExcludes {
