@@ -1000,12 +1000,19 @@ pub fn is_pid_running(pid: i64) -> bool {
     if pid <= 0 {
         return false;
     }
-    std::process::Command::new("kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    #[cfg(unix)]
+    {
+        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
 }
 
 pub fn pgrep_pids(pattern: &str) -> Result<Vec<i32>> {

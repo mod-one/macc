@@ -47,31 +47,21 @@ const TIMEOUT_KILL_GRACE_SECONDS: u64 = 10;
 async fn kill_process_tree(pid: Option<i64>, child: &mut tokio::process::Child) {
     #[cfg(unix)]
     if let Some(pid) = pid {
-        let pgid = pid; // child is process group leader, so PGID == PID
-                        // SIGTERM the entire process group
-        let _ = std::process::Command::new("kill")
-            .args(["-TERM", "--", &format!("-{}", pgid)])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-
-        // Give processes time to shut down gracefully
-        let grace = std::time::Duration::from_secs(TIMEOUT_KILL_GRACE_SECONDS);
-        if tokio::time::timeout(grace, child.wait()).await.is_ok() {
-            return; // exited within grace period
+        if pid > 0 {
+            unsafe {
+                let _ = libc::killpg(pid as libc::pid_t, libc::SIGTERM);
+            }
+            let grace = std::time::Duration::from_secs(TIMEOUT_KILL_GRACE_SECONDS);
+            if tokio::time::timeout(grace, child.wait()).await.is_ok() {
+                return;
+            }
+            unsafe {
+                let _ = libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+            }
+            let _ = child.wait().await;
+            return;
         }
-        // still alive, escalate to SIGKILL
-
-        // SIGKILL the entire process group
-        let _ = std::process::Command::new("kill")
-            .args(["-KILL", "--", &format!("-{}", pgid)])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        let _ = child.wait().await; // reap the zombie
-        return;
     }
-    // Fallback: no PID available (shouldn't happen), just kill the direct child
     let _ = child.kill().await;
 }
 
@@ -79,13 +69,10 @@ async fn kill_process_tree(pid: Option<i64>, child: &mut tokio::process::Child) 
 /// in control_plane.rs when a failure-signaled process exceeds the grace period.
 pub fn kill_process_group_sync(pid: i64) {
     #[cfg(unix)]
-    {
-        // SIGKILL the entire process group (PGID == PID because of process_group(0))
-        let _ = std::process::Command::new("kill")
-            .args(["-KILL", "--", &format!("-{}", pid)])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
+    if pid > 0 {
+        unsafe {
+            let _ = libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+        }
     }
 }
 
@@ -1648,14 +1635,13 @@ pub fn terminate_active_jobs(state: &CoordinatorRunState) -> Vec<(String, i64)> 
         let Some(pid) = job.pid else {
             continue;
         };
-        let _ = std::process::Command::new("kill")
-            .arg("-TERM")
-            .arg(pid.to_string())
-            .status();
-        let _ = std::process::Command::new("kill")
-            .arg("-TERM")
-            .arg(format!("-{}", pid))
-            .status();
+        #[cfg(unix)]
+        if pid > 0 {
+            unsafe {
+                let _ = libc::kill(pid as libc::pid_t, libc::SIGTERM);
+                let _ = libc::killpg(pid as libc::pid_t, libc::SIGTERM);
+            }
+        }
         terminated.push((task_id.clone(), pid));
     }
     terminated
@@ -2395,18 +2381,14 @@ pub fn terminate_process_group_gracefully(pgid: i64, grace_secs: u64) {
         if pgid <= 0 {
             return;
         }
-        let _ = std::process::Command::new("kill")
-            .args(["-TERM", "--", &format!("-{}", pgid)])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
+        unsafe {
+            let _ = libc::killpg(pgid as libc::pid_t, libc::SIGTERM);
+        }
 
         std::thread::sleep(std::time::Duration::from_secs(grace_secs));
 
-        let _ = std::process::Command::new("kill")
-            .args(["-KILL", "--", &format!("-{}", pgid)])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
+        unsafe {
+            let _ = libc::killpg(pgid as libc::pid_t, libc::SIGKILL);
+        }
     }
 }

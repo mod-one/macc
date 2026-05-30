@@ -1419,11 +1419,11 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
                         let _ = log.note(format!("- Sending TERM to performer process group {}", pid));
                     }
                     #[cfg(unix)]
-                    let _ = std::process::Command::new("kill")
-                        .args(["-TERM", "--", &format!("-{}", pid)])
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .status();
+                    if *pid > 0 {
+                        unsafe {
+                            let _ = libc::killpg(*pid as libc::pid_t, libc::SIGTERM);
+                        }
+                    }
                 }
                 if !pids_to_kill.is_empty() {
                     tokio::time::sleep(std::time::Duration::from_secs(grace_secs)).await;
@@ -1432,11 +1432,11 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
                             let _ = log.note(format!("- Sending KILL to performer process group {}", pid));
                         }
                         #[cfg(unix)]
-                        let _ = std::process::Command::new("kill")
-                            .args(["-KILL", "--", &format!("-{}", pid)])
-                            .stdout(std::process::Stdio::null())
-                            .stderr(std::process::Stdio::null())
-                            .status();
+                        if *pid > 0 {
+                            unsafe {
+                                let _ = libc::killpg(*pid as libc::pid_t, libc::SIGKILL);
+                            }
+                        }
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     for pid in &pids_to_kill {

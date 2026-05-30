@@ -1099,9 +1099,11 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
                             let _ = log.note(format!("Force-terminating performer process group {} for task {}...", pid, task_id));
                         }
                         #[cfg(unix)]
-                        let _ = std::process::Command::new("kill")
-                            .args(["-TERM", "--", &format!("-{}", pid)])
-                            .status();
+                        if pid > 0 {
+                            unsafe {
+                                let _ = libc::killpg(pid as libc::pid_t, libc::SIGTERM);
+                            }
+                        }
                         term_count += 1;
                         
                         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -1109,9 +1111,11 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
                         let is_running = crate::coordinator::helpers::is_pid_running(pid);
                         if is_running {
                             #[cfg(unix)]
-                            let _ = std::process::Command::new("kill")
-                                .args(["-KILL", "--", &format!("-{}", pid)])
-                                .status();
+                            if pid > 0 {
+                                unsafe {
+                                    let _ = libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+                                }
+                            }
                             kill_count += 1;
                         }
 
