@@ -159,10 +159,7 @@ pub fn restore_save_bundle(paths: &ProjectPaths, name: &str, opts: &super::Resto
                 // Session normalization: drop PIDs / stale leases
                 if let Ok(content) = fs::read_to_string(&sessions_src) {
                     if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&content) {
-                        if let Some(obj) = val.as_object_mut() {
-                            obj.remove("pid");
-                            obj.remove("active_worktree");
-                        }
+                        normalize_session_json(&mut val, &paths.root);
                         let normalized_bytes = serde_json::to_vec_pretty(&val).unwrap();
                         fs::write(&sessions_dest, normalized_bytes).ok();
                     } else {
@@ -198,6 +195,148 @@ pub fn restore_save_bundle(paths: &ProjectPaths, name: &str, opts: &super::Resto
             let _ = copy_dir_all(&registry_src, &registry_dest, paths);
         }
     }
-
     Ok(())
+}
+
+fn recompute_worktree_path(old_path_str: &str, current_project_root: &std::path::Path) -> String {
+    let old_path = std::path::Path::new(old_path_str);
+    if let Some(pos) = old_path_str.find(".macc/worktrees") {
+        let rel = &old_path_str[pos + ".macc/worktrees".len()..];
+        let rel_clean = rel.trim_start_matches('/').trim_start_matches('\\');
+        current_project_root.join(".macc/worktree").join(rel_clean).to_string_lossy().to_string()
+    } else if let Some(pos) = old_path_str.find(".macc/worktree") {
+        let rel = &old_path_str[pos + ".macc/worktree".len()..];
+        let rel_clean = rel.trim_start_matches('/').trim_start_matches('\\');
+        current_project_root.join(".macc/worktree").join(rel_clean).to_string_lossy().to_string()
+    } else {
+        if let Some(last_component) = old_path.file_name() {
+            current_project_root.join(".macc/worktree").join(last_component).to_string_lossy().to_string()
+        } else {
+            old_path_str.to_string()
+        }
+    }
+}
+
+fn normalize_session_json(value: &mut serde_json::Value, project_root: &std::path::Path) {
+    match value {
+        serde_json::Value::Object(map) => {
+            map.remove("pid");
+            map.remove("active_worktree");
+            map.remove("owner_pid");
+            map.remove("owner_task_id");
+            map.remove("owner_worktree");
+            
+            if let Some(status_val) = map.get_mut("status") {
+                if let Some(status_str) = status_val.as_str() {
+                    if status_str == "active" {
+                        *status_val = serde_json::Value::String("available".to_string());
+                    }
+                }
+            }
+            
+            if map.contains_key("heartbeat_epoch") {
+                map.insert("heartbeat_epoch".to_string(), serde_json::json!(0));
+            }
+            
+            let mut keys_to_rename = Vec::new();
+            for (k, v) in map.iter_mut() {
+                if k.contains('/') || k.contains('\\') || k.contains(".macc") {
+                    let new_k = recompute_worktree_path(k, project_root);
+                    if new_k != *k {
+                        keys_to_rename.push((k.clone(), new_k));
+                    }
+                }
+                normalize_session_json(v, project_root);
+            }
+            
+            for (old_k, new_k) in keys_to_rename {
+                if let Some(val) = map.remove(&old_k) {
+                    map.insert(new_k, val);
+                }
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for v in arr.iter_mut() {
+                normalize_session_json(v, project_root);
+            }
+        }
+        _ => {}
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::path::Path;
+
+    #[test]
+    fn test_recompute_worktree_path() {
+        let current_root = Path::new("/new/project");
+        
+        // Absolute path with .macc/worktree
+        let old_wt_1 = "/old/project/.macc/worktree/worker-01";
+        let new_wt_1 = recompute_worktree_path(old_wt_1, current_root);
+        assert_eq!(new_wt_1, "/new/project/.macc/worktree/worker-01");
+
+        // Absolute path with .macc/worktrees
+        let old_wt_2 = "/old/project/.macc/worktrees/worker-02";
+        let new_wt_2 = recompute_worktree_path(old_wt_2, current_root);
+        assert_eq!(new_wt_2, "/new/project/.macc/worktree/worker-02");
+
+        // Plain name
+        let old_wt_3 = "worker-03";
+        let new_wt_3 = recompute_worktree_path(old_wt_3, current_root);
+        assert_eq!(new_wt_3, "/new/project/.macc/worktree/worker-03");
+    }
+
+    #[test]
+    fn test_normalize_session_json() {
+        let current_root = Path::new("/new/project");
+        let mut session_data = json!({
+            "pid": 9999,
+            "active_worktree": "/old/project/.macc/worktree/worker-01",
+            "tools": {
+                "codex": {
+                    "sessions": {
+                        "/old/project/.macc/worktree/worker-01": {
+                            "session_id": "sid-old",
+                            "updated_at": "2026-01-01T00:00:00Z"
+                        },
+                        "session-new": {
+                            "status": "active",
+                            "created_at": "2026-01-01T00:00:00Z",
+                            "heartbeat_epoch": 1234567,
+                            "owner_task_id": "TASK-A",
+                            "owner_pid": "1234",
+                            "owner_worktree": "/old/project/.macc/worktree/worker-01"
+                        }
+                    }
+                }
+            }
+        });
+
+        normalize_session_json(&mut session_data, current_root);
+
+        let expected = json!({
+            "tools": {
+                "codex": {
+                    "sessions": {
+                        "/new/project/.macc/worktree/worker-01": {
+                            "session_id": "sid-old",
+                            "updated_at": "2026-01-01T00:00:00Z"
+                        },
+                        "session-new": {
+                            "status": "available",
+                            "created_at": "2026-01-01T00:00:00Z",
+                            "heartbeat_epoch": 0
+                        }
+                    }
+                }
+            }
+        });
+
+        assert_eq!(session_data, expected);
+    }
 }
