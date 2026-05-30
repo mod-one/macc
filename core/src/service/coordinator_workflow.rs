@@ -1216,13 +1216,12 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
         CoordinatorCommand::Recover { dry_run } => {
             let storage_paths = crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(paths);
             let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
-            let mut snapshot = sqlite.load_snapshot()?;
-            let mut reports = Vec::new();
-            
+
+            // ── Meta: epoch bump and coordinator run record ───────────────
             let last_run = sqlite.get_active_coordinator_run().unwrap_or(None);
             let current_epoch = last_run.map(|r| r.epoch).unwrap_or(0);
             let next_epoch = current_epoch + 1;
-            
+
             if !dry_run {
                 let run_id = crate::service::project::ensure_coordinator_run_id();
                 let hostname = std::env::var("HOSTNAME").unwrap_or_else(|_| "localhost".to_string());
@@ -1241,163 +1240,31 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
                 sqlite.upsert_coordinator_run(&current_run)?;
             }
 
+            // ── §11.2 canonical classification via execute_startup_recovery_sweep ──
             let reference_branch = request.env_cfg
                 .reference_branch
                 .as_deref()
                 .or_else(|| request.coordinator_cfg.and_then(|c| c.reference_branch.as_deref()))
                 .unwrap_or("main");
-            let commits = crate::coordinator::commit_reconciler::read_commit_range(&paths.root, None, reference_branch).unwrap_or_default();
-            let reconcile_report = crate::coordinator::commit_reconciler::reconcile(&snapshot.registry, &commits);
 
-            let mut changed = false;
+            let sweep_entries = crate::coordinator::state_runtime::execute_startup_recovery_sweep(
+                &paths.root,
+                reference_branch,
+                dry_run,
+                None,
+            )?;
 
-            for task in &mut snapshot.registry.tasks {
-                if !task.is_active() && task.state != "blocked" {
-                    continue;
-                }
-                
-                let mut situation = "Process not spawned".to_string();
-                let mut classification = "dispatched_without_process".to_string();
-                let mut action = "Requeue safely".to_string();
-                let mut task_changed = false;
-                
-                let matched_commit = reconcile_report.reconciled.iter().find(|r| r.task_id == task.id);
-                
-                if let Some(m) = matched_commit {
-                    situation = format!("Commit {} matches task on base branch", &m.matched_commit_sha[..7.min(m.matched_commit_sha.len())]);
-                    classification = "merged".to_string();
-                    action = "Close runtime claim".to_string();
-                    if !dry_run {
-                        task.state = "merged".to_string();
-                        task.task_runtime.status = Some("idle".to_string());
-                        task.clear_assignment();
-                        task_changed = true;
-                    }
-                } else if let Some(pid) = task.runtime_pid() {
-                    let is_alive = crate::coordinator::helpers::is_pid_running(pid);
-                    let mut is_stale = false;
-                    let mut elapsed_sec = 0;
-                    if let Some(ref lh) = task.task_runtime.last_heartbeat {
-                        if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(lh) {
-                            elapsed_sec = chrono::Utc::now().timestamp() - parsed.with_timezone(&chrono::Utc).timestamp();
-                            if elapsed_sec > 180 {
-                                is_stale = true;
-                            }
-                        }
-                    }
-
-                    if is_alive {
-                        if is_stale {
-                            situation = format!("Performer alive but heartbeat stale for {}s", elapsed_sec);
-                            classification = "heartbeat_stale".to_string();
-                            action = "Wait grace period, then block/requeue".to_string();
-                            if !dry_run {
-                                task.task_runtime.status = Some("stale".to_string());
-                                task_changed = true;
-                            }
-                        } else {
-                            situation = "Performer alive and heartbeat fresh".to_string();
-                            classification = "adopted".to_string();
-                            action = "Continue monitoring".to_string();
-                        }
-                    } else {
-                        let wt_path_opt = task.worktree_path();
-                        let has_commits = if let Some(wt) = wt_path_opt {
-                            let wt_path = paths.root.join(wt);
-                            branch_has_commits_ahead(&paths.root, &task.branch().unwrap_or(""), reference_branch) || 
-                            worktree_has_commits_ahead(&wt_path, reference_branch)
-                        } else {
-                            false
-                        };
-
-                        let is_dirty = if let Some(wt) = wt_path_opt {
-                            crate::git::is_dirty(&paths.root.join(wt)).unwrap_or(false)
-                        } else {
-                            false
-                        };
-
-                        let is_merge = if let Some(wt) = wt_path_opt {
-                            is_merge_in_progress(&paths.root.join(wt))
-                        } else {
-                            false
-                        };
-
-                        if is_merge {
-                            situation = "Git merge in progress".to_string();
-                            classification = "blocked_merge_recovery".to_string();
-                            action = "Manual intervention required".to_string();
-                            if !dry_run {
-                                task.state = "blocked".to_string();
-                                task_changed = true;
-                            }
-                        } else if has_commits {
-                            situation = "Performer dead but commit exists".to_string();
-                            classification = "phase_done".to_string();
-                            action = "Continue FSM advancement".to_string();
-                            if !dry_run {
-                                task.task_runtime.status = Some("phase_done".to_string());
-                                task_changed = true;
-                            }
-                        } else if is_dirty {
-                            situation = "Worktree dirty, no phase result".to_string();
-                            classification = "blocked_dirty_worktree".to_string();
-                            action = "Propose operator review".to_string();
-                            if !dry_run {
-                                task.state = "blocked".to_string();
-                                task_changed = true;
-                            }
-                        } else {
-                            situation = "Performer dead, no changes".to_string();
-                            classification = "process_dead".to_string();
-                            action = "Requeue task".to_string();
-                            if !dry_run {
-                                task.state = "todo".to_string();
-                                task.task_runtime.status = Some("idle".to_string());
-                                task.clear_assignment();
-                                task_changed = true;
-                            }
-                        }
-                    }
-                } else {
-                    situation = "Claim exists but no process spawned".to_string();
-                    classification = "dispatched_without_process".to_string();
-                    action = "Requeue safely".to_string();
-                    if !dry_run {
-                        task.state = "todo".to_string();
-                        task.task_runtime.status = Some("idle".to_string());
-                        task.clear_assignment();
-                        task_changed = true;
-                    }
-                }
-
-                if task_changed {
-                    changed = true;
-                }
-
-                reports.push(RecoveryReportEntry {
-                    task_id: task.id.clone(),
-                    situation,
-                    classification,
-                    action,
-                    mutated: !dry_run && task_changed,
-                });
-            }
-
-            let db_pids: Vec<i64> = snapshot.registry.tasks.iter().filter_map(|t| t.runtime_pid()).collect();
-            let orphaned_pids = find_orphaned_pids_local(&paths.root, &db_pids)?;
-            for pid in orphaned_pids {
-                reports.push(RecoveryReportEntry {
-                    task_id: "-".to_string(),
-                    situation: "Process exists but no active task claim".to_string(),
-                    classification: "orphaned".to_string(),
-                    action: "Surface and optionally force terminate".to_string(),
-                    mutated: false,
-                });
-            }
-
-            if !dry_run && changed {
-                sqlite.save_snapshot(&snapshot)?;
-            }
+            // Map StartupRecoveryEntry → RecoveryReportEntry (identical fields)
+            let reports: Vec<RecoveryReportEntry> = sweep_entries
+                .into_iter()
+                .map(|e| RecoveryReportEntry {
+                    task_id: e.task_id,
+                    situation: e.situation,
+                    classification: e.classification,
+                    action: e.action,
+                    mutated: e.mutated,
+                })
+                .collect();
 
             result.recovery_report = Some(reports);
         }
@@ -3353,48 +3220,5 @@ fn find_orphaned_pids_local(repo_root: &std::path::Path, db_pids: &[i64]) -> Res
         }
     }
     Ok(orphaned)
-}
-
-fn branch_has_commits_ahead(repo_root: &std::path::Path, branch: &str, reference_branch: &str) -> bool {
-    if branch.is_empty() || reference_branch.is_empty() {
-        return false;
-    }
-    if let Ok(out) = crate::git::run_git_output_mapped(
-        repo_root,
-        &["rev-list", "--count", &format!("{}..{}", reference_branch, branch)],
-        "check branch commits ahead",
-    ) {
-        if out.status.success() {
-            let count_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            return count_str.parse::<usize>().unwrap_or(0) > 0;
-        }
-    }
-    false
-}
-
-fn worktree_has_commits_ahead(worktree_path: &std::path::Path, reference_branch: &str) -> bool {
-    crate::git::has_commits_ahead(worktree_path, reference_branch)
-}
-
-fn is_merge_in_progress(repo_or_worktree: &std::path::Path) -> bool {
-    if let Ok(out) = crate::git::run_git_output_mapped(
-        repo_or_worktree,
-        &["rev-parse", "--git-path", "MERGE_HEAD"],
-        "check MERGE_HEAD path",
-    ) {
-        if out.status.success() {
-            let path_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !path_str.is_empty() {
-                let path = std::path::Path::new(&path_str);
-                let target_path = if path.is_absolute() {
-                    path.to_path_buf()
-                } else {
-                    repo_or_worktree.join(path)
-                };
-                return target_path.exists();
-            }
-        }
-    }
-    false
 }
 

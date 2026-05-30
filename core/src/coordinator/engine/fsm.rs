@@ -2033,7 +2033,7 @@ pub async fn run_native_control_plane(
         // We cannot cheaply coerce &dyn CoordinatorLog into &dyn Fn(String)
         // across lifetimes, so we collect the entries and log the summary
         // ourselves using the coordinator logger.
-        match execute_startup_recovery_sweep(repo_root, reference_branch, None) {
+        match execute_startup_recovery_sweep(repo_root, reference_branch, false, None) {
             Ok(entries) => {
                 let classified = entries.len();
                 let mutated = entries.iter().filter(|e| e.mutated).count();

@@ -359,11 +359,15 @@ pub struct StartupRecoveryEntry {
     pub mutated: bool,
 }
 
-/// §11.1 Steps 7-10: Startup Recovery Sweep
+/// §11.1 Steps 7-10: Startup Recovery Sweep — canonical §11.2 classification
 ///
 /// Inspects worktree state (step 7), Git branch and merge state (step 8),
 /// runs deterministic PRD reconciliation from commit history (step 9), and
 /// persists recovery decisions back to SQLite storage (step 10).
+///
+/// When `dry_run` is `true` the classification is performed and every entry is
+/// returned, but no task is mutated and nothing is written to storage.
+/// This is the mode used by `macc coordinator recover --dry-run`.
 ///
 /// Must be called after dead-process cleanup and event replay, but before
 /// any new task dispatch.
@@ -372,6 +376,7 @@ pub struct StartupRecoveryEntry {
 pub fn execute_startup_recovery_sweep(
     repo_root: &Path,
     reference_branch: &str,
+    dry_run: bool,
     logger: Option<&dyn Fn(String)>,
 ) -> Result<Vec<StartupRecoveryEntry>> {
     let project_paths = crate::ProjectPaths::from_root(repo_root);
@@ -416,9 +421,11 @@ pub fn execute_startup_recovery_sweep(
             );
             classification = "merged".to_string();
             action = "Close runtime claim".to_string();
-            task.state = "merged".to_string();
-            task.task_runtime.status = Some("idle".to_string());
-            task.clear_assignment();
+            if !dry_run {
+                task.state = "merged".to_string();
+                task.task_runtime.status = Some("idle".to_string());
+                task.clear_assignment();
+            }
             task_changed = true;
         } else if let Some(pid) = task.runtime_pid() {
             let is_alive = crate::coordinator::helpers::is_pid_running(pid);
@@ -444,7 +451,9 @@ pub fn execute_startup_recovery_sweep(
                     );
                     classification = "heartbeat_stale".to_string();
                     action = "Wait grace period, then block/requeue".to_string();
-                    task.task_runtime.status = Some("stale".to_string());
+                    if !dry_run {
+                        task.task_runtime.status = Some("stale".to_string());
+                    }
                     task_changed = true;
                 } else {
                     situation = "Performer alive and heartbeat fresh".to_string();
@@ -484,27 +493,35 @@ pub fn execute_startup_recovery_sweep(
                     situation = "Git merge in progress".to_string();
                     classification = "blocked_merge_recovery".to_string();
                     action = "Manual intervention required".to_string();
-                    task.state = "blocked".to_string();
+                    if !dry_run {
+                        task.state = "blocked".to_string();
+                    }
                     task_changed = true;
                 } else if has_commits {
                     situation = "Performer dead but commit exists".to_string();
                     classification = "phase_done".to_string();
                     action = "Continue FSM advancement".to_string();
-                    task.task_runtime.status = Some("phase_done".to_string());
+                    if !dry_run {
+                        task.task_runtime.status = Some("phase_done".to_string());
+                    }
                     task_changed = true;
                 } else if is_dirty {
                     situation = "Worktree dirty, no phase result".to_string();
                     classification = "blocked_dirty_worktree".to_string();
                     action = "Require operator review".to_string();
-                    task.state = "blocked".to_string();
+                    if !dry_run {
+                        task.state = "blocked".to_string();
+                    }
                     task_changed = true;
                 } else {
                     situation = "Performer dead, no changes".to_string();
                     classification = "process_dead".to_string();
                     action = "Requeue task".to_string();
-                    task.state = "todo".to_string();
-                    task.task_runtime.status = Some("idle".to_string());
-                    task.clear_assignment();
+                    if !dry_run {
+                        task.state = "todo".to_string();
+                        task.task_runtime.status = Some("idle".to_string());
+                        task.clear_assignment();
+                    }
                     task_changed = true;
                 }
             }
@@ -513,9 +530,11 @@ pub fn execute_startup_recovery_sweep(
             situation = "Claim exists but no process spawned".to_string();
             classification = "dispatched_without_process".to_string();
             action = "Requeue safely".to_string();
-            task.state = "todo".to_string();
-            task.task_runtime.status = Some("idle".to_string());
-            task.clear_assignment();
+            if !dry_run {
+                task.state = "todo".to_string();
+                task.task_runtime.status = Some("idle".to_string());
+                task.clear_assignment();
+            }
             task_changed = true;
         }
 
@@ -535,7 +554,7 @@ pub fn execute_startup_recovery_sweep(
             situation,
             classification,
             action,
-            mutated: task_changed,
+            mutated: task_changed && !dry_run,
         });
     }
 
@@ -563,8 +582,8 @@ pub fn execute_startup_recovery_sweep(
         });
     }
 
-    // ── Step 10: persist recovery decisions ──────────────────────────────
-    if changed {
+    // ── Step 10: persist recovery decisions (skipped when dry_run=true) ─────
+    if changed && !dry_run {
         let now = now_iso_coordinator();
         snapshot.registry.recompute_resource_locks(&now);
         snapshot.registry.set_updated_at(now);
@@ -584,9 +603,11 @@ pub fn execute_startup_recovery_sweep(
             ));
         }
     } else if let Some(log) = logger {
+        let label = if dry_run { "(dry-run)" } else { "0 mutated" };
         log(format!(
-            "- Recovery sweep complete: {} task(s) classified, 0 mutated",
-            entries.len()
+            "- Recovery sweep complete: {} task(s) classified, {}",
+            entries.len(),
+            label
         ));
     }
 
@@ -787,7 +808,7 @@ mod tests {
         sqlite.save_snapshot(&snapshot).expect("save snapshot");
 
         // Run the recovery sweep
-        let entries = execute_startup_recovery_sweep(&repo, "main", None)
+        let entries = execute_startup_recovery_sweep(&repo, "main", false, None)
             .expect("recovery sweep should succeed");
 
         assert_eq!(entries.len(), 1, "expected exactly one task classified");
@@ -842,7 +863,7 @@ mod tests {
         snapshot.registry.tasks.push(task);
         sqlite.save_snapshot(&snapshot).expect("save snapshot");
 
-        let entries = execute_startup_recovery_sweep(&repo, "main", None)
+        let entries = execute_startup_recovery_sweep(&repo, "main", false, None)
             .expect("recovery sweep should succeed");
 
         assert_eq!(entries.len(), 1);
