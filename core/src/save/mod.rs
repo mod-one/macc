@@ -65,6 +65,11 @@ pub fn list_save_bundles() -> Result<Vec<SaveBundleManifest>> {
     }
     let mut list = Vec::new();
     for entry in fs::read_dir(saves_dir).unwrap().flatten() {
+        let file_name = entry.file_name();
+        let name_str = file_name.to_string_lossy();
+        if name_str.starts_with('.') {
+            continue;
+        }
         let path = entry.path();
         if path.is_dir() {
             let manifest_path = path.join("manifest.yaml");
@@ -194,3 +199,79 @@ pub fn get_unsaved_state_report(paths: &ProjectPaths) -> Result<UnsavedStateRepo
 
     Ok(report)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_list_save_bundles_skips_dot_directories() {
+        let temp = tempdir().unwrap();
+        let old_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", temp.path());
+
+        let saves_dir = temp.path().join(".macc").join("saves");
+        fs::create_dir_all(&saves_dir).unwrap();
+
+        // 1. Regular save bundle
+        let bundle_dir = saves_dir.join("my-save");
+        fs::create_dir_all(&bundle_dir).unwrap();
+        let manifest_content = r#"
+version: 1
+kind: macc.save_bundle
+name: my-save
+created_at: "2026-01-01T00:00:00Z"
+updated_at: "2026-01-01T00:00:00Z"
+macc_version: "0.1.0"
+repository:
+  root_name: "test-repo"
+  root_path_hash: "hash"
+  git_remote_url_hash: "hash"
+  git_default_branch: "main"
+  git_current_branch: "main"
+  git_head_sha: "head"
+  identity_strength: "strong"
+includes:
+  config: true
+  coordinator_sessions: false
+  catalogs: false
+  logs: false
+  prd: false
+  automation_state: false
+excludes:
+  worktrees: true
+  cache: true
+  generated_files: true
+  secrets: true
+paths: {}
+hashes:
+  manifest_payload: "hash"
+security:
+  secret_scan:
+    performed: false
+    findings: 0
+    redacted_logs: false
+"#;
+        fs::write(bundle_dir.join("manifest.yaml"), manifest_content).unwrap();
+
+        // 2. Temp / dot directory (should be skipped)
+        let dot_dir = saves_dir.join(".tmp");
+        fs::create_dir_all(&dot_dir).unwrap();
+        fs::write(dot_dir.join("manifest.yaml"), manifest_content).unwrap();
+
+        let bundles = list_save_bundles().unwrap();
+        
+        // Restore environment
+        if let Some(h) = old_home {
+            std::env::set_var("HOME", h);
+        } else {
+            std::env::remove_var("HOME");
+        }
+
+        assert_eq!(bundles.len(), 1);
+        assert_eq!(bundles[0].name, "my-save");
+    }
+}
+
