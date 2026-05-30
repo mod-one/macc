@@ -1,0 +1,17 @@
+name: fetch-repo-stats
+concurrency: fetch-repo-stats
+
+on:
+  schedule:
+    - cron: "0 23 * * *"
+  workflow_dispatch:
+
+jobs:
+  run-ghrs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: github-repo-stats
+        uses: jgehrcke/github-repo-stats@v1.4.2
+        with:
+          repository: ${{ github.repository }}
+          ghtoken: ${{ secrets.GHRS_GITHUB_API_TOKEN }}
