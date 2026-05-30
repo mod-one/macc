@@ -31,6 +31,7 @@ pub mod lock;
 pub mod failure;
 pub mod settings;
 pub mod save;
+pub mod task;
 
 pub trait Command {
     fn run(&self) -> Result<()>;

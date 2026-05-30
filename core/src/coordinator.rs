@@ -95,8 +95,10 @@ pub enum WorkflowState {
     Todo,
     Claimed,
     InProgress,
-    PrOpen,
+    Testing,
     ChangesRequested,
+    Reviewing,
+    PrOpen,
     Queued,
     Merged,
     Blocked,
@@ -109,8 +111,10 @@ impl WorkflowState {
             WorkflowState::Todo => "todo",
             WorkflowState::Claimed => "claimed",
             WorkflowState::InProgress => "in_progress",
-            WorkflowState::PrOpen => "pr_open",
+            WorkflowState::Testing => "testing",
             WorkflowState::ChangesRequested => "changes_requested",
+            WorkflowState::Reviewing => "reviewing",
+            WorkflowState::PrOpen => "pr_open",
             WorkflowState::Queued => "queued",
             WorkflowState::Merged => "merged",
             WorkflowState::Blocked => "blocked",
@@ -127,8 +131,10 @@ impl FromStr for WorkflowState {
             "todo" => Ok(WorkflowState::Todo),
             "claimed" => Ok(WorkflowState::Claimed),
             "in_progress" => Ok(WorkflowState::InProgress),
-            "pr_open" => Ok(WorkflowState::PrOpen),
+            "testing" => Ok(WorkflowState::Testing),
             "changes_requested" => Ok(WorkflowState::ChangesRequested),
+            "reviewing" => Ok(WorkflowState::Reviewing),
+            "pr_open" => Ok(WorkflowState::PrOpen),
             "queued" => Ok(WorkflowState::Queued),
             "merged" => Ok(WorkflowState::Merged),
             "blocked" => Ok(WorkflowState::Blocked),
@@ -295,17 +301,42 @@ pub fn is_valid_workflow_transition(from: WorkflowState, to: WorkflowState) -> b
             | (WorkflowState::Claimed, WorkflowState::InProgress)
             | (WorkflowState::Claimed, WorkflowState::Blocked)
             | (WorkflowState::Claimed, WorkflowState::Abandoned)
+            // InProgress → Testing (spec §17: dev → test when testing.enabled)
+            | (WorkflowState::InProgress, WorkflowState::Testing)
+            // InProgress → Reviewing (when testing disabled but review enabled)
+            | (WorkflowState::InProgress, WorkflowState::Reviewing)
             | (WorkflowState::InProgress, WorkflowState::PrOpen)
             | (WorkflowState::InProgress, WorkflowState::ChangesRequested)
             | (WorkflowState::InProgress, WorkflowState::Merged)
             | (WorkflowState::InProgress, WorkflowState::Blocked)
             | (WorkflowState::InProgress, WorkflowState::Abandoned)
+            // Testing → Reviewing (test pass, review enabled; spec §15.2)
+            | (WorkflowState::Testing, WorkflowState::Reviewing)
+            // Testing → Merged (test pass, review disabled; spec §15.2)
+            | (WorkflowState::Testing, WorkflowState::Merged)
+            // Testing → InProgress (test fail → fix → retry; spec §15.2)
+            | (WorkflowState::Testing, WorkflowState::InProgress)
+            | (WorkflowState::Testing, WorkflowState::PrOpen)
+            | (WorkflowState::Testing, WorkflowState::Blocked)
+            | (WorkflowState::Testing, WorkflowState::Abandoned)
+            // Reviewing → Merged (review passes; spec §17.1)
+            | (WorkflowState::Reviewing, WorkflowState::Merged)
+            // Reviewing → InProgress (changes requested; spec §17.1)
+            | (WorkflowState::Reviewing, WorkflowState::InProgress)
+            | (WorkflowState::Reviewing, WorkflowState::ChangesRequested)
+            | (WorkflowState::Reviewing, WorkflowState::PrOpen)
+            | (WorkflowState::Reviewing, WorkflowState::Blocked)
+            | (WorkflowState::Reviewing, WorkflowState::Abandoned)
             | (WorkflowState::PrOpen, WorkflowState::ChangesRequested)
             | (WorkflowState::PrOpen, WorkflowState::Queued)
             | (WorkflowState::PrOpen, WorkflowState::Merged)
             | (WorkflowState::PrOpen, WorkflowState::Blocked)
             | (WorkflowState::PrOpen, WorkflowState::Abandoned)
             | (WorkflowState::ChangesRequested, WorkflowState::PrOpen)
+            // ChangesRequested → Testing (re-test after fix)
+            | (WorkflowState::ChangesRequested, WorkflowState::Testing)
+            // ChangesRequested → Reviewing (re-review after fix)
+            | (WorkflowState::ChangesRequested, WorkflowState::Reviewing)
             | (WorkflowState::ChangesRequested, WorkflowState::Merged)
             | (WorkflowState::ChangesRequested, WorkflowState::Blocked)
             | (WorkflowState::ChangesRequested, WorkflowState::Abandoned)
@@ -316,6 +347,8 @@ pub fn is_valid_workflow_transition(from: WorkflowState, to: WorkflowState) -> b
             | (WorkflowState::Blocked, WorkflowState::Todo)
             | (WorkflowState::Blocked, WorkflowState::Claimed)
             | (WorkflowState::Blocked, WorkflowState::InProgress)
+            | (WorkflowState::Blocked, WorkflowState::Testing)
+            | (WorkflowState::Blocked, WorkflowState::Reviewing)
             | (WorkflowState::Blocked, WorkflowState::PrOpen)
             | (WorkflowState::Blocked, WorkflowState::ChangesRequested)
             | (WorkflowState::Blocked, WorkflowState::Queued)
@@ -872,6 +905,39 @@ mod tests {
         assert!(!is_valid_workflow_transition(
             WorkflowState::Todo,
             WorkflowState::Merged
+        ));
+        // Spec §17: dev → test → review → merge pipeline
+        assert!(is_valid_workflow_transition(
+            WorkflowState::InProgress,
+            WorkflowState::Testing,
+        ));
+        assert!(is_valid_workflow_transition(
+            WorkflowState::Testing,
+            WorkflowState::Reviewing,
+        ));
+        assert!(is_valid_workflow_transition(
+            WorkflowState::Reviewing,
+            WorkflowState::Merged,
+        ));
+        // Spec §15.2: test fail → fix (back to InProgress)
+        assert!(is_valid_workflow_transition(
+            WorkflowState::Testing,
+            WorkflowState::InProgress,
+        ));
+        // Spec §17.1: review changes requested → back to InProgress
+        assert!(is_valid_workflow_transition(
+            WorkflowState::Reviewing,
+            WorkflowState::InProgress,
+        ));
+        // When testing disabled but review enabled: InProgress → Reviewing
+        assert!(is_valid_workflow_transition(
+            WorkflowState::InProgress,
+            WorkflowState::Reviewing,
+        ));
+        // Testing → Merged when review is disabled
+        assert!(is_valid_workflow_transition(
+            WorkflowState::Testing,
+            WorkflowState::Merged,
         ));
     }
 

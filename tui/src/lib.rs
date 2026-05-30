@@ -1396,7 +1396,6 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             };
             let runtime_para = wrapped_paragraph(runtime, "Runtime");
             f.render_widget(runtime_para, body_chunks[0]);
-
             let mut active_view = String::new();
             if let Some(snapshot) = &state.coordinator_snapshot {
                 if snapshot.active_tasks.is_empty() {
@@ -1409,23 +1408,144 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                         } else {
                             "-"
                         };
-                        // RL-TUI-007: show "rate-limited" instead of raw status for E601 tasks.
-                        let display_status = if task.last_error_code.starts_with("E601") {
-                            "rate-limited"
+                        // Health symbol per spec §7.1
+                        let health_symbol = if !task.last_error.is_empty()
+                            || task.runtime_status == "failed"
+                        {
+                            "▲" // Warning / failed phase
+                        } else if task.last_error_code.starts_with("E601") {
+                            "!" // Rate-limited / stale
+                        } else if task.runtime_status == "stale" {
+                            "!" // Stale heartbeat
+                        } else if matches!(
+                            task.runtime_status.as_str(),
+                            "waiting" | "waiting_for_user" | "phase_done" | "paused"
+                        ) {
+                            "◐" // Waiting / paused
+                        } else if matches!(task.runtime_status.as_str(), "completed") {
+                            "✓" // Completed
+                        } else if task.runtime_status.is_empty() || task.runtime_status == "-" {
+                            "·" // Idle / no runtime
                         } else {
-                            &task.runtime_status
+                            "●" // Healthy active
                         };
-                        active_view.push_str(&format!(
-                            "{} {} [{}|{}|{}] tool={} hb={} updated={}\n",
-                            spinner,
-                            task.id,
-                            task.state,
-                            display_status,
-                            task.current_phase,
-                            task.tool,
-                            task.last_heartbeat,
-                            task.updated_at
-                        ));
+                        // Compact status label per spec §7.2
+                        let status_label = if task.last_error_code.starts_with("E601") {
+                            "RATE".to_string()
+                        } else {
+                            match task.runtime_status.as_str() {
+                                "running" | "dispatched" | "starting" => "RUN".to_string(),
+                                "waiting" | "waiting_for_user" => "WAIT".to_string(),
+                                "blocked" => "BLK".to_string(),
+                                "retry_scheduled" => "RETRY".to_string(),
+                                "rate_limited" => "RATE".to_string(),
+                                "stale" => "STALE".to_string(),
+                                "failed" => "ERR".to_string(),
+                                "completed" | "phase_done" => "DONE".to_string(),
+                                other if !other.is_empty() && other != "-" => {
+                                    other.to_uppercase()
+                                }
+                                _ => "IDLE".to_string(),
+                            }
+                        };
+                        // Compact phase label per spec §7.3
+                        let phase_label = match task.current_phase.as_str() {
+                            "reading_context" => "ctx".to_string(),
+                            "planning" => "plan".to_string(),
+                            "implementing" => "dev".to_string(),
+                            "editing" => "edit".to_string(),
+                            "testing" => "test".to_string(),
+                            "fixing" => "fix".to_string(),
+                            "reviewing" => "review".to_string(),
+                            "committing" => "commit".to_string(),
+                            "opening_pr" => "pr".to_string(),
+                            "waiting_ci" => "ci".to_string(),
+                            "merging" => "merge".to_string(),
+                            "cleanup" => "clean".to_string(),
+                            other if !other.is_empty() && other != "-" => other.to_string(),
+                            _ => String::new(),
+                        };
+                        // Relative age from started_at
+                        let age_label = if !task.started_at.is_empty() && task.started_at != "-" {
+                            if let Ok(t) = chrono::DateTime::parse_from_rfc3339(&task.started_at) {
+                                let secs = chrono::Utc::now()
+                                    .signed_duration_since(t.with_timezone(&chrono::Utc))
+                                    .num_seconds()
+                                    .max(0) as u64;
+                                if secs < 60 {
+                                    format!("age {}s", secs)
+                                } else if secs < 3600 {
+                                    format!("age {}m", secs / 60)
+                                } else {
+                                    format!("age {}h", secs / 3600)
+                                }
+                            } else {
+                                String::new()
+                            }
+                        } else {
+                            String::new()
+                        };
+                        // Relative heartbeat age
+                        let hb_label = if !task.last_heartbeat.is_empty()
+                            && task.last_heartbeat != "-"
+                        {
+                            if let Ok(t) =
+                                chrono::DateTime::parse_from_rfc3339(&task.last_heartbeat)
+                            {
+                                let secs = chrono::Utc::now()
+                                    .signed_duration_since(t.with_timezone(&chrono::Utc))
+                                    .num_seconds()
+                                    .max(0) as u64;
+                                if secs < 60 {
+                                    format!("hb {}s", secs)
+                                } else if secs < 3600 {
+                                    format!("hb {}m", secs / 60)
+                                } else {
+                                    format!("hb {}h", secs / 3600)
+                                }
+                            } else {
+                                String::new()
+                            }
+                        } else {
+                            String::new()
+                        };
+                        // Worker slot (fall back to spinner if none)
+                        let worker = if task.worker_id.is_empty() {
+                            spinner.to_string()
+                        } else {
+                            task.worker_id.clone()
+                        };
+                        // Compose compact row: ● worker  TASK-ID  RUN dev  tool  age Xm  hb Ys  Message
+                        let runtime_part = if phase_label.is_empty() {
+                            status_label.clone()
+                        } else {
+                            format!("{} {}", status_label, phase_label)
+                        };
+                        let mut parts: Vec<String> = vec![
+                            format!("{} {}", health_symbol, worker),
+                            task.id.clone(),
+                            runtime_part,
+                        ];
+                        if !task.tool.is_empty() && task.tool != "-" {
+                            parts.push(task.tool.clone());
+                        }
+                        if !age_label.is_empty() {
+                            parts.push(age_label);
+                        }
+                        if !hb_label.is_empty() {
+                            parts.push(hb_label);
+                        }
+                        if !task.message.is_empty() {
+                            // Truncate message to keep the row readable
+                            let msg = if task.message.len() > 50 {
+                                format!("{}…", &task.message[..48])
+                            } else {
+                                task.message.clone()
+                            };
+                            parts.push(msg);
+                        }
+                        active_view.push_str(&parts.join("  "));
+                        active_view.push('\n');
                         if !task.last_error.is_empty() {
                             active_view.push_str(&format!("    error: {}\n", task.last_error));
                         }

@@ -503,6 +503,37 @@ enum Commands {
         #[command(subcommand)]
         settings_command: commands::settings::SettingsCommands,
     },
+    /// Print a chronological task timeline (events, phases, decisions)
+    Explain {
+        /// Task ID to explain (e.g. NOY-L5-WINWIDGET-001)
+        task_id: String,
+        /// Output machine-readable JSON
+        #[arg(long)]
+        json: bool,
+        /// Show only events from the last N minutes
+        #[arg(long)]
+        since: Option<u64>,
+        /// Minimum severity to display (debug, info, notice, warn, error, fatal)
+        #[arg(long)]
+        severity: Option<String>,
+    },
+    /// Show the diff for a task's active worktree (no cd required)
+    Diff {
+        /// Task ID whose diff to show (e.g. NOY-L5-WINWIDGET-001)
+        task_id: String,
+        /// Show a summary stat instead of full diff
+        #[arg(long)]
+        stat: bool,
+        /// Show only changed file names
+        #[arg(long)]
+        name_only: bool,
+        /// Override base branch (default: uses task's recorded base or main)
+        #[arg(long)]
+        base: Option<String>,
+        /// Output format: patch or stat
+        #[arg(long)]
+        format: Option<String>,
+    },
 }
 
 
@@ -1235,6 +1266,29 @@ fn run_with_engine_provider(
         }
         Some(Commands::Settings { settings_command }) => {
             commands::settings::SettingsCommand::new(app.clone(), settings_command.clone()).run()
+        }
+
+        Some(Commands::Explain { task_id, json, since, severity }) => {
+            commands::task::ExplainCommand::new(
+                app.clone(),
+                task_id.clone(),
+                *json,
+                *since,
+                severity.clone(),
+            )
+            .run()
+        }
+
+        Some(Commands::Diff { task_id, stat, name_only, base, format }) => {
+            commands::task::DiffCommand::new(
+                app.clone(),
+                task_id.clone(),
+                *stat,
+                *name_only,
+                base.clone(),
+                format.clone(),
+            )
+            .run()
         }
 
         Some(Commands::Coordinator {

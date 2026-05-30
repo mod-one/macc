@@ -114,6 +114,16 @@ pub fn coordinator_state_set_runtime(
                 attempt.parse::<i64>().ok()
             },
             now,
+            message: args.get("message").cloned(),
+            progress: args.get("progress").and_then(|s| s.parse::<u8>().ok()),
+            worker_id: args.get("worker-id").cloned(),
+            tool: args.get("tool").cloned(),
+            worktree: args.get("worktree").cloned(),
+            branch: args.get("branch").cloned(),
+            stdout_log: args.get("stdout-log").cloned(),
+            stderr_log: args.get("stderr-log").cloned(),
+            events_log: args.get("events-log").cloned(),
+            last_event_at: args.get("last-event-at").cloned(),
         };
         set_runtime_sqlite_with_event(&paths, &change, event.as_ref())?;
         maybe_mirror_json(&paths, args)?;
@@ -136,6 +146,37 @@ pub fn coordinator_state_set_runtime(
     if !phase.is_empty() {
         runtime.current_phase = Some(phase.clone());
     }
+    if let Some(msg) = args.get("message") {
+        runtime.message = Some(msg.clone());
+    }
+    if let Some(prog_str) = args.get("progress") {
+        runtime.progress = prog_str.parse::<u8>().ok();
+    }
+    if let Some(wid) = args.get("worker-id") {
+        runtime.worker_id = Some(wid.clone());
+    }
+    if let Some(t) = args.get("tool") {
+        runtime.tool = Some(t.clone());
+    }
+    if let Some(wt) = args.get("worktree") {
+        runtime.worktree = Some(wt.clone());
+    }
+    if let Some(br) = args.get("branch") {
+        runtime.branch = Some(br.clone());
+    }
+    if let Some(sol) = args.get("stdout-log") {
+        runtime.stdout_log = Some(sol.clone());
+    }
+    if let Some(sel) = args.get("stderr-log") {
+        runtime.stderr_log = Some(sel.clone());
+    }
+    if let Some(evl) = args.get("events-log") {
+        runtime.events_log = Some(evl.clone());
+    }
+    if let Some(lea) = args.get("last-event-at") {
+        runtime.last_event_at = Some(lea.clone());
+    }
+    runtime.registry_updated_at = Some(now.clone());
     if !pid.is_empty() {
         runtime.pid = pid.parse::<i64>().ok();
     } else if matches!(

@@ -1323,6 +1323,13 @@ macc/
 - ✅ Web server binds to localhost by default; explicit flag for external exposure.
 - ✅ API path parameters sanitized against directory traversal.
 
+### 18.8 Task Lifecycle & Visibility Layer
+- ✅ Extended `WorkflowState` to include `Testing` and `Reviewing` states for the full `dev → test → review → merge` pipeline.
+- ✅ Mode-based testing and review phases configured independently under `automation.coordinator.phases`.
+- ✅ Display and toggling of testing/review phases in the TUI Settings screen.
+- ✅ Added `macc explain <task-id>` to print chronological task timelines, log locations, and event metadata.
+- ✅ Added `macc diff <task-id>` to run a worktree-anchored `git diff` without requiring directory traversal.
+
 ---
 
 ## 19. Roadmap (proposed)

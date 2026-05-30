@@ -110,6 +110,56 @@ pub struct RalphConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+#[serde(default)]
+pub struct PhaseConfig {
+    /// Whether this phase is enabled.
+    pub enabled: bool,
+    /// Mode: disabled | required | risk_based | manual.
+    pub mode: String,
+    /// Task categories that always require this phase (e.g. ["feature", "bugfix"]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_for: Vec<String>,
+    /// Task categories that always skip this phase (e.g. ["docs", "chore"]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skip_for: Vec<String>,
+    /// Maximum attempts for this phase before escalating to failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_attempts: Option<usize>,
+    /// (Testing phase only) Allow tester to write or improve tests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_write_tests: Option<bool>,
+    /// (Testing phase only) Allow tester to modify source files.
+    /// Default: false — tester is read-only except for tests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_modify_source: Option<bool>,
+}
+
+impl Default for PhaseConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: "disabled".to_string(),
+            required_for: Vec::new(),
+            skip_for: Vec::new(),
+            max_attempts: None,
+            can_write_tests: None,
+            can_modify_source: None,
+        }
+    }
+}
+
+/// Phase pipeline configuration block (under automation.coordinator.phases).
+/// Spec §16: Controls the testing and review phases independently.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
+#[serde(default)]
+pub struct PhasesConfig {
+    /// Optional dedicated Tester role configuration (spec §13–16).
+    pub testing: PhaseConfig,
+    /// Optional dedicated Reviewer role configuration.
+    pub review: PhaseConfig,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct CoordinatorConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -268,6 +318,14 @@ pub struct CoordinatorConfig {
     pub expose_processes_endpoint: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub health_include_runtime_summary: Option<bool>,
+    /// Phase pipeline configuration (testing and review phases).
+    /// Spec §16: enables testing/review as independent configurable phases.
+    #[serde(default, skip_serializing_if = "is_default_phases")]
+    pub phases: PhasesConfig,
+}
+
+fn is_default_phases(p: &PhasesConfig) -> bool {
+    p == &PhasesConfig::default()
 }
 
 fn default_true() -> bool {
@@ -402,6 +460,18 @@ impl Default for CoordinatorConfig {
             event_replay_max_events: None,
             expose_processes_endpoint: None,
             health_include_runtime_summary: None,
+            phases: PhasesConfig {
+                testing: PhaseConfig {
+                    enabled: false,
+                    mode: "disabled".to_string(),
+                    ..Default::default()
+                },
+                review: PhaseConfig {
+                    enabled: true,
+                    mode: "required".to_string(),
+                    ..Default::default()
+                },
+            },
         }
     }
 }

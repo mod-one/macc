@@ -114,6 +114,12 @@ pub struct CoordinatorActiveTask {
     pub last_heartbeat: String,
     /// Most recent error code (e.g. "E601", "E602") for this task.
     pub last_error_code: String,
+    /// Worker slot currently handling the task (from task_runtime.worker_id).
+    pub worker_id: String,
+    /// Human-readable current activity message (from task_runtime.message).
+    pub message: String,
+    /// ISO 8601 start timestamp (from task_runtime.started_at).
+    pub started_at: String,
 }
 
 /// RL-TUI-007: per-tool throttle state for TUI display.
@@ -244,7 +250,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    const AUTOMATION_FIELD_COUNT: usize = 34;
+    const AUTOMATION_FIELD_COUNT: usize = 36;
     const COORDINATOR_EVENTS_EWMA_ALPHA: f64 = 0.30;
     const COORDINATOR_PAUSE_REL_PATH: &'static str = ".macc/automation/task/coordinator.pause.json";
 
@@ -712,14 +718,41 @@ impl AppState {
                 .last_heartbeat
                 .clone()
                 .unwrap_or_else(|| "-".to_string());
+            let worker_id = task
+                .task_runtime
+                .worker_id
+                .clone()
+                .unwrap_or_default();
+            let message = task
+                .task_runtime
+                .message
+                .clone()
+                .unwrap_or_default();
+            let started_at = task
+                .task_runtime
+                .started_at
+                .clone()
+                .unwrap_or_default();
             let is_live_active = matches!(
                 state.as_str(),
-                "claimed" | "in_progress" | "pr_open" | "changes_requested" | "queued"
+                "claimed"
+                    | "in_progress"
+                    | "testing"
+                    | "reviewing"
+                    | "pr_open"
+                    | "changes_requested"
+                    | "queued"
             ) && !(state == "claimed" && runtime_status == "phase_done");
 
             match state.as_str() {
                 "todo" => snapshot.todo += 1,
-                "claimed" | "in_progress" | "pr_open" | "changes_requested" | "queued"
+                "claimed"
+                | "in_progress"
+                | "testing"
+                | "reviewing"
+                | "pr_open"
+                | "changes_requested"
+                | "queued"
                     if is_live_active =>
                 {
                     snapshot.active += 1;
@@ -734,6 +767,9 @@ impl AppState {
                         last_error,
                         last_heartbeat,
                         last_error_code,
+                        worker_id,
+                        message,
+                        started_at,
                     });
                 }
                 "claimed" => {
@@ -2719,6 +2755,11 @@ impl AppState {
             31 => "[Advanced] Max Review Cycles",
             32 => "[Basic] Safety Policy",
             33 => "[Basic] Destructive Actions",
+            // Spec §19: Phase pipeline toggles for Testing and Review
+            34 => "[Phases] Testing Phase Enabled",
+            35 => "[Phases] Testing Phase Mode",
+            36 => "[Phases] Review Phase Enabled",
+            37 => "[Phases] Review Phase Mode",
             _ => "",
         }
     }
@@ -2759,6 +2800,11 @@ impl AppState {
             31 => "Max review cycles per task. 0=skip review, 1=one review+fix (no loopback), N=N loops. Empty=unlimited.",
             32 => "Permitted tool write scopes and validations (strict, standard).",
             33 => "Risk policy for destructive actions (single_confirm, double_confirm).",
+            // Spec §19: phase controls
+            34 => "Enable the dedicated Tester agent phase after the Performer.",
+            35 => "Tester activation mode: disabled | required | risk_based | manual.",
+            36 => "Enable the dedicated Reviewer agent phase after testing (or after dev if testing disabled).",
+            37 => "Reviewer activation mode: disabled | required | risk_based | manual.",
             _ => "",
         }
     }
@@ -2901,6 +2947,19 @@ impl AppState {
             33 => coordinator
                 .and_then(|c| c.destructive_actions.clone())
                 .unwrap_or_else(|| "double_confirm".to_string()),
+            // Spec §19: phase pipeline toggles
+            34 => coordinator
+                .map(|c| c.phases.testing.enabled.to_string())
+                .unwrap_or_else(|| "false".to_string()),
+            35 => coordinator
+                .map(|c| c.phases.testing.mode.clone())
+                .unwrap_or_else(|| "disabled".to_string()),
+            36 => coordinator
+                .map(|c| c.phases.review.enabled.to_string())
+                .unwrap_or_else(|| "true".to_string()),
+            37 => coordinator
+                .map(|c| c.phases.review.mode.clone())
+                .unwrap_or_else(|| "required".to_string()),
             _ => String::new(),
         }
     }

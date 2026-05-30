@@ -120,6 +120,28 @@ pub struct TaskRuntime {
     pub pid: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_phase: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdout_log: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr_log: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub events_log: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_event_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry_updated_at: Option<String>,
     #[serde(default)]
     pub last_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -484,6 +506,8 @@ impl TaskRegistry {
                 WorkflowState::Merged => merged += 1,
                 WorkflowState::Claimed
                 | WorkflowState::InProgress
+                | WorkflowState::Testing
+                | WorkflowState::Reviewing
                 | WorkflowState::PrOpen
                 | WorkflowState::ChangesRequested
                 | WorkflowState::Queued => active += 1,

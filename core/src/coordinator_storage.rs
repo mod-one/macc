@@ -180,6 +180,16 @@ pub struct RuntimeMutation {
     pub heartbeat_ts: String,
     pub attempt: Option<i64>,
     pub now: String,
+    pub message: Option<String>,
+    pub progress: Option<u8>,
+    pub worker_id: Option<String>,
+    pub tool: Option<String>,
+    pub worktree: Option<String>,
+    pub branch: Option<String>,
+    pub stdout_log: Option<String>,
+    pub stderr_log: Option<String>,
+    pub events_log: Option<String>,
+    pub last_event_at: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -987,6 +997,38 @@ impl SqliteStorage {
         if !change.phase.is_empty() {
             task.task_runtime.current_phase = Some(change.phase.clone());
         }
+        if let Some(msg) = &change.message {
+            task.task_runtime.message = Some(msg.clone());
+        }
+        if let Some(prog) = change.progress {
+            task.task_runtime.progress = Some(prog);
+        }
+        if let Some(wid) = &change.worker_id {
+            task.task_runtime.worker_id = Some(wid.clone());
+        }
+        if let Some(t) = &change.tool {
+            task.task_runtime.tool = Some(t.clone());
+        }
+        if let Some(wt) = &change.worktree {
+            task.task_runtime.worktree = Some(wt.clone());
+        }
+        if let Some(br) = &change.branch {
+            task.task_runtime.branch = Some(br.clone());
+        }
+        if let Some(sol) = &change.stdout_log {
+            task.task_runtime.stdout_log = Some(sol.clone());
+        }
+        if let Some(sel) = &change.stderr_log {
+            task.task_runtime.stderr_log = Some(sel.clone());
+        }
+        if let Some(evl) = &change.events_log {
+            task.task_runtime.events_log = Some(evl.clone());
+        }
+        if let Some(lea) = &change.last_event_at {
+            task.task_runtime.last_event_at = Some(lea.clone());
+        }
+        task.task_runtime.registry_updated_at = Some(change.now.clone());
+
         match change.pid {
             Some(pid) => task.task_runtime.pid = Some(pid),
             None => {
@@ -2490,6 +2532,16 @@ mod tests {
             heartbeat_ts: now.clone(),
             attempt: Some(1),
             now: now.clone(),
+            message: None,
+            progress: None,
+            worker_id: None,
+            tool: None,
+            worktree: None,
+            branch: None,
+            stdout_log: None,
+            stderr_log: None,
+            events_log: None,
+            last_event_at: None,
         };
         let event = EventMutation {
             event_id: Some("evt-runtime-done-1".to_string()),
