@@ -1501,7 +1501,7 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
                     stopped_ctrl.mode = "stopped".to_string();
                     let _ = sqlite.set_coordinator_control(&stopped_ctrl);
 
-                    return Err(MaccError::Validation("draining complete".to_string()));
+                    return Err(MaccError::Validation("graceful stop complete".to_string()));
                 }
             }
         }
@@ -2155,9 +2155,9 @@ pub async fn run_native_control_plane(
     let mut final_status = "success".to_string();
     if let Err(ref err) = run_result {
         if let MaccError::Validation(ref msg) = err {
-            if msg == "draining complete" || msg == "force stopped by operator" {
+            if msg == "draining complete" || msg == "graceful stop complete" || msg == "force stopped by operator" {
                 is_clean_exit = true;
-                final_status = if msg == "draining complete" { "stopped".to_string() } else { "force_stopping".to_string() };
+                final_status = if msg == "draining complete" || msg == "graceful stop complete" { "stopped".to_string() } else { "force_stopping".to_string() };
             }
         }
     }
