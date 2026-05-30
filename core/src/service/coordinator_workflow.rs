@@ -1089,6 +1089,10 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
                     reason: Some(reason.clone()),
                 })?;
                 
+                let mut term_count = 0;
+                let mut kill_count = 0;
+                let mut aborted_count = 0;
+
                 if let Ok(db_pids) = sqlite.get_running_task_pids() {
                     for (task_id, pid) in db_pids {
                         if let Some(log) = request.logger {
@@ -1098,12 +1102,19 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
                         let _ = std::process::Command::new("kill")
                             .args(["-TERM", "--", &format!("-{}", pid)])
                             .status();
-                        std::thread::sleep(std::time::Duration::from_millis(50));
-                        #[cfg(unix)]
-                        let _ = std::process::Command::new("kill")
-                            .args(["-KILL", "--", &format!("-{}", pid)])
-                            .status();
+                        term_count += 1;
                         
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        
+                        let is_running = crate::coordinator::helpers::is_pid_running(pid);
+                        if is_running {
+                            #[cfg(unix)]
+                            let _ = std::process::Command::new("kill")
+                                .args(["-KILL", "--", &format!("-{}", pid)])
+                                .status();
+                            kill_count += 1;
+                        }
+
                         let _ = crate::coordinator::helpers::append_coordinator_event_with_severity(
                             &paths.root,
                             "task_blocked",
@@ -1113,6 +1124,7 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
                             "Task aborted by operator force-stop",
                             "warning",
                         );
+                        aborted_count += 1;
                     }
                 }
 
@@ -1125,6 +1137,25 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
                     let _ = crate::service::worktree::remove_all_worktrees(&paths.root, remove_branches);
                     let _ = crate::prune_worktrees(&paths.root);
                 }
+
+                let term_exited = term_count - kill_count;
+                let worktree_msg = if remove_worktrees {
+                    "Worktrees were cleaned up."
+                } else {
+                    "Worktrees were preserved for inspection."
+                };
+
+                let output_lines = vec![
+                    "Force stop requested.".to_string(),
+                    "Dispatch disabled.".to_string(),
+                    format!("Sent SIGTERM to {} process groups.", term_count),
+                    format!("{} exited within 10s.", term_exited),
+                    format!("Sent SIGKILL to {} remaining process group{}.", kill_count, if kill_count == 1 { "" } else { "s" }),
+                    format!("Marked {} task runtimes as aborted_by_operator.", aborted_count),
+                    worktree_msg.to_string(),
+                    "Next: run `macc coordinator recover --dry-run`.".to_string(),
+                ];
+                result.runtime_status = Some(output_lines.join("\n"));
             } else {
                 sqlite.set_coordinator_control(&crate::coordinator_storage::CoordinatorControl {
                     mode: "graceful_stopping".to_string(),
