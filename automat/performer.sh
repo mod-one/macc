@@ -30,6 +30,11 @@ EVENT_IPC_ADDR_FILE="${MACC_COORDINATOR_IPC_ADDR_FILE:-}"
 EVENT_SOURCE="${MACC_EVENT_SOURCE:-}"
 EVENT_TASK_ID="${MACC_EVENT_TASK_ID:-}"
 EVENT_RUN_ID="${COORDINATOR_RUN_ID:-$(date +%s%N)-$$}"
+EVENT_COORDINATOR_EPOCH="${COORDINATOR_EPOCH:-0}"
+if [[ ! "$EVENT_COORDINATOR_EPOCH" =~ ^[0-9]+$ ]]; then
+  EVENT_COORDINATOR_EPOCH=0
+fi
+EVENT_CLAIM_ID="${MACC_CLAIM_ID:-}"
 EVENT_SEQ=0
 EVENT_SEQ_FILE=""
 LAST_IPC_ERROR=""
@@ -266,6 +271,8 @@ emit_performer_event() {
     --arg schema_version "1" \
     --arg event_id "${EVENT_TASK_ID}-${seq}-$(date +%s%N)" \
     --arg run_id "$EVENT_RUN_ID" \
+    --argjson coordinator_epoch "$EVENT_COORDINATOR_EPOCH" \
+    --arg claim_id "$EVENT_CLAIM_ID" \
     --argjson seq "$seq" \
     --arg ts "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
     --arg source "$EVENT_SOURCE" \
@@ -278,6 +285,8 @@ emit_performer_event() {
       schema_version:$schema_version,
       event_id:$event_id,
       run_id:$run_id,
+      coordinator_epoch:$coordinator_epoch,
+      claim_id:($claim_id|select(length>0)),
       seq:$seq,
       ts:$ts,
       source:$source,

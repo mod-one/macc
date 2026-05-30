@@ -389,6 +389,10 @@ pub struct CoordinatorEventRecord {
     pub event_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coordinator_epoch: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_id: Option<String>,
     #[serde(default)]
     pub seq: i64,
     #[serde(default)]
@@ -1086,6 +1090,8 @@ mod tests {
             schema_version: COORDINATOR_EVENT_SCHEMA_VERSION.to_string(),
             event_id: "evt-1".to_string(),
             run_id: Some("run-1".to_string()),
+            coordinator_epoch: None,
+            claim_id: None,
             seq: 1,
             ts: "2026-03-15T00:00:00Z".to_string(),
             source: "performer:test".to_string(),

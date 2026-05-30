@@ -1156,6 +1156,8 @@ pub fn spawn_performer_job(
     join_set: &mut tokio::task::JoinSet<()>,
     phase_timeout_seconds: usize,
     performer_ipc_addr: Option<&str>,
+    claim_id: &str,
+    coordinator_epoch: i64,
 ) -> Result<Option<i64>> {
     let effective_ipc_addr = performer_ipc_addr
         .filter(|value| !value.trim().is_empty())
@@ -1188,6 +1190,8 @@ pub fn spawn_performer_job(
                 )
             }),
         )
+        .env("COORDINATOR_EPOCH", coordinator_epoch.to_string())
+        .env("MACC_CLAIM_ID", claim_id)
         .env("MACC_EVENT_SOURCE", event_source.clone())
         .env("MACC_EVENT_TASK_ID", task_id)
         .env_remove(crate::coordinator::ipc::COORDINATOR_IPC_ADDR_ENV)

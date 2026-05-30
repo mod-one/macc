@@ -91,6 +91,8 @@ pub struct DispatchClaimUpdate {
     pub pid: Option<i64>,
     pub phase: String,
     pub now: String,
+    pub run_id: String,
+    pub coordinator_epoch: i64,
 }
 
 /// Raw output captured from a performer process for error normalization.
@@ -594,9 +596,12 @@ fn apply_dispatch_claim_typed(task: &mut Task, update: &DispatchClaimUpdate) {
     worktree.last_commit = Some(update.last_commit.clone());
     worktree.session_id = Some(update.session_id.clone());
     let runtime = task.ensure_runtime();
-    runtime.set_status(RuntimeStatus::Running);
+    runtime.set_status(RuntimeStatus::Dispatched);
     runtime.current_phase = Some(update.phase.clone());
     runtime.started_at = Some(update.now.clone());
+    runtime.run_id = Some(update.run_id.clone());
+    runtime.coordinator_epoch = Some(update.coordinator_epoch);
+    runtime.claim_id = Some(update.session_id.clone());
     if let Some(active_session_id) = update.active_session_id.as_ref() {
         runtime.active_session_id = Some(active_session_id.clone());
     }
@@ -605,7 +610,9 @@ fn apply_dispatch_claim_typed(task: &mut Task, update: &DispatchClaimUpdate) {
 }
 
 fn apply_dispatch_pid_typed(task: &mut Task, pid: Option<i64>) {
-    task.ensure_runtime().pid = pid;
+    let runtime = task.ensure_runtime();
+    runtime.pid = pid;
+    runtime.set_status(RuntimeStatus::Running);
 }
 
 pub fn apply_phase_success(task: &mut Value, transition: PhaseTransition, now: &str) -> Result<()> {
@@ -1797,6 +1804,7 @@ pub async fn run_native_control_plane(
         }
     };
     let next_epoch = max_epoch + 1;
+    std::env::set_var("COORDINATOR_EPOCH", next_epoch.to_string());
     if let Some(mut prev) = last_run {
         prev.status = "crashed".to_string();
         prev.stopped_at = Some(chrono::Utc::now().to_rfc3339());
@@ -2454,14 +2462,20 @@ mod tests {
             last_commit: "abc".to_string(),
             session_id: "s-1".to_string(),
             active_session_id: Some("tool-session-1".to_string()),
-            pid: Some(123),
+            pid: None,
             phase: "dev".to_string(),
             now: "2026-02-20T00:00:00Z".to_string(),
+            run_id: "run-1".to_string(),
+            coordinator_epoch: 1,
         };
         apply_dispatch_claim(&mut task, &update);
         assert_eq!(task["state"], "claimed");
-        assert_eq!(task["task_runtime"]["status"], "running");
+        assert_eq!(task["task_runtime"]["status"], "dispatched");
         assert_eq!(task["task_runtime"]["active_session_id"], "tool-session-1");
+        assert_eq!(task["task_runtime"]["pid"], serde_json::Value::Null);
+
+        apply_dispatch_pid(&mut task, Some(123));
+        assert_eq!(task["task_runtime"]["status"], "running");
         assert_eq!(task["task_runtime"]["pid"], 123);
     }
 

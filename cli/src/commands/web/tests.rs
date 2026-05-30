@@ -233,6 +233,8 @@ fn registry_event(task_id: &str, event_id: &str, event_type: &str) -> Coordinato
         schema_version: COORDINATOR_EVENT_SCHEMA_VERSION.to_string(),
         event_id: event_id.to_string(),
         run_id: Some("run-1".to_string()),
+        coordinator_epoch: None,
+        claim_id: None,
         seq: 1,
         ts: "2026-03-20T12:00:00Z".to_string(),
         source: "coordinator:web".to_string(),

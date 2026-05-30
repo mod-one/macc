@@ -117,12 +117,18 @@ pub(super) fn append_task_lifecycle_event_with_session(
     session_id: Option<&str>,
 ) -> Result<()> {
     let run_id = crate::coordinator::helpers::ensure_coordinator_run_id();
+    let epoch = std::env::var("COORDINATOR_EPOCH")
+        .ok()
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(0);
     let now = now_iso_coordinator();
     let seq = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default() as u64;
     let payload = serde_json::json!({
         "schema_version":"1",
         "event_id": format!("evt-{}-{}-{}", event_type, task_id, seq),
         "run_id": run_id,
+        "coordinator_epoch": epoch,
+        "claim_id": session_id,
         "seq": seq,
         "ts": now,
         "source": "coordinator:native",

@@ -54,6 +54,7 @@ pub(super) struct DispatchClaim {
     tool: String,
     base_branch: String,
     active_session_id: Option<String>,
+    claim_id: String,
 }
 
 pub(super) struct LaunchPerformerContext<'a> {
@@ -300,6 +301,11 @@ pub(super) fn claim_task_in_registry(
 ) -> Result<DispatchClaim> {
     let dispatch_now = now_iso_coordinator();
     let session_id = format!("coordinator-{}-{}", candidate.task.id, dispatch_now);
+    let run_id = std::env::var("COORDINATOR_RUN_ID").unwrap_or_else(|_| "-".to_string());
+    let coordinator_epoch = std::env::var("COORDINATOR_EPOCH")
+        .ok()
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(0);
     let claim_update = coordinator_engine::DispatchClaimUpdate {
         task_id: candidate.task.id.clone(),
         tool: candidate.task.tool.clone(),
@@ -312,6 +318,8 @@ pub(super) fn claim_task_in_registry(
         pid: None,
         phase: "dev".to_string(),
         now: dispatch_now,
+        run_id,
+        coordinator_epoch,
     };
     coordinator_engine::apply_dispatch_claim_in_registry(registry, &claim_update)?;
     recompute_resource_locks_from_tasks(registry);
@@ -334,6 +342,7 @@ pub(super) fn claim_task_in_registry(
         tool: candidate.task.tool.clone(),
         base_branch: candidate.task.base_branch.clone(),
         active_session_id: worktree.active_session_id.clone(),
+        claim_id: session_id,
     })
 }
 
@@ -405,6 +414,10 @@ pub(super) async fn launch_performer(
     let current_exe = std::env::current_exe().map_err(|e| {
         MaccError::Validation(format!("Failed to resolve current executable path: {}", e))
     })?;
+    let epoch = std::env::var("COORDINATOR_EPOCH")
+        .ok()
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(0);
     let pid = coordinator_runtime::spawn_performer_job(
         &current_exe,
         repo_root,
@@ -415,6 +428,8 @@ pub(super) async fn launch_performer(
         &mut state.join_set,
         phase_timeout_seconds,
         state.performer_ipc_addr.as_deref(),
+        &claim.claim_id,
+        epoch,
     )?;
     let mut registry =
         crate::coordinator::state::coordinator_state_registry_load(repo_root, &BTreeMap::new())?;

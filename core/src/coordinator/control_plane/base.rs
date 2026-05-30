@@ -1342,6 +1342,19 @@ pub async fn monitor_active_jobs_native(
                             e
                         ))
                     })?;
+                    let typed_registry = TaskRegistry::from_value(&registry).ok();
+                    let (claim_id, epoch) = if let Some(ref typed) = typed_registry {
+                        if let Some(task) = typed.find_task(&task_id) {
+                            (
+                                task.task_runtime.claim_id.clone().unwrap_or_default(),
+                                task.task_runtime.coordinator_epoch.unwrap_or(0),
+                            )
+                        } else {
+                            (String::new(), 0)
+                        }
+                    } else {
+                        (String::new(), 0)
+                    };
                     let retry_pid = coordinator_runtime::spawn_performer_job(
                         &current_exe,
                         repo_root,
@@ -1352,6 +1365,8 @@ pub async fn monitor_active_jobs_native(
                         &mut state.join_set,
                         phase_timeout_seconds,
                         state.performer_ipc_addr.as_deref(),
+                        &claim_id,
+                        epoch,
                     )?;
                     state.active_jobs.insert(
                         task_id,

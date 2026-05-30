@@ -2508,6 +2508,8 @@ fn retry_dev_phase<E: crate::engine::Engine + ?Sized>(
     let current_exe = std::env::current_exe().map_err(|e| {
         MaccError::Validation(format!("Failed to resolve current executable path: {}", e))
     })?;
+    let claim_id = task.task_runtime.claim_id.clone().unwrap_or_default();
+    let epoch = task.task_runtime.coordinator_epoch.unwrap_or(0);
     let pid = coordinator_runtime::spawn_performer_job(
         &current_exe,
         &paths.root,
@@ -2518,6 +2520,8 @@ fn retry_dev_phase<E: crate::engine::Engine + ?Sized>(
         &mut state.join_set,
         env_cfg.stale_in_progress_seconds.unwrap_or(0),
         state.performer_ipc_addr.as_deref(),
+        &claim_id,
+        epoch,
     )?;
     state.active_jobs.insert(
         task_id.to_string(),
