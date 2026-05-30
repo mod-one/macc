@@ -1427,7 +1427,7 @@ pub fn apply_runtime_event_bus_updates(
             Ok(event) => {
                 if let Some(log) = logger {
                     let event_type = match &event.kind {
-                        CoordinatorRuntimeEventKind::Heartbeat => "heartbeat",
+                        CoordinatorRuntimeEventKind::Heartbeat { .. } => "heartbeat",
                         CoordinatorRuntimeEventKind::TaskDispatched { .. } => "task_dispatched",
                         CoordinatorRuntimeEventKind::TaskCompleted { .. } => "task_completed",
                         CoordinatorRuntimeEventKind::Progress { .. } => "progress",
@@ -1469,7 +1469,7 @@ pub fn apply_runtime_event_bus_updates(
                 let update = runtime_updates.entry(event.task_id.clone()).or_default();
                 update.last_heartbeat = Some(event.ts.clone());
                 match event.kind {
-                    CoordinatorRuntimeEventKind::Heartbeat => {}
+                    CoordinatorRuntimeEventKind::Heartbeat { .. } => {}
                     CoordinatorRuntimeEventKind::TaskDispatched { .. }
                     | CoordinatorRuntimeEventKind::TaskCompleted { .. } => {}
                     CoordinatorRuntimeEventKind::Progress {

@@ -116,7 +116,13 @@ pub struct CoordinatorMergeEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoordinatorRuntimeEventKind {
-    Heartbeat,
+    Heartbeat {
+        run_id: Option<String>,
+        coordinator_epoch: Option<i64>,
+        claim_id: Option<String>,
+        event_id: String,
+        heartbeat_seq: i64,
+    },
     TaskDispatched {
         session_id: Option<String>,
     },
@@ -842,7 +848,13 @@ pub fn raw_event_to_runtime_event(
         .as_str()
         .to_string();
     let kind = match event_type {
-        "heartbeat" => CoordinatorRuntimeEventKind::Heartbeat,
+        "heartbeat" => CoordinatorRuntimeEventKind::Heartbeat {
+            run_id: event.run_id.clone(),
+            coordinator_epoch: event.coordinator_epoch,
+            claim_id: event.claim_id.clone(),
+            event_id: event.event_id.clone(),
+            heartbeat_seq: event.seq,
+        },
         "task_dispatched" => CoordinatorRuntimeEventKind::TaskDispatched {
             session_id: event
                 .payload
