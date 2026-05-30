@@ -510,9 +510,9 @@ enum Commands {
         /// Output machine-readable JSON
         #[arg(long)]
         json: bool,
-        /// Show only events from the last N minutes
+        /// Show only events from the last duration (e.g. 30m, 1h, 1d)
         #[arg(long)]
-        since: Option<u64>,
+        since: Option<String>,
         /// Minimum severity to display (debug, info, notice, warn, error, fatal)
         #[arg(long)]
         severity: Option<String>,
@@ -912,6 +912,26 @@ pub enum ConfigCommands {
     },
 }
 
+fn parse_since_to_seconds(s: &str) -> Option<u64> {
+    let s = s.trim().to_ascii_lowercase();
+    if s.is_empty() {
+        return None;
+    }
+    let (num_part, multiplier) = if s.ends_with('d') {
+        (&s[..s.len() - 1], 24 * 3600)
+    } else if s.ends_with('h') {
+        (&s[..s.len() - 1], 3600)
+    } else if s.ends_with('m') {
+        (&s[..s.len() - 1], 60)
+    } else if s.ends_with('s') {
+        (&s[..s.len() - 1], 1)
+    } else {
+        // Default to minutes if no suffix is specified
+        (s.as_str(), 60)
+    };
+    num_part.trim().parse::<u64>().ok().map(|val| val * multiplier)
+}
+
 fn main() {
     let cli = Cli::parse();
     init_tracing(cli.verbose);
@@ -1269,11 +1289,12 @@ fn run_with_engine_provider(
         }
 
         Some(Commands::Explain { task_id, json, since, severity }) => {
+            let since_seconds = since.as_deref().and_then(parse_since_to_seconds);
             commands::task::ExplainCommand::new(
                 app.clone(),
                 task_id.clone(),
                 *json,
-                *since,
+                since_seconds,
                 severity.clone(),
             )
             .run()
@@ -1733,6 +1754,19 @@ fn confirm_user_scope_apply(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_since_to_seconds() {
+        assert_eq!(parse_since_to_seconds(""), None);
+        assert_eq!(parse_since_to_seconds("   "), None);
+        assert_eq!(parse_since_to_seconds("30m"), Some(1800));
+        assert_eq!(parse_since_to_seconds("1h"), Some(3600));
+        assert_eq!(parse_since_to_seconds("2d"), Some(2 * 24 * 3600));
+        assert_eq!(parse_since_to_seconds("10s"), Some(10));
+        // Raw integer defaults to minutes for backward compatibility
+        assert_eq!(parse_since_to_seconds("30"), Some(1800));
+    }
+
     use crate::coordinator::legacy_helpers::{
         read_registry_counts, run_coordinator_command,
         validate_coordinator_runtime_transition_action, validate_coordinator_transition_action,

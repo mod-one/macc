@@ -10,8 +10,8 @@ pub struct ExplainCommand {
     pub task_id: String,
     /// Output machine-readable JSON.
     pub json: bool,
-    /// Filter to events newer than this number of minutes.
-    pub since_minutes: Option<u64>,
+    /// Filter to events newer than this number of seconds.
+    pub since_seconds: Option<u64>,
     /// Minimum severity to display (debug, info, notice, warn, error, fatal).
     pub severity: Option<String>,
 }
@@ -21,10 +21,10 @@ impl ExplainCommand {
         app: AppContext,
         task_id: String,
         json: bool,
-        since_minutes: Option<u64>,
+        since_seconds: Option<u64>,
         severity: Option<String>,
     ) -> Self {
-        Self { app, task_id, json, since_minutes, severity }
+        Self { app, task_id, json, since_seconds, severity }
     }
 }
 
@@ -187,8 +187,8 @@ impl ExplainCommand {
         };
         let min_rank = severity_rank(min_severity);
 
-        let cutoff_ts: Option<String> = self.since_minutes.map(|mins| {
-            let cutoff = chrono::Utc::now() - chrono::Duration::minutes(mins as i64);
+        let cutoff_ts: Option<String> = self.since_seconds.map(|secs| {
+            let cutoff = chrono::Utc::now() - chrono::Duration::seconds(secs as i64);
             cutoff.to_rfc3339()
         });
 
