@@ -1,6 +1,6 @@
 # MACC
 
-**Multi-agent coding config and orchestration.** MACC manages tool configuration across Claude Code, Codex, Gemini CLI, and others from a single canonical file, then coordinates them as autonomous agents running parallel tasks across git worktrees.
+**Multi-agent coding config & Coordination.** MACC manages tool configuration across Claude Code, Codex, Gemini CLI, and others from a single canonical file, then coordinates them as autonomous agents running parallel tasks across git worktrees.
 
 If you run more than one AI coding tool on the same codebase, or want to leave tasks running unattended across multiple branches, this is the layer that keeps it coherent.
 
