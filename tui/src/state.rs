@@ -233,6 +233,10 @@ pub struct AppState {
     pub coordinator_log_pane_visible: bool,
     pub coordinator_task_diff_popup: Option<String>,
     pub coordinator_task_explain_popup: Option<String>,
+    pub watch_control_enabled: bool,
+    pub watch_selected_worker: usize,
+    pub watch_log_tail: Vec<String>,
+    pub watch_last_refresh: Option<Instant>,
 }
 
 impl AppState {
@@ -336,6 +340,10 @@ impl AppState {
             coordinator_log_pane_visible: true,
             coordinator_task_diff_popup: None,
             coordinator_task_explain_popup: None,
+            watch_control_enabled: false,
+            watch_selected_worker: 0,
+            watch_log_tail: Vec::new(),
+            watch_last_refresh: None,
             client_context: ClientContext {
                 client_id: client_identity.client_id.clone(),
                 project_root: PathBuf::new(),

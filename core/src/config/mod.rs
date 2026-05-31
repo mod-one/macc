@@ -22,6 +22,10 @@ pub struct CanonicalConfig {
     pub process_ownership: Option<ProcessOwnershipConfig>,
     #[serde(default = "default_mcp_templates")]
     pub mcp_templates: Vec<McpTemplateDefinition>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skills: Option<SkillsConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<ContextConfig>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
@@ -922,6 +926,8 @@ impl Default for CanonicalConfig {
             settings: SettingsConfig::default(),
             process_ownership: None,
             mcp_templates: default_mcp_templates(),
+            skills: None,
+            context: None,
         }
     }
 }
@@ -989,6 +995,108 @@ fn default_mcp_templates() -> Vec<McpTemplateDefinition> {
 
 pub fn builtin_mcp_templates() -> Vec<McpTemplateDefinition> {
     default_mcp_templates()
+}
+
+// ── Skills runner config (spec §3.12) ──────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
+pub struct SkillsConfig {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_policy: Option<SkillRunPolicyConfig>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub skill_defaults: std::collections::BTreeMap<String, SkillDefaultConfig>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
+pub struct SkillRunPolicyConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_tool: Option<String>,
+    #[serde(default = "default_true")]
+    pub allow_local_commands: bool,
+    #[serde(default = "default_true")]
+    pub require_confirmation_for_writes: bool,
+    #[serde(default = "default_true")]
+    pub summarize_tool_output: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_budget: Option<usize>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
+pub struct SkillDefaultConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub write_policy: Option<String>,
+}
+
+// ── Context / token budget config (spec §5.5) ─────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
+pub struct ContextConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_budget: Option<TokenBudgetConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summarization: Option<SummarizationConfig>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct TokenBudgetConfig {
+    #[serde(default = "default_token_budget_default")]
+    pub default: usize,
+    #[serde(default = "default_token_budget_tool_output")]
+    pub tool_output: usize,
+    #[serde(default = "default_token_budget_diff")]
+    pub diff: usize,
+    #[serde(default = "default_token_budget_logs")]
+    pub logs: usize,
+}
+
+impl Default for TokenBudgetConfig {
+    fn default() -> Self {
+        Self {
+            default: default_token_budget_default(),
+            tool_output: default_token_budget_tool_output(),
+            diff: default_token_budget_diff(),
+            logs: default_token_budget_logs(),
+        }
+    }
+}
+
+fn default_token_budget_default() -> usize { 12000 }
+fn default_token_budget_tool_output() -> usize { 4000 }
+fn default_token_budget_diff() -> usize { 6000 }
+fn default_token_budget_logs() -> usize { 3000 }
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
+pub struct SummarizationConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub default_bundles: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub per_tool: std::collections::BTreeMap<String, ToolSummarizationConfig>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub per_skill: std::collections::BTreeMap<String, SkillSummarizationConfig>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
+pub struct ToolSummarizationConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_budget: Option<usize>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
+pub struct SkillSummarizationConfig {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bundles: Vec<String>,
 }
 
 #[cfg(test)]
@@ -1388,6 +1496,8 @@ settings:
             settings: SettingsConfig::default(),
             process_ownership: None,
             mcp_templates: Vec::new(),
+            skills: None,
+            context: None,
         };
 
         let yaml1 = config.to_yaml().expect("Should serialize");

@@ -6,6 +6,10 @@ mod audit;
 mod backups;
 mod config;
 mod coordinator;
+mod failures;
+mod search;
+mod skill_runs;
+mod snapshot;
 #[allow(clippy::result_large_err)]
 mod doctor;
 mod errors;
@@ -347,6 +351,33 @@ fn build_web_router(state: WebState) -> Router {
         .route(
             "/api/v1/processes/:kind/heartbeat",
             post(ownership::heartbeat_handler),
+        )
+        // ── UX observability endpoints (spec §4.21, §8) ─────────────────
+        .route("/api/v1/snapshot", get(snapshot::get_snapshot_handler))
+        .route("/api/v1/search", get(search::search_handler))
+        .route("/api/v1/skills", get(skill_runs::list_skills_handler))
+        .route("/api/v1/skills/:id", get(skill_runs::get_skill_handler))
+        .route(
+            "/api/v1/skills/:id/dry-run",
+            post(skill_runs::dry_run_skill_handler),
+        )
+        .route(
+            "/api/v1/skills/:id/run",
+            post(skill_runs::run_skill_handler),
+        )
+        .route("/api/v1/runs", get(skill_runs::list_runs_handler))
+        .route("/api/v1/runs/:id", get(skill_runs::get_run_handler))
+        .route(
+            "/api/v1/runs/:id/logs",
+            get(skill_runs::get_run_logs_handler),
+        )
+        .route(
+            "/api/v1/failures/recent",
+            get(failures::recent_failures_handler),
+        )
+        .route(
+            "/api/v1/workers/:id/snapshot",
+            get(snapshot::get_worker_snapshot_handler),
         )
         .fallback(get(assets::spa_handler))
         .layer(from_fn_with_state(audit_state, audit::audit_middleware))

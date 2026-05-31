@@ -349,6 +349,8 @@ mod tests {
             settings: SettingsConfig::default(),
             process_ownership: None,
             mcp_templates: Vec::new(),
+            skills: None,
+            context: None,
         };
 
         let resolved = resolve(&canonical, &CliOverrides::default());
@@ -386,6 +388,8 @@ mod tests {
             settings: SettingsConfig::default(),
             process_ownership: None,
             mcp_templates: Vec::new(),
+            skills: None,
+            context: None,
         };
 
         let resolved = resolve(&canonical, &CliOverrides::default());
@@ -409,6 +413,8 @@ mod tests {
             settings: SettingsConfig::default(),
             process_ownership: None,
             mcp_templates: Vec::new(),
+            skills: None,
+            context: None,
         };
 
         let overrides = CliOverrides {
@@ -475,6 +481,8 @@ mod tests {
             settings: SettingsConfig::default(),
             process_ownership: None,
             mcp_templates: Vec::new(),
+            skills: None,
+            context: None,
         };
 
         let canonical2 = CanonicalConfig {
@@ -489,6 +497,8 @@ mod tests {
             settings: SettingsConfig::default(),
             process_ownership: None,
             mcp_templates: Vec::new(),
+            skills: None,
+            context: None,
         };
 
         let resolved1 = resolve(&canonical1, &CliOverrides::default());

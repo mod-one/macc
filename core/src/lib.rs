@@ -2,6 +2,7 @@ pub mod automation;
 pub mod catalog;
 pub mod commit_message;
 pub mod config;
+pub mod context;
 pub mod coordinator;
 pub mod coordinator_storage;
 pub mod doctor;
@@ -15,9 +16,11 @@ pub mod plan;
 pub mod process_ownership;
 pub mod profile;
 pub mod resolve;
+pub mod runtime;
 pub mod security;
 pub mod service;
 pub mod skills;
+pub mod skills_runner;
 mod structured_merge;
 pub mod supervisor;
 pub mod tool;
@@ -557,6 +560,8 @@ pub fn init(paths: &ProjectPaths, force: bool) -> Result<()> {
             settings: config::SettingsConfig::default(),
             process_ownership: None,
             mcp_templates: config::builtin_mcp_templates(),
+            skills: None,
+            context: None,
         };
         let yaml = default_config.to_yaml().map_err(|e| {
             MaccError::Validation(format!("Failed to serialize default config: {}", e))

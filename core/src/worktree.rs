@@ -631,6 +631,8 @@ mod tests {
             settings: crate::config::SettingsConfig::default(),
             process_ownership: None,
             mcp_templates: CanonicalConfig::default().mcp_templates,
+            skills: None,
+            context: None,
         };
 
         assert_eq!(

@@ -13,6 +13,7 @@ pub enum Screen {
     Apply,
     Settings,
     About,
+    Watch,
 }
 
 impl Screen {
@@ -31,6 +32,7 @@ impl Screen {
             Screen::Apply => "Apply Changes",
             Screen::Settings => "Global Settings",
             Screen::About => "About",
+            Screen::Watch => "Observer",
         }
     }
 
@@ -120,6 +122,16 @@ impl Screen {
             Screen::Settings => vec![
                 ("Up/Down", "Navigate Settings"),
                 ("Space/Enter", "Edit / Cycle"),
+            ],
+            Screen::Watch => vec![
+                ("j/k", "Scroll workers"),
+                ("f", "Follow / unfollow log"),
+                ("/", "Search"),
+                ("e", "Errors only"),
+                ("w", "Warnings only"),
+                ("a", "All logs"),
+                ("r", "Refresh"),
+                ("l", "Reload snapshot"),
             ],
             _ => vec![],
         };

@@ -532,6 +532,36 @@ Inspecting task lifecycles, execution timelines, and files changed across parall
 - `macc explain <task-id> [--json] [--since <duration>] [--severity <level>] [--logs] [--artifacts] [--compact]`: Inspect task execution events, phase transitions, and execution timeline from the unified event logs. Optionally print task execution logs (stdout/stderr) or generated task artifacts.
 - `macc diff <task-id> [--stat] [--name-only] [--base <branch>] [--cached] [--open]`: Inspect the current worktree diff of a claimed task from the main repository context (no `cd` required).
 
+### Observability
+
+- `macc status [--json] [--watch] [--control]`: Show the MACC runtime status — queue counts, active workers, throttled tools, and recent events. `--json` emits a full `RuntimeSnapshot` JSON. `--watch` opens the TUI Observer (read-only). `--watch --control` enables operator actions.
+- `macc watch`: Alias for `macc status --watch`.
+
+### Skill Runner
+
+- `macc run <skill> [--tool <tool>] [--dry-run] [--watch] [--json] [--yes]`: Execute a canonical MACC skill. Skills are defined in `.macc/skills/*.yaml`. `--dry-run` previews the commands, risk level, and log path without executing. Caution-risk skills require confirmation; dangerous-risk skills require typing `YES`.
+- `macc skills list [--tool <tool>]`: List all available skills with their kind, risk level, and title.
+- `macc skills show <skill>`: Show full definition for a skill including steps and tool targets.
+- `macc skills doctor`: Health-check the skills directory and report available/missing skills.
+
+Built-in skills:
+- `validate` — local command workflow (safe): runs lint, build, and tests
+- `implement` — prompt skill (caution): implements the next pending task
+- `security-check` — prompt skill (safe): reviews changed files for security issues
+
+Custom skills can be defined as YAML files in `.macc/skills/`:
+
+```yaml
+id: my-skill
+title: My custom skill
+kind: local_command
+risk: safe
+description: Runs my custom validation.
+steps:
+  - run: pnpm lint
+  - run: pnpm test
+```
+
 
 ## TUI overview
 
@@ -548,6 +578,7 @@ Main screens:
 - Logs
 - Preview
 - Apply
+- Observer (`macc status --watch` or `macc watch`)
 
 Common keys:
 

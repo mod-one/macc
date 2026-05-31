@@ -364,6 +364,8 @@ fn extract_sections(source: &CanonicalConfig, sections: &[ProfileSection]) -> Ca
         } else {
             def.mcp_templates
         },
+        skills: source.skills.clone(),
+        context: source.context.clone(),
     }
 }
 
@@ -463,6 +465,8 @@ mod tests {
             },
             process_ownership: None,
             mcp_templates: Vec::new(),
+            skills: None,
+            context: None,
         }
     }
 

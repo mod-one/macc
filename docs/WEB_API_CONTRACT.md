@@ -980,3 +980,53 @@ Path parameters:
 
 Response 200: updated `ApiRegistryTask` object.
 
+---
+
+## UX Observability Endpoints (spec §4.21, §8)
+
+### GET `/api/v1/snapshot`
+
+Purpose: return the full `RuntimeSnapshot` — the shared runtime model consumed by CLI (`macc status --json`), TUI observer, and Web Mission Control.
+
+Response 200: full `RuntimeSnapshot` JSON with fields: `generated_at`, `project`, `coordinator`, `queue`, `workers`, `tasks`, `throttled_tools`, `recent_events`, `git`, `diagnostics`.
+
+### GET `/api/v1/search?q=<query>`
+
+Purpose: search across tasks, skills, worktrees, and error codes. Response 200: array of `{ kind, id, label, meta }`.
+
+### GET `/api/v1/skills`
+
+Purpose: list available skills from `.macc/skills/` and built-ins. Response 200: array of `{ id, title, kind, risk, description }`.
+
+### GET `/api/v1/skills/{id}`
+
+Purpose: full skill definition. Response 200: skill JSON. Response 404: not found.
+
+### POST `/api/v1/skills/{id}/dry-run`
+
+Purpose: dry-run preview (no execution). Response 200: `{ skillId, title, kind, tool, risk, commands, writes, logsPath }`.
+
+### POST `/api/v1/skills/{id}/run`
+
+Purpose: execute a skill. Request body: `{ tool?, task_id?, yes? }`. Response 200: `{ skillId, status, tool, startedAt, durationMs, stdout, stderr, exitCode }`.
+
+### GET `/api/v1/runs`
+
+Purpose: list recent skill run log entries (up to 50). Response 200: array of `{ id, skill_id, started_at, status }`.
+
+### GET `/api/v1/runs/{id}`
+
+Purpose: run events. Response 200: `{ run_id, events }`.
+
+### GET `/api/v1/runs/{id}/logs`
+
+Purpose: raw JSONL log for a skill run. Response 200: JSONL text.
+
+### GET `/api/v1/failures/recent`
+
+Purpose: last 20 failure events from the coordinator log. Response 200: array of `{ task_id, tool, error_code, retryable, excerpt, ts }`.
+
+### GET `/api/v1/workers/{id}/snapshot`
+
+Purpose: per-worker runtime snapshot. Response 200: `WorkerRuntime` JSON. Response 404: not found.
+

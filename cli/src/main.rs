@@ -561,6 +561,92 @@ enum Commands {
         #[arg(long)]
         open: bool,
     },
+    /// Show MACC runtime status (queue, workers, throttles, events)
+    Status {
+        /// Output JSON snapshot
+        #[arg(long)]
+        json: bool,
+        /// Open live TUI observer (read-only)
+        #[arg(short, long)]
+        watch: bool,
+        /// Enable operator actions in watch mode
+        #[arg(long)]
+        control: bool,
+        /// Focus on a specific task ID
+        #[arg(long)]
+        task: Option<String>,
+        /// Filter by tool
+        #[arg(long)]
+        tool: Option<String>,
+        /// Show only failed tasks
+        #[arg(long)]
+        failed: bool,
+        /// Show only rate-limited tools
+        #[arg(long)]
+        rate_limited: bool,
+        /// Show log pane only
+        #[arg(long)]
+        logs_only: bool,
+        /// Show events pane only
+        #[arg(long)]
+        events_only: bool,
+    },
+    /// Open the live TUI observer (alias for `status --watch`)
+    Watch,
+    /// Execute a MACC skill
+    Run {
+        /// Skill ID (e.g. validate, implement, security-check)
+        skill: String,
+        /// Tool to route through (overrides skill default)
+        #[arg(long)]
+        tool: Option<String>,
+        /// Agent persona to use
+        #[arg(long)]
+        agent: Option<String>,
+        /// Task ID context for the skill run
+        #[arg(long)]
+        task_id: Option<String>,
+        /// Glob scope for the skill
+        #[arg(long)]
+        scope: Option<String>,
+        /// Feature label for the skill
+        #[arg(long)]
+        feature: Option<String>,
+        /// Show what would run without executing
+        #[arg(long)]
+        dry_run: bool,
+        /// Watch the run output
+        #[arg(long)]
+        watch: bool,
+        /// Output JSON result
+        #[arg(long)]
+        json: bool,
+        /// Skip confirmation prompts
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+    /// Manage MACC skills
+    Skills {
+        #[command(subcommand)]
+        skills_subcommand: SkillsSubcommands,
+    },
+}
+
+#[derive(Subcommand, Clone, Debug)]
+pub enum SkillsSubcommands {
+    /// List available skills
+    List {
+        /// Filter by tool adapter
+        #[arg(long)]
+        tool: Option<String>,
+    },
+    /// Show details for a skill
+    Show {
+        /// Skill ID
+        skill: String,
+    },
+    /// Check skill health and configuration
+    Doctor,
 }
 
 
@@ -1342,6 +1428,82 @@ fn run_with_engine_provider(
                 *open,
             )
             .run()
+        }
+
+        Some(Commands::Status {
+            json,
+            watch,
+            control,
+            task,
+            tool: tool_filter,
+            failed,
+            rate_limited,
+            logs_only,
+            events_only,
+        }) => commands::status::StatusCommand {
+            app: app.clone(),
+            json: *json,
+            watch: *watch,
+            control: *control,
+            task: task.clone(),
+            tool: tool_filter.clone(),
+            failed: *failed,
+            rate_limited: *rate_limited,
+            logs_only: *logs_only,
+            events_only: *events_only,
+        }
+        .run(),
+
+        Some(Commands::Watch) => commands::status::StatusCommand {
+            app: app.clone(),
+            json: false,
+            watch: true,
+            control: false,
+            task: None,
+            tool: None,
+            failed: false,
+            rate_limited: false,
+            logs_only: false,
+            events_only: false,
+        }
+        .run(),
+
+        Some(Commands::Run {
+            skill,
+            tool: skill_tool,
+            agent,
+            task_id: run_task,
+            scope,
+            feature,
+            dry_run,
+            watch: run_watch,
+            json: run_json,
+            yes,
+        }) => commands::run::RunCommand {
+            app: app.clone(),
+            skill: skill.clone(),
+            tool: skill_tool.clone(),
+            agent: agent.clone(),
+            task_id: run_task.clone(),
+            scope: scope.clone(),
+            feature: feature.clone(),
+            dry_run: *dry_run,
+            watch: *run_watch,
+            json: *run_json,
+            yes: *yes,
+        }
+        .run(),
+
+        Some(Commands::Skills { skills_subcommand }) => {
+            use commands::skills_cmd::{SkillsCmdCommand, SkillsSubcommand};
+            let sub = match skills_subcommand {
+                SkillsSubcommands::List { tool } => SkillsSubcommand::List { tool: tool.clone() },
+                SkillsSubcommands::Show { skill } => {
+                    SkillsSubcommand::Show { skill: skill.clone() }
+                }
+                SkillsSubcommands::Doctor => SkillsSubcommand::Doctor,
+            };
+            SkillsCmdCommand { app: app.clone(), subcommand: sub }.run()
         }
 
         Some(Commands::Coordinator {

@@ -33,6 +33,9 @@ pub enum LaunchMode {
     /// `phase_overrides` is a human-readable summary of active runtime phase overrides
     /// (e.g. `"[testing:off] [review:required]"`), or `None` when none are active.
     CoordinatorRun { phase_overrides: Option<String> },
+    /// Launch into the read-only observer/watch screen (`macc status --watch`).
+    /// `control` enables operator actions (kill, stop, retry).
+    Watch { control: bool },
 }
 
 /// RAII guard to ensure terminal state is restored on drop.
@@ -68,11 +71,18 @@ pub fn run_tui_with_launch(mode: LaunchMode) -> Result<()> {
     let registry = macc_registry::default_registry();
     let engine = std::sync::Arc::new(macc_core::MaccEngine::new(registry));
     let mut state = AppState::new(engine);
-    if let LaunchMode::CoordinatorRun { phase_overrides } = mode {
-        state.goto_screen(Screen::CoordinatorLive);
-        state.start_coordinator_command(CoordinatorCommand::Run);
-        state.coordinator_run_auto_quit = true;
-        state.coordinator_phase_overrides = phase_overrides;
+    match mode {
+        LaunchMode::CoordinatorRun { phase_overrides } => {
+            state.goto_screen(Screen::CoordinatorLive);
+            state.start_coordinator_command(CoordinatorCommand::Run);
+            state.coordinator_run_auto_quit = true;
+            state.coordinator_phase_overrides = phase_overrides;
+        }
+        LaunchMode::Watch { control } => {
+            state.goto_screen(Screen::Watch);
+            state.watch_control_enabled = control;
+        }
+        LaunchMode::Default => {}
     }
 
     run_app(&mut guard.terminal, &mut state)?;
@@ -1831,6 +1841,9 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             );
             f.render_widget(body, chunks[1]);
         }
+        Screen::Watch => {
+            render_watch_screen(f, state, chunks[1]);
+        }
     }
 
     // Footer
@@ -1924,6 +1937,128 @@ fn scope_label(scope: Scope) -> &'static str {
         Scope::Project => "project",
         Scope::User => "user",
     }
+}
+
+fn render_watch_screen(f: &mut Frame, state: &AppState, area: Rect) {
+    let theme = theme();
+    let snapshot = state.coordinator_snapshot.as_ref();
+
+    let control_label = if state.watch_control_enabled {
+        " [CONTROL]"
+    } else {
+        " [READ-ONLY]"
+    };
+    let title = format!("Observer{}", control_label);
+
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(40),
+            Constraint::Percentage(30),
+            Constraint::Min(3),
+        ])
+        .split(area);
+
+    let top_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(35),
+            Constraint::Percentage(40),
+            Constraint::Percentage(25),
+        ])
+        .split(vertical[0]);
+
+    // Workers pane
+    use macc_core::coordinator::RuntimeStatus;
+    let worker_lines: Vec<ListItem> = if let Some(snap) = snapshot {
+        snap.active_tasks
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let sel = i == state.watch_selected_worker;
+                let symbol = match t.runtime_status {
+                    RuntimeStatus::Stale | RuntimeStatus::Failed => "▲",
+                    _ => "●",
+                };
+                let text = format!(
+                    "{} {} {} {} {}",
+                    symbol,
+                    t.worker_id,
+                    t.task_id,
+                    t.phase.compact_label(),
+                    t.runtime_status.as_str(),
+                );
+                let style = if sel {
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                ListItem::new(text).style(style)
+            })
+            .collect()
+    } else {
+        vec![ListItem::new("No active workers")]
+    };
+    let workers_list = List::new(worker_lines)
+        .block(Block::default().title("Workers").borders(Borders::ALL));
+    f.render_widget(workers_list, top_chunks[0]);
+
+    // Tasks pane
+    let tasks_text = if let Some(snap) = snapshot {
+        let counts = format!(
+            "Total: {}  todo: {}  active: {}  blocked: {}  merged: {}",
+            snap.total, snap.todo, snap.active, snap.blocked, snap.merged
+        );
+        counts
+    } else {
+        "No snapshot available — coordinator may not be running.".to_string()
+    };
+    let tasks_para = wrapped_paragraph(&tasks_text, "Tasks / Queue");
+    f.render_widget(tasks_para, top_chunks[1]);
+
+    // Events pane
+    let events_text = state
+        .coordinator_events
+        .iter()
+        .rev()
+        .take(12)
+        .rev()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    let events_para = wrapped_paragraph(
+        if events_text.is_empty() { "No events" } else { &events_text },
+        "Events",
+    );
+    f.render_widget(events_para, top_chunks[2]);
+
+    // Log pane
+    let log_text = state.watch_log_tail.iter().rev().take(15).rev().cloned().collect::<Vec<_>>().join("\n");
+    let log_para = wrapped_paragraph(
+        if log_text.is_empty() { "No log tail — use 'f' to follow coordinator logs" } else { &log_text },
+        "Coordinator Log",
+    );
+    f.render_widget(log_para, vertical[1]);
+
+    // Status strip
+    let throttled: Vec<String> = if let Some(snap) = snapshot {
+        snap.throttled_tools
+            .iter()
+            .map(|t| format!("{} throttled", t.tool_id))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let strip_text = if throttled.is_empty() {
+        format!("{} | Press '?' for help | 'q' to quit", title)
+    } else {
+        format!("{} | {} | Press '?' for help", title, throttled.join(", "))
+    };
+    let strip = Paragraph::new(strip_text)
+        .block(Block::default().title("Status").borders(Borders::ALL));
+    f.render_widget(strip, vertical[2]);
 }
 
 fn render_help_overlay(f: &mut Frame, state: &AppState) {
