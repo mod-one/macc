@@ -842,3 +842,141 @@ Notes:
 - `requeue` resets blocked/failed tasks back to `todo`.
 - `reassign` updates the task's assigned tool and rejects active or merged tasks.
 - `abandon` transitions the task to a terminal abandoned state.
+
+### GET `/api/v1/registry/tasks/{id}`
+
+Purpose: retrieve details of a single registry task, including its historical events.
+
+Path parameters:
+- `id` (string, required): registry task ID
+
+Response 200: `ApiRegistryTask` object.
+
+### GET `/api/v1/registry/tasks/{id}/events`
+
+Purpose: retrieve the list of raw coordinator events captured for a single task.
+
+Path parameters:
+- `id` (string, required): registry task ID
+
+Response 200:
+```json
+[
+  {
+    "eventId": "evt_12345",
+    "eventType": "task_claimed",
+    "ts": "2026-03-20T12:00:00Z",
+    "status": "claimed",
+    "severity": "info",
+    "message": "Task WEB2-BE-REG-001 claimed by worker-1"
+  }
+]
+```
+
+### GET `/api/v1/registry/tasks/{id}/logs`
+
+Purpose: retrieve the current stdout and stderr logs for a single task.
+
+Path parameters:
+- `id` (string, required): registry task ID
+
+Response 200:
+```json
+{
+  "taskId": "WEB2-BE-REG-001",
+  "stdout": "Running cargo build...\nCompilation successful.",
+  "stderr": "warning: unused variable: `foo`"
+}
+```
+
+### GET `/api/v1/registry/tasks/{id}/diff`
+
+Purpose: retrieve the current git diff of the task's active worktree.
+
+Path parameters:
+- `id` (string, required): registry task ID
+
+Query parameters:
+- `format` (string, optional): `patch` (default) or `stat`
+
+Response 200:
+```json
+{
+  "taskId": "WEB2-BE-REG-001",
+  "format": "patch",
+  "diff": "diff --git a/src/main.rs b/src/main.rs\n..."
+}
+```
+
+### GET `/api/v1/registry/tasks/{id}/explain`
+
+Purpose: retrieve a structured timeline explanation of a task's lifecycle events.
+
+Path parameters:
+- `id` (string, required): registry task ID
+
+Response 200:
+```json
+{
+  "taskId": "WEB2-BE-REG-001",
+  "timeline": [
+    {
+      "timestamp": "2026-03-20T12:00:00Z",
+      "severity": "info",
+      "phase": "implementing",
+      "eventType": "task_claimed",
+      "message": "Task claimed by worker-1"
+    }
+  ]
+}
+```
+
+### GET `/api/v1/tasks/{id}/stream`
+
+Purpose: open a server-sent events (SSE) stream to receive realtime events for a task.
+
+Path parameters:
+- `id` (string, required): registry task ID
+
+Query parameters:
+- `lastEventId` (string, optional): resume stream cursor
+- `webClientId` (string, optional)
+
+Response 200: `text/event-stream` returning structured event payloads.
+
+### POST `/api/v1/registry/tasks/{id}/retry`
+
+Purpose: requeue a failed or blocked task back to `todo` state to trigger a retry.
+
+Path parameters:
+- `id` (string, required): registry task ID
+
+Response 200: updated `ApiRegistryTask` object.
+
+### POST `/api/v1/registry/tasks/{id}/stop`
+
+Purpose: send a stop/kill signal to cancel the performer execution for a running task.
+
+Path parameters:
+- `id` (string, required): registry task ID
+
+Response 200: updated `ApiRegistryTask` object.
+
+### POST `/api/v1/registry/tasks/{id}/run-testing`
+
+Purpose: force/manually trigger the testing phase for a task.
+
+Path parameters:
+- `id` (string, required): registry task ID
+
+Response 200: updated `ApiRegistryTask` object.
+
+### POST `/api/v1/registry/tasks/{id}/run-review`
+
+Purpose: force/manually trigger the review phase for a task.
+
+Path parameters:
+- `id` (string, required): registry task ID
+
+Response 200: updated `ApiRegistryTask` object.
+

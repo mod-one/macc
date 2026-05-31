@@ -510,6 +510,8 @@ Coordinator orchestrates the end-to-end automation cycle: it reads the task regi
   - `--tool-priority`, `--max-parallel-per-tool-json`, `--tool-specializations-json`
   - `--max-dispatch`, `--max-parallel`, `--timeout-seconds`
   - `--phase-runner-max-attempts`
+  - `--disable-testing`, `--disable-review`: disable testing or reviewing phases completely.
+  - `--testing <mode>`, `--review <mode>`: set testing/reviewing mode (`disabled`, `required`, `risk_based`, `manual`).
   - `--stale-claimed-seconds`, `--stale-changes-requested-seconds`, `--stale-action`: auto-stale thresholds for `claimed`/`changes_requested` states (`0` disables).
   - `--stale-in-progress-seconds`: hard kill timeout for the performer process in seconds (`0` disables). When exceeded, the coordinator sends SIGTERM then SIGKILL after `force_kill_grace_seconds`. Default `0` — tasks run until they exit naturally. Set to e.g. `3600` to cap task runtime at one hour.
   - Heartbeat events update `task_runtime.last_heartbeat` from `events.jsonl`.
@@ -522,6 +524,14 @@ Coordinator orchestrates the end-to-end automation cycle: it reads the task regi
 - If no reusable slot is available, coordinator creates a new worker worktree; total pool size is bounded by `--max-parallel` / `automation.coordinator.max_parallel`.
 - Realtime orchestrator target design (state model + event contract + rollout): `docs/COORDINATOR_REALTIME.md`.
 - Use `--` only for coordinator subcommands that require raw passthrough args.
+
+### Inspecting active tasks
+
+Inspecting task lifecycles, execution timelines, and files changed across parallel worktrees:
+
+- `macc explain <task-id> [--json] [--since <duration>] [--severity <level>] [--logs] [--artifacts] [--compact]`: Inspect task execution events, phase transitions, and execution timeline from the unified event logs. Optionally print task execution logs (stdout/stderr) or generated task artifacts.
+- `macc diff <task-id> [--stat] [--name-only] [--base <branch>] [--cached] [--open]`: Inspect the current worktree diff of a claimed task from the main repository context (no `cd` required).
+
 
 ## TUI overview
 
