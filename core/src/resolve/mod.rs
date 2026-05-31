@@ -13,6 +13,12 @@ pub struct ResolvedConfig {
     pub mcp_templates: Vec<crate::config::McpTemplateDefinition>,
     pub automation: crate::config::AutomationConfig,
     pub settings: crate::config::SettingsConfig,
+    /// Spec §3.12: skill run policy resolved from `skills.run_policy` in macc.yaml.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skills_run_policy: Option<crate::config::SkillRunPolicyConfig>,
+    /// Spec §5.5: token budget and summarization config resolved from `context` in macc.yaml.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<crate::config::ContextConfig>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
@@ -199,6 +205,11 @@ pub fn resolve(canonical: &CanonicalConfig, overrides: &CliOverrides) -> Resolve
         mcp_templates: canonical.mcp_templates.clone(),
         automation: canonical.automation.clone(),
         settings,
+        skills_run_policy: canonical
+            .skills
+            .as_ref()
+            .and_then(|s| s.run_policy.clone()),
+        context: canonical.context.clone(),
     }
 }
 

@@ -963,7 +963,86 @@ pub trait Engine {
         request: &crate::skills_runner::SkillRunRequest,
     ) -> Result<crate::skills_runner::SkillRunResult> {
         let log_dir = paths.macc_dir.join("log").join("run");
-        crate::skills_runner::SkillRunner::run(skill, request, &log_dir)
+        let mut result = crate::skills_runner::SkillRunner::run(skill, request, &log_dir)?;
+
+        // Spec §5.3: apply the summarization hook pipeline to the raw stdout.
+        // Load ContextConfig from canonical config; skip silently if unavailable.
+        if !result.stdout.is_empty() && !request.watch {
+            let ctx_cfg = crate::load_canonical_config(&paths.config_path)
+                .ok()
+                .and_then(|c| c.context);
+
+            if let Some(ctx) = ctx_cfg {
+                if let Some(summarization) = &ctx.summarization {
+                    if summarization.enabled {
+                        // Determine which bundles to apply: skill-specific override first,
+                        // then global defaults (spec §5.5).
+                        let bundles: Vec<String> = summarization
+                            .per_skill
+                            .get(&skill.id)
+                            .map(|s| s.bundles.clone())
+                            .filter(|b| !b.is_empty())
+                            .unwrap_or_else(|| summarization.default_bundles.clone());
+
+                        if !bundles.is_empty() {
+                            let raw_size = result.stdout.len();
+                            let mut text = result.stdout.clone();
+
+                            for bundle in &bundles {
+                                text = match bundle.as_str() {
+                                    "test-output-failures-only" => {
+                                        crate::context::test_output_failures_only(&text)
+                                    }
+                                    "lint-errors-only" => crate::context::lint_errors_only(&text),
+                                    "stacktrace-collapse" => {
+                                        crate::context::stacktrace_collapse(&text)
+                                    }
+                                    "log-grep-error-first" => {
+                                        crate::context::log_grep_error_first(&text)
+                                    }
+                                    _ => text,
+                                };
+                            }
+
+                            // Apply token budget after all summarizer passes.
+                            let budget = ctx
+                                .token_budget
+                                .as_ref()
+                                .map(|tb| tb.tool_output)
+                                .unwrap_or(4000);
+                            let (budgeted, truncated) =
+                                crate::context::enforce_budget(&text, budget);
+
+                            let summary_size = budgeted.len();
+                            result.summary =
+                                Some(crate::skills_runner::SummaryMetadata {
+                                    raw_size_chars: raw_size,
+                                    summary_size_chars: summary_size,
+                                    bundles_applied: bundles,
+                                    was_truncated: truncated,
+                                });
+                            result.stdout = budgeted;
+                        } else if let Some(tb) = &ctx.token_budget {
+                            // No bundles configured — still enforce budget.
+                            let raw_size = result.stdout.len();
+                            let (budgeted, truncated) =
+                                crate::context::enforce_budget(&result.stdout, tb.tool_output);
+                            if truncated {
+                                result.summary = Some(crate::skills_runner::SummaryMetadata {
+                                    raw_size_chars: raw_size,
+                                    summary_size_chars: budgeted.len(),
+                                    bundles_applied: Vec::new(),
+                                    was_truncated: true,
+                                });
+                                result.stdout = budgeted;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(result)
     }
 
     /// Spec §3.5 — 8-step tool selection algorithm.

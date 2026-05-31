@@ -25,6 +25,13 @@ interface DryRunPreview {
   logsPath: string;
 }
 
+interface SummaryMetadata {
+  rawSizeChars: number;
+  summarySizeChars: number;
+  bundlesApplied: string[];
+  wasTruncated: boolean;
+}
+
 interface RunResult {
   skillId: string;
   status: string;
@@ -34,6 +41,7 @@ interface RunResult {
   stdout: string;
   stderr: string;
   exitCode: number | null;
+  summary?: SummaryMetadata;
 }
 
 const RISK_COLORS: Record<string, string> = {
@@ -224,6 +232,24 @@ const SkillRunner: React.FC = () => {
                   <StatusBadge status={result.status} />
                   <span className="text-xs text-zinc-400">{result.durationMs}ms</span>
                 </div>
+
+                {/* Spec §5.6: summary metadata — shown when the hook pipeline ran */}
+                {result.summary && (
+                  <div className="mb-3 rounded border border-yellow-800/40 bg-yellow-900/10 p-3 text-xs">
+                    <div className="font-semibold text-yellow-300 mb-1">Output summarized</div>
+                    <div className="text-zinc-400 space-y-0.5">
+                      <div>Raw size: {Math.round(result.summary.rawSizeChars / 1000 * 10) / 10}k chars</div>
+                      <div>Summary size: {Math.round(result.summary.summarySizeChars / 1000 * 10) / 10}k chars</div>
+                      {result.summary.bundlesApplied.length > 0 && (
+                        <div>Policy: {result.summary.bundlesApplied.join(' + ')}</div>
+                      )}
+                      {result.summary.wasTruncated && (
+                        <div className="text-yellow-400">Truncated to fit token budget</div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
                 {result.stdout && (
                   <pre className="text-xs text-zinc-300 bg-zinc-950 p-2 rounded overflow-auto max-h-48 whitespace-pre-wrap">
                     {result.stdout}

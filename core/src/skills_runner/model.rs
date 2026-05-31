@@ -84,6 +84,16 @@ pub struct SkillRunRequest {
     pub yes: bool,
 }
 
+/// Spec §5.6: metadata emitted when output was summarized before model context.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SummaryMetadata {
+    pub raw_size_chars: usize,
+    pub summary_size_chars: usize,
+    pub bundles_applied: Vec<String>,
+    pub was_truncated: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillRunResult {
@@ -96,6 +106,9 @@ pub struct SkillRunResult {
     pub stderr: String,
     pub exit_code: Option<i32>,
     pub log_path: Option<PathBuf>,
+    /// Populated when the summarization pipeline ran (spec §5.6).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<SummaryMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

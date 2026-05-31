@@ -92,6 +92,8 @@ impl SkillRunner {
             stderr,
             exit_code,
             log_path: Some(jsonl_path),
+            // `summary` is populated by engine.run_skill() after the hook pipeline runs.
+            summary: None,
         })
     }
 }

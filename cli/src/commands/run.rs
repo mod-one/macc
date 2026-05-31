@@ -160,6 +160,19 @@ impl Command for RunCommand {
             if let Some(log_path) = &result.log_path {
                 println!("Log:      {}", log_path.display());
             }
+            // Spec §5.6: show summary metadata when output was processed.
+            if let Some(meta) = &result.summary {
+                println!();
+                println!("Output summarized");
+                println!("  Raw size:     {} chars", meta.raw_size_chars);
+                println!("  Summary size: {} chars", meta.summary_size_chars);
+                if !meta.bundles_applied.is_empty() {
+                    println!("  Policy:       {}", meta.bundles_applied.join(" + "));
+                }
+                if meta.was_truncated {
+                    println!("  Note:         output truncated to fit token budget");
+                }
+            }
             if !result.stdout.is_empty() && !self.watch {
                 println!("\n--- stdout ---");
                 print!("{}", result.stdout);

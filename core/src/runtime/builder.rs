@@ -14,10 +14,10 @@ impl RuntimeSnapshotBuilder {
         let snapshot = if sqlite.has_snapshot_data().unwrap_or(false) {
             sqlite.load_snapshot()
         } else {
-            JsonStorage::new(storage_paths).load_snapshot()
+            JsonStorage::new(storage_paths.clone()).load_snapshot()
         };
 
-        let (queue, workers, tasks, throttled_tools, coordinator) = match snapshot {
+        let (queue, workers, tasks, throttled_tools, mut coordinator) = match snapshot {
             Ok(s) => build_from_snapshot(&s),
             Err(_) => (
                 QueueSummary::default(),
@@ -27,6 +27,29 @@ impl RuntimeSnapshotBuilder {
                 CoordinatorStatus::default(),
             ),
         };
+
+        // Spec §6.3 / §4.5: populate CoordinatorStatus from the pause file and the
+        // active coordinator_runs row so the snapshot faithfully reflects live state.
+        if let Ok(Some(pause)) =
+            crate::coordinator::state_runtime::read_coordinator_pause_file(&paths.root)
+        {
+            coordinator.paused = pause.paused;
+            if pause.paused {
+                coordinator.pause_reason = Some(pause.reason);
+                coordinator.pause_task_id = Some(pause.task_id);
+                coordinator.pause_phase = Some(pause.phase);
+            }
+        }
+
+        // Check the coordinator_runs table for an active run.
+        let active_run = SqliteStorage::new(storage_paths)
+            .get_active_coordinator_run()
+            .unwrap_or(None);
+        if let Some(run) = active_run {
+            coordinator.running = matches!(run.status.as_str(), "running" | "draining");
+            coordinator.run_id = Some(run.run_id);
+            coordinator.epoch = Some(run.epoch);
+        }
 
         let recent_events = load_recent_events(paths);
         let git = build_git_summary(paths);
@@ -202,14 +225,28 @@ fn load_recent_events(paths: &ProjectPaths) -> Vec<RuntimeEvent> {
         .take(50)
         .filter_map(|line| {
             let v: serde_json::Value = serde_json::from_str(line).ok()?;
+
+            // Spec §6.2: accept both the v1 schema (`"version": 1, "timestamp": ...`)
+            // and the legacy schema used by coordinator helpers (`"ts": ...`).
+            // Unknown versions are accepted with best-effort parsing so older logs
+            // continue to work.
+            let ts = v
+                .get("ts")
+                .or_else(|| v.get("timestamp"))
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string());
+
+            // Spec §6.2: `"type"` is the v1 field name; legacy events use `"event_type"`.
+            let event_type = v
+                .get("type")
+                .or_else(|| v.get("event_type"))
+                .and_then(|x| x.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+
             Some(RuntimeEvent {
-                ts: v.get("ts").and_then(|x| x.as_str()).map(|s| s.to_string()),
-                event_type: v
-                    .get("event_type")
-                    .or_else(|| v.get("type"))
-                    .and_then(|x| x.as_str())
-                    .unwrap_or("unknown")
-                    .to_string(),
+                ts,
+                event_type,
                 task_id: v
                     .get("task_id")
                     .and_then(|x| x.as_str())
