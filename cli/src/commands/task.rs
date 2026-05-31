@@ -14,6 +14,12 @@ pub struct ExplainCommand {
     pub since_seconds: Option<u64>,
     /// Minimum severity to display (debug, info, notice, warn, error, fatal).
     pub severity: Option<String>,
+    /// Print raw task execution logs (stdout/stderr)
+    pub logs: bool,
+    /// Print generated task artifacts
+    pub artifacts: bool,
+    /// Print a condensed timeline hiding verbose ticks
+    pub compact: bool,
 }
 
 impl ExplainCommand {
@@ -23,8 +29,20 @@ impl ExplainCommand {
         json: bool,
         since_seconds: Option<u64>,
         severity: Option<String>,
+        logs: bool,
+        artifacts: bool,
+        compact: bool,
     ) -> Self {
-        Self { app, task_id, json, since_seconds, severity }
+        Self {
+            app,
+            task_id,
+            json,
+            since_seconds,
+            severity,
+            logs,
+            artifacts,
+            compact,
+        }
     }
 }
 
@@ -139,25 +157,53 @@ impl ExplainCommand {
             .as_deref()
             .map(|p| project_root.join(p));
 
-        if let Some(events_path) = events_log_path {
-            if events_path.exists() {
-                self.print_events_timeline(&events_path)?;
+        let events_resolved_path = if let Some(ref path) = events_log_path {
+            if path.exists() {
+                Some(path.clone())
             } else {
-                println!("Timeline:");
-                println!("  No structured events found ({})", events_path.display());
-                println!("  Showing available registry state only.");
+                None
             }
         } else {
-            // Try the global events log
             let global_events = project_root.join(".macc/log/events.jsonl");
             if global_events.exists() {
-                println!("Timeline (from global events log):");
-                self.print_events_from_file(&global_events, Some(&task.id))?;
+                Some(global_events)
             } else {
-                println!("Timeline:");
+                None
+            }
+        };
+
+        if let Some(ref events_path) = events_resolved_path {
+            if events_log_path.is_some() && events_log_path.as_ref().unwrap().exists() {
+                self.print_events_timeline(events_path)?;
+            } else {
+                println!("Timeline (from global events log):");
+                self.print_events_from_file(events_path, Some(&task.id))?;
+            }
+        } else {
+            println!("Timeline:");
+            if let Some(ref path) = events_log_path {
+                println!("  No structured events found ({})", path.display());
+            } else {
                 println!("  No structured events log found.");
                 println!("  (Events are written to .macc/log/events.jsonl during coordinator runs.)");
             }
+            println!("  Showing available registry state only.");
+        }
+
+        if self.artifacts {
+            println!();
+            if let Some(ref events_path) = events_resolved_path {
+                let filter_id = if events_log_path.is_none() { Some(task.id.as_str()) } else { None };
+                self.print_artifacts(events_path, filter_id)?;
+            } else {
+                println!("Artifacts:");
+                println!("  No events log found to scan for artifacts.");
+            }
+        }
+
+        if self.logs {
+            println!();
+            self.print_raw_logs(rt, project_root)?;
         }
 
         Ok(())
@@ -213,29 +259,151 @@ impl ExplainCommand {
 
             // Filter by cutoff time
             if let Some(ref cutoff) = cutoff_ts {
-                let ts = val.get("timestamp").and_then(|v| v.as_str()).unwrap_or("");
-                if ts < cutoff.as_str() {
+                let ts_val = val.get("timestamp").and_then(|v| v.as_str())
+                    .or_else(|| val.get("ts").and_then(|v| v.as_str()))
+                    .unwrap_or("");
+                if ts_val < cutoff.as_str() {
                     continue;
                 }
             }
 
-            let ts = val.get("timestamp").and_then(|v| v.as_str()).unwrap_or("-");
+            let ts = val.get("timestamp").and_then(|v| v.as_str())
+                .or_else(|| val.get("ts").and_then(|v| v.as_str()))
+                .unwrap_or("-");
             let phase = val.get("phase").and_then(|v| v.as_str()).unwrap_or("-");
-            let event_type = val.get("event_type").and_then(|v| v.as_str()).unwrap_or("");
-            let message = val.get("message").and_then(|v| v.as_str()).unwrap_or("");
+            let event_type = val.get("event_type").and_then(|v| v.as_str())
+                .or_else(|| val.get("type").and_then(|v| v.as_str()))
+                .unwrap_or("");
+            let message = val.get("message").and_then(|v| v.as_str())
+                .or_else(|| val.get("msg").and_then(|v| v.as_str()))
+                .or_else(|| val.get("payload").and_then(|p| p.get("message")).and_then(|v| v.as_str()))
+                .unwrap_or("");
+
+            if self.compact {
+                if event_type.eq_ignore_ascii_case("heartbeat")
+                    || event_type.eq_ignore_ascii_case("status_message")
+                    || event_type.eq_ignore_ascii_case("progress")
+                {
+                    continue;
+                }
+            }
 
             // Format: HH:MM:SS  severity  phase  message
             let time_part = if ts.len() >= 19 { &ts[11..19] } else { ts };
             println!("  {}  {:<6} {:<8} {}", time_part, sev, phase, message);
-            if !event_type.is_empty() && event_type != "status_message" && event_type != "heartbeat" {
-                // Show event type as a sub-detail for important events
-            }
             found = true;
         }
 
         if !found {
             println!("  (no events match the current filters)");
         }
+        Ok(())
+    }
+
+    fn print_artifacts(&self, path: &PathBuf, filter_task_id: Option<&str>) -> Result<()> {
+        use std::io::{BufRead, BufReader};
+        let file = std::fs::File::open(path).map_err(|e| {
+            MaccError::Validation(format!("Failed to open events log {}: {}", path.display(), e))
+        })?;
+        let reader = BufReader::new(file);
+
+        let mut artifacts = Vec::new();
+
+        for line in reader.lines() {
+            let Ok(line) = line else { continue };
+            let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+
+            // Filter by task_id if specified
+            if let Some(tid) = filter_task_id {
+                let event_task = val.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
+                if !event_task.eq_ignore_ascii_case(tid) {
+                    continue;
+                }
+            }
+
+            let event_type = val.get("event_type").and_then(|v| v.as_str())
+                .or_else(|| val.get("type").and_then(|v| v.as_str()))
+                .unwrap_or("");
+
+            if event_type.eq_ignore_ascii_case("artifact_created") || event_type.eq_ignore_ascii_case("artifact") {
+                let ts = val.get("timestamp").and_then(|v| v.as_str())
+                    .or_else(|| val.get("ts").and_then(|v| v.as_str()))
+                    .unwrap_or("-");
+                let time_part = if ts.len() >= 19 { &ts[11..19] } else { ts };
+
+                // Get artifact path/name from various potential keys
+                let artifact_path = val.get("path").and_then(|v| v.as_str())
+                    .or_else(|| val.get("artifact").and_then(|v| v.as_str()))
+                    .or_else(|| val.get("payload").and_then(|p| p.get("path")).and_then(|v| v.as_str()))
+                    .or_else(|| val.get("payload").and_then(|p| p.get("artifact")).and_then(|v| v.as_str()))
+                    .or_else(|| val.get("message").and_then(|v| v.as_str()))
+                    .or_else(|| val.get("payload").and_then(|p| p.get("message")).and_then(|v| v.as_str()))
+                    .unwrap_or("unknown artifact");
+
+                artifacts.push((time_part.to_string(), artifact_path.to_string()));
+            }
+        }
+
+        println!("Artifacts:");
+        if artifacts.is_empty() {
+            println!("  No registered artifacts found for this task.");
+        } else {
+            for (time, path) in artifacts {
+                println!("  {}  {}", time, path);
+            }
+        }
+        Ok(())
+    }
+
+    fn print_raw_logs(&self, rt: &macc_core::coordinator::model::TaskRuntime, project_root: &PathBuf) -> Result<()> {
+        println!("Raw Logs:");
+        let mut printed = false;
+
+        if let Some(stdout_rel) = &rt.stdout_log {
+            let path = project_root.join(stdout_rel);
+            println!("--- stdout: {} ---", stdout_rel);
+            if path.exists() {
+                match std::fs::read_to_string(&path) {
+                    Ok(content) => {
+                        print!("{}", content);
+                        if !content.ends_with('\n') {
+                            println!();
+                        }
+                    }
+                    Err(e) => println!("(error reading stdout log: {})", e),
+                }
+            } else {
+                println!("(stdout log file does not exist)");
+            }
+            printed = true;
+        }
+
+        if let Some(stderr_rel) = &rt.stderr_log {
+            if printed {
+                println!();
+            }
+            let path = project_root.join(stderr_rel);
+            println!("--- stderr: {} ---", stderr_rel);
+            if path.exists() {
+                match std::fs::read_to_string(&path) {
+                    Ok(content) => {
+                        print!("{}", content);
+                        if !content.ends_with('\n') {
+                            println!();
+                        }
+                    }
+                    Err(e) => println!("(error reading stderr log: {})", e),
+                }
+            } else {
+                println!("(stderr log file does not exist)");
+            }
+            printed = true;
+        }
+
+        if !printed {
+            println!("  No log file paths are registered for this task.");
+        }
+
         Ok(())
     }
 
@@ -400,5 +568,102 @@ impl Command for DiffCommand {
             "No active worktree or commit found for task '{}'.\n\nThe task may not have started, or its worktree was cleaned up without a recorded commit SHA.",
             self.task_id
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+    use macc_core::{TestEngine, resolve::CliOverrides};
+    use macc_core::coordinator::model::TaskRuntime;
+    use std::sync::Arc;
+
+    fn test_app_context(cwd: PathBuf) -> AppContext {
+        AppContext::new(
+            cwd,
+            Arc::new(TestEngine::with_fixtures()),
+            CliOverrides::default(),
+        )
+    }
+
+    #[test]
+    fn test_explain_compact_filtering() {
+        let dir = tempdir().unwrap();
+        let app = test_app_context(dir.path().to_path_buf());
+        let explain = ExplainCommand::new(
+            app,
+            "T-1".to_string(),
+            false,
+            None,
+            None,
+            false,
+            false,
+            true, // compact
+        );
+
+        let log_path = dir.path().join("events.jsonl");
+        let events = r#"{"ts":"2026-05-30T23:59:00Z","type":"heartbeat","message":"ping"}
+{"ts":"2026-05-30T23:59:01Z","type":"status_message","message":"working"}
+{"ts":"2026-05-30T23:59:02Z","type":"phase_result","message":"success"}
+"#;
+        fs::write(&log_path, events).unwrap();
+
+        let res = explain.print_events_from_file(&log_path, None);
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn test_explain_artifacts_listing() {
+        let dir = tempdir().unwrap();
+        let app = test_app_context(dir.path().to_path_buf());
+        let explain = ExplainCommand::new(
+            app,
+            "T-1".to_string(),
+            false,
+            None,
+            None,
+            false,
+            true, // artifacts
+            false,
+        );
+
+        let log_path = dir.path().join("events.jsonl");
+        let events = r#"{"ts":"2026-05-30T23:59:00Z","type":"artifact_created","path":"docs/report.pdf"}
+{"ts":"2026-05-30T23:59:01Z","type":"artifact","artifact":"src/lib.rs"}
+"#;
+        fs::write(&log_path, events).unwrap();
+
+        let res = explain.print_artifacts(&log_path, None);
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn test_explain_raw_logs() {
+        let dir = tempdir().unwrap();
+        let app = test_app_context(dir.path().to_path_buf());
+        let explain = ExplainCommand::new(
+            app,
+            "T-1".to_string(),
+            false,
+            None,
+            None,
+            true, // logs
+            false,
+            false,
+        );
+
+        let stdout_path = dir.path().join("stdout.log");
+        let stderr_path = dir.path().join("stderr.log");
+        fs::write(&stdout_path, "stdout content\n").unwrap();
+        fs::write(&stderr_path, "stderr content\n").unwrap();
+
+        let mut rt = TaskRuntime::default();
+        rt.stdout_log = Some("stdout.log".to_string());
+        rt.stderr_log = Some("stderr.log".to_string());
+
+        let res = explain.print_raw_logs(&rt, &dir.path().to_path_buf());
+        assert!(res.is_ok());
     }
 }

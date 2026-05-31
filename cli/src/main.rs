@@ -516,6 +516,15 @@ enum Commands {
         /// Minimum severity to display (debug, info, notice, warn, error, fatal)
         #[arg(long)]
         severity: Option<String>,
+        /// Print raw task execution logs (stdout/stderr)
+        #[arg(long)]
+        logs: bool,
+        /// Print generated task artifacts
+        #[arg(long)]
+        artifacts: bool,
+        /// Print a condensed timeline hiding verbose ticks
+        #[arg(long)]
+        compact: bool,
     },
     /// Show the diff for a task's active worktree (no cd required)
     Diff {
@@ -1288,7 +1297,7 @@ fn run_with_engine_provider(
             commands::settings::SettingsCommand::new(app.clone(), settings_command.clone()).run()
         }
 
-        Some(Commands::Explain { task_id, json, since, severity }) => {
+        Some(Commands::Explain { task_id, json, since, severity, logs, artifacts, compact }) => {
             let since_seconds = since.as_deref().and_then(parse_since_to_seconds);
             commands::task::ExplainCommand::new(
                 app.clone(),
@@ -1296,6 +1305,9 @@ fn run_with_engine_provider(
                 *json,
                 since_seconds,
                 severity.clone(),
+                *logs,
+                *artifacts,
+                *compact,
             )
             .run()
         }
