@@ -6,7 +6,7 @@ This document details the crash-consistent runtime design, process-group termina
 
 ## 1. Crash-Consistent Runtime Ledger
 
-The MACC coordinator utilizes a local SQLite database (`.macc/state/ledger.db` or configured state path) to durably ledger all state transitions *before* and *after* execution.
+The MACC coordinator utilizes a local SQLite database (`.macc/state/coordinator.sqlite`) to durably ledger all state transitions *before* and *after* execution.
 
 ### Schema Foundations
 - **`coordinator_runs`**: Persists coordinator process instances, run IDs, hostnames, timestamps, run status (`running`, `draining`, `stopping`, `force_stopping`, `stopped`, `crashed`, `recovered`), and incrementing epoch fencing tokens.
@@ -109,3 +109,35 @@ The coordinator scans the system for processes whose cwd starts with the reposit
     ]
   }
   ```
+
+---
+
+## 6. Runtime Snapshot
+
+The coordinator's live state is accessible through the shared `RuntimeSnapshot` model without parsing raw log files.
+
+### CLI
+
+```bash
+macc status           # human-readable summary
+macc status --json    # full RuntimeSnapshot as JSON
+macc status --watch   # live Ratatui observer (read-only, 2 Hz refresh)
+macc watch            # alias for --watch
+```
+
+### Web API
+
+```http
+GET /api/v1/snapshot
+```
+
+Returns the same `RuntimeSnapshot` consumed by the CLI and TUI, including:
+
+- `coordinator` — running/paused state, pause reason, active `run_id` and `epoch`
+- `queue` — task counts by workflow state (todo, in_progress, reviewing, blocked, merged, …)
+- `workers` — active `WorkerRuntime` entries with tool, phase, heartbeat age, and worktree path
+- `throttled_tools` — rate-limited tools with backoff seconds and error code
+- `recent_events` — last 50 events from `.macc/log/coordinator/events.jsonl`, normalised to the v1 event schema (`version`, `timestamp`, `type`, `task_id`, `phase`)
+- `git` — current branch, cleanliness, worktree count
+
+The coordinator's running and paused state is read directly from `.macc/state/coordinator.sqlite` (`coordinator_runs` table) and the pause file (`.macc/state/coordinator-pause.json`), so the snapshot is accurate even when queried from outside the coordinator process.

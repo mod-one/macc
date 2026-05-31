@@ -562,6 +562,58 @@ steps:
   - run: pnpm test
 ```
 
+### Token/Context Budget
+
+MACC can summarise noisy tool output (test logs, lint errors, stack traces, diffs) before it reaches model context, and enforce a character-based token budget. Add a `context:` block to `.macc/macc.yaml`:
+
+```yaml
+context:
+  token_budget:
+    default: 12000      # chars used as a rough token proxy (1 token ≈ 4 chars)
+    tool_output: 4000
+    diff: 6000
+    logs: 3000
+
+  summarization:
+    enabled: true
+    default_bundles:
+      - test-output-failures-only
+      - lint-errors-only
+      - stacktrace-collapse
+      - git-diff-stat-before-full-diff
+      - log-grep-error-first
+
+    per_skill:
+      validate:
+        bundles:
+          - test-output-failures-only
+          - lint-errors-only
+      security-check:
+        bundles:
+          - git-diff-stat-before-full-diff
+```
+
+Available summarisation bundles:
+
+| Bundle | What it keeps |
+|---|---|
+| `test-output-failures-only` | Failed test names, assertion messages, file/line refs, exit code |
+| `lint-errors-only` | Error-level lint lines only |
+| `stacktrace-collapse` | Exception type/message, first 3 app frames, first external frame, omitted count |
+| `git-diff-stat-before-full-diff` | Diff stat + file list; full diff only when it fits within budget |
+| `log-grep-error-first` | Error/warning lines with surrounding context |
+
+When summarisation runs, `macc run <skill>` prints the metadata:
+
+```
+Output summarized
+  Raw size:     187k chars
+  Summary size: 9k chars
+  Policy:       test-output-failures-only + stacktrace-collapse
+```
+
+The Skill Runner web page (`/ops/skill-runner`) shows the same metadata after each run.
+
 
 ## TUI overview
 
