@@ -352,8 +352,8 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
                 state.ownership_respond_takeover(false);
             } else if current_screen == Screen::CoordinatorLive {
                 if let Some(task) = state.selected_live_task() {
-                    match state.requeue_selected_task(task.id.clone()) {
-                        Ok(_) => state.set_status(UiStatusLevel::Info, format!("Requeued task {}", task.id), Some(Duration::from_secs(3))),
+                    match state.requeue_selected_task(task.task_id.clone()) {
+                        Ok(_) => state.set_status(UiStatusLevel::Info, format!("Requeued task {}", task.task_id), Some(Duration::from_secs(3))),
                         Err(err) => state.set_status(UiStatusLevel::Error, format!("Failed to requeue: {}", err), Some(Duration::from_secs(4))),
                     }
                 }
@@ -374,8 +374,8 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
         }
         KeyCode::Char('s') if current_screen == Screen::CoordinatorLive => {
             if let Some(task) = state.selected_live_task() {
-                state.stop_selected_task(task.id.clone());
-                state.set_status(UiStatusLevel::Info, format!("Sent kill request to task {}", task.id), Some(Duration::from_secs(3)));
+                state.stop_selected_task(task.task_id.clone());
+                state.set_status(UiStatusLevel::Info, format!("Sent kill request to task {}", task.task_id), Some(Duration::from_secs(3)));
             }
         }
         KeyCode::Char('j') if current_screen == Screen::CoordinatorLive => {
@@ -1450,72 +1450,18 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             let filtered_tasks = state.filtered_active_tasks();
             let mut rows = Vec::new();
             for task in &filtered_tasks {
-                let health_symbol = if !task.last_error.is_empty()
-                    || task.runtime_status == "failed"
-                {
-                    "▲" // Warning / failed phase
-                } else if task.last_error_code.starts_with("E601") {
-                    "!" // Rate-limited / stale
-                } else if task.runtime_status == "stale" {
-                    "!" // Stale heartbeat
-                } else if matches!(
-                    task.runtime_status.as_str(),
-                    "waiting" | "waiting_for_user" | "phase_done" | "paused"
-                ) {
-                    "◐" // Waiting / paused
-                } else if matches!(task.runtime_status.as_str(), "completed") {
-                    "✓" // Completed
-                } else if task.runtime_status.is_empty() || task.runtime_status == "-" {
-                    "·" // Idle / no runtime
-                } else {
-                    "●" // Healthy active
+                let health_symbol = task.health.symbol();
+
+                let health_style = match task.health {
+                    macc_core::coordinator::view_model::TaskHealth::Warning => Style::default().fg(theme.bad),
+                    macc_core::coordinator::view_model::TaskHealth::Stale => Style::default().fg(theme.warn),
+                    macc_core::coordinator::view_model::TaskHealth::Healthy => Style::default().fg(theme.good),
+                    _ => Style::default().fg(theme.muted),
                 };
 
-                let health_style = if health_symbol == "▲" {
-                    Style::default().fg(theme.bad)
-                } else if health_symbol == "!" {
-                    Style::default().fg(theme.warn)
-                } else if health_symbol == "●" {
-                    Style::default().fg(theme.good)
-                } else {
-                    Style::default().fg(theme.muted)
-                };
+                let status_label = task.status_label();
 
-                let status_label = if task.last_error_code.starts_with("E601") {
-                    "RATE".to_string()
-                } else {
-                    match task.runtime_status.as_str() {
-                        "running" | "dispatched" | "starting" => "RUN".to_string(),
-                        "waiting" | "waiting_for_user" => "WAIT".to_string(),
-                        "blocked" => "BLK".to_string(),
-                        "retry_scheduled" => "RETRY".to_string(),
-                        "rate_limited" => "RATE".to_string(),
-                        "stale" => "STALE".to_string(),
-                        "failed" => "ERR".to_string(),
-                        "completed" | "phase_done" => "DONE".to_string(),
-                        other if !other.is_empty() && other != "-" => {
-                            other.to_uppercase()
-                        }
-                        _ => "IDLE".to_string(),
-                    }
-                };
-
-                let phase_label = match task.current_phase.as_str() {
-                    "reading_context" => "ctx".to_string(),
-                    "planning" => "plan".to_string(),
-                    "implementing" => "dev".to_string(),
-                    "editing" => "edit".to_string(),
-                    "testing" => "test".to_string(),
-                    "fixing" => "fix".to_string(),
-                    "reviewing" => "review".to_string(),
-                    "committing" => "commit".to_string(),
-                    "opening_pr" => "pr".to_string(),
-                    "waiting_ci" => "ci".to_string(),
-                    "merging" => "merge".to_string(),
-                    "cleanup" => "clean".to_string(),
-                    other if !other.is_empty() && other != "-" => other.to_string(),
-                    _ => String::new(),
-                };
+                let phase_label = task.phase.compact_label();
 
                 let status_text = if phase_label.is_empty() {
                     status_label
@@ -1523,49 +1469,8 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                     format!("{} {}", status_label, phase_label)
                 };
 
-                let age_label = if !task.started_at.is_empty() && task.started_at != "-" {
-                    if let Ok(t) = chrono::DateTime::parse_from_rfc3339(&task.started_at) {
-                        let secs = chrono::Utc::now()
-                            .signed_duration_since(t.with_timezone(&chrono::Utc))
-                            .num_seconds()
-                            .max(0) as u64;
-                        if secs < 60 {
-                            format!("{}s", secs)
-                        } else if secs < 3600 {
-                            format!("{}m", secs / 60)
-                        } else {
-                            format!("{}h", secs / 3600)
-                        }
-                    } else {
-                        String::new()
-                    }
-                } else {
-                    String::new()
-                };
-
-                let hb_label = if !task.last_heartbeat.is_empty()
-                    && task.last_heartbeat != "-"
-                {
-                    if let Ok(t) =
-                        chrono::DateTime::parse_from_rfc3339(&task.last_heartbeat)
-                    {
-                        let secs = chrono::Utc::now()
-                            .signed_duration_since(t.with_timezone(&chrono::Utc))
-                            .num_seconds()
-                            .max(0) as u64;
-                        if secs < 60 {
-                            format!("{}s", secs)
-                        } else if secs < 3600 {
-                            format!("{}m", secs / 60)
-                        } else {
-                            format!("{}h", secs / 3600)
-                        }
-                    } else {
-                        String::new()
-                    }
-                } else {
-                    String::new()
-                };
+                let age_label = task.age_label();
+                let hb_label = task.heartbeat_age_label();
 
                 let worker = if task.worker_id.is_empty() { "-" } else { &task.worker_id };
                 let tool = if task.tool.is_empty() { "-" } else { &task.tool };
@@ -1573,7 +1478,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 let cells = vec![
                     Cell::from(health_symbol).style(health_style),
                     Cell::from(worker.to_string()),
-                    Cell::from(task.id.clone()),
+                    Cell::from(task.task_id.clone()),
                     Cell::from(status_text),
                     Cell::from(tool.to_string()),
                     Cell::from(age_label),
@@ -1618,14 +1523,14 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             let selected_task = state.selected_live_task();
             let mut detail_lines = Vec::new();
             if let Some(ref t) = selected_task {
-                let full_task = state.load_coordinator_storage_snapshot().ok().and_then(|s| s.registry.tasks.into_iter().find(|rt| rt.id == t.id));
+                let full_task = state.load_coordinator_storage_snapshot().ok().and_then(|s| s.registry.tasks.into_iter().find(|rt| rt.id == t.task_id));
                 let title = full_task.as_ref().and_then(|rt| rt.title.clone()).unwrap_or_else(|| "(no title)".to_string());
-                let worktree = full_task.as_ref().and_then(|rt| rt.task_runtime.worktree.clone()).unwrap_or_else(|| t.worktree.clone());
-                let branch = full_task.as_ref().and_then(|rt| rt.task_runtime.branch.clone()).unwrap_or_else(|| "-".to_string());
+                let worktree = full_task.as_ref().and_then(|rt| rt.task_runtime.worktree.clone()).unwrap_or_else(|| t.worktree.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| "-".to_string()));
+                let branch = full_task.as_ref().and_then(|rt| rt.task_runtime.branch.clone()).unwrap_or_else(|| t.branch.clone().unwrap_or_else(|| "-".to_string()));
                 
                 detail_lines.push(Line::from(vec![
                     Span::styled("Task ID:    ", Style::default().fg(theme.muted)),
-                    Span::styled(&t.id, Style::default().add_modifier(Modifier::BOLD)),
+                    Span::styled(&t.task_id, Style::default().add_modifier(Modifier::BOLD)),
                     Span::styled("   Title: ", Style::default().fg(theme.muted)),
                     Span::styled(title, Style::default()),
                 ]));
@@ -1637,20 +1542,20 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 ]));
                 detail_lines.push(Line::from(vec![
                     Span::styled("Status:     ", Style::default().fg(theme.muted)),
-                    Span::styled(format!("{} (phase: {})", t.runtime_status, t.current_phase), Style::default()),
+                    Span::styled(format!("{} (phase: {})", t.runtime_status.as_str(), t.phase.compact_label()), Style::default()),
                     Span::styled("   Tool: ", Style::default().fg(theme.muted)),
                     Span::styled(&t.tool, Style::default()),
                 ]));
-                if !t.message.is_empty() {
+                if let Some(ref msg) = t.current_message {
                     detail_lines.push(Line::from(vec![
                         Span::styled("Message:    ", Style::default().fg(theme.muted)),
-                        Span::styled(&t.message, Style::default()),
+                        Span::styled(msg, Style::default()),
                     ]));
                 }
-                if !t.last_error.is_empty() {
+                if let Some(ref err) = t.last_error {
                     detail_lines.push(Line::from(vec![
                         Span::styled("Last Error: ", Style::default().fg(theme.muted)),
-                        Span::styled(&t.last_error, Style::default().fg(theme.bad)),
+                        Span::styled(err, Style::default().fg(theme.bad)),
                     ]));
                 }
             } else {
@@ -1665,7 +1570,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             if state.coordinator_log_pane_visible {
                 let mut logs_lines = Vec::new();
                 if let Some(ref t) = selected_task {
-                    let full_task = state.load_coordinator_storage_snapshot().ok().and_then(|s| s.registry.tasks.into_iter().find(|rt| rt.id == t.id));
+                    let full_task = state.load_coordinator_storage_snapshot().ok().and_then(|s| s.registry.tasks.into_iter().find(|rt| rt.id == t.task_id));
                     let mut read_success = false;
                     if let Some(ref ft) = full_task {
                         if let Some(ref stdout_rel) = ft.task_runtime.stdout_log {
@@ -1689,7 +1594,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                     if !read_success {
                         logs_lines.push(Line::from("No active stdout log file found. Showing matching coordinator events:"));
                         for line in state.coordinator_events.iter().rev() {
-                            if line.contains(&t.id) {
+                            if line.contains(&t.task_id) {
                                 logs_lines.push(Line::from(line.clone()));
                             }
                         }

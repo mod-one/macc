@@ -13,6 +13,7 @@ pub mod ipc;
 pub mod logs;
 pub mod managed_command_registry;
 pub mod model;
+pub mod view_model;
 pub mod prd_auditor;
 pub mod rate_limit;
 pub mod runtime;

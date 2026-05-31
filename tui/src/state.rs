@@ -96,30 +96,9 @@ pub struct CoordinatorTaskSnapshot {
     pub active: usize,
     pub blocked: usize,
     pub merged: usize,
-    pub active_tasks: Vec<CoordinatorActiveTask>,
+    pub active_tasks: Vec<macc_core::coordinator::view_model::LiveTaskRow>,
     /// RL-TUI-007: tools currently throttled due to rate-limiting.
     pub throttled_tools: Vec<ThrottledToolInfo>,
-}
-
-#[derive(Clone)]
-pub struct CoordinatorActiveTask {
-    pub id: String,
-    pub state: String,
-    pub tool: String,
-    pub worktree: String,
-    pub updated_at: String,
-    pub runtime_status: String,
-    pub current_phase: String,
-    pub last_error: String,
-    pub last_heartbeat: String,
-    /// Most recent error code (e.g. "E601", "E602") for this task.
-    pub last_error_code: String,
-    /// Worker slot currently handling the task (from task_runtime.worker_id).
-    pub worker_id: String,
-    /// Human-readable current activity message (from task_runtime.message).
-    pub message: String,
-    /// ISO 8601 start timestamp (from task_runtime.started_at).
-    pub started_at: String,
 }
 
 /// RL-TUI-007: per-tool throttle state for TUI display.
@@ -689,62 +668,16 @@ impl AppState {
         }
         snapshot.throttled_tools = throttle_map.into_values().collect();
         for task in &root.tasks {
-            let id = if task.id.is_empty() {
-                "-".to_string()
-            } else {
-                task.id.clone()
-            };
             let state = if task.state.is_empty() {
                 "todo".to_string()
             } else {
                 task.state.to_ascii_lowercase()
             };
-            let tool = task.tool.clone().unwrap_or_else(|| "-".to_string());
-            let worktree = task
-                .worktree
-                .as_ref()
-                .and_then(|w| w.worktree_path.clone())
-                .unwrap_or_else(|| "-".to_string());
-            let updated_at = task
-                .state_changed_at
-                .clone()
-                .unwrap_or_else(|| "-".to_string());
             let runtime_status = task
                 .task_runtime
                 .status
-                .clone()
-                .unwrap_or_else(|| "-".to_string());
-            let current_phase = task
-                .task_runtime
-                .current_phase
-                .clone()
-                .unwrap_or_else(|| "-".to_string());
-            let last_error = task.task_runtime.last_error.clone().unwrap_or_default();
-            let last_error_code = task
-                .task_runtime
-                .last_error_code
-                .clone()
-                .unwrap_or_default();
-            let last_heartbeat = task
-                .task_runtime
-                .last_heartbeat
-                .clone()
-                .unwrap_or_else(|| "-".to_string());
-            let worker_id = task
-                .task_runtime
-                .worker_id
-                .clone()
-                .unwrap_or_default();
-            let message = task
-                .task_runtime
-                .message
-                .clone()
-                .unwrap_or_default();
-            let started_at = task
-                .task_runtime
-                .started_at
-                .clone()
-                .unwrap_or_default();
+                .as_deref()
+                .unwrap_or("-");
             let is_live_active = matches!(
                 state.as_str(),
                 "claimed"
@@ -768,21 +701,7 @@ impl AppState {
                     if is_live_active =>
                 {
                     snapshot.active += 1;
-                    snapshot.active_tasks.push(CoordinatorActiveTask {
-                        id,
-                        state,
-                        tool,
-                        worktree,
-                        updated_at,
-                        runtime_status,
-                        current_phase,
-                        last_error,
-                        last_heartbeat,
-                        last_error_code,
-                        worker_id,
-                        message,
-                        started_at,
-                    });
+                    snapshot.active_tasks.push(macc_core::coordinator::view_model::LiveTaskRow::from_task(task, Utc::now()));
                 }
                 "claimed" => {
                     // Claimed + phase_done can happen after coordinator restart before reconciliation.
@@ -4722,20 +4641,23 @@ Saved in .macc/macc.yaml; CLI flag --review=<mode> overrides at runtime.",
         }
     }
 
-    pub fn filtered_active_tasks(&self) -> Vec<CoordinatorActiveTask> {
+    pub fn filtered_active_tasks(&self) -> Vec<macc_core::coordinator::view_model::LiveTaskRow> {
         let Some(ref snap) = self.coordinator_snapshot else {
             return Vec::new();
         };
         snap.active_tasks
             .iter()
             .filter(|task| {
-                matches_search(&self.search_query, &[&task.id, &task.message, &task.worker_id, &task.tool, &task.current_phase, &task.runtime_status])
+                let msg = task.current_message.as_deref().unwrap_or("");
+                let phase = task.phase.compact_label();
+                let status = task.runtime_status.as_str();
+                matches_search(&self.search_query, &[&task.task_id, &msg, &task.worker_id, &task.tool, &phase, &status])
             })
             .cloned()
             .collect()
     }
 
-    pub fn selected_live_task(&self) -> Option<CoordinatorActiveTask> {
+    pub fn selected_live_task(&self) -> Option<macc_core::coordinator::view_model::LiveTaskRow> {
         let tasks = self.filtered_active_tasks();
         if tasks.is_empty() {
             return None;
@@ -4766,7 +4688,7 @@ Saved in .macc/macc.yaml; CLI flag --review=<mode> overrides at runtime.",
         self.coordinator_log_pane_visible = !self.coordinator_log_pane_visible;
     }
 
-    pub fn get_task_diff(&self, task: &CoordinatorActiveTask) -> String {
+    pub fn get_task_diff(&self, task: &macc_core::coordinator::view_model::LiveTaskRow) -> String {
         let paths = match &self.project_paths {
             Some(p) => p,
             None => return "No project loaded.".to_string(),
@@ -4775,9 +4697,9 @@ Saved in .macc/macc.yaml; CLI flag --review=<mode> overrides at runtime.",
             Ok(s) => s,
             Err(e) => return format!("Failed to load coordinator snapshot: {}", e),
         };
-        let reg_task = match snap.registry.tasks.iter().find(|t| t.id == task.id) {
+        let reg_task = match snap.registry.tasks.iter().find(|t| t.id == task.task_id) {
             Some(t) => t,
-            None => return format!("Task '{}' not found in registry.", task.id),
+            None => return format!("Task '{}' not found in registry.", task.task_id),
         };
 
         let worktree_path = reg_task
@@ -4824,7 +4746,7 @@ Saved in .macc/macc.yaml; CLI flag --review=<mode> overrides at runtime.",
         "No diff available (worktree does not exist and no commit recorded).".to_string()
     }
 
-    pub fn get_task_explain(&self, task: &CoordinatorActiveTask) -> String {
+    pub fn get_task_explain(&self, task: &macc_core::coordinator::view_model::LiveTaskRow) -> String {
         let paths = match &self.project_paths {
             Some(p) => p,
             None => return "No project loaded.".to_string(),
@@ -4833,9 +4755,9 @@ Saved in .macc/macc.yaml; CLI flag --review=<mode> overrides at runtime.",
             Ok(s) => s,
             Err(e) => return format!("Failed to load coordinator snapshot: {}", e),
         };
-        let reg_task = match snap.registry.tasks.iter().find(|t| t.id == task.id) {
+        let reg_task = match snap.registry.tasks.iter().find(|t| t.id == task.task_id) {
             Some(t) => t,
-            None => return format!("Task '{}' not found in registry.", task.id),
+            None => return format!("Task '{}' not found in registry.", task.task_id),
         };
 
         let mut output = String::new();
@@ -4917,7 +4839,7 @@ Saved in .macc/macc.yaml; CLI flag --review=<mode> overrides at runtime.",
                     let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
                     if events_log_path.is_none() {
                         let event_task = val.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
-                        if !event_task.eq_ignore_ascii_case(&task.id) {
+                        if !event_task.eq_ignore_ascii_case(&task.task_id) {
                             continue;
                         }
                     }
