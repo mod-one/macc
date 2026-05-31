@@ -542,6 +542,12 @@ enum Commands {
         /// Output format: patch or stat
         #[arg(long)]
         format: Option<String>,
+        /// Show staged changes in the active worktree
+        #[arg(long)]
+        cached: bool,
+        /// Open the diff output in an editor or viewer
+        #[arg(long)]
+        open: bool,
     },
 }
 
@@ -1312,7 +1318,7 @@ fn run_with_engine_provider(
             .run()
         }
 
-        Some(Commands::Diff { task_id, stat, name_only, base, format }) => {
+        Some(Commands::Diff { task_id, stat, name_only, base, format, cached, open }) => {
             commands::task::DiffCommand::new(
                 app.clone(),
                 task_id.clone(),
@@ -1320,6 +1326,8 @@ fn run_with_engine_provider(
                 *name_only,
                 base.clone(),
                 format.clone(),
+                *cached,
+                *open,
             )
             .run()
         }

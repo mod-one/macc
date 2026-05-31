@@ -430,6 +430,10 @@ pub struct DiffCommand {
     pub base: Option<String>,
     /// Output format: "patch" or "stat".
     pub format: Option<String>,
+    /// Show staged changes in the active worktree.
+    pub cached: bool,
+    /// Open the diff output in an editor or viewer.
+    pub open: bool,
 }
 
 impl DiffCommand {
@@ -440,8 +444,19 @@ impl DiffCommand {
         name_only: bool,
         base: Option<String>,
         format: Option<String>,
+        cached: bool,
+        open: bool,
     ) -> Self {
-        Self { app, task_id, stat, name_only, base, format }
+        Self {
+            app,
+            task_id,
+            stat,
+            name_only,
+            base,
+            format,
+            cached,
+            open,
+        }
     }
 }
 
@@ -526,16 +541,44 @@ impl Command for DiffCommand {
                 println!("Diff stat");
                 // Run: git diff <base>...HEAD [--stat|--name-only] via facade
                 let diff_target = format!("{}...HEAD", base_branch);
-                let mut args = vec!["diff", &diff_target];
+                let mut args = vec!["diff"];
+                if self.cached {
+                    args.push("--cached");
+                } else {
+                    args.push(&diff_target);
+                }
                 if use_stat {
                     args.push("--stat");
                 } else if use_name_only {
                     args.push("--name-only");
                 }
                 let output = macc_core::git::run_git_output_mapped(wt, &args, "git diff worktree")?;
-                print!("{}", String::from_utf8_lossy(&output.stdout));
-                if !output.stderr.is_empty() {
-                    eprint!("{}", String::from_utf8_lossy(&output.stderr));
+                let diff_str = String::from_utf8_lossy(&output.stdout);
+                let stderr_str = String::from_utf8_lossy(&output.stderr);
+
+                if self.open {
+                    use std::io::Write;
+                    let mut temp = tempfile::Builder::new()
+                        .prefix("macc-diff-")
+                        .suffix(".patch")
+                        .tempfile()
+                        .map_err(|e| MaccError::Validation(format!("Failed to create temporary file for diff: {}", e)))?;
+                    temp.write_all(diff_str.as_bytes())
+                        .map_err(|e| MaccError::Validation(format!("Failed to write diff to temporary file: {}", e)))?;
+                    temp.flush()
+                        .map_err(|e| MaccError::Validation(format!("Failed to flush temporary file: {}", e)))?;
+
+                    let editor = std::env::var("EDITOR")
+                        .or_else(|_| std::env::var("VISUAL"))
+                        .unwrap_or_else(|_| "less".to_string());
+
+                    println!("Opening diff in editor/viewer: {} ...", editor);
+                    macc_core::service::task_runner::open_in_editor(temp.path(), &editor)?;
+                } else {
+                    print!("{}", diff_str);
+                    if !stderr_str.is_empty() {
+                        eprint!("{}", stderr_str);
+                    }
                 }
                 return Ok(());
             }
@@ -557,9 +600,32 @@ impl Command for DiffCommand {
                 args.push("--name-only");
             }
             let output = macc_core::git::run_git_output_mapped(&paths.root, &args, "git diff commit")?;
-            print!("{}", String::from_utf8_lossy(&output.stdout));
-            if !output.stderr.is_empty() {
-                eprint!("{}", String::from_utf8_lossy(&output.stderr));
+            let diff_str = String::from_utf8_lossy(&output.stdout);
+            let stderr_str = String::from_utf8_lossy(&output.stderr);
+
+            if self.open {
+                use std::io::Write;
+                let mut temp = tempfile::Builder::new()
+                    .prefix("macc-diff-")
+                    .suffix(".patch")
+                    .tempfile()
+                    .map_err(|e| MaccError::Validation(format!("Failed to create temporary file for diff: {}", e)))?;
+                temp.write_all(diff_str.as_bytes())
+                    .map_err(|e| MaccError::Validation(format!("Failed to write diff to temporary file: {}", e)))?;
+                temp.flush()
+                    .map_err(|e| MaccError::Validation(format!("Failed to flush temporary file: {}", e)))?;
+
+                let editor = std::env::var("EDITOR")
+                    .or_else(|_| std::env::var("VISUAL"))
+                    .unwrap_or_else(|_| "less".to_string());
+
+                println!("Opening diff in editor/viewer: {} ...", editor);
+                macc_core::service::task_runner::open_in_editor(temp.path(), &editor)?;
+            } else {
+                print!("{}", diff_str);
+                if !stderr_str.is_empty() {
+                    eprint!("{}", stderr_str);
+                }
             }
             return Ok(());
         }
@@ -665,5 +731,24 @@ mod tests {
 
         let res = explain.print_raw_logs(&rt, &dir.path().to_path_buf());
         assert!(res.is_ok());
+    }
+
+    #[test]
+    fn test_diff_command_fields() {
+        let dir = tempdir().unwrap();
+        let app = test_app_context(dir.path().to_path_buf());
+        let diff = DiffCommand::new(
+            app,
+            "T-1".to_string(),
+            false,
+            false,
+            None,
+            None,
+            true, // cached
+            true, // open
+        );
+        assert_eq!(diff.task_id, "T-1");
+        assert!(diff.cached);
+        assert!(diff.open);
     }
 }
