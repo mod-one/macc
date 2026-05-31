@@ -250,6 +250,10 @@ pub struct AppState {
     /// §18: Human-readable summary of active runtime phase overrides, e.g. "[testing:off] [review:required]".
     /// Set at launch time; None when no overrides are active.
     pub coordinator_phase_overrides: Option<String>,
+    pub coordinator_selected_task_index: usize,
+    pub coordinator_log_pane_visible: bool,
+    pub coordinator_task_diff_popup: Option<String>,
+    pub coordinator_task_explain_popup: Option<String>,
 }
 
 impl AppState {
@@ -349,6 +353,10 @@ impl AppState {
             ownership_state: crate::ownership::TuiOwnershipState::new(),
             ownership_guard: None,
             viewer_guards: Vec::new(),
+            coordinator_selected_task_index: 0,
+            coordinator_log_pane_visible: true,
+            coordinator_task_diff_popup: None,
+            coordinator_task_explain_popup: None,
             client_context: ClientContext {
                 client_id: client_identity.client_id.clone(),
                 project_root: PathBuf::new(),
@@ -596,7 +604,7 @@ impl AppState {
         )
     }
 
-    fn load_coordinator_storage_snapshot(&self) -> Result<CoordinatorSnapshot, String> {
+    pub fn load_coordinator_storage_snapshot(&self) -> Result<CoordinatorSnapshot, String> {
         let paths = self
             .project_paths
             .as_ref()
@@ -4065,6 +4073,7 @@ Saved in .macc/macc.yaml; CLI flag --review=<mode> overrides at runtime.",
             Screen::ToolSettings => self.next_tool_field(),
             Screen::Preview => self.next_preview_op(),
             Screen::Mcp => self.next_mcp(),
+            Screen::CoordinatorLive => self.next_live_task(),
             _ => {}
         }
     }
@@ -4080,6 +4089,7 @@ Saved in .macc/macc.yaml; CLI flag --review=<mode> overrides at runtime.",
             Screen::ToolSettings => self.prev_tool_field(),
             Screen::Preview => self.prev_preview_op(),
             Screen::Mcp => self.prev_mcp(),
+            Screen::CoordinatorLive => self.prev_live_task(),
             _ => {}
         }
     }
@@ -4710,6 +4720,276 @@ Saved in .macc/macc.yaml; CLI flag --review=<mode> overrides at runtime.",
             }
             _ => None,
         }
+    }
+
+    pub fn filtered_active_tasks(&self) -> Vec<CoordinatorActiveTask> {
+        let Some(ref snap) = self.coordinator_snapshot else {
+            return Vec::new();
+        };
+        snap.active_tasks
+            .iter()
+            .filter(|task| {
+                matches_search(&self.search_query, &[&task.id, &task.message, &task.worker_id, &task.tool, &task.current_phase, &task.runtime_status])
+            })
+            .cloned()
+            .collect()
+    }
+
+    pub fn selected_live_task(&self) -> Option<CoordinatorActiveTask> {
+        let tasks = self.filtered_active_tasks();
+        if tasks.is_empty() {
+            return None;
+        }
+        let index = self.coordinator_selected_task_index.min(tasks.len() - 1);
+        Some(tasks[index].clone())
+    }
+
+    pub fn next_live_task(&mut self) {
+        let tasks = self.filtered_active_tasks();
+        if !tasks.is_empty() {
+            self.coordinator_selected_task_index = (self.coordinator_selected_task_index + 1) % tasks.len();
+        }
+    }
+
+    pub fn prev_live_task(&mut self) {
+        let tasks = self.filtered_active_tasks();
+        if !tasks.is_empty() {
+            if self.coordinator_selected_task_index == 0 {
+                self.coordinator_selected_task_index = tasks.len() - 1;
+            } else {
+                self.coordinator_selected_task_index -= 1;
+            }
+        }
+    }
+
+    pub fn toggle_log_pane(&mut self) {
+        self.coordinator_log_pane_visible = !self.coordinator_log_pane_visible;
+    }
+
+    pub fn get_task_diff(&self, task: &CoordinatorActiveTask) -> String {
+        let paths = match &self.project_paths {
+            Some(p) => p,
+            None => return "No project loaded.".to_string(),
+        };
+        let snap = match self.load_coordinator_storage_snapshot() {
+            Ok(s) => s,
+            Err(e) => return format!("Failed to load coordinator snapshot: {}", e),
+        };
+        let reg_task = match snap.registry.tasks.iter().find(|t| t.id == task.id) {
+            Some(t) => t,
+            None => return format!("Task '{}' not found in registry.", task.id),
+        };
+
+        let worktree_path = reg_task
+            .task_runtime
+            .worktree
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                reg_task.worktree
+                    .as_ref()
+                    .and_then(|w| w.worktree_path.as_deref())
+                    .filter(|s| !s.is_empty())
+            })
+            .map(|p| paths.root.join(p));
+
+        let base_branch = reg_task.worktree
+            .as_ref()
+            .and_then(|w| w.base_branch.clone())
+            .filter(|s| !s.is_empty())
+            .or_else(|| reg_task.base_branch.clone().filter(|s| !s.is_empty()))
+            .unwrap_or_else(|| "main".to_string());
+
+        let commit = reg_task.worktree.as_ref().and_then(|w| w.last_commit.as_ref());
+
+        if let Some(ref wt) = worktree_path {
+            if wt.exists() {
+                let diff_target = format!("{}...HEAD", base_branch);
+                let args = vec!["diff", &diff_target];
+                match macc_core::git::run_git_output_mapped(wt, &args, "git diff worktree") {
+                    Ok(output) => return String::from_utf8_lossy(&output.stdout).into_owned(),
+                    Err(e) => return format!("Failed to run git diff in worktree: {}", e),
+                }
+            }
+        }
+
+        if let Some(commit_sha) = commit {
+            let diff_target = format!("{}...{}", base_branch, commit_sha);
+            let args = vec!["diff", &diff_target];
+            match macc_core::git::run_git_output_mapped(&paths.root, &args, "git diff commit") {
+                Ok(output) => return String::from_utf8_lossy(&output.stdout).into_owned(),
+                Err(e) => return format!("Failed to run git diff for commit {}: {}", commit_sha, e),
+            }
+        }
+        "No diff available (worktree does not exist and no commit recorded).".to_string()
+    }
+
+    pub fn get_task_explain(&self, task: &CoordinatorActiveTask) -> String {
+        let paths = match &self.project_paths {
+            Some(p) => p,
+            None => return "No project loaded.".to_string(),
+        };
+        let snap = match self.load_coordinator_storage_snapshot() {
+            Ok(s) => s,
+            Err(e) => return format!("Failed to load coordinator snapshot: {}", e),
+        };
+        let reg_task = match snap.registry.tasks.iter().find(|t| t.id == task.id) {
+            Some(t) => t,
+            None => return format!("Task '{}' not found in registry.", task.id),
+        };
+
+        let mut output = String::new();
+        let rt = &reg_task.task_runtime;
+        let title = reg_task.title.as_deref().unwrap_or("(no title)");
+        output.push_str(&format!("{} — {}\n\n", reg_task.id, title));
+        output.push_str(&format!("State:     {}\n", reg_task.state));
+        if let Some(status) = &rt.status {
+            output.push_str(&format!("Runtime:   {}\n", status));
+        }
+        if let Some(phase) = &rt.current_phase {
+            if !phase.is_empty() {
+                output.push_str(&format!("Phase:     {}\n", phase));
+            }
+        }
+        if let Some(tool) = &reg_task.tool {
+            output.push_str(&format!("Tool:      {}\n", tool));
+        }
+        if let Some(worker) = &rt.worker_id {
+            if !worker.is_empty() {
+                output.push_str(&format!("Worker:    {}\n", worker));
+            }
+        }
+        if let Some(worktree) = &rt.worktree {
+            if !worktree.is_empty() {
+                output.push_str(&format!("Worktree:  {}\n", worktree));
+            }
+        }
+        if let Some(branch) = &rt.branch {
+            if !branch.is_empty() {
+                output.push_str(&format!("Branch:    {}\n", branch));
+            }
+        }
+        if let Some(started) = &rt.started_at {
+            if !started.is_empty() {
+                output.push_str(&format!("Started:   {}\n", started));
+            }
+        }
+        if let Some(hb) = &rt.last_heartbeat {
+            if !hb.is_empty() {
+                output.push_str(&format!("Heartbeat: {}\n", hb));
+            }
+        }
+        if let Some(msg) = &rt.message {
+            if !msg.is_empty() {
+                output.push_str(&format!("Message:   {}\n", msg));
+            }
+        }
+        if let Some(err) = &rt.last_error {
+            if !err.is_empty() {
+                output.push_str(&format!("Error:     {}\n", err));
+            }
+        }
+
+        output.push_str("\nTimeline:\n");
+        let events_log_path = rt.events_log.as_deref().map(|p| paths.root.join(p));
+        let events_resolved_path = if let Some(ref path) = events_log_path {
+            if path.exists() {
+                Some(path.clone())
+            } else {
+                None
+            }
+        } else {
+            let global_events = paths.root.join(".macc/log/events.jsonl");
+            if global_events.exists() {
+                Some(global_events)
+            } else {
+                None
+            }
+        };
+
+        if let Some(ref path) = events_resolved_path {
+            use std::io::{BufRead, BufReader};
+            if let Ok(file) = std::fs::File::open(path) {
+                let reader = BufReader::new(file);
+                let mut found = false;
+                for line in reader.lines() {
+                    let Ok(line) = line else { continue };
+                    let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+                    if events_log_path.is_none() {
+                        let event_task = val.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
+                        if !event_task.eq_ignore_ascii_case(&task.id) {
+                            continue;
+                        }
+                    }
+                    let ts = val.get("timestamp").and_then(|v| v.as_str())
+                        .or_else(|| val.get("ts").and_then(|v| v.as_str()))
+                        .unwrap_or("-");
+                    let phase = val.get("phase").and_then(|v| v.as_str()).unwrap_or("-");
+                    let sev = val.get("severity").and_then(|v| v.as_str()).unwrap_or("info");
+                    let message = val.get("message").and_then(|v| v.as_str())
+                        .or_else(|| val.get("msg").and_then(|v| v.as_str()))
+                        .unwrap_or("");
+                    let time_part = if ts.len() >= 19 { &ts[11..19] } else { ts };
+                    output.push_str(&format!("  {}  {:<6} {:<8} {}\n", time_part, sev, phase, message));
+                    found = true;
+                }
+                if !found {
+                    output.push_str("  (no events found)\n");
+                }
+            } else {
+                output.push_str("  (failed to open events log)\n");
+            }
+        } else {
+            output.push_str("  (no events log found)\n");
+        }
+
+        output
+    }
+
+    pub fn requeue_selected_task(&mut self, task_id: String) -> Result<(), String> {
+        let paths = self
+            .project_paths
+            .as_ref()
+            .ok_or_else(|| "No project loaded.".to_string())?;
+        let storage_paths = CoordinatorStoragePaths::from_project_paths(paths);
+        
+        let mut snapshot = match self.load_coordinator_storage_snapshot() {
+            Ok(s) => s,
+            Err(e) => return Err(e),
+        };
+        
+        let task = match snapshot.registry.tasks.iter_mut().find(|t| t.id == task_id) {
+            Some(t) => t,
+            None => return Err(format!("Task '{}' not found in registry.", task_id)),
+        };
+        
+        task.state = "queued".to_string();
+        task.task_runtime.status = Some("idle".to_string());
+        task.task_runtime.pid = None;
+        task.task_runtime.started_at = None;
+        task.task_runtime.current_phase = None;
+        task.task_runtime.message = Some("Requeued by operator via TUI".to_string());
+        task.task_runtime.last_error = None;
+        task.task_runtime.last_error_code = None;
+        
+        snapshot.registry.updated_at = Some(macc_core::coordinator::helpers::now_iso_coordinator());
+        
+        let store_sqlite = SqliteStorage::new(storage_paths.clone());
+        if let Err(e) = store_sqlite.save_snapshot(&snapshot) {
+            return Err(format!("Failed to save snapshot to SQLite: {}", e));
+        }
+        
+        if self.allow_legacy_json_fallback() {
+            let store_json = JsonStorage::new(storage_paths);
+            let _ = store_json.save_snapshot(&snapshot);
+        }
+        
+        self.refresh_coordinator_snapshot();
+        Ok(())
+    }
+
+    pub fn stop_selected_task(&mut self, task_id: String) {
+        self.start_managed_coordinator_command(CoordinatorCommand::KillTask { task_id });
     }
 }
 

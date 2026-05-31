@@ -10,7 +10,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap, Table, TableState, Row, Cell},
     Frame, Terminal,
 };
 use std::{collections::BTreeMap, io, time::Duration};
@@ -23,7 +23,7 @@ pub mod ui;
 use macc_core::plan::{PlannedOpKind, Scope};
 use macc_core::tool::{FieldDefault, FieldKind};
 use screen::Screen;
-use state::AppState;
+use state::{AppState, UiStatusLevel};
 use ui::{compact_help_line, header_lines, panel, theme, wrapped_paragraph, HeaderContext};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,6 +107,17 @@ fn format_hms(total_secs: u64) -> String {
 }
 
 fn handle_key(state: &mut AppState, key: KeyCode) {
+    if state.coordinator_task_diff_popup.is_some() || state.coordinator_task_explain_popup.is_some() {
+        match key {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                state.coordinator_task_diff_popup = None;
+                state.coordinator_task_explain_popup = None;
+            }
+            _ => {}
+        }
+        return;
+    }
+
     if state.has_coordinator_pause_prompt() {
         match key {
             KeyCode::Char('r') | KeyCode::Enter => state.retry_after_coordinator_pause(),
@@ -240,7 +251,14 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
             state.begin_search();
         }
         KeyCode::Enter => {
-            state.navigate_enter();
+            if current_screen == Screen::CoordinatorLive {
+                if let Some(task) = state.selected_live_task() {
+                    let explain = state.get_task_explain(&task);
+                    state.coordinator_task_explain_popup = Some(explain);
+                }
+            } else {
+                state.navigate_enter();
+            }
         }
         KeyCode::Backspace if current_screen == Screen::Apply => {
             state.pop_apply_consent_char();
@@ -263,7 +281,7 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
         KeyCode::Char('v') if current_screen != Screen::CoordinatorLive => state.push_screen(Screen::CoordinatorLive),
         KeyCode::Char('m') => state.push_screen(Screen::Mcp),
         KeyCode::Char('g') => state.push_screen(Screen::Logs),
-        KeyCode::Char('e') => state.push_screen(Screen::Settings),
+        KeyCode::Char('e') if current_screen != Screen::CoordinatorLive => state.push_screen(Screen::Settings),
         KeyCode::Char('p') => state.open_preview(),
         KeyCode::Char('x') if current_screen != Screen::Apply => {
             state.open_apply_screen();
@@ -273,7 +291,7 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
         KeyCode::Backspace => state.pop_screen(),
 
         // Actions: 's' to Save Config
-        KeyCode::Char('s') if current_screen != Screen::Apply => {
+        KeyCode::Char('s') if current_screen != Screen::Apply && current_screen != Screen::CoordinatorLive => {
             state.save_config();
         }
         KeyCode::Char('u') if current_screen != Screen::CoordinatorLive => {
@@ -333,18 +351,56 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
             if has_pending_takeover {
                 state.ownership_respond_takeover(false);
             } else if current_screen == Screen::CoordinatorLive {
-                if let Some(handle) = state.coordinator_handle() {
-                    state.try_owner_action(&handle, |state| {
-                        state.start_coordinator_command(CoordinatorCommand::Run);
-                    });
-                } else {
-                    state.start_coordinator_command(CoordinatorCommand::Run);
+                if let Some(task) = state.selected_live_task() {
+                    match state.requeue_selected_task(task.id.clone()) {
+                        Ok(_) => state.set_status(UiStatusLevel::Info, format!("Requeued task {}", task.id), Some(Duration::from_secs(3))),
+                        Err(err) => state.set_status(UiStatusLevel::Error, format!("Failed to requeue: {}", err), Some(Duration::from_secs(4))),
+                    }
                 }
             } else if current_screen == Screen::Logs {
                 state.refresh_logs();
             } else if current_screen == Screen::Preview {
                 state.refresh_preview_plan();
             }
+        }
+        KeyCode::Char('R') if current_screen == Screen::CoordinatorLive => {
+            if let Some(handle) = state.coordinator_handle() {
+                state.try_owner_action(&handle, |state| {
+                    state.start_coordinator_command(CoordinatorCommand::Run);
+                });
+            } else {
+                state.start_coordinator_command(CoordinatorCommand::Run);
+            }
+        }
+        KeyCode::Char('s') if current_screen == Screen::CoordinatorLive => {
+            if let Some(task) = state.selected_live_task() {
+                state.stop_selected_task(task.id.clone());
+                state.set_status(UiStatusLevel::Info, format!("Sent kill request to task {}", task.id), Some(Duration::from_secs(3)));
+            }
+        }
+        KeyCode::Char('j') if current_screen == Screen::CoordinatorLive => {
+            state.navigate_next();
+        }
+        KeyCode::Char('k') if current_screen == Screen::CoordinatorLive => {
+            state.navigate_prev();
+        }
+        KeyCode::Char('d') if current_screen == Screen::CoordinatorLive => {
+            if let Some(task) = state.selected_live_task() {
+                let diff = state.get_task_diff(&task);
+                state.coordinator_task_diff_popup = Some(diff);
+            }
+        }
+        KeyCode::Char('e') if current_screen == Screen::CoordinatorLive => {
+            if let Some(task) = state.selected_live_task() {
+                let explain = state.get_task_explain(&task);
+                state.coordinator_task_explain_popup = Some(explain);
+            }
+        }
+        KeyCode::Char('f') if current_screen == Screen::CoordinatorLive => {
+            state.begin_search();
+        }
+        KeyCode::Char('l') if current_screen == Screen::CoordinatorLive => {
+            state.toggle_log_pane();
         }
         KeyCode::Char('y') if current_screen == Screen::CoordinatorLive => {
             if let Some(handle) = state.coordinator_handle() {
@@ -373,7 +429,7 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
                 state.start_coordinator_command(CoordinatorCommand::ResumePausedRun);
             }
         }
-        KeyCode::Char('k') if current_screen == Screen::CoordinatorLive => {
+        KeyCode::Char('K') if current_screen == Screen::CoordinatorLive => {
             if let Some(handle) = state.coordinator_handle() {
                 state.try_owner_action(&handle, |state| {
                     state.open_coordinator_stop_dialog();
@@ -390,9 +446,6 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
             } else {
                 state.open_coordinator_recover_dialog();
             }
-        }
-        KeyCode::Char('l') if current_screen == Screen::CoordinatorLive => {
-            state.refresh_coordinator_snapshot();
         }
         KeyCode::Char('T')
             if current_screen == Screen::CoordinatorLive
@@ -1332,17 +1385,13 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             // L6-TUI-003: ownership banner row above the main split.
             let live_chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Length(3), Constraint::Min(0)])
+                .constraints([
+                    Constraint::Length(3), // ownership banner
+                    Constraint::Length(1), // summary header status line
+                    Constraint::Min(0),    // vertical stacked panes
+                ])
                 .split(chunks[1]);
             render_coordinator_ownership_banner(f, live_chunks[0], state);
-            let body_chunks = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
-                .split(live_chunks[1]);
-            let right_chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
-                .split(body_chunks[1]);
 
             let status_line = if state.is_coordinator_paused() {
                 "PAUSED (awaiting resume)".to_string()
@@ -1361,251 +1410,319 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             };
             let snapshot_line = if let Some(s) = &state.coordinator_snapshot {
                 format!(
-                    "Tasks: total={} todo={} active={} blocked={} merged={}",
+                    "total={} todo={} active={} blocked={} merged={}",
                     s.total, s.todo, s.active, s.blocked, s.merged
                 )
             } else {
-                "Tasks: unavailable".to_string()
+                "unavailable".to_string()
             };
-            let refresh_line = state
-                .coordinator_last_refresh
-                .map(|ts| format!("Last refresh: {} ago", format_hms(ts.elapsed().as_secs())))
-                .unwrap_or_else(|| "Last refresh: n/a".to_string());
-            let events_rate_line = state
-                .coordinator_events_per_sec
-                .map(|v| format!("Events/sec: {:.2}", v))
-                .unwrap_or_else(|| "Events/sec: n/a".to_string());
-            let event_age_line = state
-                .coordinator_last_event_age
-                .map(|d| format!("Last event age: {}", format_hms(d.as_secs())))
-                .unwrap_or_else(|| "Last event age: n/a".to_string());
-            let run_id_line = state
-                .coordinator_current_run_id
-                .as_deref()
-                .map(|run_id| format!("Run ID: {}", run_id))
-                .unwrap_or_else(|| "Run ID: n/a".to_string());
-            let result_line = state
-                .coordinator_last_result
-                .clone()
-                .unwrap_or_else(|| "Last result: n/a".to_string());
-            // RL-TUI-007: concurrency display with throttle indicator.
-            let concurrency_line =
-                if let Some((effective, original)) = state.coordinator_effective_max_parallel {
-                    if effective < original {
-                        format!("Concurrency: {}/{} (throttled)", effective, original)
+            let search_line = if !state.search_query.is_empty() {
+                format!(" | Search: '{}'", state.search_query)
+            } else {
+                String::new()
+            };
+            let summary_para = Paragraph::new(format!(
+                "Coordinator: {} | Tasks: {}{}",
+                status_line, snapshot_line, search_line
+            )).style(Style::default().fg(theme.accent_dim));
+            f.render_widget(summary_para, live_chunks[1]);
+
+            // Layout the 3 vertical stacked panes: LIVE TASKS table + DETAIL + LIVE LOGS (optional)
+            let body_constraints = if state.coordinator_log_pane_visible {
+                vec![
+                    Constraint::Percentage(45),
+                    Constraint::Percentage(25),
+                    Constraint::Percentage(30),
+                ]
+            } else {
+                vec![
+                    Constraint::Percentage(65),
+                    Constraint::Percentage(35),
+                ]
+            };
+
+            let body_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints(body_constraints)
+                .split(live_chunks[2]);
+
+            // Pane 1: LIVE TASKS Table
+            let filtered_tasks = state.filtered_active_tasks();
+            let mut rows = Vec::new();
+            for task in &filtered_tasks {
+                let health_symbol = if !task.last_error.is_empty()
+                    || task.runtime_status == "failed"
+                {
+                    "▲" // Warning / failed phase
+                } else if task.last_error_code.starts_with("E601") {
+                    "!" // Rate-limited / stale
+                } else if task.runtime_status == "stale" {
+                    "!" // Stale heartbeat
+                } else if matches!(
+                    task.runtime_status.as_str(),
+                    "waiting" | "waiting_for_user" | "phase_done" | "paused"
+                ) {
+                    "◐" // Waiting / paused
+                } else if matches!(task.runtime_status.as_str(), "completed") {
+                    "✓" // Completed
+                } else if task.runtime_status.is_empty() || task.runtime_status == "-" {
+                    "·" // Idle / no runtime
+                } else {
+                    "●" // Healthy active
+                };
+
+                let health_style = if health_symbol == "▲" {
+                    Style::default().fg(theme.bad)
+                } else if health_symbol == "!" {
+                    Style::default().fg(theme.warn)
+                } else if health_symbol == "●" {
+                    Style::default().fg(theme.good)
+                } else {
+                    Style::default().fg(theme.muted)
+                };
+
+                let status_label = if task.last_error_code.starts_with("E601") {
+                    "RATE".to_string()
+                } else {
+                    match task.runtime_status.as_str() {
+                        "running" | "dispatched" | "starting" => "RUN".to_string(),
+                        "waiting" | "waiting_for_user" => "WAIT".to_string(),
+                        "blocked" => "BLK".to_string(),
+                        "retry_scheduled" => "RETRY".to_string(),
+                        "rate_limited" => "RATE".to_string(),
+                        "stale" => "STALE".to_string(),
+                        "failed" => "ERR".to_string(),
+                        "completed" | "phase_done" => "DONE".to_string(),
+                        other if !other.is_empty() && other != "-" => {
+                            other.to_uppercase()
+                        }
+                        _ => "IDLE".to_string(),
+                    }
+                };
+
+                let phase_label = match task.current_phase.as_str() {
+                    "reading_context" => "ctx".to_string(),
+                    "planning" => "plan".to_string(),
+                    "implementing" => "dev".to_string(),
+                    "editing" => "edit".to_string(),
+                    "testing" => "test".to_string(),
+                    "fixing" => "fix".to_string(),
+                    "reviewing" => "review".to_string(),
+                    "committing" => "commit".to_string(),
+                    "opening_pr" => "pr".to_string(),
+                    "waiting_ci" => "ci".to_string(),
+                    "merging" => "merge".to_string(),
+                    "cleanup" => "clean".to_string(),
+                    other if !other.is_empty() && other != "-" => other.to_string(),
+                    _ => String::new(),
+                };
+
+                let status_text = if phase_label.is_empty() {
+                    status_label
+                } else {
+                    format!("{} {}", status_label, phase_label)
+                };
+
+                let age_label = if !task.started_at.is_empty() && task.started_at != "-" {
+                    if let Ok(t) = chrono::DateTime::parse_from_rfc3339(&task.started_at) {
+                        let secs = chrono::Utc::now()
+                            .signed_duration_since(t.with_timezone(&chrono::Utc))
+                            .num_seconds()
+                            .max(0) as u64;
+                        if secs < 60 {
+                            format!("{}s", secs)
+                        } else if secs < 3600 {
+                            format!("{}m", secs / 60)
+                        } else {
+                            format!("{}h", secs / 3600)
+                        }
                     } else {
-                        format!("Concurrency: {}/{}", effective, original)
+                        String::new()
                     }
                 } else {
                     String::new()
                 };
-            let runtime = if concurrency_line.is_empty() {
-                format!(
-                    "Coordinator runtime\n\n{}\n{}\n{}\n{}\n{}\n{}\n\n{}\n\nActions:\n- r: run full cycle\n- y: sync registry\n- c: reconcile\n- u: resume paused run\n- k: stop options\n- v: recover options\n- l: refresh status",
-                    status_line, snapshot_line, refresh_line, events_rate_line, event_age_line,
-                    run_id_line, result_line
-                )
-            } else {
-                format!(
-                    "Coordinator runtime\n\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n\n{}\n\nActions:\n- r: run full cycle\n- y: sync registry\n- c: reconcile\n- u: resume paused run\n- k: stop options\n- v: recover options\n- l: refresh status",
-                    status_line, snapshot_line, concurrency_line, refresh_line, events_rate_line,
-                    event_age_line, run_id_line, result_line
-                )
-            };
-            let runtime_para = wrapped_paragraph(runtime, "Runtime");
-            f.render_widget(runtime_para, body_chunks[0]);
-            let mut active_view = String::new();
-            if let Some(snapshot) = &state.coordinator_snapshot {
-                if snapshot.active_tasks.is_empty() {
-                    active_view.push_str("No active tasks.\n");
+
+                let hb_label = if !task.last_heartbeat.is_empty()
+                    && task.last_heartbeat != "-"
+                {
+                    if let Ok(t) =
+                        chrono::DateTime::parse_from_rfc3339(&task.last_heartbeat)
+                    {
+                        let secs = chrono::Utc::now()
+                            .signed_duration_since(t.with_timezone(&chrono::Utc))
+                            .num_seconds()
+                            .max(0) as u64;
+                        if secs < 60 {
+                            format!("{}s", secs)
+                        } else if secs < 3600 {
+                            format!("{}m", secs / 60)
+                        } else {
+                            format!("{}h", secs / 3600)
+                        }
+                    } else {
+                        String::new()
+                    }
                 } else {
-                    for (idx, task) in snapshot.active_tasks.iter().take(8).enumerate() {
-                        let frames = ["|", "/", "-", "\\"];
-                        let spinner = if state.is_coordinator_running() {
-                            frames[((state.coordinator_spinner_tick as usize) + idx) % frames.len()]
-                        } else {
-                            "-"
-                        };
-                        // Health symbol per spec §7.1
-                        let health_symbol = if !task.last_error.is_empty()
-                            || task.runtime_status == "failed"
-                        {
-                            "▲" // Warning / failed phase
-                        } else if task.last_error_code.starts_with("E601") {
-                            "!" // Rate-limited / stale
-                        } else if task.runtime_status == "stale" {
-                            "!" // Stale heartbeat
-                        } else if matches!(
-                            task.runtime_status.as_str(),
-                            "waiting" | "waiting_for_user" | "phase_done" | "paused"
-                        ) {
-                            "◐" // Waiting / paused
-                        } else if matches!(task.runtime_status.as_str(), "completed") {
-                            "✓" // Completed
-                        } else if task.runtime_status.is_empty() || task.runtime_status == "-" {
-                            "·" // Idle / no runtime
-                        } else {
-                            "●" // Healthy active
-                        };
-                        // Compact status label per spec §7.2
-                        let status_label = if task.last_error_code.starts_with("E601") {
-                            "RATE".to_string()
-                        } else {
-                            match task.runtime_status.as_str() {
-                                "running" | "dispatched" | "starting" => "RUN".to_string(),
-                                "waiting" | "waiting_for_user" => "WAIT".to_string(),
-                                "blocked" => "BLK".to_string(),
-                                "retry_scheduled" => "RETRY".to_string(),
-                                "rate_limited" => "RATE".to_string(),
-                                "stale" => "STALE".to_string(),
-                                "failed" => "ERR".to_string(),
-                                "completed" | "phase_done" => "DONE".to_string(),
-                                other if !other.is_empty() && other != "-" => {
-                                    other.to_uppercase()
-                                }
-                                _ => "IDLE".to_string(),
-                            }
-                        };
-                        // Compact phase label per spec §7.3
-                        let phase_label = match task.current_phase.as_str() {
-                            "reading_context" => "ctx".to_string(),
-                            "planning" => "plan".to_string(),
-                            "implementing" => "dev".to_string(),
-                            "editing" => "edit".to_string(),
-                            "testing" => "test".to_string(),
-                            "fixing" => "fix".to_string(),
-                            "reviewing" => "review".to_string(),
-                            "committing" => "commit".to_string(),
-                            "opening_pr" => "pr".to_string(),
-                            "waiting_ci" => "ci".to_string(),
-                            "merging" => "merge".to_string(),
-                            "cleanup" => "clean".to_string(),
-                            other if !other.is_empty() && other != "-" => other.to_string(),
-                            _ => String::new(),
-                        };
-                        // Relative age from started_at
-                        let age_label = if !task.started_at.is_empty() && task.started_at != "-" {
-                            if let Ok(t) = chrono::DateTime::parse_from_rfc3339(&task.started_at) {
-                                let secs = chrono::Utc::now()
-                                    .signed_duration_since(t.with_timezone(&chrono::Utc))
-                                    .num_seconds()
-                                    .max(0) as u64;
-                                if secs < 60 {
-                                    format!("age {}s", secs)
-                                } else if secs < 3600 {
-                                    format!("age {}m", secs / 60)
-                                } else {
-                                    format!("age {}h", secs / 3600)
-                                }
-                            } else {
-                                String::new()
-                            }
-                        } else {
-                            String::new()
-                        };
-                        // Relative heartbeat age
-                        let hb_label = if !task.last_heartbeat.is_empty()
-                            && task.last_heartbeat != "-"
-                        {
-                            if let Ok(t) =
-                                chrono::DateTime::parse_from_rfc3339(&task.last_heartbeat)
-                            {
-                                let secs = chrono::Utc::now()
-                                    .signed_duration_since(t.with_timezone(&chrono::Utc))
-                                    .num_seconds()
-                                    .max(0) as u64;
-                                if secs < 60 {
-                                    format!("hb {}s", secs)
-                                } else if secs < 3600 {
-                                    format!("hb {}m", secs / 60)
-                                } else {
-                                    format!("hb {}h", secs / 3600)
-                                }
-                            } else {
-                                String::new()
-                            }
-                        } else {
-                            String::new()
-                        };
-                        // Worker slot (fall back to spinner if none)
-                        let worker = if task.worker_id.is_empty() {
-                            spinner.to_string()
-                        } else {
-                            task.worker_id.clone()
-                        };
-                        // Compose compact row: ● worker  TASK-ID  RUN dev  tool  age Xm  hb Ys  Message
-                        let runtime_part = if phase_label.is_empty() {
-                            status_label.clone()
-                        } else {
-                            format!("{} {}", status_label, phase_label)
-                        };
-                        let mut parts: Vec<String> = vec![
-                            format!("{} {}", health_symbol, worker),
-                            task.id.clone(),
-                            runtime_part,
-                        ];
-                        if !task.tool.is_empty() && task.tool != "-" {
-                            parts.push(task.tool.clone());
-                        }
-                        if !age_label.is_empty() {
-                            parts.push(age_label);
-                        }
-                        if !hb_label.is_empty() {
-                            parts.push(hb_label);
-                        }
-                        if !task.message.is_empty() {
-                            // Truncate message to keep the row readable
-                            let msg = if task.message.len() > 50 {
-                                format!("{}…", &task.message[..48])
-                            } else {
-                                task.message.clone()
-                            };
-                            parts.push(msg);
-                        }
-                        active_view.push_str(&parts.join("  "));
-                        active_view.push('\n');
-                        if !task.last_error.is_empty() {
-                            active_view.push_str(&format!("    error: {}\n", task.last_error));
-                        }
-                    }
-                    // RL-TUI-007: throttled tools section below active tasks.
-                    if !state.coordinator_throttled_tools.is_empty() {
-                        active_view.push_str("\nThrottled Tools:\n");
-                        for t in &state.coordinator_throttled_tools {
-                            active_view.push_str(&format!(
-                                "! {}: throttled until {} (backoff: {}s, consecutive: {})\n",
-                                t.tool_id, t.display_until, t.backoff_seconds, t.consecutive_count
-                            ));
-                        }
-                    }
-                }
-            } else {
-                active_view.push_str("No registry snapshot.\n");
+                    String::new()
+                };
+
+                let worker = if task.worker_id.is_empty() { "-" } else { &task.worker_id };
+                let tool = if task.tool.is_empty() { "-" } else { &task.tool };
+
+                let cells = vec![
+                    Cell::from(health_symbol).style(health_style),
+                    Cell::from(worker.to_string()),
+                    Cell::from(task.id.clone()),
+                    Cell::from(status_text),
+                    Cell::from(tool.to_string()),
+                    Cell::from(age_label),
+                    Cell::from(hb_label),
+                ];
+                rows.push(Row::new(cells));
             }
 
-            if !state.coordinator_events.is_empty() {
-                active_view.push_str("\nRecent active task events:\n");
-                for line in state.coordinator_events.iter().rev().take(8).rev() {
-                    active_view.push_str("- ");
-                    active_view.push_str(line);
-                    active_view.push('\n');
-                }
-            }
-            let active_para = wrapped_paragraph(active_view, "Live Tasks");
-            f.render_widget(active_para, right_chunks[0]);
+            let headers = Row::new(vec![
+                Cell::from("Health").style(Style::default().fg(theme.accent)),
+                Cell::from("Worker").style(Style::default().fg(theme.accent)),
+                Cell::from("Task ID").style(Style::default().fg(theme.accent)),
+                Cell::from("Status").style(Style::default().fg(theme.accent)),
+                Cell::from("Tool").style(Style::default().fg(theme.accent)),
+                Cell::from("Age").style(Style::default().fg(theme.accent)),
+                Cell::from("HB").style(Style::default().fg(theme.accent)),
+            ]);
 
-            let mut events_view = String::new();
-            if state.coordinator_events.is_empty() {
-                events_view.push_str("No coordinator events yet.\n");
-            } else {
-                for line in state.coordinator_events.iter().rev().take(18).rev() {
-                    events_view.push_str("- ");
-                    events_view.push_str(line);
-                    events_view.push('\n');
-                }
+            let widths = [
+                Constraint::Length(8),
+                Constraint::Length(12),
+                Constraint::Length(25),
+                Constraint::Length(12),
+                Constraint::Length(10),
+                Constraint::Length(8),
+                Constraint::Length(8),
+            ];
+            let tasks_table = Table::new(rows, widths)
+                .header(headers)
+                .block(panel("LIVE TASKS (j/k to navigate, Enter details, d diff, r retry, s stop)"))
+                .highlight_style(Style::default().bg(theme.highlight_bg))
+                .highlight_symbol("› ");
+
+            let mut table_state = TableState::default();
+            if !filtered_tasks.is_empty() {
+                let clamped_idx = state.coordinator_selected_task_index.min(filtered_tasks.len() - 1);
+                table_state.select(Some(clamped_idx));
             }
-            let events_para = wrapped_paragraph(events_view, "Essential Events");
-            f.render_widget(events_para, right_chunks[1]);
+            f.render_stateful_widget(tasks_table, body_chunks[0], &mut table_state);
+
+            // Pane 2: SELECTED TASK DETAIL
+            let selected_task = state.selected_live_task();
+            let mut detail_lines = Vec::new();
+            if let Some(ref t) = selected_task {
+                let full_task = state.load_coordinator_storage_snapshot().ok().and_then(|s| s.registry.tasks.into_iter().find(|rt| rt.id == t.id));
+                let title = full_task.as_ref().and_then(|rt| rt.title.clone()).unwrap_or_else(|| "(no title)".to_string());
+                let worktree = full_task.as_ref().and_then(|rt| rt.task_runtime.worktree.clone()).unwrap_or_else(|| t.worktree.clone());
+                let branch = full_task.as_ref().and_then(|rt| rt.task_runtime.branch.clone()).unwrap_or_else(|| "-".to_string());
+                
+                detail_lines.push(Line::from(vec![
+                    Span::styled("Task ID:    ", Style::default().fg(theme.muted)),
+                    Span::styled(&t.id, Style::default().add_modifier(Modifier::BOLD)),
+                    Span::styled("   Title: ", Style::default().fg(theme.muted)),
+                    Span::styled(title, Style::default()),
+                ]));
+                detail_lines.push(Line::from(vec![
+                    Span::styled("Worktree:   ", Style::default().fg(theme.muted)),
+                    Span::styled(worktree, Style::default()),
+                    Span::styled("   Branch: ", Style::default().fg(theme.muted)),
+                    Span::styled(branch, Style::default()),
+                ]));
+                detail_lines.push(Line::from(vec![
+                    Span::styled("Status:     ", Style::default().fg(theme.muted)),
+                    Span::styled(format!("{} (phase: {})", t.runtime_status, t.current_phase), Style::default()),
+                    Span::styled("   Tool: ", Style::default().fg(theme.muted)),
+                    Span::styled(&t.tool, Style::default()),
+                ]));
+                if !t.message.is_empty() {
+                    detail_lines.push(Line::from(vec![
+                        Span::styled("Message:    ", Style::default().fg(theme.muted)),
+                        Span::styled(&t.message, Style::default()),
+                    ]));
+                }
+                if !t.last_error.is_empty() {
+                    detail_lines.push(Line::from(vec![
+                        Span::styled("Last Error: ", Style::default().fg(theme.muted)),
+                        Span::styled(&t.last_error, Style::default().fg(theme.bad)),
+                    ]));
+                }
+            } else {
+                detail_lines.push(Line::from("No task selected. Use j/k to navigate."));
+            }
+            let detail_para = Paragraph::new(detail_lines)
+                .block(panel("SELECTED TASK DETAIL"))
+                .wrap(Wrap { trim: true });
+            f.render_widget(detail_para, body_chunks[1]);
+
+            // Pane 3: LIVE LOGS timeline (optional)
+            if state.coordinator_log_pane_visible {
+                let mut logs_lines = Vec::new();
+                if let Some(ref t) = selected_task {
+                    let full_task = state.load_coordinator_storage_snapshot().ok().and_then(|s| s.registry.tasks.into_iter().find(|rt| rt.id == t.id));
+                    let mut read_success = false;
+                    if let Some(ref ft) = full_task {
+                        if let Some(ref stdout_rel) = ft.task_runtime.stdout_log {
+                            if let Some(ref paths) = state.project_paths {
+                                let path = paths.root.join(stdout_rel);
+                                if path.exists() {
+                                    let lines = get_last_lines_of_file(&path, 15);
+                                    if !lines.is_empty() {
+                                        logs_lines.push(Line::from(vec![
+                                            Span::styled(format!("Source: stdout ({})", stdout_rel), Style::default().fg(theme.accent_dim)),
+                                        ]));
+                                        for l in lines {
+                                            logs_lines.push(Line::from(l));
+                                        }
+                                        read_success = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if !read_success {
+                        logs_lines.push(Line::from("No active stdout log file found. Showing matching coordinator events:"));
+                        for line in state.coordinator_events.iter().rev() {
+                            if line.contains(&t.id) {
+                                logs_lines.push(Line::from(line.clone()));
+                            }
+                        }
+                    }
+                } else {
+                    logs_lines.push(Line::from("No task selected. Showing recent coordinator events:"));
+                    for line in state.coordinator_events.iter().rev().take(15).rev() {
+                        logs_lines.push(Line::from(line.clone()));
+                    }
+                }
+                let logs_para = Paragraph::new(logs_lines)
+                    .block(panel("LIVE LOGS"))
+                    .wrap(Wrap { trim: true });
+                f.render_widget(logs_para, body_chunks[2]);
+            }
+
+            // Render popups if open
+            if let Some(ref diff) = state.coordinator_task_diff_popup {
+                let area = ui::centered_rect(85, 85, f.size());
+                let diff_para = Paragraph::new(diff.as_str())
+                    .block(panel("Task Diff (Press Esc/q to Close)"))
+                    .wrap(Wrap { trim: false });
+                f.render_widget(Clear, area);
+                f.render_widget(diff_para, area);
+            }
+            if let Some(ref explain) = state.coordinator_task_explain_popup {
+                let area = ui::centered_rect(85, 85, f.size());
+                let explain_para = Paragraph::new(explain.as_str())
+                    .block(panel("Task Explanation & Timeline (Press Esc/q to Close)"))
+                    .wrap(Wrap { trim: false });
+                f.render_widget(Clear, area);
+                f.render_widget(explain_para, area);
+            }
         }
         Screen::Tools => {
             let body_chunks = Layout::default()
@@ -2139,7 +2256,7 @@ mod tests {
         state.client_context.project_root = dir.path().to_path_buf();
         state.goto_screen(Screen::CoordinatorLive);
 
-        handle_key(&mut state, KeyCode::Char('k'));
+        handle_key(&mut state, KeyCode::Char('K'));
 
         let status = state.ui_status.expect("status");
         assert_eq!(status.level, UiStatusLevel::Warning);
@@ -2292,4 +2409,16 @@ fn render_coordinator_recover_dialog(f: &mut Frame, state: &AppState) {
         )
         .wrap(Wrap { trim: true });
     f.render_widget(popup, area);
+}
+
+fn get_last_lines_of_file(path: &std::path::Path, limit: usize) -> Vec<String> {
+    use std::io::{BufRead, BufReader};
+    if let Ok(file) = std::fs::File::open(path) {
+        let reader = BufReader::new(file);
+        let lines: Vec<String> = reader.lines().filter_map(Result::ok).collect();
+        let start = lines.len().saturating_sub(limit);
+        lines[start..].to_vec()
+    } else {
+        Vec::new()
+    }
 }
