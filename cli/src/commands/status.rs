@@ -20,7 +20,7 @@ impl Command for StatusCommand {
         let paths = self.app.project_paths()?;
 
         if self.watch {
-            return launch_watch_tui(self.control);
+            return launch_watch_tui(self.control, self.logs_only, self.events_only);
         }
 
         let snapshot = self.app.engine.runtime_snapshot(&paths)?;
@@ -94,7 +94,7 @@ fn print_snapshot_summary(snapshot: &macc_core::runtime::RuntimeSnapshot) {
     }
 }
 
-fn launch_watch_tui(control: bool) -> Result<()> {
-    macc_tui::run_tui_with_launch(macc_tui::LaunchMode::Watch { control })
+fn launch_watch_tui(control: bool, logs_only: bool, events_only: bool) -> Result<()> {
+    macc_tui::run_tui_with_launch(macc_tui::LaunchMode::Watch { control, logs_only, events_only })
         .map_err(|e| macc_core::MaccError::Validation(format!("TUI error: {}", e)))
 }

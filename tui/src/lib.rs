@@ -35,7 +35,9 @@ pub enum LaunchMode {
     CoordinatorRun { phase_overrides: Option<String> },
     /// Launch into the read-only observer/watch screen (`macc status --watch`).
     /// `control` enables operator actions (kill, stop, retry).
-    Watch { control: bool },
+    /// `logs_only` collapses all panes except the log tail.
+    /// `events_only` collapses all panes except the event timeline.
+    Watch { control: bool, logs_only: bool, events_only: bool },
 }
 
 /// RAII guard to ensure terminal state is restored on drop.
@@ -78,9 +80,11 @@ pub fn run_tui_with_launch(mode: LaunchMode) -> Result<()> {
             state.coordinator_run_auto_quit = true;
             state.coordinator_phase_overrides = phase_overrides;
         }
-        LaunchMode::Watch { control } => {
+        LaunchMode::Watch { control, logs_only, events_only } => {
             state.goto_screen(Screen::Watch);
             state.watch_control_enabled = control;
+            state.watch_logs_only = logs_only;
+            state.watch_events_only = events_only;
         }
         LaunchMode::Default => {}
     }
@@ -1950,15 +1954,9 @@ fn scope_label(scope: Scope) -> &'static str {
 
 fn render_watch_screen(f: &mut Frame, state: &AppState, area: Rect) {
     let theme = theme();
-    // Use the RuntimeSnapshot populated by refresh_watch_snapshot() — the same
-    // model that powers `macc status --json` and `GET /api/v1/snapshot`.
     let snapshot = state.watch_snapshot.as_ref();
 
-    let control_label = if state.watch_control_enabled {
-        " [CONTROL]"
-    } else {
-        " [READ-ONLY]"
-    };
+    let control_label = if state.watch_control_enabled { " [CONTROL]" } else { " [READ-ONLY]" };
     let age_label = state
         .watch_last_refresh
         .map(|ts| {
@@ -1968,126 +1966,190 @@ fn render_watch_screen(f: &mut Frame, state: &AppState, area: Rect) {
         .unwrap_or_else(|| "loading…".to_string());
     let title = format!("Observer{} · refreshed {}", control_label, age_label);
 
+    // Spec §2.12: paused coordinator banner — displayed above everything when paused.
+    let is_paused = snapshot.map(|s| s.coordinator.paused).unwrap_or(false);
+    let pause_reason = snapshot
+        .and_then(|s| s.coordinator.pause_reason.as_deref())
+        .unwrap_or("operator requested pause");
+
+    let (banner_area, content_area) = if is_paused {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(area);
+        (Some(chunks[0]), chunks[1])
+    } else {
+        (None, area)
+    };
+
+    if let Some(ba) = banner_area {
+        let banner = Paragraph::new(format!("  ⚠  COORDINATOR PAUSED — {} ", pause_reason))
+            .style(Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD));
+        f.render_widget(banner, ba);
+    }
+
+    // Build the vertical layout depending on --logs-only / --events-only filter flags.
+    let (show_top, show_log) = if state.watch_logs_only {
+        (false, true)
+    } else if state.watch_events_only {
+        (true, false)
+    } else {
+        (true, true)
+    };
+
+    let vertical_constraints: Vec<Constraint> = match (show_top, show_log) {
+        (true, true) => vec![Constraint::Percentage(40), Constraint::Percentage(30), Constraint::Min(3)],
+        (true, false) => vec![Constraint::Percentage(80), Constraint::Length(0), Constraint::Min(3)],
+        (false, true) => vec![Constraint::Length(0), Constraint::Percentage(90), Constraint::Min(3)],
+        (false, false) => vec![Constraint::Percentage(40), Constraint::Percentage(30), Constraint::Min(3)],
+    };
+
     let vertical = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage(40),
-            Constraint::Percentage(30),
-            Constraint::Min(3),
-        ])
-        .split(area);
+        .constraints(vertical_constraints)
+        .split(content_area);
 
-    let top_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(35),
-            Constraint::Percentage(40),
-            Constraint::Percentage(25),
-        ])
-        .split(vertical[0]);
+    // Top row (workers / queue / events) — hidden in --logs-only mode.
+    if show_top {
+        let top_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(35),
+                Constraint::Percentage(40),
+                Constraint::Percentage(25),
+            ])
+            .split(vertical[0]);
 
-    // Workers pane — reads from RuntimeSnapshot.workers (spec §6.4)
-    let worker_lines: Vec<ListItem> = if let Some(snap) = snapshot {
-        if snap.workers.is_empty() {
-            vec![ListItem::new("No active workers")]
-        } else {
-            snap.workers
-                .iter()
-                .enumerate()
-                .map(|(i, w)| {
-                    let sel = i == state.watch_selected_worker;
-                    let symbol =
-                        if w.runtime_status == "stale" || w.runtime_status == "failed" {
+        // Workers pane — spec §6.4 WorkerRuntime.
+        // Stale detection: heartbeat age > 180s triggers ▲ independently of runtime_status
+        // (spec §2.6 says "freshly-stale workers" must be detected by timestamp, not just
+        // coordinator-assigned status).
+        let now_rfc = chrono::Utc::now();
+        let worker_lines: Vec<ListItem> = if let Some(snap) = snapshot {
+            if snap.workers.is_empty() {
+                vec![ListItem::new("No active workers")]
+            } else {
+                snap.workers
+                    .iter()
+                    .enumerate()
+                    .map(|(i, w)| {
+                        let sel = i == state.watch_selected_worker;
+
+                        // Compute staleness from the raw ISO-8601 timestamp.
+                        let freshly_stale = w
+                            .last_heartbeat
+                            .as_deref()
+                            .and_then(|hb| chrono::DateTime::parse_from_rfc3339(hb).ok())
+                            .map(|hb| {
+                                (now_rfc - hb.with_timezone(&chrono::Utc)).num_seconds() > 180
+                            })
+                            .unwrap_or(false);
+
+                        let symbol = if freshly_stale
+                            || w.runtime_status == "stale"
+                            || w.runtime_status == "failed"
+                        {
                             "▲"
                         } else {
                             "●"
                         };
-                    let phase = w.phase.as_deref().unwrap_or("-");
-                    let task = w.task_id.as_deref().unwrap_or("-");
-                    let text =
-                        format!("{} {}  {}  {}  {}", symbol, w.id, task, phase, w.runtime_status);
-                    let style = if sel {
-                        Style::default()
-                            .fg(theme.accent)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default()
-                    };
-                    ListItem::new(text).style(style)
+
+                        let phase = w.phase.as_deref().unwrap_or("-");
+                        let task = w.task_id.as_deref().unwrap_or("-");
+                        let hb_age = w
+                            .last_heartbeat
+                            .as_deref()
+                            .and_then(|hb| chrono::DateTime::parse_from_rfc3339(hb).ok())
+                            .map(|hb| {
+                                let secs =
+                                    (now_rfc - hb.with_timezone(&chrono::Utc)).num_seconds();
+                                if secs < 60 { format!("{}s", secs) } else { format!("{}m", secs / 60) }
+                            })
+                            .unwrap_or_else(|| "-".to_string());
+
+                        let text = format!(
+                            "{} {}  {}  {}  {}  hb {}",
+                            symbol, w.id, task, phase, w.runtime_status, hb_age
+                        );
+                        let style = if sel {
+                            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)
+                        } else if freshly_stale || symbol == "▲" {
+                            Style::default().fg(Color::Yellow)
+                        } else {
+                            Style::default()
+                        };
+                        ListItem::new(text).style(style)
+                    })
+                    .collect()
+            }
+        } else {
+            vec![ListItem::new("Waiting for snapshot… (refreshes every 2s)")]
+        };
+        let workers_list = List::new(worker_lines)
+            .block(Block::default().title("Workers  j/k navigate").borders(Borders::ALL));
+        f.render_widget(workers_list, top_chunks[0]);
+
+        // Queue / git pane — spec §6.5 QueueSummary.
+        let tasks_text = if let Some(snap) = snapshot {
+            let q = &snap.queue;
+            format!(
+                "todo {}  active {}  blocked {}  merged {}  total {}\n\nbranch: {}",
+                q.todo,
+                q.in_progress,
+                q.blocked,
+                q.merged,
+                q.total,
+                snap.git.current_branch.as_deref().unwrap_or("-"),
+            )
+        } else {
+            "No snapshot available — coordinator may not be running.".to_string()
+        };
+        let tasks_para = wrapped_paragraph(&tasks_text, "Queue / Git");
+        f.render_widget(tasks_para, top_chunks[1]);
+
+        // Events pane — spec §6.2 RuntimeEvent.
+        let events_text = if let Some(snap) = snapshot {
+            snap.recent_events
+                .iter()
+                .rev()
+                .take(12)
+                .rev()
+                .map(|ev| {
+                    let ts = ev.ts.as_deref().unwrap_or("").get(11..19).unwrap_or("");
+                    let task = ev.task_id.as_deref().unwrap_or("");
+                    format!("{} {} {}", ts, ev.event_type, task)
                 })
-                .collect()
-        }
-    } else {
-        vec![ListItem::new("Waiting for snapshot… (refreshes every 2s)")]
-    };
-    let workers_list = List::new(worker_lines)
-        .block(Block::default().title("Workers  j/k navigate").borders(Borders::ALL));
-    f.render_widget(workers_list, top_chunks[0]);
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            String::new()
+        };
+        let events_para = wrapped_paragraph(
+            if events_text.is_empty() { "No events" } else { &events_text },
+            "Events",
+        );
+        f.render_widget(events_para, top_chunks[2]);
+    }
 
-    // Tasks pane — reads from RuntimeSnapshot.queue (spec §6.5)
-    let tasks_text = if let Some(snap) = snapshot {
-        let q = &snap.queue;
-        let paused = if snap.coordinator.paused { "  PAUSED" } else { "" };
-        format!(
-            "todo {}  active {}  blocked {}  merged {}  total {}{}\n\nbranch: {}",
-            q.todo,
-            q.in_progress,
-            q.blocked,
-            q.merged,
-            q.total,
-            paused,
-            snap.git.current_branch.as_deref().unwrap_or("-"),
-        )
-    } else {
-        "No snapshot available — coordinator may not be running.".to_string()
-    };
-    let tasks_para = wrapped_paragraph(&tasks_text, "Queue / Git");
-    f.render_widget(tasks_para, top_chunks[1]);
-
-    // Events pane — reads from RuntimeSnapshot.recent_events (spec §6.2)
-    let events_text = if let Some(snap) = snapshot {
-        snap.recent_events
+    // Log pane.
+    if show_log {
+        let log_text = state
+            .watch_log_tail
             .iter()
             .rev()
-            .take(12)
+            .take(15)
             .rev()
-            .map(|ev| {
-                let ts = ev.ts.as_deref().unwrap_or("").get(11..19).unwrap_or("");
-                let task = ev.task_id.as_deref().unwrap_or("");
-                format!("{} {} {}", ts, ev.event_type, task)
-            })
+            .cloned()
             .collect::<Vec<_>>()
-            .join("\n")
-    } else {
-        String::new()
-    };
-    let events_para = wrapped_paragraph(
-        if events_text.is_empty() { "No events" } else { &events_text },
-        "Events",
-    );
-    f.render_widget(events_para, top_chunks[2]);
+            .join("\n");
+        let log_para = wrapped_paragraph(
+            if log_text.is_empty() { "No log tail — 'f' to follow coordinator logs" } else { &log_text },
+            "Coordinator Log",
+        );
+        f.render_widget(log_para, vertical[1]);
+    }
 
-    // Log pane
-    let log_text = state
-        .watch_log_tail
-        .iter()
-        .rev()
-        .take(15)
-        .rev()
-        .cloned()
-        .collect::<Vec<_>>()
-        .join("\n");
-    let log_para = wrapped_paragraph(
-        if log_text.is_empty() {
-            "No log tail — 'f' to follow coordinator logs"
-        } else {
-            &log_text
-        },
-        "Coordinator Log",
-    );
-    f.render_widget(log_para, vertical[1]);
-
-    // Status strip — reads from RuntimeSnapshot.throttled_tools (spec §6.6)
+    // Status strip — spec §6.6 ToolThrottleStatus.
     let throttled_label = if let Some(snap) = snapshot {
         if snap.throttled_tools.is_empty() {
             String::new()
@@ -2102,9 +2164,12 @@ fn render_watch_screen(f: &mut Frame, state: &AppState, area: Rect) {
     } else {
         String::new()
     };
-    let strip_text = format!("{}{} | j/k workers | r refresh | '?' help | q quit", title, throttled_label);
-    let strip = Paragraph::new(strip_text)
-        .block(Block::default().title("Status").borders(Borders::ALL));
+    let strip_text = format!(
+        "{}{} | j/k workers | r refresh | '?' help | q quit",
+        title, throttled_label
+    );
+    let strip =
+        Paragraph::new(strip_text).block(Block::default().title("Status").borders(Borders::ALL));
     f.render_widget(strip, vertical[2]);
 }
 
