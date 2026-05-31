@@ -1,5 +1,5 @@
 import React from 'react';
-import { getConfig, getDoctorReport, getWorktrees, ApiClientError } from '../api/client';
+import { getConfig, getDoctorReport, getSnapshot, getWorktrees, ApiClientError } from '../api/client';
 import type {
   ApiConfigResponse,
   ApiCoordinatorAction,
@@ -8,6 +8,7 @@ import type {
   ApiDoctorReport,
   ApiEventPayload,
   ApiFailureReport,
+  ApiRuntimeSnapshot,
   ApiWorktree,
 } from '../api/models';
 import { Button } from '../components/Button';
@@ -298,6 +299,8 @@ const Dashboard: React.FC = () => {
   const [worktrees, setWorktrees] = React.useState<ApiWorktree[]>([]);
   const [doctorReport, setDoctorReport] = React.useState<ApiDoctorReport | null>(null);
   const [config, setConfig] = React.useState<ApiConfigResponse | null>(null);
+  // Spec §1.1 / §4.22: shared runtime snapshot — same model as `macc status --json`
+  const [snapshot, setSnapshot] = React.useState<ApiRuntimeSnapshot | null>(null);
   const [isLoadingAux, setIsLoadingAux] = React.useState(true);
 
   const status = useCoordinatorStore((state) => state.status);
@@ -335,6 +338,9 @@ const Dashboard: React.FC = () => {
           getWorktrees({ signal }).then((data) => setWorktrees(data)),
           getDoctorReport({ signal }).then((data) => setDoctorReport(data)),
           getConfig({ signal }).then((data) => setConfig(data)),
+          // Spec §1.1: fetch the shared RuntimeSnapshot so the dashboard reads
+          // from the same source as `macc status --json` and the TUI observer.
+          getSnapshot({ signal }).then((data) => setSnapshot(data)).catch(() => undefined),
         ]);
       } catch (error) {
         if (error instanceof DOMException && error.name === 'AbortError') {
@@ -498,6 +504,43 @@ const Dashboard: React.FC = () => {
           </div>
         </dl>
       </section>
+
+      {/* Spec §4.5 / §1.1: RuntimeSnapshot KPI row — shared model with CLI and TUI */}
+      {snapshot && (
+        <section className="rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-card)] p-5 shadow-[var(--shadow-soft)]">
+          <div className="mb-4 flex items-center justify-between">
+            <h2 className="text-xl font-semibold">Runtime snapshot</h2>
+            <span className="text-xs text-[var(--text-muted)]">
+              {snapshot.coordinator.paused
+                ? '⚠ COORDINATOR PAUSED'
+                : snapshot.coordinator.running
+                ? '● running'
+                : '○ idle'}
+              {snapshot.git.current_branch ? ` · ${snapshot.git.current_branch}` : ''}
+            </span>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-3 xl:grid-cols-6">
+            <KpiCard title="Todo" value={snapshot.queue.todo} />
+            <KpiCard title="In progress" value={snapshot.queue.in_progress} />
+            <KpiCard title="Reviewing" value={snapshot.queue.reviewing} />
+            <KpiCard title="Blocked" value={snapshot.queue.blocked} />
+            <KpiCard title="Merged" value={snapshot.queue.merged} />
+            <KpiCard title="Workers" value={snapshot.workers.length} />
+          </div>
+          {snapshot.throttled_tools.length > 0 && (
+            <div className="mt-3 flex flex-wrap gap-2">
+              {snapshot.throttled_tools.map((t) => (
+                <span
+                  key={t.tool}
+                  className="rounded-full bg-[var(--warning)]/20 px-2 py-0.5 text-xs text-[var(--warning)]"
+                >
+                  {t.tool} throttled — {t.backoff_seconds}s
+                </span>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
 
       <section className="grid gap-6 xl:grid-cols-[1.25fr_0.75fr]">
         <div className="rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-card)] p-5 shadow-[var(--shadow-soft)]">

@@ -33,6 +33,8 @@ import type {
   ApiWorktree,
   ApiWorktreeCreateRequest,
   ApiTrustSummary,
+  ApiRuntimeSnapshot,
+  ApiSkillItem,
   GitCommit,
   GitGraphResponse,
 } from './models';
@@ -728,4 +730,26 @@ export async function getTrust(
   options: ApiRequestOptions = {},
 ): Promise<ApiTrustSummary> {
   return sendJson<ApiTrustSummary>('/trust', 'GET', options);
+}
+
+// ── Shared runtime snapshot (spec §6.7 / §4.21) ──────────────────────────────
+
+export async function getSnapshot(
+  options: ApiRequestOptions = {},
+): Promise<ApiRuntimeSnapshot> {
+  return requestJson<ApiRuntimeSnapshot>(
+    '/snapshot',
+    { method: 'GET', signal: options.signal },
+    options.baseUrl,
+  );
+}
+
+export async function listSkills(
+  options: ApiRequestOptions = {},
+): Promise<ApiSkillItem[]> {
+  return requestJson<ApiSkillItem[]>(
+    '/skills',
+    { method: 'GET', signal: options.signal },
+    options.baseUrl,
+  );
 }

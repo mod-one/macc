@@ -106,9 +106,13 @@ pub(crate) async fn run_skill_handler(
         yes: body.yes.unwrap_or(true),
     };
 
-    let result = state
-        .engine
-        .run_skill(&state.paths, &skill, &request)
+    // `SkillRunner::run` spawns blocking child processes; move it off the async
+    // executor thread so it cannot starve the Tokio thread pool.
+    let engine = state.engine.clone();
+    let paths = state.paths.clone();
+    let result = tokio::task::spawn_blocking(move || engine.run_skill(&paths, &skill, &request))
+        .await
+        .map_err(|e| super::errors::ApiError::validation(format!("task join error: {}", e)))?
         .map_err(|e| super::errors::ApiError::validation(e.to_string()))?;
 
     let v = serde_json::to_value(&result)

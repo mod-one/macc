@@ -668,3 +668,72 @@ export interface ApiTrustSummary {
   allowed_roots: string[];
   audit_log: string;
 }
+
+// ── Shared runtime snapshot (spec §6.3) ──────────────────────────────────────
+
+export interface ApiQueueSummary {
+  todo: number;
+  ready: number;
+  claimed: number;
+  in_progress: number;
+  testing: number;
+  reviewing: number;
+  changes_requested: number;
+  blocked: number;
+  merged: number;
+  failed: number;
+  total: number;
+}
+
+export interface ApiWorkerRuntime {
+  id: string;
+  worktree_path: string;
+  tool: string;
+  task_id: string | null;
+  branch: string | null;
+  phase: string | null;
+  runtime_status: string;
+  last_heartbeat: string | null;
+  retry_count: number;
+  delayed_until: string | null;
+}
+
+export interface ApiToolThrottleStatus {
+  tool: string;
+  reason: string;
+  error_code: string;
+  retryable: boolean;
+  delayed_until: string | null;
+  backoff_seconds: number;
+  effective_parallelism_delta: number;
+}
+
+export interface ApiRuntimeEvent {
+  ts: string | null;
+  event_type: string;
+  task_id: string | null;
+  phase: string | null;
+  status: string | null;
+  message: string | null;
+}
+
+export interface ApiRuntimeSnapshot {
+  generated_at: string;
+  project: { name: string; root: string; config_version: string | null };
+  coordinator: { running: boolean; paused: boolean; pause_reason: string | null };
+  queue: ApiQueueSummary;
+  workers: ApiWorkerRuntime[];
+  throttled_tools: ApiToolThrottleStatus[];
+  recent_events: ApiRuntimeEvent[];
+  git: { current_branch: string | null; clean: boolean; worktrees_count: number };
+  diagnostics: { issues_count: number; warnings_count: number; critical_count: number };
+  active_runs: Array<{ id: string; skill_id: string; status: string; started_at: string }>;
+}
+
+export interface ApiSkillItem {
+  id: string;
+  title: string;
+  kind: string;
+  risk: string;
+  description: string;
+}
