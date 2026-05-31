@@ -11,6 +11,7 @@ pub struct SkillsCmdCommand {
 pub enum SkillsSubcommand {
     List { tool: Option<String> },
     Show { skill: String },
+    Explain { skill: String },
     Doctor,
 }
 
@@ -70,6 +71,89 @@ impl Command for SkillsCmdCommand {
                                 println!("  {}: strategy={}", tool, target.strategy);
                             }
                         }
+                    }
+                    None => {
+                        println!(
+                            "Skill '{}' not found. Run 'macc skills list' to see available skills.",
+                            skill
+                        );
+                    }
+                }
+            }
+            SkillsSubcommand::Explain { skill } => {
+                match self.app.engine.resolve_skill(&paths, skill) {
+                    Some(def) => {
+                        println!("Skill:       {}", def.id);
+                        println!("Title:       {}", def.title);
+                        println!("Kind:        {}", def.kind.as_str());
+                        println!("Risk:        {}", def.risk.as_str());
+                        if !def.description.is_empty() {
+                            println!("Description: {}", def.description);
+                        }
+                        println!();
+                        // Plain-English explanation of the execution path.
+                        match def.kind {
+                            macc_core::skills_runner::SkillKind::LocalCommand => {
+                                println!(
+                                    "Execution: local commands only — no AI tool required."
+                                );
+                                if !def.steps.is_empty() {
+                                    println!("Steps:");
+                                    for (i, step) in def.steps.iter().enumerate() {
+                                        if let Some(cmd) = &step.run {
+                                            println!("  {}. $ {}", i + 1, cmd);
+                                        }
+                                    }
+                                }
+                            }
+                            macc_core::skills_runner::SkillKind::Prompt => {
+                                println!(
+                                    "Execution: prompt sent to the selected tool adapter."
+                                );
+                                if !def.steps.is_empty() {
+                                    if let Some(prompt) = def.steps.first().and_then(|s| s.prompt.as_deref()) {
+                                        let excerpt = if prompt.len() > 200 {
+                                            format!("{}…", &prompt[..200])
+                                        } else {
+                                            prompt.to_string()
+                                        };
+                                        println!("Prompt excerpt:\n  {}", excerpt);
+                                    }
+                                }
+                            }
+                            macc_core::skills_runner::SkillKind::Hybrid => {
+                                println!(
+                                    "Execution: local commands first, then output summarized \
+                                     and sent to the selected tool adapter."
+                                );
+                            }
+                            macc_core::skills_runner::SkillKind::Agent => {
+                                println!(
+                                    "Execution: routed to a specific agent persona."
+                                );
+                            }
+                            macc_core::skills_runner::SkillKind::Coordinator => {
+                                println!(
+                                    "Execution: acts on PRD, task registry, or coordinator state."
+                                );
+                            }
+                        }
+                        if !def.targets.is_empty() {
+                            println!();
+                            println!("Adapter strategies:");
+                            for (tool, target) in &def.targets {
+                                println!("  {}: {}", tool, target.strategy);
+                            }
+                        }
+                        println!();
+                        println!(
+                            "Run:      macc run {}",
+                            def.id
+                        );
+                        println!(
+                            "Dry-run:  macc run {} --dry-run",
+                            def.id
+                        );
                     }
                     None => {
                         println!(

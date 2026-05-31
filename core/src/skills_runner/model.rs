@@ -85,6 +85,7 @@ pub struct SkillRunRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SkillRunResult {
     pub skill_id: String,
     pub status: String,
@@ -98,6 +99,7 @@ pub struct SkillRunResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SkillDryRunPreview {
     pub skill_id: String,
     pub title: String,

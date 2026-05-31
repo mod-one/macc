@@ -966,6 +966,100 @@ pub trait Engine {
         crate::skills_runner::SkillRunner::run(skill, request, &log_dir)
     }
 
+    /// Spec §3.5 — 8-step tool selection algorithm.
+    /// Returns the resolved tool ID, or `None` if no tool is needed (local-only skill)
+    /// or no tool is available (caller should produce a helpful error).
+    fn resolve_skill_tool(
+        &self,
+        paths: &ProjectPaths,
+        skill: &crate::skills_runner::SkillDefinition,
+        tool_flag: Option<&str>,
+    ) -> Option<String> {
+        use crate::skills_runner::SkillKind;
+
+        // Step 1: explicit --tool flag.
+        if let Some(t) = tool_flag {
+            return Some(t.to_string());
+        }
+
+        // Local-only skills do not need a tool adapter.
+        if matches!(skill.kind, SkillKind::LocalCommand) {
+            return None;
+        }
+
+        // Step 2: .macc/worktree.json inside a MACC worktree.
+        if let Ok(Some(meta)) = crate::read_worktree_metadata(&paths.root) {
+            if !meta.tool.is_empty() {
+                return Some(meta.tool);
+            }
+        }
+
+        // Step 3: .macc/tool.json (written by `macc worktree apply`).
+        let tool_json = paths.macc_dir.join("tool.json");
+        if tool_json.exists() {
+            if let Ok(content) = std::fs::read_to_string(&tool_json) {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(t) = v.get("tool_id").and_then(|x| x.as_str()) {
+                        return Some(t.to_string());
+                    }
+                }
+            }
+        }
+
+        if let Ok(config) = crate::load_canonical_config(&paths.config_path) {
+            // Step 4: skills.run_policy.default_tool.
+            if let Some(t) = config
+                .skills
+                .as_ref()
+                .and_then(|s| s.run_policy.as_ref())
+                .and_then(|p| p.default_tool.as_deref())
+            {
+                return Some(t.to_string());
+            }
+
+            // Step 5: automation.coordinator.tool_priority first entry.
+            if let Some(t) = config
+                .automation
+                .coordinator
+                .as_ref()
+                .and_then(|c| c.tool_priority.first())
+            {
+                return Some(t.clone());
+            }
+
+            // Steps 6 & 7: first enabled tool in macc.yaml.
+            if let Some(t) = config.tools.enabled.first() {
+                return Some(t.clone());
+            }
+        }
+
+        // Step 8: no tool found — caller handles the error.
+        None
+    }
+
+    /// Spec §3.11 — find the worktree `cwd` for a given task ID.
+    /// Returns the worktree path if the task has an active worktree, `None` otherwise.
+    fn find_task_worktree(
+        &self,
+        paths: &ProjectPaths,
+        task_id: &str,
+    ) -> Option<std::path::PathBuf> {
+        // Prefer the live RuntimeSnapshot (has runtime worktree field from task_runtime).
+        if let Ok(snapshot) = self.runtime_snapshot(paths) {
+            for task in &snapshot.tasks {
+                if task.task_id == task_id {
+                    if let Some(wt) = &task.worktree {
+                        let p = std::path::PathBuf::from(wt);
+                        if p.exists() {
+                            return Some(p);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
     fn coordinator_storage_import_json_to_sqlite(&self, paths: &ProjectPaths) -> Result<()> {
         crate::coordinator_storage::coordinator_storage_import_json_to_sqlite(paths)
     }

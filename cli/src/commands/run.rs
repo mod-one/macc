@@ -34,16 +34,21 @@ impl Command for RunCommand {
                 ))
             })?;
 
+        // Spec §3.5: 8-step tool selection algorithm.
+        let resolved_tool = self
+            .app
+            .engine
+            .resolve_skill_tool(&paths, &skill, self.tool.as_deref());
+
         if self.dry_run {
-            let preview =
-                self.app
-                    .engine
-                    .dry_run_skill(&paths, &skill, self.tool.clone());
+            let preview = self
+                .app
+                .engine
+                .dry_run_skill(&paths, &skill, resolved_tool.clone());
 
             if self.json {
-                let json = serde_json::to_string_pretty(&preview).map_err(|e| {
-                    MaccError::Validation(format!("serialize error: {}", e))
-                })?;
+                let json = serde_json::to_string_pretty(&preview)
+                    .map_err(|e| MaccError::Validation(format!("serialize error: {}", e)))?;
                 println!("{}", json);
             } else {
                 println!("Skill:   {}", preview.skill_id);
@@ -64,6 +69,18 @@ impl Command for RunCommand {
                 println!("Logs:    {}", preview.logs_path);
             }
             return Ok(());
+        }
+
+        // Spec §3.6: if a tool is required and missing, warn clearly.
+        if resolved_tool.is_none() {
+            use macc_core::skills_runner::SkillKind;
+            if !matches!(skill.kind, SkillKind::LocalCommand) {
+                return Err(MaccError::Validation(format!(
+                    "Skill '{}' is a prompt/hybrid skill but no tool adapter is available. \
+                     Specify one with --tool or set skills.run_policy.default_tool in .macc/macc.yaml.",
+                    skill.id
+                )));
+            }
         }
 
         // Risk gate
@@ -99,10 +116,29 @@ impl Command for RunCommand {
             }
         }
 
+        // Spec §3.11: worktree-aware execution — if --task is given and a matching
+        // active worktree exists, run the skill there rather than in paths.root.
+        let cwd = self
+            .task_id
+            .as_deref()
+            .and_then(|tid| self.app.engine.find_task_worktree(&paths, tid))
+            .unwrap_or_else(|| paths.root.clone());
+
+        if let Some(tid) = &self.task_id {
+            if cwd != paths.root {
+                println!("Running in worktree for task {} ({})", tid, cwd.display());
+            } else {
+                println!(
+                    "Note: no active worktree found for task '{}' — running in project root.",
+                    tid
+                );
+            }
+        }
+
         let request = SkillRunRequest {
             skill_id: skill.id.clone(),
-            tool_id: self.tool.clone(),
-            cwd: paths.root.clone(),
+            tool_id: resolved_tool,
+            cwd,
             task_id: self.task_id.clone(),
             scope: self.scope.as_ref().map(|s| vec![s.clone()]),
             inputs: HashMap::new(),
@@ -114,9 +150,8 @@ impl Command for RunCommand {
         let result = self.app.engine.run_skill(&paths, &skill, &request)?;
 
         if self.json {
-            let json = serde_json::to_string_pretty(&result).map_err(|e| {
-                MaccError::Validation(format!("serialize error: {}", e))
-            })?;
+            let json = serde_json::to_string_pretty(&result)
+                .map_err(|e| MaccError::Validation(format!("serialize error: {}", e)))?;
             println!("{}", json);
         } else {
             println!("Skill:    {}", result.skill_id);
@@ -125,7 +160,7 @@ impl Command for RunCommand {
             if let Some(log_path) = &result.log_path {
                 println!("Log:      {}", log_path.display());
             }
-            if !result.stdout.is_empty() {
+            if !result.stdout.is_empty() && !self.watch {
                 println!("\n--- stdout ---");
                 print!("{}", result.stdout);
             }

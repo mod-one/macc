@@ -14,6 +14,22 @@ pub static AGENTS_MD_ORCHESTRATOR: std::sync::OnceLock<
 > = std::sync::OnceLock::new();
 
 /// Trait that all tool adapters must implement.
+/// The output of `ToolAdapter::build_skill_invocation` — a ready-to-run subprocess spec.
+/// Adapters fill in whichever fields their strategy requires.
+#[derive(Debug, Clone)]
+pub struct SkillInvocation {
+    /// Executable name or path.
+    pub program: String,
+    /// Arguments to pass.
+    pub args: Vec<String>,
+    /// Working directory for the process.
+    pub cwd: std::path::PathBuf,
+    /// Optional stdin content (for `supports_prompt_stdin` adapters).
+    pub stdin_content: Option<String>,
+    /// Human-readable description of what will be invoked (shown in --dry-run).
+    pub description: String,
+}
+
 pub trait ToolAdapter: Send + Sync {
     /// Unique identifier for the tool.
     fn id(&self) -> String;
@@ -40,6 +56,46 @@ pub trait ToolAdapter: Send + Sync {
     /// primary context file is not present in the generated plan.
     fn context_file_fallback(&self) -> Option<String> {
         None
+    }
+
+    // ── Spec §3.6: Skill execution capabilities ──────────────────────────────
+
+    /// Whether this adapter can directly run a named skill (Strategy A).
+    fn supports_skill_run(&self) -> bool {
+        false
+    }
+
+    /// Whether this adapter accepts a full prompt via stdin (Strategy C).
+    fn supports_prompt_stdin(&self) -> bool {
+        false
+    }
+
+    /// Whether this adapter can install skill files into its skill directory.
+    fn supports_skill_install(&self) -> bool {
+        false
+    }
+
+    /// Whether this adapter supports resuming an existing session.
+    fn supports_session_resume(&self) -> bool {
+        false
+    }
+
+    /// Build a concrete subprocess invocation for this skill.
+    ///
+    /// Called by `SkillRunner` when `supports_skill_run()` or `supports_prompt_stdin()` is true.
+    /// The default implementation returns an error so adapters that don't support skill
+    /// execution fail loudly rather than silently.
+    fn build_skill_invocation(
+        &self,
+        skill: &crate::skills_runner::SkillDefinition,
+        request: &crate::skills_runner::SkillRunRequest,
+    ) -> crate::Result<SkillInvocation> {
+        Err(crate::MaccError::Validation(format!(
+            "Adapter '{}' does not support skill execution (skill '{}'). \
+             Override build_skill_invocation() in the adapter.",
+            self.id(),
+            skill.id,
+        )))
     }
 }
 

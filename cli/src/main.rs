@@ -645,6 +645,11 @@ pub enum SkillsSubcommands {
         /// Skill ID
         skill: String,
     },
+    /// Explain a skill — show kind, risk, steps, and adapter strategies in plain English
+    Explain {
+        /// Skill ID
+        skill: String,
+    },
     /// Check skill health and configuration
     Doctor,
 }
@@ -1500,6 +1505,9 @@ fn run_with_engine_provider(
                 SkillsSubcommands::List { tool } => SkillsSubcommand::List { tool: tool.clone() },
                 SkillsSubcommands::Show { skill } => {
                     SkillsSubcommand::Show { skill: skill.clone() }
+                }
+                SkillsSubcommands::Explain { skill } => {
+                    SkillsSubcommand::Explain { skill: skill.clone() }
                 }
                 SkillsSubcommands::Doctor => SkillsSubcommand::Doctor,
             };
