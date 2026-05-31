@@ -360,6 +360,9 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
         KeyCode::Char('r') => {
             if has_pending_takeover {
                 state.ownership_respond_takeover(false);
+            } else if current_screen == Screen::Watch {
+                // Force-refresh the RuntimeSnapshot immediately.
+                state.refresh_watch_snapshot();
             } else if current_screen == Screen::CoordinatorLive {
                 if let Some(task) = state.selected_live_task() {
                     match state.requeue_selected_task(task.task_id.clone()) {
@@ -392,6 +395,12 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
             state.navigate_next();
         }
         KeyCode::Char('k') if current_screen == Screen::CoordinatorLive => {
+            state.navigate_prev();
+        }
+        KeyCode::Char('j') if current_screen == Screen::Watch => {
+            state.navigate_next();
+        }
+        KeyCode::Char('k') if current_screen == Screen::Watch => {
             state.navigate_prev();
         }
         KeyCode::Char('d') if current_screen == Screen::CoordinatorLive => {
@@ -1941,14 +1950,23 @@ fn scope_label(scope: Scope) -> &'static str {
 
 fn render_watch_screen(f: &mut Frame, state: &AppState, area: Rect) {
     let theme = theme();
-    let snapshot = state.coordinator_snapshot.as_ref();
+    // Use the RuntimeSnapshot populated by refresh_watch_snapshot() — the same
+    // model that powers `macc status --json` and `GET /api/v1/snapshot`.
+    let snapshot = state.watch_snapshot.as_ref();
 
     let control_label = if state.watch_control_enabled {
         " [CONTROL]"
     } else {
         " [READ-ONLY]"
     };
-    let title = format!("Observer{}", control_label);
+    let age_label = state
+        .watch_last_refresh
+        .map(|ts| {
+            let secs = ts.elapsed().as_secs();
+            if secs < 5 { "now".to_string() } else { format!("{}s ago", secs) }
+        })
+        .unwrap_or_else(|| "loading…".to_string());
+    let title = format!("Observer{} · refreshed {}", control_label, age_label);
 
     let vertical = Layout::default()
         .direction(Direction::Vertical)
@@ -1968,66 +1986,81 @@ fn render_watch_screen(f: &mut Frame, state: &AppState, area: Rect) {
         ])
         .split(vertical[0]);
 
-    // Workers pane
-    use macc_core::coordinator::RuntimeStatus;
+    // Workers pane — reads from RuntimeSnapshot.workers (spec §6.4)
     let worker_lines: Vec<ListItem> = if let Some(snap) = snapshot {
-        snap.active_tasks
-            .iter()
-            .enumerate()
-            .map(|(i, t)| {
-                let sel = i == state.watch_selected_worker;
-                let symbol = match t.runtime_status {
-                    RuntimeStatus::Stale | RuntimeStatus::Failed => "▲",
-                    _ => "●",
-                };
-                let text = format!(
-                    "{} {} {} {} {}",
-                    symbol,
-                    t.worker_id,
-                    t.task_id,
-                    t.phase.compact_label(),
-                    t.runtime_status.as_str(),
-                );
-                let style = if sel {
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                };
-                ListItem::new(text).style(style)
-            })
-            .collect()
+        if snap.workers.is_empty() {
+            vec![ListItem::new("No active workers")]
+        } else {
+            snap.workers
+                .iter()
+                .enumerate()
+                .map(|(i, w)| {
+                    let sel = i == state.watch_selected_worker;
+                    let symbol =
+                        if w.runtime_status == "stale" || w.runtime_status == "failed" {
+                            "▲"
+                        } else {
+                            "●"
+                        };
+                    let phase = w.phase.as_deref().unwrap_or("-");
+                    let task = w.task_id.as_deref().unwrap_or("-");
+                    let text =
+                        format!("{} {}  {}  {}  {}", symbol, w.id, task, phase, w.runtime_status);
+                    let style = if sel {
+                        Style::default()
+                            .fg(theme.accent)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                    };
+                    ListItem::new(text).style(style)
+                })
+                .collect()
+        }
     } else {
-        vec![ListItem::new("No active workers")]
+        vec![ListItem::new("Waiting for snapshot… (refreshes every 2s)")]
     };
     let workers_list = List::new(worker_lines)
-        .block(Block::default().title("Workers").borders(Borders::ALL));
+        .block(Block::default().title("Workers  j/k navigate").borders(Borders::ALL));
     f.render_widget(workers_list, top_chunks[0]);
 
-    // Tasks pane
+    // Tasks pane — reads from RuntimeSnapshot.queue (spec §6.5)
     let tasks_text = if let Some(snap) = snapshot {
-        let counts = format!(
-            "Total: {}  todo: {}  active: {}  blocked: {}  merged: {}",
-            snap.total, snap.todo, snap.active, snap.blocked, snap.merged
-        );
-        counts
+        let q = &snap.queue;
+        let paused = if snap.coordinator.paused { "  PAUSED" } else { "" };
+        format!(
+            "todo {}  active {}  blocked {}  merged {}  total {}{}\n\nbranch: {}",
+            q.todo,
+            q.in_progress,
+            q.blocked,
+            q.merged,
+            q.total,
+            paused,
+            snap.git.current_branch.as_deref().unwrap_or("-"),
+        )
     } else {
         "No snapshot available — coordinator may not be running.".to_string()
     };
-    let tasks_para = wrapped_paragraph(&tasks_text, "Tasks / Queue");
+    let tasks_para = wrapped_paragraph(&tasks_text, "Queue / Git");
     f.render_widget(tasks_para, top_chunks[1]);
 
-    // Events pane
-    let events_text = state
-        .coordinator_events
-        .iter()
-        .rev()
-        .take(12)
-        .rev()
-        .cloned()
-        .collect::<Vec<_>>()
-        .join("\n");
+    // Events pane — reads from RuntimeSnapshot.recent_events (spec §6.2)
+    let events_text = if let Some(snap) = snapshot {
+        snap.recent_events
+            .iter()
+            .rev()
+            .take(12)
+            .rev()
+            .map(|ev| {
+                let ts = ev.ts.as_deref().unwrap_or("").get(11..19).unwrap_or("");
+                let task = ev.task_id.as_deref().unwrap_or("");
+                format!("{} {} {}", ts, ev.event_type, task)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        String::new()
+    };
     let events_para = wrapped_paragraph(
         if events_text.is_empty() { "No events" } else { &events_text },
         "Events",
@@ -2035,27 +2068,41 @@ fn render_watch_screen(f: &mut Frame, state: &AppState, area: Rect) {
     f.render_widget(events_para, top_chunks[2]);
 
     // Log pane
-    let log_text = state.watch_log_tail.iter().rev().take(15).rev().cloned().collect::<Vec<_>>().join("\n");
+    let log_text = state
+        .watch_log_tail
+        .iter()
+        .rev()
+        .take(15)
+        .rev()
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
     let log_para = wrapped_paragraph(
-        if log_text.is_empty() { "No log tail — use 'f' to follow coordinator logs" } else { &log_text },
+        if log_text.is_empty() {
+            "No log tail — 'f' to follow coordinator logs"
+        } else {
+            &log_text
+        },
         "Coordinator Log",
     );
     f.render_widget(log_para, vertical[1]);
 
-    // Status strip
-    let throttled: Vec<String> = if let Some(snap) = snapshot {
-        snap.throttled_tools
-            .iter()
-            .map(|t| format!("{} throttled", t.tool_id))
-            .collect()
+    // Status strip — reads from RuntimeSnapshot.throttled_tools (spec §6.6)
+    let throttled_label = if let Some(snap) = snapshot {
+        if snap.throttled_tools.is_empty() {
+            String::new()
+        } else {
+            let names: Vec<_> = snap
+                .throttled_tools
+                .iter()
+                .map(|t| format!("{} throttled ({}s)", t.tool, t.backoff_seconds))
+                .collect();
+            format!(" | {}", names.join(", "))
+        }
     } else {
-        Vec::new()
+        String::new()
     };
-    let strip_text = if throttled.is_empty() {
-        format!("{} | Press '?' for help | 'q' to quit", title)
-    } else {
-        format!("{} | {} | Press '?' for help", title, throttled.join(", "))
-    };
+    let strip_text = format!("{}{} | j/k workers | r refresh | '?' help | q quit", title, throttled_label);
     let strip = Paragraph::new(strip_text)
         .block(Block::default().title("Status").borders(Borders::ALL));
     f.render_widget(strip, vertical[2]);

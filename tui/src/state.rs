@@ -21,6 +21,7 @@ use macc_core::service::coordinator_workflow::{
 use macc_core::service::process_ownership::{ProcessOwnershipGuard, ProcessViewerGuard};
 use macc_core::service::process_ownership_gate::{gate_owner_action, ClientContext};
 use macc_core::tool::{ActionKind, FieldDefault, FieldKind, ToolDescriptor, ToolField};
+use macc_core::runtime::RuntimeSnapshot;
 use macc_core::{find_project_root, Engine, MaccError, ProjectPaths};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap};
@@ -235,6 +236,7 @@ pub struct AppState {
     pub coordinator_task_explain_popup: Option<String>,
     pub watch_control_enabled: bool,
     pub watch_selected_worker: usize,
+    pub watch_snapshot: Option<RuntimeSnapshot>,
     pub watch_log_tail: Vec<String>,
     pub watch_last_refresh: Option<Instant>,
 }
@@ -342,6 +344,7 @@ impl AppState {
             coordinator_task_explain_popup: None,
             watch_control_enabled: false,
             watch_selected_worker: 0,
+            watch_snapshot: None,
             watch_log_tail: Vec::new(),
             watch_last_refresh: None,
             client_context: ClientContext {
@@ -736,6 +739,23 @@ impl AppState {
             }
             Err(err) => {
                 self.coordinator_last_result = Some(format_actionable_error(&err));
+            }
+        }
+    }
+
+    pub fn refresh_watch_snapshot(&mut self) {
+        let Some(paths) = self.project_paths.as_ref() else {
+            return;
+        };
+        match self.engine.runtime_snapshot(paths) {
+            Ok(snapshot) => {
+                self.watch_snapshot = Some(snapshot);
+                self.watch_last_refresh = Some(Instant::now());
+            }
+            Err(_) => {
+                // Snapshot unavailable (coordinator not running or storage missing).
+                // Leave the previous snapshot in place so the screen is not blanked.
+                self.watch_last_refresh = Some(Instant::now());
             }
         }
     }
@@ -2208,6 +2228,19 @@ impl AppState {
         if should_refresh_events {
             self.refresh_coordinator_events();
             self.scan_for_takeover_requests();
+        }
+
+        // Watch screen: refresh RuntimeSnapshot every 2 seconds, independent of
+        // the CoordinatorLive snapshot so the Observer works without the coordinator
+        // live screen ever being visited.
+        if self.current_screen() == Screen::Watch {
+            let should_refresh_watch = self
+                .watch_last_refresh
+                .map(|ts| ts.elapsed() >= Duration::from_secs(2))
+                .unwrap_or(true);
+            if should_refresh_watch {
+                self.refresh_watch_snapshot();
+            }
         }
     }
 
@@ -4001,6 +4034,17 @@ Saved in .macc/macc.yaml; CLI flag --review=<mode> overrides at runtime.",
             Screen::Preview => self.next_preview_op(),
             Screen::Mcp => self.next_mcp(),
             Screen::CoordinatorLive => self.next_live_task(),
+            Screen::Watch => {
+                let max = self
+                    .watch_snapshot
+                    .as_ref()
+                    .map(|s| s.workers.len())
+                    .unwrap_or(0);
+                if max > 0 {
+                    self.watch_selected_worker =
+                        (self.watch_selected_worker + 1).min(max.saturating_sub(1));
+                }
+            }
             _ => {}
         }
     }
@@ -4017,6 +4061,9 @@ Saved in .macc/macc.yaml; CLI flag --review=<mode> overrides at runtime.",
             Screen::Preview => self.prev_preview_op(),
             Screen::Mcp => self.prev_mcp(),
             Screen::CoordinatorLive => self.prev_live_task(),
+            Screen::Watch => {
+                self.watch_selected_worker = self.watch_selected_worker.saturating_sub(1);
+            }
             _ => {}
         }
     }
