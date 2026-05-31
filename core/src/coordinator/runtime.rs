@@ -1166,6 +1166,42 @@ pub fn spawn_performer_job(
             "performer spawn refused: no coordinator IPC address".to_string(),
         ));
     }
+    let run_id = std::env::var("COORDINATOR_RUN_ID").unwrap_or_else(|_| {
+        format!(
+            "run-{}-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default(),
+            std::process::id()
+        )
+    });
+
+    let log_dir = repo_root.join(".macc").join("log").join("performer").join(task_id);
+    let _ = std::fs::create_dir_all(&log_dir);
+
+    let stdout_path = log_dir.join(format!("{}.stdout.log", run_id));
+    let stderr_path = log_dir.join(format!("{}.stderr.log", run_id));
+
+    let stdout_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&stdout_path)
+        .map_err(|e| MaccError::Io {
+            path: stdout_path.to_string_lossy().into(),
+            action: "create performer stdout log file".into(),
+            source: e,
+        })?;
+
+    let stderr_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&stderr_path)
+        .map_err(|e| MaccError::Io {
+            path: stderr_path.to_string_lossy().into(),
+            action: "create performer stderr log file".into(),
+            source: e,
+        })?;
+
     let mut run_cmd = tokio::process::Command::new(executable_path);
     // Create a new process group so we can kill the entire subprocess tree on
     // timeout by sending signals to the negative PGID.
@@ -1179,21 +1215,14 @@ pub fn spawn_performer_job(
     run_cmd
         .current_dir(repo_root)
         .env("MACC_INTERNAL_INVOCATION", "1")
-        .env(
-            "COORDINATOR_RUN_ID",
-            std::env::var("COORDINATOR_RUN_ID").unwrap_or_else(|_| {
-                format!(
-                    "run-{}-{}",
-                    chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default(),
-                    std::process::id()
-                )
-            }),
-        )
+        .env("COORDINATOR_RUN_ID", &run_id)
         .env("COORDINATOR_EPOCH", coordinator_epoch.to_string())
         .env("MACC_CLAIM_ID", claim_id)
         .env("MACC_EVENT_SOURCE", event_source.clone())
         .env("MACC_EVENT_TASK_ID", task_id)
         .env_remove(crate::coordinator::ipc::COORDINATOR_IPC_ADDR_ENV)
+        .stdout(stdout_file)
+        .stderr(stderr_file)
         .arg("--cwd")
         .arg(repo_root)
         .arg("worktree")
