@@ -910,6 +910,13 @@ pub trait Engine {
         Ok(out)
     }
 
+    fn runtime_snapshot(
+        &self,
+        paths: &ProjectPaths,
+    ) -> Result<crate::runtime::RuntimeSnapshot> {
+        crate::runtime::RuntimeSnapshotBuilder::build(paths)
+    }
+
     fn coordinator_storage_import_json_to_sqlite(&self, paths: &ProjectPaths) -> Result<()> {
         crate::coordinator_storage::coordinator_storage_import_json_to_sqlite(paths)
     }

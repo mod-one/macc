@@ -1,5 +1,5 @@
 use super::{AppContext, Command};
-use macc_core::runtime::RuntimeSnapshotBuilder;
+use macc_core::engine::Engine;
 use macc_core::Result;
 
 pub struct StatusCommand {
@@ -23,7 +23,7 @@ impl Command for StatusCommand {
             return launch_watch_tui(self.control);
         }
 
-        let snapshot = RuntimeSnapshotBuilder::build(&paths)?;
+        let snapshot = self.app.engine.runtime_snapshot(&paths)?;
 
         if self.json {
             let json = serde_json::to_string_pretty(&snapshot).map_err(|e| {

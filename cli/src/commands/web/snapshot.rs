@@ -1,13 +1,15 @@
 use super::WebState;
 use axum::extract::State;
 use axum::Json;
-use macc_core::runtime::RuntimeSnapshotBuilder;
+use macc_core::engine::Engine;
 use serde_json::Value;
 
 pub(crate) async fn get_snapshot_handler(
     State(state): State<WebState>,
 ) -> Result<Json<Value>, super::errors::ApiError> {
-    let snapshot = RuntimeSnapshotBuilder::build(&state.paths)
+    let snapshot = state
+        .engine
+        .runtime_snapshot(&state.paths)
         .map_err(|e| super::errors::ApiError::validation(e.to_string()))?;
     let json = serde_json::to_value(&snapshot)
         .map_err(|e| super::errors::ApiError::validation(e.to_string()))?;
@@ -18,7 +20,9 @@ pub(crate) async fn get_worker_snapshot_handler(
     State(state): State<WebState>,
     axum::extract::Path(worker_id): axum::extract::Path<String>,
 ) -> Result<Json<Value>, super::errors::ApiError> {
-    let snapshot = RuntimeSnapshotBuilder::build(&state.paths)
+    let snapshot = state
+        .engine
+        .runtime_snapshot(&state.paths)
         .map_err(|e| super::errors::ApiError::validation(e.to_string()))?;
     let worker = snapshot.workers.iter().find(|w| w.id == worker_id);
     match worker {
