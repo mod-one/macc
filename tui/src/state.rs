@@ -253,7 +253,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    const AUTOMATION_FIELD_COUNT: usize = 36;
+    const AUTOMATION_FIELD_COUNT: usize = 38;
     const COORDINATOR_EVENTS_EWMA_ALPHA: f64 = 0.30;
     const COORDINATOR_PAUSE_REL_PATH: &'static str = ".macc/automation/task/coordinator.pause.json";
 
@@ -2759,7 +2759,7 @@ impl AppState {
             31 => "[Advanced] Max Review Cycles",
             32 => "[Basic] Safety Policy",
             33 => "[Basic] Destructive Actions",
-            // Spec §19: Phase pipeline toggles for Testing and Review
+            // §19: Phase pipeline toggles — saved config only; runtime CLI overrides take precedence
             34 => "[Phases] Testing Phase Enabled",
             35 => "[Phases] Testing Phase Mode",
             36 => "[Phases] Review Phase Enabled",
@@ -2804,12 +2804,63 @@ impl AppState {
             31 => "Max review cycles per task. 0=skip review, 1=one review+fix (no loopback), N=N loops. Empty=unlimited.",
             32 => "Permitted tool write scopes and validations (strict, standard).",
             33 => "Risk policy for destructive actions (single_confirm, double_confirm).",
-            // Spec §19: phase controls
-            34 => "Enable the dedicated Tester agent phase after the Performer.",
-            35 => "Tester activation mode: disabled | required | risk_based | manual.",
-            36 => "Enable the dedicated Reviewer agent phase after testing (or after dev if testing disabled).",
-            37 => "Reviewer activation mode: disabled | required | risk_based | manual.",
+            // §19: phase controls — CLI flags (--disable-testing etc.) override these saved settings
+            34 => "Enable the dedicated Tester agent phase after the Performer. \
+Saved in .macc/macc.yaml; CLI flag --disable-testing/--testing= overrides at runtime without modifying this file.",
+            35 => "Tester activation mode: disabled | required | risk_based | manual. \
+Saved in .macc/macc.yaml; CLI flag --testing=<mode> overrides at runtime.",
+            36 => "Enable the dedicated Reviewer agent phase after testing (or after dev if testing disabled). \
+Saved in .macc/macc.yaml; CLI flag --disable-review/--review= overrides at runtime.",
+            37 => "Reviewer activation mode: disabled | required | risk_based | manual. \
+Saved in .macc/macc.yaml; CLI flag --review=<mode> overrides at runtime.",
             _ => "",
+        }
+    }
+
+    /// §18/§19: Returns a human-readable description of any active CLI runtime override
+    /// that affects the given phase settings field (indices 34-37).
+    /// Returns `None` when no override is active for that field.
+    pub fn phase_override_notice_for_field(&self, index: usize) -> Option<String> {
+        let overrides = self.coordinator_phase_overrides.as_deref()?;
+        // Only relevant for phase fields
+        if !matches!(index, 34..=37) {
+            return None;
+        }
+        // Parse the override tokens to extract testing/review info
+        let testing_override = if overrides.contains("[testing:") {
+            overrides
+                .split_whitespace()
+                .find(|t| t.starts_with("[testing:"))
+                .and_then(|t| t.strip_prefix("[testing:").and_then(|s| s.strip_suffix(']')))
+                .map(|m| m.to_string())
+        } else {
+            None
+        };
+        let review_override = if overrides.contains("[review:") {
+            overrides
+                .split_whitespace()
+                .find(|t| t.starts_with("[review:"))
+                .and_then(|t| t.strip_prefix("[review:").and_then(|s| s.strip_suffix(']')))
+                .map(|m| m.to_string())
+        } else {
+            None
+        };
+        match index {
+            34 | 35 => testing_override.map(|m| {
+                format!(
+                    "CLI OVERRIDE ACTIVE: --testing={m} (or --disable-testing)\n\
+                     Effective mode: {m}\n\
+                     The saved config below is NOT in effect for the running coordinator."
+                )
+            }),
+            36 | 37 => review_override.map(|m| {
+                format!(
+                    "CLI OVERRIDE ACTIVE: --review={m} (or --disable-review)\n\
+                     Effective mode: {m}\n\
+                     The saved config below is NOT in effect for the running coordinator."
+                )
+            }),
+            _ => None,
         }
     }
 
@@ -2951,19 +3002,47 @@ impl AppState {
             33 => coordinator
                 .and_then(|c| c.destructive_actions.clone())
                 .unwrap_or_else(|| "double_confirm".to_string()),
-            // Spec §19: phase pipeline toggles
-            34 => coordinator
-                .map(|c| c.phases.testing.enabled.to_string())
-                .unwrap_or_else(|| "false".to_string()),
-            35 => coordinator
-                .map(|c| c.phases.testing.mode.clone())
-                .unwrap_or_else(|| "disabled".to_string()),
-            36 => coordinator
-                .map(|c| c.phases.review.enabled.to_string())
-                .unwrap_or_else(|| "true".to_string()),
-            37 => coordinator
-                .map(|c| c.phases.review.mode.clone())
-                .unwrap_or_else(|| "required".to_string()),
+            // §19: phase pipeline toggles — show saved config value; annotate if overridden at runtime
+            34 => {
+                let saved = coordinator
+                    .map(|c| c.phases.testing.enabled.to_string())
+                    .unwrap_or_else(|| "false".to_string());
+                if self.phase_override_notice_for_field(34).is_some() {
+                    format!("{saved} [CLI OVERRIDE ACTIVE]")
+                } else {
+                    saved
+                }
+            }
+            35 => {
+                let saved = coordinator
+                    .map(|c| c.phases.testing.mode.clone())
+                    .unwrap_or_else(|| "disabled".to_string());
+                if self.phase_override_notice_for_field(35).is_some() {
+                    format!("{saved} [CLI OVERRIDE ACTIVE]")
+                } else {
+                    saved
+                }
+            }
+            36 => {
+                let saved = coordinator
+                    .map(|c| c.phases.review.enabled.to_string())
+                    .unwrap_or_else(|| "true".to_string());
+                if self.phase_override_notice_for_field(36).is_some() {
+                    format!("{saved} [CLI OVERRIDE ACTIVE]")
+                } else {
+                    saved
+                }
+            }
+            37 => {
+                let saved = coordinator
+                    .map(|c| c.phases.review.mode.clone())
+                    .unwrap_or_else(|| "required".to_string());
+                if self.phase_override_notice_for_field(37).is_some() {
+                    format!("{saved} [CLI OVERRIDE ACTIVE]")
+                } else {
+                    saved
+                }
+            }
             _ => String::new(),
         }
     }
@@ -3149,6 +3228,27 @@ impl AppState {
             self.set_automation_field_bool(self.automation_field_index, !current);
             return;
         }
+        // §19: phase bool toggles (fields 34 = testing.enabled, 36 = review.enabled)
+        if matches!(self.automation_field_index, 34 | 36) {
+            let raw = self.automation_field_display_value(self.automation_field_index);
+            // Strip any "[CLI OVERRIDE ACTIVE]" suffix before parsing
+            let current = raw.split_whitespace().next().unwrap_or("false") == "true";
+            self.set_automation_phase_bool(self.automation_field_index, !current);
+            return;
+        }
+        // §19: phase mode cycling (fields 35 = testing.mode, 37 = review.mode)
+        if matches!(self.automation_field_index, 35 | 37) {
+            let raw = self.automation_field_display_value(self.automation_field_index);
+            let current = raw.split_whitespace().next().unwrap_or("disabled");
+            let next = match current {
+                "disabled" => "required",
+                "required" => "risk_based",
+                "risk_based" => "manual",
+                _ => "disabled",
+            };
+            self.set_automation_phase_mode(self.automation_field_index, next.to_string());
+            return;
+        }
         self.begin_automation_field_edit();
     }
 
@@ -3231,6 +3331,31 @@ impl AppState {
                     Ok(())
                 } else {
                     Err("Value must be 'true' or 'false'.".to_string())
+                }
+            }
+            // §19: phase bool/mode fields 34-37 editable as text
+            34 | 36 => {
+                let value = input.to_lowercase();
+                if value == "true" {
+                    self.set_automation_phase_bool(idx, true);
+                    Ok(())
+                } else if value == "false" {
+                    self.set_automation_phase_bool(idx, false);
+                    Ok(())
+                } else {
+                    Err("Value must be 'true' or 'false'.".to_string())
+                }
+            }
+            35 | 37 => {
+                let value = input.to_lowercase();
+                if matches!(
+                    value.as_str(),
+                    "disabled" | "required" | "risk_based" | "manual"
+                ) {
+                    self.set_automation_phase_mode(idx, value);
+                    Ok(())
+                } else {
+                    Err("Mode must be one of: disabled, required, risk_based, manual.".to_string())
                 }
             }
             _ => Ok(()),
@@ -3332,6 +3457,51 @@ impl AppState {
                 25 => coordinator.legacy_json_fallback = Some(value),
                 28 => coordinator.rate_limit_fallback_enabled = Some(value),
                 29 => coordinator.rate_limit_throttle_parallel = Some(value),
+                _ => {}
+            }
+        }
+    }
+
+    /// §19: Set a phase enabled/disabled bool (fields 34 = testing.enabled, 36 = review.enabled).
+    fn set_automation_phase_bool(&mut self, idx: usize, value: bool) {
+        self.snapshot_before_config_change();
+        if let Some(coordinator) = self.coordinator_config_mut() {
+            match idx {
+                34 => {
+                    coordinator.phases.testing.enabled = value;
+                    // Keep mode in sync: disabled when unchecked, required when checked
+                    if !value {
+                        coordinator.phases.testing.mode = "disabled".to_string();
+                    } else if coordinator.phases.testing.mode == "disabled" {
+                        coordinator.phases.testing.mode = "required".to_string();
+                    }
+                }
+                36 => {
+                    coordinator.phases.review.enabled = value;
+                    if !value {
+                        coordinator.phases.review.mode = "disabled".to_string();
+                    } else if coordinator.phases.review.mode == "disabled" {
+                        coordinator.phases.review.mode = "required".to_string();
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// §19: Set a phase mode string (fields 35 = testing.mode, 37 = review.mode).
+    fn set_automation_phase_mode(&mut self, idx: usize, value: String) {
+        self.snapshot_before_config_change();
+        if let Some(coordinator) = self.coordinator_config_mut() {
+            match idx {
+                35 => {
+                    coordinator.phases.testing.enabled = value != "disabled";
+                    coordinator.phases.testing.mode = value;
+                }
+                37 => {
+                    coordinator.phases.review.enabled = value != "disabled";
+                    coordinator.phases.review.mode = value;
+                }
                 _ => {}
             }
         }
@@ -4517,6 +4687,23 @@ impl AppState {
                 let value = input.to_lowercase();
                 if !matches!(value.as_str(), "block" | "retry" | "requeue") {
                     Some("Allowed: block | retry | requeue".to_string())
+                } else {
+                    None
+                }
+            }
+            // §19: phase bool/mode validation
+            34 | 36 => {
+                let v = input.to_lowercase();
+                if !matches!(v.as_str(), "true" | "false") {
+                    Some("Value must be 'true' or 'false'.".to_string())
+                } else {
+                    None
+                }
+            }
+            35 | 37 => {
+                let v = input.to_lowercase();
+                if !matches!(v.as_str(), "disabled" | "required" | "risk_based" | "manual") {
+                    Some("Mode must be one of: disabled, required, risk_based, manual.".to_string())
                 } else {
                     None
                 }

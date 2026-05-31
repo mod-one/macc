@@ -1285,10 +1285,17 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                     } else {
                         state.automation_field_display_value(i)
                     };
+                    // §18/§19: highlight phase fields in warning colour when a CLI override is active
+                    let has_override = state.phase_override_notice_for_field(i).is_some();
+                    let value_style = if has_override {
+                        Style::default().fg(theme.warn)
+                    } else {
+                        Style::default()
+                    };
                     ListItem::new(Line::from(vec![
                         Span::styled(format!("{:<30}", label), Style::default().fg(theme.muted)),
                         Span::raw(" "),
-                        Span::raw(value),
+                        Span::styled(value, value_style),
                     ]))
                 })
                 .collect();
@@ -1302,8 +1309,14 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             let idx = state
                 .automation_field_index
                 .min(automation_count.saturating_sub(1));
+            // §18/§19: prepend a CLI override warning for phase fields when an override is active
+            let override_prefix = state
+                .phase_override_notice_for_field(idx)
+                .map(|notice| format!("⚠ {notice}\n\n"))
+                .unwrap_or_default();
             let mut detail = format!(
-                "Field: {}\n\n{}\n\nCurrent: {}\n\nShortcuts:\nSpace/Enter - Edit or cycle\nEsc - Cancel edit\ns - Save to .macc/macc.yaml",
+                "{}Field: {}\n\n{}\n\nSaved config: {}\n\nShortcuts:\nSpace/Enter - Edit or cycle\nEsc - Cancel edit\ns - Save to .macc/macc.yaml",
+                override_prefix,
                 state.automation_field_label(idx),
                 state.automation_field_help(idx),
                 state.automation_field_display_value(idx),
