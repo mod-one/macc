@@ -1,6 +1,6 @@
 use crate::coordinator::model::{PrdInput, TaskRegistry};
 use crate::coordinator::runtime as coordinator_runtime;
-use crate::coordinator_storage::append_event_sqlite;
+use crate::coordinator_storage::{append_event_sqlite, CoordinatorStorage};
 use crate::{MaccError, Result};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -852,6 +852,58 @@ mod tests {
         );
         assert_eq!(recency, SlotActivityRecency::Stale);
     }
+
+    #[test]
+    fn test_structured_event_emission_jsonl() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let repo_root = temp_dir.path();
+        
+        let event = crate::coordinator::CoordinatorEventRecord {
+            schema_version: "1".to_string(),
+            event_id: "evt-test-123".to_string(),
+            run_id: Some("run-test-xyz".to_string()),
+            coordinator_epoch: Some(0),
+            claim_id: Some("claim-test-abc".to_string()),
+            seq: 12345,
+            ts: "2026-05-31T12:00:00Z".to_string(),
+            source: "performer:test".to_string(),
+            task_id: Some("TASK-123".to_string()),
+            event_type: "phase_progress".to_string(),
+            phase: Some("dev".to_string()),
+            status: "running".to_string(),
+            detail: Some("Doing task stuff".to_string()),
+            msg: None,
+            payload: serde_json::Value::Null,
+            extra: std::collections::BTreeMap::new(),
+        };
+
+        super::append_structured_event_record(repo_root, &event).unwrap();
+
+        // Check global events.jsonl
+        let global_log = repo_root.join(".macc").join("log").join("events.jsonl");
+        assert!(global_log.exists());
+        let global_content = std::fs::read_to_string(&global_log).unwrap();
+        let parsed_global: serde_json::Value = serde_json::from_str(global_content.trim()).unwrap();
+        assert_eq!(parsed_global["id"], "evt-test-123");
+        assert_eq!(parsed_global["task_id"], "TASK-123");
+        assert_eq!(parsed_global["run_id"], "run-test-xyz");
+        assert_eq!(parsed_global["source"], "performer");
+        assert_eq!(parsed_global["event_type"], "phase_progress");
+        assert_eq!(parsed_global["phase"], "dev");
+        assert_eq!(parsed_global["message"], "Doing task stuff");
+
+        // Check performer events.jsonl
+        let task_log = repo_root
+            .join(".macc")
+            .join("log")
+            .join("performer")
+            .join("TASK-123")
+            .join("run-test-xyz.events.jsonl");
+        assert!(task_log.exists());
+        let task_content = std::fs::read_to_string(&task_log).unwrap();
+        let parsed_task: serde_json::Value = serde_json::from_str(task_content.trim()).unwrap();
+        assert_eq!(parsed_task["id"], "evt-test-123");
+    }
 }
 
 pub fn count_pool_worktrees(repo_root: &Path) -> Result<usize> {
@@ -910,6 +962,7 @@ pub fn append_coordinator_event_with_severity(
     });
     let project_paths = crate::ProjectPaths::from_root(repo_root);
     let _ = append_event_sqlite(&project_paths, &payload)?;
+    let _ = write_structured_event_jsonl(repo_root, event_type, task_id, phase, message, severity);
     Ok(())
 }
 
@@ -942,6 +995,155 @@ pub fn append_phase_skipped_event(
     });
     let project_paths = crate::ProjectPaths::from_root(repo_root);
     let _ = append_event_sqlite(&project_paths, &payload)?;
+    let msg_with_reason = format!("{} (reason: {})", message, reason);
+    let _ = write_structured_event_jsonl(repo_root, "phase_skipped", task_id, phase, &msg_with_reason, "info");
+    Ok(())
+}
+
+pub fn write_structured_event_jsonl(
+    repo_root: &Path,
+    event_type: &str,
+    task_id: &str,
+    phase: &str,
+    message: &str,
+    severity: &str,
+) -> Result<()> {
+    let run_id = ensure_coordinator_run_id();
+    let now = now_iso_coordinator();
+    let seq = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default() as u64;
+    let id = format!("evt_{}", seq);
+    let event = crate::coordinator::CoordinatorEventRecord {
+        schema_version: "1".to_string(),
+        event_id: id,
+        run_id: Some(run_id),
+        coordinator_epoch: None,
+        claim_id: None,
+        seq: seq as i64,
+        ts: now,
+        source: "coordinator".to_string(),
+        task_id: if task_id.is_empty() { None } else { Some(task_id.to_string()) },
+        event_type: event_type.to_string(),
+        phase: if phase.is_empty() { None } else { Some(phase.to_string()) },
+        status: severity.to_string(),
+        detail: Some(message.to_string()),
+        msg: None,
+        payload: serde_json::Value::Null,
+        extra: std::collections::BTreeMap::new(),
+    };
+    append_structured_event_record(repo_root, &event)
+}
+
+pub fn append_structured_event_record(
+    repo_root: &Path,
+    event: &crate::coordinator::CoordinatorEventRecord,
+) -> Result<()> {
+    let run_id = event.run_id.clone().unwrap_or_else(ensure_coordinator_run_id);
+    let now = if event.ts.is_empty() { now_iso_coordinator() } else { event.ts.clone() };
+
+    let task_id = event.task_id.as_deref().unwrap_or("-");
+    let phase = event.phase.as_deref().unwrap_or("-");
+    let severity = if event.status.eq_ignore_ascii_case("failed") || event.status.eq_ignore_ascii_case("error") || event.status.eq_ignore_ascii_case("blocking") {
+        "blocking"
+    } else if event.status.eq_ignore_ascii_case("warning") || event.status.eq_ignore_ascii_case("warn") {
+        "warning"
+    } else {
+        "info"
+    };
+
+    let project_paths = crate::ProjectPaths::from_root(repo_root);
+    let storage_paths = crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&project_paths);
+    let mut worker_id = String::new();
+    let mut tool = String::new();
+    let mut run_id_val = run_id;
+
+    if let Ok(snap) = crate::coordinator_storage::SqliteStorage::new(storage_paths).load_snapshot() {
+        if let Some(task) = snap.registry.tasks.iter().find(|t| t.id == task_id) {
+            worker_id = task.task_runtime.worker_id.clone().unwrap_or_default();
+            tool = task.tool.clone().or_else(|| task.task_runtime.tool.clone()).unwrap_or_default();
+            if let Some(ref r_id) = task.task_runtime.run_id {
+                if !r_id.is_empty() {
+                    run_id_val = r_id.clone();
+                }
+            }
+        }
+    }
+
+    let source = if event.source.starts_with("coordinator") {
+        "coordinator"
+    } else if event.source.starts_with("performer") {
+        "performer"
+    } else if event.source.starts_with("tester") {
+        "tester"
+    } else if event.source.starts_with("reviewer") {
+        "reviewer"
+    } else {
+        match phase {
+            "planning" | "plan" => "performer",
+            "implementing" | "dev" | "editing" | "edit" | "fixing" | "fix" => "performer",
+            "testing" | "test" => "tester",
+            "reviewing" | "review" => "reviewer",
+            "merging" | "merge" => "merge_worker",
+            "committing" | "commit" | "opening_pr" | "pr" => "git",
+            _ => "coordinator",
+        }
+    };
+
+    let id = if event.event_id.is_empty() {
+        let seq = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default() as u64;
+        format!("evt_{}", seq)
+    } else {
+        event.event_id.clone()
+    };
+
+    let message = event.message().unwrap_or("");
+
+    let structured_event = serde_json::json!({
+        "id": id,
+        "task_id": task_id,
+        "run_id": run_id_val,
+        "worker_id": worker_id,
+        "timestamp": now,
+        "severity": severity.to_ascii_lowercase(),
+        "source": source,
+        "event_type": event.event_type,
+        "phase": phase,
+        "message": message,
+        "metadata": {
+            "tool": tool
+        }
+    });
+
+    let log_dir = repo_root.join(".macc").join("log");
+    let _ = std::fs::create_dir_all(&log_dir);
+
+    // Append to global events.jsonl
+    let global_file = log_dir.join("events.jsonl");
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&global_file)
+    {
+        use std::io::Write;
+        let serialized = serde_json::to_string(&structured_event).unwrap_or_default();
+        let _ = writeln!(file, "{}", serialized);
+    }
+
+    // Append to task/run events.jsonl
+    if !task_id.is_empty() && task_id != "-" && !run_id_val.is_empty() {
+        let performer_log_dir = log_dir.join("performer").join(task_id);
+        let _ = std::fs::create_dir_all(&performer_log_dir);
+        let task_file = performer_log_dir.join(format!("{}.events.jsonl", run_id_val));
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&task_file)
+        {
+            use std::io::Write;
+            let serialized = serde_json::to_string(&structured_event).unwrap_or_default();
+            let _ = writeln!(file, "{}", serialized);
+        }
+    }
+
     Ok(())
 }
 

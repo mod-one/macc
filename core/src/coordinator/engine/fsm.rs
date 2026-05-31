@@ -680,6 +680,10 @@ fn apply_dispatch_claim_typed(task: &mut Task, update: &DispatchClaimUpdate) {
     if let Some(active_session_id) = update.active_session_id.as_ref() {
         runtime.active_session_id = Some(active_session_id.clone());
     }
+    let log_prefix = format!(".macc/log/performer/{}/{}", update.task_id, update.run_id);
+    runtime.events_log = Some(format!("{}.events.jsonl", log_prefix));
+    runtime.stdout_log = Some(format!("{}.stdout.log", log_prefix));
+    runtime.stderr_log = Some(format!("{}.stderr.log", log_prefix));
     runtime.pid = update.pid;
     task.touch_state_changed(&update.now);
 }

@@ -295,6 +295,7 @@ fn process_ipc_event(
             )),
         };
     }
+    let _ = crate::coordinator::helpers::append_structured_event_record(&project_paths.root, &event);
     if let Some(runtime_event) = raw_event_to_runtime_event(&event) {
         let _ = runtime_event_bus_tx.send(runtime_event);
     }
