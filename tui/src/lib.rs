@@ -26,10 +26,13 @@ use screen::Screen;
 use state::AppState;
 use ui::{compact_help_line, header_lines, panel, theme, wrapped_paragraph, HeaderContext};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LaunchMode {
     Default,
-    CoordinatorRun,
+    /// Launch directly into the coordinator live screen.
+    /// `phase_overrides` is a human-readable summary of active runtime phase overrides
+    /// (e.g. `"[testing:off] [review:required]"`), or `None` when none are active.
+    CoordinatorRun { phase_overrides: Option<String> },
 }
 
 /// RAII guard to ensure terminal state is restored on drop.
@@ -65,10 +68,11 @@ pub fn run_tui_with_launch(mode: LaunchMode) -> Result<()> {
     let registry = macc_registry::default_registry();
     let engine = std::sync::Arc::new(macc_core::MaccEngine::new(registry));
     let mut state = AppState::new(engine);
-    if mode == LaunchMode::CoordinatorRun {
+    if let LaunchMode::CoordinatorRun { phase_overrides } = mode {
         state.goto_screen(Screen::CoordinatorLive);
         state.start_coordinator_command(CoordinatorCommand::Run);
         state.coordinator_run_auto_quit = true;
+        state.coordinator_phase_overrides = phase_overrides;
     }
 
     run_app(&mut guard.terminal, &mut state)?;
@@ -417,7 +421,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(7), // Title + status badges + trust strip
+            Constraint::Length(8), // Title + status badges + trust strip + override strip
             Constraint::Min(0),    // Body
             Constraint::Length(4), // Footer / Navigation help
         ])
@@ -472,6 +476,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
         status: state.status_line(),
         width: chunks[0].width,
         trust_strip,
+        override_strip: state.coordinator_phase_overrides.clone(),
     };
     let title = Paragraph::new(header_lines(&header_ctx, &theme)).block(panel("MACC"));
     f.render_widget(title, chunks[0]);

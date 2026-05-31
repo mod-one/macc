@@ -457,6 +457,18 @@ enum Commands {
         /// Max review cycles per task (0=skip review, 1=one review+fix, N=N loops). Default: unlimited.
         #[arg(long)]
         max_review_cycles: Option<usize>,
+        /// Disable the testing phase entirely
+        #[arg(long)]
+        disable_testing: bool,
+        /// Disable the review phase entirely
+        #[arg(long)]
+        disable_review: bool,
+        /// Override the testing phase mode (disabled, required, risk_based, manual)
+        #[arg(long)]
+        testing: Option<String>,
+        /// Override the review phase mode (disabled, required, risk_based, manual)
+        #[arg(long)]
+        review: Option<String>,
         /// Extra args passed to coordinator subcommands (positional or after --)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         extra_args: Vec<String>,
@@ -1376,6 +1388,10 @@ fn run_with_engine_provider(
             error_code_retry_max,
             force_kill_grace_seconds,
             max_review_cycles,
+            disable_testing,
+            disable_review,
+            testing,
+            review,
             extra_args,
         }) => {
             let mut env_cfg = CoordinatorEnvConfig {
@@ -1417,6 +1433,10 @@ fn run_with_engine_provider(
                 max_review_cycles: *max_review_cycles,
                 safety_policy: None,
                 destructive_actions: None,
+                disable_testing: Some(*disable_testing),
+                disable_review: Some(*disable_review),
+                testing_mode: testing.clone(),
+                review_mode: review.clone(),
             };
             if let Some(ref p) = preset {
                 macc_core::ops_motif::apply_preset_to_env_cfg(&mut env_cfg, p)?;

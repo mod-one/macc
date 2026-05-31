@@ -38,4 +38,8 @@ pub struct CoordinatorEnvConfig {
     pub max_review_cycles: Option<usize>,
     pub safety_policy: Option<String>,
     pub destructive_actions: Option<String>,
+    pub disable_testing: Option<bool>,
+    pub disable_review: Option<bool>,
+    pub testing_mode: Option<String>,
+    pub review_mode: Option<String>,
 }

@@ -128,12 +128,35 @@ pub fn handle(
     }
 
     if matches!(command, CoordinatorCommand::Run) && !input.no_tui {
-        return macc_tui::run_tui_with_launch(macc_tui::LaunchMode::CoordinatorRun).map_err(|e| {
-            MaccError::Io {
-                path: "tui".into(),
-                action: "run_tui coordinator live".into(),
-                source: std::io::Error::other(e.to_string()),
+        // §18: build a human-readable summary of any active runtime phase overrides so
+        // the TUI header can display a visible warning banner.
+        let phase_overrides = {
+            let mut parts: Vec<String> = Vec::new();
+            // --disable-testing / --testing=disabled take precedence; show the
+            // effective state regardless of which flag was used.
+            let testing_off = input.env_cfg.disable_testing == Some(true)
+                || input.env_cfg.testing_mode.as_deref() == Some("disabled");
+            let review_off = input.env_cfg.disable_review == Some(true)
+                || input.env_cfg.review_mode.as_deref() == Some("disabled");
+            if testing_off {
+                parts.push("[testing:off]".to_string());
+            } else if let Some(ref mode) = input.env_cfg.testing_mode {
+                parts.push(format!("[testing:{}]", mode));
             }
+            if review_off {
+                parts.push("[review:off]".to_string());
+            } else if let Some(ref mode) = input.env_cfg.review_mode {
+                parts.push(format!("[review:{}]", mode));
+            }
+            if parts.is_empty() { None } else { Some(parts.join(" ")) }
+        };
+        return macc_tui::run_tui_with_launch(macc_tui::LaunchMode::CoordinatorRun {
+            phase_overrides,
+        })
+        .map_err(|e| MaccError::Io {
+            path: "tui".into(),
+            action: "run_tui coordinator live".into(),
+            source: std::io::Error::other(e.to_string()),
         });
     }
 

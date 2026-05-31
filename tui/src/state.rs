@@ -247,6 +247,9 @@ pub struct AppState {
     pub coordinator_stop_dialog_selection: usize,
     pub coordinator_recover_dialog_open: bool,
     pub coordinator_recover_dialog_selection: usize,
+    /// §18: Human-readable summary of active runtime phase overrides, e.g. "[testing:off] [review:required]".
+    /// Set at launch time; None when no overrides are active.
+    pub coordinator_phase_overrides: Option<String>,
 }
 
 impl AppState {
@@ -358,6 +361,7 @@ impl AppState {
             coordinator_stop_dialog_selection: 0,
             coordinator_recover_dialog_open: false,
             coordinator_recover_dialog_selection: 0,
+            coordinator_phase_overrides: None,
         };
 
         state.refresh_tools();

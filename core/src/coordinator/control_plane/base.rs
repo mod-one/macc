@@ -794,7 +794,35 @@ pub async fn advance_tasks_native(
     state: &mut CoordinatorRunState,
     logger: Option<&dyn CoordinatorLog>,
 ) -> Result<coordinator_engine::AdvanceResult> {
-    let cfg = CoordinatorConfigResolved::resolve(coordinator);
+    let mut cfg = CoordinatorConfigResolved::resolve(coordinator);
+    if let Some(disable) = env_cfg.disable_testing {
+        if disable {
+            cfg.phases.testing.enabled = false;
+            cfg.phases.testing.mode = "disabled".to_string();
+        }
+    }
+    if let Some(disable) = env_cfg.disable_review {
+        if disable {
+            cfg.phases.review.enabled = false;
+            cfg.phases.review.mode = "disabled".to_string();
+        }
+    }
+    if let Some(ref mode) = env_cfg.testing_mode {
+        cfg.phases.testing.mode = mode.clone();
+        if mode == "disabled" {
+            cfg.phases.testing.enabled = false;
+        } else {
+            cfg.phases.testing.enabled = true;
+        }
+    }
+    if let Some(ref mode) = env_cfg.review_mode {
+        cfg.phases.review.mode = mode.clone();
+        if mode == "disabled" {
+            cfg.phases.review.enabled = false;
+        } else {
+            cfg.phases.review.enabled = true;
+        }
+    }
     let mut registry =
         crate::coordinator::state::coordinator_state_registry_load(repo_root, &BTreeMap::new())?;
 
