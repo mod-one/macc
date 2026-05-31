@@ -101,7 +101,7 @@ pub(super) async fn task_action_handler(
     )))
 }
 
-fn requeue_task(
+pub(super) fn requeue_task(
     task: &mut Task,
     now: &str,
     _justification: Option<&str>,
@@ -211,7 +211,7 @@ fn reset_task_runtime(task: &mut Task) {
     runtime.delayed_until = None;
 }
 
-fn task_to_api(task: &Task, events: &[ApiRegistryEvent]) -> ApiRegistryTask {
+pub(super) fn task_to_api(task: &Task, events: &[ApiRegistryEvent]) -> ApiRegistryTask {
     ApiRegistryTask {
         id: task.id.clone(),
         title: task.title.clone(),
@@ -271,7 +271,7 @@ fn worktree_to_api(worktree: &TaskWorktree) -> ApiRegistryTaskWorktree {
     }
 }
 
-fn collect_registry_events(
+pub(super) fn collect_registry_events(
     events: &[CoordinatorEventRecord],
 ) -> BTreeMap<&str, Vec<ApiRegistryEvent>> {
     let mut out = BTreeMap::new();
@@ -297,7 +297,7 @@ fn collect_registry_events(
     out
 }
 
-fn not_found_task(task_id: &str) -> ApiError {
+pub(super) fn not_found_task(task_id: &str) -> ApiError {
     ApiError::not_found(
         format!("task '{}' was not found in the registry", task_id),
         Some(Value::Object(

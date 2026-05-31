@@ -21,6 +21,7 @@ mod prd;
 #[allow(clippy::result_large_err)]
 mod registry;
 mod sse;
+mod task_endpoints;
 #[allow(clippy::result_large_err)]
 mod terminal;
 #[cfg(test)]
@@ -275,6 +276,46 @@ fn build_web_router(state: WebState) -> Router {
         .route(
             "/api/v1/registry/tasks/:id/:action",
             post(registry::task_action_handler),
+        )
+        .route(
+            "/api/v1/registry/tasks/:id",
+            get(task_endpoints::get_registry_task_handler),
+        )
+        .route(
+            "/api/v1/registry/tasks/:id/events",
+            get(task_endpoints::get_registry_task_events_handler),
+        )
+        .route(
+            "/api/v1/registry/tasks/:id/logs",
+            get(task_endpoints::get_registry_task_logs_handler),
+        )
+        .route(
+            "/api/v1/registry/tasks/:id/diff",
+            get(task_endpoints::get_registry_task_diff_handler),
+        )
+        .route(
+            "/api/v1/registry/tasks/:id/explain",
+            get(task_endpoints::get_registry_task_explain_handler),
+        )
+        .route(
+            "/api/v1/tasks/:id/stream",
+            get(task_endpoints::task_stream_handler),
+        )
+        .route(
+            "/api/v1/registry/tasks/:id/retry",
+            post(task_endpoints::task_retry_handler),
+        )
+        .route(
+            "/api/v1/registry/tasks/:id/stop",
+            post(task_endpoints::task_stop_handler),
+        )
+        .route(
+            "/api/v1/registry/tasks/:id/run-testing",
+            post(task_endpoints::task_run_testing_handler),
+        )
+        .route(
+            "/api/v1/registry/tasks/:id/run-review",
+            post(task_endpoints::task_run_review_handler),
         )
         .route("/api/v1/prd", get(prd::get_prd_handler))
         .route("/api/v1/prd", put(prd::update_prd_handler))
