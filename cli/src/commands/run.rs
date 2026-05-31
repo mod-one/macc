@@ -1,5 +1,6 @@
 use super::{AppContext, Command};
-use macc_core::skills_runner::{SkillResolver, SkillRisk, SkillRunRequest, SkillRunner};
+use macc_core::engine::Engine;
+use macc_core::skills_runner::{SkillRisk, SkillRunRequest};
 use macc_core::{MaccError, Result};
 use std::collections::HashMap;
 use std::io::{self, Write};
@@ -22,34 +23,22 @@ impl Command for RunCommand {
     fn run(&self) -> Result<()> {
         let paths = self.app.project_paths()?;
 
-        let skill = SkillResolver::resolve(&self.skill, &paths.macc_dir).ok_or_else(|| {
-            MaccError::Validation(format!(
-                "Skill '{}' not found. Run 'macc skills list' to see available skills.",
-                self.skill
-            ))
-        })?;
+        let skill = self
+            .app
+            .engine
+            .resolve_skill(&paths, &self.skill)
+            .ok_or_else(|| {
+                MaccError::Validation(format!(
+                    "Skill '{}' not found. Run 'macc skills list' to see available skills.",
+                    self.skill
+                ))
+            })?;
 
         if self.dry_run {
-            let log_path = paths
-                .macc_dir
-                .join("log")
-                .join("run")
-                .join(format!("<ts>-{}.jsonl", skill.id));
-            let preview = macc_core::skills_runner::SkillDryRunPreview {
-                skill_id: skill.id.clone(),
-                title: skill.title.clone(),
-                kind: skill.kind.as_str().to_string(),
-                tool: self.tool.clone(),
-                risk: skill.risk.as_str().to_string(),
-                commands: skill
-                    .steps
-                    .iter()
-                    .filter_map(|s| s.run.clone())
-                    .collect(),
-                writes: Vec::new(),
-                context_estimate: None,
-                logs_path: log_path.display().to_string(),
-            };
+            let preview =
+                self.app
+                    .engine
+                    .dry_run_skill(&paths, &skill, self.tool.clone());
 
             if self.json {
                 let json = serde_json::to_string_pretty(&preview).map_err(|e| {
@@ -110,7 +99,6 @@ impl Command for RunCommand {
             }
         }
 
-        let log_dir = paths.macc_dir.join("log").join("run");
         let request = SkillRunRequest {
             skill_id: skill.id.clone(),
             tool_id: self.tool.clone(),
@@ -123,7 +111,7 @@ impl Command for RunCommand {
             yes: self.yes,
         };
 
-        let result = SkillRunner::run(&skill, &request, &log_dir)?;
+        let result = self.app.engine.run_skill(&paths, &skill, &request)?;
 
         if self.json {
             let json = serde_json::to_string_pretty(&result).map_err(|e| {

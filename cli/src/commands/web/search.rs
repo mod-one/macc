@@ -1,7 +1,7 @@
 use super::WebState;
 use axum::extract::{Query, State};
 use axum::Json;
-use macc_core::runtime::RuntimeSnapshotBuilder;
+use macc_core::engine::Engine;
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize)]
@@ -28,8 +28,8 @@ pub(crate) async fn search_handler(
 
     let mut results: Vec<SearchResult> = Vec::new();
 
-    // Search tasks from snapshot
-    if let Ok(snapshot) = RuntimeSnapshotBuilder::build(&state.paths) {
+    // Search tasks and workers from the shared runtime snapshot
+    if let Ok(snapshot) = state.engine.runtime_snapshot(&state.paths) {
         for task in &snapshot.tasks {
             let id_match = task.task_id.to_lowercase().contains(&q);
             let title_match = task.title.to_lowercase().contains(&q);
@@ -46,10 +46,13 @@ pub(crate) async fn search_handler(
             }
         }
 
-        // Search worktrees
         for worker in &snapshot.workers {
             if worker.id.to_lowercase().contains(&q)
-                || worker.task_id.as_deref().map(|t| t.to_lowercase().contains(&q)).unwrap_or(false)
+                || worker
+                    .task_id
+                    .as_deref()
+                    .map(|t| t.to_lowercase().contains(&q))
+                    .unwrap_or(false)
             {
                 results.push(SearchResult {
                     kind: "worktree".to_string(),
@@ -60,7 +63,6 @@ pub(crate) async fn search_handler(
             }
         }
 
-        // Search throttled tools / error codes
         for tool in &snapshot.throttled_tools {
             if tool.tool.to_lowercase().contains(&q)
                 || tool.error_code.to_lowercase().contains(&q)
@@ -75,8 +77,8 @@ pub(crate) async fn search_handler(
         }
     }
 
-    // Search skills
-    let skills = macc_core::skills_runner::SkillResolver::list(&state.paths.macc_dir);
+    // Search skills via the Engine trait
+    let skills = state.engine.list_skills(&state.paths);
     for skill in &skills {
         if skill.id.to_lowercase().contains(&q)
             || skill.title.to_lowercase().contains(&q)

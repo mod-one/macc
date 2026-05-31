@@ -1,5 +1,6 @@
 use super::{AppContext, Command};
-use macc_core::skills_runner::{SkillResolver, SkillKind};
+use macc_core::engine::Engine;
+use macc_core::skills_runner::SkillKind;
 use macc_core::Result;
 
 pub struct SkillsCmdCommand {
@@ -18,7 +19,7 @@ impl Command for SkillsCmdCommand {
         let paths = self.app.project_paths()?;
         match &self.subcommand {
             SkillsSubcommand::List { tool } => {
-                let skills = SkillResolver::list(&paths.macc_dir);
+                let skills = self.app.engine.list_skills(&paths);
                 if skills.is_empty() {
                     println!("No skills found. Add skill YAML files to .macc/skills/");
                     return Ok(());
@@ -41,7 +42,7 @@ impl Command for SkillsCmdCommand {
                 }
             }
             SkillsSubcommand::Show { skill } => {
-                match SkillResolver::resolve(skill, &paths.macc_dir) {
+                match self.app.engine.resolve_skill(&paths, skill) {
                     Some(def) => {
                         println!("ID:          {}", def.id);
                         println!("Title:       {}", def.title);
@@ -79,7 +80,7 @@ impl Command for SkillsCmdCommand {
                 }
             }
             SkillsSubcommand::Doctor => {
-                let skills = SkillResolver::list(&paths.macc_dir);
+                let skills = self.app.engine.list_skills(&paths);
                 println!("Skills Doctor");
                 println!("=============");
                 println!("Skills directory: {}", paths.macc_dir.join("skills").display());

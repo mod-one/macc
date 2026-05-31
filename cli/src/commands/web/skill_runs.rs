@@ -1,7 +1,8 @@
 use super::WebState;
 use axum::extract::{Path, State};
 use axum::Json;
-use macc_core::skills_runner::{SkillResolver, SkillRunRequest, SkillRunner};
+use macc_core::engine::Engine;
+use macc_core::skills_runner::SkillRunRequest;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -25,7 +26,7 @@ pub(crate) struct RunSkillRequest {
 pub(crate) async fn list_skills_handler(
     State(state): State<WebState>,
 ) -> Json<Vec<SkillListItem>> {
-    let skills = SkillResolver::list(&state.paths.macc_dir);
+    let skills = state.engine.list_skills(&state.paths);
     Json(
         skills
             .into_iter()
@@ -44,7 +45,7 @@ pub(crate) async fn get_skill_handler(
     State(state): State<WebState>,
     Path(skill_id): Path<String>,
 ) -> Result<Json<Value>, super::errors::ApiError> {
-    match SkillResolver::resolve(&skill_id, &state.paths.macc_dir) {
+    match state.engine.resolve_skill(&state.paths, &skill_id) {
         Some(skill) => {
             let v = serde_json::to_value(&skill)
                 .map_err(|e| super::errors::ApiError::validation(e.to_string()))?;
@@ -61,27 +62,17 @@ pub(crate) async fn dry_run_skill_handler(
     State(state): State<WebState>,
     Path(skill_id): Path<String>,
 ) -> Result<Json<Value>, super::errors::ApiError> {
-    let skill = SkillResolver::resolve(&skill_id, &state.paths.macc_dir)
-        .ok_or_else(|| super::errors::ApiError::not_found(format!("Skill '{}' not found", skill_id), None))?;
+    let skill = state
+        .engine
+        .resolve_skill(&state.paths, &skill_id)
+        .ok_or_else(|| {
+            super::errors::ApiError::not_found(
+                format!("Skill '{}' not found", skill_id),
+                None,
+            )
+        })?;
 
-    let log_path = state
-        .paths
-        .macc_dir
-        .join("log")
-        .join("run")
-        .join(format!("<ts>-{}.jsonl", skill.id));
-
-    let preview = macc_core::skills_runner::SkillDryRunPreview {
-        skill_id: skill.id.clone(),
-        title: skill.title.clone(),
-        kind: skill.kind.as_str().to_string(),
-        tool: None,
-        risk: skill.risk.as_str().to_string(),
-        commands: skill.steps.iter().filter_map(|s| s.run.clone()).collect(),
-        writes: Vec::new(),
-        context_estimate: None,
-        logs_path: log_path.display().to_string(),
-    };
+    let preview = state.engine.dry_run_skill(&state.paths, &skill, None);
 
     let v = serde_json::to_value(&preview)
         .map_err(|e| super::errors::ApiError::validation(e.to_string()))?;
@@ -93,10 +84,16 @@ pub(crate) async fn run_skill_handler(
     Path(skill_id): Path<String>,
     Json(body): Json<RunSkillRequest>,
 ) -> Result<Json<Value>, super::errors::ApiError> {
-    let skill = SkillResolver::resolve(&skill_id, &state.paths.macc_dir)
-        .ok_or_else(|| super::errors::ApiError::not_found(format!("Skill '{}' not found", skill_id), None))?;
+    let skill = state
+        .engine
+        .resolve_skill(&state.paths, &skill_id)
+        .ok_or_else(|| {
+            super::errors::ApiError::not_found(
+                format!("Skill '{}' not found", skill_id),
+                None,
+            )
+        })?;
 
-    let log_dir = state.paths.macc_dir.join("log").join("run");
     let request = SkillRunRequest {
         skill_id: skill.id.clone(),
         tool_id: body.tool,
@@ -109,7 +106,9 @@ pub(crate) async fn run_skill_handler(
         yes: body.yes.unwrap_or(true),
     };
 
-    let result = SkillRunner::run(&skill, &request, &log_dir)
+    let result = state
+        .engine
+        .run_skill(&state.paths, &skill, &request)
         .map_err(|e| super::errors::ApiError::validation(e.to_string()))?;
 
     let v = serde_json::to_value(&result)
@@ -181,7 +180,10 @@ pub(crate) async fn get_run_handler(
     let run_dir = state.paths.macc_dir.join("log").join("run");
     let jsonl = run_dir.join(format!("{}.jsonl", run_id));
     if !jsonl.exists() {
-        return Err(super::errors::ApiError::not_found(format!("Run '{}' not found", run_id), None::<serde_json::Value>));
+        return Err(super::errors::ApiError::not_found(
+            format!("Run '{}' not found", run_id),
+            None::<serde_json::Value>,
+        ));
     }
     let content = std::fs::read_to_string(&jsonl)
         .map_err(|e| super::errors::ApiError::validation(e.to_string()))?;
@@ -199,7 +201,10 @@ pub(crate) async fn get_run_logs_handler(
     let run_dir = state.paths.macc_dir.join("log").join("run");
     let jsonl = run_dir.join(format!("{}.jsonl", run_id));
     if !jsonl.exists() {
-        return Err(super::errors::ApiError::not_found(format!("Run '{}' not found", run_id), None::<serde_json::Value>));
+        return Err(super::errors::ApiError::not_found(
+            format!("Run '{}' not found", run_id),
+            None::<serde_json::Value>,
+        ));
     }
     std::fs::read_to_string(&jsonl)
         .map_err(|e| super::errors::ApiError::validation(e.to_string()))

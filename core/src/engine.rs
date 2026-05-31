@@ -917,6 +917,55 @@ pub trait Engine {
         crate::runtime::RuntimeSnapshotBuilder::build(paths)
     }
 
+    fn list_skills(
+        &self,
+        paths: &ProjectPaths,
+    ) -> Vec<crate::skills_runner::SkillDefinition> {
+        crate::skills_runner::SkillResolver::list(&paths.macc_dir)
+    }
+
+    fn resolve_skill(
+        &self,
+        paths: &ProjectPaths,
+        id: &str,
+    ) -> Option<crate::skills_runner::SkillDefinition> {
+        crate::skills_runner::SkillResolver::resolve(id, &paths.macc_dir)
+    }
+
+    fn dry_run_skill(
+        &self,
+        paths: &ProjectPaths,
+        skill: &crate::skills_runner::SkillDefinition,
+        tool: Option<String>,
+    ) -> crate::skills_runner::SkillDryRunPreview {
+        let log_path = paths
+            .macc_dir
+            .join("log")
+            .join("run")
+            .join(format!("<ts>-{}.jsonl", skill.id));
+        crate::skills_runner::SkillDryRunPreview {
+            skill_id: skill.id.clone(),
+            title: skill.title.clone(),
+            kind: skill.kind.as_str().to_string(),
+            tool,
+            risk: skill.risk.as_str().to_string(),
+            commands: skill.steps.iter().filter_map(|s| s.run.clone()).collect(),
+            writes: Vec::new(),
+            context_estimate: None,
+            logs_path: log_path.display().to_string(),
+        }
+    }
+
+    fn run_skill(
+        &self,
+        paths: &ProjectPaths,
+        skill: &crate::skills_runner::SkillDefinition,
+        request: &crate::skills_runner::SkillRunRequest,
+    ) -> Result<crate::skills_runner::SkillRunResult> {
+        let log_dir = paths.macc_dir.join("log").join("run");
+        crate::skills_runner::SkillRunner::run(skill, request, &log_dir)
+    }
+
     fn coordinator_storage_import_json_to_sqlite(&self, paths: &ProjectPaths) -> Result<()> {
         crate::coordinator_storage::coordinator_storage_import_json_to_sqlite(paths)
     }
