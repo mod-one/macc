@@ -289,7 +289,126 @@ pub fn collect_all_findings(paths: &crate::ProjectPaths, max_parallel: u32) -> V
     findings.extend(check_coordinator_ipc(&paths.macc_dir));
     findings.extend(check_task_readiness(&paths.macc_dir));
     findings.extend(check_tool_login_states(paths));
+    findings.extend(check_reference_branch(paths));
     findings
+}
+
+/// Check that the configured reference branch exists locally and is clean (spec §19.2 item 10).
+///
+/// Reuses the existing preflight inspection logic so the check is consistent
+/// with what `macc coordinator run` validates at startup.
+pub fn check_reference_branch(paths: &crate::ProjectPaths) -> Vec<DiagnosticFinding> {
+    use crate::coordinator::preflight::{
+        inspect_reference_branch_preflight, ReferenceBranchPreflightConfig,
+        ReferencePreflightStatus,
+    };
+
+    // Resolve the reference branch from project config (same resolution order as coordinator).
+    let reference_branch = resolve_reference_branch(paths);
+
+    let cfg = ReferenceBranchPreflightConfig::default();
+
+    let report = match inspect_reference_branch_preflight(&paths.root, &reference_branch, &cfg) {
+        Ok(r) => r,
+        Err(_) => {
+            return vec![DiagnosticFinding::warning(
+                "MACC-REFERENCE-BRANCH-UNKNOWN",
+                "git",
+                "Reference branch could not be inspected",
+                "Could not run Git commands to check the reference branch.",
+                Some("Run `git status` and `macc doctor --coordinator` for details."),
+            )];
+        }
+    };
+
+    match report.status {
+        ReferencePreflightStatus::Clean | ReferencePreflightStatus::NotCheckedOut => {
+            vec![DiagnosticFinding::ok(
+                "MACC-REFERENCE-BRANCH",
+                "git",
+                &format!("Reference branch \"{}\" exists and is clean", reference_branch),
+            )]
+        }
+
+        ReferencePreflightStatus::BranchMissing => {
+            let remote_hint = if report.remote_tracking_branches.is_empty() {
+                format!(
+                    "No local branch \"{}\" found and no matching remote-tracking branch detected.",
+                    reference_branch
+                )
+            } else {
+                format!(
+                    "No local branch \"{}\" found; remote {} exists.",
+                    reference_branch,
+                    report.remote_tracking_branches.join(", ")
+                )
+            };
+            vec![DiagnosticFinding::error(
+                "MACC-REFERENCE-BRANCH-MISSING",
+                "git",
+                &format!("Reference branch \"{}\" does not exist locally", reference_branch),
+                &remote_hint,
+                Some(&format!(
+                    "Create it:\n  git checkout -b {branch}\n\nOr run:\n  macc coordinator run --create-reference-branch --reference-branch-base main",
+                    branch = reference_branch
+                )),
+                true,
+            )]
+        }
+
+        ReferencePreflightStatus::Dirty => {
+            let dirty_paths: Vec<String> = report
+                .checked_out_worktrees
+                .iter()
+                .filter(|w| !w.dirty_entries.is_empty())
+                .map(|w| w.path.to_string_lossy().to_string())
+                .collect();
+            vec![DiagnosticFinding::warning(
+                "MACC-REFERENCE-BRANCH-DIRTY",
+                "git",
+                &format!("Reference branch \"{}\" has uncommitted changes", reference_branch),
+                &format!(
+                    "Uncommitted changes detected in: {}",
+                    dirty_paths.join(", ")
+                ),
+                Some("Commit, stash, or discard changes before running the coordinator."),
+            )]
+        }
+
+        ReferencePreflightStatus::InvalidBranchName => vec![DiagnosticFinding::error(
+            "MACC-REFERENCE-BRANCH-INVALID",
+            "git",
+            &format!("Reference branch name \"{}\" is invalid", reference_branch),
+            "The branch name fails `git check-ref-format` validation.",
+            Some("Correct `automation.coordinator.reference_branch` in macc.yaml."),
+            false,
+        )],
+
+        ReferencePreflightStatus::BareRepository => vec![DiagnosticFinding::warning(
+            "MACC-REFERENCE-BRANCH-BARE",
+            "git",
+            "Bare repository detected",
+            "Coordinator worktree operations require a non-bare repository.",
+            None,
+        )],
+
+        ReferencePreflightStatus::GitInspectionFailed => vec![DiagnosticFinding::warning(
+            "MACC-REFERENCE-BRANCH-UNKNOWN",
+            "git",
+            "Reference branch inspection failed",
+            "Could not inspect the reference branch state.",
+            Some("Run `macc doctor --coordinator` for details."),
+        )],
+    }
+}
+
+/// Resolve the coordinator reference_branch from project config, falling back to "main".
+fn resolve_reference_branch(paths: &crate::ProjectPaths) -> String {
+    crate::load_canonical_config(&paths.config_path)
+        .ok()
+        .and_then(|c| c.automation.coordinator)
+        .and_then(|c| c.reference_branch)
+        .unwrap_or_else(|| "main".to_string())
 }
 
 /// Check tool login and capability state for all enabled tools (spec §5.3.5).
