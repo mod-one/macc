@@ -288,7 +288,165 @@ pub fn collect_all_findings(paths: &crate::ProjectPaths, max_parallel: u32) -> V
     findings.extend(check_disk_space(&paths.root, max_parallel));
     findings.extend(check_coordinator_ipc(&paths.macc_dir));
     findings.extend(check_task_readiness(&paths.macc_dir));
+    findings.extend(check_tool_login_states(paths));
     findings
+}
+
+/// Check tool login and capability state for all enabled tools (spec §5.3.5).
+///
+/// Distinguishes: installed → configured → runnable → performer-available.
+/// Emits one `DiagnosticFinding` per enabled tool plus a config-not-applied finding
+/// when `macc apply` has not been run.
+pub fn check_tool_login_states(paths: &crate::ProjectPaths) -> Vec<DiagnosticFinding> {
+    use crate::tool::ToolSpecLoader;
+
+    let search_paths = ToolSpecLoader::default_search_paths(&paths.root);
+    let loader = ToolSpecLoader::new(search_paths);
+    let (specs, _) = loader.load_all_with_embedded();
+
+    let enabled_ids = load_enabled_tool_ids(paths);
+
+    // MACC-CONFIG-NOT-APPLIED: tools enabled but apply never run.
+    let config_applied = paths.managed_paths_state_path().exists();
+
+    let mut findings = Vec::new();
+
+    for spec in &specs {
+        if !enabled_ids.contains(&spec.id) {
+            continue;
+        }
+
+        let tool_name = &spec.display_name;
+
+        // Sub-check 1: binary installed.
+        let binary_ok = check_binary_in_path(&spec.id);
+        if !binary_ok {
+            findings.push(DiagnosticFinding::error(
+                "MACC-TOOL-NOT-RUNNABLE",
+                "tools",
+                &format!("{} — binary not found", tool_name),
+                &format!("'{}' is not in PATH.", spec.id),
+                Some(&format!(
+                    "Install {} then retry macc doctor.\nOr: macc tool install {}",
+                    tool_name, spec.id
+                )),
+                false,
+            ));
+            continue;
+        }
+
+        // Sub-check 2: adapter configured (ToolSpec loaded + in enabled list — always true here).
+
+        // Sub-check 3: runnable — probe via version_check if available.
+        let (runnable, run_detail) = probe_tool_runnable(spec);
+
+        // Sub-check 4: performer runner available.
+        let has_performer = spec.performer.is_some();
+
+        if runnable && has_performer {
+            findings.push(DiagnosticFinding::ok(
+                &format!("MACC-TOOL-{}", spec.id.to_ascii_uppercase().replace('-', "_")),
+                "tools",
+                &format!("{} — ready", tool_name),
+            ));
+        } else if !runnable {
+            findings.push(DiagnosticFinding::warning(
+                "MACC-TOOL-NOT-RUNNABLE",
+                "tools",
+                &format!("{} — authentication not confirmed", tool_name),
+                &run_detail,
+                Some(&format!(
+                    "Run the {} login flow, then retry:\n  macc doctor",
+                    tool_name
+                )),
+            ));
+        } else {
+            // runnable but no performer: warn
+            findings.push(DiagnosticFinding::warning(
+                "MACC-TOOL-NOT-RUNNABLE",
+                "tools",
+                &format!("{} — performer runner unavailable", tool_name),
+                "No performer spec found for this tool. Coordinator execution will fail.",
+                Some("Check tool configuration: macc doctor"),
+            ));
+        }
+    }
+
+    if !config_applied && !enabled_ids.is_empty() {
+        findings.push(DiagnosticFinding::warning(
+            "MACC-CONFIG-NOT-APPLIED",
+            "project",
+            "Config has not been applied",
+            "Tools are enabled but no MACC-managed files have been written to the project.",
+            Some("Run:\n  macc apply"),
+        ));
+    }
+
+    findings
+}
+
+// ── Tool login helpers ────────────────────────────────────────────────────────
+
+fn load_enabled_tool_ids(paths: &crate::ProjectPaths) -> Vec<String> {
+    crate::load_canonical_config(&paths.config_path)
+        .map(|c| c.tools.enabled)
+        .unwrap_or_default()
+}
+
+fn check_binary_in_path(binary: &str) -> bool {
+    let cmd = if cfg!(windows) { "where" } else { "which" };
+    matches!(
+        Command::new(cmd).arg(binary).output(),
+        Ok(out) if out.status.success()
+    )
+}
+
+/// Probe whether a tool is runnable by running its `version_check.current` command.
+///
+/// Returns `(true, "")` on success, `(false, reason)` on failure.
+/// Falls back to `<binary> --version` when no `version_check` is declared.
+fn probe_tool_runnable(spec: &ToolSpec) -> (bool, String) {
+    let (cmd_str, args): (&str, &[String]) = if let Some(vc) = &spec.version_check {
+        (&vc.current.command, &vc.current.args)
+    } else {
+        // Fallback: try `<id> --version`
+        return probe_binary_version(&spec.id);
+    };
+
+    match Command::new(cmd_str).args(args).output() {
+        Ok(out) if out.status.success() => (true, String::new()),
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let first_line = stderr.lines().next().unwrap_or("unknown error").trim();
+            (
+                false,
+                format!("'{}' exited non-zero: {}", cmd_str, first_line),
+            )
+        }
+        Err(e) => (false, format!("Could not run '{}': {}", cmd_str, e)),
+    }
+}
+
+fn probe_binary_version(binary: &str) -> (bool, String) {
+    match Command::new(binary).arg("--version").output() {
+        Ok(out) if out.status.success() => (true, String::new()),
+        Ok(_) => (
+            false,
+            format!(
+                "Authentication status unknown — '{}' returned an error. \
+                 Run the tool login flow.",
+                binary
+            ),
+        ),
+        Err(_) => (
+            false,
+            format!(
+                "Authentication status unknown — could not run '{}'. \
+                 Run the tool login flow.",
+                binary
+            ),
+        ),
+    }
 }
 
 /// Apply a git-identity fix locally in the project.

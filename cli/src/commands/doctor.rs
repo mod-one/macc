@@ -88,44 +88,84 @@ impl Command for DoctorCommand {
             return Ok(());
         }
 
-        // Human-readable extended output.
+        // Human-readable extended output — grouped by category (spec §5.2).
         if !findings.is_empty() {
-            println!();
-            println!("Readiness");
-            for f in &findings {
-                let symbol = match f.severity {
-                    DiagnosticSeverity::Ok => "  ✅",
-                    DiagnosticSeverity::Info => "  ℹ️",
-                    DiagnosticSeverity::Warning => "  ⚠️",
-                    DiagnosticSeverity::Error => "  ❌",
-                };
-                if f.severity == DiagnosticSeverity::Ok {
-                    println!("{} {}", symbol, f.title);
-                } else {
-                    println!("{} {}", symbol, f.title);
-                    println!("     {}", f.message);
-                    if let Some(action) = &f.recommended_action {
-                        for line in action.lines() {
-                            println!("     {}", line);
-                        }
-                    }
-                }
-            }
-            println!();
-
-            let blocking: Vec<_> = findings.iter().filter(|f| f.is_blocking()).collect();
-            if blocking.is_empty() {
-                println!("  ✅ Ready to dispatch a task");
-            } else {
-                println!("  ❌ Not ready to dispatch a task");
-                println!("     Blocking issues:");
-                for (i, f) in blocking.iter().enumerate() {
-                    println!("       {}. {}", i + 1, f.title);
-                }
-            }
+            print_grouped_findings(&findings);
         }
 
         tool_check_result
+    }
+}
+
+/// Print findings grouped by category, matching spec §5.2 output format.
+fn print_grouped_findings(findings: &[macc_core::doctor::DiagnosticFinding]) {
+    // Category display order and labels (spec §5.2).
+    let groups: &[(&str, &str)] = &[
+        ("project", "Project"),
+        ("git", "Git"),
+        ("worktrees", "Worktrees"),
+        ("coordinator", "Coordinator"),
+        ("tools", "Tools"),
+        ("tasks", "Tasks"),
+    ];
+
+    for (category, label) in groups {
+        let group: Vec<_> = findings.iter().filter(|f| f.category == *category).collect();
+        if group.is_empty() {
+            continue;
+        }
+        println!();
+        println!("{}", label);
+        for f in &group {
+            let symbol = match f.severity {
+                DiagnosticSeverity::Ok => "  ✅",
+                DiagnosticSeverity::Info => "  ℹ️",
+                DiagnosticSeverity::Warning => "  ⚠️",
+                DiagnosticSeverity::Error => "  ❌",
+            };
+            println!("{} {}", symbol, f.title);
+            if !matches!(f.severity, DiagnosticSeverity::Ok) && !f.message.is_empty() {
+                println!("     {}", f.message);
+                if let Some(action) = &f.recommended_action {
+                    for line in action.lines() {
+                        println!("     {}", line);
+                    }
+                }
+            }
+        }
+    }
+
+    // Uncategorised findings
+    let other: Vec<_> = findings
+        .iter()
+        .filter(|f| !groups.iter().any(|(cat, _)| f.category == *cat))
+        .collect();
+    if !other.is_empty() {
+        println!();
+        println!("Other");
+        for f in &other {
+            let symbol = match f.severity {
+                DiagnosticSeverity::Ok => "  ✅",
+                DiagnosticSeverity::Info => "  ℹ️",
+                DiagnosticSeverity::Warning => "  ⚠️",
+                DiagnosticSeverity::Error => "  ❌",
+            };
+            println!("{} {}", symbol, f.title);
+        }
+    }
+
+    // Readiness summary (spec §5.2 last block).
+    println!();
+    println!("Readiness");
+    let blocking: Vec<_> = findings.iter().filter(|f| f.is_blocking()).collect();
+    if blocking.is_empty() {
+        println!("  ✅ Ready to dispatch a task");
+    } else {
+        println!("  ❌ Not ready to dispatch a task");
+        println!("     Blocking issues:");
+        for (i, f) in blocking.iter().enumerate() {
+            println!("       {}. {}", i + 1, f.title);
+        }
     }
 }
 
