@@ -218,10 +218,10 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
     }
     if current_screen == Screen::CoordinatorLive && state.coordinator_stop_dialog_open {
         match key {
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up => {
                 state.coordinator_stop_dialog_selection = state.coordinator_stop_dialog_selection.saturating_sub(1);
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down => {
                 if state.coordinator_stop_dialog_selection < 3 {
                     state.coordinator_stop_dialog_selection += 1;
                 }
@@ -238,10 +238,10 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
     }
     if current_screen == Screen::CoordinatorLive && state.coordinator_recover_dialog_open {
         match key {
-            KeyCode::Up | KeyCode::Char('k') => {
+            KeyCode::Up => {
                 state.coordinator_recover_dialog_selection = state.coordinator_recover_dialog_selection.saturating_sub(1);
             }
-            KeyCode::Down | KeyCode::Char('j') => {
+            KeyCode::Down => {
                 if state.coordinator_recover_dialog_selection < 1 {
                     state.coordinator_recover_dialog_selection += 1;
                 }
@@ -402,18 +402,6 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
                 state.set_status(UiStatusLevel::Info, format!("Sent kill request to task {}", task.task_id), Some(Duration::from_secs(3)));
             }
         }
-        KeyCode::Char('j') if current_screen == Screen::CoordinatorLive => {
-            state.navigate_next();
-        }
-        KeyCode::Char('k') if current_screen == Screen::CoordinatorLive => {
-            state.navigate_prev();
-        }
-        KeyCode::Char('j') if current_screen == Screen::Watch => {
-            state.navigate_next();
-        }
-        KeyCode::Char('k') if current_screen == Screen::Watch => {
-            state.navigate_prev();
-        }
         // Home screen: 'd' runs doctor check inline, shows results in Readiness panel.
         KeyCode::Char('d') if current_screen == Screen::Home => {
             state.run_home_doctor_check();
@@ -463,7 +451,7 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
                 state.start_coordinator_command(CoordinatorCommand::ResumePausedRun);
             }
         }
-        KeyCode::Char('K') if current_screen == Screen::CoordinatorLive => {
+        KeyCode::Char('k') if current_screen == Screen::CoordinatorLive => {
             if let Some(handle) = state.coordinator_handle() {
                 state.try_owner_action(&handle, |state| {
                     state.open_coordinator_stop_dialog();
@@ -1538,7 +1526,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             ];
             let tasks_table = Table::new(rows, widths)
                 .header(headers)
-                .block(panel("LIVE TASKS (j/k to navigate, Enter details, d diff, r retry, s stop)"))
+                .block(panel("LIVE TASKS (↑↓ navigate, Enter details, d diff, r retry, s stop task, k stop coordinator)"))
                 .highlight_style(Style::default().bg(theme.highlight_bg))
                 .highlight_symbol("› ");
 
@@ -1589,7 +1577,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                     ]));
                 }
             } else {
-                detail_lines.push(Line::from("No task selected. Use j/k to navigate."));
+                detail_lines.push(Line::from("No task selected. Use ↑/↓ to navigate."));
             }
             let detail_para = Paragraph::new(detail_lines)
                 .block(panel("SELECTED TASK DETAIL"))
@@ -2138,7 +2126,7 @@ fn render_watch_screen(f: &mut Frame, state: &AppState, area: Rect) {
             vec![ListItem::new("Waiting for snapshot… (refreshes every 2s)")]
         };
         let workers_list = List::new(worker_lines)
-            .block(Block::default().title("Workers  j/k navigate").borders(Borders::ALL));
+            .block(Block::default().title("Workers  ↑↓ navigate").borders(Borders::ALL));
         f.render_widget(workers_list, top_chunks[0]);
 
         // Queue / git pane — spec §6.5 QueueSummary.
@@ -2217,7 +2205,7 @@ fn render_watch_screen(f: &mut Frame, state: &AppState, area: Rect) {
         String::new()
     };
     let strip_text = format!(
-        "{}{} | j/k workers | r refresh | '?' help | q quit",
+        "{}{} | ↑↓ workers | r refresh | '?' help | q quit",
         title, throttled_label
     );
     let strip =
@@ -2552,7 +2540,7 @@ fn render_coordinator_stop_dialog(f: &mut Frame, state: &AppState) {
 
     text.push(Line::from(""));
     text.push(Line::from("Controls:"));
-    text.push(Line::from("- Up/Down or k/j: Move selection"));
+    text.push(Line::from("- ↑↓: Move selection"));
     text.push(Line::from("- Enter: Confirm and apply"));
     text.push(Line::from("- Esc or q/n: Cancel"));
 
@@ -2600,7 +2588,7 @@ fn render_coordinator_recover_dialog(f: &mut Frame, state: &AppState) {
 
     text.push(Line::from(""));
     text.push(Line::from("Controls:"));
-    text.push(Line::from("- Up/Down or k/j: Move selection"));
+    text.push(Line::from("- ↑↓: Move selection"));
     text.push(Line::from("- Enter: Confirm and apply"));
     text.push(Line::from("- Esc or q/n: Cancel"));
 
