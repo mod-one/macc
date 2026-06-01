@@ -55,6 +55,12 @@ impl Screen {
         ];
 
         let screen_bindings = match self {
+            Screen::Home => vec![
+                ("d", "Run doctor check"),
+                ("a", "Open Apply screen"),
+                ("r", "Start coordinator + go to Live"),
+                ("v", "Go to Coordinator Live"),
+            ],
             Screen::Tools => vec![
                 ("Up/Down", "Navigate Tools"),
                 ("Space", "Toggle Tool"),

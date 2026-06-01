@@ -241,6 +241,8 @@ pub struct AppState {
     pub watch_snapshot: Option<RuntimeSnapshot>,
     pub watch_log_tail: Vec<String>,
     pub watch_last_refresh: Option<Instant>,
+    /// Last doctor check result displayed in the Home readiness panel.
+    pub home_doctor_summary: Option<String>,
 }
 
 impl AppState {
@@ -351,6 +353,7 @@ impl AppState {
             watch_snapshot: None,
             watch_log_tail: Vec::new(),
             watch_last_refresh: None,
+            home_doctor_summary: None,
             client_context: ClientContext {
                 client_id: client_identity.client_id.clone(),
                 project_root: PathBuf::new(),
@@ -475,6 +478,76 @@ impl AppState {
         if self.mcp_selection_index >= self.mcp_entries.len() {
             self.mcp_selection_index = 0;
         }
+    }
+
+    /// Run doctor checks synchronously and store a summary for the Home readiness panel.
+    /// Called when the user presses 'd' on the Home screen (spec §13.1).
+    pub fn run_home_doctor_check(&mut self) {
+        let Some(paths) = self.project_paths.clone() else {
+            self.set_status(
+                UiStatusLevel::Warning,
+                "No project loaded — run macc init first.",
+                Some(std::time::Duration::from_secs(4)),
+            );
+            return;
+        };
+
+        let max_parallel = 2u32;
+        let findings = macc_core::doctor::collect_all_findings(&paths, max_parallel);
+
+        let errors: Vec<_> = findings
+            .iter()
+            .filter(|f| matches!(f.severity, macc_core::doctor::DiagnosticSeverity::Error))
+            .collect();
+        let warnings: Vec<_> = findings
+            .iter()
+            .filter(|f| matches!(f.severity, macc_core::doctor::DiagnosticSeverity::Warning))
+            .collect();
+
+        let summary = if errors.is_empty() && warnings.is_empty() {
+            "✅ All checks passed".to_string()
+        } else {
+            let mut parts = Vec::new();
+            if !errors.is_empty() {
+                parts.push(format!("{} error(s)", errors.len()));
+            }
+            if !warnings.is_empty() {
+                parts.push(format!("{} warning(s)", warnings.len()));
+            }
+            format!("⚠ Doctor: {}", parts.join(", "))
+        };
+
+        // Build detailed text for the Home panel.
+        let mut detail = String::from("Last doctor check\n\n");
+        for f in &findings {
+            let sym = match f.severity {
+                macc_core::doctor::DiagnosticSeverity::Ok => "✅",
+                macc_core::doctor::DiagnosticSeverity::Info => "ℹ",
+                macc_core::doctor::DiagnosticSeverity::Warning => "⚠",
+                macc_core::doctor::DiagnosticSeverity::Error => "❌",
+            };
+            detail.push_str(&format!("{} {}\n", sym, f.title));
+            if !f.message.is_empty()
+                && !matches!(f.severity, macc_core::doctor::DiagnosticSeverity::Ok)
+            {
+                for line in f.message.lines() {
+                    detail.push_str(&format!("   {}\n", line));
+                }
+            }
+        }
+        if errors.is_empty() {
+            detail.push_str("\n✅ Ready to dispatch a task\n");
+        } else {
+            detail.push_str(&format!("\n❌ {} blocking issue(s)\n", errors.len()));
+        }
+
+        self.home_doctor_summary = Some(detail);
+        let (level, ttl) = if errors.is_empty() {
+            (UiStatusLevel::Success, std::time::Duration::from_secs(4))
+        } else {
+            (UiStatusLevel::Warning, std::time::Duration::from_secs(6))
+        };
+        self.set_status(level, summary, Some(ttl));
     }
 
     pub fn refresh_logs(&mut self) {

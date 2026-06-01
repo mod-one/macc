@@ -348,6 +348,9 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
                 state.select_all_agents();
             } else if current_screen == Screen::Mcp {
                 state.select_all_mcp();
+            } else if current_screen == Screen::Home {
+                // Home screen: 'a' opens Apply screen.
+                state.open_apply_screen();
             } else {
                 state.push_screen(Screen::About);
             }
@@ -364,6 +367,10 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
         KeyCode::Char('r') => {
             if has_pending_takeover {
                 state.ownership_respond_takeover(false);
+            } else if current_screen == Screen::Home {
+                // Home screen: 'r' starts the coordinator and navigates to Coordinator Live.
+                state.start_coordinator_command(CoordinatorCommand::Run);
+                state.push_screen(Screen::CoordinatorLive);
             } else if current_screen == Screen::Watch {
                 // Force-refresh the RuntimeSnapshot immediately.
                 state.refresh_watch_snapshot();
@@ -406,6 +413,10 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
         }
         KeyCode::Char('k') if current_screen == Screen::Watch => {
             state.navigate_prev();
+        }
+        // Home screen: 'd' runs doctor check inline, shows results in Readiness panel.
+        KeyCode::Char('d') if current_screen == Screen::Home => {
+            state.run_home_doctor_check();
         }
         KeyCode::Char('d') if current_screen == Screen::CoordinatorLive => {
             if let Some(task) = state.selected_live_task() {
@@ -1285,9 +1296,9 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
 
             // Readiness ladder (spec §9 / §13.1)
             let readiness_text = if let Some(paths) = &state.project_paths {
-                build_readiness_text(paths)
+                build_readiness_text(paths, state.home_doctor_summary.as_deref())
             } else {
-                "Run 'macc init' to set up this project.\n\nPrimary actions:\n  [q] Quickstart\n  [d] Doctor\n  [a] Apply\n  [v] Run coordinator\n  [s] Status".to_string()
+                "Run 'macc init' to set up this project.\n\nActions:\n  [d] Doctor check\n  CLI: macc quickstart".to_string()
             };
             let steps_para = wrapped_paragraph(readiness_text, "Readiness");
             f.render_widget(steps_para, body_chunks[1]);
@@ -1948,7 +1959,17 @@ fn scope_label(scope: Scope) -> &'static str {
     }
 }
 
-fn build_readiness_text(paths: &macc_core::ProjectPaths) -> String {
+fn build_readiness_text(
+    paths: &macc_core::ProjectPaths,
+    doctor_summary: Option<&str>,
+) -> String {
+    // If a doctor check has been run, show its detailed output instead of the ladder.
+    if let Some(summary) = doctor_summary {
+        let mut out = summary.to_string();
+        out.push_str("\nActions: [d] re-check  [r] start coordinator  [a] apply  [v] live view");
+        return out;
+    }
+
     let ladder = macc_core::onboarding::compute_readiness(paths);
     let mut out = String::new();
     out.push_str("MACC readiness\n\n");
@@ -1967,18 +1988,18 @@ fn build_readiness_text(paths: &macc_core::ProjectPaths) -> String {
     out.push('\n');
     if ladder.is_ready() {
         out.push_str("✅ Ready to dispatch a task\n\n");
-        out.push_str("Press 'v' to open coordinator live view.");
+        out.push_str("Actions: [r] start coordinator  [v] live view  [d] doctor check");
     } else {
         out.push_str(&format!(
             "❌ {} step(s) pending\n\n",
             ladder.blocking_count
         ));
-        out.push_str("Primary actions:\n");
-        out.push_str("  [q] Quickstart\n");
-        out.push_str("  [d] Doctor\n");
-        out.push_str("  [a] Apply\n");
-        out.push_str("  [v] Run coordinator\n");
-        out.push_str("  [s] Status");
+        out.push_str("Actions:\n");
+        out.push_str("  [d] Doctor check\n");
+        out.push_str("  [a] Apply config\n");
+        out.push_str("  [r] Start coordinator\n");
+        out.push_str("  [v] Coordinator live view\n");
+        out.push_str("  CLI: macc quickstart");
     }
     out
 }
