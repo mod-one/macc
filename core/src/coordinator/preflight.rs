@@ -179,7 +179,7 @@ pub fn inspect_reference_branch_preflight(
                 recommended_action: ReferencePreflightAction::Fail,
             });
         }
-        Err(e) => {
+        Err(_) => {
             return Ok(ReferenceBranchPreflightReport {
                 reference_branch: reference_branch.to_string(),
                 branch_exists: false,
@@ -188,7 +188,6 @@ pub fn inspect_reference_branch_preflight(
                 status: ReferencePreflightStatus::GitInspectionFailed,
                 recommended_action: ReferencePreflightAction::Fail,
             });
-            let _ = e;
         }
         Ok(false) => {}
     }

@@ -1,5 +1,4 @@
 use super::{AppContext, Command};
-use macc_core::engine::Engine;
 use macc_core::skills_runner::SkillKind;
 use macc_core::Result;
 

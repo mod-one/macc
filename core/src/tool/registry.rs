@@ -88,7 +88,7 @@ pub trait ToolAdapter: Send + Sync {
     fn build_skill_invocation(
         &self,
         skill: &crate::skills_runner::SkillDefinition,
-        request: &crate::skills_runner::SkillRunRequest,
+        _request: &crate::skills_runner::SkillRunRequest,
     ) -> crate::Result<SkillInvocation> {
         Err(crate::MaccError::Validation(format!(
             "Adapter '{}' does not support skill execution (skill '{}'). \

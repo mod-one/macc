@@ -1,7 +1,6 @@
 use crate::commands::AppContext;
 use crate::commands::Command;
 use macc_core::doctor::DiagnosticSeverity;
-use macc_core::engine::Engine;
 use macc_core::Result;
 
 pub struct DoctorCommand {

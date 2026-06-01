@@ -1,5 +1,4 @@
 use super::{AppContext, Command};
-use macc_core::engine::Engine;
 use macc_core::runtime::{CoordinatorStatus, RuntimeSnapshot};
 use macc_core::Result;
 
@@ -8,10 +7,6 @@ pub struct StatusCommand {
     pub json: bool,
     pub watch: bool,
     pub control: bool,
-    pub task: Option<String>,
-    pub tool: Option<String>,
-    pub failed: bool,
-    pub rate_limited: bool,
     pub logs_only: bool,
     pub events_only: bool,
     pub events_count: usize,

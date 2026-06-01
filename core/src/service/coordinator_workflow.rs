@@ -1389,20 +1389,6 @@ pub fn coordinator_run(
     }
 }
 
-fn handle_stop_cleanup(
-    paths: &ProjectPaths,
-    _graceful: bool,
-    remove_worktrees: bool,
-    remove_branches: bool,
-) -> Result<usize> {
-    if !remove_worktrees {
-        return Ok(0);
-    }
-    let removed = crate::service::worktree::remove_all_worktrees(&paths.root, remove_branches)?;
-    crate::prune_worktrees(&paths.root)?;
-    Ok(removed)
-}
-
 pub fn coordinator_stop(paths: &ProjectPaths, reason: &str) -> Result<()> {
     state_runtime::write_coordinator_pause_file(
         &paths.root,

@@ -2180,10 +2180,6 @@ fn parse_task_payload(task_id: &str, raw: &str) -> Result<Task> {
     })
 }
 
-fn parse_task_runtime_value(task: &Task) -> Value {
-    serde_json::to_value(&task.task_runtime).unwrap_or_else(|_| json!({}))
-}
-
 fn sql_err(e: rusqlite::Error) -> MaccError {
     MaccError::Coordinator {
         code: "E411",

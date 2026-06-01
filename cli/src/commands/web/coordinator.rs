@@ -540,7 +540,6 @@ pub(super) async fn clear_tool_cooldown_handler(
 pub(super) struct ApiStopRequest {
     pub mode: Option<String>,
     pub cleanup_worktrees: Option<bool>,
-    pub force_grace_seconds: Option<u64>,
     pub reason: Option<String>,
     pub confirm: Option<String>,
 }
@@ -698,7 +697,6 @@ pub(super) async fn coordinator_preflight_handler(
     body: Bytes,
 ) -> std::result::Result<Json<ApiPreflightResponse>, ApiError> {
     use macc_core::coordinator::preflight;
-    use macc_core::config::ReferenceBranchPreflightConfigRaw;
 
     let req: ApiPreflightRequest = if body.is_empty() {
         ApiPreflightRequest { reference_branch: None, include_untracked: None }

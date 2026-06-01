@@ -212,24 +212,6 @@ pub(crate) fn apply(
     )
 }
 
-pub(crate) fn quickstart(
-    app: &AppContext,
-    assume_yes: bool,
-    apply: bool,
-    no_tui: bool,
-) -> Result<()> {
-    macc_core::service::lifecycle::quickstart(
-        &app.cwd,
-        app.engine.as_ref(),
-        app.overrides.clone(),
-        assume_yes,
-        apply,
-        no_tui,
-        &CliLifecycleUi,
-        &CliFetchMaterializer,
-    )
-}
-
 pub(crate) fn quickstart_extended(
     app: &AppContext,
     assume_yes: bool,

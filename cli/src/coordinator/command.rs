@@ -61,8 +61,6 @@ pub enum CoordinatorClientMode {
 pub struct CoordinatorCommandInput {
     pub command_name: String,
     pub client_id: String,
-    /// Deprecated alias — use `client_mode` instead.
-    pub no_tui: bool,
     /// Client to open after the coordinator starts.
     pub client_mode: CoordinatorClientMode,
     pub supervisor: bool,
@@ -641,10 +639,7 @@ fn run_reference_branch_preflight(
     coordinator_cfg: Option<&macc_core::config::CoordinatorConfig>,
     input: &CoordinatorCommandInput,
 ) -> Result<()> {
-    use macc_core::coordinator::preflight::{
-        self, BranchCreateSource, ReferencePreflightAction, ReferencePreflightStatus,
-    };
-    use macc_core::config::ReferenceBranchPreflightConfigRaw;
+    use macc_core::coordinator::preflight::{self, BranchCreateSource, ReferencePreflightAction};
 
     // Resolve preflight config from project config + CLI overrides.
     let raw = coordinator_cfg
@@ -1436,7 +1431,6 @@ mod tests {
         CoordinatorCommandInput {
             command_name: command_name.to_string(),
             client_id: client_id.to_string(),
-            no_tui: true,
             client_mode: CoordinatorClientMode::None,
             supervisor: false,
             drain: false,

@@ -1835,7 +1835,7 @@ pub fn consume_runtime_events(
         };
     }
 
-    let mut stmt = if let (Some(seq), Some(id)) = (last_seq, &last_event_id) {
+    let mut stmt = if let (Some(_seq), Some(_id)) = (last_seq, &last_event_id) {
         conn.prepare("SELECT raw_json, event_id FROM events WHERE seq > ?1 OR (seq = ?1 AND event_id > ?2) ORDER BY seq ASC, event_id ASC")
             .map_err(sql_err)?
     } else {

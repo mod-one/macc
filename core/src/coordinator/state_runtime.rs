@@ -420,9 +420,13 @@ pub fn execute_startup_recovery_sweep(
             continue;
         }
 
+        #[allow(unused_assignments)]
         let mut situation = "Process not spawned".to_string();
+        #[allow(unused_assignments)]
         let mut classification = "dispatched_without_process".to_string();
+        #[allow(unused_assignments)]
         let mut action = "Requeue safely".to_string();
+        #[allow(unused_assignments)]
         let mut proposed_action = Some(MutationAction::Requeue);
 
         // ── Step 9 check: commit already on base branch? ──────────────────

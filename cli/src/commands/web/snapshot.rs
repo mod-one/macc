@@ -1,7 +1,6 @@
 use super::WebState;
 use axum::extract::State;
 use axum::Json;
-use macc_core::engine::Engine;
 use serde_json::Value;
 
 pub(crate) async fn get_snapshot_handler(

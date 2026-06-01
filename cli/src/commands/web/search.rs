@@ -1,7 +1,6 @@
 use super::WebState;
 use axum::extract::{Query, State};
 use axum::Json;
-use macc_core::engine::Engine;
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize)]

@@ -1,5 +1,4 @@
 use super::{AppContext, Command};
-use macc_core::engine::Engine;
 use macc_core::skills_runner::{SkillRisk, SkillRunRequest};
 use macc_core::{MaccError, Result};
 use std::collections::HashMap;
@@ -9,10 +8,8 @@ pub struct RunCommand {
     pub app: AppContext,
     pub skill: String,
     pub tool: Option<String>,
-    pub agent: Option<String>,
     pub task_id: Option<String>,
     pub scope: Option<String>,
-    pub feature: Option<String>,
     pub dry_run: bool,
     pub watch: bool,
     pub json: bool,
