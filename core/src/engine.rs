@@ -1139,6 +1139,35 @@ pub trait Engine {
         None
     }
 
+    // ── Diagnostics and onboarding (spec §5, §9, §14) ────────────────────────
+
+    /// Run all extended doctor checks and return structured diagnostic findings.
+    fn collect_diagnostic_findings(
+        &self,
+        paths: &ProjectPaths,
+        max_parallel: u32,
+    ) -> Vec<crate::doctor::DiagnosticFinding> {
+        crate::doctor::collect_all_findings(paths, max_parallel)
+    }
+
+    /// Apply a git identity fix locally in the project (local repo config).
+    fn fix_git_identity_config(
+        &self,
+        paths: &ProjectPaths,
+        name: &str,
+        email: &str,
+    ) -> Result<()> {
+        crate::doctor::fix_git_identity(&paths.root, name, email)
+            .map_err(|e| crate::MaccError::Validation(e))
+    }
+
+    /// Compute the 8-step readiness ladder for this project.
+    fn readiness_ladder(&self, paths: &ProjectPaths) -> crate::onboarding::ReadinessLadder {
+        let canonical = self.load_canonical_config(paths).ok();
+        let coordinator_running = check_coordinator_running_via_storage(paths);
+        crate::onboarding::compute_readiness_from_state(paths, canonical.as_ref(), coordinator_running)
+    }
+
     fn coordinator_storage_import_json_to_sqlite(&self, paths: &ProjectPaths) -> Result<()> {
         crate::coordinator_storage::coordinator_storage_import_json_to_sqlite(paths)
     }
@@ -1574,6 +1603,19 @@ impl CoordinatorEvent {
             message: record.message().map(|s| s.to_string()),
             raw,
         }
+    }
+}
+
+/// Check whether a coordinator is running by reading `coordinator.sqlite` via
+/// `SqliteStorage`. Used by the `Engine::readiness_ladder` default method so
+/// the `Engine` facade is the only entry-point for clients.
+fn check_coordinator_running_via_storage(paths: &ProjectPaths) -> bool {
+    use crate::coordinator_storage::{CoordinatorStoragePaths, SqliteStorage};
+    let storage_paths = CoordinatorStoragePaths::from_project_paths(paths);
+    let storage = SqliteStorage::new(storage_paths);
+    match storage.get_active_coordinator_run() {
+        Ok(Some(run)) => crate::doctor::is_pid_alive_pub(run.pid as u32),
+        _ => false,
     }
 }
 

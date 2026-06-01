@@ -493,7 +493,7 @@ impl AppState {
         };
 
         let max_parallel = 2u32;
-        let findings = macc_core::doctor::collect_all_findings(&paths, max_parallel);
+        let findings = self.engine.collect_diagnostic_findings(&paths, max_parallel);
 
         let errors: Vec<_> = findings
             .iter()

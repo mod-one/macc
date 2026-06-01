@@ -1282,9 +1282,10 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             let overview_para = wrapped_paragraph(overview, "Overview");
             f.render_widget(overview_para, body_chunks[0]);
 
-            // Readiness ladder (spec §9 / §13.1)
+            // Readiness ladder (spec §9 / §13.1) — via Engine facade.
             let readiness_text = if let Some(paths) = &state.project_paths {
-                build_readiness_text(paths, state.home_doctor_summary.as_deref())
+                let ladder = state.engine.readiness_ladder(paths);
+                build_readiness_text(&ladder, state.home_doctor_summary.as_deref())
             } else {
                 "Run 'macc init' to set up this project.\n\nActions:\n  [d] Doctor check\n  CLI: macc quickstart".to_string()
             };
@@ -1948,7 +1949,7 @@ fn scope_label(scope: Scope) -> &'static str {
 }
 
 fn build_readiness_text(
-    paths: &macc_core::ProjectPaths,
+    ladder: &macc_core::onboarding::ReadinessLadder,
     doctor_summary: Option<&str>,
 ) -> String {
     // If a doctor check has been run, show its detailed output instead of the ladder.
@@ -1958,7 +1959,6 @@ fn build_readiness_text(
         return out;
     }
 
-    let ladder = macc_core::onboarding::compute_readiness(paths);
     let mut out = String::new();
     out.push_str("MACC readiness\n\n");
     for step in &ladder.steps {

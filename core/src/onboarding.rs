@@ -1,5 +1,4 @@
 /// Readiness ladder and onboarding state (spec §9).
-use rusqlite;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -117,30 +116,50 @@ impl OnboardingState {
     }
 }
 
-/// Compute the current readiness ladder from project state.
-pub fn compute_readiness(paths: &crate::ProjectPaths) -> ReadinessLadder {
+/// Compute the readiness ladder from pre-resolved state.
+///
+/// Called by `Engine::readiness_ladder()` which supplies the already-loaded
+/// `CanonicalConfig` and coordinator liveness flag — no direct YAML/SQLite
+/// access happens here.
+pub fn compute_readiness_from_state(
+    paths: &crate::ProjectPaths,
+    canonical: Option<&crate::config::CanonicalConfig>,
+    coordinator_running: bool,
+) -> ReadinessLadder {
     let onboarding = OnboardingState::load(&paths.macc_dir);
 
     // Step 1: Project initialized
-    let step1 = if paths.macc_dir.join("macc.yaml").exists() || paths.macc_dir.join("macc.toml").exists() {
+    let step1 = if paths.macc_dir.join("macc.yaml").exists()
+        || paths.macc_dir.join("macc.toml").exists()
+    {
         ReadinessStep::done(1, "Project initialized", None)
     } else {
         ReadinessStep::pending(1, "Project initialized")
     };
 
-    // Step 2: Tool adapter selected
-    let selected_tool = detect_selected_tool(paths);
+    // Step 2: Tool adapter selected — read from the already-loaded canonical config.
+    let selected_tool = canonical
+        .and_then(|c| c.tools.enabled.first().cloned())
+        .or_else(|| {
+            // Fall back to onboarding state if config not loaded.
+            onboarding
+                .completed_steps
+                .tool_selected
+                .then(|| String::new())
+        });
     let step2 = if let Some(ref tool) = selected_tool {
-        ReadinessStep::done(2, "Tool adapter selected", Some(tool.as_str()))
-    } else if onboarding.completed_steps.tool_selected {
-        ReadinessStep::done(2, "Tool adapter selected", None)
+        if tool.is_empty() {
+            ReadinessStep::done(2, "Tool adapter selected", None)
+        } else {
+            ReadinessStep::done(2, "Tool adapter selected", Some(tool.as_str()))
+        }
     } else {
         ReadinessStep::pending(2, "Tool adapter selected")
     };
 
-    // Step 3: Config applied
+    // Step 3: Config applied — managed-paths state file written by `macc apply`.
     let config_applied =
-        onboarding.completed_steps.config_applied || detect_config_applied(paths);
+        onboarding.completed_steps.config_applied || paths.managed_paths_state_path().exists();
     let step3 = if config_applied {
         ReadinessStep::done(3, "Config applied", None)
     } else {
@@ -148,9 +167,9 @@ pub fn compute_readiness(paths: &crate::ProjectPaths) -> ReadinessLadder {
     };
 
     // Step 4: PRD/task available
-    let prd_exists = paths.macc_dir.join("prd.json").exists();
-    let task_count = if prd_exists {
-        crate::doctor::count_ready_tasks_public(&paths.macc_dir.join("prd.json"))
+    let prd_path = paths.macc_dir.join("prd.json");
+    let task_count = if prd_path.exists() {
+        crate::doctor::count_ready_tasks_public(&prd_path)
     } else {
         0
     };
@@ -174,17 +193,14 @@ pub fn compute_readiness(paths: &crate::ProjectPaths) -> ReadinessLadder {
         ReadinessStep::pending(5, "Git identity configured")
     };
 
-    // Step 6: Coordinator running
-    let coordinator_running = check_coordinator_running(paths);
+    // Step 6: Coordinator running — supplied by caller via Engine facade.
     let step6 = if coordinator_running {
         ReadinessStep::done(6, "Coordinator running", None)
-    } else if onboarding.completed_steps.coordinator_started {
-        ReadinessStep::pending(6, "Coordinator running")
     } else {
         ReadinessStep::pending(6, "Coordinator running")
     };
 
-    // Step 7: Performer connected
+    // Steps 7–8: only mark done when first task has been dispatched.
     let step7 = if onboarding.completed_steps.first_task_dispatched {
         ReadinessStep::done(7, "Performer connected", None)
     } else {
@@ -196,7 +212,6 @@ pub fn compute_readiness(paths: &crate::ProjectPaths) -> ReadinessLadder {
         }
     };
 
-    // Step 8: First task dispatched
     let step8 = if onboarding.completed_steps.first_task_dispatched {
         ReadinessStep::done(8, "First task dispatched", None)
     } else {
@@ -220,39 +235,13 @@ pub fn compute_readiness(paths: &crate::ProjectPaths) -> ReadinessLadder {
     }
 }
 
-// ── Internal helpers ──────────────────────────────────────────────────────────
-
-fn detect_selected_tool(paths: &crate::ProjectPaths) -> Option<String> {
-    let config_path = paths.macc_dir.join("macc.yaml");
-    let content = std::fs::read_to_string(config_path).ok()?;
-    let value: serde_yaml::Value = serde_yaml::from_str(&content).ok()?;
-    let tools = value.get("tools")?.as_mapping()?;
-    for (key, val) in tools {
-        if val
-            .get("enabled")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
-        {
-            return key.as_str().map(|s| s.to_string());
-        }
-    }
-    None
-}
-
-fn detect_config_applied(paths: &crate::ProjectPaths) -> bool {
-    // Heuristic: if any tool-specific file managed by MACC exists, config was applied.
-    let managed = paths.managed_paths_state_path();
-    managed.exists()
-}
+// ── Internal helpers (core-only, no direct storage I/O) ──────────────────────
 
 fn check_git_identity_ok(root: &Path) -> bool {
-    let has_name = is_git_config_set(root, "user.name");
-    let has_email = is_git_config_set(root, "user.email");
-    has_name && has_email
+    is_git_config_set(root, "user.name") && is_git_config_set(root, "user.email")
 }
 
 fn is_git_config_set(root: &Path, key: &str) -> bool {
-    // Check local first, then global.
     let local_ok = std::process::Command::new("git")
         .args(["config", "--local", key])
         .current_dir(root)
@@ -267,30 +256,4 @@ fn is_git_config_set(root: &Path, key: &str) -> bool {
         .output()
         .map(|o| o.status.success() && !String::from_utf8_lossy(&o.stdout).trim().is_empty())
         .unwrap_or(false)
-}
-
-fn check_coordinator_running(paths: &crate::ProjectPaths) -> bool {
-    let sqlite_path = paths.macc_dir.join("state/coordinator.sqlite");
-    if !sqlite_path.exists() {
-        return false;
-    }
-    let conn = match rusqlite::Connection::open(&sqlite_path) {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    let result = conn.query_row(
-        "SELECT pid FROM coordinator_runs WHERE status = 'running' OR status = 'draining' ORDER BY started_at DESC LIMIT 1",
-        [],
-        |row| row.get::<_, i64>(0),
-    );
-    match result {
-        Ok(pid) => {
-            if pid > 0 {
-                crate::doctor::is_pid_alive_pub(pid as u32)
-            } else {
-                false
-            }
-        }
-        _ => false,
-    }
 }

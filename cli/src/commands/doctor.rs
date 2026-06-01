@@ -1,6 +1,7 @@
 use crate::commands::AppContext;
 use crate::commands::Command;
-use macc_core::doctor::{collect_all_findings, fix_git_identity, DiagnosticSeverity};
+use macc_core::doctor::DiagnosticSeverity;
+use macc_core::engine::Engine;
 use macc_core::Result;
 
 pub struct DoctorCommand {
@@ -40,10 +41,10 @@ impl Command for DoctorCommand {
             crate::commands::gate_cli_mutation(&paths.root)?;
         }
 
-        // Apply git identity fix if requested.
+        // Apply git identity fix if requested — via Engine facade.
         if self.fix {
             if let (Some(name), Some(email)) = (&self.git_name, &self.git_email) {
-                match fix_git_identity(&paths.root, name, email) {
+                match self.app.engine.fix_git_identity_config(&paths, name, email) {
                     Ok(()) => {
                         if !self.json {
                             println!("Fixed: Git identity set (user.name={}, user.email={}).", name, email);
@@ -65,9 +66,9 @@ impl Command for DoctorCommand {
             &crate::services::interaction::CliInteraction,
         );
 
-        // Run new extended diagnostic findings (spec §5.3).
+        // Run new extended diagnostic findings via Engine facade (spec §5.3).
         let max_parallel = resolve_max_parallel(&paths);
-        let mut findings = collect_all_findings(&paths, max_parallel);
+        let mut findings = self.app.engine.collect_diagnostic_findings(&paths, max_parallel);
 
         if self.coordinator_only {
             findings.retain(|f| f.category == "coordinator");
