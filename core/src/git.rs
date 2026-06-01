@@ -824,6 +824,203 @@ pub fn delete_local_branch(repo_root: &Path, branch: &str, force: bool) -> Resul
     Ok(())
 }
 
+// ── Preflight gate helpers ────────────────────────────────────────────────────
+
+/// Validate a branch name using `git check-ref-format --branch <name>`.
+/// Returns `true` when the name is valid, `false` otherwise.
+pub fn check_ref_format_branch(repo_root: &Path, branch: &str) -> Result<bool> {
+    let output = run_git_output(
+        repo_root,
+        &["check-ref-format", "--branch", branch],
+        "check-ref-format",
+    )?;
+    Ok(output.status.success())
+}
+
+/// Return `true` when `refs/heads/<branch>` exists in the repository.
+pub fn local_branch_exists(repo_root: &Path, branch: &str) -> Result<bool> {
+    let refspec = format!("refs/heads/{}", branch);
+    let output = run_git_output(
+        repo_root,
+        &["show-ref", "--verify", "--quiet", &refspec],
+        "show-ref branch",
+    )?;
+    Ok(output.status.success())
+}
+
+/// Return remote-tracking refs that match `<remote>/<branch>` for all remotes.
+/// MVP checks `origin/<branch>` plus any entry returned by `git for-each-ref`.
+pub fn remote_tracking_refs_for_branch(
+    repo_root: &Path,
+    branch: &str,
+) -> Result<Vec<String>> {
+    let format = "%(refname:short)";
+    let pattern = format!("refs/remotes/*/{}", branch);
+    let output = run_git_output(
+        repo_root,
+        &["for-each-ref", &format!("--format={}", format), &pattern],
+        "for-each-ref remotes",
+    )?;
+    if !output.status.success() {
+        return Ok(Vec::new());
+    }
+    let refs: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.trim().to_string())
+        .collect();
+    Ok(refs)
+}
+
+/// Return the paths of all Git worktrees where `refs/heads/<branch>` is checked out.
+pub fn worktrees_for_branch(repo_root: &Path, branch: &str) -> Result<Vec<std::path::PathBuf>> {
+    let raw = worktree_list_porcelain(repo_root)?;
+    let target_ref = format!("refs/heads/{}", branch);
+    let mut paths = Vec::new();
+    let mut current_path: Option<std::path::PathBuf> = None;
+
+    for line in raw.lines() {
+        if let Some(rest) = line.strip_prefix("worktree ") {
+            current_path = Some(std::path::PathBuf::from(rest.trim()));
+        } else if let Some(rest) = line.strip_prefix("branch ") {
+            if rest.trim() == target_ref {
+                if let Some(p) = current_path.take() {
+                    paths.push(p);
+                }
+            } else {
+                current_path = None;
+            }
+        } else if line.trim().is_empty() {
+            current_path = None;
+        }
+    }
+    Ok(paths)
+}
+
+/// Run `git -C <path> status --porcelain=v1` and return parsed entries.
+/// When `include_untracked` is `false`, `??`-prefixed entries are excluded.
+pub fn status_porcelain_v1(
+    worktree_path: &Path,
+    include_untracked: bool,
+) -> Result<Vec<GitPorcelainEntry>> {
+    let untracked_flag = if include_untracked {
+        "--untracked-files=all"
+    } else {
+        "--untracked-files=no"
+    };
+    let output = run_git_output(
+        worktree_path,
+        &["status", "--porcelain=v1", untracked_flag],
+        "status porcelain",
+    )?;
+    if !output.status.success() {
+        return Err(MaccError::Git {
+            operation: "status_porcelain".to_string(),
+            message: format!(
+                "git status failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        });
+    }
+    let entries = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|l| l.len() >= 3)
+        .map(parse_porcelain_v1_line)
+        .collect();
+    Ok(entries)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitPorcelainEntry {
+    pub index_status: char,
+    pub worktree_status: char,
+    pub path: String,
+    pub original_path: Option<String>,
+}
+
+fn parse_porcelain_v1_line(line: &str) -> GitPorcelainEntry {
+    let mut chars = line.chars();
+    let index_status = chars.next().unwrap_or(' ');
+    let worktree_status = chars.next().unwrap_or(' ');
+    // skip the space separator
+    let rest = &line[3..];
+    // Renames: "R old -> new" or "old\0new" (v1 uses space-arrow in some modes)
+    if let Some((original, path)) = rest.split_once(" -> ") {
+        GitPorcelainEntry {
+            index_status,
+            worktree_status,
+            path: path.to_string(),
+            original_path: Some(original.to_string()),
+        }
+    } else {
+        GitPorcelainEntry {
+            index_status,
+            worktree_status,
+            path: rest.to_string(),
+            original_path: None,
+        }
+    }
+}
+
+/// Create a local branch at `start_point` (branch name, tag, or rev).
+pub fn create_branch_at(repo_root: &Path, branch: &str, start_point: &str) -> Result<()> {
+    let output = run_git_output(
+        repo_root,
+        &["branch", branch, start_point],
+        "create branch",
+    )?;
+    if !output.status.success() {
+        return Err(MaccError::Git {
+            operation: "create_branch".to_string(),
+            message: format!(
+                "git branch {} {} failed: {}",
+                branch,
+                start_point,
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Create a local tracking branch from a remote-tracking ref.
+pub fn create_tracking_branch(
+    repo_root: &Path,
+    branch: &str,
+    remote_ref: &str,
+) -> Result<()> {
+    let output = run_git_output(
+        repo_root,
+        &["branch", "--track", branch, remote_ref],
+        "create tracking branch",
+    )?;
+    if !output.status.success() {
+        return Err(MaccError::Git {
+            operation: "create_tracking_branch".to_string(),
+            message: format!(
+                "git branch --track {} {} failed: {}",
+                branch,
+                remote_ref,
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Return `true` when the repository is a bare repository.
+pub fn is_bare_repository(repo_root: &Path) -> Result<bool> {
+    let output = run_git_output(
+        repo_root,
+        &["rev-parse", "--is-bare-repository"],
+        "is-bare-repository",
+    )?;
+    Ok(
+        output.status.success()
+            && String::from_utf8_lossy(&output.stdout).trim() == "true",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

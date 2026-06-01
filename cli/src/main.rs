@@ -397,6 +397,18 @@ enum Commands {
         /// Default reference/base branch when task.base_branch is not provided
         #[arg(long)]
         reference_branch: Option<String>,
+        /// Run preflight checks and exit without starting the coordinator
+        #[arg(long)]
+        preflight_only: bool,
+        /// Allow coordinator run even when reference branch worktree is dirty
+        #[arg(long)]
+        allow_dirty_reference: bool,
+        /// Create the reference branch if it is missing
+        #[arg(long)]
+        create_reference_branch: bool,
+        /// Base branch or revision used when creating a missing reference branch
+        #[arg(long)]
+        reference_branch_base: Option<String>,
         /// Tool priority order (comma-separated, e.g. tool-a,tool-b,tool-c)
         #[arg(long)]
         tool_priority: Option<String>,
@@ -1601,6 +1613,10 @@ fn run_with_engine_provider(
             prd,
             coordinator_tool,
             reference_branch,
+            preflight_only,
+            allow_dirty_reference,
+            create_reference_branch,
+            reference_branch_base,
             tool_priority,
             max_parallel_per_tool_json,
             preset,
@@ -1700,6 +1716,10 @@ fn run_with_engine_provider(
                     remove_branches: *remove_branches,
                     env_cfg,
                     extra_args: extra_args.clone(),
+                    preflight_only: *preflight_only,
+                    allow_dirty_reference: *allow_dirty_reference,
+                    create_reference_branch: *create_reference_branch,
+                    reference_branch_base: reference_branch_base.clone(),
                 },
             )
             .run()
@@ -3190,6 +3210,10 @@ fi
                     prd: None,
                     coordinator_tool: None,
                     reference_branch: None,
+                    preflight_only: false,
+                    allow_dirty_reference: false,
+                    create_reference_branch: false,
+                    reference_branch_base: None,
                     tool_priority: None,
                     max_parallel_per_tool_json: None,
                     preset: None,

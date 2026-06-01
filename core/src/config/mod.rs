@@ -163,6 +163,67 @@ pub struct PhasesConfig {
     pub review: PhaseConfig,
 }
 
+/// Serializable representation of the reference branch preflight policy (spec §9.2).
+/// Deserialized from `automation.coordinator.reference_branch_preflight` in macc.yaml.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
+#[serde(default)]
+pub struct ReferenceBranchPreflightConfigRaw {
+    /// Enable/disable the gate entirely. Default: true.
+    pub enabled: Option<bool>,
+    /// `prompt` | `fail` | `create`. Default: prompt.
+    pub missing_branch_policy: Option<String>,
+    /// `block` | `warn` | `allow`. Default: block.
+    pub dirty_policy: Option<String>,
+    /// Include untracked files in dirty check. Default: true.
+    pub include_untracked: Option<bool>,
+    /// Source for creating a missing branch. Default: remote_tracking_or_current_head.
+    pub create_from: Option<String>,
+    /// Allow non-interactive branch creation from config alone. Default: false.
+    pub allow_non_interactive_create: Option<bool>,
+    /// Log the preflight result even when clean. Default: true.
+    pub log_clean_result: Option<bool>,
+}
+
+impl ReferenceBranchPreflightConfigRaw {
+    /// Resolve to a strongly-typed [`ReferenceBranchPreflightConfig`] using defaults for
+    /// missing fields, taking `require_clean_reference_branch` into account.
+    pub fn resolve(
+        &self,
+        require_clean_override: Option<bool>,
+    ) -> crate::coordinator::preflight::ReferenceBranchPreflightConfig {
+        use crate::coordinator::preflight::{
+            BranchCreateSourcePolicy, DirtyReferencePolicy, MissingBranchPolicy,
+            ReferenceBranchPreflightConfig,
+        };
+
+        let dirty_policy = match self.dirty_policy.as_deref() {
+            Some("warn") => DirtyReferencePolicy::Warn,
+            Some("allow") => DirtyReferencePolicy::Allow,
+            // If MVP `require_clean_reference_branch: false` is set, downgrade to warn.
+            _ if require_clean_override == Some(false) => DirtyReferencePolicy::Warn,
+            _ => DirtyReferencePolicy::Block,
+        };
+
+        ReferenceBranchPreflightConfig {
+            enabled: self.enabled.unwrap_or(true),
+            missing_branch_policy: match self.missing_branch_policy.as_deref() {
+                Some("fail") => MissingBranchPolicy::Fail,
+                Some("create") => MissingBranchPolicy::Create,
+                _ => MissingBranchPolicy::Prompt,
+            },
+            dirty_policy,
+            include_untracked: self.include_untracked.unwrap_or(true),
+            create_from: match self.create_from.as_deref() {
+                Some("current_head") => BranchCreateSourcePolicy::CurrentHead,
+                Some("remote_tracking") => BranchCreateSourcePolicy::RemoteTracking,
+                _ => BranchCreateSourcePolicy::RemoteTrackingOrCurrentHead,
+            },
+            allow_non_interactive_create: self.allow_non_interactive_create.unwrap_or(false),
+            log_clean_result: self.log_clean_result.unwrap_or(true),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct CoordinatorConfig {
@@ -170,6 +231,12 @@ pub struct CoordinatorConfig {
     pub coordinator_tool: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reference_branch: Option<String>,
+    /// MVP: block coordinator run when reference branch worktree is dirty (spec §9.1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub require_clean_reference_branch: Option<bool>,
+    /// Full preflight policy block (spec §9.2). Overrides `require_clean_reference_branch`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reference_branch_preflight: Option<ReferenceBranchPreflightConfigRaw>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prd_file: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -410,6 +477,8 @@ impl Default for CoordinatorConfig {
         Self {
             coordinator_tool: None,
             reference_branch: None,
+            require_clean_reference_branch: None,
+            reference_branch_preflight: None,
             prd_file: None,
             task_registry_file: None,
             tool_priority: Vec::new(),
@@ -509,6 +578,9 @@ pub struct CoordinatorConfigResolved {
     /// Git branch to rebase/merge finished task branches onto.
     /// Default: `"master"` — matches git's historical default.
     pub reference_branch: String,
+
+    /// Resolved preflight policy — always present with sensible defaults.
+    pub reference_branch_preflight: crate::coordinator::preflight::ReferenceBranchPreflightConfig,
 
     /// Ordered list of tools to prefer when dispatching new tasks.
     /// Default: empty — all enabled tools are eligible equally.
@@ -747,6 +819,12 @@ impl CoordinatorConfigResolved {
             reference_branch: config
                 .and_then(|c| c.reference_branch.clone())
                 .unwrap_or_else(|| "master".to_string()),
+            reference_branch_preflight: {
+                let raw = config.and_then(|c| c.reference_branch_preflight.clone())
+                    .unwrap_or_default();
+                let require_clean = config.and_then(|c| c.require_clean_reference_branch);
+                raw.resolve(require_clean)
+            },
             tool_priority: config.map(|c| c.tool_priority.clone()).unwrap_or_default(),
             max_parallel_per_tool: config
                 .map(|c| c.max_parallel_per_tool.clone())

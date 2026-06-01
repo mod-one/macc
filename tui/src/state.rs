@@ -246,7 +246,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    const AUTOMATION_FIELD_COUNT: usize = 38;
+    const AUTOMATION_FIELD_COUNT: usize = 40;
     const COORDINATOR_EVENTS_EWMA_ALPHA: f64 = 0.30;
     const COORDINATOR_PAUSE_REL_PATH: &'static str = ".macc/automation/task/coordinator.pause.json";
 
@@ -2809,6 +2809,8 @@ impl AppState {
             35 => "[Phases] Testing Phase Mode",
             36 => "[Phases] Review Phase Enabled",
             37 => "[Phases] Review Phase Mode",
+            38 => "[Preflight] Require Clean Reference Branch",
+            39 => "[Preflight] Preflight Enabled",
             _ => "",
         }
     }
@@ -2858,6 +2860,10 @@ Saved in .macc/macc.yaml; CLI flag --testing=<mode> overrides at runtime.",
 Saved in .macc/macc.yaml; CLI flag --disable-review/--review= overrides at runtime.",
             37 => "Reviewer activation mode: disabled | required | risk_based | manual. \
 Saved in .macc/macc.yaml; CLI flag --review=<mode> overrides at runtime.",
+            38 => "Block coordinator run when the reference branch worktree has uncommitted changes. \
+Default: true. Override per-run with --allow-dirty-reference.",
+            39 => "Enable the reference branch preflight gate before coordinator run. \
+Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
             _ => "",
         }
     }
@@ -3087,6 +3093,19 @@ Saved in .macc/macc.yaml; CLI flag --review=<mode> overrides at runtime.",
                 } else {
                     saved
                 }
+            }
+            38 => {
+                let require_clean = coordinator
+                    .and_then(|c| c.require_clean_reference_branch)
+                    .unwrap_or(true);
+                if require_clean { "true (block)".to_string() } else { "false (warn)".to_string() }
+            }
+            39 => {
+                let enabled = coordinator
+                    .and_then(|c| c.reference_branch_preflight.as_ref())
+                    .and_then(|p| p.enabled)
+                    .unwrap_or(true);
+                if enabled { "enabled".to_string() } else { "disabled".to_string() }
             }
             _ => String::new(),
         }

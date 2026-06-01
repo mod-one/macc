@@ -57,6 +57,15 @@ pub struct CoordinatorCommandInput {
     pub remove_branches: bool,
     pub env_cfg: CoordinatorEnvConfig,
     pub extra_args: Vec<String>,
+    // ── Reference branch preflight flags (spec §8.6) ──────────────────────
+    /// Exit after preflight checks without starting coordinator.
+    pub preflight_only: bool,
+    /// Override dirty-branch block for this run.
+    pub allow_dirty_reference: bool,
+    /// Create the reference branch if it is missing.
+    pub create_reference_branch: bool,
+    /// Base branch/revision used when creating the reference branch.
+    pub reference_branch_base: Option<String>,
 }
 
 struct ProjectContext {
@@ -203,6 +212,15 @@ Performers cannot commit without it. Fix this first:\n\
   git config --global user.name \"Your Name\""
             )));
         }
+    }
+
+    // Reference branch preflight gate (spec §7, §11.1).
+    // Must run before any registry/worktree mutation.
+    if matches!(
+        command,
+        CoordinatorCommand::RunControlPlane | CoordinatorCommand::DispatchReadyTasks
+    ) {
+        run_reference_branch_preflight(&paths.root, coordinator_cfg, &input)?;
     }
 
     if let CoordinatorCommand::Stop { drain, .. } = &command {
@@ -612,6 +630,226 @@ fn format_duration_human(secs: u64) -> String {
     }
 }
 
+/// Run the reference branch preflight gate and handle the result interactively (spec §11).
+///
+/// Returns `Ok(())` to proceed, or an `Err` to cancel the coordinator run.
+fn run_reference_branch_preflight(
+    repo_root: &std::path::Path,
+    coordinator_cfg: Option<&macc_core::config::CoordinatorConfig>,
+    input: &CoordinatorCommandInput,
+) -> Result<()> {
+    use macc_core::coordinator::preflight::{
+        self, BranchCreateSource, ReferencePreflightAction, ReferencePreflightStatus,
+    };
+    use macc_core::config::ReferenceBranchPreflightConfigRaw;
+
+    // Resolve preflight config from project config + CLI overrides.
+    let raw = coordinator_cfg
+        .and_then(|c| c.reference_branch_preflight.clone())
+        .unwrap_or_default();
+    let require_clean = coordinator_cfg.and_then(|c| c.require_clean_reference_branch);
+    let mut cfg = raw.resolve(require_clean);
+
+    // --allow-dirty-reference CLI flag overrides dirty_policy.
+    if input.allow_dirty_reference {
+        cfg.dirty_policy = preflight::DirtyReferencePolicy::Allow;
+    }
+    // --create-reference-branch enables non-interactive creation.
+    if input.create_reference_branch {
+        cfg.missing_branch_policy = preflight::MissingBranchPolicy::Create;
+        cfg.allow_non_interactive_create = true;
+    }
+
+    if !cfg.enabled {
+        return Ok(());
+    }
+
+    // Resolve reference_branch from env_cfg > coordinator_cfg > default.
+    let reference_branch = input
+        .env_cfg
+        .reference_branch
+        .clone()
+        .or_else(|| coordinator_cfg.and_then(|c| c.reference_branch.clone()))
+        .unwrap_or_else(|| "main".to_string());
+
+    let report = preflight::inspect_reference_branch_preflight(
+        repo_root,
+        &reference_branch,
+        &cfg,
+    )
+    .map_err(|e| MaccError::Validation(e.to_string()))?;
+
+    // Log preflight result to coordinator log if available.
+    let log_event =
+        preflight::build_preflight_log_event(&report, "pending", input.allow_dirty_reference);
+    if cfg.log_clean_result
+        || !matches!(report.status, preflight::ReferencePreflightStatus::Clean | preflight::ReferencePreflightStatus::NotCheckedOut)
+    {
+        if let Ok(log_json) = serde_json::to_string(&log_event) {
+            let log_path = repo_root.join(".macc/log/coordinator/preflight-latest.json");
+            if let Some(parent) = log_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(&log_path, log_json);
+        }
+    }
+
+    // --preflight-only: print result and exit.
+    if input.preflight_only {
+        println!("{}", preflight::format_report_cli(&report));
+        return if matches!(report.recommended_action, ReferencePreflightAction::Proceed) {
+            Ok(())
+        } else {
+            Err(MaccError::Validation(format!(
+                "Preflight failed for reference branch \"{}\".",
+                reference_branch
+            )))
+        };
+    }
+
+    match &report.status {
+        preflight::ReferencePreflightStatus::Clean
+        | preflight::ReferencePreflightStatus::NotCheckedOut => {
+            if cfg.log_clean_result {
+                println!("Reference branch: {}\nPreflight: OK", reference_branch);
+            }
+            Ok(())
+        }
+
+        preflight::ReferencePreflightStatus::BranchMissing => {
+            // Non-interactive: fail fast unless --create-reference-branch was given.
+            if input.create_reference_branch {
+                let base = input
+                    .reference_branch_base
+                    .clone()
+                    .or_else(|| report.remote_tracking_branches.first().cloned())
+                    .unwrap_or_else(|| "HEAD".to_string());
+
+                let source = if report.remote_tracking_branches.contains(&base) {
+                    BranchCreateSource::RemoteTracking(base.clone())
+                } else {
+                    BranchCreateSource::LocalBranch(base.clone())
+                };
+
+                preflight::create_reference_branch(repo_root, &reference_branch, source)
+                    .map_err(|e| MaccError::Validation(format!("{}", e)))?;
+
+                println!(
+                    "Created local branch \"{}\" from \"{}\".\nPreflight: OK",
+                    reference_branch, base
+                );
+                return Ok(());
+            }
+
+            // Interactive: prompt the user.
+            println!("{}", preflight::format_report_cli(&report));
+            println!();
+            println!("Options:");
+            println!("  [1] Create from current HEAD");
+            if !report.remote_tracking_branches.is_empty() {
+                for (i, remote) in report.remote_tracking_branches.iter().enumerate() {
+                    println!("  [{}] Create from {}", i + 2, remote);
+                }
+            }
+            println!("  [c] Cancel");
+            print!("Selection [c]: ");
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+            let mut line = String::new();
+            let _ = std::io::stdin().read_line(&mut line);
+            let choice = line.trim().to_lowercase();
+
+            if choice == "1" {
+                preflight::create_reference_branch(
+                    repo_root,
+                    &reference_branch,
+                    BranchCreateSource::CurrentHead,
+                )
+                .map_err(|e| MaccError::Validation(format!("{}", e)))?;
+                println!("Created local branch \"{}\" from HEAD.\nPreflight: OK", reference_branch);
+                return Ok(());
+            }
+
+            if let Ok(idx) = choice.parse::<usize>() {
+                let remote_idx = idx.saturating_sub(2);
+                if let Some(remote) = report.remote_tracking_branches.get(remote_idx) {
+                    preflight::create_reference_branch(
+                        repo_root,
+                        &reference_branch,
+                        BranchCreateSource::RemoteTracking(remote.clone()),
+                    )
+                    .map_err(|e| MaccError::Validation(format!("{}", e)))?;
+                    println!(
+                        "Created local tracking branch \"{}\" from \"{}\".\nPreflight: OK",
+                        reference_branch, remote
+                    );
+                    return Ok(());
+                }
+            }
+
+            Err(MaccError::Validation(format!(
+                "Coordinator cancelled: reference branch \"{}\" does not exist.\n\
+                 Use --create-reference-branch to create it automatically.",
+                reference_branch
+            )))
+        }
+
+        preflight::ReferencePreflightStatus::Dirty => {
+            // Non-interactive (allow_dirty_reference already set cfg.dirty_policy to Allow).
+            if matches!(cfg.dirty_policy, preflight::DirtyReferencePolicy::Allow) {
+                eprintln!(
+                    "WARNING: Reference branch \"{}\" has uncommitted changes.\n\
+                     Override accepted because --allow-dirty-reference was provided.",
+                    reference_branch
+                );
+                return Ok(());
+            }
+            if matches!(cfg.dirty_policy, preflight::DirtyReferencePolicy::Warn) {
+                eprintln!("{}", preflight::format_report_cli(&report));
+                return Ok(());
+            }
+
+            // Interactive prompt.
+            println!("{}", preflight::format_report_cli(&report));
+            println!();
+            println!("Options:");
+            println!("  [1] Cancel  (recommended)");
+            println!("  [2] Continue once");
+            print!("Selection [1]: ");
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+            let mut line = String::new();
+            let _ = std::io::stdin().read_line(&mut line);
+            if line.trim() == "2" {
+                eprintln!(
+                    "WARNING: Continuing with dirty reference branch \"{}\".",
+                    reference_branch
+                );
+                Ok(())
+            } else {
+                Err(MaccError::Validation(format!(
+                    "{}: Reference branch \"{}\" has uncommitted changes.\n\
+                     Commit, stash, discard, or rerun with --allow-dirty-reference.",
+                    preflight::E702,
+                    reference_branch
+                )))
+            }
+        }
+
+        preflight::ReferencePreflightStatus::InvalidBranchName => Err(MaccError::Validation(
+            preflight::format_report_cli(&report),
+        )),
+
+        preflight::ReferencePreflightStatus::BareRepository => Err(MaccError::Validation(
+            preflight::format_report_cli(&report),
+        )),
+
+        preflight::ReferencePreflightStatus::GitInspectionFailed => {
+            Err(MaccError::Validation(preflight::format_report_cli(&report)))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{handle, CoordinatorCommandInput};
@@ -783,6 +1021,10 @@ mod tests {
             remove_branches: false,
             env_cfg: CoordinatorEnvConfig::default(),
             extra_args: Vec::new(),
+            preflight_only: false,
+            allow_dirty_reference: false,
+            create_reference_branch: false,
+            reference_branch_base: None,
         }
     }
 

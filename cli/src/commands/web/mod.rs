@@ -265,6 +265,14 @@ fn build_web_router(state: WebState) -> Router {
             post(coordinator::coordinator_audit_prd_handler),
         )
         .route(
+            "/api/v1/coordinator/preflight",
+            post(coordinator::coordinator_preflight_handler),
+        )
+        .route(
+            "/api/v1/coordinator/preflight/create-reference-branch",
+            post(coordinator::coordinator_preflight_create_branch_handler),
+        )
+        .route(
             "/api/v1/coordinator/tool-cooldown",
             get(coordinator::get_tool_cooldowns_handler)
                 .post(coordinator::set_tool_cooldown_handler),

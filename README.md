@@ -303,6 +303,14 @@ macc coordinator audit-prd -- --tool claude
 
 Runtime overrides: `--max-parallel`, `--max-dispatch`, `--tool-priority`, `--disable-testing`, `--disable-review`.
 
+**Reference branch safety:**
+
+```bash
+macc coordinator run --preflight-only           # check and exit
+macc coordinator run --allow-dirty-reference    # bypass dirty check for this run
+macc coordinator run --create-reference-branch --reference-branch-base main
+```
+
 </details>
 
 <details>
@@ -361,7 +369,31 @@ macc config list
 | `MACC-TOOL-NOT-RUNNABLE` | Tool not authenticated | Run tool login, then `macc doctor` |
 | `MACC-WORKTREE-DISK-LOW` | Insufficient disk for worktrees | Free space or reduce `max_parallel` |
 | `MACC-CONFIG-NOT-APPLIED` | Config not applied | Run `macc apply` |
+| `E701` | Reference branch not found | Create branch or update config |
+| `E702` | Reference branch has uncommitted changes | Commit, stash, discard, or use `--allow-dirty-reference` |
+| `E703` | Reference branch inspection failed | Run `macc doctor` |
+| `E704` | Reference branch creation declined | Re-run and choose a branch |
+| `E705` | Reference branch creation failed | Fix Git error and retry |
+| `E706` | Invalid reference branch name | Correct `automation.coordinator.reference_branch` |
+| `E707` | Bare repository unsupported | Run MACC in a normal worktree |
 | E101–E901 | Coordinator / performer runtime codes | See `docs/ERRORS.md` |
+
+### Coordinator reference branch safety
+
+Before running the coordinator, MACC verifies that the configured reference branch exists locally and is clean. If the branch is missing, MACC can create it after confirmation. If the branch has uncommitted changes, MACC blocks by default.
+
+```yaml
+# automation.coordinator in macc.yaml
+reference_branch: main
+require_clean_reference_branch: true   # MVP setting
+
+# Full policy (optional)
+reference_branch_preflight:
+  enabled: true
+  missing_branch_policy: prompt     # prompt | fail | create
+  dirty_policy: block               # block | warn | allow
+  include_untracked: true
+```
 
 ---
 

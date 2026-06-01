@@ -7,6 +7,18 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added — Reference Branch Preflight Gate (spec §6)
+- **`core/src/coordinator/preflight.rs`** — new module with all preflight logic: `inspect_reference_branch_preflight()`, `create_reference_branch()`, structured `ReferenceBranchPreflightReport`, `ReferencePreflightStatus`, `ReferencePreflightAction`, `ReferenceBranchPreflightConfig`, `MissingBranchPolicy`, `DirtyReferencePolicy`, `BranchCreateSourcePolicy`, `build_preflight_log_event()`, `format_report_cli()`, `is_blocking()`.
+- **Git helpers** added to `core/src/git.rs`: `check_ref_format_branch()`, `local_branch_exists()`, `remote_tracking_refs_for_branch()`, `worktrees_for_branch()`, `status_porcelain_v1()` (with `GitPorcelainEntry`), `create_branch_at()`, `create_tracking_branch()`, `is_bare_repository()`.
+- **Config** — `ReferenceBranchPreflightConfigRaw` deserialized from `automation.coordinator.reference_branch_preflight`; `require_clean_reference_branch: bool` MVP field on `CoordinatorConfig`; both resolve into `CoordinatorConfigResolved.reference_branch_preflight: ReferenceBranchPreflightConfig`.
+- **CLI flags** on `macc coordinator`: `--preflight-only` (check and exit), `--allow-dirty-reference` (override dirty block), `--create-reference-branch` (non-interactive creation), `--reference-branch-base <branch>` (base for creation).
+- **Coordinator integration** — `run_reference_branch_preflight()` called before `CoordinatorCommand::RunControlPlane` / `DispatchReadyTasks`: resolves config, handles interactive/non-interactive missing-branch and dirty-branch flows, logs result to `.macc/log/coordinator/preflight-latest.json`.
+- **TUI Automation screen** — fields 38–39 added: `[Preflight] Require Clean Reference Branch` and `[Preflight] Preflight Enabled` with help text and display values.
+- **Web API** — `POST /api/v1/coordinator/preflight` runs inspection and returns `ReferenceBranchPreflightReport` as JSON; `POST /api/v1/coordinator/preflight/create-reference-branch` creates the local branch (caution-level, audit-gated).
+- **Error codes** `E701`–`E707` (Git/Preflight range) documented in README and implemented in `preflight.rs`.
+- **Unit tests** (15 cases): dirty policy block/warn/allow, missing policy fail/create-non-interactive, `is_blocking`, `format_report_cli`, `build_preflight_log_event`.
+- **Integration tests** (6 cases using real Git repos): clean branch, missing branch, invalid name, dirty branch blocked, dirty branch warn, create branch from HEAD.
+
 ### Added — Usability, Onboarding, and README Improvement (spec §5)
 - **`macc quickstart` extended**: new flags `--tool`, `--starter-task`, `--start-coordinator`, `--check-only`, `--demo`; interactive tool selection from detected adapters; starter task creation (`QS-001`) when no PRD exists; teaching mode prints equivalent manual commands at the end.
 - **`macc doctor` extended**: `--json` flag emits structured `DiagnosticFinding` list with stable error codes (`MACC-GIT-IDENTITY-MISSING`, `MACC-COORDINATOR-IPC-MISSING`, etc.); `--fix --git-name "…" --git-email "…"` applies git identity locally; `--coordinator` filters to coordinator group; readiness summary printed at the end of human output.
