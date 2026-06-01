@@ -1163,7 +1163,15 @@ pub fn spawn_performer_job(
         .map(|value| value.to_string());
     if effective_ipc_addr.is_none() {
         return Err(MaccError::Validation(
-            "performer spawn refused: no coordinator IPC address".to_string(),
+            "No MACC coordinator is running.\n\n\
+             The performer needs a coordinator IPC address, but none was found.\n\n\
+             Start a coordinator:\n\
+             \x20 macc coordinator run\n\n\
+             Inspect:\n\
+             \x20 macc status\n\
+             \x20 macc doctor --coordinator\n\n\
+             Error code: MACC-COORDINATOR-IPC-MISSING"
+                .to_string(),
         ));
     }
     let run_id = std::env::var("COORDINATOR_RUN_ID").unwrap_or_else(|_| {
