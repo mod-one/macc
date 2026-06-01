@@ -224,6 +224,35 @@ impl ReferenceBranchPreflightConfigRaw {
     }
 }
 
+/// Client preference for `macc coordinator run` (motif §6).
+/// Persisted under `automation.coordinator.client` in macc.yaml.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
+#[serde(default)]
+pub struct CoordinatorClientConfig {
+    /// Default client mode: `prompt` | `tui` | `web` | `none` | `auto`.
+    /// `prompt` (default): ask interactively in a TTY, fall back to `none`.
+    /// `auto`: pick `tui` when a TTY is available, otherwise `none`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+    /// Open the system browser when client mode is `web`. Default: false
+    /// (print URL instead of opening automatically).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub open_browser: Option<bool>,
+    /// Host to bind the web server to. Default: `127.0.0.1`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub web_host: Option<String>,
+    /// Port for the web server. Default: `3450`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub web_port: Option<u16>,
+    /// Show the preflight validation summary before launching. Default: true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show_preflight: Option<bool>,
+    /// Require an explicit `Y` confirmation before starting the coordinator.
+    /// Default: true in interactive mode, false when `default` is not `prompt`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub require_confirmation: Option<bool>,
+}
+
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct CoordinatorConfig {
@@ -393,6 +422,9 @@ pub struct CoordinatorConfig {
     /// Spec §16: enables testing/review as independent configurable phases.
     #[serde(default, skip_serializing_if = "is_default_phases")]
     pub phases: PhasesConfig,
+    /// Client preference for `macc coordinator run` (motif §6).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client: Option<CoordinatorClientConfig>,
 }
 
 fn is_default_phases(p: &PhasesConfig) -> bool {
@@ -479,6 +511,7 @@ impl Default for CoordinatorConfig {
             reference_branch: None,
             require_clean_reference_branch: None,
             reference_branch_preflight: None,
+            client: None,
             prd_file: None,
             task_registry_file: None,
             tool_priority: Vec::new(),
@@ -581,6 +614,9 @@ pub struct CoordinatorConfigResolved {
 
     /// Resolved preflight policy — always present with sensible defaults.
     pub reference_branch_preflight: crate::coordinator::preflight::ReferenceBranchPreflightConfig,
+
+    /// Client preference resolved with defaults — always present.
+    pub client: CoordinatorClientConfig,
 
     /// Ordered list of tools to prefer when dispatching new tasks.
     /// Default: empty — all enabled tools are eligible equally.
@@ -825,6 +861,9 @@ impl CoordinatorConfigResolved {
                 let require_clean = config.and_then(|c| c.require_clean_reference_branch);
                 raw.resolve(require_clean)
             },
+            client: config
+                .and_then(|c| c.client.clone())
+                .unwrap_or_default(),
             tool_priority: config.map(|c| c.tool_priority.clone()).unwrap_or_default(),
             max_parallel_per_tool: config
                 .map(|c| c.max_parallel_per_tool.clone())

@@ -291,15 +291,20 @@ macc watch                     # alias for status --watch
 <summary>Coordinator</summary>
 
 ```bash
-macc coordinator run [--no-tui]
+macc coordinator run                # launch review, then choose TUI / Web / headless
+macc coordinator run --client tui   # skip prompt, open TUI coordinator view
+macc coordinator run --client web   # skip prompt, run headless + print dashboard URL
+macc coordinator run --client none  # skip prompt, run headless (alias: --no-client)
 macc coordinator status
-macc coordinator sync-prd      # reconcile tasks from PRD
+macc coordinator sync-prd           # reconcile tasks from PRD
 macc coordinator reconcile
 macc coordinator unlock
 macc coordinator cleanup
 macc coordinator stop [--graceful] [--remove-worktrees]
 macc coordinator audit-prd -- --tool claude
 ```
+
+`macc coordinator run` in an interactive terminal shows a **Coordinator Launch Review** — a summary of project, execution settings, and reference branch — before asking which client to open.
 
 Runtime overrides: `--max-parallel`, `--max-dispatch`, `--tool-priority`, `--disable-testing`, `--disable-review`.
 

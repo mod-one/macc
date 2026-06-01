@@ -44,11 +44,27 @@ impl macc_core::coordinator::control_plane::CoordinatorLog for LoggerAdapter<'_>
     }
 }
 
-#[derive(Debug, Clone)]
+/// Which client the user wants to open alongside the coordinator run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoordinatorClientMode {
+    /// Show the launch review and prompt interactively (default in a TTY).
+    Interactive,
+    /// Open the Ratatui TUI coordinator live screen.
+    Tui,
+    /// Start the local web server and print the dashboard URL.
+    Web,
+    /// Run headless, no client.
+    None,
+}
+
+#[derive(Clone)]
 pub struct CoordinatorCommandInput {
     pub command_name: String,
     pub client_id: String,
+    /// Deprecated alias — use `client_mode` instead.
     pub no_tui: bool,
+    /// Client to open after the coordinator starts.
+    pub client_mode: CoordinatorClientMode,
     pub supervisor: bool,
     pub drain: bool,
     pub graceful: bool,
@@ -136,39 +152,6 @@ pub fn handle(
         spawn_attached_supervisor(&context.paths.root)?;
     }
 
-    if matches!(command, CoordinatorCommand::Run) && !input.no_tui {
-        // §18: build a human-readable summary of any active runtime phase overrides so
-        // the TUI header can display a visible warning banner.
-        let phase_overrides = {
-            let mut parts: Vec<String> = Vec::new();
-            // --disable-testing / --testing=disabled take precedence; show the
-            // effective state regardless of which flag was used.
-            let testing_off = input.env_cfg.disable_testing == Some(true)
-                || input.env_cfg.testing_mode.as_deref() == Some("disabled");
-            let review_off = input.env_cfg.disable_review == Some(true)
-                || input.env_cfg.review_mode.as_deref() == Some("disabled");
-            if testing_off {
-                parts.push("[testing:off]".to_string());
-            } else if let Some(ref mode) = input.env_cfg.testing_mode {
-                parts.push(format!("[testing:{}]", mode));
-            }
-            if review_off {
-                parts.push("[review:off]".to_string());
-            } else if let Some(ref mode) = input.env_cfg.review_mode {
-                parts.push(format!("[review:{}]", mode));
-            }
-            if parts.is_empty() { None } else { Some(parts.join(" ")) }
-        };
-        return macc_tui::run_tui_with_launch(macc_tui::LaunchMode::CoordinatorRun {
-            phase_overrides,
-        })
-        .map_err(|e| MaccError::Io {
-            path: "tui".into(),
-            action: "run_tui coordinator live".into(),
-            source: std::io::Error::other(e.to_string()),
-        });
-    }
-
     let _ = macc_core::ensure_embedded_automation_scripts(paths)?;
 
     if let Ok(effective_storage_mode) =
@@ -231,6 +214,16 @@ Performers cannot commit without it. Fix this first:\n\
             | CoordinatorCommand::DispatchReadyTasks
     ) {
         run_reference_branch_preflight(&paths.root, coordinator_cfg, &input)?;
+    }
+
+    // ── Client selection and launch review (motif §2) ─────────────────────────
+    //
+    // For `macc coordinator run`, after preflight passes, show a launch review
+    // and ask which client to open (TUI / Web / None). In non-interactive mode
+    // (--client flag set, or stdout is not a TTY), skip the prompt.
+    if matches!(command, CoordinatorCommand::Run) {
+        let chosen_mode = resolve_client_mode(&input, coordinator_cfg, paths);
+        return launch_coordinator_with_client(chosen_mode, &input, paths, coordinator_cfg);
     }
 
     if let CoordinatorCommand::Stop { drain, .. } = &command {
@@ -860,6 +853,427 @@ fn run_reference_branch_preflight(
     }
 }
 
+// ── Client selection and launch (motif §2–5) ──────────────────────────────────
+
+/// Full 8-step flow: load config → resolve → preflight → summary → client →
+/// confirm → start engine → attach client.
+///
+/// Called only for `CoordinatorCommand::Run` with interactive or explicit client.
+fn resolve_client_mode(
+    input: &CoordinatorCommandInput,
+    coordinator_cfg: Option<&macc_core::config::CoordinatorConfig>,
+    paths: &macc_core::ProjectPaths,
+) -> CoordinatorClientMode {
+    // Explicit CLI flag wins — skip config and prompt.
+    if input.client_mode != CoordinatorClientMode::Interactive {
+        return input.client_mode.clone();
+    }
+
+    // Read client preferences from config.
+    let client_cfg = coordinator_cfg
+        .and_then(|c| c.client.as_ref())
+        .cloned()
+        .unwrap_or_default();
+
+    let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
+
+    // Resolve default mode from config (falls through to Interactive/None).
+    let config_default_mode = match client_cfg.default.as_deref() {
+        Some("tui") => Some(CoordinatorClientMode::Tui),
+        Some("web") => Some(CoordinatorClientMode::Web),
+        Some("none") => Some(CoordinatorClientMode::None),
+        Some("auto") => {
+            if is_tty { Some(CoordinatorClientMode::Tui) } else { Some(CoordinatorClientMode::None) }
+        }
+        // "prompt" or absent: fall through to interactive or headless below
+        _ => None,
+    };
+
+    // Non-interactive terminal: use config default or fall back to headless.
+    if !is_tty {
+        return config_default_mode.unwrap_or(CoordinatorClientMode::None);
+    }
+
+    // If config says non-prompt mode AND show_preflight is false AND no confirmation needed:
+    // skip the review entirely and return the configured mode.
+    let show_preflight = client_cfg.show_preflight.unwrap_or(true);
+    let require_confirmation = client_cfg.require_confirmation.unwrap_or(true);
+    if let Some(ref forced_mode) = config_default_mode {
+        if !show_preflight && !require_confirmation {
+            return forced_mode.clone();
+        }
+    }
+
+    // ── Steps 4+5+6: display full launch summary, ask client, confirm ─────────
+    let warnings = collect_launch_warnings(input, coordinator_cfg, paths);
+
+    if show_preflight {
+        print_launch_review(input, coordinator_cfg, paths, &warnings, &client_cfg);
+    }
+
+    // Step 5 — choose client (or use config default).
+    let mode = if let Some(forced) = config_default_mode {
+        // Config has a non-prompt default: skip the prompt but still confirm.
+        let label = match &forced {
+            CoordinatorClientMode::Tui => "TUI",
+            CoordinatorClientMode::Web => "Web",
+            _ => "headless",
+        };
+        println!("Client:");
+        println!("  Using configured default: {} (change with --client or automation.coordinator.client.default)", label);
+        println!();
+        forced
+    } else {
+        println!("Client:");
+        println!("  Choose how to monitor this run:");
+        println!();
+        println!("  [1] TUI client (default)");
+        println!("  [2] Web client");
+        println!("  [3] No client / headless");
+        println!();
+        let client_choice = prompt("  Selection [1]: ");
+        match client_choice.trim() {
+            "2" => CoordinatorClientMode::Web,
+            "3" => CoordinatorClientMode::None,
+            _ => CoordinatorClientMode::Tui,
+        }
+    };
+
+    // Step 6 — final confirmation (respects require_confirmation config).
+    if require_confirmation {
+        println!();
+        let mode_label = match &mode {
+            CoordinatorClientMode::Tui => "TUI",
+            CoordinatorClientMode::Web => "Web",
+            _ => "headless",
+        };
+        if !warnings.is_empty() {
+            println!("  {} warning(s) noted above.", warnings.len());
+        }
+        let confirm = prompt(&format!("  Start coordinator ({})? [Y/n]: ", mode_label));
+        if matches!(confirm.trim().to_lowercase().as_str(), "n" | "no") {
+            println!("Cancelled.");
+            std::process::exit(0);
+        }
+        println!();
+    }
+
+    mode
+}
+
+fn prompt(msg: &str) -> String {
+    use std::io::Write;
+    print!("{}", msg);
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    let _ = std::io::stdin().read_line(&mut line);
+    line
+}
+
+/// Collect safety warnings to surface in the launch review.
+fn collect_launch_warnings(
+    input: &CoordinatorCommandInput,
+    coordinator_cfg: Option<&macc_core::config::CoordinatorConfig>,
+    paths: &macc_core::ProjectPaths,
+) -> Vec<String> {
+    use macc_core::config::CoordinatorConfigResolved;
+    let resolved = CoordinatorConfigResolved::resolve(coordinator_cfg);
+    let mut warnings: Vec<String> = Vec::new();
+
+    // Web host is non-localhost.
+    let client_cfg = coordinator_cfg.and_then(|c| c.client.as_ref());
+    let web_host = client_cfg
+        .and_then(|c| c.web_host.as_deref())
+        .unwrap_or("127.0.0.1");
+    if web_host != "127.0.0.1" && web_host != "localhost" {
+        warnings.push(format!(
+            "Web client will bind to {}, not localhost.",
+            web_host
+        ));
+    }
+
+    // High max_parallel — rate-limit risk.
+    let max_parallel = input.env_cfg.max_parallel.unwrap_or(resolved.max_parallel);
+    if max_parallel > 8 {
+        warnings.push(format!(
+            "Max parallel is {}; this may increase provider rate-limit risk.",
+            max_parallel
+        ));
+    }
+
+    // Reference branch behind remote.
+    let ref_branch = input
+        .env_cfg
+        .reference_branch
+        .as_deref()
+        .unwrap_or(&resolved.reference_branch);
+    let remote_ref = format!("origin/{}", ref_branch);
+    let behind = std::process::Command::new("git")
+        .args(["rev-list", "--count", &format!("{}..{}", ref_branch, remote_ref)])
+        .current_dir(&paths.root)
+        .output()
+        .ok()
+        .and_then(|o| if o.status.success() { Some(o) } else { None })
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    if behind > 0 {
+        warnings.push(format!(
+            "Reference branch \"{}\" is {} commit(s) behind {}.",
+            ref_branch, behind, remote_ref
+        ));
+    }
+
+    // Dirty working tree in reference branch worktrees.
+    // (Already caught by preflight — only warn if preflight was overridden.)
+    if input.allow_dirty_reference {
+        warnings.push("Working tree has uncommitted changes (--allow-dirty-reference active).".into());
+    }
+
+    // Tool priority contains unavailable tools.
+    for tool_id in &resolved.tool_priority {
+        let available = std::process::Command::new("which")
+            .arg(tool_id)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !available {
+            warnings.push(format!(
+                "Tool \"{}\" is in tool_priority but not available in PATH.",
+                tool_id
+            ));
+        }
+    }
+
+    warnings
+}
+
+/// Print the full Coordinator Launch Review (spec §4).
+fn print_launch_review(
+    input: &CoordinatorCommandInput,
+    coordinator_cfg: Option<&macc_core::config::CoordinatorConfig>,
+    paths: &macc_core::ProjectPaths,
+    warnings: &[String],
+    client_cfg: &macc_core::config::CoordinatorClientConfig,
+) {
+    use macc_core::config::CoordinatorConfigResolved;
+    let resolved = CoordinatorConfigResolved::resolve(coordinator_cfg);
+
+    let prd = resolved.prd_file.as_deref().unwrap_or("prd.json");
+    let ref_branch = input
+        .env_cfg
+        .reference_branch
+        .as_deref()
+        .unwrap_or(&resolved.reference_branch);
+
+    println!();
+    println!("MACC Coordinator Launch Review");
+    println!();
+
+    // ── Project and task source ───────────────────────────────────────────────
+    println!("Project:");
+    println!("  Root:              {}", paths.root.display());
+    println!("  PRD:               {}", prd);
+    println!("  Reference branch:  {}", ref_branch);
+    println!();
+
+    // ── Dispatch policy ───────────────────────────────────────────────────────
+    let max_parallel = input.env_cfg.max_parallel.unwrap_or(resolved.max_parallel);
+    let max_dispatch = input.env_cfg.max_dispatch.unwrap_or(resolved.max_dispatch);
+    let tool_priority = if !resolved.tool_priority.is_empty() {
+        resolved.tool_priority.join(", ")
+    } else {
+        "(any enabled)".to_string()
+    };
+    println!("Dispatch:");
+    println!("  Max parallel:      {}", max_parallel);
+    println!("  Max dispatch:      {}", max_dispatch);
+    println!("  Tool priority:     {}", tool_priority);
+    println!();
+
+    // ── Stale and recovery policy ─────────────────────────────────────────────
+    let stale_action = input
+        .env_cfg
+        .stale_action
+        .as_deref()
+        .or_else(|| coordinator_cfg.and_then(|c| c.stale_action.as_deref()))
+        .unwrap_or("block");
+    let stale_claimed = coordinator_cfg
+        .and_then(|c| c.stale_claimed_seconds)
+        .map(|s| format!("{}s", s))
+        .unwrap_or_else(|| "default".into());
+    let stale_in_progress = coordinator_cfg
+        .and_then(|c| c.stale_in_progress_seconds)
+        .map(|s| format!("{}s", s))
+        .unwrap_or_else(|| "default".into());
+    println!("Stale / Recovery:");
+    println!("  Stale action:      {}", stale_action);
+    println!("  Stale claimed:     {}", stale_claimed);
+    println!("  Stale in-progress: {}", stale_in_progress);
+    println!();
+
+    // ── Merge and retry policy ────────────────────────────────────────────────
+    let merge_ai_fix = coordinator_cfg
+        .and_then(|c| c.merge_ai_fix)
+        .map(|v| if v { "enabled" } else { "disabled" })
+        .unwrap_or("disabled");
+    let max_review_cycles = coordinator_cfg
+        .and_then(|c| c.max_review_cycles)
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "default".into());
+    let retry_codes = coordinator_cfg
+        .and_then(|c| c.error_code_retry_list.as_deref())
+        .unwrap_or("(none)");
+    let retry_max = coordinator_cfg
+        .and_then(|c| c.error_code_retry_max)
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "default".into());
+    let rl_backoff = coordinator_cfg
+        .and_then(|c| c.rate_limit_backoff_base_seconds)
+        .map(|n| format!("{}s base", n))
+        .unwrap_or_else(|| "default".into());
+    println!("Merge / Retry:");
+    println!("  Merge AI fix:      {}", merge_ai_fix);
+    println!("  Max review cycles: {}", max_review_cycles);
+    println!("  Retry error codes: {}", retry_codes);
+    println!("  Retry max:         {}", retry_max);
+    println!("  RL backoff:        {}", rl_backoff);
+    println!();
+
+    // ── Client and observability ──────────────────────────────────────────────
+    let web_port = client_cfg.web_port.unwrap_or(3450);
+    let web_host = client_cfg.web_host.as_deref().unwrap_or("127.0.0.1");
+    let log_dir = paths.macc_dir.join("log/coordinator");
+    println!("Observability:");
+    println!("  TUI available:     yes");
+    println!("  Web port:          {}", web_port);
+    println!("  Web host:          {}", web_host);
+    println!("  Log directory:     {}", log_dir.display());
+    println!("  SSE event stream:  /api/v1/sse (when web is running)");
+    println!("  Ops audit log:     .macc/log/ops.jsonl");
+    println!();
+
+    // ── Safety warnings ───────────────────────────────────────────────────────
+    if !warnings.is_empty() {
+        println!("Warnings:");
+        for w in warnings {
+            println!("  - {}", w);
+        }
+        println!();
+    }
+}
+
+/// Start the coordinator and open the chosen client.
+fn launch_coordinator_with_client(
+    mode: CoordinatorClientMode,
+    input: &CoordinatorCommandInput,
+    paths: &macc_core::ProjectPaths,
+    coordinator_cfg: Option<&macc_core::config::CoordinatorConfig>,
+) -> Result<()> {
+    let phase_overrides = build_phase_overrides_label(input);
+
+    match mode {
+        CoordinatorClientMode::Tui => {
+            // TUI path: the TUI drives the coordinator via engine calls.
+            macc_tui::run_tui_with_launch(macc_tui::LaunchMode::CoordinatorRun {
+                phase_overrides,
+            })
+            .map_err(|e| MaccError::Io {
+                path: "tui".into(),
+                action: "run_tui coordinator live".into(),
+                source: std::io::Error::other(e.to_string()),
+            })
+        }
+
+        CoordinatorClientMode::Web => {
+            let client_cfg = coordinator_cfg
+                .and_then(|c| c.client.as_ref())
+                .cloned()
+                .unwrap_or_default();
+            let port = client_cfg.web_port.unwrap_or(3450);
+            let host = client_cfg.web_host.as_deref().unwrap_or("127.0.0.1");
+            let url = format!("http://{}:{}/ops/console", host, port);
+            println!("Starting coordinator (headless)...");
+            if client_cfg.open_browser.unwrap_or(false) {
+                // Best-effort: open the system browser.
+                let _ = std::process::Command::new("sh")
+                    .args(["-c", &format!("open '{}' 2>/dev/null || xdg-open '{}' 2>/dev/null || true", url, url)])
+                    .spawn();
+                println!("Opening dashboard in browser: {}", url);
+            } else {
+                println!("Open the dashboard at: {}", url);
+                println!("  (run `macc web` in another terminal if the server is not yet running)");
+            }
+            println!();
+            run_headless_coordinator(paths, coordinator_cfg)
+        }
+
+        CoordinatorClientMode::None | CoordinatorClientMode::Interactive => {
+            run_headless_coordinator(paths, coordinator_cfg)
+        }
+    }
+}
+
+fn build_phase_overrides_label(input: &CoordinatorCommandInput) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    let testing_off = input.env_cfg.disable_testing == Some(true)
+        || input.env_cfg.testing_mode.as_deref() == Some("disabled");
+    let review_off = input.env_cfg.disable_review == Some(true)
+        || input.env_cfg.review_mode.as_deref() == Some("disabled");
+    if testing_off {
+        parts.push("[testing:off]".to_string());
+    } else if let Some(ref mode) = input.env_cfg.testing_mode {
+        parts.push(format!("[testing:{}]", mode));
+    }
+    if review_off {
+        parts.push("[review:off]".to_string());
+    } else if let Some(ref mode) = input.env_cfg.review_mode {
+        parts.push(format!("[review:{}]", mode));
+    }
+    if parts.is_empty() { None } else { Some(parts.join(" ")) }
+}
+
+/// Spawn the coordinator engine in headless mode (no client window).
+fn run_headless_coordinator(
+    paths: &macc_core::ProjectPaths,
+    coordinator_cfg: Option<&macc_core::config::CoordinatorConfig>,
+) -> Result<()> {
+    use macc_core::service::coordinator::{
+        coordinator_start_managed_command_process, coordinator_poll_managed_command_process,
+        CoordinatorManagedCommandPoll,
+    };
+    use macc_core::service::coordinator_workflow::coordinator_command_invocation;
+
+    // Resolve the invocation arguments for "run" (same as engine trait default).
+    let invocation = coordinator_command_invocation(
+        &macc_core::service::coordinator_workflow::CoordinatorCommand::Run,
+    )?;
+    coordinator_start_managed_command_process(paths, invocation.action, &invocation.args, coordinator_cfg)?;
+
+    // Poll until done.
+    loop {
+        match coordinator_poll_managed_command_process(paths)? {
+            CoordinatorManagedCommandPoll::Idle => return Ok(()),
+            CoordinatorManagedCommandPoll::Running { elapsed_secs, .. } => {
+                if elapsed_secs % 30 == 0 && elapsed_secs > 0 {
+                    println!("Coordinator running… {}s elapsed", elapsed_secs);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+            CoordinatorManagedCommandPoll::Exited { success, code, command, .. } => {
+                if success {
+                    println!("Coordinator '{}' completed.", command);
+                    return Ok(());
+                }
+                return Err(MaccError::Validation(format!(
+                    "Coordinator '{}' exited with code {:?}.",
+                    command, code
+                )));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{handle, CoordinatorCommandInput};
@@ -1023,6 +1437,7 @@ mod tests {
             command_name: command_name.to_string(),
             client_id: client_id.to_string(),
             no_tui: true,
+            client_mode: CoordinatorClientMode::None,
             supervisor: false,
             drain: false,
             graceful: false,

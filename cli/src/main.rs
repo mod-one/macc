@@ -364,9 +364,12 @@ enum Commands {
         /// Execute coordinator mutations as this client identity
         #[arg(long)]
         as_client: Option<String>,
-        /// Disable TUI live view for `macc coordinator run`
-        #[arg(long)]
-        no_tui: bool,
+        /// Client to open after the coordinator starts: tui (default), web, none
+        #[arg(long, value_name = "CLIENT")]
+        client: Option<String>,
+        /// Run headless without any client (alias for --client none)
+        #[arg(long, alias = "no-tui")]
+        no_client: bool,
         /// Start supervisor in daemon+attach mode before running coordinator
         #[arg(long)]
         supervisor: bool,
@@ -1602,7 +1605,8 @@ fn run_with_engine_provider(
         Some(Commands::Coordinator {
             command_name,
             as_client,
-            no_tui,
+            client,
+            no_client,
             supervisor,
             drain,
             graceful,
@@ -1707,7 +1711,20 @@ fn run_with_engine_provider(
                     client_id: as_client
                         .clone()
                         .unwrap_or_else(|| format!("cli-{}", std::process::id())),
-                    no_tui: *no_tui,
+                    no_tui: *no_client,
+                    client_mode: {
+                        use coordinator::command::CoordinatorClientMode;
+                        if *no_client {
+                            CoordinatorClientMode::None
+                        } else {
+                            match client.as_deref() {
+                                Some("tui") => CoordinatorClientMode::Tui,
+                                Some("web") => CoordinatorClientMode::Web,
+                                Some("none") => CoordinatorClientMode::None,
+                                _ => CoordinatorClientMode::Interactive,
+                            }
+                        }
+                    },
                     supervisor: *supervisor,
                     drain: *drain,
                     graceful: *graceful,
@@ -3199,7 +3216,8 @@ fi
                 command: Some(Commands::Coordinator {
                     command_name: "stop".to_string(),
                     as_client: None,
-                    no_tui: true,
+                    client: None,
+                    no_client: true,
                     supervisor: false,
                     drain: false,
                     graceful: true,
