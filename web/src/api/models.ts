@@ -757,3 +757,73 @@ export interface ApiSkillItem {
   risk: string;
   description: string;
 }
+
+// ── Catalog skills lifecycle (spec §15) ───────────────────────────────────────
+
+/** A skill available from configured catalogs. */
+export interface ApiCatalogSkillEntry {
+  id: string;
+  name: string;
+  description: string;
+  tags: string[];
+  tools: string[];
+  recommended_ref: string | null;
+  risk: string | null;
+  requires_mcp: boolean;
+  writes_user_level_config: boolean;
+  category: string | null;
+  targets: Record<string, string[]>;
+  source: {
+    kind: string;
+    url: string;
+    ref: string;
+    checksum: string | null;
+  };
+}
+
+/** Status of an installed catalog skill. */
+export interface ApiCatalogSkillStatus {
+  id: string;
+  tool: string;
+  kind: string; // SkillStatusKind
+  source_url: string | null;
+  requested_ref: string | null;
+  resolved_ref: string | null;
+  pinned: boolean;
+  warnings: string[];
+  installed_files: string[];
+}
+
+/** Single entry in the skills lockfile. */
+export interface ApiSkillLockEntry {
+  id: string;
+  tool: string;
+  source: {
+    kind: string;
+    url: string | null;
+    requested_ref: string | null;
+    resolved_ref: string | null;
+    checksum: string | null;
+    subpath: string;
+    pinned: boolean;
+  };
+  package: {
+    manifest_path: string | null;
+    manifest_digest: string | null;
+    id: string;
+    version: string | null;
+  };
+  cache: { cache_key: string };
+  installed: {
+    at: string;
+    targets: Array<{ src: string; dest: string; digest: string | null; owner: string }>;
+  };
+}
+
+/** Drift / verification finding. */
+export interface ApiVerifyFinding {
+  skill_id: string;
+  tool: string;
+  kind: string;
+  message: string;
+}

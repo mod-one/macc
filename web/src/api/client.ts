@@ -35,6 +35,10 @@ import type {
   ApiTrustSummary,
   ApiRuntimeSnapshot,
   ApiSkillItem,
+  ApiCatalogSkillEntry,
+  ApiCatalogSkillStatus,
+  ApiSkillLockEntry,
+  ApiVerifyFinding,
   GitCommit,
   GitGraphResponse,
 } from './models';
@@ -750,6 +754,48 @@ export async function listSkills(
   return requestJson<ApiSkillItem[]>(
     '/skills',
     { method: 'GET', signal: options.signal },
+    options.baseUrl,
+  );
+}
+
+// ── Catalog skills lifecycle (spec §15 / §16) ─────────────────────────────────
+
+export async function getCatalogSkillsAvailable(
+  options: ApiRequestOptions = {},
+): Promise<{ skills: ApiCatalogSkillEntry[] }> {
+  return requestJson<{ skills: ApiCatalogSkillEntry[] }>(
+    '/catalog/skills/available',
+    { method: 'GET', signal: options.signal },
+    options.baseUrl,
+  );
+}
+
+export async function getCatalogSkillsStatus(
+  options: ApiRequestOptions = {},
+): Promise<{ skills: ApiCatalogSkillStatus[]; warnings: string[] }> {
+  return requestJson<{ skills: ApiCatalogSkillStatus[]; warnings: string[] }>(
+    '/catalog/skills/status',
+    { method: 'GET', signal: options.signal },
+    options.baseUrl,
+  );
+}
+
+export async function getCatalogSkillsInstalled(
+  options: ApiRequestOptions = {},
+): Promise<{ skills: ApiSkillLockEntry[]; version: number }> {
+  return requestJson<{ skills: ApiSkillLockEntry[]; version: number }>(
+    '/catalog/skills/installed',
+    { method: 'GET', signal: options.signal },
+    options.baseUrl,
+  );
+}
+
+export async function postCatalogSkillsVerify(
+  options: ApiRequestOptions = {},
+): Promise<{ ok: boolean; findings: ApiVerifyFinding[]; finding_count: number }> {
+  return requestJson<{ ok: boolean; findings: ApiVerifyFinding[]; finding_count: number }>(
+    '/catalog/skills/verify',
+    { method: 'POST', signal: options.signal },
     options.baseUrl,
   );
 }

@@ -53,6 +53,7 @@ const navGroups = [
       { path: '/ops/git', label: 'Git Graph', icon: Icons.Activity },
       { path: '/ops/trust', label: 'Trust & Safety', icon: Icons.Shield },
       { path: '/ops/skill-runner', label: 'Skill Runner', icon: Icons.Activity },
+      { path: '/ops/skills-catalog', label: 'Skills Catalog', icon: Icons.Brain },
     ]
   },
   {
