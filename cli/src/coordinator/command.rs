@@ -198,9 +198,16 @@ pub fn handle(
     // Preflight: abort before dispatching workers if git identity is not configured.
     // A missing user.email / user.name causes every performer's `git commit` to fail,
     // leaving changes uncommitted and the coordinator stuck.
+    //
+    // CoordinatorCommand::Run is included so that `macc coordinator run --no-tui`
+    // catches errors in the parent process before the child is spawned with muted
+    // stdio (control-plane-run). Without this, preflight errors in the child are
+    // silently swallowed and the parent only sees a generic non-zero exit code.
     if matches!(
         command,
-        CoordinatorCommand::RunControlPlane | CoordinatorCommand::DispatchReadyTasks
+        CoordinatorCommand::Run
+            | CoordinatorCommand::RunControlPlane
+            | CoordinatorCommand::DispatchReadyTasks
     ) {
         let missing = macc_core::git::missing_git_identity_fields(&paths.root);
         if !missing.is_empty() {
@@ -216,9 +223,12 @@ Performers cannot commit without it. Fix this first:\n\
 
     // Reference branch preflight gate (spec §7, §11.1).
     // Must run before any registry/worktree mutation.
+    // CoordinatorCommand::Run is included for the same reason as above.
     if matches!(
         command,
-        CoordinatorCommand::RunControlPlane | CoordinatorCommand::DispatchReadyTasks
+        CoordinatorCommand::Run
+            | CoordinatorCommand::RunControlPlane
+            | CoordinatorCommand::DispatchReadyTasks
     ) {
         run_reference_branch_preflight(&paths.root, coordinator_cfg, &input)?;
     }
