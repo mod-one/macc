@@ -724,9 +724,10 @@ pub(super) async fn coordinator_preflight_handler(
     }
 
     let report = tokio::task::spawn_blocking({
-        let root = state.paths.root.clone();
+        let engine = state.engine.clone();
+        let paths = state.paths.clone();
         let branch = reference_branch.clone();
-        move || preflight::inspect_reference_branch_preflight(&root, &branch, &cfg)
+        move || engine.inspect_reference_preflight(&paths, &branch, &cfg)
     })
     .await
     .map_err(|e| ApiError::validation(format!("Preflight task error: {}", e)))?
@@ -827,9 +828,10 @@ pub(super) async fn coordinator_preflight_create_branch_handler(
     };
 
     let branch = req.branch.clone();
-    let root = state.paths.root.clone();
+    let engine = state.engine.clone();
+    let paths = state.paths.clone();
     tokio::task::spawn_blocking(move || {
-        preflight::create_reference_branch(&root, &branch, source)
+        engine.create_reference_branch_via_engine(&paths, &branch, source)
     })
     .await
     .map_err(|e| ApiError::validation(format!("Branch creation task error: {}", e)))?

@@ -211,7 +211,7 @@ Performers cannot commit without it. Fix this first:\n\
             | CoordinatorCommand::RunControlPlane
             | CoordinatorCommand::DispatchReadyTasks
     ) {
-        run_reference_branch_preflight(&paths.root, coordinator_cfg, &input)?;
+        run_reference_branch_preflight(engine, paths, coordinator_cfg, &input)?;
     }
 
     // ── Client selection and launch review (motif §2) ─────────────────────────
@@ -635,11 +635,15 @@ fn format_duration_human(secs: u64) -> String {
 ///
 /// Returns `Ok(())` to proceed, or an `Err` to cancel the coordinator run.
 fn run_reference_branch_preflight(
-    repo_root: &std::path::Path,
+    engine: &crate::services::engine_provider::SharedEngine,
+    paths: &macc_core::ProjectPaths,
     coordinator_cfg: Option<&macc_core::config::CoordinatorConfig>,
     input: &CoordinatorCommandInput,
 ) -> Result<()> {
     use macc_core::coordinator::preflight::{self, BranchCreateSource, ReferencePreflightAction};
+    use macc_core::Engine as _;
+
+    let repo_root = &paths.root;
 
     // Resolve preflight config from project config + CLI overrides.
     let raw = coordinator_cfg
@@ -670,12 +674,9 @@ fn run_reference_branch_preflight(
         .or_else(|| coordinator_cfg.and_then(|c| c.reference_branch.clone()))
         .unwrap_or_else(|| "main".to_string());
 
-    let report = preflight::inspect_reference_branch_preflight(
-        repo_root,
-        &reference_branch,
-        &cfg,
-    )
-    .map_err(|e| MaccError::Validation(e.to_string()))?;
+    let report = engine
+        .inspect_reference_preflight(paths, &reference_branch, &cfg)
+        .map_err(|e| MaccError::Validation(e.to_string()))?;
 
     // Log preflight result to coordinator log if available.
     let log_event =
@@ -729,7 +730,7 @@ fn run_reference_branch_preflight(
                     BranchCreateSource::LocalBranch(base.clone())
                 };
 
-                preflight::create_reference_branch(repo_root, &reference_branch, source)
+                engine.create_reference_branch_via_engine(paths, &reference_branch, source)
                     .map_err(|e| MaccError::Validation(format!("{}", e)))?;
 
                 println!(
@@ -758,12 +759,8 @@ fn run_reference_branch_preflight(
             let choice = line.trim().to_lowercase();
 
             if choice == "1" {
-                preflight::create_reference_branch(
-                    repo_root,
-                    &reference_branch,
-                    BranchCreateSource::CurrentHead,
-                )
-                .map_err(|e| MaccError::Validation(format!("{}", e)))?;
+                engine.create_reference_branch_via_engine(paths, &reference_branch, BranchCreateSource::CurrentHead)
+                    .map_err(|e| MaccError::Validation(format!("{}", e)))?;
                 println!("Created local branch \"{}\" from HEAD.\nPreflight: OK", reference_branch);
                 return Ok(());
             }
@@ -771,12 +768,8 @@ fn run_reference_branch_preflight(
             if let Ok(idx) = choice.parse::<usize>() {
                 let remote_idx = idx.saturating_sub(2);
                 if let Some(remote) = report.remote_tracking_branches.get(remote_idx) {
-                    preflight::create_reference_branch(
-                        repo_root,
-                        &reference_branch,
-                        BranchCreateSource::RemoteTracking(remote.clone()),
-                    )
-                    .map_err(|e| MaccError::Validation(format!("{}", e)))?;
+                    engine.create_reference_branch_via_engine(paths, &reference_branch, BranchCreateSource::RemoteTracking(remote.clone()))
+                        .map_err(|e| MaccError::Validation(format!("{}", e)))?;
                     println!(
                         "Created local tracking branch \"{}\" from \"{}\".\nPreflight: OK",
                         reference_branch, remote

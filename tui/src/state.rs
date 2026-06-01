@@ -3422,6 +3422,31 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
                     Err("Mode must be one of: disabled, required, risk_based, manual.".to_string())
                 }
             }
+            // Preflight fields
+            38 => {
+                let value = input.to_lowercase();
+                if value == "true" {
+                    self.set_require_clean_reference_branch(true);
+                    Ok(())
+                } else if value == "false" {
+                    self.set_require_clean_reference_branch(false);
+                    Ok(())
+                } else {
+                    Err("Value must be 'true' or 'false'.".to_string())
+                }
+            }
+            39 => {
+                let value = input.to_lowercase();
+                if value == "true" {
+                    self.set_preflight_enabled(true);
+                    Ok(())
+                } else if value == "false" {
+                    self.set_preflight_enabled(false);
+                    Ok(())
+                } else {
+                    Err("Value must be 'true' or 'false'.".to_string())
+                }
+            }
             _ => Ok(()),
         };
 
@@ -3568,6 +3593,23 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
                 }
                 _ => {}
             }
+        }
+    }
+
+    fn set_require_clean_reference_branch(&mut self, value: bool) {
+        self.snapshot_before_config_change();
+        if let Some(coordinator) = self.coordinator_config_mut() {
+            coordinator.require_clean_reference_branch = Some(value);
+        }
+    }
+
+    fn set_preflight_enabled(&mut self, value: bool) {
+        self.snapshot_before_config_change();
+        if let Some(coordinator) = self.coordinator_config_mut() {
+            let preflight = coordinator
+                .reference_branch_preflight
+                .get_or_insert_with(Default::default);
+            preflight.enabled = Some(value);
         }
     }
 
@@ -4784,6 +4826,14 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
                 let v = input.to_lowercase();
                 if !matches!(v.as_str(), "disabled" | "required" | "risk_based" | "manual") {
                     Some("Mode must be one of: disabled, required, risk_based, manual.".to_string())
+                } else {
+                    None
+                }
+            }
+            38 | 39 => {
+                let v = input.to_lowercase();
+                if !matches!(v.as_str(), "true" | "false") {
+                    Some("Value must be 'true' or 'false'.".to_string())
                 } else {
                     None
                 }

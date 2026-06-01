@@ -1168,6 +1168,35 @@ pub trait Engine {
         crate::onboarding::compute_readiness_from_state(paths, canonical.as_ref(), coordinator_running)
     }
 
+    /// Run the reference branch preflight inspection (spec §7).
+    /// Encapsulates the call to `coordinator::preflight` so clients never import
+    /// core business-logic modules directly.
+    fn inspect_reference_preflight(
+        &self,
+        paths: &ProjectPaths,
+        reference_branch: &str,
+        config: &crate::coordinator::preflight::ReferenceBranchPreflightConfig,
+    ) -> std::result::Result<
+        crate::coordinator::preflight::ReferenceBranchPreflightReport,
+        crate::coordinator::preflight::PreflightError,
+    > {
+        crate::coordinator::preflight::inspect_reference_branch_preflight(
+            &paths.root,
+            reference_branch,
+            config,
+        )
+    }
+
+    /// Create the reference branch from the given source.
+    fn create_reference_branch_via_engine(
+        &self,
+        paths: &ProjectPaths,
+        reference_branch: &str,
+        source: crate::coordinator::preflight::BranchCreateSource,
+    ) -> std::result::Result<(), crate::coordinator::preflight::PreflightError> {
+        crate::coordinator::preflight::create_reference_branch(&paths.root, reference_branch, source)
+    }
+
     fn coordinator_storage_import_json_to_sqlite(&self, paths: &ProjectPaths) -> Result<()> {
         crate::coordinator_storage::coordinator_storage_import_json_to_sqlite(paths)
     }
