@@ -20,6 +20,7 @@ pub mod runtime;
 pub mod security;
 pub mod service;
 pub mod skills;
+pub mod skills_catalog;
 pub mod skills_runner;
 mod structured_merge;
 pub mod supervisor;
@@ -365,6 +366,16 @@ impl ProjectPaths {
 
     pub fn managed_paths_state_path(&self) -> PathBuf {
         self.macc_dir.join("state").join("managed_paths.json")
+    }
+
+    /// Path to the skills lockfile (spec §5.2).
+    pub fn skills_lock_path(&self) -> PathBuf {
+        self.macc_dir.join("skills.lock.json")
+    }
+
+    /// Root for the skills package cache (spec §8).
+    pub fn skills_cache_dir(&self) -> PathBuf {
+        self.macc_dir.join("cache")
     }
 }
 

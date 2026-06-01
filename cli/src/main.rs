@@ -685,24 +685,123 @@ enum Commands {
 
 #[derive(Subcommand, Clone, Debug)]
 pub enum SkillsSubcommands {
-    /// List available skills
+    /// List run-skills (YAML-defined workflows in .macc/skills/)
     List {
         /// Filter by tool adapter
         #[arg(long)]
         tool: Option<String>,
     },
-    /// Show details for a skill
+    /// Show details for a run-skill
     Show {
         /// Skill ID
         skill: String,
     },
-    /// Explain a skill — show kind, risk, steps, and adapter strategies in plain English
+    /// Explain a run-skill — show kind, risk, steps, and adapter strategies in plain English
     Explain {
         /// Skill ID
         skill: String,
     },
-    /// Check skill health and configuration
+    /// Check run-skill health and configuration
     Doctor,
+    // ── Catalog/package lifecycle (spec §4) ────────────────────────────────
+    /// List skills available from configured catalogs
+    Available {
+        /// Filter by tool adapter
+        #[arg(long)]
+        tool: Option<String>,
+        /// Filter by catalog source ID
+        #[arg(long)]
+        source: Option<String>,
+        /// Filter by tag
+        #[arg(long)]
+        tag: Option<String>,
+        /// Output machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show installed catalog skills with provenance and health status
+    Status {
+        /// Filter by tool adapter
+        #[arg(long)]
+        tool: Option<String>,
+        /// Show more detail per skill
+        #[arg(long)]
+        verbose: bool,
+        /// Output machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Install a catalog skill
+    Install {
+        /// Skill ID from catalog
+        id: String,
+        /// Tool adapter to install for
+        #[arg(long)]
+        tool: String,
+        /// Override catalog source URL
+        #[arg(long)]
+        source: Option<String>,
+        /// Branch, tag, or SHA to install from
+        #[arg(long)]
+        reference: Option<String>,
+        /// Resolve and pin the ref to an immutable SHA
+        #[arg(long)]
+        pin: bool,
+        /// Preview the install plan without writing files
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Update installed catalog skills
+    Update {
+        /// Specific skill ID to update (omit for all)
+        id: Option<String>,
+        /// Filter by tool adapter
+        #[arg(long)]
+        tool: Option<String>,
+        /// Preview update plan without writing
+        #[arg(long)]
+        dry_run: bool,
+        /// Update to latest available ref (may move pinned skills)
+        #[arg(long)]
+        latest: bool,
+    },
+    /// Verify lockfile/cache/filesystem integrity
+    Verify {
+        /// Filter by tool adapter
+        #[arg(long)]
+        tool: Option<String>,
+        /// Output machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove installed skills that are no longer selected
+    Prune {
+        /// Filter by tool adapter
+        #[arg(long)]
+        tool: Option<String>,
+        /// Preview prune plan without deleting
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Show local modifications to installed skill files
+    Diff {
+        /// Specific skill ID to diff (omit for all)
+        id: Option<String>,
+        /// Filter by tool adapter
+        #[arg(long)]
+        tool: Option<String>,
+    },
+    /// Remove a selected and installed catalog skill
+    Uninstall {
+        /// Skill ID to remove
+        id: String,
+        /// Tool adapter to remove from
+        #[arg(long)]
+        tool: Option<String>,
+        /// Remove from all tools
+        #[arg(long)]
+        all_tools: bool,
+    },
 }
 
 
@@ -1588,6 +1687,56 @@ fn run_with_engine_provider(
                     SkillsSubcommand::Explain { skill: skill.clone() }
                 }
                 SkillsSubcommands::Doctor => SkillsSubcommand::Doctor,
+                // Catalog lifecycle subcommands
+                SkillsSubcommands::Available { tool, source, tag, json } => {
+                    SkillsSubcommand::Available {
+                        tool: tool.clone(),
+                        source: source.clone(),
+                        tag: tag.clone(),
+                        json: *json,
+                    }
+                }
+                SkillsSubcommands::Status { tool, verbose, json } => {
+                    SkillsSubcommand::CatalogStatus {
+                        tool: tool.clone(),
+                        verbose: *verbose,
+                        json: *json,
+                    }
+                }
+                SkillsSubcommands::Install { id, tool, source, reference, pin, dry_run } => {
+                    SkillsSubcommand::Install {
+                        id: id.clone(),
+                        tool: tool.clone(),
+                        source: source.clone(),
+                        reference: reference.clone(),
+                        pin: *pin,
+                        dry_run: *dry_run,
+                    }
+                }
+                SkillsSubcommands::Update { id, tool, dry_run, latest } => {
+                    SkillsSubcommand::Update {
+                        id: id.clone(),
+                        tool: tool.clone(),
+                        dry_run: *dry_run,
+                        latest: *latest,
+                    }
+                }
+                SkillsSubcommands::Verify { tool, json } => {
+                    SkillsSubcommand::Verify { tool: tool.clone(), json: *json }
+                }
+                SkillsSubcommands::Prune { tool, dry_run } => {
+                    SkillsSubcommand::Prune { tool: tool.clone(), dry_run: *dry_run }
+                }
+                SkillsSubcommands::Diff { id, tool } => {
+                    SkillsSubcommand::Diff { id: id.clone(), tool: tool.clone() }
+                }
+                SkillsSubcommands::Uninstall { id, tool, all_tools } => {
+                    SkillsSubcommand::Uninstall {
+                        id: id.clone(),
+                        tool: tool.clone(),
+                        all_tools: *all_tools,
+                    }
+                }
             };
             SkillsCmdCommand { app: app.clone(), subcommand: sub }.run()
         }

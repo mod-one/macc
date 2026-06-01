@@ -1139,6 +1139,62 @@ pub trait Engine {
         None
     }
 
+    // ── Skills & Catalog lifecycle (spec §7) ─────────────────────────────────
+
+    /// Return catalog skills visible to the project.
+    fn catalog_skills_available(
+        &self,
+        paths: &ProjectPaths,
+        filter_tool: Option<&str>,
+    ) -> Vec<crate::catalog::SkillEntry> {
+        use crate::catalog::load_skills_catalog_with_local;
+        load_skills_catalog_with_local(paths)
+            .map(|cat| {
+                cat.entries
+                    .into_iter()
+                    .filter(|e| {
+                        filter_tool.map_or(true, |t| e.tools.is_empty() || e.tools.iter().any(|et| et == t))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Load the skills lockfile for this project.
+    fn skills_lockfile(
+        &self,
+        paths: &ProjectPaths,
+    ) -> crate::Result<crate::skills_catalog::SkillsLockFile> {
+        crate::skills_catalog::SkillsLockFile::load(&paths.skills_lock_path())
+    }
+
+    /// Compute the installed status of all locked skills.
+    fn skills_status(
+        &self,
+        paths: &ProjectPaths,
+        filter_tool: Option<&str>,
+    ) -> crate::Result<Vec<crate::skills_catalog::SkillStatus>> {
+        let lockfile = self.skills_lockfile(paths)?;
+        Ok(crate::skills_catalog::compute_skills_status(
+            &lockfile,
+            &paths.root,
+            filter_tool,
+        ))
+    }
+
+    /// Verify lockfile/cache/filesystem integrity.
+    fn skills_verify(
+        &self,
+        paths: &ProjectPaths,
+    ) -> crate::Result<Vec<crate::skills_catalog::VerifyFinding>> {
+        let lockfile = self.skills_lockfile(paths)?;
+        Ok(crate::skills_catalog::verify_skills(
+            &lockfile,
+            &paths.root,
+            &paths.skills_cache_dir(),
+        ))
+    }
+
     // ── Diagnostics and onboarding (spec §5, §9, §14) ────────────────────────
 
     /// Run all extended doctor checks and return structured diagnostic findings.

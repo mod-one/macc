@@ -7,6 +7,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added — Skills & Catalog Lifecycle (spec §7)
+- **`core/src/skills_catalog.rs`** — new lifecycle layer implementing the four-state model (available → selected → installed → locked): `SkillsLockFile`, `SkillLockEntry`, `LockedSource`, `LockedPackage`, `InstalledTargets`, `InstalledTarget`, `SkillStatusKind`, `SkillStatus`, `PackageManifest`, `InstallConflict`, `ConflictKind`, `OwnershipMarker`, `SkillsPolicy`, `VerifyFinding`, `SkillDiffEntry`. Functions: `compute_skills_status()`, `verify_skills()`, `diff_skill()`, `detect_conflicts()`, `git_cache_key()`, `http_cache_key()`, `sha256_digest()`, `file_digest()`, `write_ownership_marker()`. Error code constants `MACC-SKILL-1001` through `MACC-SKILL-4003`.
+- **`core/src/catalog.rs` `SkillEntry`** — extended with lifecycle fields: `tools`, `recommended_ref`, `risk`, `requires_mcp`, `writes_user_level_config`, `targets`, `category`, `compatibility` (all optional for backward compatibility).
+- **`ProjectPaths`** — new path methods: `skills_lock_path()` (`.macc/skills.lock.json`), `skills_cache_dir()` (`.macc/cache/`).
+- **`Engine` trait** — new default methods: `catalog_skills_available()`, `skills_lockfile()`, `skills_status()`, `skills_verify()`.
+- **CLI `macc skills` subcommands** — new lifecycle subcommands: `available`, `status`, `install`, `update`, `verify`, `prune`, `diff`, `uninstall`. All support `--tool`, `--json`, `--dry-run` as appropriate.
+- **Web API** — new catalog endpoints: `GET /api/v1/catalog/skills/available`, `GET /api/v1/catalog/skills/status`, `GET /api/v1/catalog/skills/installed`, `POST /api/v1/catalog/skills/verify`, `GET /api/v1/catalog/skills/lockfile`.
+- **Catalog** — 7 hook-bundle entries added: `test-output-failures-only`, `lint-errors-only`, `stacktrace-collapse`, `git-diff-stat-before-full-diff`, `log-grep-error-first`, `coordinator-event-summarizer`, `performer-log-summary`. All tagged `hook-bundle` with `category: "hook-bundle"` and per-tool targets.
+- **`SkillsPolicy`** config type — `require_pin`, `allow_mutable_refs`, `conflict_policy`, `offline_uses_lockfile_only`, `write_ownership_markers` settings.
+- **Tests** — 12 unit tests covering cache key generation, SHA digest, manifest path-escape validation, lockfile round-trip, conflict detection, policy defaults, and hook bundle presence.
+
 ### Added — Reference Branch Preflight Gate (spec §6)
 - **`core/src/coordinator/preflight.rs`** — new module with all preflight logic: `inspect_reference_branch_preflight()`, `create_reference_branch()`, structured `ReferenceBranchPreflightReport`, `ReferencePreflightStatus`, `ReferencePreflightAction`, `ReferenceBranchPreflightConfig`, `MissingBranchPolicy`, `DirtyReferencePolicy`, `BranchCreateSourcePolicy`, `build_preflight_log_event()`, `format_report_cli()`, `is_blocking()`.
 - **Git helpers** added to `core/src/git.rs`: `check_ref_format_branch()`, `local_branch_exists()`, `remote_tracking_refs_for_branch()`, `worktrees_for_branch()`, `status_porcelain_v1()` (with `GitPorcelainEntry`), `create_branch_at()`, `create_tracking_branch()`, `is_bare_repository()`.

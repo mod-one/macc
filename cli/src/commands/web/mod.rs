@@ -8,6 +8,7 @@ mod config;
 mod coordinator;
 mod failures;
 mod search;
+mod catalog_skills;
 mod skill_runs;
 mod snapshot;
 #[allow(clippy::result_large_err)]
@@ -363,6 +364,12 @@ fn build_web_router(state: WebState) -> Router {
         // ── UX observability endpoints (spec §4.21, §8) ─────────────────
         .route("/api/v1/snapshot", get(snapshot::get_snapshot_handler))
         .route("/api/v1/search", get(search::search_handler))
+        // ── Catalog skills lifecycle (spec §16) ──────────────────────────
+        .route("/api/v1/catalog/skills/available", get(catalog_skills::available_handler))
+        .route("/api/v1/catalog/skills/status", get(catalog_skills::status_handler))
+        .route("/api/v1/catalog/skills/installed", get(catalog_skills::installed_handler))
+        .route("/api/v1/catalog/skills/verify", post(catalog_skills::verify_handler))
+        .route("/api/v1/catalog/skills/lockfile", get(catalog_skills::lockfile_handler))
         .route("/api/v1/skills", get(skill_runs::list_skills_handler))
         .route("/api/v1/skills/:id", get(skill_runs::get_skill_handler))
         .route(

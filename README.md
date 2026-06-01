@@ -334,7 +334,7 @@ macc worktree prune
 </details>
 
 <details>
-<summary>Skills</summary>
+<summary>Run-skills (YAML workflows)</summary>
 
 ```bash
 macc run <skill> [--tool <tool>] [--dry-run] [--watch] [--json] [--yes]
@@ -344,7 +344,31 @@ macc skills explain <skill>
 macc skills doctor
 ```
 
-Skills are defined in `.macc/skills/*.yaml`. Risk levels: safe, caution, dangerous. Caution prompts for confirmation; dangerous requires typing `YES`.
+Run-skills are defined in `.macc/skills/*.yaml`. Risk levels: safe, caution, dangerous.
+
+</details>
+
+<details>
+<summary>Catalog skills (package lifecycle)</summary>
+
+```bash
+macc skills available [--tool <tool>] [--tag <tag>] [--json]
+macc skills status [--tool <tool>] [--verbose] [--json]
+macc skills install <id> --tool <tool> [--reference <ref>] [--pin] [--dry-run]
+macc skills update [<id>] [--tool <tool>] [--dry-run]
+macc skills verify [--tool <tool>] [--json]
+macc skills prune [--tool <tool>] [--dry-run]
+macc skills diff [<id>] [--tool <tool>]
+macc skills uninstall <id> [--tool <tool>] [--all-tools]
+```
+
+Catalog skills follow a **four-state model**: available (from catalog) → selected (in `macc.yaml`) → installed (on disk) → locked (`skills.lock.json`). Hook bundles (`category: hook-bundle`) reduce noisy tool output before it enters assistant context.
+
+**Lockfile:** `.macc/skills.lock.json` — commit this; it records resolved refs and file digests for reproducibility.
+
+**Cache:** `.macc/cache/` — do not commit; automatically ignored.
+
+**Web API:** `GET /api/v1/catalog/skills/available`, `/status`, `/installed`, `POST /verify`.
 
 </details>
 
