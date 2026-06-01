@@ -1,13 +1,13 @@
 use super::errors::ApiError;
 use super::types::{
-    ApiDoctorFixIssueResult, ApiDoctorFixRequest, ApiDoctorFixResponse, ApiDoctorIssue,
-    ApiDoctorReport,
+    ApiDiagnosticFinding, ApiDoctorFixIssueResult, ApiDoctorFixRequest, ApiDoctorFixResponse,
+    ApiDoctorIssue, ApiDoctorReport,
 };
 use super::WebState;
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::Json;
-use macc_core::doctor::{ToolCheck, ToolStatus};
+use macc_core::doctor::{collect_all_findings, DiagnosticFinding, DiagnosticSeverity, ToolCheck, ToolStatus};
 use macc_core::service::interaction::InteractionHandler;
 use macc_core::tool::spec::{CheckSeverity, DoctorCheckKind};
 use macc_core::MaccError;
@@ -22,7 +22,9 @@ pub(super) async fn get_doctor_handler(
     State(state): State<WebState>,
 ) -> std::result::Result<Json<ApiDoctorReport>, ApiError> {
     let checks = state.engine.doctor(&state.paths);
-    Ok(Json(build_report(&checks)))
+    let max_parallel = read_max_parallel(&state.paths);
+    let findings = collect_all_findings(&state.paths, max_parallel);
+    Ok(Json(build_report(&checks, &findings)))
 }
 
 pub(super) async fn run_doctor_fix_handler(
@@ -60,7 +62,9 @@ pub(super) async fn run_doctor_fix_handler(
     }
 
     let checks_after = state.engine.doctor(&state.paths);
-    let report = build_report(&checks_after);
+    let max_parallel = read_max_parallel(&state.paths);
+    let findings_after = collect_all_findings(&state.paths, max_parallel);
+    let report = build_report(&checks_after, &findings_after);
     let after_codes = report
         .issues
         .iter()
@@ -139,8 +143,10 @@ fn parse_fix_request(body: &Bytes) -> std::result::Result<ApiDoctorFixRequest, A
     })
 }
 
-fn build_report(checks: &[ToolCheck]) -> ApiDoctorReport {
+fn build_report(checks: &[ToolCheck], findings: &[DiagnosticFinding]) -> ApiDoctorReport {
     let issues = build_issues(checks);
+    let api_findings: Vec<ApiDiagnosticFinding> = findings.iter().map(map_finding).collect();
+
     let mut issues_by_severity = BTreeMap::new();
     let mut issues_by_category = BTreeMap::new();
 
@@ -152,13 +158,75 @@ fn build_report(checks: &[ToolCheck]) -> ApiDoctorReport {
             .entry(issue.category.clone())
             .or_insert(0) += 1;
     }
+    // Also count finding severities
+    for f in findings {
+        let sev = f.severity.to_string();
+        if sev != "ok" {
+            *issues_by_severity.entry(sev.clone()).or_insert(0) += 1;
+            *issues_by_category.entry(f.category.clone()).or_insert(0) += 1;
+        }
+    }
+
+    let ready = !findings.iter().any(|f| f.is_blocking());
 
     ApiDoctorReport {
-        health_score: compute_health_score(checks),
+        health_score: compute_health_score_combined(checks, findings),
         issues_by_severity,
         issues_by_category,
         issues,
+        findings: api_findings,
+        ready,
     }
+}
+
+fn map_finding(f: &DiagnosticFinding) -> ApiDiagnosticFinding {
+    ApiDiagnosticFinding {
+        id: f.id.clone(),
+        title: f.title.clone(),
+        severity: f.severity.to_string(),
+        category: f.category.clone(),
+        message: f.message.clone(),
+        recommended_action: f.recommended_action.clone(),
+        fix_available: f.fix_available,
+    }
+}
+
+fn compute_health_score_combined(checks: &[ToolCheck], findings: &[DiagnosticFinding]) -> u8 {
+    let legacy_penalty = checks
+        .iter()
+        .filter(|c| !matches!(c.status, ToolStatus::Installed))
+        .map(|c| match c.severity {
+            CheckSeverity::Error => 30u16,
+            CheckSeverity::Warning => 10u16,
+        })
+        .sum::<u16>();
+
+    let finding_penalty = findings
+        .iter()
+        .map(|f| match f.severity {
+            DiagnosticSeverity::Error => 20u16,
+            DiagnosticSeverity::Warning => 10u16,
+            _ => 0u16,
+        })
+        .sum::<u16>();
+
+    100u8.saturating_sub((legacy_penalty + finding_penalty).min(100) as u8)
+}
+
+fn read_max_parallel(paths: &macc_core::ProjectPaths) -> u32 {
+    let config_path = paths.macc_dir.join("macc.yaml");
+    if let Ok(content) = std::fs::read_to_string(config_path) {
+        if let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
+            if let Some(n) = value
+                .get("coordinator")
+                .and_then(|c| c.get("max_parallel"))
+                .and_then(|v| v.as_u64())
+            {
+                return n as u32;
+            }
+        }
+    }
+    2
 }
 
 fn build_issues(checks: &[ToolCheck]) -> Vec<ApiDoctorIssue> {
@@ -182,23 +250,6 @@ fn map_issue(check: &ToolCheck) -> ApiDoctorIssue {
             DoctorCheckKind::Custom | DoctorCheckKind::GitConfigKey
         ),
     }
-}
-
-fn compute_health_score(checks: &[ToolCheck]) -> u8 {
-    if checks.is_empty() {
-        return 100;
-    }
-
-    let penalty = checks
-        .iter()
-        .filter(|check| !matches!(check.status, ToolStatus::Installed))
-        .map(|check| match check.severity {
-            CheckSeverity::Error => 40u16,
-            CheckSeverity::Warning => 20u16,
-        })
-        .sum::<u16>();
-
-    100u8.saturating_sub(penalty.min(100) as u8)
 }
 
 fn issue_code(check: &ToolCheck) -> String {

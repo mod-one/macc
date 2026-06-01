@@ -617,10 +617,30 @@ export interface ApiDoctorIssue {
   message: string | null;
 }
 
+/** Structured diagnostic finding from extended checks (spec §14.2). */
+export interface ApiDiagnosticFinding {
+  /** Stable MACC code, e.g. `MACC-GIT-IDENTITY-MISSING`. */
+  id: string;
+  title: string;
+  /** `"ok"` | `"info"` | `"warning"` | `"error"` */
+  severity: string;
+  /** `"git"` | `"coordinator"` | `"tools"` | `"tasks"` | `"worktrees"` | `"project"` */
+  category: string;
+  /** Why this matters — shown in the issue card "Why it matters" section. */
+  message: string;
+  /** Exact command(s) to run. Shown in the "Fix" section of the issue card. */
+  recommendedAction?: string;
+  fixAvailable: boolean;
+}
+
 export interface ApiDoctorReport {
   healthScore: number;
   issuesBySeverity: Record<string, number>;
   issues: ApiDoctorIssue[];
+  /** Extended diagnostic findings with stable codes and recommended actions. */
+  findings?: ApiDiagnosticFinding[];
+  /** True when no blocking (error-severity) findings exist. */
+  ready?: boolean;
 }
 
 export interface ApiBackup {

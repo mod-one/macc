@@ -886,9 +886,36 @@ pub(crate) struct ApiDoctorReport {
     /// Counts of issues grouped by doctor category.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub issues_by_category: BTreeMap<String, usize>,
-    /// Individual issues returned by doctor checks.
+    /// Individual issues returned by doctor checks (legacy tool-check model).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub issues: Vec<ApiDoctorIssue>,
+    /// Structured diagnostic findings from extended checks (spec §14.2).
+    /// Carries stable MACC codes, "why it matters" messages, and recommended actions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub findings: Vec<ApiDiagnosticFinding>,
+    /// Whether the system is ready to dispatch a task (no blocking findings).
+    pub ready: bool,
+}
+
+/// A single structured diagnostic finding (spec §14.2 `DiagnosticFinding`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ApiDiagnosticFinding {
+    /// Stable MACC error code, e.g. `MACC-GIT-IDENTITY-MISSING`.
+    pub id: String,
+    /// Short human-readable title.
+    pub title: String,
+    /// Severity: `"ok"`, `"info"`, `"warning"`, or `"error"`.
+    pub severity: String,
+    /// Category: `"git"`, `"coordinator"`, `"tools"`, `"tasks"`, `"worktrees"`, `"project"`.
+    pub category: String,
+    /// Explanation of why this matters (the "why it matters" line in the issue card).
+    pub message: String,
+    /// Exact command(s) to run to fix the issue.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recommended_action: Option<String>,
+    /// Whether the doctor fix flow can attempt an automated repair.
+    pub fix_available: bool,
 }
 
 /// Single doctor issue item surfaced to the web UI.
