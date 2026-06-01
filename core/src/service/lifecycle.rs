@@ -44,6 +44,11 @@ pub trait LifecycleUi: InteractionHandler {
     fn set_current_dir(&self, path: &Path) -> Result<()>;
     fn prompt_line(&self, prompt: &str) -> Result<String>;
     fn is_command_available(&self, command: &str) -> bool;
+    /// Spawn the coordinator in the background (detached from this process).
+    /// The default implementation does nothing — CLI overrides this.
+    fn start_coordinator_background(&self, _paths: &ProjectPaths) -> Result<()> {
+        Ok(())
+    }
 }
 
 pub fn init(
@@ -601,6 +606,7 @@ pub fn quickstart_extended(
     starter_task: bool,
     start_coordinator: bool,
     check_only: bool,
+    json: bool,
     ui: &dyn LifecycleUi,
     fetch_materializer: &dyn LifecycleFetchMaterializer,
 ) -> Result<()> {
@@ -626,6 +632,39 @@ pub fn quickstart_extended(
     ));
 
     if check_only {
+        if json {
+            // Emit structured JSON for CI/scripting (spec §6.3).
+            let ladder = engine.readiness_ladder(&paths);
+            let findings = engine.collect_diagnostic_findings(&paths, 2);
+            let ready = ladder.is_ready();
+            let output = serde_json::json!({
+                "ready": ready,
+                "blocking_count": ladder.blocking_count,
+                "steps": ladder.steps.iter().map(|s| {
+                    serde_json::json!({
+                        "number": s.number,
+                        "label": s.label,
+                        "status": format!("{:?}", s.status).to_lowercase(),
+                        "detail": s.detail,
+                    })
+                }).collect::<Vec<_>>(),
+                "findings": findings.iter().map(|f| {
+                    serde_json::json!({
+                        "id": f.id,
+                        "title": f.title,
+                        "severity": f.severity.to_string(),
+                        "category": f.category,
+                        "message": f.message,
+                        "recommended_action": f.recommended_action,
+                        "fix_available": f.fix_available,
+                    })
+                }).collect::<Vec<_>>(),
+            });
+            println!("{}", serde_json::to_string_pretty(&output).unwrap_or_default());
+            return if ready { Ok(()) } else {
+                Err(MaccError::Validation("Not ready to dispatch a task.".into()))
+            };
+        }
         ui.info("Running environment checks (--check-only)...");
         run_readiness_check(&paths, ui);
         return Ok(());
@@ -681,8 +720,13 @@ pub fn quickstart_extended(
     // Step 8 — start coordinator
     if start_coordinator {
         ui.info("\nStarting coordinator (background)...");
-        ui.info("  Run: macc coordinator run");
-        // Note: actual coordinator start requires a separate spawn, logged here.
+        match ui.start_coordinator_background(&paths) {
+            Ok(()) => ui.info("  ✅ Coordinator started."),
+            Err(e) => {
+                ui.warn(&format!("  ⚠️  Could not start coordinator: {}", e));
+                ui.info("  Run manually: macc coordinator run");
+            }
+        }
     }
 
     // Show teaching mode: equivalent commands

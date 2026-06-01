@@ -11,6 +11,7 @@ pub struct QuickstartCommand {
     starter_task: bool,
     start_coordinator: bool,
     check_only: bool,
+    json: bool,
 }
 
 impl QuickstartCommand {
@@ -23,6 +24,7 @@ impl QuickstartCommand {
         starter_task: bool,
         start_coordinator: bool,
         check_only: bool,
+        json: bool,
     ) -> Self {
         Self {
             app,
@@ -33,6 +35,7 @@ impl QuickstartCommand {
             starter_task,
             start_coordinator,
             check_only,
+            json,
         }
     }
 }
@@ -48,6 +51,7 @@ impl Command for QuickstartCommand {
             self.starter_task,
             self.start_coordinator,
             self.check_only,
+            self.json,
         )
     }
 }

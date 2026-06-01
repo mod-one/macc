@@ -130,6 +130,9 @@ enum Commands {
         /// Validate environment only, do not make changes
         #[arg(long)]
         check_only: bool,
+        /// Output machine-readable JSON (useful with --check-only for CI)
+        #[arg(long)]
+        json: bool,
         /// Demo mode: non-interactive, uses sensible defaults
         #[arg(long)]
         demo: bool,
@@ -1242,6 +1245,7 @@ fn run_with_engine_provider(
             starter_task,
             start_coordinator,
             check_only,
+            json,
             demo,
         }) => commands::quickstart::QuickstartCommand::new(
             app.clone(),
@@ -1252,6 +1256,7 @@ fn run_with_engine_provider(
             *starter_task,
             *start_coordinator,
             *check_only,
+            *json,
         )
         .run(),
         Some(Commands::Plan {

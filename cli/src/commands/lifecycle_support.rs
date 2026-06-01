@@ -120,6 +120,37 @@ impl macc_core::service::lifecycle::LifecycleUi for CliLifecycleUi {
             .map(|s| s.success())
             .unwrap_or(false)
     }
+
+    fn start_coordinator_background(&self, paths: &macc_core::ProjectPaths) -> macc_core::Result<()> {
+        // Resolve the `macc` binary path (same binary we're running from).
+        let macc_bin = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("macc"));
+
+        let mut cmd = std::process::Command::new(&macc_bin);
+        cmd.arg("--cwd")
+            .arg(&paths.root)
+            .arg("coordinator")
+            .arg("run")
+            .arg("--no-tui")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+
+        // Detach: on Unix, put the child in its own process group so it survives
+        // the parent (quickstart) exiting.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            unsafe { cmd.pre_exec(|| { libc::setsid(); Ok(()) }); }
+        }
+
+        cmd.spawn().map_err(|e| macc_core::MaccError::Io {
+            path: macc_bin.to_string_lossy().into(),
+            action: "spawn coordinator background".into(),
+            source: e,
+        })?;
+
+        Ok(())
+    }
 }
 
 pub(crate) fn init(app: &AppContext, force: bool, wizard: bool) -> Result<()> {
@@ -208,6 +239,7 @@ pub(crate) fn quickstart_extended(
     starter_task: bool,
     start_coordinator: bool,
     check_only: bool,
+    json: bool,
 ) -> Result<()> {
     macc_core::service::lifecycle::quickstart_extended(
         &app.cwd,
@@ -220,6 +252,7 @@ pub(crate) fn quickstart_extended(
         starter_task,
         start_coordinator,
         check_only,
+        json,
         &CliLifecycleUi,
         &CliFetchMaterializer,
     )
