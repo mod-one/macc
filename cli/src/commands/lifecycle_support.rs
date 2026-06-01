@@ -198,3 +198,29 @@ pub(crate) fn quickstart(
         &CliFetchMaterializer,
     )
 }
+
+pub(crate) fn quickstart_extended(
+    app: &AppContext,
+    assume_yes: bool,
+    apply: bool,
+    no_tui: bool,
+    tool: Option<&str>,
+    starter_task: bool,
+    start_coordinator: bool,
+    check_only: bool,
+) -> Result<()> {
+    macc_core::service::lifecycle::quickstart_extended(
+        &app.cwd,
+        app.engine.as_ref(),
+        app.overrides.clone(),
+        assume_yes,
+        apply,
+        no_tui,
+        tool,
+        starter_task,
+        start_coordinator,
+        check_only,
+        &CliLifecycleUi,
+        &CliFetchMaterializer,
+    )
+}

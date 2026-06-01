@@ -1283,17 +1283,13 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             let overview_para = wrapped_paragraph(overview, "Overview");
             f.render_widget(overview_para, body_chunks[0]);
 
-            let next_steps = "Intent Presets:\n\n\
-                              [1] Configure Tools\n\
-                                  Detect assistants & MCP templates (Press 't')\n\n\
-                              [2] Run One Task\n\
-                                  Prepare worktree and execute task (Press 'v')\n\n\
-                              [3] Run a Batch\n\
-                                  Validate PRD and run tasks (Press 'v')\n\n\
-                              [4] Inspect Project\n\
-                                  Open status, config, and logs (Press 'g'/'o')\n\n\
-                              Tip: Use '?' anywhere for full keybindings.";
-            let steps_para = wrapped_paragraph(next_steps, "Next Steps");
+            // Readiness ladder (spec §9 / §13.1)
+            let readiness_text = if let Some(paths) = &state.project_paths {
+                build_readiness_text(paths)
+            } else {
+                "Run 'macc init' to set up this project.\n\nPrimary actions:\n  [q] Quickstart\n  [d] Doctor\n  [a] Apply\n  [v] Run coordinator\n  [s] Status".to_string()
+            };
+            let steps_para = wrapped_paragraph(readiness_text, "Readiness");
             f.render_widget(steps_para, body_chunks[1]);
         }
         Screen::Settings => {
@@ -1950,6 +1946,41 @@ fn scope_label(scope: Scope) -> &'static str {
         Scope::Project => "project",
         Scope::User => "user",
     }
+}
+
+fn build_readiness_text(paths: &macc_core::ProjectPaths) -> String {
+    let ladder = macc_core::onboarding::compute_readiness(paths);
+    let mut out = String::new();
+    out.push_str("MACC readiness\n\n");
+    for step in &ladder.steps {
+        let symbol = step.symbol();
+        let detail = step.detail.as_deref().unwrap_or("");
+        if detail.is_empty() {
+            out.push_str(&format!("{}. {}  {}\n", step.number, step.label, symbol));
+        } else {
+            out.push_str(&format!(
+                "{}. {}  {}  {}\n",
+                step.number, step.label, symbol, detail
+            ));
+        }
+    }
+    out.push('\n');
+    if ladder.is_ready() {
+        out.push_str("✅ Ready to dispatch a task\n\n");
+        out.push_str("Press 'v' to open coordinator live view.");
+    } else {
+        out.push_str(&format!(
+            "❌ {} step(s) pending\n\n",
+            ladder.blocking_count
+        ));
+        out.push_str("Primary actions:\n");
+        out.push_str("  [q] Quickstart\n");
+        out.push_str("  [d] Doctor\n");
+        out.push_str("  [a] Apply\n");
+        out.push_str("  [v] Run coordinator\n");
+        out.push_str("  [s] Status");
+    }
+    out
 }
 
 fn render_watch_screen(f: &mut Frame, state: &AppState, area: Rect) {

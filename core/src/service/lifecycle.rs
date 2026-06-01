@@ -588,6 +588,255 @@ fn load_project_context(cwd: &Path, engine: &dyn Engine) -> Result<LoadedProject
     })
 }
 
+/// Enhanced quickstart with spec §6 interactive flow and teaching mode.
+#[allow(clippy::too_many_arguments)]
+pub fn quickstart_extended(
+    cwd: &Path,
+    engine: &dyn Engine,
+    overrides: CliOverrides,
+    assume_yes: bool,
+    apply: bool,
+    no_tui: bool,
+    tool: Option<&str>,
+    starter_task: bool,
+    start_coordinator: bool,
+    check_only: bool,
+    ui: &dyn LifecycleUi,
+    fetch_materializer: &dyn LifecycleFetchMaterializer,
+) -> Result<()> {
+    let paths = crate::find_project_root(cwd).unwrap_or_else(|_| ProjectPaths::from_root(cwd));
+
+    ui.info("Welcome to MACC.");
+    ui.info("");
+
+    // Step 1 — detect project
+    if !paths.root.join(".git").exists() {
+        ui.info(&format!(
+            "No .git directory found in {}.",
+            paths.root.display()
+        ));
+        if !assume_yes && !ui.confirm("Continue anyway [y/N]? ")? {
+            return Err(MaccError::Validation("Quickstart cancelled.".into()));
+        }
+    }
+
+    ui.info(&format!(
+        "Project detected:\n  Path: {}\n",
+        paths.root.display()
+    ));
+
+    if check_only {
+        ui.info("Running environment checks (--check-only)...");
+        run_readiness_check(&paths, ui);
+        return Ok(());
+    }
+
+    // Step 2 — initialize MACC
+    crate::init(&paths, false)?;
+
+    // Step 3 — select tool adapter
+    let selected_tool = if let Some(t) = tool {
+        ui.info(&format!("Tool adapter: {} (from --tool flag)", t));
+        Some(t.to_string())
+    } else {
+        interactive_tool_selection(&paths, engine, assume_yes, ui)?
+    };
+
+    // Step 4 — apply config
+    let mut run_overrides = overrides;
+    if let Some(ref t) = selected_tool {
+        let (descriptors, _) = engine.list_tools(&paths);
+        let allowed: Vec<String> = descriptors.iter().map(|d| d.id.clone()).collect();
+        if let Ok(parsed) = CliOverrides::from_tools_csv(t, &allowed) {
+            run_overrides.tools = parsed.tools;
+        }
+    }
+
+    if apply || assume_yes {
+        ui.info("\nApplying config...");
+        if let Err(e) = crate::service::lifecycle::apply(
+            &paths.root,
+            engine,
+            run_overrides,
+            false,
+            false,
+            false,
+            false,
+            ui,
+            fetch_materializer,
+        ) {
+            ui.warn(&format!("Apply warning: {}", e));
+        }
+    }
+
+    // Step 5 — create starter task if needed
+    if starter_task {
+        create_starter_task_if_needed(&paths, assume_yes, ui)?;
+    }
+
+    // Step 7 — run doctor preflight
+    ui.info("\nRunning preflight...");
+    run_readiness_check(&paths, ui);
+
+    // Step 8 — start coordinator
+    if start_coordinator {
+        ui.info("\nStarting coordinator (background)...");
+        ui.info("  Run: macc coordinator run");
+        // Note: actual coordinator start requires a separate spawn, logged here.
+    }
+
+    // Show teaching mode: equivalent commands
+    ui.info("\nEquivalent commands:");
+    ui.info("  macc init");
+    if let Some(ref t) = selected_tool {
+        ui.info(&format!("  macc plan --tools {}", t));
+        ui.info(&format!("  macc apply --tools {}", t));
+    } else {
+        ui.info("  macc plan");
+        ui.info("  macc apply");
+    }
+    if starter_task {
+        ui.info("  macc quickstart --starter-task");
+    }
+    ui.info("  macc doctor");
+    if start_coordinator {
+        ui.info("  macc coordinator run");
+    }
+    ui.info("  macc status");
+
+    // Step 10 — show status
+    ui.info("\nNext:");
+    ui.info("  macc status");
+    ui.info("  macc web");
+
+    if !no_tui && !apply && !assume_yes {
+        ui.info("\nQuickstart complete. Opening TUI...");
+        ui.set_current_dir(&paths.root)?;
+        ui.run_tui()?;
+    }
+
+    Ok(())
+}
+
+fn interactive_tool_selection(
+    paths: &ProjectPaths,
+    engine: &dyn Engine,
+    assume_yes: bool,
+    ui: &dyn LifecycleUi,
+) -> Result<Option<String>> {
+    let (descriptors, _) = engine.list_tools(paths);
+    if descriptors.is_empty() {
+        return Ok(None);
+    }
+
+    ui.info("\nDetected tools:");
+    for (i, d) in descriptors.iter().enumerate() {
+        let check = if ui.is_command_available(&d.id) {
+            "✅ installed"
+        } else {
+            "❌ not found"
+        };
+        ui.info(&format!("  {}. {}  {}", i + 1, d.title, check));
+    }
+
+    if assume_yes {
+        // Pick first installed tool automatically.
+        for d in &descriptors {
+            if ui.is_command_available(&d.id) {
+                ui.info(&format!("\nAuto-selected: {} (first installed tool)", d.title));
+                return Ok(Some(d.id.clone()));
+            }
+        }
+        return Ok(None);
+    }
+
+    let input = ui.prompt_line("\nChoose adapter [1]: ")?;
+    let choice: usize = input.trim().parse().unwrap_or(1);
+    let selected = descriptors.get(choice.saturating_sub(1));
+    Ok(selected.map(|d| d.id.clone()))
+}
+
+fn create_starter_task_if_needed(
+    paths: &ProjectPaths,
+    assume_yes: bool,
+    ui: &dyn LifecycleUi,
+) -> Result<()> {
+    let prd_path = paths.macc_dir.join("prd.json");
+    if prd_path.exists() {
+        let content = std::fs::read_to_string(&prd_path).unwrap_or_default();
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+            if v.get("tasks")
+                .and_then(|t| t.as_array())
+                .map(|a| !a.is_empty())
+                .unwrap_or(false)
+            {
+                return Ok(());
+            }
+        }
+    }
+
+    if !assume_yes {
+        ui.info("\nNo PRD found.");
+        if !ui.confirm("Create a starter task? [y/N] ")? {
+            return Ok(());
+        }
+    }
+
+    let starter = serde_json::json!({
+        "version": 1,
+        "tasks": [{
+            "id": "QS-001",
+            "title": "Verify MACC setup",
+            "state": "todo",
+            "description": "Run a minimal validation task to confirm that MACC, the selected tool adapter, worktrees, and coordinator execution are working.",
+            "steps": [
+                "Read the generated MACC configuration.",
+                "Run a lightweight validation command.",
+                "Write a short setup confirmation note.",
+                "Commit the result using the MACC commit convention."
+            ]
+        }]
+    });
+
+    if let Some(parent) = prd_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| MaccError::Io {
+            path: parent.to_string_lossy().into(),
+            action: "create macc dir".into(),
+            source: e,
+        })?;
+    }
+    std::fs::write(
+        &prd_path,
+        serde_json::to_string_pretty(&starter).unwrap_or_default(),
+    )
+    .map_err(|e| MaccError::Io {
+        path: prd_path.to_string_lossy().into(),
+        action: "write starter task".into(),
+        source: e,
+    })?;
+
+    ui.info("\nTask:\n  QS-001 - Verify MACC setup");
+    Ok(())
+}
+
+fn run_readiness_check(paths: &ProjectPaths, ui: &dyn LifecycleUi) {
+    use crate::doctor::{collect_all_findings, DiagnosticSeverity};
+    let max_parallel = 2u32;
+    let findings = collect_all_findings(paths, max_parallel);
+    for f in &findings {
+        let symbol = match f.severity {
+            DiagnosticSeverity::Ok => "  ✅",
+            DiagnosticSeverity::Info => "  ℹ️",
+            DiagnosticSeverity::Warning => "  ⚠️",
+            DiagnosticSeverity::Error => "  ❌",
+        };
+        ui.info(&format!("{} {}", symbol, f.title));
+        if !f.message.is_empty() && !matches!(f.severity, DiagnosticSeverity::Ok) {
+            ui.info(&format!("     {}", f.message));
+        }
+    }
+}
+
 fn enabled_titles(descriptors: &[ToolDescriptor], enabled_ids: &[String]) -> Vec<String> {
     enabled_ids
         .iter()

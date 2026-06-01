@@ -118,6 +118,21 @@ enum Commands {
         /// Do not open TUI at the end
         #[arg(long)]
         no_tui: bool,
+        /// Pre-select a tool adapter (skip interactive tool selection)
+        #[arg(long)]
+        tool: Option<String>,
+        /// Create a starter task if no PRD/tasks exist
+        #[arg(long)]
+        starter_task: bool,
+        /// Start the coordinator after setup
+        #[arg(long)]
+        start_coordinator: bool,
+        /// Validate environment only, do not make changes
+        #[arg(long)]
+        check_only: bool,
+        /// Demo mode: non-interactive, uses sensible defaults
+        #[arg(long)]
+        demo: bool,
     },
     /// Plan changes to the project
     Plan {
@@ -204,6 +219,18 @@ enum Commands {
         /// Apply safe automatic fixes
         #[arg(long)]
         fix: bool,
+        /// Output machine-readable JSON
+        #[arg(long)]
+        json: bool,
+        /// Git user.name to apply (used with --fix)
+        #[arg(long)]
+        git_name: Option<String>,
+        /// Git user.email to apply (used with --fix)
+        #[arg(long)]
+        git_email: Option<String>,
+        /// Check only the coordinator group
+        #[arg(long)]
+        coordinator: bool,
     },
     /// Migrate legacy configuration to the new format
     Migrate {
@@ -590,6 +617,12 @@ enum Commands {
         /// Show events pane only
         #[arg(long)]
         events_only: bool,
+        /// Number of recent events to show (default: 5)
+        #[arg(long, default_value = "5")]
+        events: usize,
+        /// Show verbose output including per-worker details
+        #[arg(long)]
+        verbose: bool,
     },
     /// Open the live TUI observer (alias for `status --watch`)
     Watch,
@@ -1201,9 +1234,26 @@ fn run_with_engine_provider(
             )
             .run(),
         },
-        Some(Commands::Quickstart { yes, apply, no_tui }) => {
-            commands::quickstart::QuickstartCommand::new(app.clone(), *yes, *apply, *no_tui).run()
-        }
+        Some(Commands::Quickstart {
+            yes,
+            apply,
+            no_tui,
+            tool,
+            starter_task,
+            start_coordinator,
+            check_only,
+            demo,
+        }) => commands::quickstart::QuickstartCommand::new(
+            app.clone(),
+            *yes || *demo,
+            *apply,
+            *no_tui,
+            tool.clone(),
+            *starter_task,
+            *start_coordinator,
+            *check_only,
+        )
+        .run(),
         Some(Commands::Plan {
             tools,
             json,
@@ -1268,9 +1318,21 @@ fn run_with_engine_provider(
             *print_prompt,
         )
         .run(),
-        Some(Commands::Doctor { fix }) => {
-            commands::doctor::DoctorCommand::new(app.clone(), *fix).run()
-        }
+        Some(Commands::Doctor {
+            fix,
+            json,
+            git_name,
+            git_email,
+            coordinator,
+        }) => commands::doctor::DoctorCommand::new(
+            app.clone(),
+            *fix,
+            *json,
+            git_name.clone(),
+            git_email.clone(),
+            *coordinator,
+        )
+        .run(),
         Some(Commands::Migrate { apply }) => {
             commands::migrate::MigrateCommand::new(app.clone(), *apply).run()
         }
@@ -1445,6 +1507,8 @@ fn run_with_engine_provider(
             rate_limited,
             logs_only,
             events_only,
+            events,
+            verbose,
         }) => commands::status::StatusCommand {
             app: app.clone(),
             json: *json,
@@ -1456,6 +1520,8 @@ fn run_with_engine_provider(
             rate_limited: *rate_limited,
             logs_only: *logs_only,
             events_only: *events_only,
+            events_count: *events,
+            verbose: *verbose,
         }
         .run(),
 
@@ -1470,6 +1536,8 @@ fn run_with_engine_provider(
             rate_limited: false,
             logs_only: false,
             events_only: false,
+            events_count: 5,
+            verbose: false,
         }
         .run(),
 

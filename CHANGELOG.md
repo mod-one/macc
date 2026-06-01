@@ -7,6 +7,18 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added — Usability, Onboarding, and README Improvement (spec §5)
+- **`macc quickstart` extended**: new flags `--tool`, `--starter-task`, `--start-coordinator`, `--check-only`, `--demo`; interactive tool selection from detected adapters; starter task creation (`QS-001`) when no PRD exists; teaching mode prints equivalent manual commands at the end.
+- **`macc doctor` extended**: `--json` flag emits structured `DiagnosticFinding` list with stable error codes (`MACC-GIT-IDENTITY-MISSING`, `MACC-COORDINATOR-IPC-MISSING`, etc.); `--fix --git-name "…" --git-email "…"` applies git identity locally; `--coordinator` filters to coordinator group; readiness summary printed at the end of human output.
+- **New diagnostic checks** (spec §5.3): disk-space check against formula `max(repo_size × max_parallel × 1.25, 2 GB)`; coordinator IPC check reads `coordinator.sqlite` and verifies PID liveness; task-readiness check inspects `prd.json` for dispatchable tasks.
+- **`DiagnosticFinding` / `DiagnosticSeverity`** shared types (spec §14.2) in `core/src/doctor.rs` — stable IDs, category, message, recommended action, fix availability.
+- **`ReadinessLadder`** (spec §9): `core::onboarding` module with `compute_readiness(paths)` assembling an 8-step ladder from live project state; persisted as `.macc/state/onboarding.json`.
+- **`macc status` enhanced** (spec §8): coordinator PID/uptime/mode section; worktree summary; health block with throttled-tool countdowns; stale-worker `▲` flag; `--events N` (default 5) and `--verbose` flags; degraded output when coordinator is absent.
+- **TUI Home screen readiness checklist** (spec §13.1): right panel now shows the 8-step readiness ladder computed from `core::onboarding::compute_readiness()`, replacing the static "Next Steps" text.
+- **Web Welcome page readiness cards** (spec §13.2): `Welcome.tsx` now fetches `GET /api/v1/snapshot`, computes a 5-item readiness list (project, tool, config, PRD/task, coordinator), and renders it with per-step action links; `blockingCount` summary links to `/ops/diagnostics`.
+- **New stable error codes**: `MACC-GIT-IDENTITY-MISSING`, `MACC-COORDINATOR-IPC-MISSING`, `MACC-COORDINATOR-IPC-STALE`, `MACC-TASK-NONE-READY`, `MACC-TOOL-NOT-RUNNABLE`, `MACC-WORKTREE-DISK-LOW`, `MACC-CONFIG-NOT-APPLIED`.
+- **README redesign** (spec §10-11): onboarding-first structure — 30-second quickstart at the top, visual overview Mermaid diagram, "Why MACC?" comparison table, core-workflows table, first-run readiness ladder, structured troubleshooting, error-code table, collapsible advanced sections.
+
 ## [0.2.0] - 2026-05-31
 
 ### Added

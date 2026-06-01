@@ -26,6 +26,7 @@ pub mod supervisor;
 pub mod tool;
 pub mod user_backup;
 pub mod worktree;
+pub mod onboarding;
 pub mod ops_motif;
 pub mod save;
 
