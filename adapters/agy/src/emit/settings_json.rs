@@ -12,7 +12,7 @@ pub fn render_settings_json(config: &AgyConfig) -> String {
     // If there were other options under the resolved tool config, merge them
     if let JsonValue::Object(map) = &config.tool_config {
         for (k, v) in map {
-            if k != "model" && k != "sandbox" && k != "skills" && k != "agents" && k != "mcp_servers" {
+            if k != "model" && k != "sandbox" && k != "skills" && k != "agents" && k != "mcp_servers" && k != "model_tiers" {
                 settings.insert(k.clone(), v.clone());
             }
         }
