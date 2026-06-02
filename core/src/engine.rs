@@ -1983,6 +1983,7 @@ impl TestEngine {
             update: None,
             version_check: None,
             defaults: None,
+            model_tiers: Default::default(),
         };
 
         let spec_two = ToolSpec {
@@ -2030,6 +2031,7 @@ impl TestEngine {
             update: None,
             version_check: None,
             defaults: None,
+            model_tiers: Default::default(),
         };
 
         let mut registry = ToolRegistry::new();

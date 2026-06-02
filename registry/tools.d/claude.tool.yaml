@@ -23,6 +23,16 @@ performer:
   retry:
     command: claude
     args: ["--model", "{model}", "--session-id", "{session_id}", "--output-format", "text", "--dangerously-skip-permissions"]
+model_tiers:
+  mini:
+    model: haiku
+    effort: Medium
+  standard:
+    model: sonnet
+    effort: Medium
+  heavy:
+    model: opus
+    effort: High
 defaults:
   model: sonnet
 install:
@@ -98,6 +108,54 @@ fields:
       action: open_agents
       target_pointer: /selections/agents
     help: Open Claude agents selector.
+  - id: tier_mini_model
+    label: Mini tier — model
+    kind:
+      type: enum
+      options: ["haiku", "sonnet", "sonnet[1m]", "opus"]
+    help: "Model used when routing tier = mini (light, fast tasks)."
+    pointer: /tools/config/claude/model_tiers/mini/model
+    default: "haiku"
+  - id: tier_mini_effort
+    label: Mini tier — effort
+    kind:
+      type: enum
+      options: ["Low", "Medium", "High", "Max"]
+    help: "Effort level for the mini tier (not applicable to Haiku)."
+    pointer: /tools/config/claude/model_tiers/mini/effort
+    default: "Medium"
+  - id: tier_standard_model
+    label: Standard tier — model
+    kind:
+      type: enum
+      options: ["haiku", "sonnet", "sonnet[1m]", "opus"]
+    help: "Model used when routing tier = standard (everyday tasks)."
+    pointer: /tools/config/claude/model_tiers/standard/model
+    default: "sonnet"
+  - id: tier_standard_effort
+    label: Standard tier — effort
+    kind:
+      type: enum
+      options: ["Low", "Medium", "High", "Max"]
+    help: "Effort level for the standard tier (not applicable to Haiku)."
+    pointer: /tools/config/claude/model_tiers/standard/effort
+    default: "Medium"
+  - id: tier_heavy_model
+    label: Heavy tier — model
+    kind:
+      type: enum
+      options: ["sonnet", "sonnet[1m]", "opus"]
+    help: "Model used when routing tier = heavy (complex / architectural work)."
+    pointer: /tools/config/claude/model_tiers/heavy/model
+    default: "opus"
+  - id: tier_heavy_effort
+    label: Heavy tier — effort
+    kind:
+      type: enum
+      options: ["Medium", "High", "Max"]
+    help: "Effort level for the heavy tier (not applicable to Haiku)."
+    pointer: /tools/config/claude/model_tiers/heavy/effort
+    default: "High"
 doctor:
   - kind: which
     value: claude

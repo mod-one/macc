@@ -514,6 +514,10 @@ enum Commands {
         /// Override the review phase mode (disabled, required, risk_based, manual)
         #[arg(long)]
         review: Option<String>,
+        /// Force a global model tier for all tasks in this run: mini, standard, heavy.
+        /// Overrides per-task routing_hints. Only effective when model-routing mode is auto.
+        #[arg(long)]
+        model_tier: Option<String>,
         /// Extra args passed to coordinator subcommands (positional or after --)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         extra_args: Vec<String>,
@@ -704,6 +708,9 @@ pub enum PrdSubcommands {
         /// Explicit model ID (only valid with --model-routing manual)
         #[arg(long)]
         model: Option<String>,
+        /// Model tier override: mini, standard, heavy (auto routing only)
+        #[arg(long = "model-tier")]
+        model_tier: Option<String>,
         /// Inline client instructions appended to the prompt
         #[arg(long)]
         instructions: Option<String>,
@@ -743,6 +750,9 @@ pub enum PrdSubcommands {
         /// Explicit model ID (only valid with --model-routing manual)
         #[arg(long)]
         model: Option<String>,
+        /// Model tier override: mini, standard, heavy (auto routing only)
+        #[arg(long = "model-tier")]
+        model_tier: Option<String>,
         /// Inline client instructions appended to the audit prompt
         #[arg(long)]
         instructions: Option<String>,
@@ -1865,10 +1875,16 @@ fn run_with_engine_provider(
             use commands::prd::{PrdCommand, PrdSubcommand};
             let sub = match prd_subcommand {
                 PrdSubcommands::Generate {
-                    from_path, tool, model_routing, model, instructions,
+                    from_path, tool, model_routing, model, model_tier, instructions,
                     instructions_file, target_dir, update_path,
                     dry_run, promote, yes, json,
-                } => PrdSubcommand::Generate {
+                } => {
+                    // --model-tier on prd generate sets env var for the invoked tool process
+                    if let Some(tier) = model_tier {
+                        std::env::set_var("MACC_MODEL_TIER", tier);
+                        std::env::set_var("MACC_MODEL_ROUTING_MODE", "auto");
+                    }
+                    PrdSubcommand::Generate {
                     from_path: std::path::PathBuf::from(from_path),
                     tool: tool.clone(),
                     model_routing: model_routing.clone(),
@@ -1881,11 +1897,16 @@ fn run_with_engine_provider(
                     promote: *promote,
                     yes: *yes,
                     json: *json,
-                },
+                }},
                 PrdSubcommands::Audit {
-                    prd_path, tool, model_routing, model, instructions,
+                    prd_path, tool, model_routing, model, model_tier, instructions,
                     instructions_file, reference_branch, diff_stat, dry_run, yes, json,
-                } => PrdSubcommand::Audit {
+                } => {
+                    if let Some(tier) = model_tier {
+                        std::env::set_var("MACC_MODEL_TIER", tier);
+                        std::env::set_var("MACC_MODEL_ROUTING_MODE", "auto");
+                    }
+                    PrdSubcommand::Audit {
                     prd_path: std::path::PathBuf::from(prd_path),
                     tool: tool.clone(),
                     model_routing: model_routing.clone(),
@@ -1897,7 +1918,7 @@ fn run_with_engine_provider(
                     dry_run: *dry_run,
                     yes: *yes,
                     json: *json,
-                },
+                }},
                 PrdSubcommands::Promote { source_path, dest_path, yes, json } => {
                     PrdSubcommand::Promote {
                         source_path: std::path::PathBuf::from(source_path),
@@ -1972,8 +1993,15 @@ fn run_with_engine_provider(
             disable_review,
             testing,
             review,
+            model_tier,
             extra_args,
         }) => {
+            // --model-tier propagates to all performer processes as MACC_MODEL_TIER.
+            // This acts as a global override for the routing engine's per-task decision.
+            if let Some(tier) = model_tier {
+                std::env::set_var("MACC_MODEL_TIER", tier);
+                std::env::set_var("MACC_MODEL_ROUTING_MODE", "auto");
+            }
             let mut env_cfg = CoordinatorEnvConfig {
                 prd: prd.clone(),
                 coordinator_tool: coordinator_tool.clone(),
@@ -3582,6 +3610,7 @@ fi
                     disable_review: false,
                     testing: None,
                     review: None,
+                    model_tier: None,
                     extra_args: Vec::new(),
                 }),
             },

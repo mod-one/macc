@@ -397,6 +397,20 @@ run_resume_and_capture() {
     i=$((i + 1))
   done
 
+  # Apply tier model override to resume args.
+  # Strategy A (CLI flag) only — config file was already updated by _apply_tier_model_to_args.
+  if [[ -n "$_tier_model" ]]; then
+    local _r_prev_applied="$_tier_model_applied_via_args"
+    _tier_model_applied_via_args=false
+    _replace_model_in_args final_args
+    if $_tier_model_applied_via_args && [[ -n "$_tier_effort" && -n "$_effort_flag" ]]; then
+      local _r_has=false
+      for _r_a in "${final_args[@]}"; do [[ "$_r_a" == "$_effort_flag" ]] && _r_has=true && break; done
+      $_r_has || final_args+=("$_effort_flag" "$_tier_effort")
+    fi
+    _tier_model_applied_via_args="$_r_prev_applied"
+  fi
+
   if [[ "$prompt_mode" == "arg" && -n "$prompt_arg" ]]; then
     run_and_capture "$output_file" "$session_resume_command" "${final_args[@]}" "$prompt_arg" "$prompt"
   else
@@ -474,6 +488,105 @@ else
     args+=("$arg")
   done < <(jq -r '.performer.args[]?' "$tool_json")
 fi
+
+# ── Model tier routing (spec §8) ──────────────────────────────────────────────
+# When MACC_MODEL_TIER is set (injected by coordinator model_routing.rs or via
+# CLI --model-tier), override the static model in args with the tier-specific
+# model from tool.json.model_tiers, and append the effort flag when configured.
+_macc_tier="${MACC_MODEL_TIER:-}"
+_macc_routing_mode="${MACC_MODEL_ROUTING_MODE:-auto}"
+_tier_model=""
+_tier_effort=""
+_effort_flag=""
+
+if [[ "$_macc_routing_mode" == "auto" && -n "$_macc_tier" ]]; then
+  _tier_model="$(jq -r --arg t "$_macc_tier" '.model_tiers[$t].model // empty' "$tool_json" 2>/dev/null || true)"
+  _tier_effort="$(jq -r --arg t "$_macc_tier" '.model_tiers[$t].effort // empty' "$tool_json" 2>/dev/null || true)"
+  _effort_flag="$(jq -r '.performer.effort_flag // empty' "$tool_json" 2>/dev/null || true)"
+fi
+
+# Strategy A: replace the value after --model / -m in an args array.
+# Sets _tier_model_applied_via_args=true when the flag was found and replaced.
+_tier_model_applied_via_args=false
+_replace_model_in_args() {
+  # $1 = name of array variable to modify (passed by name via nameref)
+  local -n _arr_ref="$1"
+  local _new=() _found=false
+  local _a
+  local _skip=false
+  for _a in "${_arr_ref[@]}"; do
+    if $_skip; then
+      _new+=("$_tier_model"); _skip=false; _found=true
+    elif [[ "$_a" == "--model" || "$_a" == "-m" ]]; then
+      _new+=("$_a"); _skip=true
+    else
+      _new+=("$_a")
+    fi
+  done
+  _arr_ref=("${_new[@]}")
+  $_found && _tier_model_applied_via_args=true
+}
+
+# Strategy B: write the tier model directly to the tool's config file.
+# Used when the tool reads model from a settings file instead of a CLI flag.
+_apply_tier_model_via_config_file() {
+  local _cfg_path="$1" _cfg_fmt="$2" _cfg_key="$3" _model_val="$4"
+  local _dir="${_cfg_path%/*}"
+  [[ "$_dir" != "$_cfg_path" ]] && mkdir -p "$_dir" 2>/dev/null
+  case "$_cfg_fmt" in
+    toml)
+      if [[ -f "$_cfg_path" ]]; then
+        # Update existing key if present, otherwise append.
+        if grep -qE "^[[:space:]]*${_cfg_key}[[:space:]]*=" "$_cfg_path" 2>/dev/null; then
+          local _tmp; _tmp="$(mktemp)"
+          sed "s|^[[:space:]]*${_cfg_key}[[:space:]]*=.*|${_cfg_key} = \"${_model_val}\"|" \
+              "$_cfg_path" > "$_tmp" && mv "$_tmp" "$_cfg_path"
+        else
+          printf '\n%s = "%s"\n' "$_cfg_key" "$_model_val" >> "$_cfg_path"
+        fi
+      else
+        printf '%s = "%s"\n' "$_cfg_key" "$_model_val" > "$_cfg_path"
+      fi
+      ;;
+    json)
+      local _tmp; _tmp="$(mktemp)"
+      if [[ -f "$_cfg_path" ]]; then
+        jq --arg k "$_cfg_key" --arg v "$_model_val" '.[$k] = $v' \
+           "$_cfg_path" > "$_tmp" && mv "$_tmp" "$_cfg_path"
+      else
+        jq -n --arg k "$_cfg_key" --arg v "$_model_val" '{($k): $v}' > "$_cfg_path"
+      fi
+      ;;
+  esac
+}
+
+# Apply tier model: try arg-replacement first; fall back to config file.
+_apply_tier_model_to_args() {
+  [[ -z "$_tier_model" ]] && return
+
+  # Strategy A: tool has --model flag in its args array.
+  _replace_model_in_args args
+
+  if $_tier_model_applied_via_args; then
+    # Append effort/reasoning flag for CLI-flag tools (e.g. codex --reasoning-effort).
+    if [[ -n "$_tier_effort" && -n "$_effort_flag" ]]; then
+      local _has=false
+      for _a in "${args[@]}"; do [[ "$_a" == "$_effort_flag" ]] && _has=true && break; done
+      $_has || args+=("$_effort_flag" "$_tier_effort")
+    fi
+  else
+    # Strategy B: tool reads model from a config file (e.g. vibe, agy).
+    local _cfg_path _cfg_fmt _cfg_key
+    _cfg_path="$(jq -r '.performer.model_config.path // empty' "$tool_json" 2>/dev/null || true)"
+    _cfg_fmt="$(jq -r '.performer.model_config.format // empty' "$tool_json" 2>/dev/null || true)"
+    _cfg_key="$(jq -r '.performer.model_config.key // "model"' "$tool_json" 2>/dev/null || true)"
+    if [[ -n "$_cfg_path" && -n "$_cfg_fmt" ]]; then
+      _apply_tier_model_via_config_file "$_cfg_path" "$_cfg_fmt" "$_cfg_key" "$_tier_model"
+    fi
+  fi
+}
+
+_apply_tier_model_to_args
 
 prompt_mode="$(jq -r '.performer.prompt.mode // "stdin"' "$tool_json")"
 prompt_arg="$(jq -r '.performer.prompt.arg // empty' "$tool_json")"

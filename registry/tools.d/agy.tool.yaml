@@ -10,6 +10,10 @@ performer:
   runner: adapters/agy/agy.performer.sh
   command: agy
   args: ["--dangerously-skip-permissions", "-p"]
+  model_config:
+    path: ".agents/settings.json"
+    format: json
+    key: model
   prompt:
     mode: arg
     arg: "-p"
@@ -24,6 +28,13 @@ performer:
   retry:
     command: agy
     args: ["--conversation", "{session_id}", "--dangerously-skip-permissions", "-p"]
+model_tiers:
+  mini:
+    model: "Gemini 3.5 Flash (Low)"
+  standard:
+    model: "Gemini 3.5 Flash (Medium)"
+  heavy:
+    model: "Gemini 3.5 Flash (High)"
 defaults:
   sandbox: true
 install:
@@ -54,7 +65,7 @@ fields:
     label: Model
     kind:
       type: enum
-      options: ["Gemini 3.5 Flash (Low)", "Gemini 3.5 Flash (Medium)", "Gemini 3.5 Flash (High)", "Gemini 3.1 Pro (Low)", "Gemini 3.1 Pro (High)", Claude Sonnet 4.6 (Thinking)", "Claude Opus 4.6 (Thinking)", "GPT-OSS 120B (Medium)"]
+      options: ["Gemini 3.5 Flash (Low)", "Gemini 3.5 Flash (Medium)", "Gemini 3.5 Flash (High)", "Gemini 3.1 Pro (Low)", "Gemini 3.1 Pro (High)", "Claude Sonnet 4.6 (Thinking)", "Claude Opus 4.6 (Thinking)", "GPT-OSS 120B (Medium)"]
     help: Antigravity model preset for workspace settings.
     pointer: /tools/config/agy/model
     default: "Gemini 3.5 Flash (Medium)"
@@ -79,6 +90,30 @@ fields:
       action: open_mcp
       target_pointer: /selections/mcp
     help: "Configure Model Context Protocol servers."
+  - id: tier_mini_model
+    label: Mini tier — model
+    kind:
+      type: enum
+      options: ["Gemini 3.5 Flash (Low)", "Gemini 3.5 Flash (Medium)", "Gemini 3.5 Flash (High)", "Gemini 3.1 Pro (Low)", "Gemini 3.1 Pro (High)", "Claude Sonnet 4.6 (Thinking)", "Claude Opus 4.6 (Thinking)", "GPT-OSS 120B (Medium)"]
+    help: "Model used when routing tier = mini."
+    pointer: /tools/config/agy/model_tiers/mini/model
+    default: "Gemini 3.5 Flash (Low)"
+  - id: tier_standard_model
+    label: Standard tier — model
+    kind:
+      type: enum
+      options: ["Gemini 3.5 Flash (Low)", "Gemini 3.5 Flash (Medium)", "Gemini 3.5 Flash (High)", "Gemini 3.1 Pro (Low)", "Gemini 3.1 Pro (High)", "Claude Sonnet 4.6 (Thinking)", "Claude Opus 4.6 (Thinking)", "GPT-OSS 120B (Medium)"]
+    help: "Model used when routing tier = standard."
+    pointer: /tools/config/agy/model_tiers/standard/model
+    default: "Gemini 3.5 Flash (Medium)"
+  - id: tier_heavy_model
+    label: Heavy tier — model
+    kind:
+      type: enum
+      options: ["Gemini 3.5 Flash (Low)", "Gemini 3.5 Flash (Medium)", "Gemini 3.5 Flash (High)", "Gemini 3.1 Pro (Low)", "Gemini 3.1 Pro (High)", "Claude Sonnet 4.6 (Thinking)", "Claude Opus 4.6 (Thinking)", "GPT-OSS 120B (Medium)"]
+    help: "Model used when routing tier = heavy."
+    pointer: /tools/config/agy/model_tiers/heavy/model
+    default: "Gemini 3.5 Flash (High)"
 doctor:
   - kind: which
     value: agy
