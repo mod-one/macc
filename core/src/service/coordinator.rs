@@ -50,6 +50,9 @@ pub enum CoordinatorManagedCommandState {
     Succeeded {
         command: String,
         elapsed_secs: u64,
+        /// Human-readable reason when the coordinator stopped intentionally
+        /// before all tasks completed (e.g. dispatch limit reached).
+        finish_reason: Option<String>,
     },
     Failed {
         command: String,
@@ -194,9 +197,11 @@ pub fn coordinator_poll_managed_command_state(
             elapsed_secs,
         } => {
             if success {
+                let finish_reason = read_dispatch_limit_reason(paths);
                 return Ok(CoordinatorManagedCommandState::Succeeded {
                     command,
                     elapsed_secs,
+                    finish_reason,
                 });
             }
             let failure = crate::service::diagnostic::analyze_last_failure(paths)?;
@@ -515,4 +520,44 @@ fn pid_is_alive(pid: i32) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+/// Check whether the most recent coordinator run ended because the dispatch
+/// limit was reached. Returns a user-friendly message if so, or `None` for
+/// a normal full-completion.
+fn read_dispatch_limit_reason(paths: &ProjectPaths) -> Option<String> {
+    use crate::coordinator_storage::{
+        CoordinatorSnapshot, CoordinatorStorage, CoordinatorStoragePaths, JsonStorage, SqliteStorage,
+    };
+    let storage_paths = CoordinatorStoragePaths::from_project_paths(paths);
+    let sqlite = SqliteStorage::new(storage_paths.clone());
+    let snapshot: CoordinatorSnapshot = if sqlite.has_snapshot_data().unwrap_or(false) {
+        sqlite.load_snapshot().ok()?
+    } else {
+        JsonStorage::new(storage_paths).load_snapshot().ok()?
+    };
+    // Scan the last 20 events newest-first for the dispatch_limit_reached marker.
+    for event in snapshot.events.iter().rev().take(20) {
+        if event.event_type == "dispatch_limit_reached" {
+            let detail = event.message().unwrap_or("").to_string();
+            let dispatched = detail.split_whitespace().find_map(|s| {
+                s.strip_prefix("run_total=")
+                    .and_then(|v| v.parse::<usize>().ok())
+            });
+            let max = detail.split_whitespace().find_map(|s| {
+                s.strip_prefix("max_dispatch=")
+                    .and_then(|v| v.parse::<usize>().ok())
+            });
+            return Some(match (dispatched, max) {
+                (Some(d), Some(m)) => format!(
+                    "Stopped: dispatch limit reached ({}/{} tasks dispatched). \
+                     Restart the coordinator to continue.",
+                    d, m
+                ),
+                _ => "Stopped: dispatch limit reached. Restart the coordinator to continue."
+                    .to_string(),
+            });
+        }
+    }
+    None
 }

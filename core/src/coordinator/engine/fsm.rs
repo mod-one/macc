@@ -1426,8 +1426,12 @@ async fn run_control_plane_cycle<B: ControlPlaneBackend + ?Sized>(
     }
 
     let counts = backend.on_cycle_end(cycle, &advance, dispatched).await?;
-    if let Some(reason) = backend.should_terminate_run(&counts) {
-        return Err(MaccError::Validation(reason));
+    if let Some(_reason) = backend.should_terminate_run(&counts) {
+        // This is a planned stop (e.g. dispatch limit reached), not a failure.
+        // The dispatch_limit_reached event was already emitted by the dispatcher.
+        // Returning Complete causes an exit code 0 so the TUI shows a green
+        // "finished" message instead of a red error overlay.
+        return Ok(ControlPlaneDecision::Complete);
     }
     let last_fail = backend.last_dispatch_failure();
     controller.on_cycle_counts(counts, last_fail.as_deref())

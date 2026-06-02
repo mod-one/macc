@@ -2174,15 +2174,14 @@ impl AppState {
                 Ok(CoordinatorManagedCommandState::Succeeded {
                     command,
                     elapsed_secs: elapsed,
+                    finish_reason,
                 }) => {
-                    finished_message = Some((
-                        UiStatusLevel::Success,
-                        format!(
-                            "Coordinator '{}' finished in {}.",
-                            command,
-                            format_hms(elapsed)
-                        ),
-                    ));
+                    let base = format!("Coordinator '{}' finished in {}.", command, format_hms(elapsed));
+                    let msg = match finish_reason {
+                        Some(ref reason) => format!("{} {}", base, reason),
+                        None => base,
+                    };
+                    finished_message = Some((UiStatusLevel::Success, msg));
                     post_success_action = self.coordinator_pause_next_action.take();
                     self.coordinator_pause_error = None;
                     self.coordinator_pause_command = None;
