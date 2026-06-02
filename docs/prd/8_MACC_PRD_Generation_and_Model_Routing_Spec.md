@@ -4,7 +4,7 @@
 **Document type:** Design specification / implementation addendum  
 **Language:** English  
 **Date:** 2026-05-26  
-**Status:** Proposed design  
+**Status:** Proposed design — aligned with existing code  
 
 ---
 
@@ -14,6 +14,7 @@ This document consolidates the proposed improvements discussed for MACC around t
 
 1. **Client-toggleable automatic model selection**: MACC should be able to choose the lightest sufficient model and reasoning depth automatically, while allowing clients to disable this behavior and manually select a model.
 2. **Simple, direct PRD generation**: MACC should expose a direct `macc prd generate --from brief.md` workflow that builds a complete prompt, invokes a selected tool, uses the fixed internal `macc-prd-planner` skill, writes outputs to a safe target directory, validates them, and optionally promotes the generated PRD.
+3. **PRD audit command migration**: The existing `macc coordinator audit-prd` command is removed and replaced by `macc prd audit`. The audit uses the same option set as `macc prd generate` (tool, model routing, instructions, dry-run, json) but operates on an existing PRD file and uses a dedicated audit prompt to enrich it from commit history and delivered code. The underlying business logic in `core/src/coordinator/prd_auditor.rs` is preserved unchanged.
 
 The design intentionally avoids turning MACC into a complex internal planning engine. MACC should orchestrate prompt construction, tool selection, target paths, validation, promotion, and client access. The actual planning is delegated to a selected AI tool through the built-in PRD planner flow.
 
@@ -24,8 +25,9 @@ The design intentionally avoids turning MACC into a complex internal planning en
 This proposal follows the existing MACC direction:
 
 - MACC is built around a canonical source of truth, tool-specific adapters, TUI/Web/CLI clients, worktrees, coordinator execution, PRD reconciliation, and local observability.
-- MACC already defines agents, phases, worktree execution, `.macc/tool.json`, `.macc/worktree.json`, `worktree.prd.json`, `sync-prd`, and `audit-prd` concepts.
+- MACC already defines agents, phases, worktree execution, `.macc/tool.json`, `.macc/worktree.json`, `worktree.prd.json`, `sync-prd`, and `audit-prd` concepts. The `audit-prd` concept is migrated to `macc prd audit` (see §22).
 - The `macc-prd-planner` skill is already scoped specifically to generating or updating `prd.json` files, preserving task identity, improving parallel safety, using `exclusive_resources`, adding routing hints, and avoiding concrete provider model names in PRD tasks.
+- `core/src/coordinator/prd_auditor.rs` already implements the core audit business logic: `gather_task_commit_context`, `build_audit_context`, `build_audit_prompt`, `prepare_audit`. This module is not replaced — it is wrapped by `core/src/prd_generation/audit.rs` and called from `macc prd audit` instead of from `macc coordinator audit-prd`.
 
 The resulting design therefore keeps the PRD planner as a fixed internal capability while exposing a clean, client-friendly command and API.
 
@@ -94,13 +96,13 @@ Allowed:
 
 ```json
 {
-  "routing_hints": {
-    "execution_mode": "standard",
-    "reasoning_depth": "standard",
-    "context_scope": "module",
-    "risk_level": "medium",
-    "validation_profile": "standard"
-  }
+  "routing_hints_mapping": {
+    "execution_mode": "micro | standard | structural",
+    "reasoning_depth": "light | standard | deep",
+    "context_scope": "local | module | cross-cutting",
+    "risk_level": "low | medium | high",
+    "validation_profile": "light | standard | heavy"
+  },
 }
 ```
 
@@ -624,10 +626,10 @@ Recommended prompt template:
 You are running MACC's built-in PRD generation flow.
 
 Use the MACC PRD Planner skill:
-- macc-prd-planner
+- `macc-prd-planner`
 
 Goal:
-Generate or update a MACC-compatible PRD file.
+Generate or update a MACC-compatible PRD file(s).
 
 Input brief:
 <contents of brief.md>
@@ -635,34 +637,8 @@ Input brief:
 Target output directory:
 <target-dir>
 
-Required outputs:
-- prd.json
-- prd.summary.md
-- prd.validation-notes.md if warnings exist
-
-Repository/MACC context:
-- Use prd.json.example as the schema source of truth when available.
-- Preserve existing task IDs if updating an existing PRD.
-- Keep tasks small, dependency-safe, and worktree-safe.
-- Add routing_hints if the schema permits them.
-- Do not include provider-specific model names in PRD tasks.
-- Keep output in English.
-
 Client instructions:
 <contents from --instructions or --instructions-file>
-
-Execution constraints:
-- Do not modify files outside the target output directory.
-- Do not edit source code.
-- Do not run implementation tasks.
-- Produce valid JSON.
-- If schema information is missing, use the minimal MACC reference shape and document the assumption.
-
-Output contract:
-- Write all generated files to the target output directory.
-- Ensure prd.json is complete and valid JSON.
-- Include clear summary notes in prd.summary.md.
-- Include validation warnings or assumptions in prd.validation-notes.md when relevant.
 ```
 
 ---
@@ -671,77 +647,19 @@ Output contract:
 
 MACC should collect only the context needed for PRD generation.
 
-Recommended context files when present:
-
-```text
-prd.json.example
-existing prd.json, when --update is used
-.macc/macc.yaml
-.macc/tool.json, when inside a worktree
-.macc/worktree.json, when inside a worktree
-worktree.prd.json, when inside a worktree
-```
-
 MACC should not read the whole repository by default. If richer context is needed, the brief or client instructions should request it explicitly.
 
 ---
 
-## 21. Output files
-
-Required outputs:
-
-```text
-prd.json
-prd.summary.md
-```
-
-Conditional output:
-
-```text
-prd.validation-notes.md
-```
-
-Optional future outputs:
-
-```text
-prompt.md                  # Stored prompt for reproducibility, optional
-routing-decision.json       # Model routing decision, optional
-generation-metadata.json    # Tool, model mode, run ID, timestamps, validation result
-```
-
-Recommended metadata shape:
-
-```json
-{
-  "run_id": "2026-05-26-143012",
-  "tool": "claude",
-  "model_selection": {
-    "mode": "auto",
-    "selected_tier": "standard",
-    "reasoning_depth": "standard"
-  },
-  "input_brief": "brief.md",
-  "target_dir": ".macc/generated/prd/macc-prd-planner/2026-05-26-143012",
-  "updated_from": null,
-  "promoted": false,
-  "validation": {
-    "status": "ok",
-    "warnings": []
-  }
-}
-```
-
----
-
-## 22. Minimal validation
+## 21. Minimal validation
 
 After generation, MACC should run lightweight mandatory validation.
 
 Checks:
 
 ```text
-prd.json exists
-prd.json parses as JSON
+new prd file(s) exists in <target-dir> or default target directory
+all new prd file(s) parses as JSON
 required top-level fields exist according to schema or reference shape
 task IDs are unique
 dependencies reference existing task IDs
@@ -751,6 +669,89 @@ output files stayed inside target-dir
 ```
 
 Validation should not become a complex planner. Its job is to catch unsafe or unusable output before promotion.
+
+---
+
+## 22. PRD audit (`macc prd audit`)
+
+### 22.1 Purpose
+
+`macc prd audit` enriches an existing `prd.json` file based on what was actually delivered: completed task notes are updated from commit history, and todo task descriptions are rewritten when integrated code has changed the intended architecture.
+
+This command replaces `macc coordinator audit-prd`. The underlying business logic module `core/src/coordinator/prd_auditor.rs` is preserved unchanged. The CLI dispatch is moved from the coordinator subcommand group to the `macc prd` subcommand group.
+
+### 22.2 Command
+
+```bash
+macc prd audit --prd prd.json
+```
+
+### 22.3 Options
+
+The audit command shares the same option set as `macc prd generate`, substituting `--prd` for `--from`:
+
+```text
+--prd <path>                   Required: PRD file to audit (default: prd.json)
+--tool <tool_id>               Optional: tool to invoke
+--model-routing <auto|manual>  Optional: model routing mode
+--model <model_id>             Optional: only valid with --model-routing manual
+--instructions <text>          Optional: inline client instructions appended to prompt
+--instructions-file <path>     Optional: client instruction file
+--reference-branch <branch>    Optional: override reference branch (default: from config)
+--diff-stat                    Include git diff --stat summaries per commit
+--dry-run                      Build and display the audit prompt without invoking the tool
+--yes                          Accept non-dangerous confirmations non-interactively
+--json                         Emit machine-readable result
+```
+
+Options **not** exposed (same as `macc prd generate`):
+
+```text
+--performer
+--skill
+```
+
+### 22.4 How it works
+
+1. Loads the PRD file (`--prd` or `automation.coordinator.prd_file` or `prd.json`).
+2. Loads the task registry from the PRD (tasks array or full TaskRegistry shape).
+3. Reads all commits on `reference_branch` and maps them to completed tasks.
+4. Gathers `git diff --stat` for each commit when `--diff-stat` is set.
+5. Builds a structured LLM prompt via `prd_auditor::prepare_audit` containing:
+   - The current `prd.json` content (truncated at 80 000 chars if needed).
+   - Per-completed-task commit context (SHA, subject, diff stats).
+   - List of todo task IDs for architectural impact review.
+6. When `--dry-run` or no `--tool` is provided: prints the prompt and exits.
+7. When `--tool <id>` is provided: the prompt is returned to the CLI/Web layer which routes it to the tool performer via the existing MACC performer infrastructure.
+
+### 22.5 LLM instructions in the prompt
+
+- Update `notes` of completed tasks to reflect what was actually delivered.
+- Rewrite `description`/`steps` of todo tasks if integrated code changed the architecture.
+- Move completed task objects to the `tasks_done` array.
+- Never delete or rename task IDs.
+
+### 22.6 Modes
+
+| Invocation | Behaviour |
+|---|---|
+| `--dry-run` | Generate and print the audit prompt; do not invoke any tool. |
+| No `--tool` | Same as `--dry-run`. |
+| `--tool <id>` | Deliver the prompt to the specified tool via its performer spec. |
+
+### 22.7 Underlying module
+
+`core/src/coordinator/prd_auditor.rs` — pure business logic (prompt building, context gathering, no tool invocation). Called via `core/src/prd_generation/audit.rs`, which wraps the auditor and applies the shared `ModelSelection` option set.
+
+### 22.8 Migration from `macc coordinator audit-prd`
+
+| Old invocation | New invocation |
+|---|---|
+| `macc coordinator audit-prd` | `macc prd audit` |
+| `macc coordinator audit-prd -- --tool claude` | `macc prd audit --tool claude` |
+| `macc coordinator audit-prd -- --dry-run` | `macc prd audit --dry-run` |
+
+The `CoordinatorCommand::AuditPrd` variant and its `parse_audit_prd_command` dispatcher are removed from the coordinator service layer. The `audit_prd_report` response field on `CoordinatorCommandResponse` is removed.
 
 ---
 
@@ -767,13 +768,13 @@ macc prd generate --from brief.md
 This writes to:
 
 ```text
-.macc/generated/prd/macc-prd-planner/<run-id>/prd.json
+.macc/generated/prd/macc-prd-planner/<run-id>/prd_X.json
 ```
 
 Promotion:
 
 ```bash
-macc prd promote .macc/generated/prd/macc-prd-planner/<run-id>/prd.json
+macc prd promote .macc/generated/prd/macc-prd-planner/<run-id>/prd_X.json
 ```
 
 Convenience:
@@ -835,11 +836,14 @@ macc prd generate --from brief.md
 Other commands:
 
 ```bash
+macc prd audit --prd prd.json
 macc prd promote <generated-prd-path>
 macc prd validate <prd-path>
 macc prd runs
 macc prd show-run <run-id>
 ```
+
+`macc coordinator audit-prd` is **removed**. Its functionality is fully replaced by `macc prd audit` (see §22).
 
 Recommended JSON output:
 
@@ -892,7 +896,7 @@ After generation:
 
 ```text
 Generated:
-- .macc/generated/prd/macc-prd-planner/<run-id>/prd.json
+- .macc/generated/prd/macc-prd-planner/<run-id>/prd_x.json
 - .macc/generated/prd/macc-prd-planner/<run-id>/prd.summary.md
 
 Validation:
@@ -910,11 +914,14 @@ Add the following endpoints:
 
 ```http
 POST /api/v1/prd/generate
+POST /api/v1/prd/audit
 POST /api/v1/prd/promote
 POST /api/v1/prd/validate
 GET  /api/v1/prd/generation-runs
 GET  /api/v1/prd/generation-runs/{run_id}
 ```
+
+`POST /api/v1/prd/audit` replaces the former `coordinator audit-prd` functionality and uses the same core operation as `macc prd audit`.
 
 ### 27.1 Generate request
 
@@ -979,6 +986,7 @@ Add PRD generation to the existing PRD area:
 /prd
   - Current PRD
   - Generate PRD
+  - Audit PRD
   - Generation Runs
   - Validate
   - Promote
@@ -1011,15 +1019,17 @@ The Web UI should use the same API and same core operation as CLI/TUI.
 ```text
 core/src/prd_generation/
   mod.rs
-  request.rs              # PrdGenerateRequest, ModelSelection
+  request.rs              # PrdGenerateRequest, ModelSelection, ModelRoutingMode
   prompt_builder.rs       # fixed macc-prd-planner prompt assembly
   context.rs              # minimal context collection
   target_dir.rs           # safe output directory resolution
   runner.rs               # selected tool invocation
   validation.rs           # lightweight generated PRD checks
   promotion.rs            # promote generated PRD with backup/confirmation
-  metadata.rs             # generation run metadata
+  metadata.rs             # generation run metadata (GenerationRunMetadata, run ID)
+  audit.rs                # wraps prd_auditor.rs; PrdAuditRequest, PrdAuditResult
 
+core/src/coordinator/prd_auditor.rs   # EXISTING — not replaced; called from audit.rs
 core/src/coordinator/model_routing.rs
 core/src/tool_api/model_profile.rs
 core/src/tool_api/model_ranking.rs
@@ -1028,7 +1038,7 @@ core/src/tool_api/model_ranking.rs
 CLI:
 
 ```text
-cli/src/commands/prd.rs
+cli/src/commands/prd.rs     # macc prd generate | audit | promote | validate | runs | show-run
 ```
 
 TUI:
@@ -1049,6 +1059,16 @@ Web frontend:
 web/src/pages/prd/GeneratePrdPage.tsx
 web/src/pages/prd/PrdGenerationRunsPage.tsx
 web/src/api/prdGeneration.ts
+```
+
+**Removed** (migrated to `macc prd audit`):
+
+```text
+CoordinatorCommand::AuditPrd variant in core/src/service/coordinator_workflow.rs
+parse_audit_prd_command() in core/src/service/coordinator_workflow.rs
+coordinator_audit_prd() in core/src/service/coordinator_workflow.rs
+audit-prd entry in cli/src/main.rs coordinator command list
+audit_prd_report field on CoordinatorCommandResponse
 ```
 
 ---
@@ -1271,6 +1291,9 @@ CLI, TUI, Web API, and Web UI use the same core operation.
 Automatic model selection is toggleable by all clients.
 Manual model selection is respected and not silently overridden.
 PRD routing hints remain provider-neutral.
+macc prd audit accepts the same options as macc prd generate (--tool, --model-routing, --model, --instructions, --instructions-file, --dry-run, --yes, --json).
+macc coordinator audit-prd no longer exists; macc prd audit is its replacement.
+core/src/coordinator/prd_auditor.rs is not replaced or duplicated; it is called from prd_generation/audit.rs.
 ```
 
 ---
@@ -1283,7 +1306,8 @@ The system is deterministic around prompt assembly and output placement.
 Generated output is reproducible enough to inspect via stored metadata.
 The implementation does not duplicate the planner's responsibilities inside MACC core.
 The implementation preserves MACC's adapter/performer architecture.
-The design remains compatible with coordinator execution, worktrees, sync-prd, and audit-prd.
+The design remains compatible with coordinator execution, worktrees, sync-prd, and macc prd audit.
+The audit migration introduces no new business logic — prd_auditor.rs is reused as-is.
 ```
 
 ---
@@ -1294,11 +1318,17 @@ The design remains compatible with coordinator execution, worktrees, sync-prd, a
 
 ```bash
 macc prd generate --from <brief.md> [options]
+macc prd audit   --prd <prd.json>   [options]
+macc prd promote <generated-prd-path>
+macc prd validate <prd-path>
+macc prd runs
+macc prd show-run <run-id>
 ```
 
-Options:
+### `macc prd generate` options
 
 ```text
+--from <path>                  Required input brief
 --tool <tool_id>
 --model-routing <auto|manual>
 --model <model_id>
@@ -1312,7 +1342,23 @@ Options:
 --json
 ```
 
-Forbidden user-facing options:
+### `macc prd audit` options
+
+```text
+--prd <path>                   Required: PRD file to audit (default: prd.json)
+--tool <tool_id>
+--model-routing <auto|manual>
+--model <model_id>
+--instructions <text>
+--instructions-file <path>
+--reference-branch <branch>
+--diff-stat
+--dry-run
+--yes
+--json
+```
+
+Forbidden user-facing options (both commands):
 
 ```text
 --performer
@@ -1334,6 +1380,8 @@ PRD_GENERATION_DEFAULT_TARGET_DIR = ".macc/generated/prd/macc-prd-planner"
 ## 43. Final design statement
 
 `macc prd generate` should be an opinionated, client-accessible MACC operation that generates a complete planner prompt and invokes a selected tool through the fixed internal `macc-prd-planner` flow. The user should only provide the brief, optional tool/model preferences, optional client instructions, and optional output/promotion choices. The command must be available consistently through CLI, TUI, Web API, and Web UI.
+
+`macc prd audit` is the successor to `macc coordinator audit-prd`. It shares the same option set as `macc prd generate` (tool, model routing, instructions, dry-run, json) and uses the existing `core/src/coordinator/prd_auditor.rs` business logic unchanged. The only difference is the prompt: audit enriches an existing PRD from delivered commits, whereas generate creates a new PRD from a brief.
 
 Automatic model selection must be explicit and toggleable. In manual mode, MACC respects the selected model. In auto mode, MACC chooses the lightest sufficient model and reasoning depth based on the operation phase, adapter capabilities, token efficiency policy, risk, context size, availability, and fallback rules.
 

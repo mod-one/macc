@@ -132,7 +132,8 @@ Path parameter `action`:
 - `reconcile`
 - `cleanup`
 - `sync`
-- `audit-prd`
+
+> **Removed**: `audit-prd` has been removed from this endpoint. Use `POST /api/v1/prd/audit` instead.
 
 Request body: none.
 
@@ -168,7 +169,6 @@ Response 200:
 
 Notes:
 - Fields are optional and may be `null` depending on the action.
-- `audit-prd` and `sync` return the same command result envelope as the other coordinator actions.
 
 ### GET `/api/v1/coordinator/tool-cooldown`
 
@@ -1030,3 +1030,91 @@ Purpose: last 20 failure events from the coordinator log. Response 200: array of
 
 Purpose: per-worker runtime snapshot. Response 200: `WorkerRuntime` JSON. Response 404: not found.
 
+
+## PRD Generation (spec §8)
+
+### POST `/api/v1/prd/generate`
+
+Purpose: build the fixed `macc-prd-planner` prompt from a brief file. In `dry_run` mode returns the assembled prompt without invoking any tool; otherwise returns the prompt for the caller to route.
+
+Request body:
+```json
+{
+  "fromPath": "brief.md",
+  "tool": "claude",
+  "modelSelection": { "mode": "auto" },
+  "instructions": "Split coordinator, adapter, TUI, and Web work into separate tasks.",
+  "dryRun": false,
+  "promote": false,
+  "yes": false
+}
+```
+
+Response 200:
+```json
+{
+  "status": "dry_run | prompt_ready",
+  "runId": "2026-05-26-143012",
+  "targetDir": ".macc/generated/prd/macc-prd-planner/2026-05-26-143012",
+  "tool": "claude",
+  "prompt": "..."
+}
+```
+
+### POST `/api/v1/prd/audit`
+
+Purpose: enrich an existing PRD from commit history and delivered code. Replaces the removed `POST /api/v1/coordinator/audit-prd` endpoint.
+
+Request body:
+```json
+{
+  "prdPath": "prd.json",
+  "tool": "claude",
+  "modelSelection": { "mode": "auto" },
+  "referenceBranch": "main",
+  "diffStat": true,
+  "dryRun": false
+}
+```
+
+Response 200:
+```json
+{
+  "completedWithContext": 4,
+  "todoTasks": 3,
+  "promptGenerated": true,
+  "prompt": "...",
+  "dispatched": false
+}
+```
+
+### POST `/api/v1/prd/promote`
+
+Purpose: promote a generated PRD file to the active `prd.json`. Creates a backup before overwriting.
+
+Request body:
+```json
+{
+  "sourcePath": ".macc/generated/prd/macc-prd-planner/2026-05-26-143012/prd.json",
+  "destPath": "prd.json",
+  "yes": false
+}
+```
+
+Response 200: `{ promoted, source, destination, backupCreated }`.
+
+### POST `/api/v1/prd/validate`
+
+Purpose: run lightweight validation on a PRD file.
+
+Request body: `{ "prdPath": "prd.json" }`.
+
+Response 200: `{ ok, warnings: [], errors: [] }`.
+
+### GET `/api/v1/prd/generation-runs`
+
+Purpose: list all PRD generation runs under `.macc/generated/prd/macc-prd-planner/`. Response 200: array of `{ runId, path }`.
+
+### GET `/api/v1/prd/generation-runs/{run_id}`
+
+Purpose: show metadata and file list for a specific run. Response 200: `{ runId, path, files, metadata }`. Response 404: run not found.

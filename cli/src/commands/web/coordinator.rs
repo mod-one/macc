@@ -436,34 +436,6 @@ pub(super) async fn coordinator_sync_handler(
     Ok(Json(ApiCoordinatorCommandResult::from(result)))
 }
 
-pub(super) async fn coordinator_audit_prd_handler(
-    State(state): State<WebState>,
-    headers: axum::http::HeaderMap,
-) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
-    crate::commands::web::mutation_gate::require_project_owner(&state, &headers)?;
-    let paths = state.paths.clone();
-    let engine = state.engine.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        let env_cfg = CoordinatorEnvConfig::default();
-        engine.coordinator_execute_command(
-            &paths,
-            CoordinatorCommand::AuditPrd {
-                tool: None,
-                dry_run: false,
-            },
-            CoordinatorCommandRequest {
-                canonical: None,
-                coordinator_cfg: None,
-                env_cfg: &env_cfg,
-                logger: None,
-            },
-        )
-    })
-    .await
-    .map_err(|e| ApiError::validation(e.to_string()))??;
-    Ok(Json(ApiCoordinatorCommandResult::from(result)))
-}
-
 pub(super) async fn get_tool_cooldowns_handler(
     State(state): State<WebState>,
 ) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {

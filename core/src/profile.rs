@@ -366,6 +366,7 @@ fn extract_sections(source: &CanonicalConfig, sections: &[ProfileSection]) -> Ca
         },
         skills: source.skills.clone(),
         context: source.context.clone(),
+        prd_generation: source.prd_generation.clone(),
     }
 }
 

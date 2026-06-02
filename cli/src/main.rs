@@ -358,7 +358,7 @@ enum Commands {
     /// Run the project coordinator automation script
     #[command(trailing_var_arg = true)]
     Coordinator {
-        /// Coordinator command (run, control-plane-run, dispatch, advance, resume, sync, sync-prd, audit-prd, status, reconcile, unlock, cleanup, retry-phase, cutover-gate, stop, sessions, validate-transition, validate-runtime-transition, runtime-status-from-event, storage-import, storage-export, events-export, storage-verify, storage-sync, select-ready-task, state-apply-transition, state-set-runtime, state-task-field, state-task-exists, state-counts, state-locks, state-set-merge-pending, state-set-merge-processed, state-increment-retries, state-upsert-slo-warning, state-slo-metric)
+        /// Coordinator command (run, control-plane-run, dispatch, advance, resume, sync, sync-prd, status, reconcile, unlock, cleanup, retry-phase, cutover-gate, stop, sessions, validate-transition, validate-runtime-transition, runtime-status-from-event, storage-import, storage-export, events-export, storage-verify, storage-sync, select-ready-task, state-apply-transition, state-set-runtime, state-task-field, state-task-exists, state-counts, state-locks, state-set-merge-pending, state-set-merge-processed, state-increment-retries, state-upsert-slo-warning, state-slo-metric)
         #[arg(default_value = "run")]
         command_name: String,
         /// Execute coordinator mutations as this client identity
@@ -680,6 +680,126 @@ enum Commands {
     Skills {
         #[command(subcommand)]
         skills_subcommand: SkillsSubcommands,
+    },
+    /// PRD generation, audit, promotion, and validation
+    Prd {
+        #[command(subcommand)]
+        prd_subcommand: PrdSubcommands,
+    },
+}
+
+#[derive(Subcommand, Clone, Debug)]
+pub enum PrdSubcommands {
+    /// Generate a new PRD from a brief file using the fixed macc-prd-planner flow
+    Generate {
+        /// Required: path to the brief file
+        #[arg(long = "from")]
+        from_path: String,
+        /// Tool to invoke (overrides config default)
+        #[arg(long)]
+        tool: Option<String>,
+        /// Model routing mode: auto (default) or manual
+        #[arg(long = "model-routing")]
+        model_routing: Option<String>,
+        /// Explicit model ID (only valid with --model-routing manual)
+        #[arg(long)]
+        model: Option<String>,
+        /// Inline client instructions appended to the prompt
+        #[arg(long)]
+        instructions: Option<String>,
+        /// Path to a file whose content is used as client instructions
+        #[arg(long = "instructions-file")]
+        instructions_file: Option<String>,
+        /// Override the output directory
+        #[arg(long = "target-dir")]
+        target_dir: Option<String>,
+        /// Existing PRD to update rather than creating from scratch
+        #[arg(long = "update")]
+        update_path: Option<String>,
+        /// Build and display the prompt without invoking the tool
+        #[arg(long)]
+        dry_run: bool,
+        /// Promote the generated prd.json after validation
+        #[arg(long)]
+        promote: bool,
+        /// Accept confirmations non-interactively
+        #[arg(short = 'y', long)]
+        yes: bool,
+        /// Output machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Enrich an existing PRD from commit history and delivered code
+    Audit {
+        /// PRD file to audit (default: prd.json)
+        #[arg(long = "prd", default_value = "prd.json")]
+        prd_path: String,
+        /// Tool to invoke (when omitted, prints the prompt only)
+        #[arg(long)]
+        tool: Option<String>,
+        /// Model routing mode: auto (default) or manual
+        #[arg(long = "model-routing")]
+        model_routing: Option<String>,
+        /// Explicit model ID (only valid with --model-routing manual)
+        #[arg(long)]
+        model: Option<String>,
+        /// Inline client instructions appended to the audit prompt
+        #[arg(long)]
+        instructions: Option<String>,
+        /// Path to a file whose content is used as client instructions
+        #[arg(long = "instructions-file")]
+        instructions_file: Option<String>,
+        /// Override the reference branch for commit history
+        #[arg(long = "reference-branch")]
+        reference_branch: Option<String>,
+        /// Include git diff --stat per commit in the audit context
+        #[arg(long)]
+        diff_stat: bool,
+        /// Build and display the audit prompt without invoking the tool
+        #[arg(long)]
+        dry_run: bool,
+        /// Accept confirmations non-interactively
+        #[arg(short = 'y', long)]
+        yes: bool,
+        /// Output machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Promote a generated PRD to the active project prd.json
+    Promote {
+        /// Path to the generated PRD file to promote
+        source_path: String,
+        /// Destination path (default: prd.json at project root)
+        #[arg(long = "dest")]
+        dest_path: Option<String>,
+        /// Skip confirmation when overwriting an existing PRD
+        #[arg(short = 'y', long)]
+        yes: bool,
+        /// Output machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Validate a PRD file
+    Validate {
+        /// Path to the PRD file to validate
+        prd_path: String,
+        /// Output machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// List all PRD generation runs
+    Runs {
+        /// Output machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show details for a specific generation run
+    ShowRun {
+        /// Run ID (e.g. 2026-05-26-143012)
+        run_id: String,
+        /// Output machine-readable JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -1739,6 +1859,64 @@ fn run_with_engine_provider(
                 }
             };
             SkillsCmdCommand { app: app.clone(), subcommand: sub }.run()
+        }
+
+        Some(Commands::Prd { prd_subcommand }) => {
+            use commands::prd::{PrdCommand, PrdSubcommand};
+            let sub = match prd_subcommand {
+                PrdSubcommands::Generate {
+                    from_path, tool, model_routing, model, instructions,
+                    instructions_file, target_dir, update_path,
+                    dry_run, promote, yes, json,
+                } => PrdSubcommand::Generate {
+                    from_path: std::path::PathBuf::from(from_path),
+                    tool: tool.clone(),
+                    model_routing: model_routing.clone(),
+                    model: model.clone(),
+                    instructions: instructions.clone(),
+                    instructions_file: instructions_file.as_deref().map(std::path::PathBuf::from),
+                    target_dir: target_dir.as_deref().map(std::path::PathBuf::from),
+                    update_path: update_path.as_deref().map(std::path::PathBuf::from),
+                    dry_run: *dry_run,
+                    promote: *promote,
+                    yes: *yes,
+                    json: *json,
+                },
+                PrdSubcommands::Audit {
+                    prd_path, tool, model_routing, model, instructions,
+                    instructions_file, reference_branch, diff_stat, dry_run, yes, json,
+                } => PrdSubcommand::Audit {
+                    prd_path: std::path::PathBuf::from(prd_path),
+                    tool: tool.clone(),
+                    model_routing: model_routing.clone(),
+                    model: model.clone(),
+                    instructions: instructions.clone(),
+                    instructions_file: instructions_file.as_deref().map(std::path::PathBuf::from),
+                    reference_branch: reference_branch.clone(),
+                    diff_stat: *diff_stat,
+                    dry_run: *dry_run,
+                    yes: *yes,
+                    json: *json,
+                },
+                PrdSubcommands::Promote { source_path, dest_path, yes, json } => {
+                    PrdSubcommand::Promote {
+                        source_path: std::path::PathBuf::from(source_path),
+                        dest_path: dest_path.as_deref().map(std::path::PathBuf::from),
+                        yes: *yes,
+                        json: *json,
+                    }
+                }
+                PrdSubcommands::Validate { prd_path, json } => PrdSubcommand::Validate {
+                    prd_path: std::path::PathBuf::from(prd_path),
+                    json: *json,
+                },
+                PrdSubcommands::Runs { json } => PrdSubcommand::Runs { json: *json },
+                PrdSubcommands::ShowRun { run_id, json } => PrdSubcommand::ShowRun {
+                    run_id: run_id.clone(),
+                    json: *json,
+                },
+            };
+            PrdCommand::new(app.clone(), sub).run()
         }
 
         Some(Commands::Coordinator {

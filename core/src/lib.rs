@@ -29,6 +29,7 @@ pub mod user_backup;
 pub mod worktree;
 pub mod onboarding;
 pub mod ops_motif;
+pub mod prd_generation;
 pub mod save;
 
 pub use automation::{embedded_runner_path_for_ref, ensure_embedded_automation_scripts};
@@ -574,6 +575,7 @@ pub fn init(paths: &ProjectPaths, force: bool) -> Result<()> {
             mcp_templates: config::builtin_mcp_templates(),
             skills: None,
             context: None,
+            prd_generation: None,
         };
         let yaml = default_config.to_yaml().map_err(|e| {
             MaccError::Validation(format!("Failed to serialize default config: {}", e))

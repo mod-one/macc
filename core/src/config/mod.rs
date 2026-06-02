@@ -26,6 +26,8 @@ pub struct CanonicalConfig {
     pub skills: Option<SkillsConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<ContextConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prd_generation: Option<PrdGenerationConfig>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
@@ -98,6 +100,8 @@ pub struct AutomationConfig {
     pub coordinator: Option<CoordinatorConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supervisor: Option<crate::supervisor::SupervisorConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_routing: Option<ModelRoutingConfig>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
@@ -1045,6 +1049,7 @@ impl Default for CanonicalConfig {
             mcp_templates: default_mcp_templates(),
             skills: None,
             context: None,
+            prd_generation: None,
         }
     }
 }
@@ -1214,6 +1219,123 @@ pub struct ToolSummarizationConfig {
 pub struct SkillSummarizationConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bundles: Vec<String>,
+}
+
+// ── PRD generation configuration (spec §18) ──────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
+pub struct PrdGenerationConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_tool: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_target_dir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_selection: Option<PrdModelSelectionConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outputs: Option<PrdOutputsConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub promotion: Option<PrdPromotionConfig>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
+pub struct PrdModelSelectionConfig {
+    #[serde(default)]
+    pub mode: PrdModelRoutingMode,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PrdModelRoutingMode {
+    #[default]
+    Auto,
+    Manual,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct PrdOutputsConfig {
+    #[serde(default = "default_true")]
+    pub prd_json: bool,
+    #[serde(default = "default_true")]
+    pub summary: bool,
+    #[serde(default = "default_true")]
+    pub validation_notes: bool,
+}
+
+impl Default for PrdOutputsConfig {
+    fn default() -> Self {
+        Self { prd_json: true, summary: true, validation_notes: true }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct PrdPromotionConfig {
+    #[serde(default = "default_true")]
+    pub require_confirmation_when_overwriting: bool,
+    #[serde(default = "default_prd_output_path")]
+    pub default_output_path: String,
+}
+
+impl Default for PrdPromotionConfig {
+    fn default() -> Self {
+        Self {
+            require_confirmation_when_overwriting: true,
+            default_output_path: default_prd_output_path(),
+        }
+    }
+}
+
+fn default_prd_output_path() -> String {
+    "prd.json".to_string()
+}
+
+// ── Model routing configuration (spec §6) ────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
+pub struct ModelRoutingConfig {
+    #[serde(default)]
+    pub mode: ModelRoutingMode,
+    #[serde(default = "default_true")]
+    pub client_override_allowed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manual: Option<ModelRoutingManualConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto: Option<ModelRoutingAutoConfig>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelRoutingMode {
+    #[default]
+    Auto,
+    Manual,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
+pub struct ModelRoutingManualConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_tool: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_reasoning_depth: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
+pub struct ModelRoutingAutoConfig {
+    #[serde(default = "default_efficiency_first")]
+    pub policy: String,
+    #[serde(default = "default_true")]
+    pub allow_escalation: bool,
+    #[serde(default = "default_true")]
+    pub allow_tool_fallback: bool,
+    #[serde(default = "default_true")]
+    pub allow_model_fallback: bool,
+    #[serde(default = "default_true")]
+    pub prefer_mini_under_budget_pressure: bool,
+}
+
+fn default_efficiency_first() -> String {
+    "efficiency_first".to_string()
 }
 
 #[cfg(test)]
@@ -1615,6 +1737,7 @@ settings:
             mcp_templates: Vec::new(),
             skills: None,
             context: None,
+            prd_generation: None,
         };
 
         let yaml1 = config.to_yaml().expect("Should serialize");

@@ -7,6 +7,37 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added — PRD Generation and Model Routing (spec §8)
+- **`core/src/prd_generation/`** — new module implementing the shared PRD generation and audit infrastructure:
+  - `request.rs`: `PrdGenerateRequest`, `ModelSelection`, `ModelRoutingMode` (auto/manual).
+  - `metadata.rs`: `GenerationRunMetadata`, `PRD_GENERATION_DEFAULT_TARGET_DIR` (`.macc/generated/prd/macc-prd-planner`).
+  - `target_dir.rs`: `resolve_target_dir()` — safe directory resolution with directory-traversal guard.
+  - `validation.rs`: `validate_prd_file()`, `ValidationResult` — lightweight checks (JSON parse, required fields, unique IDs, provider-neutral routing hints).
+  - `promotion.rs`: `promote_prd()`, `PromoteOptions`, `PromoteResult`, `list_generation_runs()` — backup-safe promotion.
+  - `prompt_builder.rs`: `build_generate_prompt()`, `resolve_instructions()`, `resolve_tool()` — fixed `macc-prd-planner` prompt assembly.
+  - `audit.rs`: `run_prd_audit()`, `PrdAuditRequest`, `PrdAuditResult` — wraps `core/src/coordinator/prd_auditor.rs` with `ModelSelection` support.
+- **Config** — new `PrdGenerationConfig` and `ModelRoutingConfig` structs added to `CanonicalConfig` and `AutomationConfig` respectively (both optional, no breaking change).
+- **`Engine` trait** — new default methods: `prd_audit()`, `prd_validate()`, `prd_promote()`, `prd_list_runs()`, `prd_build_generate_prompt()`.
+- **CLI `macc prd` command group** with subcommands:
+  - `generate --from <brief.md>` — builds fixed `macc-prd-planner` prompt and invokes selected tool. Options: `--tool`, `--model-routing auto|manual`, `--model`, `--instructions`, `--instructions-file`, `--target-dir`, `--update`, `--dry-run`, `--promote`, `--yes`, `--json`. No `--performer` or `--skill` options.
+  - `audit --prd <prd.json>` — enriches existing PRD from commit history. Same option set as `generate` plus `--reference-branch` and `--diff-stat`.
+  - `promote <source>` — promotes a generated PRD with backup before overwrite.
+  - `validate <prd>` — lightweight validation.
+  - `runs` — lists all generation runs under `PRD_GENERATION_DEFAULT_TARGET_DIR`.
+  - `show-run <run-id>` — shows files and metadata for a specific run.
+- **Web API** — new PRD generation endpoints: `POST /api/v1/prd/generate`, `POST /api/v1/prd/audit`, `POST /api/v1/prd/promote`, `POST /api/v1/prd/validate`, `GET /api/v1/prd/generation-runs`, `GET /api/v1/prd/generation-runs/{run_id}`.
+
+### Changed — PRD audit migration (spec §22)
+- `macc prd audit` replaces `macc coordinator audit-prd`. The underlying business logic in `core/src/coordinator/prd_auditor.rs` is preserved unchanged.
+- `POST /api/v1/prd/audit` replaces `POST /api/v1/coordinator/audit-prd`.
+
+### Removed — Legacy coordinator audit-prd
+- **`CoordinatorCommand::AuditPrd`** variant removed from `core/src/service/coordinator_workflow.rs`.
+- **`coordinator_audit_prd()`**, `invoke_audit_tool()`, `parse_audit_prd_command()`, `build_sync_summary_for_prompt()` removed from `coordinator_workflow.rs`.
+- **`audit_prd_report`** field removed from `CoordinatorCommandResponse`.
+- **`POST /api/v1/coordinator/audit-prd`** web route removed.
+- **`audit-prd`** entry removed from the CLI coordinator command description.
+
 ### Added — Skills & Catalog Lifecycle (spec §7)
 - **`core/src/skills_catalog.rs`** — new lifecycle layer implementing the four-state model (available → selected → installed → locked): `SkillsLockFile`, `SkillLockEntry`, `LockedSource`, `LockedPackage`, `InstalledTargets`, `InstalledTarget`, `SkillStatusKind`, `SkillStatus`, `PackageManifest`, `InstallConflict`, `ConflictKind`, `OwnershipMarker`, `SkillsPolicy`, `VerifyFinding`, `SkillDiffEntry`. Functions: `compute_skills_status()`, `verify_skills()`, `diff_skill()`, `detect_conflicts()`, `git_cache_key()`, `http_cache_key()`, `sha256_digest()`, `file_digest()`, `write_ownership_marker()`. Error code constants `MACC-SKILL-1001` through `MACC-SKILL-4003`.
 - **`core/src/catalog.rs` `SkillEntry`** — extended with lifecycle fields: `tools`, `recommended_ref`, `risk`, `requires_mcp`, `writes_user_level_config`, `targets`, `category`, `compatibility` (all optional for backward compatibility).

@@ -23,6 +23,7 @@ mod ownership;
 mod plan;
 #[allow(clippy::result_large_err)]
 mod prd;
+mod prd_generation;
 #[allow(clippy::result_large_err)]
 mod registry;
 mod sse;
@@ -262,10 +263,6 @@ fn build_web_router(state: WebState) -> Router {
             post(coordinator::coordinator_sync_handler),
         )
         .route(
-            "/api/v1/coordinator/audit-prd",
-            post(coordinator::coordinator_audit_prd_handler),
-        )
-        .route(
             "/api/v1/coordinator/preflight",
             post(coordinator::coordinator_preflight_handler),
         )
@@ -332,6 +329,13 @@ fn build_web_router(state: WebState) -> Router {
         )
         .route("/api/v1/prd", get(prd::get_prd_handler))
         .route("/api/v1/prd", put(prd::update_prd_handler))
+        // ── PRD generation (spec §8, §27) ────────────────────────────────────
+        .route("/api/v1/prd/generate", post(prd_generation::prd_generate_handler))
+        .route("/api/v1/prd/audit", post(prd_generation::prd_audit_handler))
+        .route("/api/v1/prd/promote", post(prd_generation::prd_promote_handler))
+        .route("/api/v1/prd/validate", post(prd_generation::prd_validate_handler))
+        .route("/api/v1/prd/generation-runs", get(prd_generation::prd_generation_runs_handler))
+        .route("/api/v1/prd/generation-runs/:run_id", get(prd_generation::prd_generation_run_detail_handler))
         .route("/api/v1/processes", get(ownership::list_processes_handler))
         .route(
             "/api/v1/processes/:kind/ownership",

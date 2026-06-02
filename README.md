@@ -301,7 +301,7 @@ macc coordinator reconcile
 macc coordinator unlock
 macc coordinator cleanup
 macc coordinator stop [--graceful] [--remove-worktrees]
-macc coordinator audit-prd -- --tool claude
+macc prd audit --tool claude             # moved from coordinator audit-prd
 ```
 
 `macc coordinator run` in an interactive terminal shows a **Coordinator Launch Review** — a summary of project, execution settings, and reference branch — before asking which client to open.
@@ -345,6 +345,34 @@ macc skills doctor
 ```
 
 Run-skills are defined in `.macc/skills/*.yaml`. Risk levels: safe, caution, dangerous.
+
+</details>
+
+<details>
+<summary>PRD generation and audit</summary>
+
+```bash
+# Generate a new PRD from a brief file (uses fixed macc-prd-planner skill)
+macc prd generate --from brief.md
+macc prd generate --from brief.md --tool claude --model-routing auto
+macc prd generate --from brief.md --dry-run           # print prompt without invoking tool
+macc prd generate --from brief.md --promote           # generate + promote to prd.json
+macc prd generate --from brief.md --instructions-file planning-notes.md
+
+# Audit an existing PRD against delivered commits
+macc prd audit                                        # uses prd.json, prints prompt
+macc prd audit --tool claude                          # generate and invoke tool
+macc prd audit --prd path/to/prd.json --diff-stat
+
+# Promote, validate, inspect runs
+macc prd promote .macc/generated/prd/macc-prd-planner/<run-id>/prd.json
+macc prd validate prd.json
+macc prd runs
+macc prd show-run <run-id>
+```
+
+Generated outputs land in `.macc/generated/prd/macc-prd-planner/<run-id>/`.
+`--performer` and `--skill` are intentionally not exposed — the skill is fixed internally.
 
 </details>
 

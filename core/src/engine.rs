@@ -17,7 +17,7 @@ use crate::{
 };
 use std::collections::BTreeMap;
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
 type MonitorMergeJobsFuture<'a> =
@@ -1251,6 +1251,56 @@ pub trait Engine {
         source: crate::coordinator::preflight::BranchCreateSource,
     ) -> std::result::Result<(), crate::coordinator::preflight::PreflightError> {
         crate::coordinator::preflight::create_reference_branch(&paths.root, reference_branch, source)
+    }
+
+    // ── PRD generation (spec §8) ──────────────────────────────────────────────
+
+    fn prd_audit(
+        &self,
+        paths: &ProjectPaths,
+        request: &crate::prd_generation::PrdAuditRequest,
+    ) -> Result<crate::prd_generation::PrdAuditResult> {
+        crate::prd_generation::audit::run_prd_audit(&paths.root, request)
+    }
+
+    fn prd_validate(
+        &self,
+        file_path: &Path,
+        target_dir: Option<&Path>,
+    ) -> crate::prd_generation::ValidationResult {
+        crate::prd_generation::validate_prd_file(file_path, target_dir)
+    }
+
+    fn prd_promote(
+        &self,
+        options: &crate::prd_generation::PromoteOptions,
+    ) -> Result<crate::prd_generation::PromoteResult> {
+        crate::prd_generation::promotion::promote_prd(options)
+    }
+
+    fn prd_list_runs(
+        &self,
+        paths: &ProjectPaths,
+    ) -> Vec<(String, PathBuf)> {
+        let base = paths.root.join(crate::prd_generation::PRD_GENERATION_DEFAULT_TARGET_DIR);
+        crate::prd_generation::promotion::list_generation_runs(&base)
+    }
+
+    fn prd_build_generate_prompt(
+        &self,
+        brief_content: &str,
+        target_dir: &Path,
+        existing_prd: Option<&str>,
+        instructions: Option<&str>,
+        model_selection: Option<&crate::prd_generation::ModelSelection>,
+    ) -> String {
+        crate::prd_generation::prompt_builder::build_generate_prompt(
+            brief_content,
+            target_dir,
+            existing_prd,
+            instructions,
+            model_selection,
+        )
     }
 
     fn coordinator_storage_import_json_to_sqlite(&self, paths: &ProjectPaths) -> Result<()> {
