@@ -188,6 +188,61 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
         }
         return;
     }
+    // ── Field 3: Tool Priority reorder editor ───────────────────────────────
+    if current_screen == Screen::Automation && state.tool_priority_editor_active {
+        match key {
+            // ↑ / k — navigate cursor up (when free), or move grabbed tool up
+            KeyCode::Up | KeyCode::Char('k') => state.tool_priority_editor_up(),
+            // ↓ / j — navigate cursor down (when free), or move grabbed tool down
+            KeyCode::Down | KeyCode::Char('j') => state.tool_priority_editor_down(),
+            // Space — grab / release the tool under the cursor for reordering
+            KeyCode::Char(' ') => state.tool_priority_toggle_grab(),
+            // Enter — release grab (drop in place) if grabbed; otherwise save and exit
+            KeyCode::Enter => {
+                if state.tool_priority_editor_grabbed {
+                    state.tool_priority_toggle_grab();
+                } else {
+                    state.commit_tool_priority_editor();
+                }
+            }
+            // s — save order and exit (regardless of grab state)
+            KeyCode::Char('s') => state.commit_tool_priority_editor(),
+            // Esc — first press releases grab, second press cancels editor
+            KeyCode::Esc => state.cancel_tool_priority_editor(),
+            _ => {}
+        }
+        return;
+    }
+    // ── Field 4: Max Parallel Per Tool editor ────────────────────────────────
+    if current_screen == Screen::Automation && state.tool_parallel_editor_active {
+        match key {
+            // ↑ / k — navigate to previous tool
+            KeyCode::Up | KeyCode::Char('k') => state.tool_parallel_editor_select(false),
+            // ↓ / j — navigate to next tool
+            KeyCode::Down | KeyCode::Char('j') => state.tool_parallel_editor_select(true),
+            // ← / - — decrement count
+            KeyCode::Left | KeyCode::Char('-') => state.tool_parallel_editor_adjust(-1),
+            // → / + — increment count
+            KeyCode::Right | KeyCode::Char('+') => state.tool_parallel_editor_adjust(1),
+            // Enter / s — commit and exit
+            KeyCode::Enter | KeyCode::Char('s') => state.cancel_tool_parallel_editor(),
+            // Esc — cancel (changes already applied in-place; Ctrl+Z restores via snapshot)
+            KeyCode::Esc => state.cancel_tool_parallel_editor(),
+            _ => {}
+        }
+        return;
+    }
+    // ── Field 0: Coordinator Tool — left/right cycle while focused ──────────
+    if current_screen == Screen::Automation
+        && !state.is_automation_field_editing()
+        && state.automation_field_index == 0
+    {
+        match key {
+            KeyCode::Left => { state.cycle_coordinator_tool(false); return; }
+            KeyCode::Right => { state.cycle_coordinator_tool(true); return; }
+            _ => {}
+        }
+    }
     if current_screen == Screen::Automation && state.is_automation_field_editing() {
         match key {
             KeyCode::Enter => state.commit_automation_field_edit(),
@@ -1354,6 +1409,14 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                         && state.is_automation_field_editing()
                     {
                         format!("{}_", state.automation_field_input)
+                    } else if i == 3 && state.tool_priority_editor_active {
+                        if state.tool_priority_editor_grabbed {
+                            "[GRABBED — ↑↓ to move, Space to drop]".to_string()
+                        } else {
+                            "[reorder mode — ↑↓ navigate, Space to grab]".to_string()
+                        }
+                    } else if i == 4 && state.tool_parallel_editor_active {
+                        "[edit mode — ↑↓ select, ←→ adjust, Enter done]".to_string()
                     } else {
                         state.automation_field_display_value(i)
                     };
@@ -1361,6 +1424,10 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                     let has_override = state.phase_override_notice_for_field(i).is_some();
                     let value_style = if has_override {
                         Style::default().fg(theme.warn)
+                    } else if (i == 3 && state.tool_priority_editor_active)
+                        || (i == 4 && state.tool_parallel_editor_active)
+                    {
+                        Style::default().fg(theme.accent)
                     } else {
                         Style::default()
                     };
@@ -1386,18 +1453,122 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 .phase_override_notice_for_field(idx)
                 .map(|notice| format!("⚠ {notice}\n\n"))
                 .unwrap_or_default();
-            let mut detail = format!(
-                "{}Field: {}\n\n{}\n\nSaved config: {}\n\nShortcuts:\nSpace/Enter - Edit or cycle\nEsc - Cancel edit\ns - Save to .macc/macc.yaml",
-                override_prefix,
-                state.automation_field_label(idx),
-                state.automation_field_help(idx),
-                state.automation_field_display_value(idx),
-            );
-            if let Some(validation) = state.current_automation_field_validation() {
-                detail.push_str(&format!("\n\nValidation:\n{}", validation));
-            }
-            detail.push_str("\n\nRuntime monitoring moved to Coordinator Live.\nPress 'v' to open live status, active tasks, and events.");
-            let detail_para = wrapped_paragraph(detail, "Field Info");
+            // ── Special editor detail panes ──────────────────────────────────
+            let detail_para = if state.tool_priority_editor_active {
+                // Field 3: priority reorder editor — show ordered list in detail pane
+                let list = state.tool_priority_ordered_list();
+                let sel = state.tool_priority_editor_index;
+                let grabbed = state.tool_priority_editor_grabbed;
+
+                let title = if grabbed {
+                    "Tool Priority — GRABBED (moving)"
+                } else {
+                    "Tool Priority — Select & Reorder"
+                };
+
+                let mut lines: Vec<String> = if grabbed {
+                    vec![
+                        "A tool is grabbed — it will move with ↑/↓.".to_string(),
+                        String::new(),
+                        "↑/k  Move tool up (higher priority)".to_string(),
+                        "↓/j  Move tool down (lower priority)".to_string(),
+                        "Space/Enter  Drop here (release grab)".to_string(),
+                        "s    Save order and exit".to_string(),
+                        "Esc  Release grab (do not exit)".to_string(),
+                    ]
+                } else {
+                    vec![
+                        "Navigate with ↑/↓, then Space to grab.".to_string(),
+                        String::new(),
+                        "↑/k  Move cursor up".to_string(),
+                        "↓/j  Move cursor down".to_string(),
+                        "Space  Grab selected tool for moving".to_string(),
+                        "Enter/s  Save order and exit".to_string(),
+                        "Esc  Cancel (discard changes)".to_string(),
+                    ]
+                };
+                lines.push(String::new());
+
+                for (i, tool) in list.iter().enumerate() {
+                    let cursor = if i == sel {
+                        if grabbed { "✦ " } else { "› " }
+                    } else {
+                        "  "
+                    };
+                    lines.push(format!("{}{}. {}", cursor, i + 1, tool));
+                }
+                wrapped_paragraph(lines.join("\n"), title)
+            } else if state.tool_parallel_editor_active {
+                // Field 4: per-tool parallel count editor
+                let enabled = state
+                    .working_copy
+                    .as_ref()
+                    .map(|wc| wc.tools.enabled.clone())
+                    .unwrap_or_default();
+                let counts: std::collections::BTreeMap<String, usize> = state
+                    .working_copy
+                    .as_ref()
+                    .and_then(|wc| wc.automation.coordinator.as_ref())
+                    .map(|c| c.max_parallel_per_tool.clone())
+                    .unwrap_or_default();
+                let sel = state.tool_parallel_editor_index;
+                let mut lines = vec![
+                    "Max Parallel Per Tool — Edit Mode".to_string(),
+                    String::new(),
+                    "↑/k    Select previous tool".to_string(),
+                    "↓/j    Select next tool".to_string(),
+                    "←/−    Decrease count (min 1)".to_string(),
+                    "→/+    Increase count".to_string(),
+                    "Enter/s  Exit editor".to_string(),
+                    String::new(),
+                ];
+                for (i, tool) in enabled.iter().enumerate() {
+                    let count = counts.get(tool).copied().unwrap_or(1);
+                    let marker = if i == sel { "› " } else { "  " };
+                    lines.push(format!("{}{}: {}", marker, tool, count));
+                }
+                wrapped_paragraph(lines.join("\n"), "Max Parallel Per Tool Editor")
+            } else if idx == 0 {
+                // Field 0: coordinator tool — show available options
+                let enabled = state
+                    .working_copy
+                    .as_ref()
+                    .map(|wc| wc.tools.enabled.clone())
+                    .unwrap_or_default();
+                let current = state.automation_field_display_value(0);
+                let mut lines = vec![
+                    format!("{}Field: {}", override_prefix, state.automation_field_label(0)),
+                    String::new(),
+                    state.automation_field_help(0).to_string(),
+                    String::new(),
+                    format!("Current: {}", if current.is_empty() { "(auto-select)" } else { &current }),
+                    String::new(),
+                    "Available tools:".to_string(),
+                    "  (empty)  — auto-select".to_string(),
+                ];
+                for t in &enabled {
+                    let marker = if t == &current { " ✓ " } else { "   " };
+                    lines.push(format!("{}{}", marker, t));
+                }
+                lines.push(String::new());
+                lines.push("Space/Enter or ←/→ to cycle".to_string());
+                lines.push("s — Save to .macc/macc.yaml".to_string());
+                wrapped_paragraph(lines.join("\n"), "Field Info")
+            } else {
+                // Default detail pane for all other fields
+                let mut detail = format!(
+                    "{}Field: {}\n\n{}\n\nSaved config: {}\n\nShortcuts:\nSpace/Enter - Edit or cycle\nEsc - Cancel edit\ns - Save to .macc/macc.yaml",
+                    override_prefix,
+                    state.automation_field_label(idx),
+                    state.automation_field_help(idx),
+                    state.automation_field_display_value(idx),
+                );
+                if let Some(validation) = state.current_automation_field_validation() {
+                    detail.push_str(&format!("\n\nValidation:\n{}", validation));
+                }
+                detail.push_str("\n\nRuntime monitoring moved to Coordinator Live.\nPress 'v' to open live status, active tasks, and events.");
+                wrapped_paragraph(detail, "Field Info")
+            };
             f.render_widget(detail_para, body_chunks[1]);
         }
         Screen::CoordinatorLive => {

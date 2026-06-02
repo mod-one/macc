@@ -155,6 +155,20 @@ pub struct AppState {
     pub automation_field_index: usize,
     pub automation_field_editing: bool,
     pub automation_field_input: String,
+    // ── Tool-aware special editors (no manual typing of tool names) ──
+    /// Field 0: index into ["" (auto), ...enabled_tools] for coordinator tool cycling.
+    pub coordinator_tool_cycle_idx: usize,
+    /// Field 3: active reorder mode for tool priority list.
+    pub tool_priority_editor_active: bool,
+    /// Field 3: index of the currently-highlighted (and moving) tool in the priority list.
+    pub tool_priority_editor_index: usize,
+    /// Field 4: active per-tool parallel count editor.
+    pub tool_parallel_editor_active: bool,
+    /// Field 4: index of the currently-selected tool in the parallel editor.
+    pub tool_parallel_editor_index: usize,
+    /// Field 3: whether the currently-selected tool is "grabbed" (ready to be moved).
+    /// When true, ↑/↓ moves the tool; when false, ↑/↓ only navigates the cursor.
+    pub tool_priority_editor_grabbed: bool,
     pub settings_field_index: usize,
     pub settings_field_editing: bool,
     pub settings_field_input: String,
@@ -282,6 +296,12 @@ impl AppState {
             automation_field_index: 0,
             automation_field_editing: false,
             automation_field_input: String::new(),
+            coordinator_tool_cycle_idx: 0,
+            tool_priority_editor_active: false,
+            tool_priority_editor_index: 0,
+            tool_priority_editor_grabbed: false,
+            tool_parallel_editor_active: false,
+            tool_parallel_editor_index: 0,
             settings_field_index: 0,
             settings_field_editing: false,
             settings_field_input: String::new(),
@@ -2760,7 +2780,11 @@ impl AppState {
     }
 
     pub fn is_automation_field_editing(&self) -> bool {
+        // Text editing AND special-mode editors all count as "editing" for
+        // purposes of blocking global key handlers.
         self.automation_field_editing
+            || self.tool_priority_editor_active
+            || self.tool_parallel_editor_active
     }
 
     pub fn is_settings_field_editing(&self) -> bool {
@@ -3235,6 +3259,13 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
     }
 
     pub fn begin_automation_field_edit(&mut self) {
+        // Fields 0, 3, 4 use special editors — never enter text mode for them.
+        match self.automation_field_index {
+            0 => { self.cycle_coordinator_tool(true); return; }
+            3 => { self.start_tool_priority_editor(); return; }
+            4 => { self.start_tool_parallel_editor(); return; }
+            _ => {}
+        }
         self.automation_field_input =
             self.automation_field_display_value(self.automation_field_index);
         self.automation_field_editing = true;
@@ -3256,7 +3287,212 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
         self.automation_field_editing = false;
     }
 
+    // ── Tool-aware field helpers ──────────────────────────────────────────────
+
+    /// Return the list `["", ...enabled_tools]` used for coordinator tool cycling.
+    fn coordinator_tool_options(&self) -> Vec<String> {
+        let mut opts = vec![String::new()];
+        if let Some(wc) = &self.working_copy {
+            opts.extend(wc.tools.enabled.iter().cloned());
+        }
+        opts
+    }
+
+    /// Field 0 – cycle coordinator tool (next/prev) without free-form text.
+    pub fn cycle_coordinator_tool(&mut self, forward: bool) {
+        let opts = self.coordinator_tool_options();
+        if opts.is_empty() { return; }
+        let n = opts.len();
+        let current = self
+            .working_copy
+            .as_ref()
+            .and_then(|wc| wc.automation.coordinator.as_ref())
+            .and_then(|c| c.coordinator_tool.clone())
+            .unwrap_or_default();
+        let idx = opts.iter().position(|o| o == &current).unwrap_or(0);
+        self.coordinator_tool_cycle_idx = if forward {
+            (idx + 1) % n
+        } else {
+            (idx + n - 1) % n
+        };
+        let chosen = opts[self.coordinator_tool_cycle_idx].clone();
+        self.snapshot_before_config_change();
+        if let Some(coordinator) = self.coordinator_config_mut() {
+            coordinator.coordinator_tool = if chosen.is_empty() { None } else { Some(chosen) };
+        }
+    }
+
+    /// Return enabled tools ordered by current priority setting (unordered tools appended at end).
+    pub fn tool_priority_ordered_list(&self) -> Vec<String> {
+        let enabled: Vec<String> = self
+            .working_copy
+            .as_ref()
+            .map(|wc| wc.tools.enabled.clone())
+            .unwrap_or_default();
+        let explicit: Vec<String> = self
+            .working_copy
+            .as_ref()
+            .and_then(|wc| wc.automation.coordinator.as_ref())
+            .map(|c| c.tool_priority.iter().filter(|t| enabled.contains(t)).cloned().collect())
+            .unwrap_or_default();
+        let mut result = explicit;
+        for t in &enabled {
+            if !result.contains(t) {
+                result.push(t.clone());
+            }
+        }
+        result
+    }
+
+    /// Field 3 – enter the priority reorder editor.
+    pub fn start_tool_priority_editor(&mut self) {
+        self.tool_priority_editor_index = 0;
+        self.tool_priority_editor_grabbed = false;
+        self.tool_priority_editor_active = true;
+    }
+
+    /// Field 3 – commit priority editor (saves current order to config).
+    pub fn commit_tool_priority_editor(&mut self) {
+        let ordered = self.tool_priority_ordered_list();
+        self.snapshot_before_config_change();
+        if let Some(coordinator) = self.coordinator_config_mut() {
+            coordinator.tool_priority = ordered;
+        }
+        self.tool_priority_editor_grabbed = false;
+        self.tool_priority_editor_active = false;
+    }
+
+    /// Field 3 – cancel priority editor (releases grab first if held).
+    pub fn cancel_tool_priority_editor(&mut self) {
+        if self.tool_priority_editor_grabbed {
+            // First Esc releases grab without closing the editor.
+            self.tool_priority_editor_grabbed = false;
+        } else {
+            self.tool_priority_editor_active = false;
+        }
+    }
+
+    /// Field 3 – toggle the "grabbed" state for the currently-selected tool.
+    ///
+    /// When grabbed = false → ↑/↓ only navigate the cursor.
+    /// When grabbed = true  → ↑/↓ move the tool in the list.
+    pub fn tool_priority_toggle_grab(&mut self) {
+        self.tool_priority_editor_grabbed = !self.tool_priority_editor_grabbed;
+    }
+
+    /// Field 3 – ↑ key: navigate cursor up OR move grabbed tool up.
+    pub fn tool_priority_editor_up(&mut self) {
+        if self.tool_priority_editor_grabbed {
+            // Move the grabbed tool to a higher-priority position.
+            let mut list = self.tool_priority_ordered_list();
+            let idx = self.tool_priority_editor_index;
+            if idx == 0 { return; }
+            list.swap(idx - 1, idx);
+            self.tool_priority_editor_index = idx - 1;
+            self.snapshot_before_config_change();
+            if let Some(coordinator) = self.coordinator_config_mut() {
+                coordinator.tool_priority = list;
+            }
+        } else {
+            // Navigate cursor without reordering.
+            let count = self.tool_priority_ordered_list().len();
+            if count > 0 {
+                self.tool_priority_editor_index =
+                    self.tool_priority_editor_index.saturating_sub(1);
+            }
+        }
+    }
+
+    /// Field 3 – ↓ key: navigate cursor down OR move grabbed tool down.
+    pub fn tool_priority_editor_down(&mut self) {
+        if self.tool_priority_editor_grabbed {
+            // Move the grabbed tool to a lower-priority position.
+            let mut list = self.tool_priority_ordered_list();
+            let idx = self.tool_priority_editor_index;
+            if idx + 1 >= list.len() { return; }
+            list.swap(idx, idx + 1);
+            self.tool_priority_editor_index = idx + 1;
+            self.snapshot_before_config_change();
+            if let Some(coordinator) = self.coordinator_config_mut() {
+                coordinator.tool_priority = list;
+            }
+        } else {
+            // Navigate cursor without reordering.
+            let count = self.tool_priority_ordered_list().len();
+            if count > 0 {
+                self.tool_priority_editor_index =
+                    (self.tool_priority_editor_index + 1).min(count - 1);
+            }
+        }
+    }
+
+    /// Field 4 – enter the per-tool parallel count editor.
+    pub fn start_tool_parallel_editor(&mut self) {
+        self.tool_parallel_editor_index = 0;
+        self.tool_parallel_editor_active = true;
+    }
+
+    /// Field 4 – cancel per-tool parallel editor.
+    pub fn cancel_tool_parallel_editor(&mut self) {
+        self.tool_parallel_editor_active = false;
+    }
+
+    /// Field 4 – navigate between tools in the parallel editor.
+    pub fn tool_parallel_editor_select(&mut self, forward: bool) {
+        let count = self
+            .working_copy
+            .as_ref()
+            .map(|wc| wc.tools.enabled.len())
+            .unwrap_or(0);
+        if count == 0 { return; }
+        if forward {
+            self.tool_parallel_editor_index =
+                (self.tool_parallel_editor_index + 1).min(count - 1);
+        } else {
+            self.tool_parallel_editor_index =
+                self.tool_parallel_editor_index.saturating_sub(1);
+        }
+    }
+
+    /// Field 4 – adjust the parallel count for the currently selected tool by `delta`.
+    pub fn tool_parallel_editor_adjust(&mut self, delta: i32) {
+        let tool = {
+            let enabled = self
+                .working_copy
+                .as_ref()
+                .map(|wc| wc.tools.enabled.clone())
+                .unwrap_or_default();
+            enabled.into_iter().nth(self.tool_parallel_editor_index)
+        };
+        let Some(tool) = tool else { return };
+        self.snapshot_before_config_change();
+        if let Some(coordinator) = self.coordinator_config_mut() {
+            let current = coordinator
+                .max_parallel_per_tool
+                .get(&tool)
+                .copied()
+                .unwrap_or(1) as i32;
+            let next = (current + delta).max(1) as usize;
+            coordinator.max_parallel_per_tool.insert(tool, next);
+        }
+    }
+
     pub fn toggle_automation_field(&mut self) {
+        // Field 0 (Coordinator Tool): cycle through enabled tools instead of free-text.
+        if self.automation_field_index == 0 {
+            self.cycle_coordinator_tool(true);
+            return;
+        }
+        // Field 3 (Tool Priority): open the reorder editor.
+        if self.automation_field_index == 3 {
+            self.start_tool_priority_editor();
+            return;
+        }
+        // Field 4 (Max Parallel Per Tool): open the per-tool count editor.
+        if self.automation_field_index == 4 {
+            self.start_tool_parallel_editor();
+            return;
+        }
         if self.automation_field_index == 13 {
             let current = self.automation_field_display_value(13);
             let next = match current.as_str() {

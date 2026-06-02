@@ -202,6 +202,276 @@ function BooleanField({
   );
 }
 
+/* ------------------------------------------------------------------ */
+/*  Tool-aware field components (never ask users to type tool names)   */
+/* ------------------------------------------------------------------ */
+
+/** Reorderable list of enabled tools — ↑↓ buttons, no manual typing. */
+function ToolPriorityField({
+  value,
+  enabledTools,
+  onChange,
+  helpText,
+}: {
+  value: string[];
+  enabledTools: string[];
+  onChange: (v: string[]) => void;
+  helpText?: string;
+}) {
+  // Build the full list: explicitly ordered tools first, then remaining enabled tools in insertion order
+  const buildFull = (explicit: string[], all: string[]): string[] => {
+    const result = explicit.filter((t) => all.includes(t));
+    for (const t of all) if (!result.includes(t)) result.push(t);
+    return result;
+  };
+  const list = buildFull(value, enabledTools);
+
+  const move = (idx: number, dir: -1 | 1) => {
+    const next = [...list];
+    const target = idx + dir;
+    if (target < 0 || target >= next.length) return;
+    [next[idx], next[target]] = [next[target], next[idx]];
+    onChange(next);
+  };
+
+  if (enabledTools.length === 0)
+    return (
+      <div className="flex flex-col gap-1.5">
+        <span className="text-xs font-medium text-[var(--text-secondary)]">Tool Priority</span>
+        <p className="text-xs text-[var(--text-muted)] px-2 py-2">No tools enabled.</p>
+      </div>
+    );
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <span className="text-xs font-medium text-[var(--text-secondary)]">Tool Priority</span>
+      <div className="rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)] p-2 flex flex-col gap-0.5">
+        {list.map((tool, idx) => {
+          const isExplicit = value.includes(tool);
+          return (
+            <div
+              key={tool}
+              className="flex items-center justify-between px-2 py-1 rounded hover:bg-[var(--bg-hover)]"
+            >
+              <div className="flex items-center gap-2">
+                <span
+                  className={cn(
+                    'text-[10px] tabular-nums w-5 text-right select-none',
+                    isExplicit ? 'text-[var(--accent)]' : 'text-[var(--text-muted)]',
+                  )}
+                >
+                  {idx + 1}.
+                </span>
+                <span
+                  className={cn(
+                    'text-xs font-mono',
+                    isExplicit ? 'text-[var(--text-primary)]' : 'text-[var(--text-muted)]',
+                  )}
+                >
+                  {tool}
+                </span>
+                {!isExplicit && (
+                  <span className="text-[9px] text-[var(--text-muted)] italic">(default)</span>
+                )}
+              </div>
+              <div className="flex gap-1">
+                <button
+                  onClick={() => move(idx, -1)}
+                  disabled={idx === 0}
+                  title="Move up"
+                  className="w-6 h-5 flex items-center justify-center text-[11px] rounded border border-[var(--border)] bg-[var(--bg-card)] hover:bg-[var(--bg-hover)] disabled:opacity-25 disabled:cursor-not-allowed"
+                >
+                  ↑
+                </button>
+                <button
+                  onClick={() => move(idx, 1)}
+                  disabled={idx === list.length - 1}
+                  title="Move down"
+                  className="w-6 h-5 flex items-center justify-center text-[11px] rounded border border-[var(--border)] bg-[var(--bg-card)] hover:bg-[var(--bg-hover)] disabled:opacity-25 disabled:cursor-not-allowed"
+                >
+                  ↓
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {helpText && <span className="text-[10px] text-[var(--text-muted)]">{helpText}</span>}
+    </div>
+  );
+}
+
+/** Per-tool parallel count stepper — no JSON required. */
+function MaxParallelPerToolField({
+  value,
+  enabledTools,
+  onChange,
+  helpText,
+}: {
+  value: Record<string, number>;
+  enabledTools: string[];
+  onChange: (v: Record<string, number>) => void;
+  helpText?: string;
+}) {
+  const adjust = (tool: string, delta: number) => {
+    const current = value[tool] ?? 1;
+    const next = Math.max(1, current + delta);
+    onChange({ ...value, [tool]: next });
+  };
+
+  if (enabledTools.length === 0)
+    return (
+      <div className="flex flex-col gap-1.5">
+        <span className="text-xs font-medium text-[var(--text-secondary)]">Max Parallel Per Tool</span>
+        <p className="text-xs text-[var(--text-muted)] px-2 py-2">No tools enabled.</p>
+      </div>
+    );
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <span className="text-xs font-medium text-[var(--text-secondary)]">Max Parallel Per Tool</span>
+      <div className="rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)] p-2 flex flex-col gap-0.5">
+        {enabledTools.map((tool) => {
+          const count = value[tool] ?? 1;
+          return (
+            <div
+              key={tool}
+              className="flex items-center justify-between px-2 py-1 rounded hover:bg-[var(--bg-hover)]"
+            >
+              <span className="text-xs font-mono text-[var(--text-primary)]">{tool}</span>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => adjust(tool, -1)}
+                  disabled={count <= 1}
+                  title="Decrease"
+                  className="w-6 h-6 flex items-center justify-center text-sm rounded border border-[var(--border)] bg-[var(--bg-card)] hover:bg-[var(--bg-hover)] disabled:opacity-25 disabled:cursor-not-allowed"
+                >
+                  −
+                </button>
+                <span className="text-xs tabular-nums w-6 text-center font-medium text-[var(--text-primary)] select-none">
+                  {count}
+                </span>
+                <button
+                  onClick={() => adjust(tool, 1)}
+                  title="Increase"
+                  className="w-6 h-6 flex items-center justify-center text-sm rounded border border-[var(--border)] bg-[var(--bg-card)] hover:bg-[var(--bg-hover)]"
+                >
+                  +
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {helpText && <span className="text-[10px] text-[var(--text-muted)]">{helpText}</span>}
+    </div>
+  );
+}
+
+/** Category → tools mapping editor — toggleable chips per category, no JSON. */
+function ToolSpecializationsField({
+  value,
+  enabledTools,
+  onChange,
+  helpText,
+}: {
+  value: Record<string, string[]>;
+  enabledTools: string[];
+  onChange: (v: Record<string, string[]>) => void;
+  helpText?: string;
+}) {
+  const [newCat, setNewCat] = useState('');
+
+  const toggleTool = (cat: string, tool: string) => {
+    const current = (value[cat] as string[]) ?? [];
+    const next = current.includes(tool)
+      ? current.filter((t) => t !== tool)
+      : [...current, tool];
+    onChange({ ...value, [cat]: next });
+  };
+
+  const removeCat = (cat: string) => {
+    const next = { ...value };
+    delete next[cat];
+    onChange(next);
+  };
+
+  const addCat = () => {
+    const trimmed = newCat.trim().toLowerCase().replace(/\s+/g, '_');
+    if (!trimmed || Object.prototype.hasOwnProperty.call(value, trimmed)) return;
+    onChange({ ...value, [trimmed]: [] });
+    setNewCat('');
+  };
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <span className="text-xs font-medium text-[var(--text-secondary)]">Tool Specializations</span>
+      <div className="rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)] p-2 flex flex-col gap-2">
+        {Object.keys(value).length === 0 && (
+          <p className="text-xs text-[var(--text-muted)] px-1 py-0.5">
+            No specializations — all tools handle all categories.
+          </p>
+        )}
+        {Object.entries(value).map(([cat, tools]) => (
+          <div key={cat} className="rounded border border-[var(--border)] p-2 flex flex-col gap-1.5">
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-mono font-semibold text-[var(--text-primary)]">{cat}</span>
+              <button
+                onClick={() => removeCat(cat)}
+                className="text-[10px] text-[var(--text-muted)] hover:text-[var(--error)] px-1"
+                title="Remove category"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="flex flex-wrap gap-1">
+              {enabledTools.length === 0 && (
+                <span className="text-[10px] text-[var(--text-muted)]">No tools enabled.</span>
+              )}
+              {enabledTools.map((tool) => {
+                const active = (tools as string[]).includes(tool);
+                return (
+                  <button
+                    key={tool}
+                    onClick={() => toggleTool(cat, tool)}
+                    className={cn(
+                      'px-2 py-0.5 text-[10px] rounded-full border font-mono transition-colors',
+                      active
+                        ? 'border-[var(--accent)] bg-[var(--accent)]/15 text-[var(--accent)]'
+                        : 'border-[var(--border)] bg-[var(--bg-card)] text-[var(--text-muted)] hover:border-[var(--accent)]/50',
+                    )}
+                  >
+                    {tool}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+        {/* Add new category */}
+        <div className="flex gap-2 pt-1">
+          <input
+            type="text"
+            className="flex-1 text-xs rounded border border-[var(--border)] bg-[var(--bg-card)] px-2 py-1 text-[var(--text-primary)] outline-none focus:border-[var(--accent)] placeholder-[var(--text-muted)]"
+            placeholder="New category (e.g. frontend)"
+            value={newCat}
+            onChange={(e) => setNewCat(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && addCat()}
+          />
+          <button
+            onClick={addCat}
+            disabled={!newCat.trim()}
+            className="px-2 py-1 text-xs rounded border border-[var(--border)] bg-[var(--bg-card)] hover:bg-[var(--bg-hover)] text-[var(--text-primary)] disabled:opacity-30"
+          >
+            + Add
+          </button>
+        </div>
+      </div>
+      {helpText && <span className="text-[10px] text-[var(--text-muted)]">{helpText}</span>}
+    </div>
+  );
+}
+
 function SectionHeading({ children }: { children: React.ReactNode }) {
   return (
     <h3 className="mb-3 border-b border-[var(--border)] pb-2 text-sm font-semibold text-[var(--text-primary)]">
@@ -369,12 +639,15 @@ function BasicTab({
 
       <SectionHeading>Task Execution &amp; Routing</SectionHeading>
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <TextField
+        <SelectField
           label="Coordinator Tool"
           value={draft.coordinatorTool}
-          onChange={(v) => update({ coordinatorTool: v })}
-          placeholder="Auto-select"
-          helpText="AI tool used for coordinator processes (e.g. review, prd-audit)."
+          onChange={(v) => update({ coordinatorTool: v || null })}
+          options={[
+            { value: '', label: '— Auto-select —' },
+            ...draft.enabledTools.map((t) => ({ value: t, label: t })),
+          ]}
+          helpText="AI tool used for coordinator phases (review, fix). Empty = auto-select from enabled tools."
         />
         <NumberField
           label="Max Parallel"
@@ -443,32 +716,23 @@ function AdvancedTab({
 
       <SectionHeading>Routing &amp; Priorities</SectionHeading>
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <TextField
-          label="Tool Priority"
-          value={draft.toolPriority.length > 0 ? draft.toolPriority.join(', ') : null}
-          onChange={(v) =>
-            update({
-              toolPriority: v
-                ? v.split(',').map((s) => s.trim()).filter(Boolean)
-                : [],
-            })
-          }
-          placeholder="claude, codex, gemini"
-          helpText="Comma-separated list of tools in priority order."
+        <ToolPriorityField
+          value={draft.toolPriority}
+          enabledTools={draft.enabledTools}
+          onChange={(v) => update({ toolPriority: v })}
+          helpText="Drag-free reordering — ↑↓ to change priority. Tools not listed use default order."
         />
-        <JsonObjectField
-          label="Max Parallel Per Tool"
-          value={draft.maxParallelPerTool}
-          onChange={(value) => update({ maxParallelPerTool: value as Record<string, number> })}
-          placeholder='{"claude": 2, "codex": 1}'
-          helpText="Per-tool concurrency caps as a JSON object."
+        <MaxParallelPerToolField
+          value={draft.maxParallelPerTool as Record<string, number>}
+          enabledTools={draft.enabledTools}
+          onChange={(v) => update({ maxParallelPerTool: v })}
+          helpText="Maximum concurrent runs per tool. Default is 1 per tool."
         />
-        <JsonObjectField
-          label="Tool Specializations"
-          value={draft.toolSpecializations}
-          onChange={(value) => update({ toolSpecializations: value as Record<string, string[]> })}
-          placeholder='{"frontend": ["claude", "codex"]}'
-          helpText="Category routing as a JSON object mapping category to tool lists."
+        <ToolSpecializationsField
+          value={draft.toolSpecializations as Record<string, string[]>}
+          enabledTools={draft.enabledTools}
+          onChange={(v) => update({ toolSpecializations: v })}
+          helpText="Route task categories to specific tools. Empty = all tools handle all categories."
         />
         <TextField
           label="PRD File"
