@@ -2318,15 +2318,7 @@ pub async fn run_native_control_plane(
         return run_result;
     }
 
-    let _ = crate::coordinator::helpers::append_coordinator_event_with_severity(
-        repo_root,
-        "command_end",
-        "-",
-        "run",
-        "done",
-        "Coordinator run complete",
-        "info",
-    );
+    let _ = crate::coordinator::helpers::append_coordinator_run_complete_event(repo_root);
     Ok(())
 }
 

@@ -966,6 +966,43 @@ pub fn append_coordinator_event_with_severity(
     Ok(())
 }
 
+/// Emit the final coordinator run-complete event.
+///
+/// Unlike the generic helper, this includes a top-level `"result"` field so
+/// that the supervisor's `read_last_coordinator_result` can identify a clean
+/// exit without ambiguity, even if the `"type"/"status"` mapping changes.
+pub fn append_coordinator_run_complete_event(repo_root: &Path) -> Result<()> {
+    let run_id = ensure_coordinator_run_id();
+    let now = now_iso_coordinator();
+    let seq = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default() as u64;
+    let payload = serde_json::json!({
+        "schema_version": "1",
+        "event_id": format!("evt-command_end--{}", seq),
+        "run_id": run_id,
+        "seq": seq,
+        "ts": now,
+        "source": "coordinator:native",
+        "task_id": "-",
+        "type": "command_end",
+        "phase": "run",
+        "status": "done",
+        "result": "success",
+        "severity": "info",
+        "payload": {"message": "Coordinator run complete"}
+    });
+    let project_paths = crate::ProjectPaths::from_root(repo_root);
+    let _ = append_event_sqlite(&project_paths, &payload)?;
+    let _ = write_structured_event_jsonl(
+        repo_root,
+        "command_end",
+        "-",
+        "run",
+        "Coordinator run complete",
+        "info",
+    );
+    Ok(())
+}
+
 pub fn append_phase_skipped_event(
     repo_root: &Path,
     task_id: &str,
