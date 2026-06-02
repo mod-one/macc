@@ -362,6 +362,7 @@ mod tests {
             mcp_templates: Vec::new(),
             skills: None,
             context: None,
+            prd_generation: None,
         };
 
         let resolved = resolve(&canonical, &CliOverrides::default());
@@ -401,6 +402,7 @@ mod tests {
             mcp_templates: Vec::new(),
             skills: None,
             context: None,
+            prd_generation: None,
         };
 
         let resolved = resolve(&canonical, &CliOverrides::default());
@@ -426,6 +428,7 @@ mod tests {
             mcp_templates: Vec::new(),
             skills: None,
             context: None,
+            prd_generation: None,
         };
 
         let overrides = CliOverrides {
@@ -494,6 +497,7 @@ mod tests {
             mcp_templates: Vec::new(),
             skills: None,
             context: None,
+            prd_generation: None,
         };
 
         let canonical2 = CanonicalConfig {
@@ -510,6 +514,7 @@ mod tests {
             mcp_templates: Vec::new(),
             skills: None,
             context: None,
+            prd_generation: None,
         };
 
         let resolved1 = resolve(&canonical1, &CliOverrides::default());

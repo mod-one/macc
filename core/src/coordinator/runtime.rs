@@ -1157,6 +1157,8 @@ pub fn spawn_performer_job(
     performer_ipc_addr: Option<&str>,
     claim_id: &str,
     coordinator_epoch: i64,
+    // Extra env vars to forward (e.g. MACC_MODEL_TIER, MACC_REASONING_DEPTH).
+    extra_env: &[(&str, String)],
 ) -> Result<Option<i64>> {
     let effective_ipc_addr = performer_ipc_addr
         .filter(|value| !value.trim().is_empty())
@@ -1246,6 +1248,10 @@ pub fn spawn_performer_job(
         "MACC_COORDINATOR_IPC_ADDR_FILE",
         crate::coordinator::ipc::performer_ipc_addr_path_pub(repo_root),
     );
+    // Inject model routing env vars so tool adapters can select the right model.
+    for (key, val) in extra_env {
+        run_cmd.env(*key, val);
+    }
     let mut child = run_cmd.spawn().map_err(|e| MaccError::Io {
         path: worktree_path.to_string_lossy().into(),
         action: "spawn performer process".into(),

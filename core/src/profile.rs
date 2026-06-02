@@ -468,6 +468,7 @@ mod tests {
             mcp_templates: Vec::new(),
             skills: None,
             context: None,
+            prd_generation: None,
         }
     }
 

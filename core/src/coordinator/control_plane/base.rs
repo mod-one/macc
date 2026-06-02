@@ -1461,6 +1461,7 @@ pub async fn monitor_active_jobs_native(
                         state.performer_ipc_addr.as_deref(),
                         &claim_id,
                         epoch,
+                        &[], // retry preserves previous performer env
                     )?;
                     state.active_jobs.insert(
                         task_id,

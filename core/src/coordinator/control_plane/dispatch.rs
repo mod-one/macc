@@ -418,6 +418,10 @@ pub(super) async fn launch_performer(
         .ok()
         .and_then(|s| s.parse::<i64>().ok())
         .unwrap_or(0);
+    // Compute model routing decision for this task (spec §8–§11).
+    // Reads routing_hints from the task's extra fields; defaults to Standard if absent.
+    let routing_env = compute_routing_env(repo_root, &claim.task_id, canonical);
+
     let pid = coordinator_runtime::spawn_performer_job(
         &current_exe,
         repo_root,
@@ -430,6 +434,7 @@ pub(super) async fn launch_performer(
         state.performer_ipc_addr.as_deref(),
         &claim.claim_id,
         epoch,
+        &routing_env,
     )?;
     let mut registry =
         crate::coordinator::state::coordinator_state_registry_load(repo_root, &BTreeMap::new())?;
@@ -658,4 +663,45 @@ pub(super) async fn run_dispatch_pipeline(
         }
     }
     Ok(dispatched)
+}
+
+/// Compute model routing env vars for the given task by reading its `routing_hints`
+/// from the coordinator state registry.  Always returns a valid decision — falls
+/// back to Standard/Standard when routing_hints are absent or malformed.
+fn compute_routing_env(
+    repo_root: &Path,
+    task_id: &str,
+    canonical: &crate::config::CanonicalConfig,
+) -> Vec<(&'static str, String)> {
+    use crate::coordinator::model_routing::decide;
+    use crate::coordinator::model::Task;
+
+    // Load the task from the registry to access routing_hints in task.extra.
+    // On any read failure, fall back to standard tier with no env injection.
+    let task = load_task_for_routing(repo_root, task_id);
+    let routing_cfg = canonical.automation.model_routing.as_ref();
+
+    let decision = decide(
+        task.as_ref().unwrap_or(&Task::default()),
+        "implementation", // conservative default phase for env var injection
+        routing_cfg,
+    );
+
+    vec![
+        ("MACC_MODEL_TIER", decision.tier.as_str().to_string()),
+        ("MACC_REASONING_DEPTH", decision.reasoning_depth.as_str().to_string()),
+        ("MACC_MODEL_ROUTING_MODE", decision.mode.clone()),
+    ]
+}
+
+fn load_task_for_routing(
+    repo_root: &Path,
+    task_id: &str,
+) -> Option<crate::coordinator::model::Task> {
+    let registry_value = crate::coordinator::state::coordinator_state_registry_load(
+        repo_root,
+        &std::collections::BTreeMap::new(),
+    ).ok()?;
+    let typed = crate::coordinator::model::TaskRegistry::from_value(&registry_value).ok()?;
+    typed.tasks.into_iter().find(|t| t.id == task_id)
 }

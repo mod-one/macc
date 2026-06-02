@@ -2181,6 +2181,7 @@ fn retry_dev_phase<E: crate::engine::Engine + ?Sized>(
         state.performer_ipc_addr.as_deref(),
         &claim_id,
         epoch,
+        &[], // run-cycle path: routing env not computed here
     )?;
     state.active_jobs.insert(
         task_id.to_string(),

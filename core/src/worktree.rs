@@ -633,6 +633,7 @@ mod tests {
             mcp_templates: CanonicalConfig::default().mcp_templates,
             skills: None,
             context: None,
+            prd_generation: None,
         };
 
         assert_eq!(
