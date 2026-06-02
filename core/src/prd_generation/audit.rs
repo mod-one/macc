@@ -1,7 +1,8 @@
 /// `macc prd audit` — enriches an existing PRD from commit history.
 ///
-/// This module replaces `macc coordinator audit-prd`. The underlying prompt
-/// logic lives in `core/src/coordinator/prd_auditor.rs` (unchanged).
+/// This module is pure business logic: it builds the audit prompt and returns it.
+/// Tool invocation is the caller's responsibility (Engine facade or CLI layer).
+/// This mirrors the design of `prd_auditor::prepare_audit`, which also never invokes.
 use crate::coordinator::prd_auditor;
 use crate::prd_generation::request::ModelSelection;
 use serde::{Deserialize, Serialize};
@@ -33,11 +34,10 @@ pub struct PrdAuditResult {
     pub dispatched: bool,
 }
 
-/// Run a PRD audit.
+/// Build the PRD audit prompt from commit history.
 ///
-/// Reads the PRD file, parses tasks from it, gathers commit context, builds the
-/// audit prompt via `prd_auditor::prepare_audit`, then either returns the prompt
-/// (dry_run / no tool) or invokes the configured tool via its performer spec.
+/// Always returns `dispatched: false` — this module never invokes a tool.
+/// The caller (Engine facade) decides whether to forward the prompt to a tool.
 pub fn run_prd_audit(repo_root: &Path, request: &PrdAuditRequest) -> crate::Result<PrdAuditResult> {
     use crate::MaccError;
 
@@ -99,49 +99,14 @@ pub fn run_prd_audit(repo_root: &Path, request: &PrdAuditRequest) -> crate::Resu
         report.prompt.clone().unwrap_or_default()
     };
 
-    let dispatched = !request.dry_run && request.tool.is_some();
-
-    if dispatched {
-        invoke_tool(repo_root, request.tool.as_deref().unwrap(), &final_prompt)?;
-    }
-
+    // This function never dispatches — the Engine facade handles tool invocation.
     Ok(PrdAuditResult {
         completed_with_context: report.completed_with_context,
         todo_tasks: report.todo_tasks,
         prompt_generated: true,
         prompt: Some(final_prompt),
-        dispatched,
+        dispatched: false,
     })
-}
-
-fn invoke_tool(repo_root: &Path, tool_id: &str, prompt: &str) -> crate::Result<()> {
-    use crate::tool::ToolSpecLoader;
-    use crate::MaccError;
-
-    let loader = ToolSpecLoader::new(ToolSpecLoader::default_search_paths(repo_root));
-    let (specs, _) = loader.load_all_with_embedded();
-
-    let spec = specs.iter().find(|s| s.id == tool_id).ok_or_else(|| {
-        MaccError::Validation(format!(
-            "PRD-GEN-TOOL-UNAVAILABLE: tool '{}' not found. Available: {}",
-            tool_id,
-            specs.iter().map(|s| s.id.as_str()).collect::<Vec<_>>().join(", ")
-        ))
-    })?;
-
-    let performer = spec.performer.as_ref().ok_or_else(|| {
-        MaccError::Validation(format!(
-            "PRD-GEN-TOOL-UNAVAILABLE: tool '{}' has no performer configuration.",
-            tool_id
-        ))
-    })?;
-
-    crate::service::context::invoke_tool_with_prompt(
-        &crate::ProjectPaths::from_root(repo_root),
-        performer,
-        prompt,
-        None,
-    )
 }
 
 fn resolve_instructions(

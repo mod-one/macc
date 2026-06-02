@@ -1255,12 +1255,54 @@ pub trait Engine {
 
     // ── PRD generation (spec §8) ──────────────────────────────────────────────
 
+    /// Invoke a tool with a prompt via its performer spec.
+    ///
+    /// This is the single authoritative point for tool invocation in the PRD
+    /// generation / audit flow. CLI, TUI, and Web must go through this method;
+    /// they must never call `service::context::invoke_tool_with_prompt` directly.
+    fn prd_invoke_tool(&self, paths: &ProjectPaths, tool_id: &str, prompt: &str) -> Result<()> {
+        use crate::tool::ToolSpecLoader;
+        use crate::MaccError;
+
+        let loader = ToolSpecLoader::new(ToolSpecLoader::default_search_paths(&paths.root));
+        let (specs, _) = loader.load_all_with_embedded();
+
+        let spec = specs.iter().find(|s| s.id == tool_id).ok_or_else(|| {
+            MaccError::Validation(format!(
+                "PRD-GEN-TOOL-UNAVAILABLE: tool '{}' not found. Available: {}",
+                tool_id,
+                specs.iter().map(|s| s.id.as_str()).collect::<Vec<_>>().join(", ")
+            ))
+        })?;
+
+        let performer = spec.performer.as_ref().ok_or_else(|| {
+            MaccError::Validation(format!(
+                "PRD-GEN-TOOL-UNAVAILABLE: tool '{}' has no performer configuration.",
+                tool_id
+            ))
+        })?;
+
+        crate::service::context::invoke_tool_with_prompt(paths, performer, prompt, None)
+    }
+
+    /// Build the audit prompt and, when a tool is configured and `dry_run` is
+    /// false, forward the prompt to the tool via [`prd_invoke_tool`].
     fn prd_audit(
         &self,
         paths: &ProjectPaths,
         request: &crate::prd_generation::PrdAuditRequest,
     ) -> Result<crate::prd_generation::PrdAuditResult> {
-        crate::prd_generation::audit::run_prd_audit(&paths.root, request)
+        let mut result = crate::prd_generation::audit::run_prd_audit(&paths.root, request)?;
+
+        // run_prd_audit is prompt-only; dispatch is handled here in the facade.
+        if result.prompt_generated && !request.dry_run {
+            if let (Some(ref tool_id), Some(ref prompt)) = (&request.tool, &result.prompt) {
+                self.prd_invoke_tool(paths, tool_id, prompt)?;
+                result.dispatched = true;
+            }
+        }
+
+        Ok(result)
     }
 
     fn prd_validate(

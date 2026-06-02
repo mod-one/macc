@@ -275,8 +275,8 @@ fn run_generate(
                 source: e,
             })?;
 
-            // Invoke tool via performer spec (tool-agnostic).
-            invoke_prd_tool(&paths.root, &t, &prompt)?;
+            // Invoke tool via the Engine facade (never call service layer directly).
+            engine.prd_invoke_tool(paths, &t, &prompt)?;
 
             // Validate the generated output.
             let generated_prd = run_dir.join("prd.json");
@@ -615,32 +615,3 @@ fn print_validation_result(result: &ValidationResult, json: bool) {
     }
 }
 
-fn invoke_prd_tool(repo_root: &std::path::Path, tool_id: &str, prompt: &str) -> Result<()> {
-    use macc_core::tool::ToolSpecLoader;
-    use macc_core::MaccError;
-
-    let loader = ToolSpecLoader::new(ToolSpecLoader::default_search_paths(repo_root));
-    let (specs, _) = loader.load_all_with_embedded();
-
-    let spec = specs.iter().find(|s| s.id == tool_id).ok_or_else(|| {
-        MaccError::Validation(format!(
-            "PRD-GEN-TOOL-UNAVAILABLE: tool '{}' not found. Available: {}",
-            tool_id,
-            specs.iter().map(|s| s.id.as_str()).collect::<Vec<_>>().join(", ")
-        ))
-    })?;
-
-    let performer = spec.performer.as_ref().ok_or_else(|| {
-        MaccError::Validation(format!(
-            "PRD-GEN-TOOL-UNAVAILABLE: tool '{}' has no performer configuration.",
-            tool_id
-        ))
-    })?;
-
-    macc_core::service::context::invoke_tool_with_prompt(
-        &macc_core::ProjectPaths::from_root(repo_root),
-        performer,
-        prompt,
-        None,
-    )
-}
