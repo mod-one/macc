@@ -39,6 +39,8 @@ mod worktrees;
 use crate::commands::AppContext;
 use crate::commands::Command;
 use crate::services::engine_provider::SharedEngine;
+#[cfg(unix)]
+use libc;
 use axum::middleware::from_fn_with_state;
 use axum::routing::{delete, get, post, put};
 use axum::Json;
@@ -59,6 +61,8 @@ pub struct WebCommand {
     host: String,
     port: Option<u16>,
     assets_mode: Option<WebAssetsMode>,
+    /// When true, re-exec as a background daemon (setsid + null stdio) and return.
+    daemon: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -85,12 +89,14 @@ impl WebCommand {
         host: String,
         port: Option<u16>,
         assets_mode: Option<WebAssetsMode>,
+        daemon: bool,
     ) -> Self {
         Self {
             app,
             host,
             port,
             assets_mode,
+            daemon,
         }
     }
 
@@ -112,10 +118,62 @@ impl WebCommand {
             }),
         })
     }
+
+    /// Re-exec the web server as a daemon: setsid + null stdio so it survives
+    /// terminal / SSH session close. `MACC_WEB_DAEMON_CHILD=1` prevents recursion.
+    fn run_as_daemon(&self) -> Result<()> {
+        let current_exe = std::env::current_exe().map_err(|e| MaccError::Io {
+            path: "web daemon".into(),
+            action: "resolve current executable".into(),
+            source: e,
+        })?;
+        let paths = self.app.project_paths()?;
+        let config = self.server_config()?;
+
+        let mut cmd = std::process::Command::new(&current_exe);
+        cmd.arg("--cwd")
+            .arg(&paths.root)
+            .arg("web")
+            .arg("--host")
+            .arg(config.host.to_string())
+            .arg("--port")
+            .arg(config.port.to_string())
+            .env("MACC_WEB_DAEMON_CHILD", "1")
+            .env("MACC_INTERNAL_INVOCATION", "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            unsafe {
+                cmd.pre_exec(|| {
+                    libc::setsid();
+                    Ok(())
+                });
+            }
+        }
+
+        cmd.spawn().map_err(|e| MaccError::Io {
+            path: current_exe.to_string_lossy().into(),
+            action: "spawn web server daemon".into(),
+            source: e,
+        })?;
+
+        println!("Web server started in background (port {}).", config.port);
+        Ok(())
+    }
 }
 
 impl Command for WebCommand {
     fn run(&self) -> Result<()> {
+        // Daemon mode: re-exec with null stdio + setsid so the server survives
+        // terminal / SSH session close. The env var prevents infinite recursion.
+        if self.daemon && std::env::var("MACC_WEB_DAEMON_CHILD").is_err() {
+            return self.run_as_daemon();
+        }
+
         let config = self.server_config()?;
         let paths = self.app.project_paths()?;
 

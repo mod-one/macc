@@ -28,21 +28,9 @@ pub fn render_config_toml(config: &CodexToolConfig) -> String {
         &["features", "shell_snapshot"],
         config.features_shell_snapshot,
     );
-    set_toml_string(
-        &mut merged,
-        "profiles.deep-review.model",
-        config.profile_deep_review_model.as_deref(),
-    );
-    set_toml_string(
-        &mut merged,
-        "profiles.deep-review.model_reasoning_effort",
-        config.profile_deep_review_model_reasoning_effort.as_deref(),
-    );
-    set_toml_string(
-        &mut merged,
-        "profiles.deep-review.approval_policy",
-        config.profile_deep_review_approval_policy.as_deref(),
-    );
+    // profiles.* keys are intentionally omitted: Codex CLI only supports them
+    // in the user-level config.toml, not in project-local files. Writing them
+    // here produces a warning and they are silently ignored by the CLI.
 
     render_toml(&merged)
 }
@@ -96,9 +84,15 @@ fn sanitize_raw_config(raw: &JsonValue) -> JsonValue {
         return value;
     };
 
+    // MACC-internal keys that must not appear in the project-local config.toml.
     map.remove("skills");
     map.remove("agents");
     map.remove("rules_enabled");
+    // model_tiers is a MACC routing concept, not a Codex config key.
+    map.remove("model_tiers");
+    // profiles is only supported in user-level config.toml, not project-local.
+    // Codex CLI emits a warning and ignores it in project-local files.
+    map.remove("profiles");
 
     if let Some(JsonValue::Object(features)) = map.get_mut("features") {
         features.remove("web_search_request");

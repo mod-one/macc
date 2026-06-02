@@ -770,13 +770,23 @@ if [[ "$session_enabled" == "true" && -n "$session_resume_command" ]]; then
       release_session_lock
     fi
   fi
-  # Apply limit detection before the success-marker override so that a tool
-  # that emits a quota error but exits 0 is not silently treated as done.
+  # Apply success-marker override first, then quota detection.
+  #
+  # ORDER MATTERS:
+  # 1. override_rc_for_success_marker: may flip a non-zero rc back to 0 if
+  #    the tool printed a MACC_TASK_RESULT marker (e.g. task completed before
+  #    a transient error).
+  # 2. detect_tool_limit_exit: ALWAYS runs last so a quota/session-limit error
+  #    in the output overrides even a success marker.  This prevents session
+  #    contamination: resumed sessions may contain MACC_TASK_RESULT markers
+  #    from earlier interactions, which must not suppress a quota failure.
+  rc="$(override_rc_for_success_marker "$rc")"
   rc="$(detect_tool_limit_exit "$rc")"
-  exit "$(override_rc_for_success_marker "$rc")"
+  exit "$rc"
 else
   rc=0
   run_default_call || rc=$?
+  rc="$(override_rc_for_success_marker "$rc")"
   rc="$(detect_tool_limit_exit "$rc")"
-  exit "$(override_rc_for_success_marker "$rc")"
+  exit "$rc"
 fi

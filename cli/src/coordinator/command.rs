@@ -14,6 +14,8 @@ use macc_core::service::process_ownership_gate::{gate_owner_action, ClientContex
 use macc_core::{find_project_root, load_canonical_config, MaccError, Result};
 use std::path::Path;
 use std::process::{Command as ProcessCommand, Stdio};
+#[cfg(unix)]
+use libc;
 
 const SUPERVISOR_PID_REL_PATH: &str = ".macc/state/supervisor.pid";
 const COORDINATOR_SUPERVISOR_REL_PATH: &str = ".macc/state/coordinator-supervisor.json";
@@ -146,9 +148,10 @@ pub fn handle(
         gate_owner_action(&client_ctx, &coordinator_process_handle(&paths.root))?;
     }
 
-    if input.supervisor && input.command_name == "run" {
-        spawn_attached_supervisor(&context.paths.root)?;
-    }
+    // Supervisor is intentionally not spawned here. When command == "run",
+    // the supervisor is started AFTER the coordinator child is spawned so it
+    // can watch the actual coordinator child PID rather than the CLI process PID.
+    // (See the launch_coordinator_with_client call below.)
 
     let _ = macc_core::ensure_embedded_automation_scripts(paths)?;
 
@@ -221,7 +224,12 @@ Performers cannot commit without it. Fix this first:\n\
     // (--client flag set, or stdout is not a TTY), skip the prompt.
     if matches!(command, CoordinatorCommand::Run) {
         let chosen_mode = resolve_client_mode(&input, coordinator_cfg, paths);
-        return launch_coordinator_with_client(chosen_mode, &input, paths, coordinator_cfg);
+        return launch_coordinator_with_client(
+            chosen_mode,
+            &input,
+            paths,
+            coordinator_cfg,
+        );
     }
 
     if let CoordinatorCommand::Stop { drain, .. } = &command {
@@ -391,13 +399,18 @@ fn coordinator_process_handle(project_root: &Path) -> ProcessHandle {
     }
 }
 
-fn spawn_attached_supervisor(project_root: &Path) -> Result<()> {
+/// Spawn a supervisor daemon attached to the given coordinator child process.
+///
+/// `coordinator_pid` must be the actual coordinator child PID (not the CLI
+/// process ID). The supervisor watches this PID and restarts the coordinator
+/// if it crashes. Because the supervisor itself uses `setsid()` it also
+/// survives SSH session close independently.
+fn spawn_attached_supervisor(project_root: &Path, coordinator_pid: u32) -> Result<()> {
     let current_exe = std::env::current_exe().map_err(|e| MaccError::Io {
         path: project_root.to_string_lossy().into(),
         action: "resolve current executable for coordinator supervisor bootstrap".into(),
         source: e,
     })?;
-    let coordinator_pid = std::process::id();
     let status = ProcessCommand::new(current_exe)
         .current_dir(project_root)
         .env("MACC_INTERNAL_INVOCATION", "1")
@@ -1140,15 +1153,26 @@ fn launch_coordinator_with_client(
 
     match mode {
         CoordinatorClientMode::Tui => {
-            // TUI path: the TUI drives the coordinator via engine calls.
-            macc_tui::run_tui_with_launch(macc_tui::LaunchMode::CoordinatorRun {
+            // TUI path: the TUI itself starts the coordinator daemon and
+            // connects to it. Once the TUI exits the coordinator keeps running
+            // in the background (coordinator child has setsid() — terminal-independent).
+            // If --supervisor was requested, start the supervisor AFTER the TUI
+            // has launched the coordinator so we have the real child PID.
+            let result = macc_tui::run_tui_with_launch(macc_tui::LaunchMode::CoordinatorRun {
                 phase_overrides,
             })
             .map_err(|e| MaccError::Io {
                 path: "tui".into(),
                 action: "run_tui coordinator live".into(),
                 source: std::io::Error::other(e.to_string()),
-            })
+            });
+            // Best-effort supervisor start after TUI (coordinator child already running).
+            if input.supervisor {
+                if let Ok(coord_pid) = coordinator_child_pid_from_registry(&paths.root) {
+                    let _ = spawn_attached_supervisor(&paths.root, coord_pid);
+                }
+            }
+            result
         }
 
         CoordinatorClientMode::Web => {
@@ -1159,23 +1183,42 @@ fn launch_coordinator_with_client(
             let port = client_cfg.web_port.unwrap_or(3450);
             let host = client_cfg.web_host.as_deref().unwrap_or("127.0.0.1");
             let url = format!("http://{}:{}/ops/console", host, port);
-            println!("Starting coordinator (headless)...");
-            if client_cfg.open_browser.unwrap_or(false) {
-                // Best-effort: open the system browser.
-                let _ = std::process::Command::new("sh")
-                    .args(["-c", &format!("open '{}' 2>/dev/null || xdg-open '{}' 2>/dev/null || true", url, url)])
-                    .spawn();
-                println!("Opening dashboard in browser: {}", url);
-            } else {
-                println!("Open the dashboard at: {}", url);
-                println!("  (run `macc web` in another terminal if the server is not yet running)");
+
+            // Start coordinator as background daemon.
+            let coord_pid = run_coordinator_daemon(paths, coordinator_cfg)?;
+
+            // Start supervisor with coordinator child PID (not CLI PID).
+            if input.supervisor {
+                let _ = spawn_attached_supervisor(&paths.root, coord_pid as u32);
             }
-            println!();
-            run_headless_coordinator(paths, coordinator_cfg)
+
+            // Launch web server as a background daemon so the CLI can return.
+            if let Err(e) = spawn_web_daemon(&paths.root) {
+                println!("Note: could not start web server daemon: {}", e);
+                println!("Start it manually: macc web");
+            } else {
+                // Give the server a moment to bind before printing the URL.
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+
+            if client_cfg.open_browser.unwrap_or(false) {
+                let _ = ProcessCommand::new("sh")
+                    .args(["-c", &format!("open '{url}' 2>/dev/null || xdg-open '{url}' 2>/dev/null || true")])
+                    .spawn();
+                println!("Dashboard opening in browser: {}", url);
+            } else {
+                println!("Dashboard: {}", url);
+            }
+            Ok(())
         }
 
         CoordinatorClientMode::None | CoordinatorClientMode::Interactive => {
-            run_headless_coordinator(paths, coordinator_cfg)
+            // Start coordinator as background daemon; return immediately.
+            let coord_pid = run_coordinator_daemon(paths, coordinator_cfg)?;
+            if input.supervisor {
+                let _ = spawn_attached_supervisor(&paths.root, coord_pid as u32);
+            }
+            Ok(())
         }
     }
 }
@@ -1199,24 +1242,100 @@ fn build_phase_overrides_label(input: &CoordinatorCommandInput) -> Option<String
     if parts.is_empty() { None } else { Some(parts.join(" ")) }
 }
 
-/// Spawn the coordinator engine in headless mode (no client window).
+/// Start the coordinator as a background daemon and return immediately.
+///
+/// The coordinator child process has `setsid()` applied (in `coordinator.rs`)
+/// so it runs in its own session, independent of any controlling terminal or
+/// SSH session. Closing the terminal / SSH that ran this command does not
+/// affect the coordinator or any of its performers/workers.
+fn run_coordinator_daemon(
+    paths: &macc_core::ProjectPaths,
+    coordinator_cfg: Option<&macc_core::config::CoordinatorConfig>,
+) -> Result<i32> {
+    use macc_core::service::coordinator::coordinator_start_managed_command_process_with_pid;
+    use macc_core::service::coordinator_workflow::coordinator_command_invocation;
+
+    let invocation = coordinator_command_invocation(
+        &macc_core::service::coordinator_workflow::CoordinatorCommand::Run,
+    )?;
+    let pid = coordinator_start_managed_command_process_with_pid(
+        paths,
+        invocation.action,
+        &invocation.args,
+        coordinator_cfg,
+    )?;
+
+    println!("Coordinator started (pid {}).", pid);
+    println!("  Monitor : macc status");
+    println!("  Live TUI: macc tui");
+    println!("  Stop    : macc coordinator stop");
+
+    Ok(pid)
+}
+
+/// Read the coordinator child PID from the managed command registry.
+fn coordinator_child_pid_from_registry(project_root: &Path) -> Result<u32> {
+    use macc_core::coordinator::managed_command_registry::get_managed_command;
+    let paths = macc_core::ProjectPaths::from_root(project_root);
+    get_managed_command(&paths, "run")?
+        .map(|r| r.pid as u32)
+        .ok_or_else(|| MaccError::Validation("coordinator is not running".into()))
+}
+
+/// Spawn the web server as a background daemon (setsid + null stdio).
+fn spawn_web_daemon(project_root: &Path) -> Result<()> {
+    let current_exe = std::env::current_exe().map_err(|e| MaccError::Io {
+        path: project_root.to_string_lossy().into(),
+        action: "resolve current exe for web daemon".into(),
+        source: e,
+    })?;
+    let mut cmd = ProcessCommand::new(current_exe);
+    cmd.arg("--cwd")
+        .arg(project_root)
+        .arg("web")
+        .env("MACC_INTERNAL_INVOCATION", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+    }
+
+    cmd.spawn().map_err(|e| MaccError::Io {
+        path: project_root.to_string_lossy().into(),
+        action: "spawn web server daemon".into(),
+        source: e,
+    })?;
+    Ok(())
+}
+
+// Legacy alias kept so the large polling loop below compiles; unused now.
+#[allow(dead_code)]
 fn run_headless_coordinator(
     paths: &macc_core::ProjectPaths,
     coordinator_cfg: Option<&macc_core::config::CoordinatorConfig>,
 ) -> Result<()> {
+    run_coordinator_daemon(paths, coordinator_cfg).map(|_| ())
+}
+
+/// Dead code: the blocking poll loop below is retained only for reference.
+/// `run_coordinator_daemon` replaces it.
+#[allow(dead_code)]
+fn _poll_coordinator_until_done(
+    paths: &macc_core::ProjectPaths,
+) -> Result<()> {
     use macc_core::service::coordinator::{
-        coordinator_start_managed_command_process, coordinator_poll_managed_command_process,
+        coordinator_poll_managed_command_process,
         CoordinatorManagedCommandPoll,
     };
-    use macc_core::service::coordinator_workflow::coordinator_command_invocation;
-
-    // Resolve the invocation arguments for "run" (same as engine trait default).
-    let invocation = coordinator_command_invocation(
-        &macc_core::service::coordinator_workflow::CoordinatorCommand::Run,
-    )?;
-    coordinator_start_managed_command_process(paths, invocation.action, &invocation.args, coordinator_cfg)?;
-
-    // Poll until done.
     loop {
         match coordinator_poll_managed_command_process(paths)? {
             CoordinatorManagedCommandPoll::Idle => return Ok(()),

@@ -196,6 +196,10 @@ enum Commands {
         /// Static asset source. `dist` serves from `web/dist`; `embedded` serves rust-embed assets.
         #[arg(long, value_enum)]
         assets: Option<WebAssetsArg>,
+        /// Run the web server as a background daemon (terminal-independent).
+        /// The server survives SSH session close; use `macc status` to check it.
+        #[arg(long)]
+        daemon: bool,
     },
     /// Tool management
     Tool {
@@ -1544,11 +1548,12 @@ fn run_with_engine_provider(
                 source: std::io::Error::other(e.to_string()),
             })
         }
-        Some(Commands::Web { host, port, assets }) => commands::web::WebCommand::new(
+        Some(Commands::Web { host, port, assets, daemon }) => commands::web::WebCommand::new(
             app.clone(),
             host.clone(),
             *port,
             assets.map(|value| value.into()),
+            *daemon,
         )
         .run(),
         Some(Commands::Tool { tool_command }) => {
@@ -5007,13 +5012,14 @@ fi
         .expect("parse web command");
 
         match cli.command {
-            Some(Commands::Web { host, port, assets }) => {
+            Some(Commands::Web { host, port, assets, daemon }) => {
                 assert_eq!(host, "0.0.0.0");
                 assert_eq!(port, Some(8080));
                 assert_eq!(
                     assets.map(WebAssetsMode::from),
                     Some(WebAssetsMode::Embedded)
                 );
+                assert!(!daemon);
             }
             other => panic!("unexpected command: {:?}", other.map(|_| "non-web")),
         }
@@ -5024,10 +5030,11 @@ fi
         let cli = Cli::try_parse_from(["macc", "web"]).expect("parse web command");
 
         match cli.command {
-            Some(Commands::Web { host, port, assets }) => {
+            Some(Commands::Web { host, port, assets, daemon }) => {
                 assert_eq!(host, "127.0.0.1");
                 assert_eq!(port, None);
                 assert_eq!(assets, None);
+                assert!(!daemon);
             }
             other => panic!("unexpected command: {:?}", other.map(|_| "non-web")),
         }

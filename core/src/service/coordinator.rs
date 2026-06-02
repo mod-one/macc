@@ -3,6 +3,8 @@ use crate::coordinator::managed_command_registry::{
     list_managed_commands, remove_managed_command, upsert_managed_command,
 };
 use crate::{ensure_embedded_automation_scripts, MaccError, ProjectPaths, Result};
+#[cfg(unix)]
+use libc;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -98,6 +100,17 @@ pub fn coordinator_start_managed_command_process(
     args: &[String],
     cfg: Option<&CoordinatorConfig>,
 ) -> Result<()> {
+    coordinator_start_managed_command_process_with_pid(paths, command, args, cfg).map(|_| ())
+}
+
+/// Like `coordinator_start_managed_command_process` but also returns the
+/// coordinator child process ID so callers can pass it to the supervisor.
+pub fn coordinator_start_managed_command_process_with_pid(
+    paths: &ProjectPaths,
+    command: &str,
+    args: &[String],
+    cfg: Option<&CoordinatorConfig>,
+) -> Result<i32> {
     let key = handle_key(paths, command);
     if let Some(existing) = active_managed_command(paths)? {
         return Err(MaccError::Validation(format!(
@@ -112,7 +125,7 @@ pub fn coordinator_start_managed_command_process(
         .lock()
         .map_err(|_| MaccError::Validation("coordinator local handle table lock poisoned".into()))?
         .insert(key, handle);
-    Ok(())
+    Ok(pid)
 }
 
 pub fn coordinator_poll_managed_command_process(
@@ -308,8 +321,31 @@ fn coordinator_start_command_process_with_pid(
     };
 
     cmd.env("MACC_INTERNAL_INVOCATION", "1")
+        .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+
+    // Detach from the controlling terminal so the coordinator survives SSH
+    // session close.  setsid(2) creates a new session with no controlling
+    // terminal; the child becomes the session leader and is no longer in the
+    // parent's process group, so SIGHUP on terminal close never reaches it.
+    // This applies to all coordinator commands (control-plane-run, dispatch,
+    // sync, …) — performers and merge workers inherit the same independence
+    // because they are spawned by this child.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: setsid(2) is async-signal-safe. The restriction is that the
+        // calling process must not be a process-group leader; a freshly forked
+        // child always satisfies this.
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+    }
+
     let child = cmd.spawn().map_err(|e| MaccError::Io {
         path: root.to_string_lossy().into(),
         action: format!("spawn coordinator command '{}'", command),

@@ -383,6 +383,7 @@ impl Command for StartCommand {
                 "127.0.0.1".to_string(),
                 None,
                 None,
+                false,
             );
             web_cmd.run()?;
         } else if self.tui {
