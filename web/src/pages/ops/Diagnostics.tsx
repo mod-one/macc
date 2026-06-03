@@ -150,9 +150,7 @@ const Diagnostics: React.FC = () => {
 
   const criticalCount = report?.issuesBySeverity['error'] ?? 0;
   const warningCount = report?.issuesBySeverity['warning'] ?? 0;
-  const fixableCount = report?.findings?.filter((f) => f.fixAvailable).length
-    ?? report?.issues.filter((i) => i.fixAvailable).length
-    ?? 0;
+  const fixableCount = report?.findings?.filter((f) => f.fixAvailable).length ?? 0;
 
   if (loading && !report) {
     return (
@@ -324,11 +322,7 @@ const Diagnostics: React.FC = () => {
                     severityTone={legacyTone(String(issue.severity))}
                     currentState={issue.status}
                     expectedState={issue.message ?? 'Expected to be healthy'}
-                    actions={
-                      issue.fixAvailable
-                        ? [{ label: 'Safe Fix', onClick: () => setFixConfirmOpen(true) }]
-                        : []
-                    }
+                    actions={[]}
                   />
                 ))
               )}

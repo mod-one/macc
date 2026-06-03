@@ -210,14 +210,13 @@ const SkillRunner: React.FC = () => {
               <Button
                 onClick={() => void handleRun()}
                 disabled={running}
-                variant="primary"
+                className="bg-[var(--accent)]/20 border-[var(--accent)]/40 hover:bg-[var(--accent)]/30"
               >
                 {running ? 'Running…' : 'Run'}
               </Button>
               <Button
                 onClick={() => void handleSelect(selected)}
                 disabled={previewLoading}
-                variant="secondary"
               >
                 Dry Run
               </Button>

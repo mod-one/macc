@@ -23,11 +23,6 @@ import { surfaceClassName, cn } from '../../components/styles';
 
 type View = 'available' | 'installed' | 'updates' | 'conflicts' | 'provenance';
 
-interface ProvenanceEntry {
-  lockEntry: ApiSkillLockEntry;
-  status?: ApiCatalogSkillStatus;
-}
-
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function statusTone(kind: string): 'active' | 'failed' | 'blocked' | 'todo' {
