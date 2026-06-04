@@ -8,7 +8,8 @@ import type {
   ApiStandardsPreviewRequest,
   JsonValue,
 } from '../api/models';
-import { Button, ErrorBanner, LoadingSpinner, StatusBadge } from '../components';
+import { Button, ErrorBanner, LoadingSpinner } from '../components';
+import { CheckIcon, AlertTriangleIcon } from '../components/icons';
 import { cn } from '../components/styles';
 
 type InitStep = 0 | 1 | 2 | 3;
@@ -35,7 +36,14 @@ interface ConfigWithRootHint extends ApiConfigResponse {
   cwd?: string | null;
 }
 
-const STEPS = ['Welcome & Project Root', 'Tool Detection', 'Standards', 'Review'] as const;
+const STEPS = ['Project root', 'Tool detection', 'Standards', 'Review'] as const;
+
+const STEP_DESCRIPTIONS = [
+  'Confirm the project root before writing .macc/macc.yaml.',
+  'Choose which tool adapters to enable for this project.',
+  'Select a standards preset and preview the generated output.',
+  'Review the configuration before saving.',
+] as const;
 
 const PRESETS: InitPreset[] = [
   {
@@ -191,15 +199,9 @@ function buildStandardsInline(presetId: InitPresetId): Record<string, string> {
 }
 
 function yamlScalar(value: unknown): string {
-  if (value === null || typeof value === 'undefined') {
-    return 'null';
-  }
-  if (typeof value === 'string') {
-    return JSON.stringify(value);
-  }
-  if (typeof value === 'number' || typeof value === 'boolean') {
-    return String(value);
-  }
+  if (value === null || typeof value === 'undefined') return 'null';
+  if (typeof value === 'string') return JSON.stringify(value);
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
   return JSON.stringify(value);
 }
 
@@ -207,10 +209,7 @@ function yamlLines(value: unknown, indent = 0): string[] {
   const pad = '  '.repeat(indent);
 
   if (Array.isArray(value)) {
-    if (value.length === 0) {
-      return [`${pad}[]`];
-    }
-
+    if (value.length === 0) return [`${pad}[]`];
     return value.flatMap((entry) => {
       if (entry !== null && typeof entry === 'object' && !Array.isArray(entry)) {
         const nested = yamlLines(entry, indent + 1);
@@ -222,10 +221,7 @@ function yamlLines(value: unknown, indent = 0): string[] {
 
   if (value !== null && typeof value === 'object') {
     const entries = Object.entries(value);
-    if (entries.length === 0) {
-      return [`${pad}{}`];
-    }
-
+    if (entries.length === 0) return [`${pad}{}`];
     return entries.flatMap(([key, entry]) => {
       if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
         return [`${pad}${key}: ${yamlScalar(entry)}`];
@@ -243,7 +239,12 @@ function toYaml(value: unknown): string {
 }
 
 function isStandardsPreviewCard(value: unknown): value is ApiStandardsPreviewCard {
-  return isRecord(value) && typeof value.id === 'string' && typeof value.title === 'string' && typeof value.content === 'string';
+  return (
+    isRecord(value) &&
+    typeof value.id === 'string' &&
+    typeof value.title === 'string' &&
+    typeof value.content === 'string'
+  );
 }
 
 const Init: React.FC = () => {
@@ -271,22 +272,19 @@ const Init: React.FC = () => {
   const [stepError, setStepError] = React.useState<string | null>(null);
 
   const detectedRoot = React.useMemo(() => {
-    if (!config) {
-      return '';
-    }
-    const hinted = (config as ConfigWithRootHint).projectRoot ?? (config as ConfigWithRootHint).root ?? (config as ConfigWithRootHint).cwd;
+    if (!config) return '';
+    const hinted =
+      (config as ConfigWithRootHint).projectRoot ??
+      (config as ConfigWithRootHint).root ??
+      (config as ConfigWithRootHint).cwd;
     return normalizePath(hinted ?? '.') || '.';
   }, [config]);
 
   const toolOptions = React.useMemo(() => (config ? buildToolOptions(config) : []), [config]);
-
   const standardsInline = React.useMemo(() => buildStandardsInline(presetId), [presetId]);
 
   const previewConfig = React.useMemo(() => {
-    if (!config) {
-      return null;
-    }
-
+    if (!config) return null;
     return {
       ...config,
       enabledTools: Array.from(selectedTools).sort((left, right) => left.localeCompare(right)),
@@ -295,32 +293,23 @@ const Init: React.FC = () => {
     };
   }, [config, selectedTools, standardsInline]);
 
-  const stepIndexLabel = `${step + 1} / ${STEPS.length}`;
   const progressPercent = ((step + 1) / STEPS.length) * 100;
 
   const validateStep = React.useCallback(
     (candidateStep: InitStep): string | null => {
       if (candidateStep === 0) {
-        if (projectRoot.trim().length === 0) {
-          return 'Project root is required.';
-        }
-        if (normalizePath(projectRoot).length === 0) {
-          return 'Project root cannot be blank.';
-        }
+        if (projectRoot.trim().length === 0) return 'Project root is required.';
+        if (normalizePath(projectRoot).length === 0) return 'Project root cannot be blank.';
       }
-
       if (candidateStep === 1 && selectedTools.size === 0) {
         return 'Enable at least one tool before continuing.';
       }
-
       if (candidateStep === 2 && !PRESETS.some((preset) => preset.id === presetId)) {
         return 'Choose a standards preset.';
       }
-
       if (candidateStep === 3 && !reviewAccepted) {
         return 'Review and accept the configuration before finishing.';
       }
-
       return null;
     },
     [presetId, projectRoot, reviewAccepted, selectedTools.size],
@@ -328,23 +317,28 @@ const Init: React.FC = () => {
 
   React.useEffect(() => {
     let cancelled = false;
-
     void (async () => {
       setIsLoading(true);
       try {
         const nextConfig = normalizeConfigResponse(await getConfig());
-        if (cancelled) {
-          return;
-        }
-
+        if (cancelled) return;
         const inferredRoot = normalizePath(
-          ((nextConfig as ConfigWithRootHint).projectRoot ?? (nextConfig as ConfigWithRootHint).root ?? (nextConfig as ConfigWithRootHint).cwd ?? '.')
-            .toString(),
+          (
+            (nextConfig as ConfigWithRootHint).projectRoot ??
+            (nextConfig as ConfigWithRootHint).root ??
+            (nextConfig as ConfigWithRootHint).cwd ??
+            '.'
+          ).toString(),
         );
-
         setConfig(nextConfig);
         setProjectRoot(inferredRoot || '.');
-        setSelectedTools(new Set(nextConfig.enabledTools.length > 0 ? nextConfig.enabledTools : collectToolIds(nextConfig)));
+        setSelectedTools(
+          new Set(
+            nextConfig.enabledTools.length > 0
+              ? nextConfig.enabledTools
+              : collectToolIds(nextConfig),
+          ),
+        );
         setPresetId('minimal');
         setReviewAccepted(false);
         setStep(0);
@@ -353,64 +347,37 @@ const Init: React.FC = () => {
         setPreviewError(null);
         setPreviewCards([]);
       } catch (error) {
-        if (!cancelled) {
-          setLoadError(formatError(error));
-        }
+        if (!cancelled) setLoadError(formatError(error));
       } finally {
-        if (!cancelled) {
-          setIsLoading(false);
-        }
+        if (!cancelled) setIsLoading(false);
       }
     })();
-
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, []);
 
   React.useEffect(() => {
-    if (!config) {
-      return;
-    }
-
+    if (!config) return;
     let cancelled = false;
     setIsPreviewLoading(true);
     setPreviewError(null);
-
-    const request: ApiStandardsPreviewRequest = {
-      standardsPath: null,
-      standardsInline,
-    };
-
+    const request: ApiStandardsPreviewRequest = { standardsPath: null, standardsInline };
     void getStandardsPreview(request)
       .then((response) => {
-        if (cancelled) {
-          return;
-        }
+        if (cancelled) return;
         setPreviewCards(response.cards.filter(isStandardsPreviewCard));
       })
       .catch((error) => {
-        if (!cancelled) {
-          setPreviewError(formatError(error));
-        }
+        if (!cancelled) setPreviewError(formatError(error));
       })
       .finally(() => {
-        if (!cancelled) {
-          setIsPreviewLoading(false);
-        }
+        if (!cancelled) setIsPreviewLoading(false);
       });
-
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, [config, standardsInline]);
 
   const goNext = React.useCallback(() => {
     const issue = validateStep(step);
-    if (issue) {
-      setStepError(issue);
-      return;
-    }
+    if (issue) { setStepError(issue); return; }
     setStepError(null);
     setStep((current) => Math.min(current + 1, 3) as InitStep);
   }, [step, validateStep]);
@@ -421,11 +388,13 @@ const Init: React.FC = () => {
   }, []);
 
   const useDefaults = React.useCallback(() => {
-    if (!config) {
-      return;
-    }
+    if (!config) return;
     setProjectRoot(detectedRoot || '.');
-    setSelectedTools(new Set(config.enabledTools.length > 0 ? config.enabledTools : collectToolIds(config)));
+    setSelectedTools(
+      new Set(
+        config.enabledTools.length > 0 ? config.enabledTools : collectToolIds(config),
+      ),
+    );
     setPresetId('minimal');
     setReviewAccepted(false);
     setPlanPreview(null);
@@ -437,11 +406,7 @@ const Init: React.FC = () => {
   const toggleTool = React.useCallback((toolId: string) => {
     setSelectedTools((current) => {
       const next = new Set(current);
-      if (next.has(toolId)) {
-        next.delete(toolId);
-      } else {
-        next.add(toolId);
-      }
+      if (next.has(toolId)) { next.delete(toolId); } else { next.add(toolId); }
       return next;
     });
     setStepError(null);
@@ -450,7 +415,6 @@ const Init: React.FC = () => {
   const handlePlanPreview = React.useCallback(async () => {
     setIsPlanPreviewLoading(true);
     setPlanPreviewError(null);
-
     try {
       const response = await runPlan({
         scope: 'project',
@@ -470,20 +434,11 @@ const Init: React.FC = () => {
   const handleFinish = React.useCallback(async () => {
     for (const candidateStep of [0, 1, 2, 3] as const) {
       const issue = validateStep(candidateStep);
-      if (issue) {
-        setStep(candidateStep);
-        setStepError(issue);
-        return;
-      }
+      if (issue) { setStep(candidateStep); setStepError(issue); return; }
     }
-
-    if (!config) {
-      return;
-    }
-
+    if (!config) return;
     setIsSaving(true);
     setSaveError(null);
-
     try {
       await updateConfig({
         enabledTools: Array.from(selectedTools).sort((left, right) => left.localeCompare(right)),
@@ -501,240 +456,342 @@ const Init: React.FC = () => {
   }, [config, navigate, selectedTools, standardsInline, validateStep]);
 
   const renderStepContent = (): React.ReactNode => {
+    // Step 0: Project root
     if (step === 0) {
       return (
-        <div className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
-          <section className="rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] p-5">
-            <h2 className="text-lg font-semibold text-[var(--text-primary)]">Welcome</h2>
-            <p className="mt-2 text-sm text-[var(--text-secondary)]">
-              Initialize the repository with a guided configuration flow. You can confirm the detected project root or override it before writing `.macc/macc.yaml`.
-            </p>
-
-            <label className="mt-5 flex flex-col gap-2">
-              <span className="text-xs font-semibold uppercase tracking-wide text-[var(--text-muted)]">
-                Project root
-              </span>
+        <div
+          className="overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-card)]"
+          style={{ boxShadow: 'var(--shadow-soft)' }}
+        >
+          <div className="px-5 py-5">
+            <label className="block">
+              <span className="text-sm font-medium text-[var(--text-primary)]">Project root</span>
               <input
                 aria-label="Project root"
-                className="rounded-xl border border-[var(--border)] bg-[var(--bg-secondary)] px-4 py-3 text-sm text-[var(--text-primary)] outline-none ring-0 transition focus:border-[var(--accent)]"
-                onChange={(event) => {
-                  setProjectRoot(event.target.value);
-                  setStepError(null);
-                }}
+                className="mt-2 h-10 w-full rounded-md border border-[var(--border)] bg-[var(--bg-secondary)] px-3 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)]/50 transition-shadow"
+                onChange={(event) => { setProjectRoot(event.target.value); setStepError(null); }}
                 placeholder={detectedRoot || '.'}
                 value={projectRoot}
               />
+              {detectedRoot && (
+                <p className="mt-1.5 text-xs text-[var(--text-muted)]">
+                  Detected from backend:{' '}
+                  <span className="font-mono">{detectedRoot}</span>
+                </p>
+              )}
             </label>
-
-            <div className="mt-4 rounded-xl border border-[var(--border)] bg-[var(--bg-secondary)] p-4 text-sm text-[var(--text-secondary)]">
-              <p className="font-medium text-[var(--text-primary)]">Detected from backend</p>
-              <p className="mt-1 font-mono text-xs break-all">{detectedRoot || '.'}</p>
-            </div>
-          </section>
-
-          <aside className="rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] p-5">
-            <h3 className="text-sm font-semibold uppercase tracking-wide text-[var(--text-muted)]">What happens next</h3>
-            <ul className="mt-3 space-y-3 text-sm text-[var(--text-secondary)]">
-              <li>Tool detection previews enabled adapters, versions, and health.</li>
-              <li>Standards presets generate the initial `macc.yaml` content.</li>
-              <li>Review shows the final YAML before saving.</li>
-            </ul>
-          </aside>
+          </div>
+          <div className="border-t border-[var(--border-subtle)] bg-[var(--bg-secondary)] px-5 py-3 text-xs text-[var(--text-secondary)]">
+            This path determines where{' '}
+            <span className="font-mono">.macc/macc.yaml</span> will be written. Relative paths are resolved from the current working directory.
+          </div>
         </div>
       );
     }
 
+    // Step 1: Tool detection
     if (step === 1) {
       return (
-        <div className="grid gap-4">
-          {toolOptions.map((tool) => (
-            <label
-              key={tool.id}
-              className="flex items-start justify-between gap-4 rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] p-4 transition hover:border-white/20 hover:bg-white/5"
-            >
-              <div className="min-w-0">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="font-semibold text-[var(--text-primary)]">{titleCase(tool.id)}</span>
-                  <StatusBadge status={tool.health} tone={tool.health === 'healthy' ? 'merged' : 'blocked'} />
-                </div>
-                <p className="mt-1 text-sm text-[var(--text-secondary)]">
-                  Version: <span className="font-mono">{tool.version}</span>
-                </p>
-              </div>
-              <input
-                aria-label={`Enable ${tool.id}`}
-                checked={selectedTools.has(tool.id)}
-                className="mt-1 h-4 w-4 accent-[var(--accent)]"
-                onChange={() => toggleTool(tool.id)}
-                type="checkbox"
-              />
-            </label>
-          ))}
-
-          {toolOptions.length === 0 && (
-            <div className="rounded-2xl border border-dashed border-[var(--border)] bg-[var(--bg-card)] p-6 text-sm text-[var(--text-secondary)]">
-              No tools were detected yet. Finish setup with the defaults or return after tools are available.
-            </div>
+        <div
+          className="overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-card)]"
+          style={{ boxShadow: 'var(--shadow-soft)' }}
+        >
+          {toolOptions.length === 0 ? (
+            <p className="px-5 py-8 text-center text-sm text-[var(--text-secondary)]">
+              No tool adapters detected. Continue with defaults or return after installing adapters.
+            </p>
+          ) : (
+            <ul className="divide-y divide-[var(--border-subtle)]">
+              {toolOptions.map((tool) => (
+                <li key={tool.id}>
+                  <label className="flex cursor-pointer items-center gap-4 px-4 py-3 transition-colors hover:bg-[var(--bg-elevated)]">
+                    <div className="min-w-0 flex-1">
+                      <span className="text-sm font-medium text-[var(--text-primary)]">
+                        {titleCase(tool.id)}
+                      </span>
+                      {tool.version !== 'n/a' && (
+                        <span className="ml-2 font-mono text-[11px] text-[var(--text-muted)]">
+                          v{tool.version}
+                        </span>
+                      )}
+                    </div>
+                    <span
+                      className="flex shrink-0 items-center gap-1.5 text-[11px]"
+                      style={{
+                        color:
+                          tool.health === 'healthy' ? 'var(--success)' : 'var(--warning)',
+                      }}
+                    >
+                      <span
+                        className="h-1.5 w-1.5 rounded-full"
+                        style={{
+                          backgroundColor:
+                            tool.health === 'healthy' ? 'var(--success)' : 'var(--warning)',
+                        }}
+                      />
+                      {tool.health}
+                    </span>
+                    {/* Visual toggle switch */}
+                    <span
+                      aria-hidden
+                      className="relative inline-flex h-5 w-9 shrink-0 items-center rounded-full border-2 border-transparent transition-colors"
+                      style={{
+                        backgroundColor: selectedTools.has(tool.id)
+                          ? 'var(--accent)'
+                          : 'var(--border)',
+                      }}
+                    >
+                      <span
+                        className="inline-block h-4 w-4 rounded-full bg-white shadow-sm transition-transform"
+                        style={{
+                          transform: selectedTools.has(tool.id)
+                            ? 'translateX(1rem)'
+                            : 'translateX(0)',
+                        }}
+                      />
+                    </span>
+                    <input
+                      aria-label={`Enable ${tool.id}`}
+                      checked={selectedTools.has(tool.id)}
+                      className="sr-only"
+                      onChange={() => toggleTool(tool.id)}
+                      type="checkbox"
+                    />
+                  </label>
+                </li>
+              ))}
+            </ul>
           )}
+          <div className="border-t border-[var(--border-subtle)] bg-[var(--bg-secondary)] px-5 py-2.5 text-xs text-[var(--text-muted)]">
+            {selectedTools.size} of {toolOptions.length} adapters enabled
+          </div>
         </div>
       );
     }
 
+    // Step 2: Standards
     if (step === 2) {
       return (
-        <div className="grid gap-6 lg:grid-cols-[0.8fr_1.2fr]">
-          <section className="rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] p-5">
-            <h2 className="text-lg font-semibold text-[var(--text-primary)]">Standards preset</h2>
-            <p className="mt-2 text-sm text-[var(--text-secondary)]">
-              Choose the initial standards profile for generated docs and repo guidance.
-            </p>
-            <div className="mt-4 grid gap-3">
-              {PRESETS.map((preset) => (
+        <div className="grid gap-5 lg:grid-cols-[0.85fr_1.15fr]">
+          {/* Preset selector */}
+          <fieldset className="min-w-0">
+            <legend className="mb-2 text-sm font-medium text-[var(--text-primary)]">
+              Standards preset
+            </legend>
+            <div
+              className="overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-card)]"
+              style={{ boxShadow: 'var(--shadow-soft)' }}
+            >
+              {PRESETS.map((preset, index) => (
                 <label
                   key={preset.id}
                   className={cn(
-                    'rounded-2xl border p-4 transition',
+                    'flex cursor-pointer items-center gap-3 px-4 py-3 transition-colors',
+                    index > 0 && 'border-t border-[var(--border-subtle)]',
                     preset.id === presetId
-                      ? 'border-[var(--accent)] bg-[var(--accent)]/10'
-                      : 'border-[var(--border)] bg-[var(--bg-secondary)] hover:border-white/20',
+                      ? 'bg-[var(--accent-bg)]'
+                      : 'hover:bg-[var(--bg-elevated)]',
                   )}
                 >
-                  <div className="flex items-start gap-3">
-                    <input
-                      checked={preset.id === presetId}
-                      className="mt-1 h-4 w-4 accent-[var(--accent)]"
-                      onChange={() => {
-                        setPresetId(preset.id);
-                        setStepError(null);
-                      }}
-                      name="standards-preset"
-                      type="radio"
-                      value={preset.id}
-                    />
-                    <div>
-                      <div className="font-medium text-[var(--text-primary)]">{preset.label}</div>
-                      <p className="mt-1 text-sm text-[var(--text-secondary)]">{preset.description}</p>
-                    </div>
+                  <input
+                    checked={preset.id === presetId}
+                    className="h-4 w-4 accent-[var(--accent)] shrink-0"
+                    name="standards-preset"
+                    onChange={() => { setPresetId(preset.id); setStepError(null); }}
+                    type="radio"
+                    value={preset.id}
+                  />
+                  <div className="min-w-0 flex-1">
+                    <p
+                      className={cn(
+                        'text-sm font-medium',
+                        preset.id === presetId
+                          ? 'text-[var(--text-primary)]'
+                          : 'text-[var(--text-secondary)]',
+                      )}
+                    >
+                      {preset.label}
+                    </p>
+                    <p className="mt-0.5 text-xs text-[var(--text-muted)]">
+                      {preset.description}
+                    </p>
                   </div>
+                  {preset.id === presetId && (
+                    <CheckIcon
+                      className="h-3.5 w-3.5 shrink-0"
+                      style={{ color: 'var(--accent)' }}
+                    />
+                  )}
                 </label>
               ))}
             </div>
-          </section>
+          </fieldset>
 
-          <section className="rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] p-5">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <h3 className="text-lg font-semibold text-[var(--text-primary)]">Rendered preview</h3>
-                <p className="text-sm text-[var(--text-secondary)]">
-                  The backend preview shows what the generated standards files will contain.
-                </p>
-              </div>
-              {isPreviewLoading && <LoadingSpinner label="Refreshing preview" />}
+          {/* Preview */}
+          <div
+            className="overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-card)]"
+            style={{ boxShadow: 'var(--shadow-soft)' }}
+          >
+            <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-2.5">
+              <span className="text-sm font-medium text-[var(--text-primary)]">
+                Standards preview
+              </span>
+              {isPreviewLoading && (
+                <span className="text-xs text-[var(--text-muted)]">Refreshing...</span>
+              )}
             </div>
 
             {previewError && (
-              <div className="mt-4 rounded-xl border border-rose-500/30 bg-rose-500/10 p-4 text-sm text-rose-200">
+              <div className="border-b border-[var(--error)]/30 bg-[var(--error)]/10 px-4 py-2.5 text-xs text-[var(--text-primary)]">
                 Preview refresh failed: {previewError}
               </div>
             )}
 
-            <div className="mt-4 grid gap-4">
-              {previewCards.length > 0 ? (
-                previewCards.map((card) => (
-                  <article key={card.id} className="rounded-2xl border border-[var(--border)] bg-[var(--bg-secondary)] p-4">
-                    <h4 className="text-sm font-semibold text-[var(--text-primary)]">{card.title}</h4>
-                    <pre className="mt-3 overflow-x-auto whitespace-pre-wrap break-words font-mono text-xs leading-6 text-[var(--text-secondary)]">
+            {previewCards.length > 0 ? (
+              <div className="divide-y divide-[var(--border-subtle)]">
+                {previewCards.map((card) => (
+                  <div key={card.id} className="px-4 py-3">
+                    <p className="text-xs font-semibold text-[var(--text-primary)]">
+                      {card.title}
+                    </p>
+                    <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-5 text-[var(--text-secondary)]">
                       {card.content}
                     </pre>
-                  </article>
-                ))
-              ) : (
-                <div className="rounded-2xl border border-dashed border-[var(--border)] bg-[var(--bg-secondary)] p-4 text-sm text-[var(--text-secondary)]">
-                  No preview returned yet.
-                </div>
-              )}
-            </div>
-          </section>
+                  </div>
+                ))}
+              </div>
+            ) : !isPreviewLoading ? (
+              <p className="px-4 py-6 text-sm text-[var(--text-secondary)]">
+                No preview returned yet.
+              </p>
+            ) : null}
+          </div>
         </div>
       );
     }
 
+    // Step 3: Review
     return (
-      <div className="grid gap-6 lg:grid-cols-[1fr_0.95fr]">
-        <section className="rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] p-5">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h2 className="text-lg font-semibold text-[var(--text-primary)]">Config preview</h2>
-              <p className="mt-2 text-sm text-[var(--text-secondary)]">
-                Review the YAML that will be written before saving the initialization files.
-              </p>
-            </div>
-            <Button disabled={isPlanPreviewLoading} onClick={handlePlanPreview} type="button">
-              {isPlanPreviewLoading ? 'Previewing plan...' : 'Preview plan'}
+      <div className="grid gap-5 lg:grid-cols-[1.1fr_0.9fr]">
+        {/* YAML preview */}
+        <div
+          className="overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-card)]"
+          style={{ boxShadow: 'var(--shadow-soft)' }}
+        >
+          <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-2.5">
+            <span className="text-sm font-medium text-[var(--text-primary)]">Config preview</span>
+            <Button
+              className="h-7 border-[var(--border)] bg-[var(--bg-secondary)] px-2.5 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+              disabled={isPlanPreviewLoading}
+              onClick={handlePlanPreview}
+              type="button"
+            >
+              {isPlanPreviewLoading ? 'Loading plan...' : 'Preview plan'}
             </Button>
           </div>
-
-          <pre className="mt-4 max-h-[30rem] overflow-auto rounded-2xl border border-[var(--border)] bg-[var(--bg-secondary)] p-4 font-mono text-xs leading-6 text-[var(--text-secondary)]">
+          <pre className="max-h-[32rem] overflow-auto p-4 font-mono text-[11px] leading-5 text-[var(--text-secondary)]">
             {previewConfig ? toYaml(previewConfig) : 'Loading preview...'}
           </pre>
-        </section>
+        </div>
 
-        <aside className="grid gap-4">
-          <section className="rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] p-5">
-            <h3 className="text-lg font-semibold text-[var(--text-primary)]">Initialization summary</h3>
-            <dl className="mt-4 grid gap-3 text-sm">
-              <div className="flex items-center justify-between gap-4">
+        {/* Summary + plan */}
+        <div className="flex flex-col gap-4">
+          {/* Summary */}
+          <div
+            className="overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-card)]"
+            style={{ boxShadow: 'var(--shadow-soft)' }}
+          >
+            <div className="border-b border-[var(--border)] px-4 py-2.5">
+              <span className="text-sm font-medium text-[var(--text-primary)]">Summary</span>
+            </div>
+            <dl className="divide-y divide-[var(--border-subtle)]">
+              <div className="flex items-center justify-between gap-4 px-4 py-2.5 text-sm">
                 <dt className="text-[var(--text-secondary)]">Project root</dt>
-                <dd className="font-mono text-[var(--text-primary)] break-all">{projectRoot || detectedRoot || '.'}</dd>
+                <dd className="truncate font-mono text-[13px] text-[var(--text-primary)]">
+                  {projectRoot || detectedRoot || '.'}
+                </dd>
               </div>
-              <div className="flex items-center justify-between gap-4">
+              <div className="flex items-center justify-between gap-4 px-4 py-2.5 text-sm">
                 <dt className="text-[var(--text-secondary)]">Enabled tools</dt>
-                <dd className="text-[var(--text-primary)]">{selectedTools.size}</dd>
+                <dd className="font-semibold tabular-nums text-[var(--text-primary)]">
+                  {selectedTools.size}
+                </dd>
               </div>
-              <div className="flex items-center justify-between gap-4">
+              <div className="flex items-center justify-between gap-4 px-4 py-2.5 text-sm">
                 <dt className="text-[var(--text-secondary)]">Standards preset</dt>
-                <dd className="text-[var(--text-primary)]">{PRESETS.find((preset) => preset.id === presetId)?.label ?? presetId}</dd>
+                <dd className="text-[var(--text-primary)]">
+                  {PRESETS.find((p) => p.id === presetId)?.label ?? presetId}
+                </dd>
               </div>
             </dl>
-          </section>
+          </div>
 
-          <section className="rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] p-5">
-            <div className="flex items-center justify-between gap-3">
-              <h3 className="text-lg font-semibold text-[var(--text-primary)]">Optional plan preview</h3>
-              {isPlanPreviewLoading && <LoadingSpinner label="Loading plan preview" />}
-            </div>
-            <p className="mt-2 text-sm text-[var(--text-secondary)]">
-              Generate a draft plan for the initialized configuration without applying changes.
-            </p>
-            {planPreviewError && (
-              <div className="mt-4 rounded-xl border border-rose-500/30 bg-rose-500/10 p-4 text-sm text-rose-200">
-                {planPreviewError}
+          {/* Optional plan */}
+          {(planPreview || planPreviewError) && (
+            <div
+              className="overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-card)]"
+              style={{ boxShadow: 'var(--shadow-soft)' }}
+            >
+              <div className="border-b border-[var(--border)] px-4 py-2.5">
+                <span className="text-sm font-medium text-[var(--text-primary)]">Plan preview</span>
               </div>
-            )}
-            {planPreview && (
-              <div className="mt-4 grid gap-3 text-sm text-[var(--text-secondary)]">
-                <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-secondary)] p-4">
-                  <p className="font-medium text-[var(--text-primary)]">Summary</p>
-                  <p className="mt-1">Total actions: {planPreview.summary.totalActions}</p>
-                  <p>Files to write: {planPreview.summary.filesWrite}</p>
-                  <p>Files to merge: {planPreview.summary.filesMerge}</p>
-                </div>
-                <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-secondary)] p-4">
-                  <p className="font-medium text-[var(--text-primary)]">Risks</p>
-                  {planPreview.risks.length === 0 ? (
-                    <p className="mt-1">No risks returned.</p>
-                  ) : (
-                    <ul className="mt-2 list-disc space-y-1 pl-5">
-                      {planPreview.risks.map((risk) => (
-                        <li key={`${risk.level}-${risk.message}`}>{risk.message}</li>
-                      ))}
-                    </ul>
+
+              {planPreviewError && (
+                <p className="px-4 py-3 text-xs text-[var(--text-secondary)]">
+                  {planPreviewError}
+                </p>
+              )}
+
+              {planPreview && (
+                <div className="divide-y divide-[var(--border-subtle)]">
+                  <div className="px-4 py-3">
+                    <dl className="space-y-1.5 text-sm">
+                      <div className="flex justify-between gap-4">
+                        <dt className="text-[var(--text-secondary)]">Total actions</dt>
+                        <dd className="tabular-nums text-[var(--text-primary)]">
+                          {planPreview.summary.totalActions}
+                        </dd>
+                      </div>
+                      <div className="flex justify-between gap-4">
+                        <dt className="text-[var(--text-secondary)]">Files to write</dt>
+                        <dd className="tabular-nums text-[var(--text-primary)]">
+                          {planPreview.summary.filesWrite}
+                        </dd>
+                      </div>
+                      <div className="flex justify-between gap-4">
+                        <dt className="text-[var(--text-secondary)]">Files to merge</dt>
+                        <dd className="tabular-nums text-[var(--text-primary)]">
+                          {planPreview.summary.filesMerge}
+                        </dd>
+                      </div>
+                    </dl>
+                  </div>
+                  {planPreview.risks.length > 0 && (
+                    <div className="px-4 py-3">
+                      <p className="mb-2 text-xs font-medium text-[var(--text-secondary)]">
+                        Risks
+                      </p>
+                      <ul className="space-y-1.5">
+                        {planPreview.risks.map((risk) => (
+                          <li
+                            key={`${risk.level}-${risk.message}`}
+                            className="flex items-start gap-2 text-sm text-[var(--text-secondary)]"
+                          >
+                            <AlertTriangleIcon
+                              className="mt-0.5 h-3.5 w-3.5 shrink-0"
+                              style={{ color: 'var(--warning)' }}
+                            />
+                            {risk.message}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
                   )}
                 </div>
-              </div>
-            )}
-          </section>
-        </aside>
+              )}
+            </div>
+          )}
+        </div>
       </div>
     );
   };
@@ -742,120 +799,145 @@ const Init: React.FC = () => {
   if (isLoading) {
     return (
       <div className="flex min-h-[48vh] items-center justify-center">
-        <LoadingSpinner label="Loading initialization wizard" />
+        <LoadingSpinner label="Loading setup wizard" />
       </div>
     );
   }
 
   if (loadError) {
     return (
-      <div className="flex flex-col gap-6 pb-8">
-        <header className="rounded-2xl border border-[var(--border)] bg-[var(--bg-secondary)] p-6 shadow-sm">
-          <h1 className="text-3xl font-semibold tracking-tight text-[var(--text-primary)]">Project initialization</h1>
-          <p className="mt-2 max-w-3xl text-sm text-[var(--text-secondary)]">
-            Guided repository setup failed to load.
+      <div className="flex flex-col gap-5 pb-8">
+        <div>
+          <h1 className="text-xl font-semibold text-[var(--text-primary)]">Setup wizard</h1>
+          <p className="mt-0.5 text-sm text-[var(--text-secondary)]">
+            Failed to load project configuration.
           </p>
-        </header>
-        <ErrorBanner title="Unable to load initialization wizard" message={loadError} />
+        </div>
+        <ErrorBanner title="Unable to load setup wizard" message={loadError} />
       </div>
     );
   }
 
   return (
-    <div className="flex flex-col gap-6 pb-8">
-      <header className="rounded-3xl border border-[var(--border)] bg-[linear-gradient(135deg,rgba(59,130,246,0.12),rgba(255,255,255,0.02))] p-6 shadow-sm">
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div className="max-w-3xl">
-            <p className="text-xs font-semibold uppercase tracking-[0.3em] text-[var(--text-muted)]">macc init --wizard</p>
-            <h1 className="mt-3 text-4xl font-semibold tracking-tight text-[var(--text-primary)]">
-              Project initialization wizard
+    <div className="flex max-w-4xl flex-col gap-5 pb-8">
+      {/* Header: step name + progress */}
+      <div>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h1 className="text-xl font-semibold text-[var(--text-primary)]">
+              {STEPS[step]}
             </h1>
-            <p className="mt-3 text-sm leading-6 text-[var(--text-secondary)]">
-              Walk through root selection, tool detection, standards generation, and final review before writing `.macc/macc.yaml`.
+            <p className="mt-0.5 text-sm text-[var(--text-secondary)]">
+              {STEP_DESCRIPTIONS[step]}
             </p>
           </div>
-          <div className="rounded-2xl border border-[var(--border)] bg-[var(--bg-card)] px-4 py-3 text-right">
-            <div className="text-xs uppercase tracking-[0.24em] text-[var(--text-muted)]">Step</div>
-            <div className="mt-1 text-2xl font-semibold text-[var(--text-primary)]">{stepIndexLabel}</div>
-          </div>
+          <span className="shrink-0 text-sm text-[var(--text-muted)]">
+            {step + 1} of {STEPS.length}
+          </span>
         </div>
 
-        <div className="mt-5">
-          <div className="flex items-center justify-between text-xs uppercase tracking-wide text-[var(--text-muted)]">
-            <span>Progress</span>
-            <span>{STEPS[step]}</span>
-          </div>
-          <div className="mt-3 h-2 overflow-hidden rounded-full bg-white/5">
+        {/* Progress bar + step labels */}
+        <div className="mt-4">
+          <div className="h-0.5 overflow-hidden rounded-full bg-[var(--bg-elevated)]">
             <div
               className="h-full rounded-full bg-[var(--accent)] transition-[width] duration-300"
               style={{ width: `${progressPercent}%` }}
             />
           </div>
-          <ol className="mt-4 grid gap-2 md:grid-cols-4" aria-label="Initialization progress">
-            {STEPS.map((label, index) => {
-              const isActive = index === step;
-              const isDone = index < step;
-              return (
+          <ol className="mt-2.5 flex items-center" aria-label="Setup progress">
+            {STEPS.map((label, index) => (
+              <React.Fragment key={label}>
                 <li
-                  key={label}
                   className={cn(
-                    'rounded-2xl border px-4 py-3 text-sm transition',
-                    isActive
-                      ? 'border-[var(--accent)] bg-[var(--accent)]/10 text-[var(--text-primary)]'
-                      : isDone
-                        ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
-                        : 'border-[var(--border)] bg-[var(--bg-card)] text-[var(--text-secondary)]',
+                    'whitespace-nowrap text-xs transition-colors',
+                    index === step ? 'font-medium' : '',
                   )}
+                  style={{
+                    color:
+                      index === step
+                        ? 'var(--accent)'
+                        : index < step
+                          ? 'var(--success)'
+                          : 'var(--text-muted)',
+                  }}
                 >
-                  <span className="block text-[10px] uppercase tracking-[0.24em]">Step {index + 1}</span>
-                  <span className="mt-1 block font-medium">{label}</span>
+                  {label}
                 </li>
-              );
-            })}
+                {index < STEPS.length - 1 && (
+                  <span
+                    aria-hidden
+                    className="mx-2 h-px min-w-4 flex-1 rounded-full"
+                    style={{
+                      backgroundColor:
+                        index < step ? 'var(--success)' : 'var(--border)',
+                    }}
+                  />
+                )}
+              </React.Fragment>
+            ))}
           </ol>
         </div>
-      </header>
+      </div>
 
+      {/* Errors */}
       {stepError && <ErrorBanner title="Validation required" message={stepError} />}
       {saveError && <ErrorBanner title="Initialization failed" message={saveError} />}
 
-      <section className="rounded-3xl border border-[var(--border)] bg-[var(--bg-secondary)] p-5 shadow-sm">
-        {renderStepContent()}
-      </section>
+      {/* Step content */}
+      {renderStepContent()}
 
-      <footer className="flex flex-wrap items-center justify-between gap-3 rounded-3xl border border-[var(--border)] bg-[var(--bg-card)] px-5 py-4">
-        <Button disabled={step === 0 || isSaving} onClick={goBack} type="button">
+      {/* Navigation */}
+      <div className="flex flex-wrap items-center justify-between gap-3 border-t border-[var(--border-subtle)] pt-4">
+        <Button
+          className="border-[var(--border)] bg-[var(--bg-card)]"
+          disabled={step === 0 || isSaving}
+          onClick={goBack}
+          type="button"
+        >
           Back
         </Button>
         <div className="flex flex-wrap items-center gap-3">
-          <Button onClick={useDefaults} type="button">
+          <Button
+            className="border-[var(--border)] bg-[var(--bg-card)] text-[var(--text-secondary)]"
+            onClick={useDefaults}
+            type="button"
+          >
             Skip to defaults
           </Button>
           {step < 3 ? (
-            <Button onClick={goNext} type="button">
-              Next
+            <Button
+              className="border-transparent bg-[var(--accent)] text-white hover:brightness-110"
+              onClick={goNext}
+              type="button"
+            >
+              Continue
             </Button>
           ) : (
-            <label className="flex items-center gap-2 rounded-md border border-[var(--border)] bg-[var(--bg-secondary)] px-3 py-2 text-sm text-[var(--text-secondary)]">
-              <input
-                checked={reviewAccepted}
-                className="h-4 w-4 accent-[var(--accent)]"
-                onChange={(event) => {
-                  setReviewAccepted(event.target.checked);
-                  setStepError(null);
-                }}
-                type="checkbox"
-              />
-              I reviewed the config preview
-            </label>
+            <>
+              <label className="flex cursor-pointer items-center gap-2 text-sm text-[var(--text-secondary)]">
+                <input
+                  checked={reviewAccepted}
+                  className="h-4 w-4 accent-[var(--accent)]"
+                  onChange={(event) => {
+                    setReviewAccepted(event.target.checked);
+                    setStepError(null);
+                  }}
+                  type="checkbox"
+                />
+                I reviewed the configuration
+              </label>
+              <Button
+                className="border-transparent bg-[var(--accent)] text-white hover:brightness-110"
+                disabled={isSaving}
+                onClick={handleFinish}
+                type="button"
+              >
+                {isSaving ? 'Creating project...' : 'Create project'}
+              </Button>
+            </>
           )}
-          {step === 3 ? (
-            <Button disabled={isSaving} onClick={handleFinish} type="button">
-              {isSaving ? 'Creating project...' : 'Create project'}
-            </Button>
-          ) : null}
         </div>
-      </footer>
+      </div>
     </div>
   );
 };

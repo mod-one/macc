@@ -1,5 +1,5 @@
 import React from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import { ApiClientError, getConfig, getToolDescriptors, updateConfig } from '../../api/client';
 import type {
   ApiConfigResponse,
@@ -9,7 +9,7 @@ import type {
   ApiToolFieldDefault,
   JsonValue,
 } from '../../api/models';
-import { Button, RightDrawer, StatusBadge } from '../../components';
+import { Button, RightDrawer } from '../../components';
 import { CopyIcon, RefreshIcon, SearchIcon } from '../../components/icons';
 import { cn } from '../../components/styles';
 
@@ -917,59 +917,57 @@ const Tools: React.FC = () => {
   }
 
   return (
-    <div className="flex flex-col gap-6">
-      <header className="rounded-[var(--radius-card)] border border-[var(--border)] bg-[radial-gradient(circle_at_top_left,_rgba(59,130,246,0.18),_transparent_35%),var(--bg-secondary)] p-6 shadow-[var(--shadow-soft)]">
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div className="space-y-2">
-            <h1 className="text-3xl font-semibold tracking-tight text-[var(--text-primary)]">Tools & Adapters</h1>
-            <p className="max-w-3xl text-sm text-[var(--text-secondary)]">
-              Configure every descriptor-backed tool setting from the same schema the TUI uses, including model choices,
-              runtime toggles, catalog links, and raw JSON overrides.
+    <div className="flex flex-col gap-5">
+      <header>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h1 className="text-xl font-semibold tracking-tight text-[var(--text-primary)]">Tools &amp; Adapters</h1>
+            <p className="mt-0.5 text-sm text-[var(--text-secondary)]">
+              Configure adapter settings, enable or disable tools, and edit per-tool JSON overrides.
             </p>
           </div>
           <div className="flex items-center gap-2">
             <Button
-              className="border-[var(--border)] bg-[var(--bg-card)]"
+              className="h-8 border-[var(--border)] bg-[var(--bg-card)] px-3 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
               disabled={isRefreshing}
               onClick={() => {
                 if (hasAnyUnsavedChanges) {
                   const proceed = window.confirm(
                     'You have unsaved adapter changes. Refreshing will discard them. Continue?',
                   );
-                  if (!proceed) {
-                    return;
-                  }
+                  if (!proceed) return;
                 }
                 void loadConfig(true);
               }}
               type="button"
             >
-              <RefreshIcon className={cn('mr-2 h-4 w-4', isRefreshing && 'animate-spin')} />
-              Refresh Schema
+              <RefreshIcon className={cn('mr-1.5 h-3.5 w-3.5', isRefreshing && 'animate-spin')} />
+              Refresh
             </Button>
           </div>
         </div>
 
-        <div className="mt-5 flex flex-wrap items-center gap-3">
-          <div className="relative min-w-[230px] flex-1">
-            <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--text-muted)]" />
+        {/* Filter bar */}
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          <div className="relative min-w-[180px] flex-1">
+            <SearchIcon className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--text-muted)]" />
             <input
-              className="h-10 w-full rounded-lg border border-[var(--border)] bg-[var(--bg-card)] pl-10 pr-3 text-sm text-[var(--text-primary)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/40"
-              placeholder="Search tools, fields, capabilities, category"
+              className="h-8 w-full rounded-md border border-[var(--border)] bg-[var(--bg-card)] pl-8 pr-3 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)]/50"
+              placeholder="Search tools, capabilities"
               value={searchTerm}
               onChange={(event) => setSearchTerm(event.target.value)}
             />
           </div>
 
-          <div className="inline-flex rounded-lg border border-[var(--border)] bg-[var(--bg-card)] p-1">
+          <div className="inline-flex rounded-md border border-[var(--border)] bg-[var(--bg-card)] p-0.5" role="group">
             {(['all', 'enabled', 'installed'] as ToolFilter[]).map((value) => (
               <button
                 key={value}
                 className={cn(
-                  'rounded-md px-3 py-1.5 text-sm capitalize transition-colors',
+                  'rounded px-2.5 py-1 text-xs font-medium capitalize transition-colors',
                   filter === value
                     ? 'bg-[var(--accent)] text-white'
-                    : 'text-[var(--text-secondary)] hover:bg-white/10 hover:text-[var(--text-primary)]',
+                    : 'text-[var(--text-secondary)] hover:bg-white/8 hover:text-[var(--text-primary)]',
                 )}
                 onClick={() => setFilter(value)}
                 type="button"
@@ -981,94 +979,129 @@ const Tools: React.FC = () => {
         </div>
 
         {hasAnyUnsavedChanges && (
-          <div className="mt-4 rounded-lg border border-[var(--status-blocked)]/50 bg-[var(--status-blocked)]/10 px-3 py-2 text-xs text-[var(--text-primary)]">
-            You have unsaved adapter changes. Open a card and apply from the editor drawer.
+          <div className="mt-3 rounded-md border border-[var(--status-blocked)]/40 bg-[var(--status-blocked)]/10 px-3 py-2 text-xs text-[var(--text-primary)]">
+            Unsaved changes. Open a tool and apply from the settings drawer.
           </div>
         )}
 
         {error && (
-          <div className="mt-4 rounded-lg border border-[var(--error)]/40 bg-[var(--error)]/10 px-3 py-2 text-sm text-[var(--text-primary)]">
+          <div className="mt-3 rounded-md border border-[var(--error)]/40 bg-[var(--error)]/10 px-3 py-2 text-sm text-[var(--text-primary)]">
             {error}
           </div>
         )}
       </header>
 
+      {/* Results count */}
+      <div className="text-xs text-[var(--text-muted)]">
+        {filteredTools.length} {filteredTools.length === 1 ? 'tool' : 'tools'}
+        {filteredTools.filter((t) => t.enabled).length > 0 && (
+          <span className="ml-2" style={{ color: 'var(--success)' }}>
+            · {filteredTools.filter((t) => t.enabled).length} enabled
+          </span>
+        )}
+      </div>
+
       {filteredTools.length === 0 ? (
-        <section className="rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-card)] p-8 text-center text-sm text-[var(--text-secondary)] shadow-[var(--shadow-soft)]">
+        <section
+          className="rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-card)] p-10 text-center text-sm text-[var(--text-secondary)]"
+          style={{ boxShadow: 'var(--shadow-soft)' }}
+        >
           No tools matched the current filters.
         </section>
       ) : (
-        <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-          {filteredTools.map((tool) => (
-            <article
+        <ul
+          className="overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)]"
+          style={{ boxShadow: 'var(--shadow-soft)' }}
+        >
+          {filteredTools.map((tool, index) => (
+            <li
               key={tool.id}
-              className="group flex cursor-pointer flex-col gap-4 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-card)] p-4 shadow-[var(--shadow-soft)] transition-colors hover:border-white/15 hover:bg-white/[0.03]"
-              onClick={() => handleOpenTool(tool.id)}
-            >
-              <div className="flex items-start justify-between gap-3">
-                <div className="space-y-1">
-                  <h2 className="text-lg font-semibold text-[var(--text-primary)]">{tool.name}</h2>
-                  <p className="text-xs uppercase tracking-wide text-[var(--text-muted)]">
-                    {tool.id} · v{tool.version}
-                  </p>
-                  <p className="line-clamp-2 text-sm text-[var(--text-secondary)]">{tool.description}</p>
-                </div>
-                <label
-                  className="inline-flex items-center gap-2 rounded-full border border-[var(--border)] bg-[var(--bg-secondary)] px-2.5 py-1 text-xs"
-                  onClick={(event) => event.stopPropagation()}
-                >
-                  <input
-                    checked={tool.enabled}
-                    className="h-4 w-4 rounded border-[var(--border)] bg-transparent text-[var(--accent)]"
-                    onChange={() => handleToggleEnabled(tool.id)}
-                    type="checkbox"
-                  />
-                  <span className={tool.enabled ? 'text-[var(--accent)]' : 'text-[var(--text-secondary)]'}>
-                    {tool.enabled ? 'Enabled' : 'Disabled'}
-                  </span>
-                </label>
-              </div>
-
-              <div className="flex flex-wrap items-center gap-2">
-                <StatusBadge
-                  status={tool.health}
-                  tone={tool.health === 'healthy' ? 'active' : 'blocked'}
-                />
-                <StatusBadge
-                  status={tool.activity}
-                  tone={tool.activity === 'active' ? 'active' : 'todo'}
-                />
-                <span className="inline-flex rounded-full border border-[var(--border)] bg-[var(--bg-secondary)] px-2.5 py-1 text-xs uppercase text-[var(--text-secondary)]">
-                  {tool.category}
-                </span>
-              </div>
-
-              <div className="flex flex-wrap gap-2">
-                {tool.capabilities.length > 0 ? (
-                  tool.capabilities.slice(0, 4).map((capability) => (
-                    <span
-                      key={`${tool.id}-${capability}`}
-                      className="rounded-full border border-[var(--border)] bg-[var(--bg-secondary)] px-2 py-1 text-xs text-[var(--text-secondary)]"
-                    >
-                      {capability}
-                    </span>
-                  ))
-                ) : (
-                  <span className="text-xs text-[var(--text-muted)]">No capability metadata.</span>
-                )}
-              </div>
-
-              {!tool.installed && (
-                <div className="mt-auto rounded-lg border border-[var(--accent)]/30 bg-[var(--accent)]/10 p-2 text-xs text-[var(--text-secondary)]">
-                  Adapter not installed.{' '}
-                  <Link className="font-semibold text-[var(--accent)] hover:underline" to="/ops/console">
-                    Open terminal setup
-                  </Link>
-                </div>
+              className={cn(
+                'flex flex-wrap items-center gap-3 px-4 py-3 transition-colors sm:flex-nowrap',
+                index > 0 && 'border-t border-[var(--border-subtle)]',
+                tool.enabled
+                  ? 'bg-[var(--accent-bg)] hover:bg-[var(--accent-bg-hover)]'
+                  : 'bg-[var(--bg-card)] hover:bg-[var(--bg-elevated)]',
               )}
-            </article>
+            >
+              {/* Toggle switch */}
+              <button
+                aria-checked={tool.enabled}
+                aria-label={`${tool.enabled ? 'Disable' : 'Enable'} ${tool.name}`}
+                className={cn(
+                  'relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--bg-primary)]',
+                )}
+                onClick={() => handleToggleEnabled(tool.id)}
+                role="switch"
+                style={{
+                  backgroundColor: tool.enabled ? 'var(--accent)' : 'var(--border)',
+                }}
+                type="button"
+              >
+                <span
+                  className="pointer-events-none block h-4 w-4 rounded-full bg-white shadow-sm transition-transform"
+                  style={{ transform: tool.enabled ? 'translateX(1rem)' : 'translateX(0)' }}
+                />
+              </button>
+
+              {/* Content */}
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-baseline gap-x-2">
+                  <span className="text-sm font-semibold text-[var(--text-primary)]">{tool.name}</span>
+                  <span className="font-mono text-[11px] text-[var(--text-muted)]">
+                    {tool.id}
+                    {tool.version !== 'n/a' && ` · v${tool.version}`}
+                  </span>
+                </div>
+                <p className="mt-0.5 line-clamp-1 text-sm text-[var(--text-secondary)]">{tool.description}</p>
+              </div>
+
+              {/* Status indicators */}
+              <div className="flex shrink-0 items-center gap-2">
+                {/* Health dot */}
+                <span
+                  className="inline-flex items-center gap-1.5 text-xs"
+                  style={{
+                    color: tool.health === 'healthy' ? 'var(--success)' : 'var(--warning)',
+                  }}
+                >
+                  <span
+                    className="h-1.5 w-1.5 rounded-full"
+                    style={{
+                      backgroundColor: tool.health === 'healthy' ? 'var(--success)' : 'var(--warning)',
+                    }}
+                  />
+                  {tool.health}
+                </span>
+
+                {tool.activity === 'active' && (
+                  <span
+                    className="inline-flex items-center gap-1.5 text-xs"
+                    style={{ color: 'var(--accent)' }}
+                  >
+                    <span
+                      className="h-1.5 w-1.5 rounded-full"
+                      style={{ backgroundColor: 'var(--accent)' }}
+                    />
+                    active
+                  </span>
+                )}
+
+                {!tool.installed && (
+                  <span className="text-xs text-[var(--text-muted)]">not installed</span>
+                )}
+
+                <Button
+                  className="h-7 border-[var(--border)] bg-[var(--bg-secondary)] px-2.5 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                  onClick={() => handleOpenTool(tool.id)}
+                  type="button"
+                >
+                  Configure
+                </Button>
+              </div>
+            </li>
           ))}
-        </section>
+        </ul>
       )}
 
       <RightDrawer
