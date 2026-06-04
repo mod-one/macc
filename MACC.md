@@ -1,1348 +1,1080 @@
-# MACC (v1)
+# MACC — Multi-Agentic Coding Config
 
-> **MACC** (*Multi-Assistant Code Config*). A personal configuration manager for AI coding tools to provide a consistent developer experience across machines.
-> **Date**: 2026-01-30
-> **Status**: Draft v1 (MVP + evolutions)
-
----
-
-## 1. Context & goals
-
-### 1.1 Problem to solve
-AI coding assistants each have their own configuration formats, conventions, and mechanisms (instructions, skills, agents, MCP, permissions). This leads to:
-- an inconsistent experience from one machine to another,
-- duplicated conventions and workflows,
-- friction when starting a project, onboarding, or parallelizing work (sessions / worktrees).
-
-### 1.2 Goals
-MACC must enable:
-1) **Fast installation** on Linux & Windows, then **easy initialization** on a target project.
-2) A **consistent experience** across multiple AI tools via a canonical “source of truth” + tool-specific config generation.
-3) A **TUI (Text-based UI)** to select tools, standards, skills, agents, MCP servers, and worktrees.
-4) A **local Web UI** (SPA served by the `macc` binary) providing feature parity with the TUI plus web-only observability, editing, terminals, and git graph visualization (see §3.5).
-5) Support for **parallelism** (worktrees) and automation scripts like **ralph**.
-6) Safe **merge/backup** mechanisms for user-level settings, with explicit consent.
-7) **Remote distribution of Skills and MCP servers** via Git/HTTP links, with safe download + install into tool-specific locations (see §8.5).
-
-### 1.3 Non-goals (v1)
-- Replace the tools themselves (MACC does not re-implement the AI tools).
-- Store or sync **secrets** in Git (API keys, tokens).
-- Execute remote code as part of installation (no post-install scripts/hooks).
-- Provide a full “CI/CD orchestrator” (MACC can help, but it is not a pipeline).
-- Multi-project management (MACC operates on a single repository at a time).
-- Remote/public hosting of the web UI (localhost only by default; explicit flag to expose).
+> **MACC** (*Multi-Agentic Coding Config*) orchestrates AI coding tools across a project: canonical configuration generation, parallel worktree execution, coordinator-driven task dispatch, and live observability via TUI and web UI.
+> **Last updated**: 2026-06-04
+> **Status**: Active — reflects the current production codebase.
 
 ---
 
-## 2. Functional scope
+## Table of contents
 
-### 2.1 Target tools (v1)
-MACC is designed to be **extensible**. It currently supports several major AI coding assistants via adapters, and can be extended to support others (GitHub Copilot, Cursor, Windsurf, etc.) through its plugin/adapter architecture.
-
-### 2.2 Installation modes
-- **User-level** (user configuration, plugins, MCP, global permissions)
-- **Project-level** (project configuration, versioned, reproducible)
-
-MACC must provide:
-- Linux/macOS: `install.sh`
-- Windows: `install.ps1`
-- A `macc` command available in the PATH
-- Optional GitHub bootstrap via `curl -sSL .../scripts/install.sh | bash`
+1. [Overview](#1-overview)
+2. [Architecture](#2-architecture)
+3. [Installation](#3-installation)
+4. [Configuration — `macc.yaml`](#4-configuration--maccyaml)
+5. [CLI reference](#5-cli-reference)
+   - [Project setup](#51-project-setup)
+   - [Configuration & profiles](#52-configuration--profiles)
+   - [Plan & apply](#53-plan--apply)
+   - [Tools](#54-tools)
+   - [Catalog](#55-catalog)
+   - [Skills](#56-skills)
+   - [PRD generation & audit](#57-prd-generation--audit)
+   - [Coordinator](#58-coordinator)
+   - [Supervisor](#59-supervisor)
+   - [Status & observability](#510-status--observability)
+   - [Worktrees](#511-worktrees)
+   - [Logs](#512-logs)
+   - [Save, restore & backups](#513-save-restore--backups)
+   - [Clear](#514-clear)
+   - [Failure diagnostics](#515-failure-diagnostics)
+   - [Process ownership](#516-process-ownership)
+   - [Lock](#517-lock)
+   - [Settings](#518-settings)
+   - [Miscellaneous](#519-miscellaneous)
+   - [TUI & web UI](#520-tui--web-ui)
+6. [Coordinator runtime](#6-coordinator-runtime)
+7. [Model routing](#7-model-routing)
+8. [PRD system](#8-prd-system)
+9. [Skills runner](#9-skills-runner)
+10. [Process ownership](#10-process-ownership)
+11. [Adapters — supported tools](#11-adapters--supported-tools)
+12. [Web API](#12-web-api)
+13. [Debug mode](#13-debug-mode)
+14. [File layout](#14-file-layout)
+15. [Security](#15-security)
+16. [Technical stack](#16-technical-stack)
 
 ---
 
-## 3. UX: user journeys
+## 1. Overview
 
-### 3.1 Installation (machine)
-**Goal**: install MACC and (optionally) detect/install AI tools.
+MACC manages configuration for multiple AI coding assistants from one canonical source (`.macc/macc.yaml`) and runs tasks across parallel git worktrees. Its three main surfaces are:
 
-- The user runs:
-  - Linux/macOS: `./scripts/install.sh [options]` (or GitHub `curl -sSL` installer)
-  - Windows: `./install.ps1 [options]`
-- The script:
-  - installs the `macc` binary/command,
-  - installs `macc-uninstall` helper,
-  - proposes installing/detecting supported tools,
-  - configures user-level locations if chosen (with backup + consent).
+| Surface | Launch | Purpose |
+|---|---|---|
+| CLI | `macc <command>` | Scripting, CI, one-shot operations |
+| TUI | `macc` or `macc tui` | Interactive operator console |
+| Web UI | `macc web` | Browser-based dashboard, config editor, coordinator console |
 
-### 3.2 Initialization (project)
-In a target repo:
-- `macc init`: creates `.macc/` and baseline files.
-- `macc init --wizard`: interactive CLI setup (3 questions: tools, standards preset, MCP yes/no), then writes `.macc/macc.yaml`.
-- `macc quickstart`: one-command happy path (prerequisites check, init/seed, then TUI or plan+apply).
-- `macc` (no arguments): opens the **TUI**.
-- `macc apply`: generates/installs the config into the project.
-- `macc doctor --fix`: runs actionable diagnostics and applies safe auto-fixes only.
-- `macc backups list/open` + `macc restore --latest`: inspect and restore backup sets (project or user-level).
-- `macc clear`: asks confirmation, force-removes non-root worktrees, then removes MACC-managed project files (safe cleanup mode).
+### Core concepts
 
-### 3.2.1 Configuration profiles
+- **Canonical config** (`macc.yaml`) — single source of truth; MACC generates tool-specific files from it.
+- **Coordinator** — autonomous dispatch engine that reads a PRD, claims worktrees, and runs performers.
+- **Performer** — a shell adapter that wraps a tool (Claude, Codex, Agy, etc.) and drives it to complete a task.
+- **Worktree** — a git worktree checked out for one parallel task; isolated from `main`.
+- **PRD** — a JSON task registry (`prd.json`) listing tasks with IDs, titles, dependencies, and routing hints.
+- **Skill** — a YAML-defined workflow (`.macc/skills/<id>.yaml`) that a performer can execute.
 
-MACC supports **user-level configuration profiles** that let users save a project's
-configuration and restore it in another repository. Profiles are stored under
-`~/.macc/profiles/<name>.yaml`.
+---
 
-#### Commands
+## 2. Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Clients  (CLI · TUI · Web)                                     │
+│  Never call core service functions directly.                    │
+│  All access goes through the Engine trait (facade).            │
+└───────────────────────────────┬─────────────────────────────────┘
+                                │  Engine trait
+┌───────────────────────────────▼─────────────────────────────────┐
+│  macc-core                                                      │
+│  Business logic: config, plan, apply, coordinator, PRD,        │
+│  skills, adapters, storage, doctor, process ownership, etc.    │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Architecture rules:**
+- `core/` — pure business logic, tool-agnostic.
+- `cli/`, `tui/`, `web/` — clients; they call `Engine` methods only.
+- Adapters (`adapters/<tool>/`) translate between MACC's abstract API and each tool's CLI.
+
+### Crate structure
+
+| Crate | Path | Role |
+|---|---|---|
+| `macc-core` | `core/` | Business logic, coordinator, config, PRD, skills |
+| `macc-cli` | `cli/` | All `macc <cmd>` commands |
+| `macc-tui` | `tui/` | Ratatui terminal UI |
+| `macc-registry` | `registry/` | Built-in tool specs and default registry |
+| Adapter crates | `adapters/<tool>/` | Per-tool performer logic |
+
+---
+
+## 3. Installation
+
+```bash
+# Linux / macOS
+./scripts/install.sh [--tools] [--no-tui] [--prefix ~/.local]
+
+# Windows
+./install.ps1 [-Tools] [-NoTui]
+```
+
+After installation, `macc` is available in `PATH`. Run `macc --version` and `macc --help` to verify.
+
+### Flags (common)
+
+| Flag | Description |
+|---|---|
+| `--verbose` / `-v` | Enable verbose logging; also sets `MACC_DEBUG=1` for performers |
+| `--cwd <path>` | Override the working directory |
+| `--version` | Print version |
+
+---
+
+## 4. Configuration — `macc.yaml`
+
+Project config lives at `.macc/macc.yaml`. Initialize it with `macc init`.
+
+### Top-level sections
+
+| Section | Description |
+|---|---|
+| `tools` | Enabled adapters and per-tool config |
+| `standards` | Inline or path-based coding standards |
+| `skills` | Selected skill IDs and catalog sources |
+| `automation` | Coordinator settings, phases, model routing |
+| `process_ownership` | Heartbeat TTL and takeover policy |
+| `prd_generation` | PRD generation defaults |
+| `context` | Token budget and summarization policy |
+
+### Key automation fields
+
+```yaml
+automation:
+  coordinator:
+    max_parallel: 4            # global parallel worker cap
+    max_dispatch: null         # optional dispatch limit
+    timeout_seconds: 3600
+    tool_priority: [claude, codex, agy]
+    max_parallel_per_tool:
+      claude: 2
+      codex: 2
+    tool_specializations:
+      frontend: [vibe, codex]
+    phases:
+      testing:
+        mode: disabled         # disabled | required | risk_based | manual
+      review:
+        mode: required
+        coordinator_tool: claude
+    model_routing:
+      mode: auto               # auto | manual
+```
+
+### Model tier config per tool
+
+Each tool can define model tiers that the coordinator selects from:
+
+```yaml
+tools:
+  config:
+    claude:
+      model_tiers:
+        mini:     { model: claude-haiku-4-5, effort: low }
+        standard: { model: claude-sonnet-4-6, effort: medium }
+        heavy:    { model: claude-opus-4-8, effort: high }
+```
+
+---
+
+## 5. CLI reference
+
+Run `macc <command> --help` for full flag documentation.
+
+### 5.1 Project setup
 
 | Command | Description |
 |---|---|
-| `macc config save <name>` | Save current project config as a named profile |
-| `macc config save <name> --only tools,settings` | Save only specific sections |
-| `macc config save <name> --description "My defaults"` | Save with a description |
-| `macc config restore <name>` | Restore a full profile into the current project |
-| `macc config restore <name> --only tools,automation` | Restore only specific sections |
-| `macc config list` | List all saved profiles |
-| `macc config delete <name>` | Delete a saved profile |
-| `macc init --profile <name>` | Initialize and immediately restore a profile |
+| `macc init` | Initialize `.macc/` in the current repo |
+| `macc init --wizard` | Interactive 4-step setup wizard (root, tools, standards, review) |
+| `macc init --profile <name>` | Initialize and immediately restore a saved profile |
+| `macc init --restore [name]` | Restore the best matching save (or a named one) after init |
+| `macc init --fresh` | Ignore matching saves; create a baseline from scratch |
+| `macc init --apply` | Run `macc apply` after initialization completes |
+| `macc quickstart` | Zero-friction setup: preflight, init, TUI or plan+apply |
+| `macc quickstart --check-only --json` | CI-safe environment validation; exits with JSON result |
+| `macc quickstart --start-coordinator` | Also start the coordinator after setup |
+| `macc start [--intent <intent>]` | Guided onboarding / task-startup entry point |
+| `macc migrate [--apply]` | Migrate legacy config to the current format |
 
-#### Sections
+### 5.2 Configuration & profiles
 
-The `--only` flag accepts a comma-separated list of section names:
-`tools`, `standards`, `selections`, `automation`, `settings`, `mcp_templates`.
+```
+macc config save <name> [--only tools,standards] [--description "..."]
+macc config restore <name> [--only tools,automation]
+macc config list
+macc config delete <name>
+```
 
-When `--only` is used with `save`, only the listed sections are captured (others
-get default values). When used with `restore`, only the listed sections are
-overwritten in the target project config.
+Profiles are stored at `~/.macc/profiles/<name>.yaml`.
 
-#### Design principles
+**Sections** accepted by `--only`: `tools`, `standards`, `selections`, `automation`, `settings`, `mcp_templates`.
 
-- **Automatic coverage**: profiles serialize the full `CanonicalConfig` via serde.
-  New config fields added in the future are automatically included without code changes.
-- **Portability**: absolute paths (e.g. `standards.path`, `coordinator.prd_file`)
-  are stripped to filenames on save, so profiles work across machines and repos.
-- **Profile names**: alphanumeric characters, hyphens, underscores, and dots only.
-- **Selective merge**: `--only` provides fine-grained control; a full restore
-  replaces everything except the `version` field.
+### 5.3 Plan & apply
 
-### 3.3 TUI (Text-based UI) — Rust + Ratatui
-**Implementation requirement (v1)**: the TUI must be implemented in **Rust** using **Ratatui** (crate `ratatui`).
+| Command | Description |
+|---|---|
+| `macc plan [-t tools] [--json] [--explain]` | Preview config changes without writing |
+| `macc apply [-t tools] [--dry-run] [--allow-user-scope] [--locked]` | Generate and write tool-specific files |
+| `macc context [--tool <id>] [--dry-run] [--print-prompt]` | Ask AI tools to refresh their context files |
+| `macc lock generate` | Write `macc.lock.yaml` pinning the current environment |
+| `macc lock check` | Verify current environment against the lock |
+| `macc lock diff` | Show drift between environment and lock |
+| `macc lock explain` | Human-readable explanation of what is pinned |
 
-To ensure the TUI displays the configuration already present in the project and that `macc apply` applies exactly the user’s changes, the TUI and the CLI must use the same:
-- canonical source of truth (`.macc/macc.yaml`),
-- resolve logic,
-- planning (`ActionPlan`) and preview/diff,
-- apply engine (atomic writes + backups + consent gates).
+### 5.4 Tools
 
-Minimum screens:
-1) **AI tool selection** (List of available adapters)
-   - Enable/Disable tools
-   - Configure tool-specific settings (via generic property editors)
-   - **Skills** (catalog + selection + remote sources)
-   - **Agents** selection (catalog + selection + remote sources) (if supported)
-   - **Plugins** (user-level, if supported)
-   - **MCP servers** selection (catalog + selection + remote sources)
-2) **Standards** (global conventions / presets)
-3) **Automation / Coordinator** (dispatch policy, parallelism, stale handling)
-4) Worktrees (create, scopes, launch)
-5) Global Settings (quiet mode, offline mode, web port)
-6) Preview & Apply (summary of files to be written, backups, consent prompts)
+```
+macc tool install <tool-id> [-y]
+macc tool update [tool-id] [--all] [--check] [-y]
+macc tool outdated [--only enabled|installed]
+```
 
+| Command | Description |
+|---|---|
+| `macc tool install <id>` | Install a tool adapter using its ToolSpec install steps |
+| `macc tool update [id]` | Update one or all tools; `--check` previews without running |
+| `macc tool outdated` | Show which tools have a newer version available |
 
-### 3.4 Web Client (Local Web UI)
+### 5.5 Catalog
 
-**Full specification**: see `MACC_Web_Client_spec.md`.
+```
+macc catalog skills list
+macc catalog skills search <query>
+macc catalog skills add --id <id> --name <name> --url <url> --kind git
+macc catalog skills remove --id <id>
+macc catalog import-url --kind skill --id <id> --url <url>
+macc catalog search-remote --kind skill --q <query> [--add]
 
-MACC provides a local SPA web client served by the `macc` binary, offering **feature parity** with the CLI/TUI plus web-only features: rich observability dashboards, interactive editors, embedded terminals, and an always-visible git graph.
+macc install skill --tool <tool> --id <id>
+macc install mcp --id <id>
+```
 
-#### 3.4.1 Architecture
+### 5.6 Skills
 
-- `macc web` starts the web server (Axum) serving:
-  - REST API (`/api/v1/*`) — JSON request/response
-  - SSE streaming (`/api/v1/events`, `/api/v1/logs/tail`) — real-time events and log tailing
-  - WebSocket (`/api/v1/terminal/*`) — PTY terminal sessions
-  - SPA static assets — embedded in the binary (`--assets embedded`) or served from disk (`--assets dist`)
-- **Binding**: `127.0.0.1:3450` by default. Use `--host 0.0.0.0` to expose on all interfaces.
-- **No authentication**: the web client is accessible without login or token. Security relies on localhost binding.
-- **Single project**: the web UI operates on the project directory where `macc web` was launched.
+Skills are YAML workflows stored in `.macc/skills/`. They can also be installed from a catalog.
 
-#### 3.4.2 Frontend stack
+#### Run-skill commands
 
-- React 19 + TypeScript + Vite
-- Tailwind CSS 4 (dark theme, console-grade readability)
-- Radix UI (headless accessible primitives)
-- Zustand (state management)
-- react-router-dom v7 (client-side routing)
-- `commit-graph` (git graph visualization)
-- xterm.js (embedded terminals)
+| Command | Description |
+|---|---|
+| `macc skills list [--tool <id>]` | List available run-skills |
+| `macc skills show <skill>` | Show skill definition |
+| `macc skills explain <skill>` | Human-readable explanation of a skill |
+| `macc skills doctor` | Health check for skill configuration |
 
-#### 3.4.3 UX modes
+#### Catalog-skill lifecycle commands
 
-The UI uses two consistent modes accessible via sidebar navigation:
+| Command | Description |
+|---|---|
+| `macc skills available [--tool] [--source] [--tag] [--json]` | List skills from configured catalogs |
+| `macc skills status [--tool] [--verbose] [--json]` | Show installed skills with provenance |
+| `macc skills install <id> --tool <tool> [--pin] [--dry-run]` | Install a catalog skill |
+| `macc skills update [id] [--tool] [--dry-run] [--latest]` | Update installed skills |
+| `macc skills verify [--tool] [--json]` | Check lockfile/cache/filesystem integrity |
+| `macc skills prune [--tool] [--dry-run]` | Remove skills no longer selected |
+| `macc skills diff [id] [--tool]` | Show local modifications to installed skill files |
+| `macc skills uninstall <id> [--tool] [--all-tools]` | Remove an installed skill |
 
-1. **Setup & Config Mode** — onboarding, tools/adapters, standards, skills/agents/MCP, plan/apply, PRD editing, settings.
-2. **Ops Mode** — coordinator console, registry inspector, live wall, dependency graph, diagnostics, logs explorer, backups, git graph.
-
-#### 3.4.4 App shell
-
-- **Left sidebar**: collapsible navigation organized by mode (Setup & Config, Ops).
-- **Top bar**: project path, connection status indicator, global search trigger (Ctrl+/), command palette (Ctrl+K).
-- **Bottom status strip**: coordinator state, active workers, throttled tools summary.
-- **Git Graph side panel**: always-visible collapsible panel (right side) showing the commit/branch graph. Can be expanded to a full page (`/ops/git`).
-
-#### 3.4.5 Pages
-
-**Setup & Config:**
-
-| Route | Page | Description |
-|---|---|---|
-| `/welcome` | Welcome / Quick Start | First-run onboarding cards |
-| `/init` | Init Wizard | 4-step project initialization |
-| `/dashboard` | Dashboard | Project summary, coordinator KPIs, alerts |
-| `/config/tools` | Tools & Adapters | Card grid with right drawer editor |
-| `/config/standards` | Standards | Preset selector + override editor |
-| `/config/skills` | Skills / Agents / MCP | Catalog browser with install flow |
-| `/config/settings` | Settings | General / Coordinator / Advanced tabs |
-| `/prd` | PRD Editor | Table + detail + graph (DAG) + diff views |
-| `/plan` | Plan | Run plan, display ActionPlan with diffs |
-| `/apply` | Apply | Confirmation, apply, results + backup info |
-
-**Ops:**
-
-| Route | Page | Description |
-|---|---|---|
-| `/ops/console` | Coordinator Console | KPIs, active performer streams, quick actions |
-| `/ops/registry` | Registry & Inspector | Task table + event timeline + operator actions |
-| `/ops/live` | Live Wall | Multi-stream grid (20+ concurrent tiles) |
-| `/ops/worker/:id` | Worker Detail | Fullscreen: live logs, events, artifacts |
-| `/ops/locks` | Dependency Graph | Task dependencies + resource contention + deadlock detection |
-| `/ops/diagnostics` | Diagnostics (Doctor) | Health score, issue cards, bulk safe fix |
-| `/ops/logs` | Logs Explorer | File browser, search, tail, structured events |
-| `/ops/backups` | Backups & Restore | Chronological list, restore with safety gates |
-| `/ops/git` | Git Graph (full page) | Full-page commit/branch graph |
-
-**Shared:**
-
-| Route | Page | Description |
-|---|---|---|
-| `/help` | Help | Offline docs viewer, contextual help |
-| `/about` | About | Version, paths, support info |
-
-#### 3.4.6 API contract
-
-**Core endpoints (implemented):**
-- `GET  /api/v1/health` — server availability
-- `GET  /api/v1/status` — coordinator status (task counts, pause state, rate-limit info)
-- `POST /api/v1/coordinator/{action}` — run, stop, resume, dispatch, advance, reconcile, cleanup
-- `GET  /api/v1/events` — SSE stream of coordinator events
-
-**Extended endpoints:**
-- `GET|PUT /api/v1/config` — read/write canonical config
-- `GET|PUT /api/v1/prd` — read/write PRD (`?path=` for worktree PRDs)
-- `POST /api/v1/plan` — run plan preview
-- `POST /api/v1/apply` — apply with confirmation gate (`confirmed` field required)
-- `GET|POST|DELETE /api/v1/worktrees` — worktree CRUD
-- `POST /api/v1/worktrees/{id}/run` — trigger performer run
-- `GET  /api/v1/worktrees/{id}/logs` — SSE per-worktree log stream
-- `GET  /api/v1/registry/tasks` — task registry listing
-- `POST /api/v1/registry/tasks/{id}/{action}` — requeue, reassign
-- `GET  /api/v1/logs` — list log files by category
-- `GET  /api/v1/logs/{path}` — read log content (paginated, searchable)
-- `GET  /api/v1/logs/tail` — SSE log tail stream
-- `GET  /api/v1/git/graph` — commit graph data (`?limit=`, `?since=`)
-- `GET  /api/v1/doctor` — diagnostics report
-- `POST /api/v1/doctor/fix` — apply safe fixes
-- `GET  /api/v1/backups` — list backups
-- `POST /api/v1/backups/{id}/restore` — restore with confirmation gate
-- `POST /api/v1/terminal` — create terminal session
-- `WS   /api/v1/terminal/{session}` — PTY WebSocket
-
-**Error model:**
-All errors return a structured envelope: `{ error: { code, category, message, retryable, recommended_action } }`. Error codes follow `MACC-WEB-XXXX` with domain ranges (1000=validation, 2000=not found, 3000=conflict, 4000=engine, 5000=internal).
-
-#### 3.4.7 Consent gates and risk levels
-
-All write actions are classified:
-- **Safe**: read-only operations, viewing logs, browsing.
-- **Caution**: project-level writes (apply, config edit, create worktree) → single confirm.
-- **Dangerous**: destructive operations (remove worktree, restore backup, emergency stop) → double confirm or typed phrase.
-
-#### 3.4.8 Streaming
-
-- **SSE** for coordinator events, log tails, and long-operation progress. Supports `Last-Event-ID` for reconnect replay. Heartbeats every 15s.
-- **WebSocket** for terminal PTY (bidirectional I/O).
-- Client implements exponential backoff reconnect with gap detection.
-- Bounded buffers per stream (max 500 lines per tile, configurable).
-
-#### 3.4.9 Git Graph (always visible)
-
-The git commit graph is a first-class UI element:
-- **Side panel** (right, 350px, collapsible): always visible during navigation, shows recent commit history with branch rails and merge edges.
-- **Full page** (`/ops/git`): expanded view with more history and controls.
-- Commits linked to MACC tasks (via `[macc:task]` tags) show task ID badges.
-- Infinite scroll for pagination. Auto-refresh every 30s.
-- Backend: `GET /api/v1/git/graph` calls `git log --parents --decorate` (CLI-based, no git library dependency).
-- Frontend: `commit-graph` npm package (actively maintained, React-native, MIT).
-
-#### 3.4.10 Embedded terminals
-
-- PTY over WebSocket with directory restriction (project root or worktree path).
-- Multi-tab sessions (max 5 concurrent).
-- Idle timeout (5 minutes). Session cleanup on disconnect.
-- Rendered with xterm.js in a bottom drawer.
-
-#### 3.4.11 Ops audit log
-
-All mutating API requests (POST, PUT, DELETE) are logged to `.macc/log/ops.jsonl` with: timestamp, method, path, status code, duration.
-
-#### 3.4.12 Performance targets
-
-- UI initial load < 2s (cached assets).
-- Virtualized tables for large PRDs (500+ tasks) and logs (10000+ lines).
-- 20+ concurrent stream tiles for the Live Wall.
-
-#### 3.4.13 Development workflow
+#### Execute a skill
 
 ```bash
-# Dev mode (hot reload + API proxy)
-cd web && npm install && npm run dev   # Vite dev server on :5173
-macc web                                # Backend on :3450
-
-# Production mode (embedded assets)
-cd web && npm run build
-macc web --assets embedded              # Single binary serves everything
+macc run <skill-id> [--tool <id>] [--task-id <id>] [--scope <glob>] [--dry-run] [--yes] [--json]
 ```
 
-### 3.5 Operational runbook (reference)
-For production-like usage, the recommended sequence is:
-1) blank machine bootstrap,
-2) AI tool installation + health checks,
-3) project initialization and configuration,
-4) coordinator full-cycle execution,
-5) deterministic failure recovery.
+`--dry-run` previews the skill execution plan without running it. Skills with `risk: dangerous` require explicit `--yes`.
 
-#### 3.5.1 Blank machine bootstrap
-- Install system dependencies (`git`, `curl`, `jq`, build toolchain).
-- Install MACC via `./scripts/install.sh --release` or:
-  - `curl -sSL https://raw.githubusercontent.com/Brand201/macc/master/scripts/install.sh | bash -s -- --release`
-- Verify binary in PATH with `macc --version`.
+### 5.7 PRD generation & audit
 
-#### 3.5.2 Tool installation and validation
-- Run `macc tui`, open `Tools`, install missing tools via install action.
-- Before install, users must confirm they already have account/API credentials.
-- After install, run login/API-key setup through the tool's own command flow.
-- Validate with `macc doctor`.
-- Generate/update tool-specific context files with prompts sent to the selected AI tool (the tool edits files directly):
-  - CLI: `macc context [--tool <tool_id>]`
-  - TUI: `Tools` screen, press `f` on a selected tool.
+The `macc prd` group manages the full PRD lifecycle. The internal generation tool is always `macc-prd-planner`; generated files land in `.macc/generated/prd/macc-prd-planner/`.
 
-#### 3.5.3 Project init
-- In target repo: `macc init`, then `macc tui`.
-- Configure tools + automation/coordinator settings (reference branch, dispatch/parallel limits, timeout/staleness policy).
-- Persist and materialize with `macc apply`.
+| Command | Description |
+|---|---|
+| `macc prd generate --from <brief.md>` | Generate a new PRD from a brief file |
+| `macc prd generate --from <brief.md> --update <prd.json>` | Update an existing PRD from a brief |
+| `macc prd generate --from <brief.md> --dry-run` | Preview the generation prompt without invoking the tool |
+| `macc prd generate --from <brief.md> --promote` | Generate and immediately promote to `prd.json` |
+| `macc prd audit [--prd prd.json] [--tool <id>]` | Enrich PRD from commit history; prints prompt when `--tool` is omitted |
+| `macc prd audit --dry-run` | Preview the audit prompt without invoking a tool |
+| `macc prd promote <source.json> [--dest prd.json] [-y]` | Promote a generated PRD to the active `prd.json` |
+| `macc prd validate <prd.json>` | Validate PRD structure |
+| `macc prd runs [--json]` | List all generation runs |
+| `macc prd show-run <run-id>` | Show details for a specific generation run |
 
-#### 3.5.4 Coordinator execution
-- Start full cycle with `macc coordinator`.
-- Monitor with `macc coordinator status`.
-- Logs must be consumed from:
-  - `.macc/log/coordinator/`
-  - `.macc/log/performer/`
+**Model flags** (available on `generate` and `audit`):
 
-#### 3.5.4.1 Coordinator mechanism (end-to-end diagram)
+| Flag | Description |
+|---|---|
+| `--model-routing auto\|manual` | Routing mode (default: auto) |
+| `--model-tier mini\|standard\|heavy` | Override tier (auto mode only) |
+| `--model <id>` | Explicit model (manual mode only) |
+| `--instructions <text>` | Inline instructions appended to the prompt |
+| `--instructions-file <path>` | File whose content is appended to the prompt |
 
-```mermaid
-flowchart TD
-    A["macc coordinator"] --> B["TUI Coordinator Live + run loop"]
-    B --> C["Load config + PRD + registry (SQLite source of truth)"]
-    C --> D["Select ready tasks (priority/dependencies/exclusive_resources)"]
-    D --> E{"Reusable clean worktree available?"}
-    E -- Yes --> F["Reuse worktree slot"]
-    E -- No --> G["Create new worktree slot (<= Max Parallel)"]
-    F --> H["Ensure branch merged guard + checkout base + create new task branch"]
-    G --> H
-    H --> I["Write worktree.prd.json + sync context files + tool.json"]
-    I --> J["Spawn performer (phase=dev)"]
-    J --> K["Stream events (heartbeat/progress/phase_result/commit_created)"]
-    K --> L["Advance FSM: dev -> review -> fix (optional) -> merge"]
-    L --> M{"Local merge success?"}
-    M -- Yes --> N["Task -> merged"]
-    M -- No --> O["AI merge-fix policy"]
-    O --> P{"Still failing?"}
-    P -- Yes --> Q["Pause coordinator (blocking) + wait resume signal"]
-    P -- No --> N
-    N --> R["Best-effort branch cleanup (warning if skipped/deferred)"]
-    R --> S["Maintenance queue retry for deferred cleanup"]
-    S --> T{"No todo and no active?"}
-    T -- No --> D
-    T -- Yes --> U["Run complete"]
+### 5.8 Coordinator
+
+The coordinator orchestrates autonomous task execution. It reads `prd.json`, claims worktrees, spawns performers, and manages the full `todo → claimed → in_progress → testing → reviewing → merged` lifecycle.
+
+```bash
+macc coordinator [command] [flags]
 ```
 
-```mermaid
-sequenceDiagram
-    participant U as User/TUI
-    participant C as Coordinator
-    participant W as Worktree
-    participant P as Performer
-    participant R as Reviewer
-    participant G as Git
+Default command is `run`. The coordinator starts, runs until the queue is exhausted or a limit is reached, then exits. It also opens a client (TUI by default, web if `--client web`, or none with `--no-client`).
 
-    U->>C: Start run
-    C->>C: Select ready task
-    C->>W: Reuse/create slot + create task branch from base
-    C->>W: Write worktree.prd.json + sync context files
-    C->>P: Launch dev phase
-    P-->>C: heartbeat/progress
-    P-->>C: phase_result(done) + commit_created
-    C->>R: Launch review phase on same worktree branch
-    R-->>C: review_done (OK / changes requested)
-    alt changes requested
-        C->>P: Launch fix phase
-        P-->>C: phase_result(done)
-    end
-    C->>G: Merge task branch into base
-    alt merge conflict
-        C->>G: AI merge-fix attempt
-        alt still failing
-            C-->>U: Pause (blocking) + wait resume
-        else resolved
-            C->>C: Continue
-        end
-    else merge success
-        C->>G: Branch cleanup (best effort)
-        C->>C: Queue deferred cleanup for maintenance retry
-    end
+#### Coordinator commands
+
+| Command | Description |
+|---|---|
+| `run` | Start orchestration (default) |
+| `stop` | Request coordinator stop |
+| `dispatch` | Manually dispatch one task |
+| `advance` | Advance coordinator state machine one step |
+| `resume` | Resume from a paused state |
+| `sync` | Sync worktree state with git |
+| `sync-prd` | Reconcile `prd.json` against commit history (marks merged tasks) |
+| `status` | Print coordinator status |
+| `reconcile` | Run coordinator reconciliation loop |
+| `unlock` | Release locked resources |
+| `cleanup` | Clean up dead workers and stale state |
+| `retry-phase` | Retry a failed phase for a task |
+| `cutover-gate` | Evaluate the cutover gate condition |
+| `sessions` | Manage session resumption state |
+| `validate-transition` | Validate a workflow state transition |
+| `storage-import` | Import storage snapshot |
+| `storage-export` | Export storage snapshot |
+| `events-export` | Export coordinator events |
+| `storage-verify` | Verify storage consistency |
+| `storage-sync` | Sync SQLite ↔ JSON storage |
+| `select-ready-task` | Select the next ready task to dispatch |
+| `state-apply-transition` | Apply a workflow state transition |
+| `state-set-runtime` | Set runtime metadata for a task |
+
+#### Key coordinator flags
+
+| Flag | Description |
+|---|---|
+| `--no-client` / `--client none` | Run headless (no TUI or web) |
+| `--client web` | Open web client after starting |
+| `--client tui` | Open TUI client (default) |
+| `--supervisor` | Start supervisor watchdog before coordinator |
+| `--max-parallel <n>` | Override global parallel cap |
+| `--max-dispatch <n>` | Stop after dispatching N tasks |
+| `--timeout-seconds <n>` | Per-task timeout |
+| `--tool-priority <csv>` | Comma-separated tool priority order |
+| `--preset conservative\|balanced\|throughput` | Apply a named concurrency preset |
+| `--model-tier mini\|standard\|heavy` | Force a global tier for all tasks |
+| `--testing <mode>` | Override testing phase mode |
+| `--review <mode>` | Override review phase mode |
+| `--disable-testing` | Disable the testing phase entirely |
+| `--disable-review` | Disable the review phase entirely |
+| `--storage-mode json\|dual-write\|sqlite` | Override storage backend |
+| `--prd <path>` | Override PRD file path |
+| `--reference-branch <branch>` | Default base branch |
+| `--drain` | Disable new dispatch; let active tasks finish |
+| `--preflight-only` | Run preflight checks and exit |
+| `--allow-dirty-reference` | Start even if reference branch is dirty |
+| `--merge-ai-fix` | Enable AI-assisted merge conflict resolution |
+
+#### Task workflow states
+
+```
+todo → queued → claimed → in_progress → testing → reviewing → pr_open → changes_requested → merged
+                                                              ↘ failed / blocked
 ```
 
-#### 3.5.5 Failure recovery
-Standard recovery sequence:
-1) `macc coordinator status`
-2) `macc coordinator sync-prd` (reconcile tasks from commit history)
-3) `macc coordinator reconcile`
-4) `macc coordinator unlock`
-5) `macc coordinator cleanup`
-6) `macc coordinator` (resume loop)
+States `claimed`, `in_progress`, `testing`, `reviewing`, `pr_open`, `changes_requested`, and `queued` are counted as "active" for parallelism.
 
-If a task is blocked with `dispatch_retry_limit_exceeded`, treat it as a dispatch preparation failure cap (`max_dispatch_retries`) and start recovery with:
-- `macc coordinator unlock`
-Then rerun the standard sequence above after fixing the underlying sanitize/dispatch cause.
+### 5.9 Supervisor
 
-Post-run PRD enrichment (optional):
-- `macc coordinator audit-prd -- --tool <tool_id>` (AI-powered update of prd.json notes)
+The supervisor is a watchdog process that monitors the coordinator and restarts it if it crashes.
 
-Stop flow:
-- graceful stop: `macc coordinator stop --graceful`
-- full stop + cleanup: `macc coordinator stop --remove-worktrees --remove-branches`
+```bash
+macc supervisor start [--daemon] [--attach] [--coordinator-pid <pid>]
+macc supervisor stop
+macc supervisor status
+macc supervisor report
+```
 
-Project reset:
-- `macc clear` (confirmation required, worktree cleanup executed first, only MACC-managed paths removed).
+The coordinator can automatically start the supervisor with `macc coordinator --supervisor`.
 
-##### 3.5.5.1 Error codes + auto-retry (v1)
-MACC records structured error codes for failures to distinguish origin and apply consistent remediation.
+### 5.10 Status & observability
 
-Error code schema (v1):
-- `E100` Runner/Tool
-  - `E101` Runner exited non-zero
-  - `E102` Tool runner not found / not executable
-  - `E103` Tool output malformed / parsing failed
-  - `E104` Performer produced partial changes before failure (conditional retry; prefer salvage on same worktree)
-  - `E105` Performer completed output but exited non-zero (conditional retry after completion-state verification)
-- `E200` Capability/Contract
-  - `E201` Requested unavailable tool
-  - `E202` Capability guard triggered
-- `E300` Worktree/FS
-  - `E301` Worktree missing
-  - `E302` PRD missing
-  - `E303` tool.json missing
-  - `E304` Worktree branch conflict (conditional retry)
-  - `E305` Worktree checkout failure (conditional retry)
-  - `E306` Worktree reset failure (conditional retry)
-- `E400` Coordinator/Registry
-  - `E401` Task registry read/write failure
-  - `E402` Task state transition invalid
-  - `E403` Task state conflict (retryable after reconcile)
-- `E500` Merge
-  - `E501` Merge conflict
-  - `E502` Merge worker failed
-  - `E503` Merge blocked by policy (**not retryable**)
-  - `E504` Post-merge validation failed (conditional retry)
-- `E600` Rate-limit / Provider throttle
-  - `E601` Rate-limited / Transient 429 or 529 (overloaded). Retryable with backoff.
-  - `E602` Quota exhausted / Hard limit (monthly cap, budget). **Not retryable** — requires operator action.
-  - `E603` Session conflict (session ID already in use). Retryable with a new session.
-- `E900` Unknown/Unexpected
-  - `E901` Unknown fatal error
+```bash
+macc status                       # human-readable snapshot
+macc status --json                # full RuntimeSnapshot as JSON
+macc status --watch               # open TUI observer (read-only)
+macc status --watch --control     # observer with operator actions
+macc status --verbose             # per-worker details
+macc status --failed              # show only failed tasks
+macc status --task <id>           # focus on a specific task
+macc watch                        # alias for --watch
+```
 
-Auto-retry controls (coordinator settings):
-- `error_code_retry_list`: comma-separated list of error codes eligible for auto-retry.
-- `error_code_retry_max`: max retries per task for eligible codes.
-- `max_dispatch_retries`: max dispatch preparation retries before coordinator blocks task with `dispatch_retry_limit_exceeded`.
+`macc status --json` emits the same `RuntimeSnapshot` model that `GET /api/v1/snapshot` serves. Fields:
 
-Default policy:
-- `error_code_retry_list=E101,E102,E103,E301,E302,E303,E601,E603`
-- `error_code_retry_max=2`
+- `project`: name, root, config_version
+- `coordinator`: running, paused, pause_reason, run_id, epoch
+- `queue`: todo, ready, claimed, in_progress, testing, reviewing, changes_requested, blocked, merged, failed, total
+- `workers`: id, worktree_path, tool, task_id, branch, phase, runtime_status, last_heartbeat, retry_count
+- `throttled_tools`: tool, reason, error_code, retryable, backoff_seconds
+- `recent_events`: ts, event_type, task_id, phase, status, message
+- `git`: current_branch, clean, worktrees_count
+- `diagnostics`: issues_count, warnings_count, critical_count
 
-Note: E602 is intentionally excluded from the default retry list. Quota exhaustion is a hard limit requiring operator action (e.g., wait for quota reset or switch to another tool). Retrying E602 immediately would waste quota.
+#### Task timeline and diff
 
-##### 3.5.5.2 Coordinator Recovery & Reliability
+```bash
+macc explain <task-id>            # chronological event timeline
+macc explain <task-id> --logs     # include raw performer logs
+macc explain <task-id> --compact  # condensed, hide verbose ticks
+macc explain <task-id> --since 1h # filter to last hour
+macc explain <task-id> --json
 
-Coordinator recovery is intentionally staged to minimize lost work and avoid duplicate retries:
+macc diff <task-id>               # git diff in the task's active worktree
+macc diff <task-id> --stat        # diff --stat summary
+macc diff <task-id> --name-only   # changed file names only
+macc diff <task-id> --base <branch> # override base branch
+```
 
-- **Salvage before retry** (`salvage_before_retry=true`): on failed tasks with preserved worktree metadata, coordinator attempts a salvage merge before requeueing.
-- **Retry on same worktree** (`retry_on_same_worktree=true`): retries prefer the previous slot when healthy, preserving local state and reducing cold-start cost.
-- **Merge-gate on dispatch** (`merge_gate_on_dispatch=true`): before dispatching a retry, coordinator checks if the retry branch can already merge into base; if yes, task transitions to `merged` without rerunning performer.
-- **Abandonment tagging** (`tag_abandoned_branches=true`): if a branch with commits must be abandoned/reset, coordinator creates `macc/abandoned/<task-id>-<YYYYMMDD-HHMMSS>` before cleanup.
-- **Sync unmerged branches** (`sync_unmerged_branches=true`): sync scans task branches with recoverable commits and attempts merge/reconciliation for tasks still in `todo`/`error`.
+### 5.11 Worktrees
 
-Recovery limits:
+```bash
+macc worktree create <slug> --tool <id> [--count 2] [--base main] [--scope "..."] [--feature "..."]
+macc worktree list
+macc worktree status
+macc worktree open <id> [--editor code] [--terminal]
+macc worktree apply <id> | --all
+macc worktree doctor <id>
+macc worktree run <id>            # run performer.sh inside the worktree
+macc worktree exec <id> -- <cmd>  # execute a command inside the worktree
+macc worktree remove <id> | --all [--force] [--remove-branch]
+macc worktree prune               # git worktree prune
+```
 
-- `max_salvage_attempts_per_task` bounds salvage retries per task.
-- `salvage_merge_timeout_seconds` caps salvage merge runtime.
+Worktree metadata is written to `.macc/worktree.json` in each worktree.
 
-##### 3.5.5.3 Session Optimization
+### 5.12 Logs
 
-Session-aware behavior reduces token waste and preserves conversation continuity:
+```bash
+macc logs tail [--component all|coordinator|performer] [--worktree <id>] [--task <id>] [-n 120] [--follow]
+macc logs list [--component all|coordinator|performer] [--since 24h]
+```
 
-- **Session-aware dispatch**: dispatch prefers reuse paths that can continue with existing tool session context instead of always cold-starting.
-- **TTL-aware scheduling**: recently active slots are preferred to maximize warm-session reuse windows.
-- **Retry session preservation**: when a task fails with retained worktree state, `last_session_id` and `last_session_tool` are preserved and reused for the next attempt when compatible.
+Coordinator logs land in `.macc/log/coordinator/`. Performer logs land in `.macc/log/performers/`.
 
-Session optimization config:
+### 5.13 Save, restore & backups
 
-- `session_cache_ttl_seconds` (default `300`): warm-session TTL used by dispatch preference scoring.
+#### Save bundles
 
-##### 3.5.5.4 Canonical error model
+```bash
+macc save [name] [--overwrite] [--description "..."] [--only <sections>]
+macc save [name] --include-logs [--log-max-size 50MB] [--log-since 7d] [--redact-logs]
+macc save --dry-run               # preview without writing
+macc save list [--matching <pattern>]
+macc save show <name>
+macc save delete <name> [-y]
+```
 
-MACC uses a three-layer canonical error model to normalize provider-specific errors into a uniform representation consumed by the coordinator, TUI, and Web API.
+Saves are stored in `.macc/saves/<name>/`.
 
-**Three layers:**
-1. **Transport** — network/TLS failures, DNS resolution errors (→ `CanonicalClass::Network`)
-2. **Provider API** — HTTP status codes and provider-specific JSON error bodies (e.g., Claude 529, OpenAI 429, Gemini RESOURCE_EXHAUSTED)
-3. **Local tool** — exit-code interpretation, stdout/stderr parsing, output malformation
+#### Restore
 
-**CanonicalClass enum** (defined in `core/src/coordinator/error_normalizer.rs`):
+```bash
+macc restore [name]               # restore a named save bundle
+macc restore --latest             # restore the most recent backup or save
+macc restore --backup <timestamp> # restore a specific backup set
+macc restore --dry-run            # preview without writing
+macc restore --config-only        # restore config only
+macc restore --apply              # run macc apply after restore
+macc restore -y                   # skip confirmation
+```
 
-| Class | E-code | Retryable | Description |
-|---|---|---|---|
-| `RateLimit` | E601 | yes | Transient rate-limit (HTTP 429) |
-| `Overloaded` | E601 | yes | Provider overloaded (HTTP 529, 503) |
-| `QuotaExhausted` | E602 | no | Hard quota (monthly cap, budget) |
-| `SessionConflict` | E603 | yes | Session ID collision/reuse |
-| `Auth` | E201 | no | Invalid or expired API key |
-| `Billing` | E201 | no | Account billing issue |
-| `PolicyViolation` | E201 | no | Content/safety policy violation |
-| `Timeout` | E101 | yes | Request or connection timeout |
-| `Network` | E101 | yes | DNS, TLS, or connection failure |
-| `ToolNotFound` | E102 | no | Tool CLI binary not found |
-| `OutputMalformed` | E103 | no | Tool output could not be parsed |
-| `Internal` | E901 | yes | Provider internal error (HTTP 500) |
-| `Unknown` | E901 | no | Cannot classify the error |
+#### Backups (safety backups created by apply/clear)
 
-**Per-adapter normalizers** (in `core/src/coordinator/normalizers.rs`):
-- `ClaudeErrorNormalizer` — matches Claude JSON error bodies (`overloaded_error` → E601, `insufficient_quota` → E602) and `req_xxx` request IDs.
-- `CodexErrorNormalizer` — matches OpenAI HTTP status + message patterns (`insufficient_quota` → E602, standard 429 → E601).
-- `GeminiErrorNormalizer` — matches gRPC status codes (`RESOURCE_EXHAUSTED` → E601) and quota patterns (E602).
+```bash
+macc backups list [--user]
+macc backups open [id] [--latest] [--user] [--editor <cmd>]
+```
 
-**ToolError struct** carries: `provider`, `canonical_class`, `retryable`, `retry_after_seconds`, `user_action_required`, `raw_message`, `error_code`, `request_id`, `attempt`, `operation`.
+Backups are stored in `.macc/backups/<timestamp>/`.
 
-The coordinator calls the appropriate normalizer based on the task's assigned `tool` field. If no normalizer matches, the error falls through to generic E101 classification.
+### 5.14 Clear
 
----
+```bash
+macc clear [--save <name>] [--force] [--dry-run] [--no-save-prompt]
+```
 
-## 4. Coding standards (source of truth)
+Removes MACC-managed project files. Prompts to save unsaved state unless `--no-save-prompt` is set. Non-root worktrees are removed first.
 
-### 4.1 Global file
-- `config/standards.md` (or `config/coding-standards.md`)
-- Applied to all projects, then **rendered** into each tool format (e.g., Markdown system prompts, rule files, etc.).
+### 5.15 Failure diagnostics
 
-### 4.2 Standards (table)
-| Rule | Description |
-|------|-------------|
-| **Package Manager** | Always `pnpm`, never npm or yarn |
-| **Language** | English for code, commits, docs |
-| **TypeScript** | Strict mode, avoid `any` (use `unknown` or generics) |
-| **Imports** | Absolute imports with `@/` alias, no relative paths |
-| **Code style** | Functional/declarative, no classes |
-| **Naming** | `kebab-case` folders, `camelCase` functions, `PascalCase` components |
-| **React/Next.js** | Prefer Server Components, minimize `'use client'` |
-| **State Management** | Prefer Zustand over React Context for global state |
-| **Data Fetching** | Prefer Server Actions over API Routes |
-| **UI** | Tailwind CSS + shadcn/ui |
-| **Performance** | Optimize Web Vitals, WebP images, lazy loading |
-| **No Barrel Imports** | Import directly, not via index |
-| **No Waterfalls** | Use `Promise.all()`; avoid sequential awaits |
-| **Deduplication** | Use `React.cache()` for repeated server-render calls |
+```bash
+macc failure list
+macc failure show <task-id>
+macc failure retry <task-id> [--tool <id>]
+macc failure salvage <task-id>
+macc failure restore <task-id>
+macc failure inspect-diff <task-id>
+macc failure abandon <task-id>
+```
 
----
+### 5.16 Process ownership
 
-## 5. Per-tool configuration (generation “adapters”)
+MACC uses a project-wide control lease to prevent multiple clients from issuing conflicting mutations simultaneously.
 
-### 5.1 MACC source of truth
-MACC maintains a canonical configuration (e.g., `.macc/macc.yaml`) including:
-- enabled tools,
-- standards,
-- selected skills,
-- selected agents,
-- selected MCP servers,
-- remote sources (Git/HTTP) for skills and MCP packages,
-- merge policies (user-level), worktree scopes, etc.
+```bash
+macc process list
+macc process ownership --kind project --pid 0
+macc process claim --kind project --pid 0
+macc process release --kind project --pid 0 --client-id <id>
+macc process release-stale           # force-clear dead owner without ownership
+macc process takeover request --kind project --pid 0
+macc process takeover accept --kind project --pid 0 --owner-client-id <id> --request-id <id>
+macc process takeover reject --kind project --pid 0 --owner-client-id <id> --request-id <id>
+```
 
-### 5.2 Generated project files
-Each tool adapter defines which files it generates. For example:
-- System prompt files (Markdown)
-- Configuration files (JSON, TOML, YAML)
-- Skill files
-- Agent definitions
-- MCP configurations
-- Ignore files
+`release-stale` is the recovery command when a client (TUI, browser tab, etc.) died without releasing ownership. It bypasses the ownership check and prints the cleared client ID.
 
----
+### 5.17 Lock
 
-## 6. Config build & install logic
+```bash
+macc lock generate     # write / update macc.lock.yaml
+macc lock check        # verify against lock file (exits non-zero on drift)
+macc lock diff         # show drift
+macc lock explain      # human-readable pin explanations
+```
 
-### 6.1 `macc apply` pipeline
-1) Read `.macc/macc.yaml` + presets
-2) Resolve selection (tools, skills, agents, MCP, plugins)
-3) **Materialize remote artifacts** (skills/MCP packages) into `.macc/cache/` (Git/HTTP) (see §8.5) using the “Fetch Unit + Selection” model (download once, install only selected subpaths)
-4) Generate per-tool files and install artifacts (adapters + installer)
-5) Write into the project **with backups** (safe mode, atomic writes)
-6) Optional: merge user-level configs (with explicit consent)
+The lock file records tool versions, resolved skill references, and config hashes for reproducible environments.
 
-### 6.2 Backups & consent
-Any changes to user-level files must:
-- create a **timestamped backup**,
-- show a **diff / summary** when possible,
-- prompt for confirmation (TUI) before writing.
+### 5.18 Settings
 
-### 6.3 Project cleanup (`macc clear`)
-`macc clear` is a guarded cleanup command:
-1) prompt for confirmation,
-2) run worktree cleanup equivalent to `macc worktree remove --all --force`,
-3) remove MACC-managed files from the current project directory.
+```bash
+macc settings show [--advanced] [--admin]
+macc settings preset <conservative|balanced|throughput>
+```
 
-Rules:
-- Only paths tracked/managed by MACC are removed.
-- Pre-existing user/project files are preserved.
-- Typical removals include generated tool files and MACC project artifacts under `.macc/` (except anything not managed by MACC).
-- Worktrees are cleaned first to avoid orphaned branches/process artifacts during project cleanup.
+Presets adjust `max_parallel`, `max_parallel_per_tool`, `timeout_seconds`, and phase modes for common use cases.
 
-Use cases:
-- Reset a project to pre-MACC state after experimentation.
-- Re-run `macc init`/`macc apply` from a clean project-level baseline.
+### 5.19 Miscellaneous
+
+| Command | Description |
+|---|---|
+| `macc doctor [--fix] [--json] [--coordinator]` | Run diagnostics; `--fix` applies safe auto-fixes |
+| `macc doctor --git-name <name> --git-email <email> --fix` | Fix git identity |
+| `macc trust` | Display project trust and safety parameters |
+| `macc migrate [--apply]` | Migrate legacy config to the current format |
+| `macc context [--tool <id>] [--from <files>] [--dry-run]` | Refresh tool context files |
+
+### 5.20 TUI & web UI
+
+```bash
+macc                              # open TUI (default when no command given)
+macc tui                          # explicit TUI command
+
+macc web                          # serve web UI on http://127.0.0.1:3450
+macc web --port 3451              # custom port
+macc web --host 0.0.0.0           # expose on all interfaces (LAN access)
+macc web --daemon                 # run as background daemon (survives SSH close)
+```
+
+The web server binds to `127.0.0.1` by default. Use `macc web --daemon` to run it as a background daemon independent of the terminal session.
 
 ---
 
-## 7. “BMAD Lite” workflow
+## 6. Coordinator runtime
 
-### 7.1 Chain
-- `/brainstorm` → `/prd` → `/tech-stack` → `/implementation-plan` → `/implement`
+### Storage backends
 
-### 7.2 Artifacts
-In a versioned folder, e.g.:
-- `memory-bank/` (global)
-- `memory-bank/features/<feature>/...` (per feature)
+The coordinator uses SQLite as its primary storage (`.macc/automation/task/coordinator.sqlite`) with optional JSON mirror:
 
----
+| Mode | Description |
+|---|---|
+| `json` | Legacy JSON-only storage |
+| `dual-write` | Write to both SQLite and JSON simultaneously |
+| `sqlite` | SQLite primary; JSON mirror on a debounced schedule |
 
-## 8. Skills (multi-tool)
+Override with `--storage-mode <mode>`.
 
-### 8.1 Principles
-- MACC provides a **catalog** of skills.
-- Skills must be installable **per tool**.
-- Skills support **triggers** for auto-discovery (when the tool supports it).
-- Support a `--feature=<name>` flag to write into `memory-bank/features/<name>/`.
+### Pause file
 
-### 8.2 Development skills
-| Skill | Triggers | What it does |
-|-------|----------|--------------|
-| `/validate` | “validate”, “run tests” | `pnpm lint` → `pnpm build` → `pnpm test:e2e` |
-| `/implement` | “implement”, “let’s code”, “develop” | Read docs → plan → code → validate → review → commit |
-| `/next-task` | “what’s next”, “next task” | Reads the plan and identifies the next task |
-| `/refresh-context` | “where are we”, “refresh context” | Re-reads project docs (`standards.md`, `progress.md`) |
-| `/update-progress` | “update progress” | Updates `progress.md` |
-| `/git-add-commit-push` | “commit”, “push” | Stage, message, push |
-| `/validate-update-push` | end of session | validate → update-progress → commit → push |
+When the coordinator pauses (on error, merge conflict, or `stop` command), it writes `.macc/automation/task/coordinator.pause.json`. This file is automatically cleared when:
+- A new coordinator run starts.
+- `macc coordinator resume` is called.
+- The coordinator is running (the status endpoint ignores the pause file when a live PID is active).
 
-### 8.3 Utility skills
-| Skill | Triggers | What it does |
-|-------|----------|--------------|
-| `/db-check` | After DB changes | Checks Supabase advisors (perf/security) |
-| `/security-check` | Before commit | Red-team style security audit |
-| `/seo-check` | Page work | SEO + accessibility + Web Vitals audit |
-| `/permissions-allow` | Setup | Applies standard permissions |
-| `/design-principles` | UI work | Minimal design system (Linear/Notion/Stripe-like) |
-| `/validate-quick` | Before commits | lint + build (fast) |
-| `/sync-config` | Manual | Sync local config → repo |
+### Phase configuration
 
-### 8.4 Auto-discovery
-- Some skills should be auto-suggested/executed based on context (DB, SEO, security) when the tool supports it.
-- Otherwise: clear documentation for “when to use it”.
+Phases run after the main execution phase:
 
-### 8.5 Remote Skills and MCP sources (NEW)
-MACC must support selecting skills and MCP servers that live in **remote repositories or servers**.
-When a user selects a skill or MCP entry for a tool, MACC must be able to:
-- fetch it (Git or HTTP),
-- verify it (best-effort),
-- install it into the correct tool locations during `macc apply`.
+| Phase | Mode options | Description |
+|---|---|---|
+| `testing` | `disabled`, `required`, `risk_based`, `manual` | Run tests against the task's output |
+| `review` | `disabled`, `required`, `risk_based`, `manual` | AI-driven code review |
 
-#### 8.5.1 Supported source kinds
-A skill/MCP reference can come from:
-- **Git** (recommended): a repo URL + pinned `rev` (commit SHA or tag)
-- **HTTP(S)**: zip/tar/single file downloads (checksum strongly recommended)
-- **Local** (optional): local folder path (useful for development)
+`coordinator_tool` selects which adapter handles review/merge-fix phases. `max_review_cycles` limits the review-fix loop.
 
-**Fetch Unit + Selection model**
-- **Fetch Unit**: the thing you download once (git repo at ref, http archive/file). Materialized into `.macc/cache/<key>/...`.
-- **Selection**: per skill/MCP entry, defines the subpath inside the fetch unit to install. Multiple selections can share one fetch unit (download once, install many).
+### Coordinator events
 
-**Catalogs (versioned)**
-- Default catalogs live in `catalog/skills.catalog.json` and `catalog/mcp.catalog.json` at repo root; `macc init` seeds them if missing.
-- Users can add/modify entries via CLI; additional catalogs can be layered later (TUI/remote index planned).
+Events are appended to `.macc/log/coordinator/events.jsonl`. The web SSE stream (`GET /api/v1/events`) streams them in real time.
 
-#### 8.5.2 Canonical config additions (conceptual)
-The canonical config must be able to represent an artifact reference:
-- `id` (stable identifier)
-- `kind`: `git | http | local`
-- `url` (git or http)
-- `rev` (git only; prefer pinned commit SHA for reproducibility)
-- `subpath` (optional; points inside repo; used at install time, not in the cache key)
-- `checksum` (http only; recommended, e.g., `sha256:...`)
+### Background operation
 
-#### 8.5.3 Package manifest requirement
-Remote content must be **data-only packages** (no scripts) and include a manifest that tells MACC what to install.
-Required: `macc.package.json` at the package root.
-
-Minimal manifest fields:
-- `type`: `skill` or `mcp`
-- `id`, `version`
-- `targets`: mapping of tool → list of file installs (src → dest)
-
-Example (skill):
-- install `tool_a/*` → `.tool_a/skills/<id>/...`
-- install `tool_b/*` → `.tool_b/skills/<id>/...`
-
-Example (mcp):
-- provide a JSON object describing the MCP server and how to merge into the project or user scope (with consent).
-
-#### 8.5.4 Cache and reproducibility
-- MACC stores fetched artifacts under `.macc/cache/` (cache key ignores subpaths; one fetch unit can serve multiple selected subpaths).
-- `.macc/cache/` must be added to `.gitignore`.
-- Git sources should be pinned to commits/tags; HTTP sources should provide a checksum.
-- `macc apply --offline` (v2+) should reuse cache if present.
-
-#### 8.5.5 Security boundaries
-- No post-install scripts. No executing downloaded code.
-- Never write real secrets: MCP env values must be placeholders like `${ENV_VAR}`.
-- Secret scanning should run on generated outputs prior to writing.
-
-#### 8.5.6 CLI/TUI behavior
-- TUI: allow “Add by URL” for skills/MCP entries.
-- CLI (proposed, v1+):
-  - `macc catalog add-source --kind git --url <repo> --rev <tag|sha>`
-  - `macc add skill --tool <tool> --id <id> --url <...> [--rev ...]`
-  - `macc add mcp --tool <...> --id <id> --url <...> [--rev ...]`
-  - These commands update `.macc/macc.yaml` and then `macc apply` installs.
+When launched with `--no-client`, the coordinator uses `setsid()` to detach from the terminal. All subprocesses (performers, merge workers) run in their own process groups, surviving SSH session close. Use `macc status` or `macc web` to observe a running headless coordinator.
 
 ---
 
-## 9. Custom agents
+## 7. Model routing
 
-### 9.1 BMAD Lite agents (product discovery)
-| Agent | Model | Expertise | Used by |
-|-------|-------|-----------|---------|
-| `analyst` | inherit | Discovery, market analysis, ideation | `/brainstorm` |
-| `product-manager` | inherit | Needs, user stories, prioritization | `/prd` |
-| `architect` | heavy | Tech decisions, system design, planning | `/tech-stack`, `/implementation-plan` |
+The coordinator automatically selects a model tier and reasoning depth for each task based on:
 
-### 9.2 Development agents
-| Agent | Model | Expertise | Triggered when |
-|-------|-------|-----------|----------------|
-| `code-reviewer` | inherit | Quality, security, best practices | after changes, during `/implement` |
-| `nextjs-developer` | inherit | Next.js 14+, RSC, Server Actions | Next.js work |
-| `supabase-developer` | inherit | Postgres, Auth, RLS | DB/auth |
-| `prompt-engineer` | inherit | Prompts, context extraction | prompts & content |
-| `seo-specialist` | inherit | SEO, accessibility, Web Vitals | pages/content |
+1. **Phase defaults** — exploration/summarization → mini/light; architecture/deep_refactor → heavy/deep; default → standard/standard.
+2. **`routing_hints`** in the PRD task's `extra` field — override phase defaults.
+3. **Global `--model-tier`** flag — overrides everything in auto mode.
+4. **Manual mode** — no automatic selection; uses the tool's configured default model.
 
-### 9.3 Rules
-- `model: inherit` by default, with exceptions (e.g., `architect`).
-- MACC must render agents in the tool’s format.
-- For tools that do not support “agent files”, MACC must provide a fallback:
-  - dedicated skills,
-  - or instruction sections inside the system prompt.
+### Tiers and depths
 
----
+| Tier | `ModelTier` | Typical use |
+|---|---|---|
+| `mini` | Fast, cheap | Summarization, exploration, simple transforms |
+| `standard` | Balanced | Most development tasks (default) |
+| `heavy` | Full power | Architecture, refactors, high-risk tasks |
 
-## 10. Plugins (user-level)
+| Depth | `ReasoningDepth` | Description |
+|---|---|---|
+| `light` | Low reasoning budget | Fast, routine operations |
+| `standard` | Normal reasoning | Default |
+| `deep` | Extended reasoning | Complex multi-file changes |
 
-### 10.1 Principle
-- Plugins are enabled **only** at user-level.
-- MACC must:
-  - enable/disable plugins,
-  - show their impact (capabilities),
-  - handle conflicts/versions (at minimum: warnings).
+### `routing_hints` in PRD tasks
 
-### 10.2 Proposed plugins
-| Plugin | What it does |
-|--------|--------------|
-| `mgrep` | Semantic search via embeddings |
-| `frontend-design` | Generates distinctive production-ready UI |
-| `code-review` | Automated code review + checks |
-| `code-simplifier` | Simplifies and refines code |
-| `typescript-lsp` | TS language server integration |
-| `security-guidance` | Security best practices + detection |
-| `context7` | Up-to-date library docs |
-
----
-
-## 11. MCP servers (optional)
-
-### 11.1 Principle
-MCP servers extend capabilities via external services and are **merged automatically** during install (existing servers preserved).
-- MACC maintains templates **without secrets**.
-- Installation/activation can:
-  - write a project config (`.mcp.json`) if supported,
-  - or merge user-level config (with backup + consent).
-- API keys are entered **afterwards** (manual), never committed.
-
-### 11.2 Remote distribution
-MCP servers may be provided via remote packages (Git/HTTP) using §8.5. The package manifest must specify:
-- the MCP server definition (command/args/env placeholders),
-- the merge destination (project `.mcp.json` and/or user config in later milestones).
-
----
-
-## 12. Automation scripts
-
-### 12.1 Ralph (autonomous)
-- `scripts/ralph.sh <n>`
-
-**Sequence**:
-1) switch to `ralph` branch (or dedicated worktree)
-2) `/next-task` → `/implement` → `/validate` → `/update-progress` → `/git-add-commit-push`
-3) loop N times (or stop)
-
-**Prereqs**:
-- `memory-bank/` (project docs)
-- `progress.md` for tracking
-
-### 12.2 Coordinator + Performer (worktree orchestration)
-
-MACC automation is split into:
-1) Native Rust coordinator control-plane (primary path): reads PRD, maintains `.macc/automation/task/task_registry.json`, dispatches READY tasks by constraints (`priority`, `dependencies`, `exclusive_resources`, `category`, `id`), supervises performers asynchronously, and tracks transitions.
-2) `coordinator.sh` (thin wrapper): forwards to native Rust coordinator actions.
-3) `performer.sh` (worktree-level executor): runs in a single worktree and delegates to the tool-specific runner from `.macc/tool.json`.
-4) `runners/<tool>.performer.sh`: tool-specific execution strategy.
-
-Observability:
-- Coordinator and performer runtime logs are centralized in `.macc/log/`:
-  - `.macc/log/coordinator/`
-  - `.macc/log/performer/`
-- TUI includes a dedicated **Logs** screen to inspect recent `.md/.log/.txt` files without leaving the interface.
-
-Coordinator settings are persisted in `.macc/macc.yaml` under `automation.coordinator` and can be edited in TUI (Automation screen) or overridden by CLI flags/env.
-
-### 12.4 Session strategy (tool runners)
-
-Tool sessions are managed at project level in:
-- `.macc/state/tool-sessions.json`
-
-Model:
-- Per tool, MACC keeps:
-  - `sessions` mapping (scope key -> `session_id`)
-  - `leases` mapping (`session_id` -> ownership/heartbeat/status)
-- Default scope is **worktree** (`scope: worktree`), so parallel worktrees do not share a session.
-
-Lease/occupancy rules:
-- A session is considered occupied when:
-  - lease status is `active`,
-  - owner worktree is different and still alive,
-  - heartbeat is fresh (TTL-based).
-- If occupied, runner must not reuse it.
-- If stale/missing owner, runner may reclaim it.
-- On runner exit, lease is marked `released` (session mapping remains reusable).
-
-Tool-specific session acquisition:
-- Codex: parse `session id:` from output; resume with configured resume command.
-- Gemini: optional discover command (`--list-sessions`) + resume (`--resume <UUID>`).
-- Claude: generated session IDs (e.g., `uuidgen`) + resume via `--session-id <ID>`.
-
-Important behavior:
-- If no reusable session exists for the tool/scope, create a new one.
-- If all known sessions are occupied, create a new one.
-- Session IDs are reused in serial runs for the same worktree/scope.
-- Worktree pool reuse keeps session continuity because the scope key (worktree path) remains stable.
-- `session_manager.rs` I/O failures now surface as structured errors (no panic path), so operator-visible failures remain diagnosable in coordinator/task error metadata.
-
-### 12.5 Session save / restore
-
-Tool sessions can be saved to user-level storage and restored across coordinator runs, preserving AI tool context continuity.
-
-**Storage location**: `~/.macc/sessions/<project-slug>/<name>.json`
-
-**Commands**:
-- `macc coordinator sessions list` — list all saved session snapshots for the current project.
-- `macc coordinator sessions save [<name>]` — snapshot the current `tool-sessions.json` (active sessions, leases, and archived entries) to user-level storage. If no name is provided, an auto-generated timestamp name is used.
-- `macc coordinator sessions restore <name> [--dry-run]` — merge a saved snapshot back into the current `tool-sessions.json`. Existing entries are preserved (snapshot fills gaps, does not overwrite). Restored leases are reset to `available` status so performers can claim them. `--dry-run` previews the merge without writing.
-- `macc coordinator sessions delete <name>` — remove a saved snapshot.
-
-**Auto-save**: when the coordinator is stopped gracefully (`macc coordinator stop --graceful`), a session snapshot is automatically saved. This is best-effort; failure to save does not block the stop.
-
-**Snapshot format**:
 ```json
 {
-  "saved_at": "<ISO-8601>",
-  "project_root": "<absolute-path>",
-  "name": "<snapshot-name>",
-  "tools": {
-    "<tool_id>": {
-      "sessions": { "<scope-key>": { "session_id": "...", ... } },
-      "leases": { "<session_id>": { "status": "...", ... } },
-      "archived": { "<archive-key>": { ... } }
+  "id": "TASK-001",
+  "extra": {
+    "routing_hints": {
+      "execution_mode": "structural",
+      "risk_level": "high",
+      "context_scope": "cross-cutting"
     }
   }
 }
 ```
 
-**Restore merge rules**:
-- Active sessions: snapshot entries are added only if the scope key does not already exist in the current file.
-- Leases: snapshot entries are added only if the session ID is not already present. Status is reset to `available` and a `restored_at` timestamp is added.
-- Archived entries are not merged (they are informational in the snapshot).
+- `execution_mode: structural` → `heavy` tier
+- `risk_level: high` → `heavy` tier
+- `context_scope: cross-cutting` → `heavy` tier
 
-**Typical workflow**:
-1. Coordinator run completes or is stopped gracefully (auto-save happens).
-2. Worktrees are removed / new run is started.
-3. `macc coordinator sessions restore <name>` injects saved session IDs into the fresh `tool-sessions.json`.
-4. Performers on the new run pick up restored sessions and resume AI tool conversations with prior context.
+### Environment variables injected into performers
 
-### 12.3 Coordinator command
+| Variable | Description |
+|---|---|
+| `MACC_MODEL_TIER` | Resolved tier: `mini`, `standard`, or `heavy` |
+| `MACC_REASONING_DEPTH` | Resolved depth: `light`, `standard`, or `deep` |
+| `MACC_MODEL_ROUTING_MODE` | `auto` or `manual` |
 
-- `macc coordinator` runs full-cycle mode by default (`run`).
-- Full-cycle loop: `sync -> dispatch -> advance -> reconcile -> cleanup` until convergence.
-- `macc coordinator [run|dispatch|advance|resume|sync|sync-prd|audit-prd|status|reconcile|unlock|cleanup|sessions]`
-- `run`, `dispatch`, `advance`, `reconcile`, and `cleanup` are handled natively in Rust.
-- Worktrees are reused as worker slots (not task-coupled names): once a task is merged, the slot is reset to reference, moved to a fresh branch, refreshed for the new task, then relaunched.
-- New worker worktrees are created only when no reusable slot is available; pool size is bounded by `max_parallel`.
-- Coordinator options can override config at runtime:
-  - `--prd`, `--coordinator-tool`
-  - `--tool-priority`, `--max-parallel-per-tool-json`, `--tool-specializations-json`
-  - `--max-dispatch`, `--max-parallel`, `--timeout-seconds`
-  - `--phase-runner-max-attempts`
-  - `--stale-claimed-seconds`, `--stale-in-progress-seconds`, `--stale-changes-requested-seconds`, `--stale-action`
-  - `--merge-ai-fix`, `--merge-fix-hook`, `--merge-job-timeout-seconds`, `--merge-hook-timeout-seconds`
-  - `--ghost-heartbeat-grace-seconds`, `--dispatch-cooldown-seconds`
-  - `--json-compat`, `--legacy-json-fallback`
-  - `--error-code-retry-list`, `--error-code-retry-max`
-  - `--cutover-gate-window-events`, `--cutover-gate-max-blocked-ratio`, `--cutover-gate-max-stale-ratio`
-  - `--rate-limit-backoff-base-seconds`, `--rate-limit-backoff-max-seconds`
-  - `--rate-limit-fallback-enabled`, `--rate-limit-throttle-parallel`
-- Coordinator settings are persisted in `.macc/macc.yaml` under `automation.coordinator`.
-- TUI (Automation Settings screen) allows visual editing of all 31 coordinator parameters.
-- Heartbeat events update `task_runtime.last_heartbeat` from `events.jsonl`.
-- Stale heartbeat policy is enforced during control-plane runs; can be reset, blocked, or requeued based on `stale_action`.
-- Extra raw args with `--` are for coordinator subcommands that require raw passthrough args.
-- Optional VCS automation hook:
-  - `COORDINATOR_VCS_HOOK=/path/to/hook.sh`
-  - Hook modes called by `advance`: `pr_create`, `review_status`, `ci_status`, `queue_status`, `merge_status`
-  - Hook receives task context via env (`MACC_TASK_ID`, `MACC_TASK_WORKTREE`, `MACC_TASK_BRANCH`, `MACC_TASK_BASE_BRANCH`, `MACC_TASK_PR_URL`, `MACC_TASK_TOOL`).
-  - Hook returns JSON object on stdout (mode-specific fields such as `pr_url`, `decision`, `status`, `reason`).
-  - Without hook, coordinator can use local fallback merge when `COORDINATOR_AUTOMERGE=true`.
+### Tool-level model tier mapping
 
-### 12.3.1 Commit message convention
+Each tool's `model_tiers` config maps symbolic tiers to concrete models and effort settings:
 
-MACC enforces a unified commit message format used by performers, merge workers, and the reconciliation engine. The format is defined in `core/src/commit_message.rs` (single source of truth).
-
-**Subject format**: `<type>: <TASK-ID> - <title>`
-
-Supported types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`, `macc`.
-
-**Trailers** (in commit body, one per line):
-- `[macc:task <TASK-ID>]` — required, links the commit to a task
-- `[macc:phase <phase>]` — optional, records the coordinator phase (dev/review/fix/merge)
-- `[macc:tool <tool>]` — optional, records which AI tool produced the commit
-- `[macc:merge true]` — marks a merge commit
-
-**Parsing (3-tier extraction)**:
-1. Structured `[macc:task ID]` tags (highest priority)
-2. Conventional subject regex (`<type>: <ID> - ...`)
-3. Legacy heuristic regex (fallback for older commits)
-
-The `commit_message` module provides: `task_commit()`, `merge_commit()`, `parse()`, `shell_commit_args()`, and type-safe `CommitType` / `CommitMessage` / `ParsedCommit` structs.
-
-### 12.3.2 PRD reconciliation from commit history (`sync-prd`)
-
-**Command**: `macc coordinator sync-prd`
-
-Deterministic reconciliation that scans the reference branch for committed task IDs and transitions matching tasks to `merged`. No AI involved — pure pattern matching.
-
-**How it works**:
-1. Reads all commits on `reference_branch` (default: `main`) via `git log` with NUL-delimited format.
-2. Extracts task IDs from each commit using the 3-tier parser (§12.3.1).
-3. Compares extracted IDs against the task registry.
-4. Tasks in reconcilable states (`todo`, `claimed`, `in_progress`, `pr_open`, `changes_requested`, `queued`) are transitioned to `merged`.
-5. Tasks already in terminal states (`merged`, `abandoned`) are skipped.
-6. Saves updated registry back (respects storage mode: JSON or SQLite).
-
-**Integration**: `sync-prd` is also called automatically as part of `coordinator sync`, running after the PRD registry sync and before dispatch. This prevents re-dispatching tasks that were already merged on the reference branch.
-
-**Configuration**:
-- `reference_branch`: resolved from env → `automation.coordinator.reference_branch` → `"main"` (default).
-
-**Module**: `core/src/coordinator/commit_reconciler.rs` (pure business logic, no CLI/UI).
-
-### 12.3.3 AI-powered PRD audit (`audit-prd`)
-
-**Command**: `macc coordinator audit-prd [-- --tool <tool_id>] [-- --dry-run]`
-
-Uses an LLM to enrich `prd.json` based on what was actually delivered, updating completed task notes and rewriting todo task descriptions when the integrated code has changed the intended architecture.
-
-**How it works**:
-1. Loads the PRD file (`--prd` or `automation.coordinator.prd_file` or `prd.json`).
-2. Loads the task registry (respects storage mode).
-3. Reads all commits on `reference_branch` and maps them to completed tasks.
-4. Gathers `git diff --stat` for each commit to provide file-level change summaries.
-5. Builds a structured LLM prompt containing:
-   - The current `prd.json` content (truncated at 80k chars if needed).
-   - Per-completed-task commit context (SHA, subject, diff stats).
-   - List of todo task IDs for architectural impact review.
-6. If `--tool <tool_id>` is provided (and not `--dry-run`), sends the prompt to the tool via its performer spec.
-
-**LLM instructions in the prompt**:
-- Update `notes` of completed tasks to reflect what was actually delivered.
-- Rewrite `description`/`steps` of todo tasks if integrated code changed the architecture.
-- Never delete or rename task IDs.
-- Output the complete updated `prd.json`.
-
-**Modes**:
-- `--dry-run`: generate and display the prompt without invoking any tool.
-- No `--tool`: generate and display the prompt (same as dry-run).
-- `--tool <id>`: invoke the specified AI tool with the prompt.
-
-**Module**: `core/src/coordinator/prd_auditor.rs` (pure business logic — prompt building, context gathering, no tool invocation).
-
-### 12.3.4 Realtime orchestrator target (next evolution)
-
-To remove ambiguity between "task dispatched" and "task actually running", MACC targets a split model:
-
-- Workflow state remains in `task.state` (`todo`, `in_progress`, `pr_open`, ...).
-- Runtime process lifecycle moves to `task.task_runtime.status` (`dispatched`, `running`, `phase_done`, `failed`, `stale`).
-
-Migration direction:
-
-1. strict transition table in core (single source of truth),
-2. versioned event contract (JSON schema),
-3. heartbeat event consumer now updates `task_runtime.last_heartbeat` (cursor is in-memory today),
-4. control-plane loop split (scheduler / event monitor / runtime monitor),
-5. TUI live timeline + blocking error gate (Retry / Skip / Stop / Logs).
-
-Reference short design doc:
-- `docs/COORDINATOR_REALTIME.md`
-
-### 12.3.5 Rate-limit handling
-
-MACC implements automatic, provider-aware rate-limit handling. The full flow:
-
-```
-Tool exit → stderr → ErrorNormalizer → CanonicalClass → E-code
-                                             ↓
-                                      E601/E603 → BackoffEngine → delayed_until on task
-                                      E602       → pause coordinator (quota hard stop)
-                                             ↓
-                                      ToolThrottleRegistry updated (in-memory)
-                                             ↓
-                                      TaskSelector: skip throttled tools → fallback tool
-                                             ↓
-                                      ConcurrencyController: reduce max_parallel → event
-                                             ↓
-                                      Recovery: success → clear throttle, restore parallel
+```yaml
+# in macc.yaml or registry/tools.d/<tool>.tool.yaml
+model_tiers:
+  mini:
+    model: claude-haiku-4-5
+    effort: low
+  standard:
+    model: claude-sonnet-4-6
+    effort: medium
+  heavy:
+    model: claude-opus-4-8
+    effort: high
 ```
 
-**New coordinator settings (rate-limit controls):**
-
-| Setting | Type | Default | Description |
-|---|---|---|---|
-| `rate_limit_backoff_base_seconds` | `u64` | 60 | Minimum backoff delay on first E601 |
-| `rate_limit_backoff_max_seconds` | `u64` | 3600 | Maximum backoff delay (cap for exponential growth) |
-| `rate_limit_fallback_enabled` | `bool` | true | When the primary tool is throttled, dispatch to next tool in priority order |
-| `rate_limit_throttle_parallel` | `bool` | true | Reduce `effective_max_parallel` by 1 on each E601 (restored on recovery) |
-
-**Backoff formula**: `min(base * 2^(consecutive_429_count - 1), max)` with jitter.
-
-**Fallback dispatch**: if `rate_limit_fallback_enabled=true` and the next tool in `tool_priority` is not throttled, the task is dispatched immediately to that tool. The throttled tool remains in the `ToolThrottleRegistry` and is re-eligible after `delayed_until` passes.
-
-**Quota exhaustion (E602)**: triggers a coordinator pause (same path as merge conflicts). The TUI shows a specific "PAUSED: Quota exhausted" banner. Operator must either wait for quota reset or switch to another tool, then `macc coordinator resume`.
-
-**Visibility**:
-- TUI CoordinatorLive screen shows "Throttled Tools" section with countdown per tool.
-- Active tasks show `rate-limited` runtime status instead of `failed` for E601.
-- Concurrency line shows `Concurrency: N/M (throttled)` when effective < original.
-- Web API `/api/v1/status` returns `throttled_tools` array and `effective_max_parallel`.
+For tools that use a config file for effort (e.g. Codex with `.codex/config.toml`), the adapter writes the effort value before invoking the tool.
 
 ---
 
-### 12.5 Global settings
+## 8. PRD system
 
-MACC maintains global preferences at the project level in `.macc/macc.yaml` under the `settings` key. These settings control the behavior of the MACC binary itself.
+### PRD file format
 
-Available settings:
-- `quiet`: Suppress all non-essential output from AI tools and MACC internal operations (e.g., fetch logs).
-- `offline`: Disable all remote fetching and updates.
-- `web_port`: The port number for the MACC web interface (default: 3450).
+`prd.json` contains a flat list of tasks:
 
-Control hierarchy:
-1. CLI global flags (`--quiet`, `--offline`, `--web-port`)
-2. Project configuration (`.macc/macc.yaml`)
-3. Built-in defaults
-
-## 13. Worktrees & parallelism
-
-### 13.1 Goal
-Enable multiple parallel sessions:
-- multiple instances of the same tool,
-- multiple different tools simultaneously.
-
-### 13.2 Conventions
-- Worktree folder: `.macc/worktree/` (default)
-- Branch naming: `ai/<tool>/<slug>-<NN>`
-- Session state folder: `.macc/state/` (includes `tool-sessions.json`)
-
-### 13.3 Proposed commands
-- `macc worktree create <slug> --tool <tool> --count N --base main --scope "glob,glob" --feature X`
-- `macc worktree list`
-- `macc worktree open <id> [--editor code] [--terminal]`
-- `macc worktree run <id>` (launches the tool for that worktree)
-- `macc worktree exec <id> -- <cmd...>`
-- `macc worktree apply <id>|--all`
-- `macc worktree status <id>`
-- `macc worktree doctor <id>`
-- `macc worktree merge <id>|--all --into main`
-- `macc worktree remove <id>`
-- `macc worktree prune`
-
-**Worktree status (current implementation):**
-- ✅ `macc worktree create` (creates git worktrees, writes `.macc/worktree.json`, optional scope, applies tool config)
-- ✅ `macc worktree list` (uses `git worktree list --porcelain`)
-- ✅ `macc worktree status` (shows the current worktree and totals)
-- 🧪 `macc worktree open <id> [--editor <cmd>] [--terminal]` (opens a worktree)
-- 🧪 `macc worktree apply <id>|--all` (applies configuration in worktree(s))
-- 🧪 `macc worktree doctor <id>` (runs doctor checks in a worktree)
-- 🧪 `macc worktree exec <id> -- <cmd...>` (executes a command inside a worktree)
-- ✅ `macc worktree run <id>` (runs performer automation inside the target worktree)
-- ✅ `macc worktree remove <id|path> [--remove-branch]` (removes a worktree, optionally deletes its branch)
-- ✅ `macc worktree remove --all [--remove-branch]` (removes all worktrees except the main one, optionally deletes their branches)
-- 🧪 `macc worktree prune` (prunes stale worktrees)
-- ⏳ All other `macc worktree ...` commands are planned but not implemented yet.
-
-**Coordinator pool mode (current implementation):**
-- `WORKTREE_POOL_MODE=true` (default): coordinator may reuse an idle compatible worktree.
-- Compatibility checks include: selected tool, base branch, optional task scope, clean worktree state, and no active task binding.
-- On reuse, `worktree.prd.json` is rewritten for the new task and the existing worktree-scoped session can be reused.
-
-### 13.4 Exact `create` behavior
-1) Derive IDs/branches (e.g., `feature-tool-01`, `ai/tool/feature-01`)
-2) `git worktree add -b ... .worktrees/... <base>`
-3) In each worktree, create:
-   - `.macc/worktree.json` (id, tool, scope, feature, base)
-   - `.macc/scope.md`
-   - `.macc/selections.lock.json` (copy of the selection)
-4) Apply config:
-   - `macc apply --cwd <worktree> --tools <tool>`
-
-### 13.5 Anti-conflict rule: “one worktree = one scope”
-- MACC should encourage separation by: feature / code area / task type
-- Optional locks (e.g., `pnpm-lock.yaml`, migrations):
-  - block, or require confirmation
-
----
-
-## 14. Security & privacy
-
-### 14.1 Secrets
-- Strict prohibition on committing secrets.
-- Templates with placeholders only.
-- Robust `.gitignore` entries (including `.macc/cache/`).
-- Web UI must redact likely secrets in logs/diffs (best effort).
-- MCP env values must be placeholders (e.g., `${ENV_VAR}`).
-
-### 14.2 Permissions
-- MACC must make explicit:
-  - auto-approved commands (pnpm dev/build/test…),
-  - forbidden commands by default (e.g., `rm -rf`, `curl|sh`).
-- Any permission escalation must require consent.
-
-### 14.3 Web API security
-- Web server binds to `127.0.0.1` by default (no external exposure).
-- No authentication required (single local operator).
-- Explicit `--host 0.0.0.0` flag required to expose on all interfaces.
-- API must not read/write outside the project root, except user-level config operations with explicit consent.
-- Terminal sessions restricted to project root and worktree paths.
-- All mutating API requests logged to `.macc/log/ops.jsonl` for audit.
-- Path parameters sanitized to prevent directory traversal.
-
-### 14.4 Package safety (Skills/MCP)
-- Remote packages must be **data-only** and include `macc.package.json`.
-- No post-install scripts; no executing downloaded code.
-- Web install review UI must show permissions/risks (env/network/fs).
-
----
-
-## 15. Technical requirements
-
-### 15.1 OS compatibility
-- Linux (Ubuntu/Debian) minimum
-- Windows (PowerShell)
-- macOS (bonus, compatible with install.sh)
-
-### 15.2 Implementation & dependencies
-- **Primary implementation language: Rust (stable)**.
-- **TUI: Ratatui** (`ratatui`) + typical terminal stack (`crossterm`).
-- **Web backend: Axum** (HTTP server, SSE, WebSocket) + **Tokio** (async runtime) + **RustEmbed** (embedded SPA assets).
-- **Web frontend: React 19** + TypeScript + Vite + Tailwind CSS 4 + Radix UI + Zustand + `commit-graph` + xterm.js.
-- Git is required (CLI-based invocations; no native git library dependency).
-- Prefer distributing **prebuilt binaries**; Rust toolchain should be required only for contributors/build-from-source.
-
-### 15.3 Performance
-- `macc apply` should be fast (< 1s on a standard project excluding downloads).
-- Downloads are cached and should be incremental.
-- Web UI initial load < 2s (cached assets, code splitting via React.lazy).
-- Virtualized tables for large datasets (PRD 500+ tasks, logs 10000+ lines).
-- 20+ concurrent SSE stream tiles supported for Live Wall.
-
----
-
-## 16. Documentation
-- `README.md` (user guide)
-- `CONTRIBUTING.md` (engineering quality baseline)
-- `CHANGELOG.md` (versioned release notes)
-- `SECURITY.md` (vulnerability disclosure and support window)
-- `docs/README.md` (documentation index, active vs historical docs)
-- [Catalog Management](docs/CATALOGS.md): skills/MCP catalogs, imports, remote search
-- `docs/TOOL_ONBOARDING.md` (unified “add tool end-to-end” guide)
-- `docs/COMPATIBILITY.md` (OS + Rust compatibility policy)
-- `docs/RELEASE.md` (SemVer/tag/release process)
-- `docs/WEB_API_CONTRACT.md` (web API endpoints, request/response shapes, error codes)
-- `docs/ERRORS.md` (error code format and catalog)
-- `MACC_Web_Client_spec.md` (full web client specification)
-- Additional guides: installation, init/apply, worktrees, MCP, Ralph
-
----
-
-## 17. Tree structure (updated)
+```json
+{
+  "tasks": [
+    {
+      "id": "NOY-L5-TASK-001",
+      "title": "Implement feature X",
+      "description": "...",
+      "state": "todo",
+      "tool": "claude",
+      "base_branch": "main",
+      "dependencies": [],
+      "extra": {
+        "routing_hints": { "risk_level": "high" }
+      }
+    }
+  ]
+}
 ```
-macc/
-  core/                        # macc-core crate
-    src/
-      config/                  # parse + validate canonical config
-      catalog/                 # skill/mcp catalog, remote sources, indexes
-      resolve/                 # canonical -> resolved selections
-      tool_api/                # ToolAdapter trait + registry
-      plan/                    # ActionPlan, scopes, diffs, consent gates
-      fetch/                   # git/http fetchers (into .macc/cache)
-      packages/                # macc.package.json parsing + validation
-      install/                 # package -> tool install mapping (plan actions)
-      io/                      # atomic write, backup, filesystem ops
-      merge/                   # json/toml merge + policies
-      security/                # secret scanning, deny patterns
-      doctor/                  # diagnostics framework
-      coordinator/             # coordinator runtime, IPC, control plane, storage
-      git.rs                   # git CLI wrapper (worktrees, log, status, merge)
-  cli/                         # macc-cli crate (clap commands)
-    src/
-      commands/
-        web/                   # web server module (Axum)
-          mod.rs               # server setup, router, state
-          errors.rs            # ApiError types, MACC-WEB-XXXX codes
-          types.rs             # API request/response types
-          coordinator.rs       # coordinator action handlers
-          config.rs            # config read/write handlers
-          prd.rs               # PRD read/write handlers
-          plan.rs              # plan handler
-          apply.rs             # apply handler
-          worktrees.rs         # worktree CRUD + run + logs
-          registry.rs          # task registry handlers
-          logs.rs              # log list, read, SSE tail
-          git.rs               # git graph data handler
-          doctor.rs            # diagnostics handlers
-          backups.rs           # backup list + restore
-          terminal.rs          # WebSocket PTY gateway
-          audit.rs             # ops audit logging middleware
-          sse.rs               # SSE streaming handler
-          assets.rs            # embedded/dist asset serving
-  tui/                         # macc-tui crate (ratatui)
-  web/                         # frontend SPA
-    src/
-      api/                     # API client + TypeScript models
-      components/              # shared components (KpiCard, StatusBadge, etc.)
-      pages/                   # route pages (Dashboard, Console, PRD, etc.)
-      stores/                  # Zustand stores
-      hooks/                   # custom React hooks (useEventSource, etc.)
-    dist/                      # production build output (gitignored)
+
+### PRD generation workflow
+
+1. Write a brief in Markdown (scope, requirements, constraints).
+2. Run `macc prd generate --from brief.md` — the `macc-prd-planner` skill produces `prd.json` in `.macc/generated/prd/macc-prd-planner/<timestamp>/`.
+3. Review and edit the generated file.
+4. Run `macc prd promote <generated-file.json>` to copy it to `prd.json`.
+5. Run `macc coordinator run` to start dispatch.
+
+### PRD audit
+
+`macc prd audit` builds a structured LLM prompt from commit history and PRD state, enabling an AI tool to update task completion status and add delivery notes. Use `--dry-run` to preview the prompt.
+
+### PRD reconciliation
+
+`macc coordinator sync-prd` deterministically transitions tasks to `merged` based on commit history without AI. It runs automatically as part of `coordinator sync`. Task IDs are extracted from commit messages using:
+1. `[macc:TASK-ID]` structured trailer
+2. Conventional commit subject matching
+3. Legacy heuristic fallback
+
+---
+
+## 9. Skills runner
+
+Skills are YAML-defined workflows that a performer executes within a worktree. They live in `.macc/skills/<id>.yaml` or are installed from a catalog.
+
+### Skill schema
+
+```yaml
+id: validate
+title: Validate implementation
+kind: prompt             # local_command | prompt | hybrid | agent | coordinator
+risk: safe               # safe | caution | dangerous
+steps:
+  - run: "npm test"
+  - prompt: "Review the test output and report any failures."
+targets:
+  claude:
+    model: claude-sonnet-4-6
 ```
----
 
-## 18. Acceptance criteria (MVP)
+### Risk levels
 
-### 18.1 Installation
-- ✅ Linux: `install.sh` installs `macc` and works non-interactively (flags) or interactively (TUI).
-- ✅ Windows: `install.ps1` installs `macc`.
-- ✅ `macc --version` and `macc --help` work.
+| Risk | Behavior |
+|---|---|
+| `safe` | Runs without confirmation |
+| `caution` | Prompts for confirmation |
+| `dangerous` | Requires explicit `--yes` |
 
-### 18.2 Project apply
-- ✅ `macc init` creates `.macc/` + minimal config.
-- ✅ `macc plan` shows a preview without writing.
-- ✅ `macc apply` generates tool config safely (atomic + backups).
-- ✅ `macc clear` asks confirmation, cleans non-root worktrees first, then removes MACC-managed project artifacts without deleting pre-existing files/directories.
-- ✅ `.macc/backups/<timestamp>/...` contains backups of overwritten files.
-- ✅ No secrets are written into the repo.
-- ✅ User-level modifications require consent (and are disabled by default in early milestones).
+### Built-in skills
 
-### 18.3 Remote artifacts (Skills/MCP) (NEW)
-- ✅ A skill/MCP can be referenced by Git/HTTP link in `.macc/macc.yaml`.
-- ✅ `macc apply` fetches artifacts into `.macc/cache/` and installs files into the correct tool locations.
-- ✅ `.macc/cache/` is gitignored.
-- ✅ HTTP downloads can be verified by checksum when provided; Git sources can be pinned to a commit/tag.
-
-### 18.4 Worktrees
-- ✅ `macc worktree create <slug> --tool <tool> --count 2` creates 2 worktrees, applies config, and writes `.macc/worktree.json`.
-- ✅ `macc worktree list` shows worktrees.
-- ✅ `macc worktree prune` removes merged ones (or those removed in git).
-
-### 18.5 PRD reconciliation and audit
-- ✅ Unified commit message format with `[macc:task ID]` trailers enforced by performers and merge workers.
-- ✅ `macc coordinator sync-prd` deterministically transitions tasks to `merged` based on commit history (no AI).
-- ✅ `sync-prd` runs automatically as part of `coordinator sync` to prevent re-dispatching completed tasks.
-- ✅ 3-tier task ID extraction (structured tags → conventional subject → legacy heuristic) for backward compatibility.
-- ✅ `macc coordinator audit-prd` builds a structured LLM prompt from commit context for completed tasks.
-- ✅ `audit-prd --dry-run` previews the prompt without invoking any tool.
-- ✅ `audit-prd --tool <id>` sends the prompt to a selected AI tool via its performer spec.
-
-### 18.6 Web Client
-- `macc web` launches the web UI on localhost without authentication.
-- Config editor reads/writes `.macc/macc.yaml` with validation and backups.
-- Plan displays ActionPlan diffs without writing.
-- Apply writes atomically, creates backups, and enforces consent gates.
-- Worktrees page lists and manages worktrees; can open worktree details and live logs.
-- Coordinator console shows state, metrics, throttling, and can run actions (run/stop/resume/reconcile/cleanup).
-- PRD editor supports table + detail + graph (DAG) + diff views with validation and save backups.
-- Git graph is always visible (side panel) and expandable to full page.
-- Live Wall supports 20+ concurrent stream tiles with bounded buffers.
-- Embedded terminals work for project root and worktree paths with directory restriction.
-- All mutating API requests are audit-logged to `.macc/log/ops.jsonl`.
-
-### 18.7 Security
-- ✅ No API key is written into the repo.
-- ✅ Remote packages are data-only; no scripts executed.
-- ✅ User-level modifications = backup + consent.
-- ✅ Web server binds to localhost by default; explicit flag for external exposure.
-- ✅ API path parameters sanitized against directory traversal.
-
-### 18.8 Task Lifecycle & Visibility Layer
-- ✅ Extended `WorkflowState` to include `Testing` and `Reviewing` states for the full `dev → test → review → merge` pipeline.
-- ✅ Mode-based testing and review phases configured independently under `automation.coordinator.phases`.
-- ✅ Display and toggling of testing/review phases in the TUI Settings screen.
-- ✅ Added `macc explain <task-id>` to print chronological task timelines, log locations, and event metadata.
-- ✅ Added `macc diff <task-id>` to run a worktree-anchored `git diff` without requiring directory traversal.
+| Skill ID | Description |
+|---|---|
+| `macc-performer` | Core task performer — used by the coordinator to drive a tool through a task |
+| `macc-prd-planner` | PRD generation — creates `prd.json` from a brief |
 
 ---
 
-## 19. Roadmap (proposed)
-- **v0.1**: init/plan/apply + standards + 2 skills + worktree create/list/apply
-- **v0.2**: full TUI (Rust + Ratatui) + ralph + MCP templates + consented merges. See [Acceptance Checklist](docs/v0.2-checklist.md).
-- **v0.3**: **remote catalog + git/http package fetch** for skills/MCP
-- **v0.4**: **Web Client MVP** — dashboard, coordinator console, SSE streaming, git graph, embedded assets
-- **v0.5**: **Web Client completion** — config editor, PRD editor (table/graph/diff), worktree management, live wall, diagnostics, embedded terminals, command palette
-- **v1.0**: stability, docs, modules, skill/agent marketplace (indexes + signatures), broader tool support
+## 10. Process ownership
+
+MACC maintains a project-wide control lease that prevents multiple clients from issuing conflicting mutations. The lease is stored in `.macc/state/process_ownership.json`.
+
+### How it works
+
+1. When a client (TUI, browser, CLI) starts a mutation (apply, coordinator action, clear, etc.), it calls `gate_owner_action`.
+2. If no owner exists, the first client takes ownership.
+3. Subsequent clients become viewers or request a takeover.
+4. Clients send heartbeats every few seconds to renew their lease.
+5. If a client dies without releasing ownership, the lease expires after **15 seconds** of missed heartbeats.
+6. The gate evicts stale owners on every ownership read (passive eviction).
+
+### Recovery
+
+If a client died and the lease is stuck:
+
+```bash
+macc process release-stale
+# Cleared stale owner: 1748xxx-16f4fd0104f468
+```
+
+### Takeover flow
+
+When a second client wants control:
+
+```bash
+macc process takeover request --kind project --pid 0
+# Takeover requested. request_id: abc-123
+
+# On the owning client:
+macc process takeover accept --kind project --pid 0 --owner-client-id <id> --request-id abc-123
+```
 
 ---
 
-## 20. References & Prior Art
-- Codex (OpenAI)
-- Gemini Cli
-- Claude Code
+## 11. Adapters — supported tools
+
+| Tool ID | Binary | Notes |
+|---|---|---|
+| `claude` | `claude` | Claude Code CLI; supports `--effort` flag |
+| `codex` | `codex` | OpenAI Codex CLI; effort via `.codex/config.toml` |
+| `gemini` | `gemini` | Gemini CLI |
+| `agy` | `agy` | Agy CLI; config via `.agents/settings.json` |
+| `vibe` | `vibe` | Vibe Coding CLI |
+
+Each tool has a spec in `registry/tools.d/<tool>.tool.yaml` defining:
+- `performer`: command, args, prompt mode, session config, retry config
+- `model_tiers`: symbolic tier → concrete model + effort mapping
+- `effort_config` / `effort_flag`: how to inject effort level
+- `fields`: user-configurable settings (model, reasoning effort, sandbox mode, etc.)
+- `install` / `update` / `version_check`: lifecycle commands
+- `doctor`: health checks
+
+### Tool configuration in TUI / Web
+
+All tool settings (model, effort, tier models, approval policy, etc.) are editable from the TUI's **Settings** screen (tabbed: General, Coordinator, Tools, Phases, Reliability, Admin) and from the web **Config → Tools** page.
+
+---
+
+## 12. Web API
+
+The web server exposes a REST/SSE API on `http://127.0.0.1:3450/api/v1/`.
+
+### Core endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/v1/health` | Health check |
+| GET | `/api/v1/trust` | Project trust parameters |
+| GET | `/api/v1/config` | Read canonical config |
+| PUT | `/api/v1/config` | Update canonical config |
+| GET | `/api/v1/status` | Coordinator status |
+| GET | `/api/v1/snapshot` | Full RuntimeSnapshot (same as `macc status --json`) |
+| POST | `/api/v1/coordinator` | Run a coordinator action |
+| GET | `/api/v1/events` | SSE stream of coordinator events |
+
+### Worktrees
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/v1/worktrees` | List worktrees with status |
+| POST | `/api/v1/worktrees` | Create worktrees |
+| GET | `/api/v1/worktrees/:id` | Worktree detail |
+| DELETE | `/api/v1/worktrees/:id` | Remove a worktree |
+| GET | `/api/v1/worktrees/:id/logs` | SSE log stream for a worktree |
+
+Worktree status reflects the coordinator registry: `in_progress` is surfaced when the coordinator has an active task in that worktree.
+
+### PRD
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/v1/prd` | Read active PRD |
+| PUT | `/api/v1/prd` | Update active PRD |
+| POST | `/api/v1/prd/generate` | Generate a new PRD |
+| POST | `/api/v1/prd/audit` | Audit PRD from commit history |
+| POST | `/api/v1/prd/promote` | Promote generated PRD |
+| POST | `/api/v1/prd/validate` | Validate a PRD file |
+| GET | `/api/v1/prd/generation-runs` | List generation runs |
+| GET | `/api/v1/prd/generation-runs/:id` | Generation run detail |
+
+### Skills & runs
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/v1/skills` | List available skills |
+| GET | `/api/v1/skills/:id` | Skill definition + dry-run preview |
+| GET | `/api/v1/runs` | List skill run logs |
+| GET | `/api/v1/runs/:id` | Single run result |
+
+### Observability
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/v1/doctor` | Run diagnostics |
+| POST | `/api/v1/doctor/fix` | Apply safe auto-fixes |
+| GET | `/api/v1/logs` | List log files |
+| GET | `/api/v1/logs/tail` | Tail latest log (SSE) |
+| GET | `/api/v1/logs/*path` | Read a log file |
+| GET | `/api/v1/git/graph` | Git graph data |
+| GET | `/api/v1/search?q=` | Search tasks, skills, worktrees, error codes |
+
+### Process ownership
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/v1/processes` | List process records |
+| GET | `/api/v1/processes/:kind` | Ownership record for a process kind |
+| POST | `/api/v1/processes/:kind/claim` | Claim ownership |
+| POST | `/api/v1/processes/:kind/release` | Release ownership |
+| POST | `/api/v1/processes/:kind/heartbeat` | Renew heartbeat |
+| POST | `/api/v1/processes/:kind/takeover` | Request takeover |
+| POST | `/api/v1/processes/:kind/respond-takeover` | Accept or reject takeover |
+
+### Plan, apply, backups
+
+| Method | Path | Description |
+|---|---|---|
+| POST | `/api/v1/plan` | Run plan (dry-run) |
+| POST | `/api/v1/apply` | Apply configuration |
+| GET | `/api/v1/backups` | List backup sets |
+| POST | `/api/v1/terminal` | Create WebSocket PTY session |
+
+### Catalog skills
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/v1/catalog/skills/available` | Skills from configured catalogs |
+| GET | `/api/v1/catalog/skills/status` | Installed skills with provenance |
+| GET | `/api/v1/catalog/skills/installed` | Installed skill list |
+| POST | `/api/v1/catalog/skills/verify` | Verify skill integrity |
+| GET | `/api/v1/catalog/skills/lockfile` | Skill lockfile content |
+
+### Security
+
+- Binds to `127.0.0.1` by default; requires `--host 0.0.0.0` for LAN access.
+- No authentication (single local operator).
+- All mutating requests are audit-logged to `.macc/log/ops.jsonl`.
+- Path parameters are sanitized against directory traversal.
+- Web viewer heartbeats are refreshed automatically by the server every 30 seconds.
+
+---
+
+## 13. Debug mode
+
+Set `MACC_DEBUG=1` or pass `--verbose` to enable debug output across all MACC components:
+
+| Effect | Description |
+|---|---|
+| Performer prompt dump | The full prompt sent to the tool is printed |
+| `[MACC] invoke` lines | Tool invocation commands are logged |
+| Coordinator verbose | Tick and dispatch decisions are logged |
+
+`--verbose` automatically sets `MACC_DEBUG=1` for all child processes (coordinator, performers, workers).
+
+In `macc.yaml`, set `debug: true` to enable persistently.
+
+---
+
+## 14. File layout
+
+```
+<project-root>/
+  .macc/
+    macc.yaml                     # canonical config
+    macc.lock.yaml                # environment lock (optional)
+    prd.json                      # active PRD task registry
+    generated/
+      prd/macc-prd-planner/       # generated PRDs (one folder per run)
+    automation/
+      task/
+        coordinator.sqlite        # primary coordinator storage
+        task_registry.json        # JSON mirror (dual-write / fallback)
+        coordinator.pause.json    # pause state (auto-cleared on restart)
+    backups/
+      <timestamp>/                # safety backups created before apply/clear
+    saves/
+      <name>/                     # named save bundles
+    skills/
+      <skill-id>.yaml             # project-level run-skills
+    state/
+      process_ownership.json      # client lease state
+      supervisor.json             # supervisor state
+    log/
+      coordinator/
+        events.jsonl              # coordinator event stream
+        <timestamp>.log           # coordinator log
+      performers/
+        <worktree>/<task>-<ts>.log  # per-task performer logs
+      ops.jsonl                   # web API mutation audit log
+    cache/                        # fetched remote packages (gitignored)
+    worktree.json                 # (in each worktree) worktree metadata
+    scope.md                      # (optional) per-worktree scope
+
+  registry/
+    tools.d/
+      claude.tool.yaml            # built-in Claude adapter spec
+      codex.tool.yaml             # built-in Codex adapter spec
+      gemini.tool.yaml            # built-in Gemini adapter spec
+      agy.tool.yaml               # built-in Agy adapter spec
+      vibe.tool.yaml              # built-in Vibe adapter spec
+
+  adapters/
+    shared/
+      performer_lib.sh            # shared performer shell library
+    claude/                       # Claude-specific adapter
+    codex/                        # Codex-specific adapter
+    gemini/                       # Gemini-specific adapter
+    agy/                          # Agy-specific adapter
+    vibe/                         # Vibe-specific adapter
+
+  automat/
+    coordinator.sh                # coordinator orchestration entry
+    performer.sh                  # performer entry point
+    merge_worker.sh               # merge worker entry point
+    hooks/                        # lifecycle hooks
+
+  core/src/
+    config/                       # canonical config parsing and validation
+    coordinator/                  # coordinator runtime, FSM, control plane
+    coordinator_storage.rs        # storage abstraction (SQLite + JSON)
+    prd_generation/               # PRD generation workflows
+    skills_runner/                # skill resolver and executor
+    runtime/                      # RuntimeSnapshot builder
+    process_ownership/            # client lease, heartbeat, eviction
+    tool/                         # ToolSpec parser, model tier config
+    doctor/                       # diagnostics framework
+    engine.rs                     # Engine trait (the façade)
+
+  cli/src/
+    commands/
+      web/                        # Axum web server + handlers
+
+  tui/src/
+    lib.rs                        # Ratatui main loop
+    state.rs                      # TUI application state
+
+  web/src/
+    pages/                        # React route pages
+    components/                   # Shared UI components
+    api/                          # API client + TypeScript models
+    stores/                       # Zustand state stores
+    hooks/                        # Custom React hooks
+```
+
+---
+
+## 15. Security
+
+- **No secrets in repo.** Tool API keys, tokens, and credentials must never be written to disk by MACC. MCP env values must use placeholder syntax (`${ENV_VAR}`).
+- **Remote packages are data-only.** No post-install scripts. Web install review shows permissions and risks before installing.
+- **Web server binds to localhost.** Explicit `--host 0.0.0.0` required for external access.
+- **Process ownership gate.** All mutating CLI and web API calls are gated behind the project control lease. The gate evicts stale owners using a 15-second heartbeat TTL.
+- **API audit log.** All mutating web API requests are logged to `.macc/log/ops.jsonl`.
+- **Backup before overwrite.** `macc apply` and `macc clear` create safety backups in `.macc/backups/<timestamp>/` before modifying any file.
+- **User-scope operations require consent.** `--allow-user-scope` must be passed explicitly; disabled by default.
+
+---
+
+## 16. Technical stack
+
+| Layer | Technology |
+|---|---|
+| Primary language | Rust (stable) |
+| TUI | Ratatui + Crossterm |
+| Web backend | Axum + Tokio + RustEmbed |
+| Web frontend | React 19, TypeScript, Vite, Tailwind CSS 4, Radix UI, Zustand |
+| Storage | SQLite (rusqlite) + JSON mirror |
+| Git | CLI-based invocations (no native git library) |
+| Performer shell | bash (`adapters/shared/performer_lib.sh`) |
+
+### Performance targets
+
+- `macc apply` < 1 second (excluding downloads)
+- Downloads: cached, incremental
+- Web UI initial load < 2 seconds
+- 20+ concurrent SSE streams supported
+- Virtualized tables for PRD (500+ tasks) and logs (10 000+ lines)

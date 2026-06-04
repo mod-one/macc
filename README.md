@@ -1,6 +1,14 @@
-# MACC
+<h1 align="center">
+  <strong>MACC</strong>
+</h1>
 
-> **Multi-Assistant Code Config** one canonical config, many AI coding tools, coordinated worktrees.
+<p align="center">
+  <strong>Multi-Assistant Code Config + Coordinator</strong>
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/mod-one/macc?style=flat" alt="License"></a>
+</p>
 
 MACC manages tool configuration across Claude Code, Codex, Gemini CLI, and others from a single source of truth, then coordinates them as autonomous agents running parallel tasks across git worktrees.
 
@@ -16,7 +24,7 @@ If you run more than one AI coding tool on the same codebase, or want to leave t
 
 ---
 
-## 30-second quickstart
+## Quickstart
 
 ```bash
 # Install
@@ -45,7 +53,34 @@ macc status
 macc web
 ```
 
----
+### Works with...
+
+<table align="center">
+	<tr>
+		<td align="center" width="12.5%">
+			<a href="https://claude.com/product/claude-code"><img src="https://github.com/claude.png?size=120" alt="Claude Code" width="48" height="48" /></a><br/>
+			<strong>Claude Code</strong><br/>
+		</td>
+		<td align="center" width="12.5%">
+			<a href="https://github.com/openai/codex"><img src="https://github.com/openai.png?size=120" alt="Codex CLI" width="48" height="48" /></a><br/>
+			<strong>Codex CLI</strong><br/>
+		</td>
+		<td align="center" width="12.5%">
+			<a href="https://github.com/google-gemini/gemini-cli"><img src="https://github.com/google-gemini.png?size=120" alt="Gemini CLI" width="48" height="48" /></a><br/>
+			<strong>Gemini CLI</strong><br/>
+		</td>
+		<td align="center" width="12.5%">
+			<a href="https://github.com/google-antigravity/antigravity-cli"><img src="https://github.com/google-antigravity.png?size=120" alt="Antigravity CLI" width="48" height="48" /></a><br/>
+			<strong>Antigravity CLI</strong><br/>
+		</td>
+		<td align="center" width="12.5%">
+			<a href="https://github.com/mistralai/mistral-vibe"><img src="https://github.com/mistral-vibe.png?size=120" alt="Mistral Vibe" width="48" height="48" /></a><br/>
+			<strong>Mistral Vibe</strong><br/>
+		</td>
+	</tr>
+</table>
+
+
 
 ## Why MACC?
 
