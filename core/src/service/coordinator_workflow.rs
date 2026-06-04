@@ -1034,42 +1034,52 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
             remove_branches,
             reason,
         } => {
-            let storage_paths = crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(paths);
+            let storage_paths =
+                crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(paths);
             let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
-            
+
             if drain {
                 let mut active_task_ids = Vec::new();
                 if let Ok(snapshot) = sqlite.load_snapshot() {
                     for task in snapshot.registry.tasks {
-                        if task.state == "claimed" || task.state == "in_progress" || task.state == "changes_requested" || task.state == "queued" {
+                        if task.state == "claimed"
+                            || task.state == "in_progress"
+                            || task.state == "changes_requested"
+                            || task.state == "queued"
+                        {
                             active_task_ids.push(task.id);
                         }
                     }
                 }
-                let snapshot_json = serde_json::to_string(&active_task_ids).unwrap_or_else(|_| "[]".to_string());
-                sqlite.set_coordinator_control(&crate::coordinator_storage::CoordinatorControl {
-                    mode: "draining".to_string(),
-                    requested_at: Some(chrono::Utc::now().to_rfc3339()),
-                    requested_by: Some("cli".to_string()),
-                    drain_snapshot_json: Some(snapshot_json),
-                    force_grace_seconds: Some(10),
-                    cleanup_after_force: Some(false),
-                    reason: Some(reason.clone()),
-                })?;
+                let snapshot_json =
+                    serde_json::to_string(&active_task_ids).unwrap_or_else(|_| "[]".to_string());
+                sqlite.set_coordinator_control(
+                    &crate::coordinator_storage::CoordinatorControl {
+                        mode: "draining".to_string(),
+                        requested_at: Some(chrono::Utc::now().to_rfc3339()),
+                        requested_by: Some("cli".to_string()),
+                        drain_snapshot_json: Some(snapshot_json),
+                        force_grace_seconds: Some(10),
+                        cleanup_after_force: Some(false),
+                        reason: Some(reason.clone()),
+                    },
+                )?;
                 if let Some(log) = request.logger {
                     let _ = log.note("Coordinator transitioned to draining mode.".to_string());
                 }
             } else if force {
-                sqlite.set_coordinator_control(&crate::coordinator_storage::CoordinatorControl {
-                    mode: "force_stopping".to_string(),
-                    requested_at: Some(chrono::Utc::now().to_rfc3339()),
-                    requested_by: Some("cli".to_string()),
-                    drain_snapshot_json: None,
-                    force_grace_seconds: Some(10),
-                    cleanup_after_force: Some(remove_worktrees),
-                    reason: Some(reason.clone()),
-                })?;
-                
+                sqlite.set_coordinator_control(
+                    &crate::coordinator_storage::CoordinatorControl {
+                        mode: "force_stopping".to_string(),
+                        requested_at: Some(chrono::Utc::now().to_rfc3339()),
+                        requested_by: Some("cli".to_string()),
+                        drain_snapshot_json: None,
+                        force_grace_seconds: Some(10),
+                        cleanup_after_force: Some(remove_worktrees),
+                        reason: Some(reason.clone()),
+                    },
+                )?;
+
                 let mut term_count = 0;
                 let mut kill_count = 0;
                 let mut aborted_count = 0;
@@ -1077,7 +1087,10 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
                 if let Ok(db_pids) = sqlite.get_running_task_pids() {
                     for (task_id, pid) in db_pids {
                         if let Some(log) = request.logger {
-                            let _ = log.note(format!("Force-terminating performer process group {} for task {}...", pid, task_id));
+                            let _ = log.note(format!(
+                                "Force-terminating performer process group {} for task {}...",
+                                pid, task_id
+                            ));
                         }
                         #[cfg(unix)]
                         if pid > 0 {
@@ -1086,9 +1099,9 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
                             }
                         }
                         term_count += 1;
-                        
+
                         std::thread::sleep(std::time::Duration::from_millis(50));
-                        
+
                         let is_running = crate::coordinator::helpers::is_pid_running(pid);
                         if is_running {
                             #[cfg(unix)]
@@ -1113,13 +1126,18 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
                     }
                 }
 
-                let _ = crate::service::coordinator::coordinator_stop_managed_command_process(paths, false);
-                
+                let _ = crate::service::coordinator::coordinator_stop_managed_command_process(
+                    paths, false,
+                );
+
                 if remove_worktrees {
                     if let Some(log) = request.logger {
                         let _ = log.note("Cleaning up worktrees...".to_string());
                     }
-                    let _ = crate::service::worktree::remove_all_worktrees(&paths.root, remove_branches);
+                    let _ = crate::service::worktree::remove_all_worktrees(
+                        &paths.root,
+                        remove_branches,
+                    );
                     let _ = crate::prune_worktrees(&paths.root);
                 }
 
@@ -1130,43 +1148,63 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
                     "Worktrees were preserved for inspection."
                 };
 
-                let output_lines = vec![
+                let output_lines = [
                     "Force stop requested.".to_string(),
                     "Dispatch disabled.".to_string(),
                     format!("Sent SIGTERM to {} process groups.", term_count),
                     format!("{} exited within 10s.", term_exited),
-                    format!("Sent SIGKILL to {} remaining process group{}.", kill_count, if kill_count == 1 { "" } else { "s" }),
-                    format!("Marked {} task runtimes as aborted_by_operator.", aborted_count),
+                    format!(
+                        "Sent SIGKILL to {} remaining process group{}.",
+                        kill_count,
+                        if kill_count == 1 { "" } else { "s" }
+                    ),
+                    format!(
+                        "Marked {} task runtimes as aborted_by_operator.",
+                        aborted_count
+                    ),
                     worktree_msg.to_string(),
                     "Next: run `macc coordinator recover --dry-run`.".to_string(),
                 ];
                 result.runtime_status = Some(output_lines.join("\n"));
             } else {
-                sqlite.set_coordinator_control(&crate::coordinator_storage::CoordinatorControl {
-                    mode: "graceful_stopping".to_string(),
-                    requested_at: Some(chrono::Utc::now().to_rfc3339()),
-                    requested_by: Some("cli".to_string()),
-                    drain_snapshot_json: None,
-                    force_grace_seconds: Some(10),
-                    cleanup_after_force: Some(false),
-                    reason: Some(reason.clone()),
-                })?;
-                
-                let _ = crate::service::coordinator::coordinator_stop_managed_command_process(paths, graceful);
-                
+                sqlite.set_coordinator_control(
+                    &crate::coordinator_storage::CoordinatorControl {
+                        mode: "graceful_stopping".to_string(),
+                        requested_at: Some(chrono::Utc::now().to_rfc3339()),
+                        requested_by: Some("cli".to_string()),
+                        drain_snapshot_json: None,
+                        force_grace_seconds: Some(10),
+                        cleanup_after_force: Some(false),
+                        reason: Some(reason.clone()),
+                    },
+                )?;
+
+                let _ = crate::service::coordinator::coordinator_stop_managed_command_process(
+                    paths, graceful,
+                );
+
                 if remove_worktrees {
-                    let _ = crate::service::worktree::remove_all_worktrees(&paths.root, remove_branches);
+                    let _ = crate::service::worktree::remove_all_worktrees(
+                        &paths.root,
+                        remove_branches,
+                    );
                     let _ = crate::prune_worktrees(&paths.root);
                 }
             }
         }
         CoordinatorCommand::Ps => {
-            let storage_paths = crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(paths);
+            let storage_paths =
+                crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(paths);
             let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
             let snapshot = sqlite.load_snapshot()?;
             let mut processes = Vec::new();
-            
-            let db_pids: Vec<i64> = snapshot.registry.tasks.iter().filter_map(|t| t.runtime_pid()).collect();
+
+            let db_pids: Vec<i64> = snapshot
+                .registry
+                .tasks
+                .iter()
+                .filter_map(|t| t.runtime_pid())
+                .collect();
             let orphaned_pids = find_orphaned_pids_local(&paths.root, &db_pids)?;
 
             for task in &snapshot.registry.tasks {
@@ -1180,12 +1218,13 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
                     } else {
                         false
                     };
-                    
+
                     let mut heartbeat_str = "none".to_string();
                     let mut is_stale = false;
                     if let Some(ref lh) = task.task_runtime.last_heartbeat {
                         if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(lh) {
-                            let elapsed = chrono::Utc::now().timestamp() - parsed.with_timezone(&chrono::Utc).timestamp();
+                            let elapsed = chrono::Utc::now().timestamp()
+                                - parsed.with_timezone(&chrono::Utc).timestamp();
                             heartbeat_str = format!("{}s ago", elapsed);
                             if elapsed > 180 {
                                 is_stale = true;
@@ -1194,7 +1233,11 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
                     }
 
                     let status = if is_alive {
-                        if is_stale { "stale".to_string() } else { "alive".to_string() }
+                        if is_stale {
+                            "stale".to_string()
+                        } else {
+                            "alive".to_string()
+                        }
                     } else if pid > 0 {
                         "dead".to_string()
                     } else {
@@ -1203,7 +1246,11 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
 
                     processes.push(PsProcessEntry {
                         task_id: task.id.clone(),
-                        claim_id: task.task_runtime.active_session_id.clone().unwrap_or_else(|| "-".to_string()),
+                        claim_id: task
+                            .task_runtime
+                            .active_session_id
+                            .clone()
+                            .unwrap_or_else(|| "-".to_string()),
                         tool: task.tool.clone().unwrap_or_else(|| "-".to_string()),
                         pid,
                         pgid,
@@ -1230,7 +1277,8 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
             result.processes = Some(processes);
         }
         CoordinatorCommand::Recover { dry_run } => {
-            let storage_paths = crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(paths);
+            let storage_paths =
+                crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(paths);
             let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
 
             // ── Meta: epoch bump and coordinator run record ───────────────
@@ -1240,7 +1288,8 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
 
             if !dry_run {
                 let run_id = crate::service::project::ensure_coordinator_run_id();
-                let hostname = std::env::var("HOSTNAME").unwrap_or_else(|_| "localhost".to_string());
+                let hostname =
+                    std::env::var("HOSTNAME").unwrap_or_else(|_| "localhost".to_string());
                 let current_run = crate::coordinator_storage::CoordinatorRun {
                     run_id: run_id.clone(),
                     pid: std::process::id() as i64,
@@ -1257,10 +1306,15 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
             }
 
             // ── §11.2 canonical classification via execute_startup_recovery_sweep ──
-            let reference_branch = request.env_cfg
+            let reference_branch = request
+                .env_cfg
                 .reference_branch
                 .as_deref()
-                .or_else(|| request.coordinator_cfg.and_then(|c| c.reference_branch.as_deref()))
+                .or_else(|| {
+                    request
+                        .coordinator_cfg
+                        .and_then(|c| c.reference_branch.as_deref())
+                })
                 .unwrap_or("main");
 
             let sweep_entries = crate::coordinator::state_runtime::execute_startup_recovery_sweep(
@@ -1295,13 +1349,17 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
             result.recovery_report = Some(reports);
         }
         CoordinatorCommand::KillTask { task_id } => {
-            let storage_paths = crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(paths);
+            let storage_paths =
+                crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(paths);
             let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
             let mut snapshot = sqlite.load_snapshot()?;
             if let Some(task) = snapshot.registry.find_task_mut(&task_id) {
                 if let Some(pid) = task.runtime_pid() {
                     if let Some(logger) = request.logger {
-                        let _ = logger.note(format!("Killing process group {} for task {}...", pid, task_id));
+                        let _ = logger.note(format!(
+                            "Killing process group {} for task {}...",
+                            pid, task_id
+                        ));
                     }
                     coordinator_runtime::terminate_process_group_gracefully(pid, 10);
                 }
@@ -1310,26 +1368,40 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
                 task.clear_assignment();
                 sqlite.save_snapshot(&snapshot)?;
                 if let Some(logger) = request.logger {
-                    let _ = logger.note(format!("Task {} process terminated and state reset to blocked.", task_id));
+                    let _ = logger.note(format!(
+                        "Task {} process terminated and state reset to blocked.",
+                        task_id
+                    ));
                 }
             } else {
-                return Err(MaccError::Validation(format!("Task {} not found in registry", task_id)));
+                return Err(MaccError::Validation(format!(
+                    "Task {} not found in registry",
+                    task_id
+                )));
             }
         }
         CoordinatorCommand::AdoptTask { task_id } => {
-            let storage_paths = crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(paths);
+            let storage_paths =
+                crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(paths);
             let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
             let mut snapshot = sqlite.load_snapshot()?;
             if let Some(task) = snapshot.registry.find_task_mut(&task_id) {
                 task.state = "in_progress".to_string();
                 task.task_runtime.status = Some("running".to_string());
-                task.task_runtime.last_heartbeat = Some(crate::coordinator::helpers::now_iso_coordinator());
+                task.task_runtime.last_heartbeat =
+                    Some(crate::coordinator::helpers::now_iso_coordinator());
                 sqlite.save_snapshot(&snapshot)?;
                 if let Some(logger) = request.logger {
-                    let _ = logger.note(format!("Task {} successfully adopted by coordinator.", task_id));
+                    let _ = logger.note(format!(
+                        "Task {} successfully adopted by coordinator.",
+                        task_id
+                    ));
                 }
             } else {
-                return Err(MaccError::Validation(format!("Task {} not found in registry", task_id)));
+                return Err(MaccError::Validation(format!(
+                    "Task {} not found in registry",
+                    task_id
+                )));
             }
         }
     }
@@ -2872,8 +2944,9 @@ mod tests {
 
     #[test]
     fn state_counts_action_maps_to_typed_command() {
-        let command = coordinator_command_from_name("state-counts", &[], false, false, false, false, false)
-            .expect("state-counts should parse");
+        let command =
+            coordinator_command_from_name("state-counts", &[], false, false, false, false, false)
+                .expect("state-counts should parse");
         assert_eq!(command, CoordinatorCommand::StateCounts);
     }
 
@@ -2962,12 +3035,18 @@ fn parse_task_id_arg(args: &[String], cmd: &str) -> Result<String> {
     while i < args.len() {
         if args[i] == "--task" {
             if i + 1 >= args.len() {
-                return Err(MaccError::Validation(format!("{} --task requires a value", cmd)));
+                return Err(MaccError::Validation(format!(
+                    "{} --task requires a value",
+                    cmd
+                )));
             }
             task_id = Some(args[i + 1].clone());
             i += 2;
         } else {
-            return Err(MaccError::Validation(format!("Unknown {} arg: {}", cmd, args[i])));
+            return Err(MaccError::Validation(format!(
+                "Unknown {} arg: {}",
+                cmd, args[i]
+            )));
         }
     }
     task_id.ok_or_else(|| MaccError::Validation(format!("{} requires --task <task_id>", cmd)))
@@ -2979,7 +3058,10 @@ fn parse_recover_args(args: &[String]) -> Result<bool> {
         if arg == "--dry-run" {
             dry_run = true;
         } else {
-            return Err(MaccError::Validation(format!("Unknown recover arg: {}", arg)));
+            return Err(MaccError::Validation(format!(
+                "Unknown recover arg: {}",
+                arg
+            )));
         }
     }
     Ok(dry_run)
@@ -3014,4 +3096,3 @@ fn find_orphaned_pids_local(repo_root: &std::path::Path, db_pids: &[i64]) -> Res
     }
     Ok(orphaned)
 }
-

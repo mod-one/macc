@@ -1,10 +1,10 @@
-use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
-use std::time::Duration;
-use std::str::FromStr;
-use chrono::{DateTime, Utc};
 use crate::coordinator::model::Task;
 use crate::coordinator::{RuntimeStatus, WorkflowState};
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use std::str::FromStr;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -29,11 +29,7 @@ impl TaskHealth {
         }
     }
 
-    pub fn compute(
-        last_error: &str,
-        runtime_status: &str,
-        last_error_code: &str,
-    ) -> Self {
+    pub fn compute(last_error: &str, runtime_status: &str, last_error_code: &str) -> Self {
         if !last_error.is_empty() || runtime_status == "failed" {
             TaskHealth::Warning
         } else if last_error_code.starts_with("E601") || runtime_status == "stale" {
@@ -162,9 +158,12 @@ impl LiveTaskRow {
         let last_error_code_str = task.task_runtime.last_error_code.as_deref().unwrap_or("");
 
         let health = TaskHealth::compute(last_error, runtime_status_str, last_error_code_str);
-        
+
         let workflow_state = WorkflowState::from_str(&task.state).unwrap_or(WorkflowState::Todo);
-        let runtime_status = task.task_runtime.status.as_deref()
+        let runtime_status = task
+            .task_runtime
+            .status
+            .as_deref()
             .map(|s| match s {
                 "starting" | "dispatched" => RuntimeStatus::Dispatched,
                 "running" => RuntimeStatus::Running,
@@ -177,35 +176,47 @@ impl LiveTaskRow {
             })
             .unwrap_or(RuntimeStatus::Idle);
 
-        let phase = task.task_runtime.current_phase.clone()
+        let phase = task
+            .task_runtime
+            .current_phase
+            .clone()
             .map(TaskPhase::from)
             .unwrap_or(TaskPhase::Other(String::new()));
 
         let worker_id = task.task_runtime.worker_id.clone().unwrap_or_default();
         let task_id = task.id.clone();
         let tool = task.tool.clone().unwrap_or_else(|| "-".to_string());
-        
+
         let age = parse_age_to_duration(task.task_runtime.started_at.as_deref(), now)
             .unwrap_or(Duration::from_secs(0));
-            
+
         let heartbeat_age = parse_age_to_duration(task.task_runtime.last_heartbeat.as_deref(), now);
         let last_event_age = parse_age_to_duration(task.task_runtime.last_event_at.as_deref(), now);
-        
-        let current_message = task.task_runtime.message.clone()
-            .filter(|m| !m.is_empty());
-            
-        let worktree = task.worktree.as_ref()
+
+        let current_message = task.task_runtime.message.clone().filter(|m| !m.is_empty());
+
+        let worktree = task
+            .worktree
+            .as_ref()
             .and_then(|w| w.worktree_path.clone())
             .filter(|p| !p.is_empty() && p != "-")
             .map(PathBuf::from);
-            
-        let branch = task.worktree.as_ref()
+
+        let branch = task
+            .worktree
+            .as_ref()
             .and_then(|w| w.branch.clone())
             .filter(|b| !b.is_empty() && b != "-");
 
-        let last_error_code = task.task_runtime.last_error_code.clone()
+        let last_error_code = task
+            .task_runtime
+            .last_error_code
+            .clone()
             .filter(|c| !c.is_empty());
-        let last_error = task.task_runtime.last_error.clone()
+        let last_error = task
+            .task_runtime
+            .last_error
+            .clone()
             .filter(|e| !e.is_empty());
 
         Self {
@@ -243,7 +254,9 @@ impl LiveTaskRow {
     }
 
     pub fn heartbeat_age_label(&self) -> String {
-        self.heartbeat_age.map(Self::format_duration).unwrap_or_default()
+        self.heartbeat_age
+            .map(Self::format_duration)
+            .unwrap_or_default()
     }
 
     pub fn status_label(&self) -> String {
@@ -326,12 +339,21 @@ mod tests {
     #[test]
     fn test_task_health_compute() {
         assert_eq!(TaskHealth::compute("", "failed", ""), TaskHealth::Warning);
-        assert_eq!(TaskHealth::compute("err", "running", ""), TaskHealth::Warning);
-        assert_eq!(TaskHealth::compute("", "running", "E601"), TaskHealth::Stale);
+        assert_eq!(
+            TaskHealth::compute("err", "running", ""),
+            TaskHealth::Warning
+        );
+        assert_eq!(
+            TaskHealth::compute("", "running", "E601"),
+            TaskHealth::Stale
+        );
         assert_eq!(TaskHealth::compute("", "stale", ""), TaskHealth::Stale);
         assert_eq!(TaskHealth::compute("", "waiting", ""), TaskHealth::Waiting);
         assert_eq!(TaskHealth::compute("", "paused", ""), TaskHealth::Waiting);
-        assert_eq!(TaskHealth::compute("", "completed", ""), TaskHealth::Completed);
+        assert_eq!(
+            TaskHealth::compute("", "completed", ""),
+            TaskHealth::Completed
+        );
         assert_eq!(TaskHealth::compute("", "idle", ""), TaskHealth::Idle);
         assert_eq!(TaskHealth::compute("", "running", ""), TaskHealth::Healthy);
     }
@@ -351,7 +373,7 @@ mod tests {
     fn test_live_task_row_conversion() {
         let now = chrono::Utc::now();
         let started_at = (now - chrono::Duration::seconds(45)).to_rfc3339();
-        
+
         let task = Task {
             id: "task-123".to_string(),
             state: "in_progress".to_string(),

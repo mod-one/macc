@@ -461,10 +461,7 @@ pub fn execute_startup_recovery_sweep(
             if is_alive {
                 // ── Step 6 (verified alive): adopted or heartbeat_stale ────
                 if is_stale {
-                    situation = format!(
-                        "Performer alive but heartbeat stale for {}s",
-                        elapsed_sec
-                    );
+                    situation = format!("Performer alive but heartbeat stale for {}s", elapsed_sec);
                     classification = "heartbeat_stale".to_string();
                     action = "Wait grace period, then block/requeue".to_string();
                     proposed_action = Some(MutationAction::Stale);
@@ -482,7 +479,7 @@ pub fn execute_startup_recovery_sweep(
                     let wt_path = repo_root.join(wt);
                     branch_has_commits_ahead(
                         repo_root,
-                        &task.branch().unwrap_or(""),
+                        task.branch().unwrap_or(""),
                         reference_branch,
                     ) || crate::git::has_commits_ahead(&wt_path, reference_branch)
                 } else {
@@ -662,7 +659,11 @@ fn branch_has_commits_ahead(repo_root: &Path, branch: &str, reference_branch: &s
     }
     if let Ok(out) = crate::git::run_git_output_mapped(
         repo_root,
-        &["rev-list", "--count", &format!("{}..{}", reference_branch, branch)],
+        &[
+            "rev-list",
+            "--count",
+            &format!("{}..{}", reference_branch, branch),
+        ],
         "check branch commits ahead",
     ) {
         if out.status.success() {
@@ -914,9 +915,6 @@ mod tests {
             entry.classification, "adopted",
             "alive task with fresh heartbeat should be adopted"
         );
-        assert!(
-            !entry.mutated,
-            "adopted task should not be mutated"
-        );
+        assert!(!entry.mutated, "adopted task should not be mutated");
     }
 }

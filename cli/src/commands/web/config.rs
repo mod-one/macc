@@ -261,8 +261,12 @@ impl From<CanonicalConfig> for ApiConfigResponse {
                 .as_ref()
                 .and_then(|cfg| cfg.force_kill_grace_seconds),
             max_review_cycles: coordinator.as_ref().and_then(|cfg| cfg.max_review_cycles),
-            safety_policy: coordinator.as_ref().and_then(|cfg| cfg.safety_policy.clone()),
-            destructive_actions: coordinator.as_ref().and_then(|cfg| cfg.destructive_actions.clone()),
+            safety_policy: coordinator
+                .as_ref()
+                .and_then(|cfg| cfg.safety_policy.clone()),
+            destructive_actions: coordinator
+                .as_ref()
+                .and_then(|cfg| cfg.destructive_actions.clone()),
             requirements_detected: false,
             managed_environment_warnings: Vec::new(),
         }

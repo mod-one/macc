@@ -577,7 +577,8 @@ impl macc_core::engine::Engine for WebTestEngine {
             return execute_coordinator_workflow_command(&self.inner, paths, command, request);
         }
         if matches!(command, CoordinatorCommand::Stop { .. }) {
-            return self.stop_result
+            return self
+                .stop_result
                 .lock()
                 .expect("lock")
                 .take()
@@ -638,6 +639,14 @@ impl macc_core::engine::Engine for WebTestEngine {
             .expect("lock")
             .take()
             .unwrap_or_else(|| Ok(()))
+    }
+
+    fn collect_diagnostic_findings(
+        &self,
+        _paths: &ProjectPaths,
+        _max_parallel: u32,
+    ) -> Vec<macc_core::doctor::DiagnosticFinding> {
+        Vec::new()
     }
 
     fn get_coordinator_events(&self, _paths: &ProjectPaths) -> Result<Vec<CoordinatorEvent>> {

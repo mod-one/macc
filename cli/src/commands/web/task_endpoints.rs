@@ -1,27 +1,24 @@
 use super::errors::ApiError;
 use super::types::ApiRegistryTask;
 use super::WebState;
+use async_stream::stream;
 use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use axum::response::sse::{Event, Sse};
 use axum::Json;
-use macc_core::coordinator::RuntimeStatus;
 use macc_core::coordinator::types::CoordinatorEnvConfig;
-use macc_core::service::coordinator_workflow::{
-    CoordinatorCommand, CoordinatorCommandRequest,
-};
+use macc_core::coordinator::RuntimeStatus;
 use macc_core::engine::CoordinatorEvent;
+use macc_core::service::coordinator_workflow::{CoordinatorCommand, CoordinatorCommandRequest};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::time::Duration;
-use async_stream::stream;
 
 use super::registry::{collect_registry_events, not_found_task, requeue_task, task_to_api};
 use super::sse::{
-    EventsQuery, web_client_id, register_web_viewers,
-    resolve_source_seq_cursor, pending_events_after,
-    build_coordinator_sse_event, build_heartbeat_sse_event,
+    build_coordinator_sse_event, build_heartbeat_sse_event, pending_events_after,
+    register_web_viewers, resolve_source_seq_cursor, web_client_id, EventsQuery,
 };
 
 const SSE_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -211,8 +208,9 @@ pub(super) async fn get_registry_task_diff_handler(
             if format == "stat" {
                 args.push("--stat");
             }
-            let output = macc_core::git::run_git_output_mapped(&state.paths.root, &args, "git diff commit")
-                .map_err(ApiError::from)?;
+            let output =
+                macc_core::git::run_git_output_mapped(&state.paths.root, &args, "git diff commit")
+                    .map_err(ApiError::from)?;
             diff_str = String::from_utf8_lossy(&output.stdout).into_owned();
         }
     }
@@ -238,10 +236,7 @@ pub(super) async fn get_registry_task_explain_handler(
         .ok_or_else(|| not_found_task(&task_id))?;
 
     let rt = &task.task_runtime;
-    let events_log_path = rt
-        .events_log
-        .as_deref()
-        .map(|p| state.paths.root.join(p));
+    let events_log_path = rt.events_log.as_deref().map(|p| state.paths.root.join(p));
 
     let events_resolved_path = if let Some(ref path) = events_log_path {
         if path.exists() {
@@ -266,7 +261,9 @@ pub(super) async fn get_registry_task_explain_handler(
             let reader = BufReader::new(file);
             for line in reader.lines() {
                 let Ok(line) = line else { continue };
-                let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+                let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) else {
+                    continue;
+                };
 
                 // Filter by task_id
                 let event_task = val.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
@@ -274,19 +271,37 @@ pub(super) async fn get_registry_task_explain_handler(
                     continue;
                 }
 
-                let ts = val.get("timestamp").and_then(|v| v.as_str())
+                let ts = val
+                    .get("timestamp")
+                    .and_then(|v| v.as_str())
                     .or_else(|| val.get("ts").and_then(|v| v.as_str()))
                     .unwrap_or("")
                     .to_string();
-                let sev = val.get("severity").and_then(|v| v.as_str()).unwrap_or("info").to_string();
-                let phase = val.get("phase").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let event_type = val.get("event_type").and_then(|v| v.as_str())
+                let sev = val
+                    .get("severity")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("info")
+                    .to_string();
+                let phase = val
+                    .get("phase")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let event_type = val
+                    .get("event_type")
+                    .and_then(|v| v.as_str())
                     .or_else(|| val.get("type").and_then(|v| v.as_str()))
                     .unwrap_or("")
                     .to_string();
-                let message = val.get("message").and_then(|v| v.as_str())
+                let message = val
+                    .get("message")
+                    .and_then(|v| v.as_str())
                     .or_else(|| val.get("msg").and_then(|v| v.as_str()))
-                    .or_else(|| val.get("payload").and_then(|p| p.get("message")).and_then(|v| v.as_str()))
+                    .or_else(|| {
+                        val.get("payload")
+                            .and_then(|p| p.get("message"))
+                            .and_then(|v| v.as_str())
+                    })
                     .unwrap_or("")
                     .to_string();
 
@@ -301,10 +316,7 @@ pub(super) async fn get_registry_task_explain_handler(
         }
     }
 
-    Ok(Json(ApiTaskExplain {
-        task_id,
-        timeline,
-    }))
+    Ok(Json(ApiTaskExplain { task_id, timeline }))
 }
 
 pub(super) async fn task_stream_handler(
@@ -375,7 +387,7 @@ fn task_event_stream(
         loop {
             while let Some(event) = pending_events.pop_front() {
                 source_seq_cursor = source_seq_cursor.max(event.seq);
-                
+
                 let is_heartbeat = event.event_type == "heartbeat";
                 let is_task_match = event.task_id.as_deref() == Some(&task_id);
                 if is_heartbeat || is_task_match {
@@ -466,7 +478,9 @@ pub(super) async fn task_stop_handler(
     tokio::task::spawn_blocking(move || {
         engine.coordinator_execute_command(
             &paths,
-            CoordinatorCommand::KillTask { task_id: task_id_clone },
+            CoordinatorCommand::KillTask {
+                task_id: task_id_clone,
+            },
             CoordinatorCommandRequest {
                 canonical: None,
                 coordinator_cfg: None,

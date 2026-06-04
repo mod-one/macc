@@ -372,7 +372,10 @@ impl TaskRegistry {
                 .as_ref()
                 .and_then(|w| w.worktree_path.clone())
                 .unwrap_or_default();
-            let claim_id = task.task_runtime.claim_id.clone()
+            let claim_id = task
+                .task_runtime
+                .claim_id
+                .clone()
                 .filter(|s| !s.is_empty())
                 .or(task.task_runtime.active_session_id.clone())
                 .unwrap_or_else(|| format!("unclaimed-{}", task.id));

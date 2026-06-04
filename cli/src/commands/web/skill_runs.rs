@@ -22,9 +22,7 @@ pub(crate) struct RunSkillRequest {
     yes: Option<bool>,
 }
 
-pub(crate) async fn list_skills_handler(
-    State(state): State<WebState>,
-) -> Json<Vec<SkillListItem>> {
+pub(crate) async fn list_skills_handler(State(state): State<WebState>) -> Json<Vec<SkillListItem>> {
     let skills = state.engine.list_skills(&state.paths);
     Json(
         skills
@@ -65,10 +63,7 @@ pub(crate) async fn dry_run_skill_handler(
         .engine
         .resolve_skill(&state.paths, &skill_id)
         .ok_or_else(|| {
-            super::errors::ApiError::not_found(
-                format!("Skill '{}' not found", skill_id),
-                None,
-            )
+            super::errors::ApiError::not_found(format!("Skill '{}' not found", skill_id), None)
         })?;
 
     let preview = state.engine.dry_run_skill(&state.paths, &skill, None);
@@ -87,10 +82,7 @@ pub(crate) async fn run_skill_handler(
         .engine
         .resolve_skill(&state.paths, &skill_id)
         .ok_or_else(|| {
-            super::errors::ApiError::not_found(
-                format!("Skill '{}' not found", skill_id),
-                None,
-            )
+            super::errors::ApiError::not_found(format!("Skill '{}' not found", skill_id), None)
         })?;
 
     let request = SkillRunRequest {
@@ -129,9 +121,7 @@ pub(crate) struct RunEntry {
     status: String,
 }
 
-pub(crate) async fn list_runs_handler(
-    State(state): State<WebState>,
-) -> Json<Vec<RunEntry>> {
+pub(crate) async fn list_runs_handler(State(state): State<WebState>) -> Json<Vec<RunEntry>> {
     let run_dir = state.paths.macc_dir.join("log").join("run");
     if !run_dir.exists() {
         return Json(Vec::new());
@@ -141,12 +131,7 @@ pub(crate) async fn list_runs_handler(
         .into_iter()
         .flatten()
         .flatten()
-        .filter(|e| {
-            e.path()
-                .extension()
-                .map(|x| x == "jsonl")
-                .unwrap_or(false)
-        })
+        .filter(|e| e.path().extension().map(|x| x == "jsonl").unwrap_or(false))
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().to_string();
             let stem = name.trim_end_matches(".jsonl");
@@ -194,7 +179,9 @@ pub(crate) async fn get_run_handler(
         .lines()
         .filter_map(|l| serde_json::from_str(l).ok())
         .collect();
-    Ok(Json(serde_json::json!({ "run_id": run_id, "events": lines })))
+    Ok(Json(
+        serde_json::json!({ "run_id": run_id, "events": lines }),
+    ))
 }
 
 pub(crate) async fn get_run_logs_handler(
@@ -209,6 +196,5 @@ pub(crate) async fn get_run_logs_handler(
             None::<serde_json::Value>,
         ));
     }
-    std::fs::read_to_string(&jsonl)
-        .map_err(|e| super::errors::ApiError::validation(e.to_string()))
+    std::fs::read_to_string(&jsonl).map_err(|e| super::errors::ApiError::validation(e.to_string()))
 }

@@ -54,10 +54,10 @@ pub struct ToolPerformerSessionSpec {
 }
 
 /// Describes how to write the selected model to a tool-specific config file.
-/// Used for tools that do not accept `--model` as a CLI flag (e.g. vibe, agy).
+/// Used for tools that do not accept `--model` as a CLI flag.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelConfigSpec {
-    /// Config file path relative to the worktree (e.g. ".vibe/config.toml").
+    /// Config file path relative to the worktree (e.g. ".tool/config.toml").
     pub path: String,
     /// File format: `toml` or `json`.
     pub format: String,
@@ -98,8 +98,7 @@ pub struct ToolPerformerSpec {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_config: Option<ModelConfigSpec>,
     /// Config-file-based effort override for tools that do not accept an effort CLI flag
-    /// but read the reasoning/effort level from a settings file (e.g. codex reads
-    /// `model_reasoning_effort` from `.codex/config.toml`).
+    /// but read the reasoning/effort level from a settings file.
     /// Takes precedence over `effort_flag` when both are set for a given tool.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort_config: Option<ModelConfigSpec>,
@@ -675,6 +674,7 @@ mod tests {
             update: None,
             version_check: None,
             defaults: None,
+            model_tiers: Default::default(),
         };
 
         assert!(spec.validate().is_ok());
@@ -716,6 +716,7 @@ mod tests {
             update: None,
             version_check: None,
             defaults: None,
+            model_tiers: Default::default(),
         };
 
         assert!(spec.validate().is_err());
@@ -744,6 +745,7 @@ mod tests {
             update: None,
             version_check: None,
             defaults: None,
+            model_tiers: Default::default(),
         };
 
         assert!(spec.validate().is_err());
@@ -802,6 +804,7 @@ mod tests {
             update: None,
             version_check: None,
             defaults: None,
+            model_tiers: Default::default(),
         };
 
         let desc = spec.to_descriptor();
@@ -856,6 +859,7 @@ mod tests {
             update: None,
             version_check: None,
             defaults: None,
+            model_tiers: Default::default(),
         };
 
         let desc = spec.to_descriptor();

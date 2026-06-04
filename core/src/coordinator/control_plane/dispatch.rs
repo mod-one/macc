@@ -673,8 +673,8 @@ fn compute_routing_env(
     task_id: &str,
     canonical: &crate::config::CanonicalConfig,
 ) -> Vec<(&'static str, String)> {
-    use crate::coordinator::model_routing::decide;
     use crate::coordinator::model::Task;
+    use crate::coordinator::model_routing::decide;
 
     // Load the task from the registry to access routing_hints in task.extra.
     // On any read failure, fall back to standard tier with no env injection.
@@ -689,7 +689,10 @@ fn compute_routing_env(
 
     vec![
         ("MACC_MODEL_TIER", decision.tier.as_str().to_string()),
-        ("MACC_REASONING_DEPTH", decision.reasoning_depth.as_str().to_string()),
+        (
+            "MACC_REASONING_DEPTH",
+            decision.reasoning_depth.as_str().to_string(),
+        ),
         ("MACC_MODEL_ROUTING_MODE", decision.mode.clone()),
     ]
 }
@@ -701,7 +704,8 @@ fn load_task_for_routing(
     let registry_value = crate::coordinator::state::coordinator_state_registry_load(
         repo_root,
         &std::collections::BTreeMap::new(),
-    ).ok()?;
+    )
+    .ok()?;
     let typed = crate::coordinator::model::TaskRegistry::from_value(&registry_value).ok()?;
     typed.tasks.into_iter().find(|t| t.id == task_id)
 }

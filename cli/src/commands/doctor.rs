@@ -46,7 +46,10 @@ impl Command for DoctorCommand {
                 match self.app.engine.fix_git_identity_config(&paths, name, email) {
                     Ok(()) => {
                         if !self.json {
-                            println!("Fixed: Git identity set (user.name={}, user.email={}).", name, email);
+                            println!(
+                                "Fixed: Git identity set (user.name={}, user.email={}).",
+                                name, email
+                            );
                         }
                     }
                     Err(e) => {
@@ -67,7 +70,10 @@ impl Command for DoctorCommand {
 
         // Run new extended diagnostic findings via Engine facade (spec §5.3).
         let max_parallel = resolve_max_parallel(&paths);
-        let mut findings = self.app.engine.collect_diagnostic_findings(&paths, max_parallel);
+        let mut findings = self
+            .app
+            .engine
+            .collect_diagnostic_findings(&paths, max_parallel);
 
         if self.coordinator_only {
             findings.retain(|f| f.category == "coordinator");
@@ -79,7 +85,10 @@ impl Command for DoctorCommand {
                 "ready": !blocking,
                 "findings": findings,
             });
-            println!("{}", serde_json::to_string_pretty(&output).unwrap_or_default());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&output).unwrap_or_default()
+            );
             if blocking {
                 return Err(macc_core::MaccError::Validation(
                     "Doctor checks found blocking issues.".into(),
@@ -110,7 +119,10 @@ fn print_grouped_findings(findings: &[macc_core::doctor::DiagnosticFinding]) {
     ];
 
     for (category, label) in groups {
-        let group: Vec<_> = findings.iter().filter(|f| f.category == *category).collect();
+        let group: Vec<_> = findings
+            .iter()
+            .filter(|f| f.category == *category)
+            .collect();
         if group.is_empty() {
             continue;
         }

@@ -79,9 +79,18 @@ impl SkillResolver {
                 risk: SkillRisk::Safe,
                 description: "Run lint, build, and tests.".to_string(),
                 steps: vec![
-                    SkillStep { run: Some("pnpm lint".to_string()), prompt: None },
-                    SkillStep { run: Some("pnpm build".to_string()), prompt: None },
-                    SkillStep { run: Some("pnpm test".to_string()), prompt: None },
+                    SkillStep {
+                        run: Some("pnpm lint".to_string()),
+                        prompt: None,
+                    },
+                    SkillStep {
+                        run: Some("pnpm build".to_string()),
+                        prompt: None,
+                    },
+                    SkillStep {
+                        run: Some("pnpm test".to_string()),
+                        prompt: None,
+                    },
                 ],
                 targets: Default::default(),
             }),
@@ -93,7 +102,9 @@ impl SkillResolver {
                 description: "Implement the next pending task.".to_string(),
                 steps: vec![SkillStep {
                     run: None,
-                    prompt: Some("Implement the task described in the current context.".to_string()),
+                    prompt: Some(
+                        "Implement the task described in the current context.".to_string(),
+                    ),
                 }],
                 targets: Default::default(),
             }),

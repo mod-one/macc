@@ -18,7 +18,10 @@ pub struct ModelSelection {
 
 impl Default for ModelSelection {
     fn default() -> Self {
-        Self { mode: ModelRoutingMode::Auto, model: None }
+        Self {
+            mode: ModelRoutingMode::Auto,
+            model: None,
+        }
     }
 }
 

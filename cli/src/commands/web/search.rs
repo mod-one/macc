@@ -37,10 +37,7 @@ pub(crate) async fn search_handler(
                     kind: "task".to_string(),
                     id: task.task_id.clone(),
                     label: format!("{} — {}", task.task_id, task.title),
-                    meta: Some(format!(
-                        "{} · {}",
-                        task.workflow_state, task.runtime_status
-                    )),
+                    meta: Some(format!("{} · {}", task.workflow_state, task.runtime_status)),
                 });
             }
         }
@@ -63,8 +60,7 @@ pub(crate) async fn search_handler(
         }
 
         for tool in &snapshot.throttled_tools {
-            if tool.tool.to_lowercase().contains(&q)
-                || tool.error_code.to_lowercase().contains(&q)
+            if tool.tool.to_lowercase().contains(&q) || tool.error_code.to_lowercase().contains(&q)
             {
                 results.push(SearchResult {
                     kind: "error_code".to_string(),

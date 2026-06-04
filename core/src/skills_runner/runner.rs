@@ -63,14 +63,18 @@ impl SkillRunner {
                         skill.id
                     ),
                 };
-                println!("{}", msg);
+                tracing::warn!("{}", msg);
                 write_log_file(&log_path, &msg, "");
                 (msg, String::new(), Some(0))
             }
         };
 
         let duration_ms = started.elapsed().as_millis() as u64;
-        let status = if exit_code.unwrap_or(0) == 0 { "success" } else { "failed" };
+        let status = if exit_code.unwrap_or(0) == 0 {
+            "success"
+        } else {
+            "failed"
+        };
 
         emit_event(
             &jsonl_path,
@@ -146,7 +150,7 @@ fn run_local_commands_streaming(
             continue;
         };
 
-        println!("$ {}", cmd_str);
+        tracing::debug!("$ {}", cmd_str);
         log_header.push_str(&format!("$ {}\n", cmd_str));
 
         let status = shell_command(cmd_str, cwd)
@@ -183,7 +187,11 @@ fn shell_command(cmd_str: &str, cwd: &Path) -> Command {
 
 /// Write combined stdout/stderr to the plain-text `.log` file (spec §3.10).
 fn write_log_file(path: &Path, stdout: &str, stderr: &str) {
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         if !stdout.is_empty() {
             let _ = write!(f, "{}", stdout);
         }
@@ -194,7 +202,11 @@ fn write_log_file(path: &Path, stdout: &str, stderr: &str) {
 }
 
 fn emit_event(path: &Path, event: &serde_json::Value) {
-    if let Ok(mut file) = std::fs::OpenOptions::new().append(true).create(true).open(path) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(path)
+    {
         if let Ok(line) = serde_json::to_string(event) {
             let _ = writeln!(file, "{}", line);
         }

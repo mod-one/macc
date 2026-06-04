@@ -118,11 +118,7 @@ fn build_from_snapshot(
         }
 
         let runtime = &task.task_runtime;
-        let runtime_status = runtime
-            .status
-            .as_deref()
-            .unwrap_or("idle")
-            .to_string();
+        let runtime_status = runtime.status.as_deref().unwrap_or("idle").to_string();
 
         let is_active = matches!(
             runtime_status.as_str(),
@@ -150,10 +146,7 @@ fn build_from_snapshot(
         if is_active {
             if let Some(wt_path) = runtime.worktree.as_deref() {
                 let worker = WorkerRuntime {
-                    id: runtime
-                        .worker_id
-                        .clone()
-                        .unwrap_or_else(|| task.id.clone()),
+                    id: runtime.worker_id.clone().unwrap_or_else(|| task.id.clone()),
                     worktree_path: std::path::PathBuf::from(wt_path),
                     tool: runtime.tool.clone().unwrap_or_default(),
                     task_id: Some(task.id.clone()),
@@ -180,17 +173,18 @@ fn build_from_snapshot(
                     .and_then(|v| v.get("backoff_seconds"))
                     .and_then(|x| x.as_u64())
                     .unwrap_or(0);
-                let entry = throttle_map
-                    .entry(tool_id.to_string())
-                    .or_insert_with(|| ToolThrottleStatus {
-                        tool: tool_id.to_string(),
-                        reason: "rate_limited".to_string(),
-                        error_code: "E601".to_string(),
-                        retryable: true,
-                        delayed_until: Some(delayed_until.to_string()),
-                        backoff_seconds: backoff,
-                        effective_parallelism_delta: -1,
-                    });
+                let entry =
+                    throttle_map
+                        .entry(tool_id.to_string())
+                        .or_insert_with(|| ToolThrottleStatus {
+                            tool: tool_id.to_string(),
+                            reason: "rate_limited".to_string(),
+                            error_code: "E601".to_string(),
+                            retryable: true,
+                            delayed_until: Some(delayed_until.to_string()),
+                            backoff_seconds: backoff,
+                            effective_parallelism_delta: -1,
+                        });
                 if delayed_until > entry.delayed_until.as_deref().unwrap_or("") {
                     entry.delayed_until = Some(delayed_until.to_string());
                 }

@@ -43,6 +43,8 @@ fn check_adapter_contract(adapter: Arc<dyn ToolAdapter>) {
         mcp_templates: Vec::new(),
         automation: Default::default(),
         settings: Default::default(),
+        context: None,
+        skills_run_policy: None,
     };
 
     let ctx = PlanningContext {
@@ -141,6 +143,8 @@ fn test_adapter_with_skills_and_agents() {
             mcp_templates: Vec::new(),
             automation: Default::default(),
             settings: Default::default(),
+            context: None,
+            skills_run_policy: None,
         };
 
         let ctx = PlanningContext {

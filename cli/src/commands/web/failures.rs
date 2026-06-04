@@ -44,26 +44,29 @@ pub(crate) async fn recent_failures_handler(
                 .unwrap_or("");
             let status = v.get("status").and_then(|x| x.as_str()).unwrap_or("");
 
-            if !event_type.contains("fail")
-                && !event_type.contains("error")
-                && status != "failed"
-            {
+            if !event_type.contains("fail") && !event_type.contains("error") && status != "failed" {
                 return None;
             }
 
             Some(RecentFailure {
-                task_id: v.get("task_id").and_then(|x| x.as_str()).map(|s| s.to_string()),
-                tool: v.get("tool").and_then(|x| x.as_str()).map(|s| s.to_string()),
-                worktree: v.get("worktree").and_then(|x| x.as_str()).map(|s| s.to_string()),
+                task_id: v
+                    .get("task_id")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string()),
+                tool: v
+                    .get("tool")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string()),
+                worktree: v
+                    .get("worktree")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string()),
                 error_code: v
                     .get("error_code")
                     .or_else(|| v.get("last_error_code"))
                     .and_then(|x| x.as_str())
                     .map(|s| s.to_string()),
-                retryable: v
-                    .get("retryable")
-                    .and_then(|x| x.as_bool())
-                    .unwrap_or(true),
+                retryable: v.get("retryable").and_then(|x| x.as_bool()).unwrap_or(true),
                 excerpt: v
                     .get("message")
                     .and_then(|x| x.as_str())

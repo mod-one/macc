@@ -50,6 +50,8 @@ mod tests {
             mcp_templates: Vec::new(),
             automation: crate::config::AutomationConfig::default(),
             settings: crate::config::SettingsConfig::default(),
+            context: None,
+            skills_run_policy: None,
         };
 
         let ctx = PlanningContext {

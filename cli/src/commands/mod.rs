@@ -12,9 +12,11 @@ pub mod config;
 pub mod context;
 pub mod coordinator;
 pub mod doctor;
+pub mod failure;
 pub mod init;
 pub mod install;
 pub mod lifecycle_support;
+pub mod lock;
 pub mod logs;
 pub mod migrate;
 pub mod plan;
@@ -23,19 +25,17 @@ pub mod process;
 pub mod quickstart;
 pub mod restore;
 pub mod run;
+pub mod save;
+pub mod settings;
 pub mod skills_cmd;
+pub mod start;
 pub mod status;
 pub mod supervisor;
+pub mod task;
 pub mod tool;
+pub mod trust;
 pub mod web;
 pub mod worktree;
-pub mod start;
-pub mod trust;
-pub mod lock;
-pub mod failure;
-pub mod settings;
-pub mod save;
-pub mod task;
 
 pub trait Command {
     fn run(&self) -> Result<()>;
@@ -163,7 +163,8 @@ pub fn create_save_bundle_interactive(
     loop {
         match macc_core::save::create_save_bundle(paths, name, &opts) {
             Err(macc_core::MaccError::Validation(ref msg)) if msg.contains("MACC-SAVE-1003") => {
-                let term_interactive = !cfg!(test) || std::env::var("MACC_FORCE_INTERACTIVE").is_ok();
+                let term_interactive =
+                    !cfg!(test) || std::env::var("MACC_FORCE_INTERACTIVE").is_ok();
                 if !term_interactive {
                     return Err(macc_core::MaccError::Validation(msg.clone()));
                 }

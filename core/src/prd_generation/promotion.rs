@@ -41,7 +41,8 @@ pub fn promote_prd(options: &PromoteOptions) -> crate::Result<PromoteResult> {
     let backup_created = if dest_exists {
         if let Some(backup_dir) = &options.backup_dir {
             let ts = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
-            let filename = options.dest_path
+            let filename = options
+                .dest_path
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "prd.json".to_string());

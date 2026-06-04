@@ -1,17 +1,24 @@
-use std::fs;
-use chrono::Utc;
-use crate::{MaccError, ProjectPaths, Result};
-use super::manifest::{SaveBundleManifest, MatchStrength};
 use super::bundle::{compute_file_sha256, compute_manifest_payload_hash};
-use super::repository_identity::{get_repository_identity, compute_match_strength};
 use super::classifier::copy_dir_all;
+use super::manifest::{MatchStrength, SaveBundleManifest};
+use super::repository_identity::{compute_match_strength, get_repository_identity};
+use crate::{MaccError, ProjectPaths, Result};
+use chrono::Utc;
+use std::fs;
 
-pub fn restore_save_bundle(paths: &ProjectPaths, name: &str, opts: &super::RestoreOptions) -> Result<()> {
+pub fn restore_save_bundle(
+    paths: &ProjectPaths,
+    name: &str,
+    opts: &super::RestoreOptions,
+) -> Result<()> {
     let saves_dir = super::user_saves_dir().ok_or(MaccError::HomeDirNotFound)?;
     let target_save_dir = saves_dir.join(name);
-    
+
     if !target_save_dir.exists() {
-        return Err(MaccError::Validation(format!("MACC-RESTORE-2000: Save bundle not found: {}", name)));
+        return Err(MaccError::Validation(format!(
+            "MACC-RESTORE-2000: Save bundle not found: {}",
+            name
+        )));
     }
 
     let manifest_path = target_save_dir.join("manifest.yaml");
@@ -25,11 +32,17 @@ pub fn restore_save_bundle(paths: &ProjectPaths, name: &str, opts: &super::Resto
     let computed_payload_hash = compute_manifest_payload_hash(&manifest_str);
 
     let manifest: SaveBundleManifest = serde_yaml::from_str(&manifest_str).map_err(|e| {
-        MaccError::Validation(format!("MACC-RESTORE-2001: Unsupported or malformed manifest: {}", e))
+        MaccError::Validation(format!(
+            "MACC-RESTORE-2001: Unsupported or malformed manifest: {}",
+            e
+        ))
     })?;
 
     if computed_payload_hash != manifest.hashes.manifest_payload {
-        return Err(MaccError::Validation("MACC-RESTORE-2003: Checksum mismatch. Manifest payload integrity verification failed.".to_string()));
+        return Err(MaccError::Validation(
+            "MACC-RESTORE-2003: Checksum mismatch. Manifest payload integrity verification failed."
+                .to_string(),
+        ));
     }
 
     // Verify standalone checksums/sha256sums.txt if present
@@ -56,7 +69,8 @@ pub fn restore_save_bundle(paths: &ProjectPaths, name: &str, opts: &super::Resto
             let expected_sha = parts[0];
             let rel_path = parts[1];
 
-            let target_path = target_save_dir.join(rel_path.replace('/', &std::path::MAIN_SEPARATOR.to_string()));
+            let target_path =
+                target_save_dir.join(rel_path.replace('/', std::path::MAIN_SEPARATOR_STR));
 
             if !target_path.exists() {
                 return Err(MaccError::Validation(format!(
@@ -108,7 +122,10 @@ pub fn restore_save_bundle(paths: &ProjectPaths, name: &str, opts: &super::Resto
             let actual_sha = compute_file_sha256(&sessions_src).unwrap();
             if let Some(expected_sha) = &manifest.hashes.coordinator_sessions {
                 if &actual_sha != expected_sha {
-                    return Err(MaccError::Validation("MACC-RESTORE-2003: Checksum mismatch. Save sessions file is corrupted.".to_string()));
+                    return Err(MaccError::Validation(
+                        "MACC-RESTORE-2003: Checksum mismatch. Save sessions file is corrupted."
+                            .to_string(),
+                    ));
                 }
             }
         }
@@ -125,7 +142,7 @@ pub fn restore_save_bundle(paths: &ProjectPaths, name: &str, opts: &super::Resto
             let config_src = target_save_dir.join(config_rel);
             if config_src.exists() {
                 fs::create_dir_all(paths.config_path.parent().unwrap()).ok();
-                
+
                 // Back up overwritten file first
                 if paths.config_path.exists() {
                     let backup_name = format!("macc.yaml.backup.{}", Utc::now().timestamp());
@@ -148,14 +165,15 @@ pub fn restore_save_bundle(paths: &ProjectPaths, name: &str, opts: &super::Resto
     }
 
     // 2. Restore sessions
-    let restore_sessions = opts.sessions || (!opts.no_sessions && manifest.includes.coordinator_sessions);
+    let restore_sessions =
+        opts.sessions || (!opts.no_sessions && manifest.includes.coordinator_sessions);
     if restore_sessions {
         if let Some(sessions_rel) = &manifest.paths.coordinator_sessions {
             let sessions_src = target_save_dir.join(sessions_rel);
             if sessions_src.exists() {
                 let sessions_dest = paths.macc_dir.join("state").join("tool-sessions.json");
                 fs::create_dir_all(sessions_dest.parent().unwrap()).ok();
-                
+
                 // Session normalization: drop PIDs / stale leases
                 if let Ok(content) = fs::read_to_string(&sessions_src) {
                     if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&content) {
@@ -174,7 +192,7 @@ pub fn restore_save_bundle(paths: &ProjectPaths, name: &str, opts: &super::Resto
     if manifest.includes.catalogs {
         let catalogs_src = target_save_dir.join("catalogs");
         if catalogs_src.exists() {
-            let _ = copy_dir_all(&catalogs_src, &paths.project_catalog_dir(), paths);
+            let _ = copy_dir_all(&catalogs_src, paths.project_catalog_dir(), paths);
         }
     }
 
@@ -203,14 +221,26 @@ fn recompute_worktree_path(old_path_str: &str, current_project_root: &std::path:
     if let Some(pos) = old_path_str.find(".macc/worktrees") {
         let rel = &old_path_str[pos + ".macc/worktrees".len()..];
         let rel_clean = rel.trim_start_matches('/').trim_start_matches('\\');
-        current_project_root.join(".macc/worktree").join(rel_clean).to_string_lossy().to_string()
+        current_project_root
+            .join(".macc/worktree")
+            .join(rel_clean)
+            .to_string_lossy()
+            .to_string()
     } else if let Some(pos) = old_path_str.find(".macc/worktree") {
         let rel = &old_path_str[pos + ".macc/worktree".len()..];
         let rel_clean = rel.trim_start_matches('/').trim_start_matches('\\');
-        current_project_root.join(".macc/worktree").join(rel_clean).to_string_lossy().to_string()
+        current_project_root
+            .join(".macc/worktree")
+            .join(rel_clean)
+            .to_string_lossy()
+            .to_string()
     } else {
         if let Some(last_component) = old_path.file_name() {
-            current_project_root.join(".macc/worktree").join(last_component).to_string_lossy().to_string()
+            current_project_root
+                .join(".macc/worktree")
+                .join(last_component)
+                .to_string_lossy()
+                .to_string()
         } else {
             old_path_str.to_string()
         }
@@ -225,7 +255,7 @@ fn normalize_session_json(value: &mut serde_json::Value, project_root: &std::pat
             map.remove("owner_pid");
             map.remove("owner_task_id");
             map.remove("owner_worktree");
-            
+
             if let Some(status_val) = map.get_mut("status") {
                 if let Some(status_str) = status_val.as_str() {
                     if status_str == "active" {
@@ -233,11 +263,11 @@ fn normalize_session_json(value: &mut serde_json::Value, project_root: &std::pat
                     }
                 }
             }
-            
+
             if map.contains_key("heartbeat_epoch") {
                 map.insert("heartbeat_epoch".to_string(), serde_json::json!(0));
             }
-            
+
             let mut keys_to_rename = Vec::new();
             for (k, v) in map.iter_mut() {
                 if k.contains('/') || k.contains('\\') || k.contains(".macc") {
@@ -248,7 +278,7 @@ fn normalize_session_json(value: &mut serde_json::Value, project_root: &std::pat
                 }
                 normalize_session_json(v, project_root);
             }
-            
+
             for (old_k, new_k) in keys_to_rename {
                 if let Some(val) = map.remove(&old_k) {
                     map.insert(new_k, val);
@@ -264,7 +294,6 @@ fn normalize_session_json(value: &mut serde_json::Value, project_root: &std::pat
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,7 +303,7 @@ mod tests {
     #[test]
     fn test_recompute_worktree_path() {
         let current_root = Path::new("/new/project");
-        
+
         // Absolute path with .macc/worktree
         let old_wt_1 = "/old/project/.macc/worktree/worker-01";
         let new_wt_1 = recompute_worktree_path(old_wt_1, current_root);

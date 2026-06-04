@@ -63,9 +63,7 @@ enum SaveSubcommands {
         matching: bool,
     },
     /// Show details of a save bundle
-    Show {
-        name: String,
-    },
+    Show { name: String },
     /// Delete a MACC save bundle
     Delete {
         name: String,
@@ -938,7 +936,6 @@ pub enum SkillsSubcommands {
     },
 }
 
-
 #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 enum WebAssetsArg {
     Dist,
@@ -1331,7 +1328,11 @@ fn parse_since_to_seconds(s: &str) -> Option<u64> {
         // Default to minutes if no suffix is specified
         (s.as_str(), 60)
     };
-    num_part.trim().parse::<u64>().ok().map(|val| val * multiplier)
+    num_part
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(|val| val * multiplier)
 }
 
 fn main() {
@@ -1565,7 +1566,12 @@ fn run_with_engine_provider(
                 source: std::io::Error::other(e.to_string()),
             })
         }
-        Some(Commands::Web { host, port, assets, daemon }) => commands::web::WebCommand::new(
+        Some(Commands::Web {
+            host,
+            port,
+            assets,
+            daemon,
+        }) => commands::web::WebCommand::new(
             app.clone(),
             host.clone(),
             *port,
@@ -1624,15 +1630,16 @@ fn run_with_engine_provider(
             cmd,
         }) => {
             let action = match cmd {
-                Some(SaveSubcommands::List { matching }) => {
-                    commands::save::SaveAction::List { matching: *matching }
-                }
+                Some(SaveSubcommands::List { matching }) => commands::save::SaveAction::List {
+                    matching: *matching,
+                },
                 Some(SaveSubcommands::Show { name }) => {
                     commands::save::SaveAction::Show { name: name.clone() }
                 }
-                Some(SaveSubcommands::Delete { name, yes }) => {
-                    commands::save::SaveAction::Delete { name: name.clone(), yes: *yes }
-                }
+                Some(SaveSubcommands::Delete { name, yes }) => commands::save::SaveAction::Delete {
+                    name: name.clone(),
+                    yes: *yes,
+                },
                 None => {
                     let n = name.clone().unwrap_or_default();
                     if n.is_empty() {
@@ -1739,7 +1746,15 @@ fn run_with_engine_provider(
             commands::settings::SettingsCommand::new(app.clone(), settings_command.clone()).run()
         }
 
-        Some(Commands::Explain { task_id, json, since, severity, logs, artifacts, compact }) => {
+        Some(Commands::Explain {
+            task_id,
+            json,
+            since,
+            severity,
+            logs,
+            artifacts,
+            compact,
+        }) => {
             let since_seconds = since.as_deref().and_then(parse_since_to_seconds);
             commands::task::ExplainCommand::new(
                 app.clone(),
@@ -1754,19 +1769,25 @@ fn run_with_engine_provider(
             .run()
         }
 
-        Some(Commands::Diff { task_id, stat, name_only, base, format, cached, open }) => {
-            commands::task::DiffCommand::new(
-                app.clone(),
-                task_id.clone(),
-                *stat,
-                *name_only,
-                base.clone(),
-                format.clone(),
-                *cached,
-                *open,
-            )
-            .run()
-        }
+        Some(Commands::Diff {
+            task_id,
+            stat,
+            name_only,
+            base,
+            format,
+            cached,
+            open,
+        }) => commands::task::DiffCommand::new(
+            app.clone(),
+            task_id.clone(),
+            *stat,
+            *name_only,
+            base.clone(),
+            format.clone(),
+            *cached,
+            *open,
+        )
+        .run(),
 
         Some(Commands::Status {
             json,
@@ -1832,72 +1853,104 @@ fn run_with_engine_provider(
             use commands::skills_cmd::{SkillsCmdCommand, SkillsSubcommand};
             let sub = match skills_subcommand {
                 SkillsSubcommands::List { tool } => SkillsSubcommand::List { tool: tool.clone() },
-                SkillsSubcommands::Show { skill } => {
-                    SkillsSubcommand::Show { skill: skill.clone() }
-                }
-                SkillsSubcommands::Explain { skill } => {
-                    SkillsSubcommand::Explain { skill: skill.clone() }
-                }
+                SkillsSubcommands::Show { skill } => SkillsSubcommand::Show {
+                    skill: skill.clone(),
+                },
+                SkillsSubcommands::Explain { skill } => SkillsSubcommand::Explain {
+                    skill: skill.clone(),
+                },
                 SkillsSubcommands::Doctor => SkillsSubcommand::Doctor,
                 // Catalog lifecycle subcommands
-                SkillsSubcommands::Available { tool, source, tag, json } => {
-                    SkillsSubcommand::Available {
-                        tool: tool.clone(),
-                        source: source.clone(),
-                        tag: tag.clone(),
-                        json: *json,
-                    }
-                }
-                SkillsSubcommands::Status { tool, verbose, json } => {
-                    SkillsSubcommand::CatalogStatus {
-                        tool: tool.clone(),
-                        verbose: *verbose,
-                        json: *json,
-                    }
-                }
-                SkillsSubcommands::Install { id, tool, source: _, reference, pin, dry_run } => {
-                    SkillsSubcommand::Install {
-                        id: id.clone(),
-                        tool: tool.clone(),
-                        reference: reference.clone(),
-                        pin: *pin,
-                        dry_run: *dry_run,
-                    }
-                }
-                SkillsSubcommands::Update { id, tool, dry_run, latest: _ } => {
-                    SkillsSubcommand::Update {
-                        id: id.clone(),
-                        tool: tool.clone(),
-                        dry_run: *dry_run,
-                    }
-                }
-                SkillsSubcommands::Verify { tool, json } => {
-                    SkillsSubcommand::Verify { tool: tool.clone(), json: *json }
-                }
-                SkillsSubcommands::Prune { tool, dry_run } => {
-                    SkillsSubcommand::Prune { tool: tool.clone(), dry_run: *dry_run }
-                }
-                SkillsSubcommands::Diff { id, tool } => {
-                    SkillsSubcommand::Diff { id: id.clone(), tool: tool.clone() }
-                }
-                SkillsSubcommands::Uninstall { id, tool, all_tools } => {
-                    SkillsSubcommand::Uninstall {
-                        id: id.clone(),
-                        tool: tool.clone(),
-                        all_tools: *all_tools,
-                    }
-                }
+                SkillsSubcommands::Available {
+                    tool,
+                    source,
+                    tag,
+                    json,
+                } => SkillsSubcommand::Available {
+                    tool: tool.clone(),
+                    source: source.clone(),
+                    tag: tag.clone(),
+                    json: *json,
+                },
+                SkillsSubcommands::Status {
+                    tool,
+                    verbose,
+                    json,
+                } => SkillsSubcommand::CatalogStatus {
+                    tool: tool.clone(),
+                    verbose: *verbose,
+                    json: *json,
+                },
+                SkillsSubcommands::Install {
+                    id,
+                    tool,
+                    source: _,
+                    reference,
+                    pin,
+                    dry_run,
+                } => SkillsSubcommand::Install {
+                    id: id.clone(),
+                    tool: tool.clone(),
+                    reference: reference.clone(),
+                    pin: *pin,
+                    dry_run: *dry_run,
+                },
+                SkillsSubcommands::Update {
+                    id,
+                    tool,
+                    dry_run,
+                    latest: _,
+                } => SkillsSubcommand::Update {
+                    id: id.clone(),
+                    tool: tool.clone(),
+                    dry_run: *dry_run,
+                },
+                SkillsSubcommands::Verify { tool, json } => SkillsSubcommand::Verify {
+                    tool: tool.clone(),
+                    json: *json,
+                },
+                SkillsSubcommands::Prune { tool, dry_run } => SkillsSubcommand::Prune {
+                    tool: tool.clone(),
+                    dry_run: *dry_run,
+                },
+                SkillsSubcommands::Diff { id, tool } => SkillsSubcommand::Diff {
+                    id: id.clone(),
+                    tool: tool.clone(),
+                },
+                SkillsSubcommands::Uninstall {
+                    id,
+                    tool,
+                    all_tools,
+                } => SkillsSubcommand::Uninstall {
+                    id: id.clone(),
+                    tool: tool.clone(),
+                    all_tools: *all_tools,
+                },
             };
-            SkillsCmdCommand { app: app.clone(), subcommand: sub }.run()
+            SkillsCmdCommand {
+                app: app.clone(),
+                subcommand: sub,
+            }
+            .run()
         }
 
         Some(Commands::Prd { prd_subcommand }) => {
             use commands::prd::{PrdCommand, PrdSubcommand};
             let sub = match prd_subcommand {
                 PrdSubcommands::Generate {
-                    from_path, tool, model_routing, model, model_tier, instructions,
-                    instructions_file, target_dir, update_path,
-                    dry_run, promote, yes, json,
+                    from_path,
+                    tool,
+                    model_routing,
+                    model,
+                    model_tier,
+                    instructions,
+                    instructions_file,
+                    target_dir,
+                    update_path,
+                    dry_run,
+                    promote,
+                    yes,
+                    json,
                 } => {
                     // --model-tier on prd generate sets env var for the invoked tool process
                     if let Some(tier) = model_tier {
@@ -1905,47 +1958,66 @@ fn run_with_engine_provider(
                         std::env::set_var("MACC_MODEL_ROUTING_MODE", "auto");
                     }
                     PrdSubcommand::Generate {
-                    from_path: std::path::PathBuf::from(from_path),
-                    tool: tool.clone(),
-                    model_routing: model_routing.clone(),
-                    model: model.clone(),
-                    instructions: instructions.clone(),
-                    instructions_file: instructions_file.as_deref().map(std::path::PathBuf::from),
-                    target_dir: target_dir.as_deref().map(std::path::PathBuf::from),
-                    update_path: update_path.as_deref().map(std::path::PathBuf::from),
-                    dry_run: *dry_run,
-                    promote: *promote,
-                    yes: *yes,
-                    json: *json,
-                }},
+                        from_path: std::path::PathBuf::from(from_path),
+                        tool: tool.clone(),
+                        model_routing: model_routing.clone(),
+                        model: model.clone(),
+                        instructions: instructions.clone(),
+                        instructions_file: instructions_file
+                            .as_deref()
+                            .map(std::path::PathBuf::from),
+                        target_dir: target_dir.as_deref().map(std::path::PathBuf::from),
+                        update_path: update_path.as_deref().map(std::path::PathBuf::from),
+                        dry_run: *dry_run,
+                        promote: *promote,
+                        yes: *yes,
+                        json: *json,
+                    }
+                }
                 PrdSubcommands::Audit {
-                    prd_path, tool, model_routing, model, model_tier, instructions,
-                    instructions_file, reference_branch, diff_stat, dry_run, yes: _, json,
+                    prd_path,
+                    tool,
+                    model_routing,
+                    model,
+                    model_tier,
+                    instructions,
+                    instructions_file,
+                    reference_branch,
+                    diff_stat,
+                    dry_run,
+                    yes: _,
+                    json,
                 } => {
                     if let Some(tier) = model_tier {
                         std::env::set_var("MACC_MODEL_TIER", tier);
                         std::env::set_var("MACC_MODEL_ROUTING_MODE", "auto");
                     }
                     PrdSubcommand::Audit {
-                    prd_path: std::path::PathBuf::from(prd_path),
-                    tool: tool.clone(),
-                    model_routing: model_routing.clone(),
-                    model: model.clone(),
-                    instructions: instructions.clone(),
-                    instructions_file: instructions_file.as_deref().map(std::path::PathBuf::from),
-                    reference_branch: reference_branch.clone(),
-                    diff_stat: *diff_stat,
-                    dry_run: *dry_run,
-                    json: *json,
-                }},
-                PrdSubcommands::Promote { source_path, dest_path, yes, json } => {
-                    PrdSubcommand::Promote {
-                        source_path: std::path::PathBuf::from(source_path),
-                        dest_path: dest_path.as_deref().map(std::path::PathBuf::from),
-                        yes: *yes,
+                        prd_path: std::path::PathBuf::from(prd_path),
+                        tool: tool.clone(),
+                        model_routing: model_routing.clone(),
+                        model: model.clone(),
+                        instructions: instructions.clone(),
+                        instructions_file: instructions_file
+                            .as_deref()
+                            .map(std::path::PathBuf::from),
+                        reference_branch: reference_branch.clone(),
+                        diff_stat: *diff_stat,
+                        dry_run: *dry_run,
                         json: *json,
                     }
                 }
+                PrdSubcommands::Promote {
+                    source_path,
+                    dest_path,
+                    yes,
+                    json,
+                } => PrdSubcommand::Promote {
+                    source_path: std::path::PathBuf::from(source_path),
+                    dest_path: dest_path.as_deref().map(std::path::PathBuf::from),
+                    yes: *yes,
+                    json: *json,
+                },
                 PrdSubcommands::Validate { prd_path, json } => PrdSubcommand::Validate {
                     prd_path: std::path::PathBuf::from(prd_path),
                     json: *json,
@@ -2121,10 +2193,13 @@ fn run_with_engine_provider(
 }
 
 pub(crate) fn confirm_yes_no(prompt: &str) -> Result<bool> {
-    use std::io::{self, Write, IsTerminal};
+    use std::io::{self, IsTerminal, Write};
 
     if std::env::var("CARGO_MANIFEST_DIR").is_ok() || !io::stdin().is_terminal() {
-        println!("{} [y/N]: (auto-confirmed yes in test/non-interactive environment)", prompt);
+        println!(
+            "{} [y/N]: (auto-confirmed yes in test/non-interactive environment)",
+            prompt
+        );
         return Ok(true);
     }
 
@@ -2718,7 +2793,9 @@ mod tests {
             .expect("parse settings show");
         match cli.command {
             Some(Commands::Settings { settings_command }) => match settings_command {
-                commands::settings::SettingsCommands::Show { advanced, admin, .. } => {
+                commands::settings::SettingsCommands::Show {
+                    advanced, admin, ..
+                } => {
                     assert!(advanced);
                     assert!(admin);
                 }
@@ -2898,7 +2975,7 @@ mod tests {
                 restore: None,
                 no_restore_prompt: true,
                 apply: false,
-}),
+            }),
         };
 
         run_with_engine(cli, TestEngine::with_fixtures())?;
@@ -2933,7 +3010,7 @@ mod tests {
                 restore: None,
                 no_restore_prompt: true,
                 apply: false,
-}),
+            }),
         };
         run_with_engine(cli, TestEngine::with_fixtures())?;
 
@@ -2961,7 +3038,7 @@ mod tests {
                 restore: None,
                 no_restore_prompt: true,
                 apply: false,
-}),
+            }),
         };
         run_with_engine(cli_idempotent, TestEngine::with_fixtures())?;
 
@@ -2986,7 +3063,7 @@ mod tests {
                 restore: None,
                 no_restore_prompt: true,
                 apply: false,
-}),
+            }),
         };
         run_with_engine(cli_force, TestEngine::with_fixtures())?;
 
@@ -3035,7 +3112,7 @@ mod tests {
                     restore: None,
                     no_restore_prompt: true,
                     apply: false,
-}),
+                }),
             },
             fixture_engine(&ids),
         )?;
@@ -3524,7 +3601,7 @@ fi
                     restore: None,
                     no_restore_prompt: true,
                     apply: false,
-}),
+                }),
             },
             fixture_engine(&ids),
         )?;
@@ -3673,7 +3750,7 @@ fi
                     restore: None,
                     no_restore_prompt: true,
                     apply: false,
-}),
+                }),
             },
             fixture_engine(&ids),
         )?;
@@ -3732,7 +3809,7 @@ fi
                     restore: None,
                     no_restore_prompt: true,
                     apply: false,
-}),
+                }),
             },
             TestEngine::with_fixtures(),
         )?;
@@ -3788,7 +3865,7 @@ fi
                     restore: None,
                     no_restore_prompt: true,
                     apply: false,
-}),
+                }),
             },
             TestEngine::with_fixtures(),
         )?;
@@ -3907,7 +3984,7 @@ fi
                     restore: None,
                     no_restore_prompt: true,
                     apply: false,
-}),
+                }),
             },
             TestEngine::with_fixtures(),
         )?;
@@ -4029,7 +4106,7 @@ fi
                     restore: None,
                     no_restore_prompt: true,
                     apply: false,
-}),
+                }),
             },
             fixture_engine(&ids),
         )?;
@@ -4141,7 +4218,7 @@ fi
                     restore: None,
                     no_restore_prompt: true,
                     apply: false,
-}),
+                }),
             },
             TestEngine::with_fixtures(),
         )?;
@@ -4257,7 +4334,7 @@ fi
                     restore: None,
                     no_restore_prompt: true,
                     apply: false,
-}),
+                }),
             },
             TestEngine::with_fixtures(),
         )?;
@@ -4403,7 +4480,7 @@ fi
                     restore: None,
                     no_restore_prompt: true,
                     apply: false,
-}),
+                }),
             },
             TestEngine::with_fixtures(),
         )?;
@@ -4543,7 +4620,7 @@ fi
                     restore: None,
                     no_restore_prompt: true,
                     apply: false,
-}),
+                }),
             },
             fixture_engine(&ids),
         )?;
@@ -4696,7 +4773,7 @@ fi
                     restore: None,
                     no_restore_prompt: true,
                     apply: false,
-}),
+                }),
             },
             fixture_engine(&ids),
         )?;
@@ -4925,7 +5002,7 @@ fi
                     restore: None,
                     no_restore_prompt: true,
                     apply: false,
-}),
+                }),
             },
             fixture_engine(&ids),
         )?;
@@ -5026,7 +5103,12 @@ fi
         .expect("parse web command");
 
         match cli.command {
-            Some(Commands::Web { host, port, assets, daemon }) => {
+            Some(Commands::Web {
+                host,
+                port,
+                assets,
+                daemon,
+            }) => {
                 assert_eq!(host, "0.0.0.0");
                 assert_eq!(port, Some(8080));
                 assert_eq!(
@@ -5044,7 +5126,12 @@ fi
         let cli = Cli::try_parse_from(["macc", "web"]).expect("parse web command");
 
         match cli.command {
-            Some(Commands::Web { host, port, assets, daemon }) => {
+            Some(Commands::Web {
+                host,
+                port,
+                assets,
+                daemon,
+            }) => {
                 assert_eq!(host, "127.0.0.1");
                 assert_eq!(port, None);
                 assert_eq!(assets, None);
@@ -5127,7 +5214,7 @@ fi
                     restore: None,
                     no_restore_prompt: true,
                     apply: false,
-}),
+                }),
             },
             TestEngine::with_fixtures(),
         )?;
@@ -5140,7 +5227,8 @@ fi
         if !config_val.is_mapping() {
             config_val = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
         }
-        let automation = config_val.as_mapping_mut()
+        let automation = config_val
+            .as_mapping_mut()
             .unwrap()
             .entry(serde_yaml::Value::String("automation".to_string()))
             .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()))
@@ -5153,7 +5241,7 @@ fi
             .unwrap();
         coordinator.insert(
             serde_yaml::Value::String("storage_mode".to_string()),
-            serde_yaml::Value::String("json".to_string())
+            serde_yaml::Value::String("json".to_string()),
         );
         let new_config_str = serde_yaml::to_string(&config_val).unwrap();
         std::fs::write(&config_path, new_config_str).unwrap();
@@ -5163,12 +5251,12 @@ fi
         std::fs::create_dir_all(&registry_dir).unwrap();
         let registry_path = registry_dir.join("task_registry.json");
 
-        use macc_core::coordinator::model::{TaskRegistry, Task, TaskRuntime};
+        use macc_core::coordinator::model::{Task, TaskRegistry, TaskRuntime};
         let mut task = Task::default();
         task.id = "AUTH-014".to_string();
         task.title = Some("Add OAuth callback validation".to_string());
         task.state = "blocked".to_string();
-        
+
         let mut runtime = TaskRuntime::default();
         runtime.status = Some("failed".to_string());
         runtime.last_error_code = Some("E601".to_string());
@@ -5236,7 +5324,10 @@ fi
         let registry_content = std::fs::read_to_string(&registry_path).unwrap();
         let registry_after_retry: TaskRegistry = serde_json::from_str(&registry_content).unwrap();
         assert_eq!(registry_after_retry.tasks[0].state, "todo");
-        assert_eq!(registry_after_retry.tasks[0].tool, Some("codex".to_string()));
+        assert_eq!(
+            registry_after_retry.tasks[0].tool,
+            Some("codex".to_string())
+        );
 
         // 6. Test `macc failure salvage AUTH-014`
         run_with_engine(
@@ -5296,7 +5387,8 @@ fi
     #[test]
     fn test_save_restore_clear_init_workflow() -> macc_core::Result<()> {
         let _guard = env_test_lock();
-        let temp_base = std::env::temp_dir().join(format!("macc_save_restore_test_{}", uuid_v4_like()));
+        let temp_base =
+            std::env::temp_dir().join(format!("macc_save_restore_test_{}", uuid_v4_like()));
         std::fs::create_dir_all(&temp_base).unwrap();
 
         run_git_ok(&temp_base, &["init"]);
@@ -5344,12 +5436,20 @@ fi
         let sessions_dir = temp_base.join(".macc/state");
         std::fs::create_dir_all(&sessions_dir).unwrap();
         let sessions_path = sessions_dir.join("tool-sessions.json");
-        std::fs::write(&sessions_path, r#"{"session_id": "test-uuid-1234", "pid": 999}"#).unwrap();
+        std::fs::write(
+            &sessions_path,
+            r#"{"session_id": "test-uuid-1234", "pid": 999}"#,
+        )
+        .unwrap();
 
         let log_dir = temp_base.join(".macc/log/coordinator");
         std::fs::create_dir_all(&log_dir).unwrap();
         let log_path = log_dir.join("test.log");
-        std::fs::write(&log_path, "session key is ghp_123456789012345678901234567890123456").unwrap();
+        std::fs::write(
+            &log_path,
+            "session key is ghp_123456789012345678901234567890123456",
+        )
+        .unwrap();
 
         // Create some directories that should be excluded
         let cache_dir = temp_base.join(".macc/cache");
@@ -5395,7 +5495,8 @@ fi
         assert!(save_dir.join("checksums/sha256sums.txt").exists());
 
         // Verify checksums content
-        let checksums_content = std::fs::read_to_string(save_dir.join("checksums/sha256sums.txt")).unwrap();
+        let checksums_content =
+            std::fs::read_to_string(save_dir.join("checksums/sha256sums.txt")).unwrap();
         assert!(checksums_content.contains("manifest.yaml"));
         assert!(checksums_content.contains("config/macc.yaml"));
         assert!(checksums_content.contains("state/tool-sessions.json"));
@@ -5434,7 +5535,7 @@ fi
             assert!(restore_result.is_err());
             let err_msg = format!("{:?}", restore_result.err().unwrap());
             assert!(err_msg.contains("MACC-RESTORE-2003")); // Checksum mismatch
-            
+
             // Restore original content
             std::fs::write(&config_save_path, original_config_save_content).unwrap();
         }
@@ -5444,7 +5545,8 @@ fi
         assert!(!save_dir.join("worktree").exists());
 
         // Verify log redaction
-        let redacted_log_content = std::fs::read_to_string(save_dir.join("logs/coordinator/test.log")).unwrap();
+        let redacted_log_content =
+            std::fs::read_to_string(save_dir.join("logs/coordinator/test.log")).unwrap();
         assert!(redacted_log_content.contains("session key is [REDACTED]"));
         assert!(!redacted_log_content.contains("ghp_"));
 
@@ -5559,7 +5661,9 @@ fi
                     log_since: "7d".to_string(),
                     redact_logs: true,
                     dry_run: false,
-                    cmd: Some(SaveSubcommands::Show { name: "test-save-1".to_string() }),
+                    cmd: Some(SaveSubcommands::Show {
+                        name: "test-save-1".to_string(),
+                    }),
                 }),
             },
             TestEngine::with_fixtures(),
@@ -5584,7 +5688,10 @@ fi
                     log_since: "7d".to_string(),
                     redact_logs: true,
                     dry_run: false,
-                    cmd: Some(SaveSubcommands::Delete { name: "test-save-1".to_string(), yes: true }),
+                    cmd: Some(SaveSubcommands::Delete {
+                        name: "test-save-1".to_string(),
+                        yes: true,
+                    }),
                 }),
             },
             TestEngine::with_fixtures(),
@@ -5644,7 +5751,8 @@ fi
     #[test]
     fn test_save_handles_secrets_interactively() -> macc_core::Result<()> {
         let _guard = env_test_lock();
-        let temp_base = std::env::temp_dir().join(format!("macc_secrets_interactive_test_{}", uuid_v4_like()));
+        let temp_base =
+            std::env::temp_dir().join(format!("macc_secrets_interactive_test_{}", uuid_v4_like()));
         std::fs::create_dir_all(&temp_base).unwrap();
 
         run_git_ok(&temp_base, &["init"]);
@@ -5687,7 +5795,8 @@ fi
         assert!(config_path.exists());
 
         // 2. Put a secret in config file
-        let config_with_secret = "version: v1\nsettings:\n  my_secret: ghp_123456789012345678901234567890123456";
+        let config_with_secret =
+            "version: v1\nsettings:\n  my_secret: ghp_123456789012345678901234567890123456";
         std::fs::write(&config_path, config_with_secret).unwrap();
 
         // Test Case A: User inputs "R" (Redact)

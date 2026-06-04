@@ -266,7 +266,8 @@ fn process_ipc_event(
         }
         if let Some(ref task_id) = event.task_id {
             let ev_claim_id = event.claim_id.as_deref().unwrap_or("");
-            let paths = coordinator_storage::CoordinatorStoragePaths::from_project_paths(project_paths);
+            let paths =
+                coordinator_storage::CoordinatorStoragePaths::from_project_paths(project_paths);
             if let Ok(conn) = rusqlite::Connection::open(&paths.sqlite_path) {
                 let db_claim_id: std::result::Result<String, _> = conn.query_row(
                     "SELECT claim_id FROM task_runtime WHERE task_id = ?1",
@@ -274,11 +275,14 @@ fn process_ipc_event(
                     |row| row.get(0),
                 );
                 if let Ok(active_claim_id) = db_claim_id {
-                    if !active_claim_id.starts_with("unclaimed-") && ev_claim_id != active_claim_id {
+                    if !active_claim_id.starts_with("unclaimed-") && ev_claim_id != active_claim_id
+                    {
                         return PerformerIpcAck {
                             ok: false,
                             event_id,
-                            error: Some("E418: Stale event rejected: mismatched claim ID".to_string()),
+                            error: Some(
+                                "E418: Stale event rejected: mismatched claim ID".to_string(),
+                            ),
                         };
                     }
                 }
@@ -295,7 +299,8 @@ fn process_ipc_event(
             )),
         };
     }
-    let _ = crate::coordinator::helpers::append_structured_event_record(&project_paths.root, &event);
+    let _ =
+        crate::coordinator::helpers::append_structured_event_record(&project_paths.root, &event);
     if let Some(runtime_event) = raw_event_to_runtime_event(&event) {
         let _ = runtime_event_bus_tx.send(runtime_event);
     }

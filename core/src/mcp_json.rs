@@ -133,6 +133,8 @@ mod tests {
             mcp_templates: templates.clone(),
             automation: crate::config::AutomationConfig::default(),
             settings: crate::config::SettingsConfig::default(),
+            context: None,
+            skills_run_policy: None,
         };
 
         let output = render_project_mcp_json(&resolved).unwrap();

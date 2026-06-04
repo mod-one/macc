@@ -516,7 +516,7 @@ const Console: React.FC = () => {
   const [toolFilter, setToolFilter] = useState('all');
   const [taskFilter, setTaskFilter] = useState<'active' | 'queue' | 'all'>('all');
   const [elapsed, setElapsed] = useState(0);
-  const startRef = useRef(Date.now());
+  const startRef = useRef<number>(0);
 
   // Poll data
   useEffect(() => {
@@ -532,8 +532,9 @@ const Console: React.FC = () => {
     return () => clearInterval(id);
   }, [loadStatus]);
 
-  // Elapsed clock
+  // Elapsed clock — initialize startRef on mount (avoids impure Date.now() during render)
   useEffect(() => {
+    startRef.current = Date.now();
     const id = setInterval(() => setElapsed(Math.floor((Date.now() - startRef.current) / 1000)), 1000);
     return () => clearInterval(id);
   }, []);

@@ -3,7 +3,7 @@ use macc_adapter_shared::render::format::ensure_trailing_newline;
 
 pub fn render_config_toml(config: &VibeConfig) -> String {
     let mut toml_str = String::new();
-    
+
     toml_str.push_str(&format!("default_agent = \"{}\"\n", config.agent));
     toml_str.push_str(&format!("active_model = \"{}\"\n", config.model));
     toml_str.push_str("enable_telemetry = false\n");
@@ -34,6 +34,8 @@ mod tests {
             mcp_templates: Vec::new(),
             automation: Default::default(),
             settings: Default::default(),
+            context: None,
+            skills_run_policy: None,
         };
         let vibe_cfg = VibeConfig::from_resolved(&resolved);
         let rendered = render_config_toml(&vibe_cfg);

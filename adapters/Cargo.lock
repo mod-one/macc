@@ -887,8 +887,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "macc-adapter-agy"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+ "macc-adapter-shared",
+ "macc-core",
+ "regex",
+ "serde",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
 name = "macc-adapter-claude"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "inventory",
@@ -901,8 +914,9 @@ dependencies = [
 
 [[package]]
 name = "macc-adapter-codex"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
+ "chrono",
  "inventory",
  "macc-adapter-shared",
  "macc-core",
@@ -913,7 +927,7 @@ dependencies = [
 
 [[package]]
 name = "macc-adapter-gemini"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "inventory",
  "macc-adapter-shared",
@@ -926,7 +940,7 @@ dependencies = [
 
 [[package]]
 name = "macc-adapter-shared"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "macc-core",
@@ -941,7 +955,7 @@ dependencies = [
 
 [[package]]
 name = "macc-adapter-vibe"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "inventory",
  "macc-adapter-shared",
@@ -954,11 +968,12 @@ dependencies = [
 
 [[package]]
 name = "macc-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "chrono",
  "inventory",
+ "libc",
  "regex",
  "rusqlite",
  "serde",

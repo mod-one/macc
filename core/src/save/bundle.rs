@@ -1,19 +1,19 @@
+use chrono::Utc;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use sha2::{Digest, Sha256};
-use chrono::Utc;
 
-use crate::{MaccError, ProjectPaths, Result};
-use super::manifest::{
-    SaveBundleManifest, SaveIncludes, SaveExcludes, SavePaths, SaveHashes,
-    SaveSecurity, SecretScanMetadata
-};
-use super::SecretHandlingChoice;
-use super::logs::{parse_size_to_bytes, parse_duration_to_seconds};
-use super::scanner::redact_secrets_in_text;
 use super::classifier::copy_dir_all;
+use super::logs::{parse_duration_to_seconds, parse_size_to_bytes};
+use super::manifest::{
+    SaveBundleManifest, SaveExcludes, SaveHashes, SaveIncludes, SavePaths, SaveSecurity,
+    SecretScanMetadata,
+};
 use super::repository_identity::get_repository_identity;
+use super::scanner::redact_secrets_in_text;
+use super::SecretHandlingChoice;
+use crate::{MaccError, ProjectPaths, Result};
 
 pub fn compute_file_sha256(path: &Path) -> std::io::Result<String> {
     let content = fs::read(path)?;
@@ -43,7 +43,7 @@ fn write_checksums_file(tmp_save_dir: &Path) -> Result<()> {
     })?;
 
     let mut files = Vec::new();
-    
+
     fn visit_dirs(dir: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
         if dir.is_dir() {
             for entry in fs::read_dir(dir)? {
@@ -94,33 +94,72 @@ fn write_checksums_file(tmp_save_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn create_save_bundle(paths: &ProjectPaths, name: &str, opts: &super::SaveOptions) -> Result<SaveBundleManifest> {
-    if name.is_empty() || name.chars().any(|c| !c.is_alphanumeric() && c != '-' && c != '_') {
-        return Err(MaccError::Validation(format!("MACC-SAVE-1000: Invalid save name: {}", name)));
+pub fn create_save_bundle(
+    paths: &ProjectPaths,
+    name: &str,
+    opts: &super::SaveOptions,
+) -> Result<SaveBundleManifest> {
+    if name.is_empty()
+        || name
+            .chars()
+            .any(|c| !c.is_alphanumeric() && c != '-' && c != '_')
+    {
+        return Err(MaccError::Validation(format!(
+            "MACC-SAVE-1000: Invalid save name: {}",
+            name
+        )));
     }
 
     let saves_dir = super::user_saves_dir().ok_or(MaccError::HomeDirNotFound)?;
     let target_save_dir = saves_dir.join(name);
-    
+
     if target_save_dir.exists() && !opts.overwrite {
-        return Err(MaccError::Validation(format!("MACC-SAVE-1001: Save already exists: {}", name)));
+        return Err(MaccError::Validation(format!(
+            "MACC-SAVE-1001: Save already exists: {}",
+            name
+        )));
     }
 
     if !paths.config_path.exists() {
-        return Err(MaccError::Validation("MACC-SAVE-1002: No .macc/macc.yaml found in project root.".to_string()));
+        return Err(MaccError::Validation(
+            "MACC-SAVE-1002: No .macc/macc.yaml found in project root.".to_string(),
+        ));
     }
 
     // Determine what to include
-    let only_sections: Option<BTreeSet<String>> = opts.only.as_ref().map(|s| {
-        s.split(',').map(|sec| sec.trim().to_string()).collect()
-    });
+    let only_sections: Option<BTreeSet<String>> = opts
+        .only
+        .as_ref()
+        .map(|s| s.split(',').map(|sec| sec.trim().to_string()).collect());
 
-    let include_config = only_sections.as_ref().map(|s| s.contains("config")).unwrap_or(true);
-    let include_sessions = !opts.no_sessions && only_sections.as_ref().map(|s| s.contains("sessions")).unwrap_or(true);
-    let include_catalogs = only_sections.as_ref().map(|s| s.contains("catalogs")).unwrap_or(true);
-    let include_logs = opts.include_logs || only_sections.as_ref().map(|s| s.contains("logs")).unwrap_or(false);
-    let include_prd = opts.include_prd || only_sections.as_ref().map(|s| s.contains("prd")).unwrap_or(false);
-    let include_state = opts.include_state || only_sections.as_ref().map(|s| s.contains("automation_state")).unwrap_or(false);
+    let include_config = only_sections
+        .as_ref()
+        .map(|s| s.contains("config"))
+        .unwrap_or(true);
+    let include_sessions = !opts.no_sessions
+        && only_sections
+            .as_ref()
+            .map(|s| s.contains("sessions"))
+            .unwrap_or(true);
+    let include_catalogs = only_sections
+        .as_ref()
+        .map(|s| s.contains("catalogs"))
+        .unwrap_or(true);
+    let include_logs = opts.include_logs
+        || only_sections
+            .as_ref()
+            .map(|s| s.contains("logs"))
+            .unwrap_or(false);
+    let include_prd = opts.include_prd
+        || only_sections
+            .as_ref()
+            .map(|s| s.contains("prd"))
+            .unwrap_or(false);
+    let include_state = opts.include_state
+        || only_sections
+            .as_ref()
+            .map(|s| s.contains("automation_state"))
+            .unwrap_or(false);
 
     let tmp_parent = saves_dir.join(".tmp");
     fs::create_dir_all(&tmp_parent).ok();
@@ -166,10 +205,13 @@ pub fn create_save_bundle(paths: &ProjectPaths, name: &str, opts: &super::SaveOp
             action: "copy config file".into(),
             source: e,
         })?;
-        
+
         let config_bytes = fs::read(&dest).unwrap();
         let findings = crate::security::scan_bytes("config/macc.yaml", &config_bytes);
-        findings_count += findings.iter().filter(|f| f.severity == crate::security::Severity::Error).count();
+        findings_count += findings
+            .iter()
+            .filter(|f| f.severity == crate::security::Severity::Error)
+            .count();
 
         let sha = compute_file_sha256(&dest).unwrap();
         hashes.config = Some(sha);
@@ -191,7 +233,10 @@ pub fn create_save_bundle(paths: &ProjectPaths, name: &str, opts: &super::SaveOp
 
         let sessions_bytes = fs::read(&dest).unwrap();
         let findings = crate::security::scan_bytes("state/tool-sessions.json", &sessions_bytes);
-        findings_count += findings.iter().filter(|f| f.severity == crate::security::Severity::Error).count();
+        findings_count += findings
+            .iter()
+            .filter(|f| f.severity == crate::security::Severity::Error)
+            .count();
 
         let sha = compute_file_sha256(&dest).unwrap();
         hashes.coordinator_sessions = Some(sha);
@@ -202,7 +247,7 @@ pub fn create_save_bundle(paths: &ProjectPaths, name: &str, opts: &super::SaveOp
     // 3. Copy catalogs
     if include_catalogs && paths.project_catalog_dir().exists() {
         let catalogs_dest = tmp_save_dir.join("catalogs");
-        if let Err(e) = copy_dir_all(&paths.project_catalog_dir(), &catalogs_dest, paths) {
+        if let Err(e) = copy_dir_all(paths.project_catalog_dir(), &catalogs_dest, paths) {
             fs::remove_dir_all(&tmp_save_dir).ok();
             return Err(MaccError::Io {
                 path: catalogs_dest.to_string_lossy().into(),
@@ -236,14 +281,16 @@ pub fn create_save_bundle(paths: &ProjectPaths, name: &str, opts: &super::SaveOp
     if include_logs && logs_src.exists() {
         let logs_dest = tmp_save_dir.join("logs");
         fs::create_dir_all(&logs_dest).ok();
-        
+
         // Custom copy logs with size limit, time range, and redaction
         let max_bytes = parse_size_to_bytes(&opts.log_max_size);
         let max_age_seconds = parse_duration_to_seconds(&opts.log_since);
         let mut total_copied = 0;
 
         let mut read_logs = |dir: &Path| -> std::io::Result<()> {
-            if !dir.exists() { return Ok(()); }
+            if !dir.exists() {
+                return Ok(());
+            }
             for entry in fs::read_dir(dir)? {
                 let entry = entry?;
                 let path = entry.path();
@@ -277,7 +324,7 @@ pub fn create_save_bundle(paths: &ProjectPaths, name: &str, opts: &super::SaveOp
         let _ = read_logs(&logs_src);
         let _ = read_logs(&logs_src.join("coordinator"));
         let _ = read_logs(&logs_src.join("performer"));
-        
+
         includes.logs = true;
         paths_meta.logs_archive = Some("logs".to_string());
     }
@@ -342,7 +389,10 @@ pub fn create_save_bundle(paths: &ProjectPaths, name: &str, opts: &super::SaveOp
                 if config_dest.exists() {
                     if let Ok(bytes) = fs::read(&config_dest) {
                         let findings = crate::security::scan_bytes("config/macc.yaml", &bytes);
-                        if findings.iter().any(|f| f.severity == crate::security::Severity::Error) {
+                        if findings
+                            .iter()
+                            .any(|f| f.severity == crate::security::Severity::Error)
+                        {
                             fs::remove_dir_all(config_dest.parent().unwrap()).ok();
                             includes.config = false;
                             hashes.config = None;
@@ -353,8 +403,12 @@ pub fn create_save_bundle(paths: &ProjectPaths, name: &str, opts: &super::SaveOp
                 let sessions_dest = tmp_save_dir.join("state").join("tool-sessions.json");
                 if sessions_dest.exists() {
                     if let Ok(bytes) = fs::read(&sessions_dest) {
-                        let findings = crate::security::scan_bytes("state/tool-sessions.json", &bytes);
-                        if findings.iter().any(|f| f.severity == crate::security::Severity::Error) {
+                        let findings =
+                            crate::security::scan_bytes("state/tool-sessions.json", &bytes);
+                        if findings
+                            .iter()
+                            .any(|f| f.severity == crate::security::Severity::Error)
+                        {
                             fs::remove_dir_all(sessions_dest.parent().unwrap()).ok();
                             includes.coordinator_sessions = false;
                             hashes.coordinator_sessions = None;
@@ -401,12 +455,14 @@ pub fn create_save_bundle(paths: &ProjectPaths, name: &str, opts: &super::SaveOp
     };
 
     // Calculate manifest payload hash by serializing with empty payload first
-    let manifest_str = serde_yaml::to_string(&manifest).map_err(|e| MaccError::Validation(e.to_string()))?;
+    let manifest_str =
+        serde_yaml::to_string(&manifest).map_err(|e| MaccError::Validation(e.to_string()))?;
     let payload_hash = compute_manifest_payload_hash(&manifest_str);
     manifest.hashes.manifest_payload = payload_hash;
 
     // Write final manifest with the calculated payload hash
-    let manifest_str = serde_yaml::to_string(&manifest).map_err(|e| MaccError::Validation(e.to_string()))?;
+    let manifest_str =
+        serde_yaml::to_string(&manifest).map_err(|e| MaccError::Validation(e.to_string()))?;
     fs::write(&manifest_path, manifest_str).map_err(|e| MaccError::Io {
         path: manifest_path.to_string_lossy().into(),
         action: "write final manifest".into(),

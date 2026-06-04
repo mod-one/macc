@@ -121,7 +121,10 @@ impl macc_core::service::lifecycle::LifecycleUi for CliLifecycleUi {
             .unwrap_or(false)
     }
 
-    fn start_coordinator_background(&self, paths: &macc_core::ProjectPaths) -> macc_core::Result<()> {
+    fn start_coordinator_background(
+        &self,
+        paths: &macc_core::ProjectPaths,
+    ) -> macc_core::Result<()> {
         // Resolve the `macc` binary path (same binary we're running from).
         let macc_bin = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("macc"));
 
@@ -140,7 +143,12 @@ impl macc_core::service::lifecycle::LifecycleUi for CliLifecycleUi {
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
-            unsafe { cmd.pre_exec(|| { libc::setsid(); Ok(()) }); }
+            unsafe {
+                cmd.pre_exec(|| {
+                    libc::setsid();
+                    Ok(())
+                });
+            }
         }
 
         cmd.spawn().map_err(|e| macc_core::MaccError::Io {
@@ -212,6 +220,7 @@ pub(crate) fn apply(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn quickstart_extended(
     app: &AppContext,
     assume_yes: bool,

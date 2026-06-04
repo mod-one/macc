@@ -1,23 +1,25 @@
+pub mod bundle;
+pub mod classifier;
+pub mod logs;
 pub mod manifest;
 pub mod repository_identity;
-pub mod scanner;
-pub mod logs;
-pub mod classifier;
-pub mod bundle;
 pub mod restore;
+pub mod scanner;
 
+use crate::{MaccError, ProjectPaths, Result};
 use std::fs;
 use std::path::PathBuf;
-use crate::{MaccError, ProjectPaths, Result};
 
+pub use bundle::{compute_file_sha256, compute_manifest_payload_hash, create_save_bundle};
 pub use manifest::{
-    MatchStrength, SaveBundleManifest, SaveIncludes, SaveExcludes, SavePaths, SaveHashes,
-    SaveSecurity, SecretScanMetadata
+    MatchStrength, SaveBundleManifest, SaveExcludes, SaveHashes, SaveIncludes, SavePaths,
+    SaveSecurity, SecretScanMetadata,
 };
-pub use repository_identity::{RepositoryIdentity, get_repository_identity, compute_match_strength};
-pub use scanner::redact_secrets_in_text;
-pub use bundle::{create_save_bundle, compute_file_sha256, compute_manifest_payload_hash};
+pub use repository_identity::{
+    compute_match_strength, get_repository_identity, RepositoryIdentity,
+};
 pub use restore::restore_save_bundle;
+pub use scanner::redact_secrets_in_text;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecretHandlingChoice {
@@ -75,7 +77,8 @@ pub fn list_save_bundles() -> Result<Vec<SaveBundleManifest>> {
             let manifest_path = path.join("manifest.yaml");
             if manifest_path.exists() {
                 if let Ok(manifest_str) = fs::read_to_string(&manifest_path) {
-                    if let Ok(manifest) = serde_yaml::from_str::<SaveBundleManifest>(&manifest_str) {
+                    if let Ok(manifest) = serde_yaml::from_str::<SaveBundleManifest>(&manifest_str)
+                    {
                         list.push(manifest);
                     }
                 }
@@ -89,7 +92,10 @@ pub fn delete_save_bundle(name: &str) -> Result<()> {
     let saves_dir = user_saves_dir().ok_or(MaccError::HomeDirNotFound)?;
     let target_save_dir = saves_dir.join(name);
     if !target_save_dir.exists() {
-        return Err(MaccError::Validation(format!("MACC-RESTORE-2000: Save not found: {}", name)));
+        return Err(MaccError::Validation(format!(
+            "MACC-RESTORE-2000: Save not found: {}",
+            name
+        )));
     }
     fs::remove_dir_all(target_save_dir).map_err(|e| MaccError::Io {
         path: name.to_string(),
@@ -98,7 +104,9 @@ pub fn delete_save_bundle(name: &str) -> Result<()> {
     })
 }
 
-pub fn detect_matching_saves(paths: &ProjectPaths) -> Result<Vec<(SaveBundleManifest, MatchStrength)>> {
+pub fn detect_matching_saves(
+    paths: &ProjectPaths,
+) -> Result<Vec<(SaveBundleManifest, MatchStrength)>> {
     let current_repo = get_repository_identity(&paths.root);
     let list = list_save_bundles()?;
     let mut matches = Vec::new();
@@ -109,7 +117,8 @@ pub fn detect_matching_saves(paths: &ProjectPaths) -> Result<Vec<(SaveBundleMani
         }
     }
     matches.sort_by(|a, b| {
-        b.1.cmp(&a.1).then_with(|| b.0.created_at.cmp(&a.0.created_at))
+        b.1.cmp(&a.1)
+            .then_with(|| b.0.created_at.cmp(&a.0.created_at))
     });
     Ok(matches)
 }
@@ -270,7 +279,7 @@ security:
         fs::write(dot_dir.join("manifest.yaml"), manifest_content).unwrap();
 
         let bundles = list_save_bundles().unwrap();
-        
+
         // Restore environment
         if let Some(h) = old_home {
             std::env::set_var("HOME", h);

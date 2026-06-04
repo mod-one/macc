@@ -88,7 +88,10 @@ pub(super) async fn audit_middleware(
 
 fn should_skip_request(method: &Method, path: &str) -> bool {
     !matches!(method.as_str(), "POST" | "PUT" | "DELETE")
-        || matches!(path, "/api/v1/health" | "/api/v1/events" | "/api/v1/coordinator/stop")
+        || matches!(
+            path,
+            "/api/v1/health" | "/api/v1/events" | "/api/v1/coordinator/stop"
+        )
 }
 
 fn summarize_inputs(uri: &Uri, content_type: Option<&str>, body_bytes: &Bytes) -> Option<Value> {
@@ -210,7 +213,10 @@ pub(super) struct StopAuditRecord {
     pub duration_ms: u64,
 }
 
-pub(super) async fn append_stop_record(state: &WebState, record: &StopAuditRecord) -> std::io::Result<()> {
+pub(super) async fn append_stop_record(
+    state: &WebState,
+    record: &StopAuditRecord,
+) -> std::io::Result<()> {
     let path = audit_log_path(state);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).await?;

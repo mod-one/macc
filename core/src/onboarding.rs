@@ -129,23 +129,19 @@ pub fn compute_readiness_from_state(
     let onboarding = OnboardingState::load(&paths.macc_dir);
 
     // Step 1: Project initialized
-    let step1 = if paths.macc_dir.join("macc.yaml").exists()
-        || paths.macc_dir.join("macc.toml").exists()
-    {
-        ReadinessStep::done(1, "Project initialized", None)
-    } else {
-        ReadinessStep::pending(1, "Project initialized")
-    };
+    let step1 =
+        if paths.macc_dir.join("macc.yaml").exists() || paths.macc_dir.join("macc.toml").exists() {
+            ReadinessStep::done(1, "Project initialized", None)
+        } else {
+            ReadinessStep::pending(1, "Project initialized")
+        };
 
     // Step 2: Tool adapter selected — read from the already-loaded canonical config.
     let selected_tool = canonical
         .and_then(|c| c.tools.enabled.first().cloned())
         .or_else(|| {
             // Fall back to onboarding state if config not loaded.
-            onboarding
-                .completed_steps
-                .tool_selected
-                .then(|| String::new())
+            onboarding.completed_steps.tool_selected.then(String::new)
         });
     let step2 = if let Some(ref tool) = selected_tool {
         if tool.is_empty() {

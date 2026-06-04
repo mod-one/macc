@@ -372,9 +372,7 @@ fn apply_user_model_tiers(
     let Some(user_tiers) = user_tiers else { return };
 
     for (tier_name, tier_val) in user_tiers {
-        if let Ok(tier) =
-            serde_json::from_value::<crate::tool::ModelTierSpec>(tier_val.clone())
-        {
+        if let Ok(tier) = serde_json::from_value::<crate::tool::ModelTierSpec>(tier_val.clone()) {
             runtime.model_tiers.insert(tier_name.clone(), tier);
         }
     }
@@ -641,6 +639,7 @@ mod tests {
             update: None,
             version_check: None,
             defaults: Some(json!({"model": "fallback-model"})),
+            model_tiers: Default::default(),
         };
         let canonical = CanonicalConfig {
             version: None,
@@ -706,8 +705,12 @@ mod tests {
                     discover: None,
                     id_strategy: None,
                 }),
+                effort_flag: None,
+                model_config: None,
+                effort_config: None,
             },
             defaults: None,
+            model_tiers: Default::default(),
         };
         let placeholders = BTreeMap::from([("model".to_string(), "gpt-5.2-codex".to_string())]);
 

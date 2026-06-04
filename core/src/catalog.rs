@@ -74,6 +74,7 @@ pub struct Selector {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct SkillEntry {
     pub id: String,
     pub name: String,
@@ -82,7 +83,7 @@ pub struct SkillEntry {
     pub selector: Selector,
     pub source: Source,
     // ── Spec §6 lifecycle fields (optional for backward compatibility) ─────
-    /// Tool adapters this skill supports, e.g. `["claude", "codex"]`.
+    /// Tool adapters this skill supports (e.g. `["tool-a", "tool-b"]`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<String>,
     /// Preferred ref (tag, branch, SHA).
@@ -313,7 +314,9 @@ fn discover_local_skill_entries(paths: &ProjectPaths) -> Vec<SkillEntry> {
             name: format!("Local: {}", id),
             description: format!("Local skill from {}", path.display()),
             tags: vec!["local".to_string()],
-            selector: Selector { subpath: "".to_string() },
+            selector: Selector {
+                subpath: "".to_string(),
+            },
             source: Source {
                 kind: SourceKind::Local,
                 url: path.to_string_lossy().into(),
@@ -902,6 +905,14 @@ mod tests {
                 checksum: None,
                 subpaths: vec![],
             },
+            tools: vec![],
+            recommended_ref: None,
+            risk: None,
+            requires_mcp: false,
+            writes_user_level_config: false,
+            targets: Default::default(),
+            category: None,
+            compatibility: None,
         });
         user_skills
             .save_atomically(&paths, &paths.skills_catalog_path())
@@ -923,6 +934,14 @@ mod tests {
                 checksum: None,
                 subpaths: vec![],
             },
+            tools: vec![],
+            recommended_ref: None,
+            risk: None,
+            requires_mcp: false,
+            writes_user_level_config: false,
+            targets: Default::default(),
+            category: None,
+            compatibility: None,
         });
         project_skills
             .save_atomically(&paths, &paths.project_skills_catalog_path())

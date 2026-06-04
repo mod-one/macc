@@ -7,7 +7,7 @@ use macc_core::coordinator::task_selector::SelectedTask;
 use macc_core::coordinator::types::CoordinatorEnvConfig;
 use macc_core::service::coordinator_workflow::{
     CoordinatorCommand, CoordinatorCommandRequest, CoordinatorCommandResult, CoordinatorStatus,
-    ThrottledToolStatus, PsProcessEntry, RecoveryReportEntry,
+    PsProcessEntry, RecoveryReportEntry, ThrottledToolStatus,
 };
 use macc_core::service::diagnostic::{FailureKind, FailureReport};
 use serde::{Deserialize, Serialize};
@@ -107,12 +107,12 @@ impl From<CoordinatorCommandResult> for ApiCoordinatorCommandResult {
                     .map(ApiToolCooldownEntry::from)
                     .collect()
             }),
-            processes: result.processes.map(|list| {
-                list.into_iter().map(ApiPsProcessEntry::from).collect()
-            }),
-            recovery_report: result.recovery_report.map(|list| {
-                list.into_iter().map(ApiRecoveryReportEntry::from).collect()
-            }),
+            processes: result
+                .processes
+                .map(|list| list.into_iter().map(ApiPsProcessEntry::from).collect()),
+            recovery_report: result
+                .recovery_report
+                .map(|list| list.into_iter().map(ApiRecoveryReportEntry::from).collect()),
         }
     }
 }
@@ -242,10 +242,17 @@ pub(super) async fn coordinator_stop_handler(
     let graceful = mode == "graceful" || mode == "drain";
     let force = mode == "force" || mode == "force_cleanup";
     let remove_worktrees = req.cleanup_worktrees.unwrap_or(false) || mode == "force_cleanup";
-    let reason = req.reason.clone().unwrap_or_else(|| "web api stop".to_string());
+    let reason = req
+        .reason
+        .clone()
+        .unwrap_or_else(|| "web api stop".to_string());
 
     if force {
-        let expected_confirm = if remove_worktrees { "FORCE CLEANUP" } else { "FORCE" };
+        let expected_confirm = if remove_worktrees {
+            "FORCE CLEANUP"
+        } else {
+            "FORCE"
+        };
         if req.confirm.as_deref() != Some(expected_confirm) {
             let msg = if remove_worktrees {
                 "Confirmation required. Type FORCE CLEANUP to terminate active tools and clean MACC-managed worktrees."
@@ -624,8 +631,6 @@ pub(super) async fn coordinator_recover_handler(
     Ok(Json(ApiCoordinatorCommandResult::from(result)))
 }
 
-
-
 // ── Reference branch preflight endpoints (spec §14) ──────────────────────────
 
 #[derive(Debug, serde::Deserialize)]
@@ -671,7 +676,10 @@ pub(super) async fn coordinator_preflight_handler(
     use macc_core::coordinator::preflight;
 
     let req: ApiPreflightRequest = if body.is_empty() {
-        ApiPreflightRequest { reference_branch: None, include_untracked: None }
+        ApiPreflightRequest {
+            reference_branch: None,
+            include_untracked: None,
+        }
     } else {
         serde_json::from_slice(&body)
             .map_err(|e| ApiError::validation(format!("Invalid preflight request: {}", e)))?
@@ -679,7 +687,9 @@ pub(super) async fn coordinator_preflight_handler(
 
     let config_path = state.paths.macc_dir.join("macc.yaml");
     let canonical = macc_core::load_canonical_config(&config_path).ok();
-    let coordinator = canonical.as_ref().and_then(|c| c.automation.coordinator.as_ref());
+    let coordinator = canonical
+        .as_ref()
+        .and_then(|c| c.automation.coordinator.as_ref());
 
     let reference_branch = req
         .reference_branch
@@ -726,18 +736,24 @@ pub(super) async fn coordinator_preflight_handler(
         branch_exists: report.branch_exists,
         remote_tracking_branches: report.remote_tracking_branches,
         status: status_str.to_string(),
-        checked_out_worktrees: report.checked_out_worktrees.into_iter().map(|w| {
-            ApiPreflightWorktreeEntry {
+        checked_out_worktrees: report
+            .checked_out_worktrees
+            .into_iter()
+            .map(|w| ApiPreflightWorktreeEntry {
                 path: w.path.to_string_lossy().to_string(),
                 branch: w.branch,
-                dirty_entries: w.dirty_entries.into_iter().map(|e| ApiPreflightStatusEntry {
-                    index_status: e.index_status.to_string(),
-                    worktree_status: e.worktree_status.to_string(),
-                    path: e.path,
-                    original_path: e.original_path,
-                }).collect(),
-            }
-        }).collect(),
+                dirty_entries: w
+                    .dirty_entries
+                    .into_iter()
+                    .map(|e| ApiPreflightStatusEntry {
+                        index_status: e.index_status.to_string(),
+                        worktree_status: e.worktree_status.to_string(),
+                        path: e.path,
+                        original_path: e.original_path,
+                    })
+                    .collect(),
+            })
+            .collect(),
         recommended_action: action_str.to_string(),
     }))
 }
@@ -780,15 +796,16 @@ pub(super) async fn coordinator_preflight_create_branch_handler(
 
     let source = match req.source.source_type.as_str() {
         "current_head" => BranchCreateSource::CurrentHead,
-        "remote_tracking" => BranchCreateSource::RemoteTracking(
-            req.source.value.clone().unwrap_or_default(),
-        ),
-        "local_branch" => BranchCreateSource::LocalBranch(
-            req.source.value.clone().unwrap_or_default(),
-        ),
+        "remote_tracking" => {
+            BranchCreateSource::RemoteTracking(req.source.value.clone().unwrap_or_default())
+        }
+        "local_branch" => {
+            BranchCreateSource::LocalBranch(req.source.value.clone().unwrap_or_default())
+        }
         other => {
             return Err(ApiError::validation(format!(
-                "Unknown branch source type \"{}\".", other
+                "Unknown branch source type \"{}\".",
+                other
             )));
         }
     };

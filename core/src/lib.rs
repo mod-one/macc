@@ -11,12 +11,16 @@ pub mod engine;
 pub mod git;
 pub use config::migrate;
 pub mod mcp_json;
+pub mod onboarding;
+pub mod ops_motif;
 pub mod packages;
 pub mod plan;
+pub mod prd_generation;
 pub mod process_ownership;
 pub mod profile;
 pub mod resolve;
 pub mod runtime;
+pub mod save;
 pub mod security;
 pub mod service;
 pub mod skills;
@@ -27,10 +31,6 @@ pub mod supervisor;
 pub mod tool;
 pub mod user_backup;
 pub mod worktree;
-pub mod onboarding;
-pub mod ops_motif;
-pub mod prd_generation;
-pub mod save;
 
 pub use automation::{embedded_runner_path_for_ref, ensure_embedded_automation_scripts};
 pub use catalog::{McpCatalog, McpEntry, Selector, SkillEntry, SkillsCatalog, Source, SourceKind};
@@ -217,7 +217,8 @@ pub fn classify_path<P: AsRef<Path>>(path: P, paths: &ProjectPaths) -> ManagedPa
     }
 
     if let Ok(rel) = clean_path.strip_prefix(&paths.root) {
-        let components: Vec<String> = rel.components()
+        let components: Vec<String> = rel
+            .components()
             .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
             .collect();
 
@@ -2515,30 +2516,66 @@ mod tests {
         let paths = ProjectPaths::from_root(&temp_dir);
 
         // 1. Config file (SourceOfTruth)
-        assert_eq!(classify_path(&paths.config_path, &paths), ManagedPathKind::SourceOfTruth);
+        assert_eq!(
+            classify_path(&paths.config_path, &paths),
+            ManagedPathKind::SourceOfTruth
+        );
 
         // 2. Cache dir (Cache)
-        assert_eq!(classify_path(temp_dir.join(".macc/cache"), &paths), ManagedPathKind::Cache);
-        assert_eq!(classify_path(temp_dir.join(".macc/cache/some_file"), &paths), ManagedPathKind::Cache);
-        assert_eq!(classify_path(temp_dir.join("some/nested/node_modules/pkg"), &paths), ManagedPathKind::Cache);
+        assert_eq!(
+            classify_path(temp_dir.join(".macc/cache"), &paths),
+            ManagedPathKind::Cache
+        );
+        assert_eq!(
+            classify_path(temp_dir.join(".macc/cache/some_file"), &paths),
+            ManagedPathKind::Cache
+        );
+        assert_eq!(
+            classify_path(temp_dir.join("some/nested/node_modules/pkg"), &paths),
+            ManagedPathKind::Cache
+        );
 
         // 3. Worktree dir (Worktree)
-        assert_eq!(classify_path(temp_dir.join(".macc/worktrees"), &paths), ManagedPathKind::Worktree);
-        assert_eq!(classify_path(temp_dir.join("some/nested/.worktrees"), &paths), ManagedPathKind::Worktree);
+        assert_eq!(
+            classify_path(temp_dir.join(".macc/worktrees"), &paths),
+            ManagedPathKind::Worktree
+        );
+        assert_eq!(
+            classify_path(temp_dir.join("some/nested/.worktrees"), &paths),
+            ManagedPathKind::Worktree
+        );
 
         // 4. Log dir (DiagnosticLog)
-        assert_eq!(classify_path(temp_dir.join(".macc/log"), &paths), ManagedPathKind::DiagnosticLog);
+        assert_eq!(
+            classify_path(temp_dir.join(".macc/log"), &paths),
+            ManagedPathKind::DiagnosticLog
+        );
 
         // 5. PortableState (state/catalog)
-        assert_eq!(classify_path(temp_dir.join(".macc/state"), &paths), ManagedPathKind::PortableState);
-        assert_eq!(classify_path(temp_dir.join(".macc/catalog"), &paths), ManagedPathKind::PortableState);
+        assert_eq!(
+            classify_path(temp_dir.join(".macc/state"), &paths),
+            ManagedPathKind::PortableState
+        );
+        assert_eq!(
+            classify_path(temp_dir.join(".macc/catalog"), &paths),
+            ManagedPathKind::PortableState
+        );
 
         // 6. RuntimeState (backups/tmp)
-        assert_eq!(classify_path(temp_dir.join(".macc/tmp"), &paths), ManagedPathKind::RuntimeState);
-        assert_eq!(classify_path(temp_dir.join("my_temp_dir/tmp"), &paths), ManagedPathKind::RuntimeState);
+        assert_eq!(
+            classify_path(temp_dir.join(".macc/tmp"), &paths),
+            ManagedPathKind::RuntimeState
+        );
+        assert_eq!(
+            classify_path(temp_dir.join("my_temp_dir/tmp"), &paths),
+            ManagedPathKind::RuntimeState
+        );
 
         // 7. Unknown
-        assert_eq!(classify_path(temp_dir.join("random_user_file.txt"), &paths), ManagedPathKind::Unknown);
+        assert_eq!(
+            classify_path(temp_dir.join("random_user_file.txt"), &paths),
+            ManagedPathKind::Unknown
+        );
 
         fs::remove_dir_all(&temp_dir).ok();
         Ok(())

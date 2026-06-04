@@ -2568,6 +2568,7 @@ fn server_config_defaults_to_localhost_and_configured_port() {
         Ipv4Addr::LOCALHOST.to_string(),
         None,
         None,
+        false,
     );
 
     let config = command.server_config().expect("server config");
@@ -2601,6 +2602,7 @@ fn server_config_uses_cli_overrides() {
         "0.0.0.0".to_string(),
         Some(8080),
         Some(WebAssetsMode::Embedded),
+        false,
     );
 
     let config = command.server_config().expect("server config");
@@ -2629,6 +2631,7 @@ fn server_config_assets_mode_defaults_to_dist_in_dev() {
         Ipv4Addr::LOCALHOST.to_string(),
         None,
         None,
+        false,
     );
 
     assert_eq!(
@@ -2651,6 +2654,7 @@ fn server_config_assets_mode_uses_config_when_cli_flag_is_absent() {
         Ipv4Addr::LOCALHOST.to_string(),
         None,
         None,
+        false,
     );
 
     assert_eq!(
@@ -2673,6 +2677,7 @@ fn server_config_assets_mode_cli_flag_overrides_config() {
         Ipv4Addr::LOCALHOST.to_string(),
         None,
         Some(WebAssetsMode::Embedded),
+        false,
     );
 
     assert_eq!(
@@ -2715,7 +2720,6 @@ async fn coordinator_run_endpoint_returns_envelope() {
             base_branch: "main".to_string(),
             is_fallback: false,
         }),
-        audit_prd_report: None,
         tool_cooldowns: None,
         ..CoordinatorCommandResult::default()
     };
@@ -2868,7 +2872,6 @@ async fn coordinator_dispatch_endpoint_returns_envelope() {
             base_branch: "main".to_string(),
             is_fallback: false,
         }),
-        audit_prd_report: None,
         tool_cooldowns: None,
         ..CoordinatorCommandResult::default()
     };

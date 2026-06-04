@@ -136,8 +136,7 @@ fn parse_task_registry(
     prd_path: &str,
 ) -> crate::Result<crate::coordinator::model::TaskRegistry> {
     // Try full TaskRegistry shape first.
-    if let Ok(registry) =
-        serde_json::from_str::<crate::coordinator::model::TaskRegistry>(prd_json)
+    if let Ok(registry) = serde_json::from_str::<crate::coordinator::model::TaskRegistry>(prd_json)
     {
         return Ok(registry);
     }

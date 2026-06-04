@@ -10,7 +10,10 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap, Table, TableState, Row, Cell},
+    widgets::{
+        Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState,
+        Wrap,
+    },
     Frame, Terminal,
 };
 use std::{collections::BTreeMap, io, time::Duration};
@@ -32,12 +35,18 @@ pub enum LaunchMode {
     /// Launch directly into the coordinator live screen.
     /// `phase_overrides` is a human-readable summary of active runtime phase overrides
     /// (e.g. `"[testing:off] [review:required]"`), or `None` when none are active.
-    CoordinatorRun { phase_overrides: Option<String> },
+    CoordinatorRun {
+        phase_overrides: Option<String>,
+    },
     /// Launch into the read-only observer/watch screen (`macc status --watch`).
     /// `control` enables operator actions (kill, stop, retry).
     /// `logs_only` collapses all panes except the log tail.
     /// `events_only` collapses all panes except the event timeline.
-    Watch { control: bool, logs_only: bool, events_only: bool },
+    Watch {
+        control: bool,
+        logs_only: bool,
+        events_only: bool,
+    },
 }
 
 /// RAII guard to ensure terminal state is restored on drop.
@@ -80,7 +89,11 @@ pub fn run_tui_with_launch(mode: LaunchMode) -> Result<()> {
             state.coordinator_run_auto_quit = true;
             state.coordinator_phase_overrides = phase_overrides;
         }
-        LaunchMode::Watch { control, logs_only, events_only } => {
+        LaunchMode::Watch {
+            control,
+            logs_only,
+            events_only,
+        } => {
             state.goto_screen(Screen::Watch);
             state.watch_control_enabled = control;
             state.watch_logs_only = logs_only;
@@ -121,7 +134,8 @@ fn format_hms(total_secs: u64) -> String {
 }
 
 fn handle_key(state: &mut AppState, key: KeyCode) {
-    if state.coordinator_task_diff_popup.is_some() || state.coordinator_task_explain_popup.is_some() {
+    if state.coordinator_task_diff_popup.is_some() || state.coordinator_task_explain_popup.is_some()
+    {
         match key {
             KeyCode::Esc | KeyCode::Char('q') => {
                 state.coordinator_task_diff_popup = None;
@@ -238,8 +252,14 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
         && state.automation_field_index == 0
     {
         match key {
-            KeyCode::Left => { state.cycle_coordinator_tool(false); return; }
-            KeyCode::Right => { state.cycle_coordinator_tool(true); return; }
+            KeyCode::Left => {
+                state.cycle_coordinator_tool(false);
+                return;
+            }
+            KeyCode::Right => {
+                state.cycle_coordinator_tool(true);
+                return;
+            }
             _ => {}
         }
     }
@@ -261,14 +281,38 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
         && !state.is_config_editing()
     {
         match key {
-            KeyCode::Tab => { state.next_config_tab(); return; }
-            KeyCode::BackTab => { state.prev_config_tab(); return; }
-            KeyCode::Char('1') => { state.jump_config_tab(0); return; }
-            KeyCode::Char('2') => { state.jump_config_tab(1); return; }
-            KeyCode::Char('3') => { state.jump_config_tab(2); return; }
-            KeyCode::Char('4') => { state.jump_config_tab(3); return; }
-            KeyCode::Char('5') => { state.jump_config_tab(4); return; }
-            KeyCode::Char('6') => { state.jump_config_tab(5); return; }
+            KeyCode::Tab => {
+                state.next_config_tab();
+                return;
+            }
+            KeyCode::BackTab => {
+                state.prev_config_tab();
+                return;
+            }
+            KeyCode::Char('1') => {
+                state.jump_config_tab(0);
+                return;
+            }
+            KeyCode::Char('2') => {
+                state.jump_config_tab(1);
+                return;
+            }
+            KeyCode::Char('3') => {
+                state.jump_config_tab(2);
+                return;
+            }
+            KeyCode::Char('4') => {
+                state.jump_config_tab(3);
+                return;
+            }
+            KeyCode::Char('5') => {
+                state.jump_config_tab(4);
+                return;
+            }
+            KeyCode::Char('6') => {
+                state.jump_config_tab(5);
+                return;
+            }
             _ => {}
         }
     }
@@ -283,12 +327,11 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
     if current_screen == Screen::CoordinatorLive && state.coordinator_stop_dialog_open {
         match key {
             KeyCode::Up => {
-                state.coordinator_stop_dialog_selection = state.coordinator_stop_dialog_selection.saturating_sub(1);
+                state.coordinator_stop_dialog_selection =
+                    state.coordinator_stop_dialog_selection.saturating_sub(1);
             }
-            KeyCode::Down => {
-                if state.coordinator_stop_dialog_selection < 3 {
-                    state.coordinator_stop_dialog_selection += 1;
-                }
+            KeyCode::Down if state.coordinator_stop_dialog_selection < 3 => {
+                state.coordinator_stop_dialog_selection += 1;
             }
             KeyCode::Enter => {
                 state.stop_coordinator_with_selected_mode();
@@ -303,12 +346,11 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
     if current_screen == Screen::CoordinatorLive && state.coordinator_recover_dialog_open {
         match key {
             KeyCode::Up => {
-                state.coordinator_recover_dialog_selection = state.coordinator_recover_dialog_selection.saturating_sub(1);
+                state.coordinator_recover_dialog_selection =
+                    state.coordinator_recover_dialog_selection.saturating_sub(1);
             }
-            KeyCode::Down => {
-                if state.coordinator_recover_dialog_selection < 1 {
-                    state.coordinator_recover_dialog_selection += 1;
-                }
+            KeyCode::Down if state.coordinator_recover_dialog_selection < 1 => {
+                state.coordinator_recover_dialog_selection += 1;
             }
             KeyCode::Enter => {
                 state.recover_coordinator_with_selected_mode();
@@ -364,7 +406,9 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
             state.jump_config_tab(0); // General tab
             state.push_screen(Screen::Automation);
         }
-        KeyCode::Char('v') if current_screen != Screen::CoordinatorLive => state.push_screen(Screen::CoordinatorLive),
+        KeyCode::Char('v') if current_screen != Screen::CoordinatorLive => {
+            state.push_screen(Screen::CoordinatorLive)
+        }
         KeyCode::Char('m') => state.push_screen(Screen::Mcp),
         KeyCode::Char('g') => state.push_screen(Screen::Logs),
         KeyCode::Char('p') => state.open_preview(),
@@ -376,7 +420,9 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
         KeyCode::Backspace => state.pop_screen(),
 
         // Actions: 's' to Save Config
-        KeyCode::Char('s') if current_screen != Screen::Apply && current_screen != Screen::CoordinatorLive => {
+        KeyCode::Char('s')
+            if current_screen != Screen::Apply && current_screen != Screen::CoordinatorLive =>
+        {
             state.save_config();
         }
         KeyCode::Char('u') if current_screen != Screen::CoordinatorLive => {
@@ -448,8 +494,16 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
             } else if current_screen == Screen::CoordinatorLive {
                 if let Some(task) = state.selected_live_task() {
                     match state.requeue_selected_task(task.task_id.clone()) {
-                        Ok(_) => state.set_status(UiStatusLevel::Info, format!("Requeued task {}", task.task_id), Some(Duration::from_secs(3))),
-                        Err(err) => state.set_status(UiStatusLevel::Error, format!("Failed to requeue: {}", err), Some(Duration::from_secs(4))),
+                        Ok(_) => state.set_status(
+                            UiStatusLevel::Info,
+                            format!("Requeued task {}", task.task_id),
+                            Some(Duration::from_secs(3)),
+                        ),
+                        Err(err) => state.set_status(
+                            UiStatusLevel::Error,
+                            format!("Failed to requeue: {}", err),
+                            Some(Duration::from_secs(4)),
+                        ),
                     }
                 }
             } else if current_screen == Screen::Logs {
@@ -470,7 +524,11 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
         KeyCode::Char('s') if current_screen == Screen::CoordinatorLive => {
             if let Some(task) = state.selected_live_task() {
                 state.stop_selected_task(task.task_id.clone());
-                state.set_status(UiStatusLevel::Info, format!("Sent kill request to task {}", task.task_id), Some(Duration::from_secs(3)));
+                state.set_status(
+                    UiStatusLevel::Info,
+                    format!("Sent kill request to task {}", task.task_id),
+                    Some(Duration::from_secs(3)),
+                );
             }
         }
         // Home screen: 'd' runs doctor check inline, shows results in Readiness panel.
@@ -595,13 +653,31 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             "warn"
         }
     );
-    let trust_strip = if let (Some(paths), Some(config)) = (&state.project_paths, state.working_copy.as_ref()) {
+    let trust_strip = if let (Some(paths), Some(config)) =
+        (&state.project_paths, state.working_copy.as_ref())
+    {
         let trust = macc_core::ops_motif::calculate_trust_summary(paths, config);
         let local_only = if trust.local_only { "yes" } else { "no" };
-        let terminal = if trust.terminal_enabled { "enabled" } else { "disabled" };
-        let backups = if trust.backups_ready { "ready" } else { "missing" };
-        let catalog = if trust.catalog_pinned { "pinned" } else { "unpinned" };
-        let secrets = if trust.secrets_redacted { "redacted" } else { "unredacted" };
+        let terminal = if trust.terminal_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        };
+        let backups = if trust.backups_ready {
+            "ready"
+        } else {
+            "missing"
+        };
+        let catalog = if trust.catalog_pinned {
+            "pinned"
+        } else {
+            "unpinned"
+        };
+        let secrets = if trust.secrets_redacted {
+            "redacted"
+        } else {
+            "unredacted"
+        };
         Some(format!(
             "Local only: {} | Terminal: {} | User writes: {} | Backups: {} | Catalog: {} | Secrets: {}",
             local_only, terminal, trust.user_level_writes, backups, catalog, secrets
@@ -1391,7 +1467,9 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 .flat_map(|(i, name)| {
                     let (label_style, sep_style) = if i == state.config_tab_index {
                         (
-                            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(theme.accent)
+                                .add_modifier(Modifier::BOLD),
                             Style::default().fg(theme.muted),
                         )
                     } else {
@@ -1425,7 +1503,9 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             let tab_fields = AppState::config_tab_fields(state.config_tab_index);
             let mut list_state = ListState::default();
             list_state.select(Some(
-                state.config_view_index.min(tab_fields.len().saturating_sub(1)),
+                state
+                    .config_view_index
+                    .min(tab_fields.len().saturating_sub(1)),
             ));
 
             let items: Vec<ListItem> = tab_fields
@@ -1439,13 +1519,15 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                         if let Some(input) = state.config_field_input_display() {
                             // Text-editing cursor active for this field
                             input
-                        } else if source == 1 && field_idx == 3 && state.tool_priority_editor_active {
+                        } else if source == 1 && field_idx == 3 && state.tool_priority_editor_active
+                        {
                             if state.tool_priority_editor_grabbed {
                                 "[GRABBED — ↑↓ to move, Space to drop]".to_string()
                             } else {
                                 "[reorder — ↑↓ navigate, Space to grab]".to_string()
                             }
-                        } else if source == 1 && field_idx == 4 && state.tool_parallel_editor_active {
+                        } else if source == 1 && field_idx == 4 && state.tool_parallel_editor_active
+                        {
                             "[edit — ↑↓ select, ←→ adjust, Enter done]".to_string()
                         } else {
                             state.config_field_value(source, field_idx)
@@ -1455,8 +1537,8 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                     };
 
                     // Highlight phase-override fields in warning color
-                    let has_override = source == 1
-                        && state.phase_override_notice_for_field(field_idx).is_some();
+                    let has_override =
+                        source == 1 && state.phase_override_notice_for_field(field_idx).is_some();
                     let value_style = if has_override {
                         Style::default().fg(theme.warn)
                     } else if is_selected
@@ -1493,7 +1575,11 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 let list = state.tool_priority_ordered_list();
                 let sel = state.tool_priority_editor_index;
                 let grabbed = state.tool_priority_editor_grabbed;
-                let title = if grabbed { "Tool Priority — GRABBED" } else { "Tool Priority — Reorder" };
+                let title = if grabbed {
+                    "Tool Priority — GRABBED"
+                } else {
+                    "Tool Priority — Reorder"
+                };
                 let mut lines: Vec<String> = if grabbed {
                     vec![
                         "Tool grabbed — moves with ↑/↓.".to_string(),
@@ -1517,13 +1603,27 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 };
                 lines.push(String::new());
                 for (i, tool) in list.iter().enumerate() {
-                    let cursor = if i == sel { if grabbed { "✦ " } else { "› " } } else { "  " };
+                    let cursor = if i == sel {
+                        if grabbed {
+                            "✦ "
+                        } else {
+                            "› "
+                        }
+                    } else {
+                        "  "
+                    };
                     lines.push(format!("{}{}. {}", cursor, i + 1, tool));
                 }
                 wrapped_paragraph(lines.join("\n"), title)
             } else if state.tool_parallel_editor_active {
-                let enabled = state.working_copy.as_ref().map(|wc| wc.tools.enabled.clone()).unwrap_or_default();
-                let counts: std::collections::BTreeMap<String, usize> = state.working_copy.as_ref()
+                let enabled = state
+                    .working_copy
+                    .as_ref()
+                    .map(|wc| wc.tools.enabled.clone())
+                    .unwrap_or_default();
+                let counts: std::collections::BTreeMap<String, usize> = state
+                    .working_copy
+                    .as_ref()
                     .and_then(|wc| wc.automation.coordinator.as_ref())
                     .map(|c| c.max_parallel_per_tool.clone())
                     .unwrap_or_default();
@@ -1546,9 +1646,14 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 wrapped_paragraph(lines.join("\n"), "Parallel Per Tool Editor")
             } else if matches!(state.current_config_field(), Some((1, 0))) {
                 // Coordinator tool field — show available tools for cycling
-                let enabled = state.working_copy.as_ref().map(|wc| wc.tools.enabled.clone()).unwrap_or_default();
+                let enabled = state
+                    .working_copy
+                    .as_ref()
+                    .map(|wc| wc.tools.enabled.clone())
+                    .unwrap_or_default();
                 let current = state.automation_field_display_value(0);
-                let override_prefix = state.phase_override_notice_for_field(0)
+                let override_prefix = state
+                    .phase_override_notice_for_field(0)
                     .map(|n| format!("⚠ {n}\n\n"))
                     .unwrap_or_default();
                 let mut lines = vec![
@@ -1556,7 +1661,14 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                     String::new(),
                     state.automation_field_help(0).to_string(),
                     String::new(),
-                    format!("Current: {}", if current.is_empty() { "(auto-select)" } else { &current }),
+                    format!(
+                        "Current: {}",
+                        if current.is_empty() {
+                            "(auto-select)"
+                        } else {
+                            &current
+                        }
+                    ),
                     String::new(),
                     "Available tools:".to_string(),
                     "  (empty)  — auto-select".to_string(),
@@ -1573,7 +1685,8 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 // Default: show field description and current value.
                 let detail_text = if let Some((source, field_idx)) = state.current_config_field() {
                     let override_prefix = if source == 1 {
-                        state.phase_override_notice_for_field(field_idx)
+                        state
+                            .phase_override_notice_for_field(field_idx)
                             .map(|n| format!("⚠ {n}\n\n"))
                             .unwrap_or_default()
                     } else {
@@ -1650,7 +1763,8 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             let summary_para = Paragraph::new(format!(
                 "Coordinator: {} | Tasks: {}{}",
                 status_line, snapshot_line, search_line
-            )).style(Style::default().fg(theme.accent_dim));
+            ))
+            .style(Style::default().fg(theme.accent_dim));
             f.render_widget(summary_para, live_chunks[1]);
 
             // Layout the 3 vertical stacked panes: LIVE TASKS table + DETAIL + LIVE LOGS (optional)
@@ -1661,10 +1775,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                     Constraint::Percentage(30),
                 ]
             } else {
-                vec![
-                    Constraint::Percentage(65),
-                    Constraint::Percentage(35),
-                ]
+                vec![Constraint::Percentage(65), Constraint::Percentage(35)]
             };
 
             let body_chunks = Layout::default()
@@ -1679,9 +1790,15 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 let health_symbol = task.health.symbol();
 
                 let health_style = match task.health {
-                    macc_core::coordinator::view_model::TaskHealth::Warning => Style::default().fg(theme.bad),
-                    macc_core::coordinator::view_model::TaskHealth::Stale => Style::default().fg(theme.warn),
-                    macc_core::coordinator::view_model::TaskHealth::Healthy => Style::default().fg(theme.good),
+                    macc_core::coordinator::view_model::TaskHealth::Warning => {
+                        Style::default().fg(theme.bad)
+                    }
+                    macc_core::coordinator::view_model::TaskHealth::Stale => {
+                        Style::default().fg(theme.warn)
+                    }
+                    macc_core::coordinator::view_model::TaskHealth::Healthy => {
+                        Style::default().fg(theme.good)
+                    }
                     _ => Style::default().fg(theme.muted),
                 };
 
@@ -1698,8 +1815,16 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 let age_label = task.age_label();
                 let hb_label = task.heartbeat_age_label();
 
-                let worker = if task.worker_id.is_empty() { "-" } else { &task.worker_id };
-                let tool = if task.tool.is_empty() { "-" } else { &task.tool };
+                let worker = if task.worker_id.is_empty() {
+                    "-"
+                } else {
+                    &task.worker_id
+                };
+                let tool = if task.tool.is_empty() {
+                    "-"
+                } else {
+                    &task.tool
+                };
 
                 let cells = vec![
                     Cell::from(health_symbol).style(health_style),
@@ -1740,7 +1865,9 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
 
             let mut table_state = TableState::default();
             if !filtered_tasks.is_empty() {
-                let clamped_idx = state.coordinator_selected_task_index.min(filtered_tasks.len() - 1);
+                let clamped_idx = state
+                    .coordinator_selected_task_index
+                    .min(filtered_tasks.len() - 1);
                 table_state.select(Some(clamped_idx));
             }
             f.render_stateful_widget(tasks_table, body_chunks[0], &mut table_state);
@@ -1749,11 +1876,28 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             let selected_task = state.selected_live_task();
             let mut detail_lines = Vec::new();
             if let Some(ref t) = selected_task {
-                let full_task = state.load_coordinator_storage_snapshot().ok().and_then(|s| s.registry.tasks.into_iter().find(|rt| rt.id == t.task_id));
-                let title = full_task.as_ref().and_then(|rt| rt.title.clone()).unwrap_or_else(|| "(no title)".to_string());
-                let worktree = full_task.as_ref().and_then(|rt| rt.task_runtime.worktree.clone()).unwrap_or_else(|| t.worktree.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| "-".to_string()));
-                let branch = full_task.as_ref().and_then(|rt| rt.task_runtime.branch.clone()).unwrap_or_else(|| t.branch.clone().unwrap_or_else(|| "-".to_string()));
-                
+                let full_task = state
+                    .load_coordinator_storage_snapshot()
+                    .ok()
+                    .and_then(|s| s.registry.tasks.into_iter().find(|rt| rt.id == t.task_id));
+                let title = full_task
+                    .as_ref()
+                    .and_then(|rt| rt.title.clone())
+                    .unwrap_or_else(|| "(no title)".to_string());
+                let worktree = full_task
+                    .as_ref()
+                    .and_then(|rt| rt.task_runtime.worktree.clone())
+                    .unwrap_or_else(|| {
+                        t.worktree
+                            .as_ref()
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| "-".to_string())
+                    });
+                let branch = full_task
+                    .as_ref()
+                    .and_then(|rt| rt.task_runtime.branch.clone())
+                    .unwrap_or_else(|| t.branch.clone().unwrap_or_else(|| "-".to_string()));
+
                 detail_lines.push(Line::from(vec![
                     Span::styled("Task ID:    ", Style::default().fg(theme.muted)),
                     Span::styled(&t.task_id, Style::default().add_modifier(Modifier::BOLD)),
@@ -1768,7 +1912,14 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 ]));
                 detail_lines.push(Line::from(vec![
                     Span::styled("Status:     ", Style::default().fg(theme.muted)),
-                    Span::styled(format!("{} (phase: {})", t.runtime_status.as_str(), t.phase.compact_label()), Style::default()),
+                    Span::styled(
+                        format!(
+                            "{} (phase: {})",
+                            t.runtime_status.as_str(),
+                            t.phase.compact_label()
+                        ),
+                        Style::default(),
+                    ),
                     Span::styled("   Tool: ", Style::default().fg(theme.muted)),
                     Span::styled(&t.tool, Style::default()),
                 ]));
@@ -1796,7 +1947,10 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             if state.coordinator_log_pane_visible {
                 let mut logs_lines = Vec::new();
                 if let Some(ref t) = selected_task {
-                    let full_task = state.load_coordinator_storage_snapshot().ok().and_then(|s| s.registry.tasks.into_iter().find(|rt| rt.id == t.task_id));
+                    let full_task = state
+                        .load_coordinator_storage_snapshot()
+                        .ok()
+                        .and_then(|s| s.registry.tasks.into_iter().find(|rt| rt.id == t.task_id));
                     let mut read_success = false;
                     if let Some(ref ft) = full_task {
                         if let Some(ref stdout_rel) = ft.task_runtime.stdout_log {
@@ -1805,9 +1959,10 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                                 if path.exists() {
                                     let lines = get_last_lines_of_file(&path, 15);
                                     if !lines.is_empty() {
-                                        logs_lines.push(Line::from(vec![
-                                            Span::styled(format!("Source: stdout ({})", stdout_rel), Style::default().fg(theme.accent_dim)),
-                                        ]));
+                                        logs_lines.push(Line::from(vec![Span::styled(
+                                            format!("Source: stdout ({})", stdout_rel),
+                                            Style::default().fg(theme.accent_dim),
+                                        )]));
                                         for l in lines {
                                             logs_lines.push(Line::from(l));
                                         }
@@ -1818,7 +1973,9 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                         }
                     }
                     if !read_success {
-                        logs_lines.push(Line::from("No active stdout log file found. Showing matching coordinator events:"));
+                        logs_lines.push(Line::from(
+                            "No active stdout log file found. Showing matching coordinator events:",
+                        ));
                         for line in state.coordinator_events.iter().rev() {
                             if line.contains(&t.task_id) {
                                 logs_lines.push(Line::from(line.clone()));
@@ -1826,7 +1983,9 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                         }
                     }
                 } else {
-                    logs_lines.push(Line::from("No task selected. Showing recent coordinator events:"));
+                    logs_lines.push(Line::from(
+                        "No task selected. Showing recent coordinator events:",
+                    ));
                     for line in state.coordinator_events.iter().rev().take(15).rev() {
                         logs_lines.push(Line::from(line.clone()));
                     }
@@ -2185,10 +2344,7 @@ fn build_readiness_text(
         out.push_str("✅ Ready to dispatch a task\n\n");
         out.push_str("Actions: [r] start coordinator  [v] live view  [d] doctor check");
     } else {
-        out.push_str(&format!(
-            "❌ {} step(s) pending\n\n",
-            ladder.blocking_count
-        ));
+        out.push_str(&format!("❌ {} step(s) pending\n\n", ladder.blocking_count));
         out.push_str("Actions:\n");
         out.push_str("  [d] Doctor check\n");
         out.push_str("  [a] Apply config\n");
@@ -2204,12 +2360,20 @@ fn render_watch_screen(f: &mut Frame, state: &AppState, area: Rect) {
     let theme = theme();
     let snapshot = state.watch_snapshot.as_ref();
 
-    let control_label = if state.watch_control_enabled { " [CONTROL]" } else { " [READ-ONLY]" };
+    let control_label = if state.watch_control_enabled {
+        " [CONTROL]"
+    } else {
+        " [READ-ONLY]"
+    };
     let age_label = state
         .watch_last_refresh
         .map(|ts| {
             let secs = ts.elapsed().as_secs();
-            if secs < 5 { "now".to_string() } else { format!("{}s ago", secs) }
+            if secs < 5 {
+                "now".to_string()
+            } else {
+                format!("{}s ago", secs)
+            }
         })
         .unwrap_or_else(|| "loading…".to_string());
     let title = format!("Observer{} · refreshed {}", control_label, age_label);
@@ -2231,8 +2395,12 @@ fn render_watch_screen(f: &mut Frame, state: &AppState, area: Rect) {
     };
 
     if let Some(ba) = banner_area {
-        let banner = Paragraph::new(format!("  ⚠  COORDINATOR PAUSED — {} ", pause_reason))
-            .style(Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD));
+        let banner = Paragraph::new(format!("  ⚠  COORDINATOR PAUSED — {} ", pause_reason)).style(
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        );
         f.render_widget(banner, ba);
     }
 
@@ -2246,10 +2414,26 @@ fn render_watch_screen(f: &mut Frame, state: &AppState, area: Rect) {
     };
 
     let vertical_constraints: Vec<Constraint> = match (show_top, show_log) {
-        (true, true) => vec![Constraint::Percentage(40), Constraint::Percentage(30), Constraint::Min(3)],
-        (true, false) => vec![Constraint::Percentage(80), Constraint::Length(0), Constraint::Min(3)],
-        (false, true) => vec![Constraint::Length(0), Constraint::Percentage(90), Constraint::Min(3)],
-        (false, false) => vec![Constraint::Percentage(40), Constraint::Percentage(30), Constraint::Min(3)],
+        (true, true) => vec![
+            Constraint::Percentage(40),
+            Constraint::Percentage(30),
+            Constraint::Min(3),
+        ],
+        (true, false) => vec![
+            Constraint::Percentage(80),
+            Constraint::Length(0),
+            Constraint::Min(3),
+        ],
+        (false, true) => vec![
+            Constraint::Length(0),
+            Constraint::Percentage(90),
+            Constraint::Min(3),
+        ],
+        (false, false) => vec![
+            Constraint::Percentage(40),
+            Constraint::Percentage(30),
+            Constraint::Min(3),
+        ],
     };
 
     let vertical = Layout::default()
@@ -2309,9 +2493,12 @@ fn render_watch_screen(f: &mut Frame, state: &AppState, area: Rect) {
                             .as_deref()
                             .and_then(|hb| chrono::DateTime::parse_from_rfc3339(hb).ok())
                             .map(|hb| {
-                                let secs =
-                                    (now_rfc - hb.with_timezone(&chrono::Utc)).num_seconds();
-                                if secs < 60 { format!("{}s", secs) } else { format!("{}m", secs / 60) }
+                                let secs = (now_rfc - hb.with_timezone(&chrono::Utc)).num_seconds();
+                                if secs < 60 {
+                                    format!("{}s", secs)
+                                } else {
+                                    format!("{}m", secs / 60)
+                                }
                             })
                             .unwrap_or_else(|| "-".to_string());
 
@@ -2320,7 +2507,9 @@ fn render_watch_screen(f: &mut Frame, state: &AppState, area: Rect) {
                             symbol, w.id, task, phase, w.runtime_status, hb_age
                         );
                         let style = if sel {
-                            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)
+                            Style::default()
+                                .fg(theme.accent)
+                                .add_modifier(Modifier::BOLD)
                         } else if freshly_stale || symbol == "▲" {
                             Style::default().fg(Color::Yellow)
                         } else {
@@ -2333,8 +2522,11 @@ fn render_watch_screen(f: &mut Frame, state: &AppState, area: Rect) {
         } else {
             vec![ListItem::new("Waiting for snapshot… (refreshes every 2s)")]
         };
-        let workers_list = List::new(worker_lines)
-            .block(Block::default().title("Workers  ↑↓ navigate").borders(Borders::ALL));
+        let workers_list = List::new(worker_lines).block(
+            Block::default()
+                .title("Workers  ↑↓ navigate")
+                .borders(Borders::ALL),
+        );
         f.render_widget(workers_list, top_chunks[0]);
 
         // Queue / git pane — spec §6.5 QueueSummary.
@@ -2373,7 +2565,11 @@ fn render_watch_screen(f: &mut Frame, state: &AppState, area: Rect) {
             String::new()
         };
         let events_para = wrapped_paragraph(
-            if events_text.is_empty() { "No events" } else { &events_text },
+            if events_text.is_empty() {
+                "No events"
+            } else {
+                &events_text
+            },
             "Events",
         );
         f.render_widget(events_para, top_chunks[2]);
@@ -2391,7 +2587,11 @@ fn render_watch_screen(f: &mut Frame, state: &AppState, area: Rect) {
             .collect::<Vec<_>>()
             .join("\n");
         let log_para = wrapped_paragraph(
-            if log_text.is_empty() { "No log tail — 'f' to follow coordinator logs" } else { &log_text },
+            if log_text.is_empty() {
+                "No log tail — 'f' to follow coordinator logs"
+            } else {
+                &log_text
+            },
             "Coordinator Log",
         );
         f.render_widget(log_para, vertical[1]);
@@ -2636,33 +2836,6 @@ mod tests {
         fs::write(macc_dir.join("macc.yaml"), "tools:\n  enabled: []\n").expect("write config");
     }
 
-    #[test]
-    fn coordinator_live_viewer_key_shows_viewer_mode_toast() {
-        let dir = tempdir().expect("tempdir");
-        sample_project(dir.path());
-        let handle = ProcessHandle {
-            kind: ProcessKind::Coordinator,
-            project_root: dir.path().to_path_buf(),
-            pid: Some(4242),
-        };
-        register_process(dir.path(), handle.clone()).expect("register process");
-        claim_owner(dir.path(), &handle, sample_cli_client("client-A")).expect("claim owner");
-
-        let engine = Arc::new(ViewerGateEngine::default());
-        let mut state = AppState::with_engine(engine.clone());
-        state.project_paths = Some(ProjectPaths::from_root(dir.path()));
-        state.client_identity.client_id = "client-B".to_string();
-        state.client_context.client_id = "client-B".to_string();
-        state.client_context.project_root = dir.path().to_path_buf();
-        state.goto_screen(Screen::CoordinatorLive);
-
-        handle_key(&mut state, KeyCode::Char('K'));
-
-        let status = state.ui_status.expect("status");
-        assert_eq!(status.level, UiStatusLevel::Warning);
-        assert_eq!(status.message, "Viewer mode — press T to request takeover");
-        assert_eq!(*engine.stop_calls.borrow(), 0);
-    }
 }
 
 fn render_coordinator_pause_overlay(f: &mut Frame, state: &AppState) {
@@ -2743,7 +2916,10 @@ fn render_coordinator_stop_dialog(f: &mut Frame, state: &AppState) {
         } else {
             "  "
         };
-        text.push(Line::from(vec![Span::styled(format!("{}{}", prefix, opt), style)]));
+        text.push(Line::from(vec![Span::styled(
+            format!("{}{}", prefix, opt),
+            style,
+        )]));
     }
 
     text.push(Line::from(""));
@@ -2791,7 +2967,10 @@ fn render_coordinator_recover_dialog(f: &mut Frame, state: &AppState) {
         } else {
             "  "
         };
-        text.push(Line::from(vec![Span::styled(format!("{}{}", prefix, opt), style)]));
+        text.push(Line::from(vec![Span::styled(
+            format!("{}{}", prefix, opt),
+            style,
+        )]));
     }
 
     text.push(Line::from(""));
@@ -2815,7 +2994,7 @@ fn get_last_lines_of_file(path: &std::path::Path, limit: usize) -> Vec<String> {
     use std::io::{BufRead, BufReader};
     if let Ok(file) = std::fs::File::open(path) {
         let reader = BufReader::new(file);
-        let lines: Vec<String> = reader.lines().filter_map(Result::ok).collect();
+        let lines: Vec<String> = reader.lines().map_while(Result::ok).collect();
         let start = lines.len().saturating_sub(limit);
         lines[start..].to_vec()
     } else {

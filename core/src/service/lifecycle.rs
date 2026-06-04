@@ -174,7 +174,9 @@ pub fn apply(
     if !json {
         crate::ops_motif::print_trust_review_card(&paths, &plan, allow_user_scope);
         if !ui.confirm_yes_no("Proceed with apply [y/N]? ")? {
-            return Err(crate::MaccError::Validation("Apply cancelled by user".to_string()));
+            return Err(crate::MaccError::Validation(
+                "Apply cancelled by user".to_string(),
+            ));
         }
         ui.print_pre_apply_summary(&paths, &plan, &ops);
         if explain {
@@ -660,9 +662,16 @@ pub fn quickstart_extended(
                     })
                 }).collect::<Vec<_>>(),
             });
-            println!("{}", serde_json::to_string_pretty(&output).unwrap_or_default());
-            return if ready { Ok(()) } else {
-                Err(MaccError::Validation("Not ready to dispatch a task.".into()))
+            tracing::info!(
+                "{}",
+                serde_json::to_string_pretty(&output).unwrap_or_default()
+            );
+            return if ready {
+                Ok(())
+            } else {
+                Err(MaccError::Validation(
+                    "Not ready to dispatch a task.".into(),
+                ))
             };
         }
         ui.info("Running environment checks (--check-only)...");
@@ -787,7 +796,10 @@ fn interactive_tool_selection(
         // Pick first installed tool automatically.
         for d in &descriptors {
             if ui.is_command_available(&d.id) {
-                ui.info(&format!("\nAuto-selected: {} (first installed tool)", d.title));
+                ui.info(&format!(
+                    "\nAuto-selected: {} (first installed tool)",
+                    d.title
+                ));
                 return Ok(Some(d.id.clone()));
             }
         }

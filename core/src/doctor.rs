@@ -167,7 +167,7 @@ pub fn check_disk_space(project_root: &Path, max_parallel: u32) -> Vec<Diagnosti
             "Low disk space for worktrees",
             &format!(
                 "Available: {}. Recommended: {} for max_parallel={}. Consider freeing disk or reducing max_parallel.",
-                fmt_bytes(available as u64),
+                fmt_bytes(available),
                 fmt_bytes(recommended as u64),
                 max_parallel
             ),
@@ -180,7 +180,7 @@ pub fn check_disk_space(project_root: &Path, max_parallel: u32) -> Vec<Diagnosti
             "Insufficient disk space for worktrees",
             &format!(
                 "Available: {}. Recommended: {} for max_parallel={}.",
-                fmt_bytes(available as u64),
+                fmt_bytes(available),
                 fmt_bytes(recommended as u64),
                 max_parallel
             ),
@@ -282,7 +282,10 @@ pub fn check_task_readiness(macc_dir: &Path) -> Vec<DiagnosticFinding> {
 }
 
 /// Collect all new-style diagnostic findings for the current project.
-pub fn collect_all_findings(paths: &crate::ProjectPaths, max_parallel: u32) -> Vec<DiagnosticFinding> {
+pub fn collect_all_findings(
+    paths: &crate::ProjectPaths,
+    max_parallel: u32,
+) -> Vec<DiagnosticFinding> {
     let mut findings = Vec::new();
     findings.extend(check_git_identity(&paths.root));
     findings.extend(check_disk_space(&paths.root, max_parallel));
@@ -326,7 +329,10 @@ pub fn check_reference_branch(paths: &crate::ProjectPaths) -> Vec<DiagnosticFind
             vec![DiagnosticFinding::ok(
                 "MACC-REFERENCE-BRANCH",
                 "git",
-                &format!("Reference branch \"{}\" exists and is clean", reference_branch),
+                &format!(
+                    "Reference branch \"{}\" exists and is clean",
+                    reference_branch
+                ),
             )]
         }
 
@@ -366,7 +372,10 @@ pub fn check_reference_branch(paths: &crate::ProjectPaths) -> Vec<DiagnosticFind
             vec![DiagnosticFinding::warning(
                 "MACC-REFERENCE-BRANCH-DIRTY",
                 "git",
-                &format!("Reference branch \"{}\" has uncommitted changes", reference_branch),
+                &format!(
+                    "Reference branch \"{}\" has uncommitted changes",
+                    reference_branch
+                ),
                 &format!(
                     "Uncommitted changes detected in: {}",
                     dirty_paths.join(", ")
@@ -464,7 +473,10 @@ pub fn check_tool_login_states(paths: &crate::ProjectPaths) -> Vec<DiagnosticFin
 
         if runnable && has_performer {
             findings.push(DiagnosticFinding::ok(
-                &format!("MACC-TOOL-{}", spec.id.to_ascii_uppercase().replace('-', "_")),
+                &format!(
+                    "MACC-TOOL-{}",
+                    spec.id.to_ascii_uppercase().replace('-', "_")
+                ),
                 "tools",
                 &format!("{} — ready", tool_name),
             ));
@@ -569,11 +581,7 @@ fn probe_binary_version(binary: &str) -> (bool, String) {
 }
 
 /// Apply a git-identity fix locally in the project.
-pub fn fix_git_identity(
-    project_root: &Path,
-    name: &str,
-    email: &str,
-) -> Result<(), String> {
+pub fn fix_git_identity(project_root: &Path, name: &str, email: &str) -> Result<(), String> {
     let status = Command::new("git")
         .args(["config", "--local", "user.name", name])
         .current_dir(project_root)
@@ -945,6 +953,7 @@ mod tests {
             update: None,
             version_check: None,
             defaults: None,
+            model_tiers: Default::default(),
         };
 
         let checks = checks_for_enabled_tools(&[spec]);

@@ -9,19 +9,57 @@ pub struct SkillsCmdCommand {
 
 pub enum SkillsSubcommand {
     // ── Run-skill subcommands ───────────────────────────────────────────────
-    List { tool: Option<String> },
-    Show { skill: String },
-    Explain { skill: String },
+    List {
+        tool: Option<String>,
+    },
+    Show {
+        skill: String,
+    },
+    Explain {
+        skill: String,
+    },
     Doctor,
     // ── Catalog/package lifecycle (spec §4) ─────────────────────────────────
-    Available { tool: Option<String>, source: Option<String>, tag: Option<String>, json: bool },
-    CatalogStatus { tool: Option<String>, verbose: bool, json: bool },
-    Install { id: String, tool: String, reference: Option<String>, pin: bool, dry_run: bool },
-    Update { id: Option<String>, tool: Option<String>, dry_run: bool },
-    Verify { tool: Option<String>, json: bool },
-    Prune { tool: Option<String>, dry_run: bool },
-    Diff { id: Option<String>, tool: Option<String> },
-    Uninstall { id: String, tool: Option<String>, all_tools: bool },
+    Available {
+        tool: Option<String>,
+        source: Option<String>,
+        tag: Option<String>,
+        json: bool,
+    },
+    CatalogStatus {
+        tool: Option<String>,
+        verbose: bool,
+        json: bool,
+    },
+    Install {
+        id: String,
+        tool: String,
+        reference: Option<String>,
+        pin: bool,
+        dry_run: bool,
+    },
+    Update {
+        id: Option<String>,
+        tool: Option<String>,
+        dry_run: bool,
+    },
+    Verify {
+        tool: Option<String>,
+        json: bool,
+    },
+    Prune {
+        tool: Option<String>,
+        dry_run: bool,
+    },
+    Diff {
+        id: Option<String>,
+        tool: Option<String>,
+    },
+    Uninstall {
+        id: String,
+        tool: Option<String>,
+        all_tools: bool,
+    },
 }
 
 impl Command for SkillsCmdCommand {
@@ -34,7 +72,7 @@ impl Command for SkillsCmdCommand {
                     println!("No skills found. Add skill YAML files to .macc/skills/");
                     return Ok(());
                 }
-                println!("{:<20} {:<12} {:<10} {}", "ID", "KIND", "RISK", "TITLE");
+                println!("{:<20} {:<12} {:<10} TITLE", "ID", "KIND", "RISK");
                 println!("{:-<20} {:-<12} {:-<10} {:-<30}", "", "", "", "");
                 for skill in &skills {
                     if let Some(tool_filter) = tool {
@@ -103,9 +141,7 @@ impl Command for SkillsCmdCommand {
                         // Plain-English explanation of the execution path.
                         match def.kind {
                             macc_core::skills_runner::SkillKind::LocalCommand => {
-                                println!(
-                                    "Execution: local commands only — no AI tool required."
-                                );
+                                println!("Execution: local commands only — no AI tool required.");
                                 if !def.steps.is_empty() {
                                     println!("Steps:");
                                     for (i, step) in def.steps.iter().enumerate() {
@@ -116,11 +152,11 @@ impl Command for SkillsCmdCommand {
                                 }
                             }
                             macc_core::skills_runner::SkillKind::Prompt => {
-                                println!(
-                                    "Execution: prompt sent to the selected tool adapter."
-                                );
+                                println!("Execution: prompt sent to the selected tool adapter.");
                                 if !def.steps.is_empty() {
-                                    if let Some(prompt) = def.steps.first().and_then(|s| s.prompt.as_deref()) {
+                                    if let Some(prompt) =
+                                        def.steps.first().and_then(|s| s.prompt.as_deref())
+                                    {
                                         let excerpt = if prompt.len() > 200 {
                                             format!("{}…", &prompt[..200])
                                         } else {
@@ -137,9 +173,7 @@ impl Command for SkillsCmdCommand {
                                 );
                             }
                             macc_core::skills_runner::SkillKind::Agent => {
-                                println!(
-                                    "Execution: routed to a specific agent persona."
-                                );
+                                println!("Execution: routed to a specific agent persona.");
                             }
                             macc_core::skills_runner::SkillKind::Coordinator => {
                                 println!(
@@ -155,14 +189,8 @@ impl Command for SkillsCmdCommand {
                             }
                         }
                         println!();
-                        println!(
-                            "Run:      macc run {}",
-                            def.id
-                        );
-                        println!(
-                            "Dry-run:  macc run {} --dry-run",
-                            def.id
-                        );
+                        println!("Run:      macc run {}", def.id);
+                        println!("Dry-run:  macc run {} --dry-run", def.id);
                     }
                     None => {
                         println!(
@@ -176,7 +204,10 @@ impl Command for SkillsCmdCommand {
                 let skills = self.app.engine.list_skills(&paths);
                 println!("Skills Doctor");
                 println!("=============");
-                println!("Skills directory: {}", paths.macc_dir.join("skills").display());
+                println!(
+                    "Skills directory: {}",
+                    paths.macc_dir.join("skills").display()
+                );
                 println!("Skills found: {}", skills.len());
                 println!();
                 let local: Vec<_> = skills
@@ -201,23 +232,34 @@ impl Command for SkillsCmdCommand {
             }
 
             // ── Catalog lifecycle ────────────────────────────────────────────
-
-            SkillsSubcommand::Available { tool, source, tag, json } => {
-
-                let entries = self.app.engine.catalog_skills_available(&paths, tool.as_deref());
+            SkillsSubcommand::Available {
+                tool,
+                source,
+                tag,
+                json,
+            } => {
+                let entries = self
+                    .app
+                    .engine
+                    .catalog_skills_available(&paths, tool.as_deref());
                 let filtered: Vec<_> = entries
                     .into_iter()
                     .filter(|e| {
-                        let src_ok = source.as_deref().map_or(true, |s| {
-                            e.source.url.contains(s) || e.id.starts_with(s)
-                        });
-                        let tag_ok = tag.as_deref().map_or(true, |t| e.tags.iter().any(|et| et == t));
+                        let src_ok = source
+                            .as_deref()
+                            .is_none_or(|s| e.source.url.contains(s) || e.id.starts_with(s));
+                        let tag_ok = tag
+                            .as_deref()
+                            .is_none_or(|t| e.tags.iter().any(|et| et == t));
                         src_ok && tag_ok
                     })
                     .collect();
 
                 if *json {
-                    println!("{}", serde_json::to_string_pretty(&filtered).unwrap_or_default());
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&filtered).unwrap_or_default()
+                    );
                     return Ok(());
                 }
 
@@ -227,27 +269,43 @@ impl Command for SkillsCmdCommand {
                 }
 
                 println!("Available skills\n");
-                println!("{:<24} {:<18} {:<10} {:<14} {}", "ID", "Tools", "Source", "Ref", "Risk");
-                println!("{:-<24} {:-<18} {:-<10} {:-<14} {}", "", "", "", "", "---");
+                println!(
+                    "{:<24} {:<18} {:<10} {:<14} Risk",
+                    "ID", "Tools", "Source", "Ref"
+                );
+                println!("{:-<24} {:-<18} {:-<10} {:-<14} ---", "", "", "", "");
                 for e in &filtered {
                     let tools_str = if e.tools.is_empty() {
                         "(any)".to_string()
                     } else {
                         e.tools.join(",")
                     };
-                    let src_short = e.source.url.split('/').last().unwrap_or("local");
+                    let src_short = e.source.url.split('/').next_back().unwrap_or("local");
                     let ref_str = e.recommended_ref.as_deref().unwrap_or("-");
                     let risk = e.risk.as_deref().unwrap_or("-");
-                    println!("{:<24} {:<18} {:<10} {:<14} {}", e.id, &tools_str[..tools_str.len().min(17)], src_short, ref_str, risk);
+                    println!(
+                        "{:<24} {:<18} {:<10} {:<14} {}",
+                        e.id,
+                        &tools_str[..tools_str.len().min(17)],
+                        src_short,
+                        ref_str,
+                        risk
+                    );
                 }
             }
 
-            SkillsSubcommand::CatalogStatus { tool, verbose, json } => {
-
+            SkillsSubcommand::CatalogStatus {
+                tool,
+                verbose,
+                json,
+            } => {
                 let statuses = self.app.engine.skills_status(&paths, tool.as_deref())?;
 
                 if *json {
-                    println!("{}", serde_json::to_string_pretty(&statuses).unwrap_or_default());
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&statuses).unwrap_or_default()
+                    );
                     return Ok(());
                 }
 
@@ -258,20 +316,36 @@ impl Command for SkillsCmdCommand {
                 }
 
                 println!("Installed skills\n");
-                println!("{:<10} {:<20} {:<12} {:<12} {:<12} {}",
-                    "Tool", "Skill", "Ref", "Pin", "Status", "Source");
-                println!("{:-<10} {:-<20} {:-<12} {:-<12} {:-<12} {:-<30}", "", "", "", "", "", "");
+                println!(
+                    "{:<10} {:<20} {:<12} {:<12} {:<12} Source",
+                    "Tool", "Skill", "Ref", "Pin", "Status"
+                );
+                println!(
+                    "{:-<10} {:-<20} {:-<12} {:-<12} {:-<12} {:-<30}",
+                    "", "", "", "", "", ""
+                );
                 let mut all_warnings = Vec::new();
                 for s in &statuses {
                     let ref_str = s.requested_ref.as_deref().unwrap_or("-");
                     let pin_str = if s.pinned {
-                        s.resolved_ref.as_deref().map(|r| &r[..r.len().min(9)]).unwrap_or("pinned").to_string()
+                        s.resolved_ref
+                            .as_deref()
+                            .map(|r| &r[..r.len().min(9)])
+                            .unwrap_or("pinned")
+                            .to_string()
                     } else {
                         "unpinned".to_string()
                     };
                     let src = s.source_url.as_deref().unwrap_or("-");
-                    println!("{:<10} {:<20} {:<12} {:<12} {:<12} {}",
-                        s.tool, s.id, ref_str, pin_str, s.kind.as_str(), src);
+                    println!(
+                        "{:<10} {:<20} {:<12} {:<12} {:<12} {}",
+                        s.tool,
+                        s.id,
+                        ref_str,
+                        pin_str,
+                        s.kind.as_str(),
+                        src
+                    );
                     if *verbose && !s.installed_files.is_empty() {
                         for f in &s.installed_files {
                             println!("             {}", f);
@@ -287,15 +361,22 @@ impl Command for SkillsCmdCommand {
                 }
             }
 
-            SkillsSubcommand::Install { id, tool, reference, pin, dry_run } => {
+            SkillsSubcommand::Install {
+                id,
+                tool,
+                reference,
+                pin,
+                dry_run,
+            } => {
                 use macc_core::skills_catalog::{
-                    SkillLockEntry, LockedSource, LockedPackage,
-                    CacheRef, InstalledTargets, git_cache_key,
-                    detect_conflicts,
+                    detect_conflicts, git_cache_key, CacheRef, InstalledTargets, LockedPackage,
+                    LockedSource, SkillLockEntry,
                 };
 
-
-                let catalog_entries = self.app.engine.catalog_skills_available(&paths, Some(tool.as_str()));
+                let catalog_entries = self
+                    .app
+                    .engine
+                    .catalog_skills_available(&paths, Some(tool.as_str()));
                 let entry = catalog_entries.iter().find(|e| e.id == id.as_str());
 
                 if entry.is_none() {
@@ -309,30 +390,46 @@ impl Command for SkillsCmdCommand {
 
                 // Check tool is supported.
                 if !entry.tools.is_empty() && !entry.tools.iter().any(|t| t == tool.as_str()) {
-                    eprintln!("Skill '{}' does not support tool '{}'. Supported: {}",
-                        id, tool, entry.tools.join(", "));
+                    eprintln!(
+                        "Skill '{}' does not support tool '{}'. Supported: {}",
+                        id,
+                        tool,
+                        entry.tools.join(", ")
+                    );
                     return Err(macc_core::MaccError::Catalog {
                         operation: "install".to_string(),
-                        message: format!("{}: Unsupported tool '{}'", macc_core::skills_catalog::MACC_SKILL_1003, tool),
+                        message: format!(
+                            "{}: Unsupported tool '{}'",
+                            macc_core::skills_catalog::MACC_SKILL_1003,
+                            tool
+                        ),
                     });
                 }
 
-                let requested_ref = reference.clone().or_else(|| entry.recommended_ref.clone())
+                let requested_ref = reference
+                    .clone()
+                    .or_else(|| entry.recommended_ref.clone())
                     .unwrap_or_else(|| entry.source.reference.clone());
 
                 // For mutable branch refs without --pin, warn.
                 let is_mutable_ref = !matches!(requested_ref.as_str(), r if r.len() == 40 && r.chars().all(|c| c.is_ascii_hexdigit()));
                 if is_mutable_ref && !pin {
-                    eprintln!("Warning: Ref '{}' is mutable. Use --pin to resolve to an immutable SHA.", requested_ref);
+                    eprintln!(
+                        "Warning: Ref '{}' is mutable. Use --pin to resolve to an immutable SHA.",
+                        requested_ref
+                    );
                 }
 
                 // Build planned targets from catalog entry.
-                let planned_targets: Vec<(String, String)> = entry.targets
+                let planned_targets: Vec<(String, String)> = entry
+                    .targets
                     .get(tool.as_str())
-                    .map(|dests| dests.iter().map(|d| (
-                        entry.selector.subpath.clone() + "/" + d,
-                        d.clone(),
-                    )).collect())
+                    .map(|dests| {
+                        dests
+                            .iter()
+                            .map(|d| (entry.selector.subpath.clone() + "/" + d, d.clone()))
+                            .collect()
+                    })
                     .unwrap_or_default();
 
                 // Load lockfile and check conflicts.
@@ -350,12 +447,21 @@ impl Command for SkillsCmdCommand {
                     }
                     return Err(macc_core::MaccError::Catalog {
                         operation: "install".to_string(),
-                        message: format!("{}: Install plan has {} conflict(s)", macc_core::skills_catalog::MACC_SKILL_3001, conflicts.len()),
+                        message: format!(
+                            "{}: Install plan has {} conflict(s)",
+                            macc_core::skills_catalog::MACC_SKILL_3001,
+                            conflicts.len()
+                        ),
                     });
                 }
 
                 if *dry_run {
-                    println!("Install plan for '{}' ({}): {} file(s)", id, tool, planned_targets.len());
+                    println!(
+                        "Install plan for '{}' ({}): {} file(s)",
+                        id,
+                        tool,
+                        planned_targets.len()
+                    );
                     for (_, dest) in &planned_targets {
                         println!("  → {}", dest);
                     }
@@ -364,7 +470,7 @@ impl Command for SkillsCmdCommand {
                 }
 
                 // Build the lock entry (fetch is out of scope for MVP — record intent).
-                let resolved_ref = if *pin { None } else { None }; // SHA resolution requires network
+                let resolved_ref: Option<String> = None; // SHA resolution requires network (pin flag reserved for future use)
                 let cache_key = git_cache_key(
                     &entry.source.url,
                     resolved_ref.as_deref().unwrap_or(&requested_ref),
@@ -393,31 +499,37 @@ impl Command for SkillsCmdCommand {
                     cache: CacheRef { cache_key },
                     installed: InstalledTargets {
                         at: now,
-                        targets: planned_targets.iter().map(|(src, dest)| {
-                            macc_core::skills_catalog::InstalledTarget {
+                        targets: planned_targets
+                            .iter()
+                            .map(|(src, dest)| macc_core::skills_catalog::InstalledTarget {
                                 src: src.clone(),
                                 dest: dest.clone(),
                                 digest: None,
                                 owner: "macc".to_string(),
-                            }
-                        }).collect(),
+                            })
+                            .collect(),
                     },
                 });
                 updated_lockfile.save(&paths.skills_lock_path())?;
 
-                println!("Recorded install intent for '{}' ({}) in skills.lock.json.", id, tool);
+                println!(
+                    "Recorded install intent for '{}' ({}) in skills.lock.json.",
+                    id, tool
+                );
                 if is_mutable_ref && !pin {
-                    println!("Note: skill is tracked from mutable ref '{}' (not pinned).", requested_ref);
+                    println!(
+                        "Note: skill is tracked from mutable ref '{}' (not pinned).",
+                        requested_ref
+                    );
                 }
                 println!("Run 'macc apply' to materialize the skill files.");
             }
 
             SkillsSubcommand::Update { id, tool, dry_run } => {
-
                 let statuses = self.app.engine.skills_status(&paths, tool.as_deref())?;
                 let to_check: Vec<_> = statuses
                     .iter()
-                    .filter(|s| id.as_deref().map_or(true, |fid| s.id == fid))
+                    .filter(|s| id.as_deref().is_none_or(|fid| s.id == fid))
                     .collect();
 
                 if to_check.is_empty() {
@@ -444,15 +556,17 @@ impl Command for SkillsCmdCommand {
             }
 
             SkillsSubcommand::Verify { tool, json } => {
-
                 let findings = self.app.engine.skills_verify(&paths)?;
                 let filtered: Vec<_> = findings
                     .iter()
-                    .filter(|f| tool.as_deref().map_or(true, |t| f.tool == t))
+                    .filter(|f| tool.as_deref().is_none_or(|t| f.tool == t))
                     .collect();
 
                 if *json {
-                    println!("{}", serde_json::to_string_pretty(&filtered).unwrap_or_default());
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&filtered).unwrap_or_default()
+                    );
                     return Ok(());
                 }
 
@@ -465,20 +579,25 @@ impl Command for SkillsCmdCommand {
                 for f in &filtered {
                     println!("  {} ({}) [{}]: {}", f.skill_id, f.tool, f.kind, f.message);
                 }
-                return Err(macc_core::MaccError::Validation(
-                    format!("Skills verification found {} issue(s)", filtered.len()),
-                ));
+                return Err(macc_core::MaccError::Validation(format!(
+                    "Skills verification found {} issue(s)",
+                    filtered.len()
+                )));
             }
 
             SkillsSubcommand::Prune { tool, dry_run } => {
-
                 let lockfile = self.app.engine.skills_lockfile(&paths)?;
 
                 // Find lockfile entries whose installed files exist.
-                let orphaned: Vec<_> = lockfile.skills.iter()
-                    .filter(|e| tool.as_deref().map_or(true, |t| e.tool == t))
+                let orphaned: Vec<_> = lockfile
+                    .skills
+                    .iter()
+                    .filter(|e| tool.as_deref().is_none_or(|t| e.tool == t))
                     .filter(|e| {
-                        e.installed.targets.iter().all(|t| paths.root.join(&t.dest).exists())
+                        e.installed
+                            .targets
+                            .iter()
+                            .all(|t| paths.root.join(&t.dest).exists())
                     })
                     .collect();
 
@@ -505,11 +624,12 @@ impl Command for SkillsCmdCommand {
             }
 
             SkillsSubcommand::Diff { id, tool } => {
-
                 let lockfile = self.app.engine.skills_lockfile(&paths)?;
-                let entries: Vec<_> = lockfile.skills.iter()
-                    .filter(|e| id.as_deref().map_or(true, |fid| e.id == fid))
-                    .filter(|e| tool.as_deref().map_or(true, |t| e.tool == t))
+                let entries: Vec<_> = lockfile
+                    .skills
+                    .iter()
+                    .filter(|e| id.as_deref().is_none_or(|fid| e.id == fid))
+                    .filter(|e| tool.as_deref().is_none_or(|t| e.tool == t))
                     .collect();
 
                 if entries.is_empty() {
@@ -519,7 +639,8 @@ impl Command for SkillsCmdCommand {
 
                 let cache_dir = paths.skills_cache_dir();
                 for entry in entries {
-                    let diffs = macc_core::skills_catalog::diff_skill(entry, &paths.root, &cache_dir);
+                    let diffs =
+                        macc_core::skills_catalog::diff_skill(entry, &paths.root, &cache_dir);
                     if diffs.is_empty() {
                         println!("{} ({}): no local modifications", entry.id, entry.tool);
                     } else {
@@ -533,12 +654,17 @@ impl Command for SkillsCmdCommand {
                 }
             }
 
-            SkillsSubcommand::Uninstall { id, tool, all_tools } => {
-
+            SkillsSubcommand::Uninstall {
+                id,
+                tool,
+                all_tools,
+            } => {
                 let mut lockfile = self.app.engine.skills_lockfile(&paths)?;
 
                 let tools_to_remove: Vec<String> = if *all_tools {
-                    lockfile.skills.iter()
+                    lockfile
+                        .skills
+                        .iter()
                         .filter(|e| e.id == id.as_str())
                         .map(|e| e.tool.clone())
                         .collect()

@@ -279,11 +279,7 @@ pub fn force_release_project_owner(repo_root: &Path) -> Result<Option<String>> {
     let lease = project_lease_handle(repo_root);
     let mut evicted: Option<String> = None;
     OwnershipStore::load_and_modify(repo_root, |store| {
-        if let Some(record) = store
-            .records
-            .iter_mut()
-            .find(|r| r.process == lease)
-        {
+        if let Some(record) = store.records.iter_mut().find(|r| r.process == lease) {
             if let Some(owner) = record.owner.take() {
                 evicted = Some(owner.client_id);
                 record.takeover_request = None;

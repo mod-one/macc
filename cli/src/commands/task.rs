@@ -23,6 +23,7 @@ pub struct ExplainCommand {
 }
 
 impl ExplainCommand {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         app: AppContext,
         task_id: String,
@@ -57,9 +58,11 @@ impl Command for ExplainCommand {
             ))
         })?;
 
-        let task = snapshot.registry.tasks.iter().find(|t| {
-            t.id.eq_ignore_ascii_case(&self.task_id)
-        });
+        let task = snapshot
+            .registry
+            .tasks
+            .iter()
+            .find(|t| t.id.eq_ignore_ascii_case(&self.task_id));
 
         let Some(task) = task else {
             return Err(MaccError::Validation(format!(
@@ -77,7 +80,7 @@ impl Command for ExplainCommand {
 }
 
 impl ExplainCommand {
-    fn print_human(&self, task: &Task, project_root: &PathBuf) -> Result<()> {
+    fn print_human(&self, task: &Task, project_root: &std::path::Path) -> Result<()> {
         let rt = &task.task_runtime;
         let state = &task.state;
         let title = task.title.as_deref().unwrap_or("(no title)");
@@ -136,7 +139,8 @@ impl ExplainCommand {
 
         // Log file pointers
         println!();
-        let has_logs = rt.stdout_log.is_some() || rt.stderr_log.is_some() || rt.events_log.is_some();
+        let has_logs =
+            rt.stdout_log.is_some() || rt.stderr_log.is_some() || rt.events_log.is_some();
         if has_logs {
             println!("Log files:");
             if let Some(p) = &rt.stdout_log {
@@ -152,10 +156,7 @@ impl ExplainCommand {
         }
 
         // Timeline from structured events log
-        let events_log_path = rt
-            .events_log
-            .as_deref()
-            .map(|p| project_root.join(p));
+        let events_log_path = rt.events_log.as_deref().map(|p| project_root.join(p));
 
         let events_resolved_path = if let Some(ref path) = events_log_path {
             if path.exists() {
@@ -185,7 +186,9 @@ impl ExplainCommand {
                 println!("  No structured events found ({})", path.display());
             } else {
                 println!("  No structured events log found.");
-                println!("  (Events are written to .macc/log/events.jsonl during coordinator runs.)");
+                println!(
+                    "  (Events are written to .macc/log/events.jsonl during coordinator runs.)"
+                );
             }
             println!("  Showing available registry state only.");
         }
@@ -193,7 +196,11 @@ impl ExplainCommand {
         if self.artifacts {
             println!();
             if let Some(ref events_path) = events_resolved_path {
-                let filter_id = if events_log_path.is_none() { Some(task.id.as_str()) } else { None };
+                let filter_id = if events_log_path.is_none() {
+                    Some(task.id.as_str())
+                } else {
+                    None
+                };
                 self.print_artifacts(events_path, filter_id)?;
             } else {
                 println!("Artifacts:");
@@ -217,7 +224,11 @@ impl ExplainCommand {
     fn print_events_from_file(&self, path: &PathBuf, filter_task_id: Option<&str>) -> Result<()> {
         use std::io::{BufRead, BufReader};
         let file = std::fs::File::open(path).map_err(|e| {
-            MaccError::Validation(format!("Failed to open events log {}: {}", path.display(), e))
+            MaccError::Validation(format!(
+                "Failed to open events log {}: {}",
+                path.display(),
+                e
+            ))
         })?;
         let reader = BufReader::new(file);
 
@@ -241,7 +252,9 @@ impl ExplainCommand {
         let mut found = false;
         for line in reader.lines() {
             let Ok(line) = line else { continue };
-            let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+            let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
 
             // Filter by task_id if specified
             if let Some(tid) = filter_task_id {
@@ -252,14 +265,19 @@ impl ExplainCommand {
             }
 
             // Filter by severity
-            let sev = val.get("severity").and_then(|v| v.as_str()).unwrap_or("info");
+            let sev = val
+                .get("severity")
+                .and_then(|v| v.as_str())
+                .unwrap_or("info");
             if severity_rank(sev) < min_rank {
                 continue;
             }
 
             // Filter by cutoff time
             if let Some(ref cutoff) = cutoff_ts {
-                let ts_val = val.get("timestamp").and_then(|v| v.as_str())
+                let ts_val = val
+                    .get("timestamp")
+                    .and_then(|v| v.as_str())
                     .or_else(|| val.get("ts").and_then(|v| v.as_str()))
                     .unwrap_or("");
                 if ts_val < cutoff.as_str() {
@@ -267,25 +285,34 @@ impl ExplainCommand {
                 }
             }
 
-            let ts = val.get("timestamp").and_then(|v| v.as_str())
+            let ts = val
+                .get("timestamp")
+                .and_then(|v| v.as_str())
                 .or_else(|| val.get("ts").and_then(|v| v.as_str()))
                 .unwrap_or("-");
             let phase = val.get("phase").and_then(|v| v.as_str()).unwrap_or("-");
-            let event_type = val.get("event_type").and_then(|v| v.as_str())
+            let event_type = val
+                .get("event_type")
+                .and_then(|v| v.as_str())
                 .or_else(|| val.get("type").and_then(|v| v.as_str()))
                 .unwrap_or("");
-            let message = val.get("message").and_then(|v| v.as_str())
+            let message = val
+                .get("message")
+                .and_then(|v| v.as_str())
                 .or_else(|| val.get("msg").and_then(|v| v.as_str()))
-                .or_else(|| val.get("payload").and_then(|p| p.get("message")).and_then(|v| v.as_str()))
+                .or_else(|| {
+                    val.get("payload")
+                        .and_then(|p| p.get("message"))
+                        .and_then(|v| v.as_str())
+                })
                 .unwrap_or("");
 
-            if self.compact {
-                if event_type.eq_ignore_ascii_case("heartbeat")
+            if self.compact
+                && (event_type.eq_ignore_ascii_case("heartbeat")
                     || event_type.eq_ignore_ascii_case("status_message")
-                    || event_type.eq_ignore_ascii_case("progress")
-                {
-                    continue;
-                }
+                    || event_type.eq_ignore_ascii_case("progress"))
+            {
+                continue;
             }
 
             // Format: HH:MM:SS  severity  phase  message
@@ -303,7 +330,11 @@ impl ExplainCommand {
     fn print_artifacts(&self, path: &PathBuf, filter_task_id: Option<&str>) -> Result<()> {
         use std::io::{BufRead, BufReader};
         let file = std::fs::File::open(path).map_err(|e| {
-            MaccError::Validation(format!("Failed to open events log {}: {}", path.display(), e))
+            MaccError::Validation(format!(
+                "Failed to open events log {}: {}",
+                path.display(),
+                e
+            ))
         })?;
         let reader = BufReader::new(file);
 
@@ -311,7 +342,9 @@ impl ExplainCommand {
 
         for line in reader.lines() {
             let Ok(line) = line else { continue };
-            let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+            let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
 
             // Filter by task_id if specified
             if let Some(tid) = filter_task_id {
@@ -321,23 +354,43 @@ impl ExplainCommand {
                 }
             }
 
-            let event_type = val.get("event_type").and_then(|v| v.as_str())
+            let event_type = val
+                .get("event_type")
+                .and_then(|v| v.as_str())
                 .or_else(|| val.get("type").and_then(|v| v.as_str()))
                 .unwrap_or("");
 
-            if event_type.eq_ignore_ascii_case("artifact_created") || event_type.eq_ignore_ascii_case("artifact") {
-                let ts = val.get("timestamp").and_then(|v| v.as_str())
+            if event_type.eq_ignore_ascii_case("artifact_created")
+                || event_type.eq_ignore_ascii_case("artifact")
+            {
+                let ts = val
+                    .get("timestamp")
+                    .and_then(|v| v.as_str())
                     .or_else(|| val.get("ts").and_then(|v| v.as_str()))
                     .unwrap_or("-");
                 let time_part = if ts.len() >= 19 { &ts[11..19] } else { ts };
 
                 // Get artifact path/name from various potential keys
-                let artifact_path = val.get("path").and_then(|v| v.as_str())
+                let artifact_path = val
+                    .get("path")
+                    .and_then(|v| v.as_str())
                     .or_else(|| val.get("artifact").and_then(|v| v.as_str()))
-                    .or_else(|| val.get("payload").and_then(|p| p.get("path")).and_then(|v| v.as_str()))
-                    .or_else(|| val.get("payload").and_then(|p| p.get("artifact")).and_then(|v| v.as_str()))
+                    .or_else(|| {
+                        val.get("payload")
+                            .and_then(|p| p.get("path"))
+                            .and_then(|v| v.as_str())
+                    })
+                    .or_else(|| {
+                        val.get("payload")
+                            .and_then(|p| p.get("artifact"))
+                            .and_then(|v| v.as_str())
+                    })
                     .or_else(|| val.get("message").and_then(|v| v.as_str()))
-                    .or_else(|| val.get("payload").and_then(|p| p.get("message")).and_then(|v| v.as_str()))
+                    .or_else(|| {
+                        val.get("payload")
+                            .and_then(|p| p.get("message"))
+                            .and_then(|v| v.as_str())
+                    })
                     .unwrap_or("unknown artifact");
 
                 artifacts.push((time_part.to_string(), artifact_path.to_string()));
@@ -355,7 +408,11 @@ impl ExplainCommand {
         Ok(())
     }
 
-    fn print_raw_logs(&self, rt: &macc_core::coordinator::model::TaskRuntime, project_root: &PathBuf) -> Result<()> {
+    fn print_raw_logs(
+        &self,
+        rt: &macc_core::coordinator::model::TaskRuntime,
+        project_root: &std::path::Path,
+    ) -> Result<()> {
         println!("Raw Logs:");
         let mut printed = false;
 
@@ -410,8 +467,11 @@ impl ExplainCommand {
     fn print_json(&self, task: &Task) -> Result<()> {
         let val = serde_json::to_value(task)
             .map_err(|e| MaccError::Validation(format!("Failed to serialize task: {}", e)))?;
-        println!("{}", serde_json::to_string_pretty(&val)
-            .map_err(|e| MaccError::Validation(format!("Failed to format JSON: {}", e)))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&val)
+                .map_err(|e| MaccError::Validation(format!("Failed to format JSON: {}", e)))?
+        );
         Ok(())
     }
 }
@@ -437,6 +497,7 @@ pub struct DiffCommand {
 }
 
 impl DiffCommand {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         app: AppContext,
         task_id: String,
@@ -464,16 +525,17 @@ impl Command for DiffCommand {
     fn run(&self) -> Result<()> {
         let paths = self.app.project_paths()?;
         let storage_paths = CoordinatorStoragePaths::from_project_paths(&paths);
-        let snapshot = SqliteStorage::new(storage_paths).load_snapshot().map_err(|e| {
-            MaccError::Validation(format!(
-                "Failed to load coordinator snapshot: {}",
-                e
-            ))
-        })?;
+        let snapshot = SqliteStorage::new(storage_paths)
+            .load_snapshot()
+            .map_err(|e| {
+                MaccError::Validation(format!("Failed to load coordinator snapshot: {}", e))
+            })?;
 
-        let task = snapshot.registry.tasks.iter().find(|t| {
-            t.id.eq_ignore_ascii_case(&self.task_id)
-        });
+        let task = snapshot
+            .registry
+            .tasks
+            .iter()
+            .find(|t| t.id.eq_ignore_ascii_case(&self.task_id));
 
         let Some(task) = task else {
             return Err(MaccError::Validation(format!(
@@ -526,8 +588,7 @@ impl Command for DiffCommand {
             });
 
         // Determine effective format flags
-        let use_stat = self.stat
-            || self.format.as_deref() == Some("stat");
+        let use_stat = self.stat || self.format.as_deref() == Some("stat");
         let use_name_only = self.name_only;
 
         if let Some(ref wt) = worktree_path {
@@ -562,11 +623,21 @@ impl Command for DiffCommand {
                         .prefix("macc-diff-")
                         .suffix(".patch")
                         .tempfile()
-                        .map_err(|e| MaccError::Validation(format!("Failed to create temporary file for diff: {}", e)))?;
-                    temp.write_all(diff_str.as_bytes())
-                        .map_err(|e| MaccError::Validation(format!("Failed to write diff to temporary file: {}", e)))?;
-                    temp.flush()
-                        .map_err(|e| MaccError::Validation(format!("Failed to flush temporary file: {}", e)))?;
+                        .map_err(|e| {
+                            MaccError::Validation(format!(
+                                "Failed to create temporary file for diff: {}",
+                                e
+                            ))
+                        })?;
+                    temp.write_all(diff_str.as_bytes()).map_err(|e| {
+                        MaccError::Validation(format!(
+                            "Failed to write diff to temporary file: {}",
+                            e
+                        ))
+                    })?;
+                    temp.flush().map_err(|e| {
+                        MaccError::Validation(format!("Failed to flush temporary file: {}", e))
+                    })?;
 
                     let editor = std::env::var("EDITOR")
                         .or_else(|_| std::env::var("VISUAL"))
@@ -599,7 +670,8 @@ impl Command for DiffCommand {
             } else if use_name_only {
                 args.push("--name-only");
             }
-            let output = macc_core::git::run_git_output_mapped(&paths.root, &args, "git diff commit")?;
+            let output =
+                macc_core::git::run_git_output_mapped(&paths.root, &args, "git diff commit")?;
             let diff_str = String::from_utf8_lossy(&output.stdout);
             let stderr_str = String::from_utf8_lossy(&output.stderr);
 
@@ -609,11 +681,18 @@ impl Command for DiffCommand {
                     .prefix("macc-diff-")
                     .suffix(".patch")
                     .tempfile()
-                    .map_err(|e| MaccError::Validation(format!("Failed to create temporary file for diff: {}", e)))?;
-                temp.write_all(diff_str.as_bytes())
-                    .map_err(|e| MaccError::Validation(format!("Failed to write diff to temporary file: {}", e)))?;
-                temp.flush()
-                    .map_err(|e| MaccError::Validation(format!("Failed to flush temporary file: {}", e)))?;
+                    .map_err(|e| {
+                        MaccError::Validation(format!(
+                            "Failed to create temporary file for diff: {}",
+                            e
+                        ))
+                    })?;
+                temp.write_all(diff_str.as_bytes()).map_err(|e| {
+                    MaccError::Validation(format!("Failed to write diff to temporary file: {}", e))
+                })?;
+                temp.flush().map_err(|e| {
+                    MaccError::Validation(format!("Failed to flush temporary file: {}", e))
+                })?;
 
                 let editor = std::env::var("EDITOR")
                     .or_else(|_| std::env::var("VISUAL"))
@@ -640,11 +719,11 @@ impl Command for DiffCommand {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use tempfile::tempdir;
-    use macc_core::{TestEngine, resolve::CliOverrides};
     use macc_core::coordinator::model::TaskRuntime;
+    use macc_core::{resolve::CliOverrides, TestEngine};
+    use std::fs;
     use std::sync::Arc;
+    use tempfile::tempdir;
 
     fn test_app_context(cwd: PathBuf) -> AppContext {
         AppContext::new(

@@ -747,7 +747,8 @@ fn check_and_emit_skipped_phases(
     let runtime = task.ensure_runtime();
 
     if !phases.testing.enabled {
-        let already_emitted = runtime.extra
+        let already_emitted = runtime
+            .extra
             .get("test_skipped_emitted")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
@@ -759,13 +760,17 @@ fn check_and_emit_skipped_phases(
                 "disabled_by_config",
                 "testing skipped by config",
             );
-            runtime.extra.insert("test_skipped_emitted".to_string(), serde_json::Value::Bool(true));
+            runtime.extra.insert(
+                "test_skipped_emitted".to_string(),
+                serde_json::Value::Bool(true),
+            );
             changed = true;
         }
     }
 
     if !phases.review.enabled {
-        let already_emitted = runtime.extra
+        let already_emitted = runtime
+            .extra
             .get("review_skipped_emitted")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
@@ -777,7 +782,10 @@ fn check_and_emit_skipped_phases(
                 "disabled_by_config",
                 "review skipped by config",
             );
-            runtime.extra.insert("review_skipped_emitted".to_string(), serde_json::Value::Bool(true));
+            runtime.extra.insert(
+                "review_skipped_emitted".to_string(),
+                serde_json::Value::Bool(true),
+            );
             changed = true;
         }
     }
@@ -809,19 +817,11 @@ pub async fn advance_tasks_native(
     }
     if let Some(ref mode) = env_cfg.testing_mode {
         cfg.phases.testing.mode = mode.clone();
-        if mode == "disabled" {
-            cfg.phases.testing.enabled = false;
-        } else {
-            cfg.phases.testing.enabled = true;
-        }
+        cfg.phases.testing.enabled = mode != "disabled";
     }
     if let Some(ref mode) = env_cfg.review_mode {
         cfg.phases.review.mode = mode.clone();
-        if mode == "disabled" {
-            cfg.phases.review.enabled = false;
-        } else {
-            cfg.phases.review.enabled = true;
-        }
+        cfg.phases.review.enabled = mode != "disabled";
     }
     let mut registry =
         crate::coordinator::state::coordinator_state_registry_load(repo_root, &BTreeMap::new())?;
@@ -832,10 +832,11 @@ pub async fn advance_tasks_native(
     for task in &mut registry_typed.tasks {
         use crate::coordinator::WorkflowState;
         let ws = task.workflow_state().unwrap_or(WorkflowState::Todo);
-        if ws != WorkflowState::Todo && ws != WorkflowState::Claimed {
-            if check_and_emit_skipped_phases(repo_root, task, &cfg.phases)? {
-                skipped_phases_changed = true;
-            }
+        if ws != WorkflowState::Todo
+            && ws != WorkflowState::Claimed
+            && check_and_emit_skipped_phases(repo_root, task, &cfg.phases)?
+        {
+            skipped_phases_changed = true;
         }
     }
     if skipped_phases_changed {
@@ -1803,7 +1804,8 @@ pub fn consume_runtime_events(
     logger: Option<&dyn CoordinatorLog>,
 ) -> Result<usize> {
     let project_paths = crate::ProjectPaths::from_root(repo_root);
-    let storage_paths = crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&project_paths);
+    let storage_paths =
+        crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&project_paths);
     let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
     let conn = sqlite.open()?;
     sqlite.init_schema(&conn)?;
@@ -1825,11 +1827,9 @@ pub fn consume_runtime_events(
 
     let mut last_seq: Option<i64> = None;
     if let Some(ref id) = last_event_id {
-        last_seq = match conn.query_row(
-            "SELECT seq FROM events WHERE event_id = ?1",
-            [id],
-            |row| row.get::<_, i64>(0),
-        ) {
+        last_seq = match conn.query_row("SELECT seq FROM events WHERE event_id = ?1", [id], |row| {
+            row.get::<_, i64>(0)
+        }) {
             Ok(seq) => Some(seq),
             Err(rusqlite::Error::QueryReturnedNoRows) => None,
             Err(e) => return Err(sql_err(e)),
@@ -2283,7 +2283,10 @@ pub async fn dispatch_ready_tasks_native(
     if let Ok(Some(ctrl)) = sqlite.get_coordinator_control() {
         if ctrl.mode != "running" {
             if let Some(log) = logger {
-                let _ = log.note(format!("- Dispatch skipped: coordinator control mode is {}", ctrl.mode));
+                let _ = log.note(format!(
+                    "- Dispatch skipped: coordinator control mode is {}",
+                    ctrl.mode
+                ));
             }
             return Ok(0);
         }
@@ -2918,7 +2921,8 @@ mod tests {
     fn test_consume_runtime_events_replays_properly() {
         let repo = make_test_repo();
         let project_paths = crate::ProjectPaths::from_root(&repo);
-        let storage_paths = crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&project_paths);
+        let storage_paths =
+            crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&project_paths);
         let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
         let conn = sqlite.open().unwrap();
         sqlite.init_schema(&conn).unwrap();
@@ -2962,11 +2966,13 @@ mod tests {
         let replayed = super::consume_runtime_events(&repo, &mut run_state, None).unwrap();
         assert_eq!(replayed, 2);
 
-        let last_event_id: String = conn.query_row(
-            "SELECT last_event_id FROM event_cursor WHERE stream = 'coordinator'",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let last_event_id: String = conn
+            .query_row(
+                "SELECT last_event_id FROM event_cursor WHERE stream = 'coordinator'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(last_event_id, "evt-2");
 
         let replayed_again = super::consume_runtime_events(&repo, &mut run_state, None).unwrap();
@@ -2992,11 +2998,13 @@ mod tests {
         let replayed_third = super::consume_runtime_events(&repo, &mut run_state, None).unwrap();
         assert_eq!(replayed_third, 1);
 
-        let last_event_id: String = conn.query_row(
-            "SELECT last_event_id FROM event_cursor WHERE stream = 'coordinator'",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let last_event_id: String = conn
+            .query_row(
+                "SELECT last_event_id FROM event_cursor WHERE stream = 'coordinator'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(last_event_id, "evt-3");
 
         let _ = fs::remove_dir_all(repo);
@@ -3006,7 +3014,8 @@ mod tests {
     fn test_check_and_emit_skipped_phases() {
         let repo = make_test_repo();
         let project_paths = crate::ProjectPaths::from_root(&repo);
-        let storage_paths = crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&project_paths);
+        let storage_paths =
+            crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&project_paths);
         let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths.clone());
         let conn = sqlite.open().unwrap();
         sqlite.init_schema(&conn).unwrap();
@@ -3020,8 +3029,14 @@ mod tests {
 
         // 2. Set phase config to have testing disabled and review enabled
         let phases = crate::config::PhasesConfig {
-            testing: crate::config::PhaseConfig { enabled: false, ..Default::default() },
-            review: crate::config::PhaseConfig { enabled: true, ..Default::default() },
+            testing: crate::config::PhaseConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            review: crate::config::PhaseConfig {
+                enabled: true,
+                ..Default::default()
+            },
         };
 
         // 3. Call check_and_emit_skipped_phases
@@ -3036,7 +3051,8 @@ mod tests {
         );
 
         // 5. Calling it again should return changed = false (idempotence)
-        let changed_again = super::check_and_emit_skipped_phases(&repo, &mut task, &phases).unwrap();
+        let changed_again =
+            super::check_and_emit_skipped_phases(&repo, &mut task, &phases).unwrap();
         assert!(!changed_again);
 
         // 6. Verify the event actually got appended to SQLite storage

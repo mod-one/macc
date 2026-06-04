@@ -21,7 +21,10 @@ pub fn clear_project(
 
     if dry_run {
         let entries = crate::list_worktrees(&paths.root).unwrap_or_default();
-        let root_canon = paths.root.canonicalize().unwrap_or_else(|_| paths.root.clone());
+        let root_canon = paths
+            .root
+            .canonicalize()
+            .unwrap_or_else(|_| paths.root.clone());
         let mut removed_worktrees = 0usize;
         for entry in entries {
             if entry.path != root_canon {
@@ -30,7 +33,10 @@ pub fn clear_project(
         }
 
         let clear_report = crate::clear_dry_run(paths)?;
-        ui.info(&format!("[Dry run] Would remove worktrees: {}", removed_worktrees));
+        ui.info(&format!(
+            "[Dry run] Would remove worktrees: {}",
+            removed_worktrees
+        ));
         ui.info(&format!(
             "[Dry run] Would clear managed paths: removed={}, skipped=0",
             clear_report.removed

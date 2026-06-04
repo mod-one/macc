@@ -45,6 +45,7 @@ pub struct RestoreCommand {
 }
 
 impl RestoreCommand {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         app: AppContext,
         name: Option<String>,
@@ -93,10 +94,11 @@ impl Command for RestoreCommand {
             || self.include_logs;
 
         // Also check if --latest refers to a save bundle (we prefer save bundle if there are saves)
-        let is_save_bundle_restore = has_save_bundle_args || (self.latest && {
-            let matches = macc_core::save::detect_matching_saves(&paths).unwrap_or_default();
-            !matches.is_empty() && self.backup.is_none() && !self.user
-        });
+        let is_save_bundle_restore = has_save_bundle_args
+            || (self.latest && {
+                let matches = macc_core::save::detect_matching_saves(&paths).unwrap_or_default();
+                !matches.is_empty() && self.backup.is_none() && !self.user
+            });
 
         if is_save_bundle_restore {
             let name = match &self.name {
@@ -104,7 +106,9 @@ impl Command for RestoreCommand {
                 None => {
                     let matches = macc_core::save::detect_matching_saves(&paths)?;
                     if matches.is_empty() {
-                        return Err(MaccError::Validation("No matching MACC saves found for this repository.".to_string()));
+                        return Err(MaccError::Validation(
+                            "No matching MACC saves found for this repository.".to_string(),
+                        ));
                     }
                     matches[0].0.name.clone()
                 }
@@ -134,9 +138,7 @@ impl Command for RestoreCommand {
             if opts.apply {
                 println!("Running macc apply...");
                 crate::commands::lifecycle_support::apply(
-                    &self.app,
-                    None,
-                    false, // dry_run
+                    &self.app, None, false, // dry_run
                     false, // allow_user_scope
                     false, // json
                     false, // explain

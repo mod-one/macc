@@ -169,7 +169,9 @@ fn parse_try_again_at_seconds(text: &str) -> Option<u64> {
     };
 
     use chrono::{TimeZone as _, Utc};
-    let retry_dt = Utc.with_ymd_and_hms(year, month, day, hour, min, 0).single()?;
+    let retry_dt = Utc
+        .with_ymd_and_hms(year, month, day, hour, min, 0)
+        .single()?;
     let now_ts = Utc::now().timestamp();
     let retry_ts = retry_dt.timestamp();
     if retry_ts <= now_ts {

@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use super::repository_identity::RepositoryIdentity;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

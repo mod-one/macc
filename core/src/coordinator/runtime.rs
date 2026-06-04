@@ -1184,7 +1184,11 @@ pub fn spawn_performer_job(
         )
     });
 
-    let log_dir = repo_root.join(".macc").join("log").join("performer").join(task_id);
+    let log_dir = repo_root
+        .join(".macc")
+        .join("log")
+        .join("performer")
+        .join(task_id);
     let _ = std::fs::create_dir_all(&log_dir);
 
     let stdout_path = log_dir.join(format!("{}.stdout.log", run_id));

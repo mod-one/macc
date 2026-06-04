@@ -865,14 +865,13 @@ impl CoordinatorConfigResolved {
                 .and_then(|c| c.reference_branch.clone())
                 .unwrap_or_else(|| "master".to_string()),
             reference_branch_preflight: {
-                let raw = config.and_then(|c| c.reference_branch_preflight.clone())
+                let raw = config
+                    .and_then(|c| c.reference_branch_preflight.clone())
                     .unwrap_or_default();
                 let require_clean = config.and_then(|c| c.require_clean_reference_branch);
                 raw.resolve(require_clean)
             },
-            client: config
-                .and_then(|c| c.client.clone())
-                .unwrap_or_default(),
+            client: config.and_then(|c| c.client.clone()).unwrap_or_default(),
             tool_priority: config.map(|c| c.tool_priority.clone()).unwrap_or_default(),
             max_parallel_per_tool: config
                 .map(|c| c.max_parallel_per_tool.clone())
@@ -977,10 +976,18 @@ impl CoordinatorConfigResolved {
             destructive_actions: config
                 .and_then(|c| c.destructive_actions.clone())
                 .unwrap_or_else(|| "double_confirm".to_string()),
-            runtime_ledger_enabled: config.and_then(|c| c.runtime_ledger_enabled).unwrap_or(true),
-            event_replay_max_events: config.and_then(|c| c.event_replay_max_events).unwrap_or(10000),
-            expose_processes_endpoint: config.and_then(|c| c.expose_processes_endpoint).unwrap_or(true),
-            health_include_runtime_summary: config.and_then(|c| c.health_include_runtime_summary).unwrap_or(true),
+            runtime_ledger_enabled: config
+                .and_then(|c| c.runtime_ledger_enabled)
+                .unwrap_or(true),
+            event_replay_max_events: config
+                .and_then(|c| c.event_replay_max_events)
+                .unwrap_or(10000),
+            expose_processes_endpoint: config
+                .and_then(|c| c.expose_processes_endpoint)
+                .unwrap_or(true),
+            health_include_runtime_summary: config
+                .and_then(|c| c.health_include_runtime_summary)
+                .unwrap_or(true),
             phases: config.map(|c| c.phases.clone()).unwrap_or_default(),
         }
     }
@@ -1195,10 +1202,18 @@ impl Default for TokenBudgetConfig {
     }
 }
 
-fn default_token_budget_default() -> usize { 12000 }
-fn default_token_budget_tool_output() -> usize { 4000 }
-fn default_token_budget_diff() -> usize { 6000 }
-fn default_token_budget_logs() -> usize { 3000 }
+fn default_token_budget_default() -> usize {
+    12000
+}
+fn default_token_budget_tool_output() -> usize {
+    4000
+}
+fn default_token_budget_diff() -> usize {
+    6000
+}
+fn default_token_budget_logs() -> usize {
+    3000
+}
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
 pub struct SummarizationConfig {
@@ -1268,7 +1283,11 @@ pub struct PrdOutputsConfig {
 
 impl Default for PrdOutputsConfig {
     fn default() -> Self {
-        Self { prd_json: true, summary: true, validation_notes: true }
+        Self {
+            prd_json: true,
+            summary: true,
+            validation_notes: true,
+        }
     }
 }
 

@@ -1,7 +1,7 @@
 use crate::commands::{AppContext, Command};
 use crate::confirm_yes_no;
-use macc_core::Result;
 use macc_core::ops_motif::{apply_preset_to_config, calculate_trust_summary};
+use macc_core::Result;
 use std::path::PathBuf;
 
 pub struct StartCommand {
@@ -16,6 +16,7 @@ pub struct StartCommand {
 }
 
 impl StartCommand {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         app: AppContext,
         intent: Option<String>,
@@ -51,8 +52,8 @@ impl Command for StartCommand {
                     "Lock file not found. Cannot proceed under --locked.".to_string(),
                 ));
             }
-            let lock_str = std::fs::read_to_string(&lock_path)
-                .map_err(|e| macc_core::MaccError::Io {
+            let lock_str =
+                std::fs::read_to_string(&lock_path).map_err(|e| macc_core::MaccError::Io {
                     path: lock_path.to_string_lossy().into(),
                     action: "read macc.lock.yaml".into(),
                     source: e,
@@ -91,7 +92,7 @@ impl Command for StartCommand {
         // Active tool scanner using ToolSpecLoader and Doctor system checks
         println!("Scanning PATH for installed AI helper commands...");
         let loader = macc_core::tool::loader::ToolSpecLoader::new(
-            macc_core::tool::loader::ToolSpecLoader::default_search_paths(&paths.root)
+            macc_core::tool::loader::ToolSpecLoader::default_search_paths(&paths.root),
         );
         let (specs, _) = loader.load_all_with_embedded();
         let mut checks = macc_core::doctor::checks_for_enabled_tools(&specs);
@@ -108,10 +109,26 @@ impl Command for StartCommand {
         detected_tools.sort();
         detected_tools.dedup();
 
-        println!("- Git repository: {}", if git_exists { "detected" } else { "none" });
-        println!("- MACC configuration: {}", if config_exists { "detected" } else { "none" });
-        println!("- Lockfile: {}", if lock_exists { "detected" } else { "none" });
-        println!("- Detected installed AI tools: {}", if detected_tools.is_empty() { "none".to_string() } else { detected_tools.join(", ") });
+        println!(
+            "- Git repository: {}",
+            if git_exists { "detected" } else { "none" }
+        );
+        println!(
+            "- MACC configuration: {}",
+            if config_exists { "detected" } else { "none" }
+        );
+        println!(
+            "- Lockfile: {}",
+            if lock_exists { "detected" } else { "none" }
+        );
+        println!(
+            "- Detected installed AI tools: {}",
+            if detected_tools.is_empty() {
+                "none".to_string()
+            } else {
+                detected_tools.join(", ")
+            }
+        );
 
         // =====================================================================
         // 2. DIAGNOSE
@@ -119,14 +136,22 @@ impl Command for StartCommand {
         println!("\n=== [2/7] DIAGNOSE ===");
         let mut warnings = Vec::new();
         if !git_exists {
-            warnings.push("Not inside a Git repository. Certain worktree commands may fail.".to_string());
+            warnings.push(
+                "Not inside a Git repository. Certain worktree commands may fail.".to_string(),
+            );
         }
         if detected_tools.is_empty() {
-            warnings.push("No local AI developer tools found on PATH. Install assistants/tools first.".to_string());
+            warnings.push(
+                "No local AI developer tools found on PATH. Install assistants/tools first."
+                    .to_string(),
+            );
         }
         let git_identity_missing = macc_core::git::missing_git_identity_fields(&paths.root);
         if !git_identity_missing.is_empty() {
-            warnings.push(format!("Git identity fields ({}) are unconfigured. Commits will fail.", git_identity_missing.join(", ")));
+            warnings.push(format!(
+                "Git identity fields ({}) are unconfigured. Commits will fail.",
+                git_identity_missing.join(", ")
+            ));
         }
 
         if warnings.is_empty() {
@@ -145,13 +170,19 @@ impl Command for StartCommand {
             macc_core::load_canonical_config(&paths.config_path)?
         } else {
             println!("No configuration found. Planning initialization of default config...");
-            planned_writes.push(format!("Initialize default canonical configuration at {}", paths.config_path.display()));
+            planned_writes.push(format!(
+                "Initialize default canonical configuration at {}",
+                paths.config_path.display()
+            ));
             macc_core::init(&paths, false)?;
             macc_core::load_canonical_config(&paths.config_path)?
         };
 
         // Determine user-configured PRD path
-        let prd_filename = config.automation.coordinator.as_ref()
+        let prd_filename = config
+            .automation
+            .coordinator
+            .as_ref()
             .and_then(|c| c.prd_file.clone())
             .unwrap_or_else(|| "prd.json".to_string());
         let prd_path = paths.root.join(&prd_filename);
@@ -163,18 +194,27 @@ impl Command for StartCommand {
             println!("Applying config profile '{}'...", profile_name);
             let mgr = macc_core::profile::ProfileManager::new()?;
             config = mgr.restore(profile_name, &config, None)?;
-            planned_writes.push(format!("Merge profile '{}' into configuration", profile_name));
+            planned_writes.push(format!(
+                "Merge profile '{}' into configuration",
+                profile_name
+            ));
         }
 
         // Apply preset if specified
         if let Some(ref preset_name) = self.preset {
             println!("Applying preset: {}...", preset_name);
             apply_preset_to_config(&mut config, preset_name)?;
-            planned_writes.push(format!("Apply preset '{}' overrides to coordinator config", preset_name));
+            planned_writes.push(format!(
+                "Apply preset '{}' overrides to coordinator config",
+                preset_name
+            ));
         }
 
         if self.preset.is_some() || self.profile.is_some() {
-            planned_writes.push(format!("Save updated configuration changes to {}", paths.config_path.display()));
+            planned_writes.push(format!(
+                "Save updated configuration changes to {}",
+                paths.config_path.display()
+            ));
         }
 
         // 4. Guided Intent Selector
@@ -237,7 +277,10 @@ impl Command for StartCommand {
 
             match prd_selection.as_str() {
                 "1" => {
-                    planned_writes.push(format!("Create a minimal PRD task specification at {}", prd_path.display()));
+                    planned_writes.push(format!(
+                        "Create a minimal PRD task specification at {}",
+                        prd_path.display()
+                    ));
                 }
                 "2" => {
                     if self.tui {
@@ -250,7 +293,11 @@ impl Command for StartCommand {
                         if io::stdin().read_line(&mut import_path_str).is_ok() {
                             let import_path = std::path::Path::new(import_path_str.trim());
                             if import_path.exists() {
-                                planned_writes.push(format!("Import PRD from {} to {}", import_path.display(), prd_path.display()));
+                                planned_writes.push(format!(
+                                    "Import PRD from {} to {}",
+                                    import_path.display(),
+                                    prd_path.display()
+                                ));
                                 import_path_to_use = Some(import_path.to_path_buf());
                             } else {
                                 println!("Import path does not exist. Skipping PRD import.");
@@ -266,7 +313,10 @@ impl Command for StartCommand {
 
         // Establish reproducibility baseline lock file if missing
         if !lock_exists {
-            planned_writes.push(format!("Create environment lock manifest at {}", lock_path.display()));
+            planned_writes.push(format!(
+                "Create environment lock manifest at {}",
+                lock_path.display()
+            ));
         }
 
         // =====================================================================
@@ -275,10 +325,34 @@ impl Command for StartCommand {
         println!("\n=== [4/7] PREVIEW ===");
         let trust = calculate_trust_summary(&paths, &config);
         println!("Trust State     : {:?}", trust.state);
-        println!("Local only      : {}", if trust.local_only { "yes" } else { "no" });
-        println!("Terminal access : {}", if trust.terminal_enabled { "enabled" } else { "disabled" });
-        println!("Backups         : {}", if trust.backups_ready { "ready" } else { "missing" });
-        println!("Catalog         : {}", if trust.catalog_pinned { "pinned" } else { "unpinned" });
+        println!(
+            "Local only      : {}",
+            if trust.local_only { "yes" } else { "no" }
+        );
+        println!(
+            "Terminal access : {}",
+            if trust.terminal_enabled {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
+        println!(
+            "Backups         : {}",
+            if trust.backups_ready {
+                "ready"
+            } else {
+                "missing"
+            }
+        );
+        println!(
+            "Catalog         : {}",
+            if trust.catalog_pinned {
+                "pinned"
+            } else {
+                "unpinned"
+            }
+        );
 
         println!("\nPlanned writes & actions:");
         if planned_writes.is_empty() {
@@ -310,14 +384,16 @@ impl Command for StartCommand {
         println!("\n=== [6/7] APPLY ===");
         if self.preset.is_some() || self.profile.is_some() {
             println!("Saving config updates to disk...");
-            let serialized = serde_yaml::to_string(&config)
-                .map_err(|e| macc_core::MaccError::Validation(format!("serialize config: {}", e)))?;
-            std::fs::write(&paths.config_path, serialized)
-                .map_err(|e| macc_core::MaccError::Io {
+            let serialized = serde_yaml::to_string(&config).map_err(|e| {
+                macc_core::MaccError::Validation(format!("serialize config: {}", e))
+            })?;
+            std::fs::write(&paths.config_path, serialized).map_err(|e| {
+                macc_core::MaccError::Io {
                     path: paths.config_path.to_string_lossy().into(),
                     action: "write updated config".into(),
                     source: e,
-                })?;
+                }
+            })?;
         }
 
         // Generate or Import PRD
@@ -351,7 +427,11 @@ impl Command for StartCommand {
                                 source: e,
                             }
                         })?;
-                        println!("Imported PRD from {} to {}", import_from.display(), prd_path.display());
+                        println!(
+                            "Imported PRD from {} to {}",
+                            import_from.display(),
+                            prd_path.display()
+                        );
                     }
                 }
                 _ => {}
@@ -362,14 +442,14 @@ impl Command for StartCommand {
         if !lock_exists {
             println!("Establishing reproducibility lock baseline...");
             let lock = macc_core::ops_motif::generate_lock_manifest(&paths, &config)?;
-            let serialized_lock = serde_yaml::to_string(&lock)
-                .map_err(|e| macc_core::MaccError::Validation(format!("serialize lock manifest: {}", e)))?;
-            std::fs::write(&lock_path, serialized_lock)
-                .map_err(|e| macc_core::MaccError::Io {
-                    path: lock_path.to_string_lossy().into(),
-                    action: "write baseline lock manifest".into(),
-                    source: e,
-                })?;
+            let serialized_lock = serde_yaml::to_string(&lock).map_err(|e| {
+                macc_core::MaccError::Validation(format!("serialize lock manifest: {}", e))
+            })?;
+            std::fs::write(&lock_path, serialized_lock).map_err(|e| macc_core::MaccError::Io {
+                path: lock_path.to_string_lossy().into(),
+                action: "write baseline lock manifest".into(),
+                source: e,
+            })?;
         }
 
         // =====================================================================

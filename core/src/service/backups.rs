@@ -85,7 +85,11 @@ pub fn restore(
                 dummy_plan.add_action(crate::plan::Action::WriteFile {
                     path: target_root.join(rel).to_string_lossy().into_owned(),
                     content: vec![],
-                    scope: if user { crate::plan::Scope::User } else { crate::plan::Scope::Project },
+                    scope: if user {
+                        crate::plan::Scope::User
+                    } else {
+                        crate::plan::Scope::Project
+                    },
                 });
             }
         }

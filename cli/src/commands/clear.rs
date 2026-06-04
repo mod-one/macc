@@ -1,9 +1,9 @@
 use crate::commands::AppContext;
 use crate::commands::Command;
 use crate::services::interaction::CliInteraction;
+use chrono::Utc;
 use macc_core::{MaccError, Result};
 use std::io::IsTerminal;
-use chrono::Utc;
 
 pub struct ClearCommand {
     app: AppContext,
@@ -37,7 +37,7 @@ impl ClearCommand {
 impl Command for ClearCommand {
     fn run(&self) -> Result<()> {
         let paths = self.app.project_paths()?;
-        
+
         if !self.dry_run {
             crate::commands::gate_cli_mutation(&paths.root)?;
         }
@@ -60,10 +60,14 @@ impl Command for ClearCommand {
                     include_state: false,
                     handle_secrets: None,
                 };
-                println!("Saving current MACC setup to \"{}\" before clear...", save_name);
+                println!(
+                    "Saving current MACC setup to \"{}\" before clear...",
+                    save_name
+                );
                 crate::commands::create_save_bundle_interactive(&paths, save_name, opts)?;
             } else {
-                let term_interactive = std::io::stdin().is_terminal() && std::env::var("CARGO_MANIFEST_DIR").is_err();
+                let term_interactive =
+                    std::io::stdin().is_terminal() && std::env::var("CARGO_MANIFEST_DIR").is_err();
                 if !term_interactive {
                     if !self.force {
                         return Err(MaccError::Validation(
@@ -100,9 +104,15 @@ impl Command for ClearCommand {
                                 println!("  {}. {}", idx + 1, m.name);
                                 println!("     Saved: {}", m.created_at);
                                 let mut incls = Vec::new();
-                                if m.includes.config { incls.push("config"); }
-                                if m.includes.coordinator_sessions { incls.push("sessions"); }
-                                if m.includes.catalogs { incls.push("catalogs"); }
+                                if m.includes.config {
+                                    incls.push("config");
+                                }
+                                if m.includes.coordinator_sessions {
+                                    incls.push("sessions");
+                                }
+                                if m.includes.catalogs {
+                                    incls.push("catalogs");
+                                }
                                 println!("     Includes: {}", incls.join(", "));
                             }
                             println!("\nChoose:");

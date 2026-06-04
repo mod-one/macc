@@ -2,6 +2,8 @@ use crate::coordinator::legacy_helpers::{
     stop_coordinator_process_groups, NativeCoordinatorLogger,
 };
 use crate::coordinator::render::print_status_summary;
+#[cfg(unix)]
+use libc;
 use macc_core::coordinator::engine as coordinator_engine;
 use macc_core::coordinator::types::CoordinatorEnvConfig;
 use macc_core::coordinator_storage::CoordinatorStorageMode;
@@ -14,8 +16,6 @@ use macc_core::service::process_ownership_gate::{gate_owner_action, ClientContex
 use macc_core::{find_project_root, load_canonical_config, MaccError, Result};
 use std::path::Path;
 use std::process::{Command as ProcessCommand, Stdio};
-#[cfg(unix)]
-use libc;
 
 const SUPERVISOR_PID_REL_PATH: &str = ".macc/state/supervisor.pid";
 const COORDINATOR_SUPERVISOR_REL_PATH: &str = ".macc/state/coordinator-supervisor.json";
@@ -224,12 +224,7 @@ Performers cannot commit without it. Fix this first:\n\
     // (--client flag set, or stdout is not a TTY), skip the prompt.
     if matches!(command, CoordinatorCommand::Run) {
         let chosen_mode = resolve_client_mode(&input, coordinator_cfg, paths);
-        return launch_coordinator_with_client(
-            chosen_mode,
-            &input,
-            paths,
-            coordinator_cfg,
-        );
+        return launch_coordinator_with_client(chosen_mode, &input, paths, coordinator_cfg);
     }
 
     if let CoordinatorCommand::Stop { drain, .. } = &command {
@@ -284,7 +279,10 @@ Performers cannot commit without it. Fix this first:\n\
         print_status_summary(&paths.root, &status);
     }
     if let Some(processes) = response.processes {
-        println!("{:<12} {:<12} {:<12} {:>8} {:>8} {:<10} {:<12} {}", "TASK ID", "CLAIM ID", "TOOL", "PID", "PGID", "STATUS", "HEARTBEAT", "WORKTREE");
+        println!(
+            "{:<12} {:<12} {:<12} {:>8} {:>8} {:<10} {:<12} WORKTREE",
+            "TASK ID", "CLAIM ID", "TOOL", "PID", "PGID", "STATUS", "HEARTBEAT"
+        );
         println!("{}", "-".repeat(100));
         for p in processes {
             println!(
@@ -294,7 +292,10 @@ Performers cannot commit without it. Fix this first:\n\
         }
     }
     if let Some(report) = response.recovery_report {
-        println!("{:<12} {:<30} {:<20} {:<30} {}", "TASK ID", "SITUATION", "CLASSIFICATION", "ACTION", "MUTATED");
+        println!(
+            "{:<12} {:<30} {:<20} {:<30} MUTATED",
+            "TASK ID", "SITUATION", "CLASSIFICATION", "ACTION"
+        );
         println!("{}", "-".repeat(100));
         for r in report {
             println!(
@@ -673,7 +674,11 @@ fn run_reference_branch_preflight(
     let log_event =
         preflight::build_preflight_log_event(&report, "pending", input.allow_dirty_reference);
     if cfg.log_clean_result
-        || !matches!(report.status, preflight::ReferencePreflightStatus::Clean | preflight::ReferencePreflightStatus::NotCheckedOut)
+        || !matches!(
+            report.status,
+            preflight::ReferencePreflightStatus::Clean
+                | preflight::ReferencePreflightStatus::NotCheckedOut
+        )
     {
         if let Ok(log_json) = serde_json::to_string(&log_event) {
             let log_path = repo_root.join(".macc/log/coordinator/preflight-latest.json");
@@ -721,7 +726,8 @@ fn run_reference_branch_preflight(
                     BranchCreateSource::LocalBranch(base.clone())
                 };
 
-                engine.create_reference_branch_via_engine(paths, &reference_branch, source)
+                engine
+                    .create_reference_branch_via_engine(paths, &reference_branch, source)
                     .map_err(|e| MaccError::Validation(format!("{}", e)))?;
 
                 println!(
@@ -750,16 +756,29 @@ fn run_reference_branch_preflight(
             let choice = line.trim().to_lowercase();
 
             if choice == "1" {
-                engine.create_reference_branch_via_engine(paths, &reference_branch, BranchCreateSource::CurrentHead)
+                engine
+                    .create_reference_branch_via_engine(
+                        paths,
+                        &reference_branch,
+                        BranchCreateSource::CurrentHead,
+                    )
                     .map_err(|e| MaccError::Validation(format!("{}", e)))?;
-                println!("Created local branch \"{}\" from HEAD.\nPreflight: OK", reference_branch);
+                println!(
+                    "Created local branch \"{}\" from HEAD.\nPreflight: OK",
+                    reference_branch
+                );
                 return Ok(());
             }
 
             if let Ok(idx) = choice.parse::<usize>() {
                 let remote_idx = idx.saturating_sub(2);
                 if let Some(remote) = report.remote_tracking_branches.get(remote_idx) {
-                    engine.create_reference_branch_via_engine(paths, &reference_branch, BranchCreateSource::RemoteTracking(remote.clone()))
+                    engine
+                        .create_reference_branch_via_engine(
+                            paths,
+                            &reference_branch,
+                            BranchCreateSource::RemoteTracking(remote.clone()),
+                        )
                         .map_err(|e| MaccError::Validation(format!("{}", e)))?;
                     println!(
                         "Created local tracking branch \"{}\" from \"{}\".\nPreflight: OK",
@@ -818,13 +837,13 @@ fn run_reference_branch_preflight(
             }
         }
 
-        preflight::ReferencePreflightStatus::InvalidBranchName => Err(MaccError::Validation(
-            preflight::format_report_cli(&report),
-        )),
+        preflight::ReferencePreflightStatus::InvalidBranchName => {
+            Err(MaccError::Validation(preflight::format_report_cli(&report)))
+        }
 
-        preflight::ReferencePreflightStatus::BareRepository => Err(MaccError::Validation(
-            preflight::format_report_cli(&report),
-        )),
+        preflight::ReferencePreflightStatus::BareRepository => {
+            Err(MaccError::Validation(preflight::format_report_cli(&report)))
+        }
 
         preflight::ReferencePreflightStatus::GitInspectionFailed => {
             Err(MaccError::Validation(preflight::format_report_cli(&report)))
@@ -862,7 +881,11 @@ fn resolve_client_mode(
         Some("web") => Some(CoordinatorClientMode::Web),
         Some("none") => Some(CoordinatorClientMode::None),
         Some("auto") => {
-            if is_tty { Some(CoordinatorClientMode::Tui) } else { Some(CoordinatorClientMode::None) }
+            if is_tty {
+                Some(CoordinatorClientMode::Tui)
+            } else {
+                Some(CoordinatorClientMode::None)
+            }
         }
         // "prompt" or absent: fall through to interactive or headless below
         _ => None,
@@ -987,15 +1010,17 @@ fn collect_launch_warnings(
         .as_deref()
         .unwrap_or(&resolved.reference_branch);
     let remote_ref = format!("origin/{}", ref_branch);
-    let behind = std::process::Command::new("git")
-        .args(["rev-list", "--count", &format!("{}..{}", ref_branch, remote_ref)])
-        .current_dir(&paths.root)
-        .output()
-        .ok()
-        .and_then(|o| if o.status.success() { Some(o) } else { None })
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .and_then(|s| s.trim().parse::<u64>().ok())
-        .unwrap_or(0);
+    let count_arg = format!("{}..{}", ref_branch, remote_ref);
+    let behind = macc_core::git::run_git_output_mapped(
+        &paths.root,
+        &["rev-list", "--count", &count_arg],
+        "rev-list count",
+    )
+    .ok()
+    .and_then(|o| if o.status.success() { Some(o) } else { None })
+    .and_then(|o| String::from_utf8(o.stdout).ok())
+    .and_then(|s| s.trim().parse::<u64>().ok())
+    .unwrap_or(0);
     if behind > 0 {
         warnings.push(format!(
             "Reference branch \"{}\" is {} commit(s) behind {}.",
@@ -1006,7 +1031,8 @@ fn collect_launch_warnings(
     // Dirty working tree in reference branch worktrees.
     // (Already caught by preflight — only warn if preflight was overridden.)
     if input.allow_dirty_reference {
-        warnings.push("Working tree has uncommitted changes (--allow-dirty-reference active).".into());
+        warnings
+            .push("Working tree has uncommitted changes (--allow-dirty-reference active).".into());
     }
 
     // Tool priority contains unavailable tools.
@@ -1203,7 +1229,12 @@ fn launch_coordinator_with_client(
 
             if client_cfg.open_browser.unwrap_or(false) {
                 let _ = ProcessCommand::new("sh")
-                    .args(["-c", &format!("open '{url}' 2>/dev/null || xdg-open '{url}' 2>/dev/null || true")])
+                    .args([
+                        "-c",
+                        &format!(
+                            "open '{url}' 2>/dev/null || xdg-open '{url}' 2>/dev/null || true"
+                        ),
+                    ])
                     .spawn();
                 println!("Dashboard opening in browser: {}", url);
             } else {
@@ -1239,7 +1270,11 @@ fn build_phase_overrides_label(input: &CoordinatorCommandInput) -> Option<String
     } else if let Some(ref mode) = input.env_cfg.review_mode {
         parts.push(format!("[review:{}]", mode));
     }
-    if parts.is_empty() { None } else { Some(parts.join(" ")) }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" "))
+    }
 }
 
 /// Start the coordinator as a background daemon and return immediately.
@@ -1319,7 +1354,7 @@ fn spawn_web_daemon(project_root: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{handle, CoordinatorCommandInput};
+    use super::{handle, CoordinatorClientMode, CoordinatorCommandInput};
     use crate::services::engine_provider::SharedEngine;
     use macc_core::config::CanonicalConfig;
     use macc_core::coordinator::types::CoordinatorEnvConfig;

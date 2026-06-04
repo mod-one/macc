@@ -63,7 +63,8 @@ impl Command for SaveCommand {
                     let target_save_dir = dir.join(&name);
                     if target_save_dir.exists() && !overwrite {
                         use std::io::IsTerminal;
-                        let term_interactive = std::io::stdin().is_terminal() && std::env::var("CARGO_MANIFEST_DIR").is_err();
+                        let term_interactive = std::io::stdin().is_terminal()
+                            && std::env::var("CARGO_MANIFEST_DIR").is_err();
                         if term_interactive {
                             println!("Save \"{}\" already exists.\n", name);
                             println!("Choose:");
@@ -115,12 +116,30 @@ impl Command for SaveCommand {
                     handle_secrets: None,
                 };
 
-                let manifest = crate::commands::create_save_bundle_interactive(&paths, &name, opts)?;
+                let manifest =
+                    crate::commands::create_save_bundle_interactive(&paths, &name, opts)?;
                 println!("Saved MACC bundle \"{}\".\n", manifest.name);
                 println!("Included:");
-                println!("  {} config", if manifest.includes.config { "✓" } else { "-" });
-                println!("  {} coordinator sessions", if manifest.includes.coordinator_sessions { "✓" } else { "-" });
-                println!("  {} catalogs", if manifest.includes.catalogs { "✓" } else { "-" });
+                println!(
+                    "  {} config",
+                    if manifest.includes.config { "✓" } else { "-" }
+                );
+                println!(
+                    "  {} coordinator sessions",
+                    if manifest.includes.coordinator_sessions {
+                        "✓"
+                    } else {
+                        "-"
+                    }
+                );
+                println!(
+                    "  {} catalogs",
+                    if manifest.includes.catalogs {
+                        "✓"
+                    } else {
+                        "-"
+                    }
+                );
                 if manifest.includes.logs {
                     println!("  ✓ logs, redacted");
                 }
@@ -156,21 +175,33 @@ impl Command for SaveCommand {
                         println!("    Saved: {}", m.created_at);
                         println!("    Repo: {}", m.repository.root_name);
                         let mut incls = Vec::new();
-                        if m.includes.config { incls.push("config"); }
-                        if m.includes.coordinator_sessions { incls.push("sessions"); }
-                        if m.includes.catalogs { incls.push("catalogs"); }
-                        if m.includes.logs { incls.push("logs"); }
+                        if m.includes.config {
+                            incls.push("config");
+                        }
+                        if m.includes.coordinator_sessions {
+                            incls.push("sessions");
+                        }
+                        if m.includes.catalogs {
+                            incls.push("catalogs");
+                        }
+                        if m.includes.logs {
+                            incls.push("logs");
+                        }
                         println!("    Includes: {}", incls.join(", "));
                     }
                 }
             }
             SaveAction::Show { name } => {
                 let saves = macc_core::save::list_save_bundles()?;
-                let manifest = saves.iter().find(|m| m.name == *name)
-                    .ok_or_else(|| MaccError::Validation(format!("Save bundle '{}' not found.", name)))?;
+                let manifest = saves.iter().find(|m| m.name == *name).ok_or_else(|| {
+                    MaccError::Validation(format!("Save bundle '{}' not found.", name))
+                })?;
 
                 let current_identity = macc_core::save::get_repository_identity(&paths.root);
-                let match_strength = macc_core::save::compute_match_strength(&current_identity, &manifest.repository);
+                let match_strength = macc_core::save::compute_match_strength(
+                    &current_identity,
+                    &manifest.repository,
+                );
 
                 println!("Save: {}", manifest.name);
                 if let Some(desc) = &manifest.description {
@@ -179,9 +210,26 @@ impl Command for SaveCommand {
                 println!("Created: {}", manifest.created_at);
                 println!("Repository match: {}", match_strength.as_str());
                 println!("Includes:");
-                println!("  {} config", if manifest.includes.config { "✓" } else { "-" });
-                println!("  {} coordinator sessions", if manifest.includes.coordinator_sessions { "✓" } else { "-" });
-                println!("  {} catalogs", if manifest.includes.catalogs { "✓" } else { "-" });
+                println!(
+                    "  {} config",
+                    if manifest.includes.config { "✓" } else { "-" }
+                );
+                println!(
+                    "  {} coordinator sessions",
+                    if manifest.includes.coordinator_sessions {
+                        "✓"
+                    } else {
+                        "-"
+                    }
+                );
+                println!(
+                    "  {} catalogs",
+                    if manifest.includes.catalogs {
+                        "✓"
+                    } else {
+                        "-"
+                    }
+                );
                 println!("  {} logs", if manifest.includes.logs { "✓" } else { "-" });
 
                 println!("\nExplicitly excluded:");
@@ -195,7 +243,10 @@ impl Command for SaveCommand {
             }
             SaveAction::Delete { name, yes } => {
                 if !*yes {
-                    let prompt = format!("Are you sure you want to delete save bundle '{}' [y/N]? ", name);
+                    let prompt = format!(
+                        "Are you sure you want to delete save bundle '{}' [y/N]? ",
+                        name
+                    );
                     if !crate::confirm_yes_no(&prompt)? {
                         println!("Delete cancelled.");
                         return Ok(());

@@ -1,6 +1,6 @@
 use crate::commands::{AppContext, Command};
-use macc_core::Result;
 use macc_core::ops_motif::calculate_trust_summary;
+use macc_core::Result;
 
 pub struct TrustCommand {
     app: AppContext,
@@ -23,12 +23,50 @@ impl Command for TrustCommand {
         println!("====================================================");
         println!("Trust State     : {:?}", trust.state);
         println!("Server Exposure : {}", trust.server_exposure);
-        println!("Local Only      : {}", if trust.local_only { "YES (offline mode)" } else { "NO (remote requests allowed)" });
-        println!("Terminal Access : {}", if trust.terminal_enabled { "ENABLED (Caution)" } else { "DISABLED (Safe)" });
-        println!("User-Level Files: {} modified outside project root", trust.user_level_writes);
-        println!("Backups Status  : {}", if trust.backups_ready { "READY (Restorables found)" } else { "MISSING (.macc/backups/ does not exist)" });
-        println!("Catalog Pinned  : {}", if trust.catalog_pinned { "YES (Deterministic catalogs)" } else { "NO (Caution: Dynamic catalogs in use)" });
-        println!("Secrets Redacted: {}", if trust.secrets_redacted { "YES (Redaction scanner active)" } else { "NO" });
+        println!(
+            "Local Only      : {}",
+            if trust.local_only {
+                "YES (offline mode)"
+            } else {
+                "NO (remote requests allowed)"
+            }
+        );
+        println!(
+            "Terminal Access : {}",
+            if trust.terminal_enabled {
+                "ENABLED (Caution)"
+            } else {
+                "DISABLED (Safe)"
+            }
+        );
+        println!(
+            "User-Level Files: {} modified outside project root",
+            trust.user_level_writes
+        );
+        println!(
+            "Backups Status  : {}",
+            if trust.backups_ready {
+                "READY (Restorables found)"
+            } else {
+                "MISSING (.macc/backups/ does not exist)"
+            }
+        );
+        println!(
+            "Catalog Pinned  : {}",
+            if trust.catalog_pinned {
+                "YES (Deterministic catalogs)"
+            } else {
+                "NO (Caution: Dynamic catalogs in use)"
+            }
+        );
+        println!(
+            "Secrets Redacted: {}",
+            if trust.secrets_redacted {
+                "YES (Redaction scanner active)"
+            } else {
+                "NO"
+            }
+        );
         println!("Audit Log File  : {}", trust.audit_log);
         println!("----------------------------------------------------");
         println!("Allowed Roots:");

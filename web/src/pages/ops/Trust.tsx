@@ -36,7 +36,7 @@ const Trust: React.FC = () => {
       await navigator.clipboard.writeText(path);
       setCopySuccess(true);
       setTimeout(() => setCopySuccess(false), 2000);
-    } catch (err) {
+    } catch {
       // ignore
     }
   };

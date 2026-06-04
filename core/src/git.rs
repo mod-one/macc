@@ -850,10 +850,7 @@ pub fn local_branch_exists(repo_root: &Path, branch: &str) -> Result<bool> {
 
 /// Return remote-tracking refs that match `<remote>/<branch>` for all remotes.
 /// MVP checks `origin/<branch>` plus any entry returned by `git for-each-ref`.
-pub fn remote_tracking_refs_for_branch(
-    repo_root: &Path,
-    branch: &str,
-) -> Result<Vec<String>> {
+pub fn remote_tracking_refs_for_branch(repo_root: &Path, branch: &str) -> Result<Vec<String>> {
     let format = "%(refname:short)";
     let pattern = format!("refs/remotes/*/{}", branch);
     let output = run_git_output(
@@ -964,11 +961,7 @@ fn parse_porcelain_v1_line(line: &str) -> GitPorcelainEntry {
 
 /// Create a local branch at `start_point` (branch name, tag, or rev).
 pub fn create_branch_at(repo_root: &Path, branch: &str, start_point: &str) -> Result<()> {
-    let output = run_git_output(
-        repo_root,
-        &["branch", branch, start_point],
-        "create branch",
-    )?;
+    let output = run_git_output(repo_root, &["branch", branch, start_point], "create branch")?;
     if !output.status.success() {
         return Err(MaccError::Git {
             operation: "create_branch".to_string(),
@@ -984,11 +977,7 @@ pub fn create_branch_at(repo_root: &Path, branch: &str, start_point: &str) -> Re
 }
 
 /// Create a local tracking branch from a remote-tracking ref.
-pub fn create_tracking_branch(
-    repo_root: &Path,
-    branch: &str,
-    remote_ref: &str,
-) -> Result<()> {
+pub fn create_tracking_branch(repo_root: &Path, branch: &str, remote_ref: &str) -> Result<()> {
     let output = run_git_output(
         repo_root,
         &["branch", "--track", branch, remote_ref],
@@ -1015,10 +1004,7 @@ pub fn is_bare_repository(repo_root: &Path) -> Result<bool> {
         &["rev-parse", "--is-bare-repository"],
         "is-bare-repository",
     )?;
-    Ok(
-        output.status.success()
-            && String::from_utf8_lossy(&output.stdout).trim() == "true",
-    )
+    Ok(output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true")
 }
 
 #[cfg(test)]

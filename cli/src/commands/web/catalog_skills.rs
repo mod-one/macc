@@ -29,10 +29,7 @@ pub(super) async fn status_handler(
         .skills_status(&state.paths, None)
         .map_err(|e| ApiError::validation(e.to_string()))?;
 
-    let warnings: Vec<String> = statuses
-        .iter()
-        .flat_map(|s| s.warnings.clone())
-        .collect();
+    let warnings: Vec<String> = statuses.iter().flat_map(|s| s.warnings.clone()).collect();
 
     Ok(Json(serde_json::json!({
         "skills": statuses,
@@ -52,7 +49,9 @@ pub(super) async fn installed_handler(
         .engine
         .skills_lockfile(&state.paths)
         .map_err(|e| ApiError::validation(e.to_string()))?;
-    Ok(Json(serde_json::json!({ "skills": lockfile.skills, "version": lockfile.version })))
+    Ok(Json(
+        serde_json::json!({ "skills": lockfile.skills, "version": lockfile.version }),
+    ))
 }
 
 // ── POST /api/v1/catalog/skills/verify ───────────────────────────────────────

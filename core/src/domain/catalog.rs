@@ -87,7 +87,9 @@ pub fn build_skill_entry(input: CatalogEntryInput) -> Result<SkillEntry> {
         name: input.name,
         description: input.description,
         tags: parse_tags_csv(input.tags_csv.as_deref()),
-        selector: Selector { subpath: input.subpath },
+        selector: Selector {
+            subpath: input.subpath,
+        },
         source: Source {
             kind: source_kind,
             url: input.url,

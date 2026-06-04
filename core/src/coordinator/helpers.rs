@@ -857,7 +857,7 @@ mod tests {
     fn test_structured_event_emission_jsonl() {
         let temp_dir = tempfile::tempdir().unwrap();
         let repo_root = temp_dir.path();
-        
+
         let event = crate::coordinator::CoordinatorEventRecord {
             schema_version: "1".to_string(),
             event_id: "evt-test-123".to_string(),
@@ -1033,7 +1033,14 @@ pub fn append_phase_skipped_event(
     let project_paths = crate::ProjectPaths::from_root(repo_root);
     let _ = append_event_sqlite(&project_paths, &payload)?;
     let msg_with_reason = format!("{} (reason: {})", message, reason);
-    let _ = write_structured_event_jsonl(repo_root, "phase_skipped", task_id, phase, &msg_with_reason, "info");
+    let _ = write_structured_event_jsonl(
+        repo_root,
+        "phase_skipped",
+        task_id,
+        phase,
+        &msg_with_reason,
+        "info",
+    );
     Ok(())
 }
 
@@ -1058,9 +1065,17 @@ pub fn write_structured_event_jsonl(
         seq: seq as i64,
         ts: now,
         source: "coordinator".to_string(),
-        task_id: if task_id.is_empty() { None } else { Some(task_id.to_string()) },
+        task_id: if task_id.is_empty() {
+            None
+        } else {
+            Some(task_id.to_string())
+        },
         event_type: event_type.to_string(),
-        phase: if phase.is_empty() { None } else { Some(phase.to_string()) },
+        phase: if phase.is_empty() {
+            None
+        } else {
+            Some(phase.to_string())
+        },
         status: severity.to_string(),
         detail: Some(message.to_string()),
         msg: None,
@@ -1074,29 +1089,47 @@ pub fn append_structured_event_record(
     repo_root: &Path,
     event: &crate::coordinator::CoordinatorEventRecord,
 ) -> Result<()> {
-    let run_id = event.run_id.clone().unwrap_or_else(ensure_coordinator_run_id);
-    let now = if event.ts.is_empty() { now_iso_coordinator() } else { event.ts.clone() };
+    let run_id = event
+        .run_id
+        .clone()
+        .unwrap_or_else(ensure_coordinator_run_id);
+    let now = if event.ts.is_empty() {
+        now_iso_coordinator()
+    } else {
+        event.ts.clone()
+    };
 
     let task_id = event.task_id.as_deref().unwrap_or("-");
     let phase = event.phase.as_deref().unwrap_or("-");
-    let severity = if event.status.eq_ignore_ascii_case("failed") || event.status.eq_ignore_ascii_case("error") || event.status.eq_ignore_ascii_case("blocking") {
+    let severity = if event.status.eq_ignore_ascii_case("failed")
+        || event.status.eq_ignore_ascii_case("error")
+        || event.status.eq_ignore_ascii_case("blocking")
+    {
         "blocking"
-    } else if event.status.eq_ignore_ascii_case("warning") || event.status.eq_ignore_ascii_case("warn") {
+    } else if event.status.eq_ignore_ascii_case("warning")
+        || event.status.eq_ignore_ascii_case("warn")
+    {
         "warning"
     } else {
         "info"
     };
 
     let project_paths = crate::ProjectPaths::from_root(repo_root);
-    let storage_paths = crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&project_paths);
+    let storage_paths =
+        crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&project_paths);
     let mut worker_id = String::new();
     let mut tool = String::new();
     let mut run_id_val = run_id;
 
-    if let Ok(snap) = crate::coordinator_storage::SqliteStorage::new(storage_paths).load_snapshot() {
+    if let Ok(snap) = crate::coordinator_storage::SqliteStorage::new(storage_paths).load_snapshot()
+    {
         if let Some(task) = snap.registry.tasks.iter().find(|t| t.id == task_id) {
             worker_id = task.task_runtime.worker_id.clone().unwrap_or_default();
-            tool = task.tool.clone().or_else(|| task.task_runtime.tool.clone()).unwrap_or_default();
+            tool = task
+                .tool
+                .clone()
+                .or_else(|| task.task_runtime.tool.clone())
+                .unwrap_or_default();
             if let Some(ref r_id) = task.task_runtime.run_id {
                 if !r_id.is_empty() {
                     run_id_val = r_id.clone();
@@ -1310,7 +1343,8 @@ pub fn pid_in_repo(pid: i32, repo_root: &std::path::Path) -> bool {
         return false;
     };
     let cwd = cwd.canonicalize().unwrap_or(cwd);
-    let repo_canon = repo_root.canonicalize().unwrap_or_else(|_| repo_root.to_path_buf());
+    let repo_canon = repo_root
+        .canonicalize()
+        .unwrap_or_else(|_| repo_root.to_path_buf());
     cwd.starts_with(repo_canon)
 }
-

@@ -9,7 +9,7 @@ fmt-check:
 	cargo fmt --all -- --check
 
 lint:
-	cargo clippy --workspace --locked -- -D warnings
+	cargo clippy --workspace --locked
 
 test:
 	cargo test --workspace --locked

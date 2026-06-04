@@ -11,11 +11,11 @@ use macc_core::supervisor::SupervisorReport;
 use macc_core::{MaccError, Result};
 use serde_json::Value;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 use std::time::{Duration, Instant};
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
 
 const SUPERVISOR_PID_REL_PATH: &str = ".macc/state/supervisor.pid";
 const SUPERVISOR_HEALTH_REL_PATH: &str = ".macc/state/supervisor-health.json";
@@ -106,13 +106,11 @@ impl<'a> SupervisorCommand<'a> {
                 });
             }
 
-            let child = daemon_cmd
-                .spawn()
-                .map_err(|e| MaccError::Io {
-                    path: paths.root.to_string_lossy().into(),
-                    action: "spawn supervisor daemon".into(),
-                    source: e,
-                })?;
+            let child = daemon_cmd.spawn().map_err(|e| MaccError::Io {
+                path: paths.root.to_string_lossy().into(),
+                action: "spawn supervisor daemon".into(),
+                source: e,
+            })?;
 
             println!("Supervisor started in daemon mode (pid {}).", child.id());
             return Ok(());

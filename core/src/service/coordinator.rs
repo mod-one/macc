@@ -563,7 +563,8 @@ fn pid_is_alive(pid: i32) -> bool {
 /// a normal full-completion.
 fn read_dispatch_limit_reason(paths: &ProjectPaths) -> Option<String> {
     use crate::coordinator_storage::{
-        CoordinatorSnapshot, CoordinatorStorage, CoordinatorStoragePaths, JsonStorage, SqliteStorage,
+        CoordinatorSnapshot, CoordinatorStorage, CoordinatorStoragePaths, JsonStorage,
+        SqliteStorage,
     };
     let storage_paths = CoordinatorStoragePaths::from_project_paths(paths);
     let sqlite = SqliteStorage::new(storage_paths.clone());

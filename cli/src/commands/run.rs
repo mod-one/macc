@@ -32,10 +32,10 @@ impl Command for RunCommand {
             })?;
 
         // Spec §3.5: 8-step tool selection algorithm.
-        let resolved_tool = self
-            .app
-            .engine
-            .resolve_skill_tool(&paths, &skill, self.tool.as_deref());
+        let resolved_tool =
+            self.app
+                .engine
+                .resolve_skill_tool(&paths, &skill, self.tool.as_deref());
 
         if self.dry_run {
             let preview = self

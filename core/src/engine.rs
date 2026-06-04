@@ -923,17 +923,11 @@ pub trait Engine {
         Ok(out)
     }
 
-    fn runtime_snapshot(
-        &self,
-        paths: &ProjectPaths,
-    ) -> Result<crate::runtime::RuntimeSnapshot> {
+    fn runtime_snapshot(&self, paths: &ProjectPaths) -> Result<crate::runtime::RuntimeSnapshot> {
         crate::runtime::RuntimeSnapshotBuilder::build(paths)
     }
 
-    fn list_skills(
-        &self,
-        paths: &ProjectPaths,
-    ) -> Vec<crate::skills_runner::SkillDefinition> {
+    fn list_skills(&self, paths: &ProjectPaths) -> Vec<crate::skills_runner::SkillDefinition> {
         crate::skills_runner::SkillResolver::list(&paths.macc_dir)
     }
 
@@ -1027,13 +1021,12 @@ pub trait Engine {
                                 crate::context::enforce_budget(&text, budget);
 
                             let summary_size = budgeted.len();
-                            result.summary =
-                                Some(crate::skills_runner::SummaryMetadata {
-                                    raw_size_chars: raw_size,
-                                    summary_size_chars: summary_size,
-                                    bundles_applied: bundles,
-                                    was_truncated: truncated,
-                                });
+                            result.summary = Some(crate::skills_runner::SummaryMetadata {
+                                raw_size_chars: raw_size,
+                                summary_size_chars: summary_size,
+                                bundles_applied: bundles,
+                                was_truncated: truncated,
+                            });
                             result.stdout = budgeted;
                         } else if let Some(tb) = &ctx.token_budget {
                             // No bundles configured — still enforce budget.
@@ -1166,7 +1159,8 @@ pub trait Engine {
                 cat.entries
                     .into_iter()
                     .filter(|e| {
-                        filter_tool.map_or(true, |t| e.tools.is_empty() || e.tools.iter().any(|et| et == t))
+                        filter_tool
+                            .is_none_or(|t| e.tools.is_empty() || e.tools.iter().any(|et| et == t))
                     })
                     .collect()
             })
@@ -1220,21 +1214,20 @@ pub trait Engine {
     }
 
     /// Apply a git identity fix locally in the project (local repo config).
-    fn fix_git_identity_config(
-        &self,
-        paths: &ProjectPaths,
-        name: &str,
-        email: &str,
-    ) -> Result<()> {
+    fn fix_git_identity_config(&self, paths: &ProjectPaths, name: &str, email: &str) -> Result<()> {
         crate::doctor::fix_git_identity(&paths.root, name, email)
-            .map_err(|e| crate::MaccError::Validation(e))
+            .map_err(crate::MaccError::Validation)
     }
 
     /// Compute the 8-step readiness ladder for this project.
     fn readiness_ladder(&self, paths: &ProjectPaths) -> crate::onboarding::ReadinessLadder {
         let canonical = self.load_canonical_config(paths).ok();
         let coordinator_running = check_coordinator_running_via_storage(paths);
-        crate::onboarding::compute_readiness_from_state(paths, canonical.as_ref(), coordinator_running)
+        crate::onboarding::compute_readiness_from_state(
+            paths,
+            canonical.as_ref(),
+            coordinator_running,
+        )
     }
 
     /// Run the reference branch preflight inspection (spec §7).
@@ -1263,7 +1256,11 @@ pub trait Engine {
         reference_branch: &str,
         source: crate::coordinator::preflight::BranchCreateSource,
     ) -> std::result::Result<(), crate::coordinator::preflight::PreflightError> {
-        crate::coordinator::preflight::create_reference_branch(&paths.root, reference_branch, source)
+        crate::coordinator::preflight::create_reference_branch(
+            &paths.root,
+            reference_branch,
+            source,
+        )
     }
 
     // ── PRD generation (spec §8) ──────────────────────────────────────────────
@@ -1284,7 +1281,11 @@ pub trait Engine {
             MaccError::Validation(format!(
                 "PRD-GEN-TOOL-UNAVAILABLE: tool '{}' not found. Available: {}",
                 tool_id,
-                specs.iter().map(|s| s.id.as_str()).collect::<Vec<_>>().join(", ")
+                specs
+                    .iter()
+                    .map(|s| s.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ))
         })?;
 
@@ -1333,11 +1334,10 @@ pub trait Engine {
         crate::prd_generation::promotion::promote_prd(options)
     }
 
-    fn prd_list_runs(
-        &self,
-        paths: &ProjectPaths,
-    ) -> Vec<(String, PathBuf)> {
-        let base = paths.root.join(crate::prd_generation::PRD_GENERATION_DEFAULT_TARGET_DIR);
+    fn prd_list_runs(&self, paths: &ProjectPaths) -> Vec<(String, PathBuf)> {
+        let base = paths
+            .root
+            .join(crate::prd_generation::PRD_GENERATION_DEFAULT_TARGET_DIR);
         crate::prd_generation::promotion::list_generation_runs(&base)
     }
 
@@ -2123,6 +2123,15 @@ impl Engine for TestEngine {
         checks
     }
 
+    /// Return no extended findings in tests so health score stays at 100.
+    fn collect_diagnostic_findings(
+        &self,
+        _paths: &ProjectPaths,
+        _max_parallel: u32,
+    ) -> Vec<crate::doctor::DiagnosticFinding> {
+        Vec::new()
+    }
+
     /// Produces a deterministic ActionPlan.
     fn plan(
         &self,
@@ -2290,7 +2299,7 @@ fields: []
 
     #[test]
     fn engine_trait_method_count_guard() {
-        const EXPECTED_METHOD_COUNT: usize = 122;
+        const EXPECTED_METHOD_COUNT: usize = 144;
         let source = include_str!("engine.rs");
         let trait_start = source
             .find("pub trait Engine {")

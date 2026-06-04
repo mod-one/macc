@@ -1,11 +1,11 @@
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-use sha2::{Digest, Sha256};
-use std::fs;
-use crate::{MaccError, ProjectPaths, Result};
 use crate::config::CanonicalConfig;
-use crate::coordinator::types::CoordinatorEnvConfig;
 use crate::coordinator::error_normalizer::CanonicalClass;
+use crate::coordinator::types::CoordinatorEnvConfig;
+use crate::{MaccError, ProjectPaths, Result};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
+use std::fs;
 
 // =========================================================================
 // Setting Descriptor Contracts
@@ -251,12 +251,16 @@ fn check_catalogs_pinned(paths: &ProjectPaths) -> bool {
                             let kind = source.get("kind").and_then(|k| k.as_str()).unwrap_or("");
                             if kind != "local" {
                                 if kind == "git" {
-                                    let reference = source.get("ref").and_then(|r| r.as_str()).unwrap_or("");
+                                    let reference =
+                                        source.get("ref").and_then(|r| r.as_str()).unwrap_or("");
                                     if !is_pinned_git_ref(reference) {
                                         return false;
                                     }
                                 } else if kind == "http" {
-                                    let checksum = source.get("checksum").and_then(|c| c.as_str()).unwrap_or("");
+                                    let checksum = source
+                                        .get("checksum")
+                                        .and_then(|c| c.as_str())
+                                        .unwrap_or("");
                                     if checksum.is_empty() {
                                         return false;
                                     }
@@ -288,8 +292,13 @@ fn check_catalogs_pinned(paths: &ProjectPaths) -> bool {
 fn check_secrets_redacted(paths: &ProjectPaths) -> bool {
     if paths.config_path.exists() {
         if let Ok(content) = std::fs::read_to_string(&paths.config_path) {
-            let findings = crate::security::scan_bytes(&paths.config_path.to_string_lossy(), content.as_bytes());
-            findings.iter().all(|f| f.severity != crate::security::Severity::Error)
+            let findings = crate::security::scan_bytes(
+                &paths.config_path.to_string_lossy(),
+                content.as_bytes(),
+            );
+            findings
+                .iter()
+                .all(|f| f.severity != crate::security::Severity::Error)
         } else {
             true
         }
@@ -302,7 +311,10 @@ fn check_user_level_writes(paths: &ProjectPaths, config: &CanonicalConfig) -> us
     let registry = crate::tool::ToolRegistry::from_inventory();
     let resolved = crate::resolve::resolve(config, &Default::default());
     if let Ok(plan) = crate::build_plan(paths, &resolved, &[], &registry) {
-        plan.actions.iter().filter(|action| action.scope() == crate::plan::Scope::User).count()
+        plan.actions
+            .iter()
+            .filter(|action| action.scope() == crate::plan::Scope::User)
+            .count()
     } else {
         0
     }
@@ -310,23 +322,34 @@ fn check_user_level_writes(paths: &ProjectPaths, config: &CanonicalConfig) -> us
 
 pub fn calculate_trust_summary(paths: &ProjectPaths, config: &CanonicalConfig) -> TrustSummary {
     let local_only = config.settings.offline;
-    
-    let terminal_enabled = config.tools.enabled.iter().any(|t| t == "terminal" || t == "shell");
-    
+
+    let terminal_enabled = config
+        .tools
+        .enabled
+        .iter()
+        .any(|t| t == "terminal" || t == "shell");
+
     let user_level_writes = check_user_level_writes(paths, config);
 
     let backups_ready = paths.macc_dir.join("backups").exists();
-    
+
     let catalog_pinned = check_catalogs_pinned(paths);
 
     let secrets_redacted = check_secrets_redacted(paths);
-    
+
     let bind_addr = config.settings.web_port.unwrap_or(3450);
     let server_exposure = format!("127.0.0.1:{}", bind_addr);
     let allowed_roots = vec![paths.root.to_string_lossy().into_owned()];
-    let audit_log = paths.macc_dir.join("log/coordinator/coordinator.log").to_string_lossy().into_owned();
+    let audit_log = paths
+        .macc_dir
+        .join("log/coordinator/coordinator.log")
+        .to_string_lossy()
+        .into_owned();
 
-    let resolved_safety = config.automation.coordinator.as_ref()
+    let resolved_safety = config
+        .automation
+        .coordinator
+        .as_ref()
         .and_then(|c| c.safety_policy.clone())
         .unwrap_or_else(|| "standard".to_string());
 
@@ -340,7 +363,9 @@ pub fn calculate_trust_summary(paths: &ProjectPaths, config: &CanonicalConfig) -
     if !secrets_redacted || !backups_ready {
         state = TrustState::Risky;
     }
-    if resolved_safety == "strict" && (user_level_writes > 0 || !catalog_pinned || !secrets_redacted) {
+    if resolved_safety == "strict"
+        && (user_level_writes > 0 || !catalog_pinned || !secrets_redacted)
+    {
         state = TrustState::Blocked;
     }
 
@@ -429,13 +454,16 @@ pub struct LockedCoordinator {
     pub rate_limit_policy_hash: String,
 }
 
-pub fn generate_lock_manifest(paths: &ProjectPaths, config: &CanonicalConfig) -> Result<LockManifest> {
-    use crate::tool::registry::ToolRegistry;
+pub fn generate_lock_manifest(
+    paths: &ProjectPaths,
+    config: &CanonicalConfig,
+) -> Result<LockManifest> {
+    use crate::resolve::{resolve_fetch_units, PlanningContext, SelectionKind};
     use crate::tool::loader::ToolSpecLoader;
-    use crate::resolve::{PlanningContext, resolve_fetch_units, SelectionKind};
+    use crate::tool::registry::ToolRegistry;
 
     let now = chrono::Utc::now().to_rfc3339();
-    
+
     let config_content = fs::read_to_string(&paths.config_path).unwrap_or_default();
     let config_sha256 = format!("sha256:{:x}", Sha256::digest(config_content.as_bytes()));
 
@@ -448,12 +476,20 @@ pub fn generate_lock_manifest(paths: &ProjectPaths, config: &CanonicalConfig) ->
         .unwrap_or_else(|| "sha256:test".to_string());
 
     // 2. Git URL and commit fingerprint
-    let repo_url = crate::git::run_git_output_mapped(paths.root.as_ref(), &["config", "--get", "remote.origin.url"], "get git remote URL")
-        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
-        .unwrap_or_else(|_| "local".to_string());
-    let commit_hash = crate::git::run_git_output_mapped(paths.root.as_ref(), &["rev-parse", "HEAD"], "get git HEAD commit")
-        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
-        .unwrap_or_else(|_| "unknown".to_string());
+    let repo_url = crate::git::run_git_output_mapped(
+        paths.root.as_ref(),
+        &["config", "--get", "remote.origin.url"],
+        "get git remote URL",
+    )
+    .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    .unwrap_or_else(|_| "local".to_string());
+    let commit_hash = crate::git::run_git_output_mapped(
+        paths.root.as_ref(),
+        &["rev-parse", "HEAD"],
+        "get git HEAD commit",
+    )
+    .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+    .unwrap_or_else(|_| "unknown".to_string());
     let project_root_fingerprint = format!("git:{}#{}", repo_url, commit_hash);
 
     // 3. Runtime versions
@@ -502,15 +538,19 @@ pub fn generate_lock_manifest(paths: &ProjectPaths, config: &CanonicalConfig) ->
 
     let mut locked_tools = Vec::new();
     for tool_id in &config.tools.enabled {
-        let detected_version = specs.iter()
+        let detected_version = specs
+            .iter()
             .find(|s| &s.id == tool_id)
             .and_then(|spec| spec.version_check.as_ref())
             .and_then(|vc| crate::service::tooling::run_version_command(&vc.current))
             .unwrap_or_else(|| "0.1.0".to_string());
-        
+
         let adapter_version = env!("CARGO_PKG_VERSION").to_string();
 
-        let model = config.tools.config.get(tool_id)
+        let model = config
+            .tools
+            .config
+            .get(tool_id)
             .and_then(|v| v.as_object())
             .and_then(|obj| obj.get("model"))
             .and_then(|m| m.as_str())
@@ -565,7 +605,7 @@ pub fn generate_lock_manifest(paths: &ProjectPaths, config: &CanonicalConfig) ->
         };
         // Generate a nice ID
         let id = get_catalog_id_from_url(&url);
-        
+
         catalogs.push(LockedCatalog {
             id,
             kind,
@@ -580,7 +620,8 @@ pub fn generate_lock_manifest(paths: &ProjectPaths, config: &CanonicalConfig) ->
     if let Ok(fetch_units) = resolve_fetch_units(paths, &resolved) {
         for unit in fetch_units {
             // Find corresponding source_id from catalogs
-            let source_id = catalogs.iter()
+            let source_id = catalogs
+                .iter()
                 .find(|c| c.url == unit.source.url)
                 .map(|c| c.id.clone())
                 .unwrap_or_else(|| "default-source".to_string());
@@ -596,7 +637,11 @@ pub fn generate_lock_manifest(paths: &ProjectPaths, config: &CanonicalConfig) ->
 
                 if selection.kind == SelectionKind::Skill {
                     for tool in &config.tools.enabled {
-                        let skill_dir = paths.root.join(format!(".{}", tool)).join("skills").join(&selection.id);
+                        let skill_dir = paths
+                            .root
+                            .join(format!(".{}", tool))
+                            .join("skills")
+                            .join(&selection.id);
                         let manifest_path = skill_dir.join("macc.package.json");
                         if manifest_path.exists() {
                             if let Ok(content) = fs::read(&manifest_path) {
@@ -609,10 +654,14 @@ pub fn generate_lock_manifest(paths: &ProjectPaths, config: &CanonicalConfig) ->
                                     let path = entry.path();
                                     if path.is_file() {
                                         if let Ok(content) = fs::read(&path) {
-                                            let sha256 = format!("sha256:{:x}", Sha256::digest(&content));
-                                            let rel_path = path.strip_prefix(&paths.root)
+                                            let sha256 =
+                                                format!("sha256:{:x}", Sha256::digest(&content));
+                                            let rel_path = path
+                                                .strip_prefix(&paths.root)
                                                 .map(|p| p.to_string_lossy().into_owned())
-                                                .unwrap_or_else(|_| path.to_string_lossy().into_owned());
+                                                .unwrap_or_else(|_| {
+                                                    path.to_string_lossy().into_owned()
+                                                });
                                             installed_targets.push(LockedInstalledTarget {
                                                 tool: tool.clone(),
                                                 path: rel_path,
@@ -649,7 +698,7 @@ pub fn generate_lock_manifest(paths: &ProjectPaths, config: &CanonicalConfig) ->
     // 7. Coordinator hashes
     let coord = config.automation.coordinator.as_ref();
     let max_parallel = coord.and_then(|c| c.max_parallel).unwrap_or(0);
-    
+
     let retry_input = format!(
         "{:?}|{:?}",
         coord.and_then(|c| c.error_code_retry_list.as_ref()),
@@ -667,7 +716,9 @@ pub fn generate_lock_manifest(paths: &ProjectPaths, config: &CanonicalConfig) ->
     let rate_limit_policy_hash = format!("sha256:{:x}", Sha256::digest(rate_input.as_bytes()));
 
     let coordinator = LockedCoordinator {
-        storage_mode: coord.and_then(|c| c.storage_mode.clone()).unwrap_or_else(|| "sqlite".to_string()),
+        storage_mode: coord
+            .and_then(|c| c.storage_mode.clone())
+            .unwrap_or_else(|| "sqlite".to_string()),
         max_parallel,
         retry_policy_hash,
         rate_limit_policy_hash,
@@ -679,12 +730,18 @@ pub fn generate_lock_manifest(paths: &ProjectPaths, config: &CanonicalConfig) ->
         macc_version,
         macc_binary_sha256,
         project_root_fingerprint,
-        reference_branch: config.automation.coordinator.as_ref()
+        reference_branch: config
+            .automation
+            .coordinator
+            .as_ref()
             .and_then(|c| c.reference_branch.clone())
             .unwrap_or_else(|| "master".to_string()),
         config_sha256,
         active_profile: "default".to_string(),
-        preset: config.automation.coordinator.as_ref()
+        preset: config
+            .automation
+            .coordinator
+            .as_ref()
             .and_then(|c| c.preset.clone())
             .unwrap_or_else(|| "balanced".to_string()),
         tools: locked_tools,
@@ -702,16 +759,19 @@ pub struct LockCheckReport {
 }
 
 pub fn verify_lock_manifest(paths: &ProjectPaths, lock: &LockManifest) -> Result<LockCheckReport> {
-    use crate::tool::loader::ToolSpecLoader;
     use crate::resolve::resolve_fetch_units;
+    use crate::tool::loader::ToolSpecLoader;
 
     let mut drift = Vec::new();
-    
+
     // 1. Check config hash
     let config_content = fs::read_to_string(&paths.config_path).unwrap_or_default();
     let config_sha256 = format!("sha256:{:x}", Sha256::digest(config_content.as_bytes()));
     if config_sha256 != lock.config_sha256 {
-        drift.push(format!("Config file drift: current sha {} != locked {}", config_sha256, lock.config_sha256));
+        drift.push(format!(
+            "Config file drift: current sha {} != locked {}",
+            config_sha256, lock.config_sha256
+        ));
     }
 
     // Load active config to compare other sections
@@ -724,31 +784,42 @@ pub fn verify_lock_manifest(paths: &ProjectPaths, lock: &LockManifest) -> Result
         // 2. Verify tools & versions & generated files
         for locked_tool in &lock.tools {
             if !config.tools.enabled.contains(&locked_tool.id) {
-                drift.push(format!("Tool '{}' is locked but currently disabled in config", locked_tool.id));
+                drift.push(format!(
+                    "Tool '{}' is locked but currently disabled in config",
+                    locked_tool.id
+                ));
                 continue;
             }
 
-            let current_detected = specs.iter()
+            let current_detected = specs
+                .iter()
                 .find(|s| s.id == locked_tool.id)
                 .and_then(|spec| spec.version_check.as_ref())
                 .and_then(|vc| crate::service::tooling::run_version_command(&vc.current))
                 .unwrap_or_else(|| "0.1.0".to_string());
 
             if current_detected != locked_tool.detected_version {
-                drift.push(format!("Tool '{}' version mismatch: current detected '{}' != locked '{}'", 
-                    locked_tool.id, current_detected, locked_tool.detected_version));
+                drift.push(format!(
+                    "Tool '{}' version mismatch: current detected '{}' != locked '{}'",
+                    locked_tool.id, current_detected, locked_tool.detected_version
+                ));
             }
 
             // Verify generated files & hashes
             for locked_file in &locked_tool.generated_files {
                 let file_path = paths.root.join(&locked_file.path);
                 if !file_path.exists() {
-                    drift.push(format!("Generated file '{}' for tool '{}' is missing from disk", locked_file.path, locked_tool.id));
+                    drift.push(format!(
+                        "Generated file '{}' for tool '{}' is missing from disk",
+                        locked_file.path, locked_tool.id
+                    ));
                 } else if let Ok(content) = fs::read(&file_path) {
                     let sha256 = format!("sha256:{:x}", Sha256::digest(&content));
                     if sha256 != locked_file.sha256 {
-                        drift.push(format!("Generated file '{}' hash drift: current '{}' != locked '{}'", 
-                            locked_file.path, sha256, locked_file.sha256));
+                        drift.push(format!(
+                            "Generated file '{}' hash drift: current '{}' != locked '{}'",
+                            locked_file.path, sha256, locked_file.sha256
+                        ));
                     }
                 }
             }
@@ -757,7 +828,10 @@ pub fn verify_lock_manifest(paths: &ProjectPaths, lock: &LockManifest) -> Result
         // Check if any tool is enabled in config but missing from lock
         for enabled_tool in &config.tools.enabled {
             if !lock.tools.iter().any(|t| &t.id == enabled_tool) {
-                drift.push(format!("Tool '{}' is enabled in config but missing from lockfile", enabled_tool));
+                drift.push(format!(
+                    "Tool '{}' is enabled in config but missing from lockfile",
+                    enabled_tool
+                ));
             }
         }
 
@@ -782,16 +856,23 @@ pub fn verify_lock_manifest(paths: &ProjectPaths, lock: &LockManifest) -> Result
             if let Some(source) = current_catalogs.get(&locked_cat.url) {
                 if let Some(ref locked_rev) = locked_cat.rev {
                     if &source.reference != locked_rev {
-                        drift.push(format!("Catalog '{}' revision drift: current '{}' != locked '{}'", 
-                            locked_cat.id, source.reference, locked_rev));
+                        drift.push(format!(
+                            "Catalog '{}' revision drift: current '{}' != locked '{}'",
+                            locked_cat.id, source.reference, locked_rev
+                        ));
                     }
                 }
                 if locked_cat.checksum != source.checksum {
-                    drift.push(format!("Catalog '{}' checksum drift: current '{:?}' != locked '{:?}'", 
-                        locked_cat.id, source.checksum, locked_cat.checksum));
+                    drift.push(format!(
+                        "Catalog '{}' checksum drift: current '{:?}' != locked '{:?}'",
+                        locked_cat.id, source.checksum, locked_cat.checksum
+                    ));
                 }
             } else {
-                drift.push(format!("Catalog '{}' (url: {}) in lockfile is missing from current effective catalogs", locked_cat.id, locked_cat.url));
+                drift.push(format!(
+                    "Catalog '{}' (url: {}) in lockfile is missing from current effective catalogs",
+                    locked_cat.id, locked_cat.url
+                ));
             }
         }
 
@@ -802,14 +883,19 @@ pub fn verify_lock_manifest(paths: &ProjectPaths, lock: &LockManifest) -> Result
                     if let Some(locked_pkg) = lock.packages.iter().find(|p| p.id == selection.id) {
                         // Compare subpath
                         if locked_pkg.subpath != selection.subpath {
-                            drift.push(format!("Package '{}' subpath mismatch: current '{}' != locked '{}'", 
-                                selection.id, selection.subpath, locked_pkg.subpath));
+                            drift.push(format!(
+                                "Package '{}' subpath mismatch: current '{}' != locked '{}'",
+                                selection.id, selection.subpath, locked_pkg.subpath
+                            ));
                         }
                         // Verify target files' hashes
                         for target in &locked_pkg.installed_targets {
                             let target_path = paths.root.join(&target.path);
                             if !target_path.exists() {
-                                drift.push(format!("Package target file '{}' is missing from disk", target.path));
+                                drift.push(format!(
+                                    "Package target file '{}' is missing from disk",
+                                    target.path
+                                ));
                             } else if let Ok(content) = fs::read(&target_path) {
                                 let sha256 = format!("sha256:{:x}", Sha256::digest(&content));
                                 if sha256 != target.sha256 {
@@ -819,7 +905,10 @@ pub fn verify_lock_manifest(paths: &ProjectPaths, lock: &LockManifest) -> Result
                             }
                         }
                     } else {
-                        drift.push(format!("Package '{}' is currently selected but missing from lockfile", selection.id));
+                        drift.push(format!(
+                            "Package '{}' is currently selected but missing from lockfile",
+                            selection.id
+                        ));
                     }
                 }
             }
@@ -829,12 +918,20 @@ pub fn verify_lock_manifest(paths: &ProjectPaths, lock: &LockManifest) -> Result
         let coord = config.automation.coordinator.as_ref();
         let max_parallel = coord.and_then(|c| c.max_parallel).unwrap_or(0);
         if max_parallel != lock.coordinator.max_parallel {
-            drift.push(format!("Coordinator max_parallel drift: current {} != locked {}", max_parallel, lock.coordinator.max_parallel));
+            drift.push(format!(
+                "Coordinator max_parallel drift: current {} != locked {}",
+                max_parallel, lock.coordinator.max_parallel
+            ));
         }
 
-        let current_storage_mode = coord.and_then(|c| c.storage_mode.clone()).unwrap_or_else(|| "sqlite".to_string());
+        let current_storage_mode = coord
+            .and_then(|c| c.storage_mode.clone())
+            .unwrap_or_else(|| "sqlite".to_string());
         if current_storage_mode != lock.coordinator.storage_mode {
-            drift.push(format!("Coordinator storage_mode drift: current '{}' != locked '{}'", current_storage_mode, lock.coordinator.storage_mode));
+            drift.push(format!(
+                "Coordinator storage_mode drift: current '{}' != locked '{}'",
+                current_storage_mode, lock.coordinator.storage_mode
+            ));
         }
 
         let retry_input = format!(
@@ -844,7 +941,7 @@ pub fn verify_lock_manifest(paths: &ProjectPaths, lock: &LockManifest) -> Result
         );
         let current_retry_hash = format!("sha256:{:x}", Sha256::digest(retry_input.as_bytes()));
         if current_retry_hash != lock.coordinator.retry_policy_hash {
-            drift.push(format!("Coordinator retry policy drift from lockfile"));
+            drift.push("Coordinator retry policy drift from lockfile".to_string());
         }
 
         let rate_input = format!(
@@ -856,7 +953,7 @@ pub fn verify_lock_manifest(paths: &ProjectPaths, lock: &LockManifest) -> Result
         );
         let current_rate_hash = format!("sha256:{:x}", Sha256::digest(rate_input.as_bytes()));
         if current_rate_hash != lock.coordinator.rate_limit_policy_hash {
-            drift.push(format!("Coordinator rate limit policy drift from lockfile"));
+            drift.push("Coordinator rate limit policy drift from lockfile".to_string());
         }
 
         // 6. Verify runtime
@@ -864,12 +961,18 @@ pub fn verify_lock_manifest(paths: &ProjectPaths, lock: &LockManifest) -> Result
             if key == "os" {
                 let current_os = std::env::consts::OS.to_string();
                 if &current_os != val {
-                    drift.push(format!("Runtime OS mismatch: current '{}' != locked '{}'", current_os, val));
+                    drift.push(format!(
+                        "Runtime OS mismatch: current '{}' != locked '{}'",
+                        current_os, val
+                    ));
                 }
             } else if key == "arch" {
                 let current_arch = std::env::consts::ARCH.to_string();
                 if &current_arch != val {
-                    drift.push(format!("Runtime arch mismatch: current '{}' != locked '{}'", current_arch, val));
+                    drift.push(format!(
+                        "Runtime arch mismatch: current '{}' != locked '{}'",
+                        current_arch, val
+                    ));
                 }
             }
         }
@@ -885,7 +988,10 @@ pub fn verify_lock_manifest(paths: &ProjectPaths, lock: &LockManifest) -> Result
 // Failure Recovery Summary
 // =========================================================================
 
-pub fn load_task_registry(paths: &ProjectPaths, config: &CanonicalConfig) -> Result<crate::coordinator::model::TaskRegistry> {
+pub fn load_task_registry(
+    paths: &ProjectPaths,
+    config: &CanonicalConfig,
+) -> Result<crate::coordinator::model::TaskRegistry> {
     let mut args = std::collections::BTreeMap::new();
     let coord = config.automation.coordinator.as_ref();
     if let Some(storage_mode) = coord.and_then(|c| c.storage_mode.as_ref()) {
@@ -897,9 +1003,8 @@ pub fn load_task_registry(paths: &ProjectPaths, config: &CanonicalConfig) -> Res
         }
     }
     let value = crate::coordinator::state::coordinator_state_registry_load(&paths.root, &args)?;
-    let registry: crate::coordinator::model::TaskRegistry = serde_json::from_value(value).map_err(|e| {
-        MaccError::Validation(format!("Failed to parse registry: {}", e))
-    })?;
+    let registry: crate::coordinator::model::TaskRegistry = serde_json::from_value(value)
+        .map_err(|e| MaccError::Validation(format!("Failed to parse registry: {}", e)))?;
     Ok(registry)
 }
 
@@ -971,23 +1076,39 @@ pub struct FailureSummary {
     pub evidence_refs: Vec<String>,
 }
 
-pub fn get_failure_summary(paths: &ProjectPaths, config: &CanonicalConfig, task_id: &str) -> Result<FailureSummary> {
+pub fn get_failure_summary(
+    paths: &ProjectPaths,
+    config: &CanonicalConfig,
+    task_id: &str,
+) -> Result<FailureSummary> {
     let registry = load_task_registry(paths, config)?;
-    let task = registry.tasks.iter().find(|t| t.id == task_id)
+    let task = registry
+        .tasks
+        .iter()
+        .find(|t| t.id == task_id)
         .ok_or_else(|| MaccError::Validation(format!("Task {} not found", task_id)))?;
-    
+
     let runtime = &task.task_runtime;
-    let error_code = runtime.last_error_code.clone().unwrap_or_else(|| "E901".to_string());
-    let normalized_cause = crate::coordinator::error_normalizer::error_code_to_canonical_class(&error_code);
-    
-    let retry_policy = crate::coordinator::error_normalizer::retry_policy_for_error_code(&error_code);
+    let error_code = runtime
+        .last_error_code
+        .clone()
+        .unwrap_or_else(|| "E901".to_string());
+    let normalized_cause =
+        crate::coordinator::error_normalizer::error_code_to_canonical_class(&error_code);
+
+    let retry_policy =
+        crate::coordinator::error_normalizer::retry_policy_for_error_code(&error_code);
     let retryable = retry_policy == crate::coordinator::error_normalizer::RetryPolicy::Retryable;
-    let user_action_required = retry_policy == crate::coordinator::error_normalizer::RetryPolicy::Conditional || retry_policy == crate::coordinator::error_normalizer::RetryPolicy::NotRetryable;
-    
-    let affected_worktree = task.worktree.as_ref()
+    let user_action_required = retry_policy
+        == crate::coordinator::error_normalizer::RetryPolicy::Conditional
+        || retry_policy == crate::coordinator::error_normalizer::RetryPolicy::NotRetryable;
+
+    let affected_worktree = task
+        .worktree
+        .as_ref()
         .and_then(|w| w.worktree_path.clone())
         .or_else(|| Some(format!(".macc/worktree/{}", task_id)));
-        
+
     let last_safe_state = if task.state == "claimed" {
         "claimed task session initialized".to_string()
     } else if task.state == "in_progress" {
@@ -995,7 +1116,7 @@ pub fn get_failure_summary(paths: &ProjectPaths, config: &CanonicalConfig, task_
     } else {
         "base branch workspace".to_string()
     };
-    
+
     let recommended_action = if retryable {
         "retry with backoff or switch tool".to_string()
     } else {
@@ -1026,7 +1147,10 @@ pub fn get_failure_summary(paths: &ProjectPaths, config: &CanonicalConfig, task_
 }
 
 pub fn apply_preset_to_config(config: &mut CanonicalConfig, preset_name: &str) -> Result<()> {
-    let coordinator = config.automation.coordinator.get_or_insert_with(Default::default);
+    let coordinator = config
+        .automation
+        .coordinator
+        .get_or_insert_with(Default::default);
     coordinator.preset = Some(preset_name.to_string());
     match preset_name {
         "conservative" => {
@@ -1053,15 +1177,20 @@ pub fn apply_preset_to_config(config: &mut CanonicalConfig, preset_name: &str) -
             coordinator.safety_policy = Some("standard".to_string());
             coordinator.destructive_actions = Some("double_confirm".to_string());
         }
-        _ => return Err(MaccError::Validation(format!(
-            "Unknown preset '{}'. Choose from conservative, balanced, throughput.",
-            preset_name
-        ))),
+        _ => {
+            return Err(MaccError::Validation(format!(
+                "Unknown preset '{}'. Choose from conservative, balanced, throughput.",
+                preset_name
+            )))
+        }
     }
     Ok(())
 }
 
-pub fn apply_preset_to_env_cfg(env_cfg: &mut CoordinatorEnvConfig, preset_name: &str) -> Result<()> {
+pub fn apply_preset_to_env_cfg(
+    env_cfg: &mut CoordinatorEnvConfig,
+    preset_name: &str,
+) -> Result<()> {
     match preset_name {
         "conservative" => {
             env_cfg.max_parallel = Some(1);
@@ -1087,19 +1216,51 @@ pub fn apply_preset_to_env_cfg(env_cfg: &mut CoordinatorEnvConfig, preset_name: 
             env_cfg.safety_policy = Some("standard".to_string());
             env_cfg.destructive_actions = Some("double_confirm".to_string());
         }
-        _ => return Err(MaccError::Validation(format!(
-            "Unknown preset '{}'. Choose from conservative, balanced, throughput.",
-            preset_name
-        ))),
+        _ => {
+            return Err(MaccError::Validation(format!(
+                "Unknown preset '{}'. Choose from conservative, balanced, throughput.",
+                preset_name
+            )))
+        }
     }
     Ok(())
 }
 
-pub fn print_trust_review_card(paths: &ProjectPaths, plan: &crate::plan::ActionPlan, allowed_user_scope: bool) {
-    let has_user_level = plan.actions.iter().any(|a| a.scope() == crate::plan::Scope::User);
-    let scope_str = if has_user_level || allowed_user_scope { "user-level write" } else { "project-level write" };
-    let files_to_change = plan.actions.iter().filter(|a| matches!(a, crate::plan::Action::WriteFile { .. } | crate::plan::Action::MergeJson { .. })).count();
-    let user_files = plan.actions.iter().filter(|a| a.scope() == crate::plan::Scope::User && matches!(a, crate::plan::Action::WriteFile { .. } | crate::plan::Action::MergeJson { .. })).count();
+pub fn print_trust_review_card(
+    paths: &ProjectPaths,
+    plan: &crate::plan::ActionPlan,
+    allowed_user_scope: bool,
+) {
+    let has_user_level = plan
+        .actions
+        .iter()
+        .any(|a| a.scope() == crate::plan::Scope::User);
+    let scope_str = if has_user_level || allowed_user_scope {
+        "user-level write"
+    } else {
+        "project-level write"
+    };
+    let files_to_change = plan
+        .actions
+        .iter()
+        .filter(|a| {
+            matches!(
+                a,
+                crate::plan::Action::WriteFile { .. } | crate::plan::Action::MergeJson { .. }
+            )
+        })
+        .count();
+    let user_files = plan
+        .actions
+        .iter()
+        .filter(|a| {
+            a.scope() == crate::plan::Scope::User
+                && matches!(
+                    a,
+                    crate::plan::Action::WriteFile { .. } | crate::plan::Action::MergeJson { .. }
+                )
+        })
+        .count();
 
     let backups_dir = paths.macc_dir.join("backups");
     let mut backup_str = "not found (will create)".to_string();
@@ -1156,17 +1317,27 @@ pub fn print_trust_review_card(paths: &ProjectPaths, plan: &crate::plan::ActionP
         match action {
             crate::plan::Action::WriteFile { path, content, .. } => {
                 let findings = crate::security::scan_bytes(path, content);
-                secrets_count += findings.iter().filter(|f| f.severity == crate::security::Severity::Error).count();
+                secrets_count += findings
+                    .iter()
+                    .filter(|f| f.severity == crate::security::Severity::Error)
+                    .count();
             }
             crate::plan::Action::MergeJson { path, patch, .. } => {
                 let content = serde_json::to_vec(patch).unwrap_or_default();
                 let findings = crate::security::scan_bytes(path, &content);
-                secrets_count += findings.iter().filter(|f| f.severity == crate::security::Severity::Error).count();
+                secrets_count += findings
+                    .iter()
+                    .filter(|f| f.severity == crate::security::Severity::Error)
+                    .count();
             }
             _ => {}
         }
     }
-    let secrets_str = if secrets_count == 0 { "none".to_string() } else { format!("{} detected", secrets_count) };
+    let secrets_str = if secrets_count == 0 {
+        "none".to_string()
+    } else {
+        format!("{} detected", secrets_count)
+    };
 
     println!("\nTrust Review");
     println!("Scope:            {}", scope_str);
@@ -1177,4 +1348,3 @@ pub fn print_trust_review_card(paths: &ProjectPaths, plan: &crate::plan::ActionP
     println!("Secrets detected: {}", secrets_str);
     println!("Rollback:         macc restore --backup <id>\n");
 }
-

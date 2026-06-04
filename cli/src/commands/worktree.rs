@@ -318,7 +318,10 @@ impl<'a> Command for WorktreeCommand<'a> {
                 if !*force {
                     let dummy_plan = macc_core::plan::ActionPlan::new();
                     macc_core::ops_motif::print_trust_review_card(&paths, &dummy_plan, false);
-                    if !crate::confirm_yes_no(&format!("Proceed with removing worktree {} [y/N]? ", id))? {
+                    if !crate::confirm_yes_no(&format!(
+                        "Proceed with removing worktree {} [y/N]? ",
+                        id
+                    ))? {
                         println!("Worktree removal cancelled.");
                         return Ok(());
                     }

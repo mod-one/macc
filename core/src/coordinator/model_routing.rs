@@ -1,3 +1,4 @@
+use crate::config::ModelRoutingConfig;
 /// Automatic model selection engine for coordinator task dispatch (spec §8–§11).
 ///
 /// Reads `routing_hints` from a PRD task's `extra` map, applies phase-based
@@ -8,7 +9,6 @@
 /// provider-neutral: it emits symbolic tiers ("mini", "standard", "heavy")
 /// that tool adapters map to concrete model IDs.
 use crate::coordinator::model::Task;
-use crate::config::ModelRoutingConfig;
 use serde::{Deserialize, Serialize};
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -67,7 +67,11 @@ pub struct RoutingDecision {
 impl RoutingDecision {
     /// Compact log line: `Auto -> standard / standard (reason1, reason2)`.
     pub fn summary(&self) -> String {
-        let mode = if self.mode == "auto" { "Auto" } else { "Manual" };
+        let mode = if self.mode == "auto" {
+            "Auto"
+        } else {
+            "Manual"
+        };
         format!(
             "{} -> {} / {} reasoning ({})",
             mode,
@@ -88,10 +92,10 @@ impl RoutingDecision {
 /// All fields are optional — missing values fall back to phase defaults.
 #[derive(Debug, Clone, Default)]
 struct RoutingHints {
-    execution_mode: Option<String>,    // micro | standard | structural
-    reasoning_depth: Option<String>,   // light | standard | deep
-    context_scope: Option<String>,     // local | module | cross-cutting
-    risk_level: Option<String>,        // low | medium | high
+    execution_mode: Option<String>,     // micro | standard | structural
+    reasoning_depth: Option<String>,    // light | standard | deep
+    context_scope: Option<String>,      // local | module | cross-cutting
+    risk_level: Option<String>,         // low | medium | high
     validation_profile: Option<String>, // light | standard | heavy
 }
 
@@ -128,27 +132,51 @@ fn phase_defaults(phase: &str) -> (ModelTier, ReasoningDepth) {
 // ── Tier ordering (for escalation logic) ─────────────────────────────────────
 
 fn tier_rank(t: &ModelTier) -> u8 {
-    match t { ModelTier::Mini => 0, ModelTier::Standard => 1, ModelTier::Heavy => 2 }
+    match t {
+        ModelTier::Mini => 0,
+        ModelTier::Standard => 1,
+        ModelTier::Heavy => 2,
+    }
 }
 
 fn depth_rank(d: &ReasoningDepth) -> u8 {
-    match d { ReasoningDepth::Light => 0, ReasoningDepth::Standard => 1, ReasoningDepth::Deep => 2 }
+    match d {
+        ReasoningDepth::Light => 0,
+        ReasoningDepth::Standard => 1,
+        ReasoningDepth::Deep => 2,
+    }
 }
 
 fn max_tier(a: ModelTier, b: ModelTier) -> ModelTier {
-    if tier_rank(&a) >= tier_rank(&b) { a } else { b }
+    if tier_rank(&a) >= tier_rank(&b) {
+        a
+    } else {
+        b
+    }
 }
 
 fn max_depth(a: ReasoningDepth, b: ReasoningDepth) -> ReasoningDepth {
-    if depth_rank(&a) >= depth_rank(&b) { a } else { b }
+    if depth_rank(&a) >= depth_rank(&b) {
+        a
+    } else {
+        b
+    }
 }
 
 fn min_tier(a: ModelTier, b: ModelTier) -> ModelTier {
-    if tier_rank(&a) <= tier_rank(&b) { a } else { b }
+    if tier_rank(&a) <= tier_rank(&b) {
+        a
+    } else {
+        b
+    }
 }
 
 fn min_depth(a: ReasoningDepth, b: ReasoningDepth) -> ReasoningDepth {
-    if depth_rank(&a) <= depth_rank(&b) { a } else { b }
+    if depth_rank(&a) <= depth_rank(&b) {
+        a
+    } else {
+        b
+    }
 }
 
 // ── Core routing function ─────────────────────────────────────────────────────
@@ -166,9 +194,7 @@ pub fn decide(
     phase: &str,
     routing_config: Option<&ModelRoutingConfig>,
 ) -> RoutingDecision {
-    let mode_str = routing_config
-        .map(|c| c.mode.as_str())
-        .unwrap_or("auto");
+    let mode_str = routing_config.map(|c| c.mode.as_str()).unwrap_or("auto");
 
     // Manual mode: return Standard/Standard (or config-specified manual defaults).
     if mode_str == "manual" {
@@ -209,12 +235,11 @@ pub fn decide(
             depth = max_depth(depth, ReasoningDepth::Deep);
             reasons.push("context_scope=cross-cutting".into());
         }
-        Some("local") => {
+        Some("local")
             // Can allow downgrade if execution_mode is also micro
-            if hints.execution_mode.as_deref() == Some("micro") {
+            if hints.execution_mode.as_deref() == Some("micro") => {
                 tier = min_tier(tier, ModelTier::Mini);
             }
-        }
         _ => {}
     }
 
@@ -225,14 +250,13 @@ pub fn decide(
             depth = max_depth(depth, ReasoningDepth::Deep);
             reasons.push("risk_level=high".into());
         }
-        Some("low") => {
+        Some("low")
             // Permit downgrade only if nothing else escalated.
-            if tier == ModelTier::Standard && depth == ReasoningDepth::Standard {
+            if tier == ModelTier::Standard && depth == ReasoningDepth::Standard => {
                 tier = ModelTier::Mini;
                 depth = ReasoningDepth::Light;
                 reasons.push("risk_level=low".into());
             }
-        }
         _ => {}
     }
 
@@ -301,11 +325,11 @@ fn manual_defaults(cfg: Option<&ModelRoutingConfig>) -> (ModelTier, ReasoningDep
     let manual = cfg.and_then(|c| c.manual.as_ref());
     let tier = manual
         .and_then(|m| m.default_model.as_deref())
-        .and_then(|m| tier_from_str(m))
+        .and_then(tier_from_str)
         .unwrap_or(ModelTier::Standard);
     let depth = manual
         .and_then(|m| m.default_reasoning_depth.as_deref())
-        .and_then(|d| depth_from_str(d))
+        .and_then(depth_from_str)
         .unwrap_or(ReasoningDepth::Standard);
     (tier, depth)
 }
@@ -349,7 +373,10 @@ mod tests {
     fn task_with_hints(hints: serde_json::Value) -> Task {
         let mut extra = std::collections::BTreeMap::new();
         extra.insert("routing_hints".to_string(), hints);
-        Task { extra, ..Task::default() }
+        Task {
+            extra,
+            ..Task::default()
+        }
     }
 
     fn task_no_hints() -> Task {
@@ -421,7 +448,7 @@ mod tests {
     fn explicit_deep_reasoning_upgrades_tier() {
         let task = task_with_hints(json!({ "reasoning_depth": "deep" }));
         let decision = decide(&task, "summarization", None); // mini by default
-        // deep reasoning requires at least Standard tier
+                                                             // deep reasoning requires at least Standard tier
         assert!(tier_rank(&decision.tier) >= tier_rank(&ModelTier::Standard));
         assert_eq!(decision.reasoning_depth, ReasoningDepth::Deep);
     }
@@ -429,7 +456,10 @@ mod tests {
     #[test]
     fn missing_hints_never_blocks_dispatch() {
         // No panic, no error — always returns a valid decision.
-        let task = Task { extra: Default::default(), ..Task::default() };
+        let task = Task {
+            extra: Default::default(),
+            ..Task::default()
+        };
         let decision = decide(&task, "implementation", None);
         assert_eq!(decision.tier, ModelTier::Standard);
     }
@@ -439,7 +469,10 @@ mod tests {
         // hints is not an object — should fall back to phase defaults.
         let mut extra = std::collections::BTreeMap::new();
         extra.insert("routing_hints".to_string(), json!("not-an-object"));
-        let task = Task { extra, ..Task::default() };
+        let task = Task {
+            extra,
+            ..Task::default()
+        };
         let decision = decide(&task, "implementation", None);
         assert_eq!(decision.tier, ModelTier::Standard);
     }

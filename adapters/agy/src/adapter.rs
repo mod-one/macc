@@ -116,7 +116,10 @@ fn render_skill_md(name: &str) -> String {
     };
 
     let mut md = String::new();
-    md.push_str(&format!("---\nname: {}\ndescription: {}\n---\n\n", name, goal));
+    md.push_str(&format!(
+        "---\nname: {}\ndescription: {}\n---\n\n",
+        name, goal
+    ));
     md.push_str("# Goal\n");
     md.push_str(goal);
     md.push_str("\n\n# Steps\n");

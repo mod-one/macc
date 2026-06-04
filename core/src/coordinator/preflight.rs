@@ -4,8 +4,8 @@
 /// coordinator mutation. Pure business logic — no prompts or terminal I/O.
 use crate::git::{
     check_ref_format_branch, create_branch_at, create_tracking_branch, is_bare_repository,
-    local_branch_exists, remote_tracking_refs_for_branch, status_porcelain_v1, worktrees_for_branch,
-    GitPorcelainEntry,
+    local_branch_exists, remote_tracking_refs_for_branch, status_porcelain_v1,
+    worktrees_for_branch, GitPorcelainEntry,
 };
 use std::path::{Path, PathBuf};
 
@@ -152,7 +152,10 @@ impl std::fmt::Display for PreflightError {
 
 impl PreflightError {
     fn new(code: &'static str, message: impl Into<String>) -> Self {
-        Self { code, message: message.into() }
+        Self {
+            code,
+            message: message.into(),
+        }
     }
 }
 
@@ -208,8 +211,7 @@ pub fn inspect_reference_branch_preflight(
     }
 
     // Local branch existence check (spec §7.3)
-    let branch_exists = local_branch_exists(repo_root, reference_branch)
-        .unwrap_or(false);
+    let branch_exists = local_branch_exists(repo_root, reference_branch).unwrap_or(false);
 
     // Remote-tracking branches (spec §7.4)
     let remote_tracking_branches = if !branch_exists {
@@ -259,8 +261,7 @@ pub fn inspect_reference_branch_preflight(
     let mut any_dirty = false;
 
     for wt_path in &worktree_paths {
-        let entries = status_porcelain_v1(wt_path, config.include_untracked)
-            .unwrap_or_default();
+        let entries = status_porcelain_v1(wt_path, config.include_untracked).unwrap_or_default();
         let dirty_entries: Vec<GitStatusEntry> =
             entries.into_iter().map(GitStatusEntry::from).collect();
 
@@ -283,7 +284,10 @@ pub fn inspect_reference_branch_preflight(
         };
         (ReferencePreflightStatus::Dirty, action)
     } else {
-        (ReferencePreflightStatus::Clean, ReferencePreflightAction::Proceed)
+        (
+            ReferencePreflightStatus::Clean,
+            ReferencePreflightAction::Proceed,
+        )
     };
 
     Ok(ReferenceBranchPreflightReport {
@@ -303,11 +307,8 @@ pub fn create_reference_branch(
     source: BranchCreateSource,
 ) -> Result<(), PreflightError> {
     match source {
-        BranchCreateSource::CurrentHead => {
-            create_branch_at(repo_root, reference_branch, "HEAD").map_err(|e| {
-                PreflightError::new(E705, format!("Failed to create branch: {}", e))
-            })
-        }
+        BranchCreateSource::CurrentHead => create_branch_at(repo_root, reference_branch, "HEAD")
+            .map_err(|e| PreflightError::new(E705, format!("Failed to create branch: {}", e))),
         BranchCreateSource::RemoteTracking(remote_ref) => {
             create_tracking_branch(repo_root, reference_branch, &remote_ref).map_err(|e| {
                 PreflightError::new(E705, format!("Failed to create tracking branch: {}", e))
@@ -315,7 +316,10 @@ pub fn create_reference_branch(
         }
         BranchCreateSource::LocalBranch(base) | BranchCreateSource::Revision(base) => {
             create_branch_at(repo_root, reference_branch, &base).map_err(|e| {
-                PreflightError::new(E705, format!("Failed to create branch from {}: {}", base, e))
+                PreflightError::new(
+                    E705,
+                    format!("Failed to create branch from {}: {}", base, e),
+                )
             })
         }
     }
@@ -341,7 +345,10 @@ pub fn is_blocking(report: &ReferenceBranchPreflightReport) -> bool {
 pub fn format_report_cli(report: &ReferenceBranchPreflightReport) -> String {
     match &report.status {
         ReferencePreflightStatus::Clean => {
-            format!("Reference branch: {}\nPreflight: OK", report.reference_branch)
+            format!(
+                "Reference branch: {}\nPreflight: OK",
+                report.reference_branch
+            )
         }
         ReferencePreflightStatus::NotCheckedOut => {
             format!(
@@ -375,7 +382,10 @@ pub fn format_report_cli(report: &ReferenceBranchPreflightReport) -> String {
                         wt.path.display()
                     ));
                     for e in &wt.dirty_entries {
-                        out.push_str(&format!("  {}{} {}\n", e.index_status, e.worktree_status, e.path));
+                        out.push_str(&format!(
+                            "  {}{} {}\n",
+                            e.index_status, e.worktree_status, e.path
+                        ));
                     }
                 }
             }
@@ -657,7 +667,11 @@ mod tests {
         }
 
         fn temp_dir(prefix: &str) -> PathBuf {
-            let base = std::env::temp_dir().join(format!("macc-preflight-{}-{}", prefix, std::process::id()));
+            let base = std::env::temp_dir().join(format!(
+                "macc-preflight-{}-{}",
+                prefix,
+                std::process::id()
+            ));
             fs::create_dir_all(&base).unwrap();
             base
         }
@@ -669,8 +683,12 @@ mod tests {
             let cfg = ReferenceBranchPreflightConfig::default();
             let report = inspect_reference_branch_preflight(&dir, "main", &cfg).unwrap();
             assert!(
-                matches!(report.status, ReferencePreflightStatus::Clean | ReferencePreflightStatus::NotCheckedOut),
-                "expected clean or not-checked-out, got {:?}", report.status
+                matches!(
+                    report.status,
+                    ReferencePreflightStatus::Clean | ReferencePreflightStatus::NotCheckedOut
+                ),
+                "expected clean or not-checked-out, got {:?}",
+                report.status
             );
             assert_eq!(report.recommended_action, ReferencePreflightAction::Proceed);
             let _ = fs::remove_dir_all(&dir);
@@ -716,8 +734,14 @@ mod tests {
             };
             let report = inspect_reference_branch_preflight(&dir, "main", &cfg).unwrap();
             assert_eq!(report.status, ReferencePreflightStatus::Dirty);
-            assert_eq!(report.recommended_action, ReferencePreflightAction::PromptCleanOrOverride);
-            assert!(report.checked_out_worktrees.iter().any(|w| !w.dirty_entries.is_empty()));
+            assert_eq!(
+                report.recommended_action,
+                ReferencePreflightAction::PromptCleanOrOverride
+            );
+            assert!(report
+                .checked_out_worktrees
+                .iter()
+                .any(|w| !w.dirty_entries.is_empty()));
             let _ = fs::remove_dir_all(&dir);
         }
 

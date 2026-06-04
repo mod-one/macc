@@ -41,14 +41,13 @@ fn validate_locked(paths: &macc_core::ProjectPaths) -> Result<()> {
             "Lock file not found. Cannot proceed under --locked.".to_string(),
         ));
     }
-    let lock_str = std::fs::read_to_string(&lock_path)
-        .map_err(|e| macc_core::MaccError::Io {
-            path: lock_path.to_string_lossy().into(),
-            action: "read macc.lock.yaml".into(),
-            source: e,
-        })?;
-    let lock: macc_core::ops_motif::LockManifest = serde_yaml::from_str(&lock_str)
-        .map_err(|e| macc_core::MaccError::Config {
+    let lock_str = std::fs::read_to_string(&lock_path).map_err(|e| macc_core::MaccError::Io {
+        path: lock_path.to_string_lossy().into(),
+        action: "read macc.lock.yaml".into(),
+        source: e,
+    })?;
+    let lock: macc_core::ops_motif::LockManifest =
+        serde_yaml::from_str(&lock_str).map_err(|e| macc_core::MaccError::Config {
             path: lock_path.to_string_lossy().into(),
             source: e,
         })?;

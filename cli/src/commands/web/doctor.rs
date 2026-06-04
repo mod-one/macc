@@ -7,7 +7,7 @@ use super::WebState;
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::Json;
-use macc_core::doctor::{collect_all_findings, DiagnosticFinding, DiagnosticSeverity, ToolCheck, ToolStatus};
+use macc_core::doctor::{DiagnosticFinding, DiagnosticSeverity, ToolCheck, ToolStatus};
 use macc_core::service::interaction::InteractionHandler;
 use macc_core::tool::spec::{CheckSeverity, DoctorCheckKind};
 use macc_core::MaccError;
@@ -23,7 +23,9 @@ pub(super) async fn get_doctor_handler(
 ) -> std::result::Result<Json<ApiDoctorReport>, ApiError> {
     let checks = state.engine.doctor(&state.paths);
     let max_parallel = read_max_parallel(&state.paths);
-    let findings = collect_all_findings(&state.paths, max_parallel);
+    let findings = state
+        .engine
+        .collect_diagnostic_findings(&state.paths, max_parallel);
     Ok(Json(build_report(&checks, &findings)))
 }
 
@@ -63,7 +65,9 @@ pub(super) async fn run_doctor_fix_handler(
 
     let checks_after = state.engine.doctor(&state.paths);
     let max_parallel = read_max_parallel(&state.paths);
-    let findings_after = collect_all_findings(&state.paths, max_parallel);
+    let findings_after = state
+        .engine
+        .collect_diagnostic_findings(&state.paths, max_parallel);
     let report = build_report(&checks_after, &findings_after);
     let after_codes = report
         .issues

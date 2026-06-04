@@ -58,7 +58,8 @@ pub fn stacktrace_collapse(input: &str) -> String {
     for line in input.lines() {
         let trimmed = line.trim();
         if !found_header {
-            if trimmed.contains(':') || trimmed.starts_with("Error") || trimmed.starts_with("panic") {
+            if trimmed.contains(':') || trimmed.starts_with("Error") || trimmed.starts_with("panic")
+            {
                 result.push(line);
                 found_header = true;
             }

@@ -52,7 +52,9 @@ impl Command for InitCommand {
                 // Find best match
                 let matches = macc_core::save::detect_matching_saves(&paths)?;
                 if matches.is_empty() {
-                    return Err(MaccError::Validation("No matching saves found to restore.".to_string()));
+                    return Err(MaccError::Validation(
+                        "No matching saves found to restore.".to_string(),
+                    ));
                 }
                 matches[0].0.name.clone()
             } else {
@@ -76,9 +78,7 @@ impl Command for InitCommand {
             if self.apply {
                 println!("Running macc apply...");
                 crate::commands::lifecycle_support::apply(
-                    &self.app,
-                    None,
-                    false, // dry_run
+                    &self.app, None, false, // dry_run
                     false, // allow_user_scope
                     false, // json
                     false, // explain
@@ -95,11 +95,17 @@ impl Command for InitCommand {
                 println!("A previous MACC save was found for this repository:\n");
                 println!("  {}", best_match.name);
                 println!("  Saved: {}", best_match.created_at);
-                
+
                 let mut incls = Vec::new();
-                if best_match.includes.config { incls.push("config"); }
-                if best_match.includes.coordinator_sessions { incls.push("sessions"); }
-                if best_match.includes.catalogs { incls.push("catalogs"); }
+                if best_match.includes.config {
+                    incls.push("config");
+                }
+                if best_match.includes.coordinator_sessions {
+                    incls.push("sessions");
+                }
+                if best_match.includes.catalogs {
+                    incls.push("catalogs");
+                }
                 println!("  Includes: {}", incls.join(", "));
                 println!("  Excludes: worktrees, cache, generated files, logs\n");
 
@@ -111,7 +117,8 @@ impl Command for InitCommand {
 
                 // In tests/non-interactive environments, default to yes/restore or fresh depending on flag
                 // We reuse crate::confirm_yes_no logic or standard terminal check
-                let term_interactive = std::io::stdin().is_terminal() && std::env::var("CARGO_MANIFEST_DIR").is_err();
+                let term_interactive =
+                    std::io::stdin().is_terminal() && std::env::var("CARGO_MANIFEST_DIR").is_err();
                 let choice = if !term_interactive {
                     println!("(Auto-confirmed Start fresh in test/non-interactive environment)");
                     "n".to_string()
@@ -136,7 +143,7 @@ impl Command for InitCommand {
                     };
                     macc_core::save::restore_save_bundle(&paths, &best_match.name, &opts)?;
                     println!("Restore completed successfully.");
-                    
+
                     let run_apply = if self.apply {
                         true
                     } else if !term_interactive {
@@ -147,12 +154,7 @@ impl Command for InitCommand {
 
                     if run_apply {
                         crate::commands::lifecycle_support::apply(
-                            &self.app,
-                            None,
-                            false,
-                            false,
-                            false,
-                            false,
+                            &self.app, None, false, false, false, false,
                         )?;
                     }
                     return Ok(());

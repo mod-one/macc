@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 use crate::commands::web::{errors::ApiError, WebState};
 use axum::extract::{Path, State};
 use axum::Json;
@@ -115,8 +117,8 @@ pub(crate) async fn prd_generate_handler(
             )));
         }
 
-        let brief_content = std::fs::read_to_string(&from)
-            .map_err(|e| ApiError::validation(e.to_string()))?;
+        let brief_content =
+            std::fs::read_to_string(&from).map_err(|e| ApiError::validation(e.to_string()))?;
 
         let model_sel = req.model_selection.as_ref().map(to_model_selection);
 
@@ -130,7 +132,7 @@ pub(crate) async fn prd_generate_handler(
             req.target_dir.as_deref().map(std::path::Path::new),
             &run_meta.run_id,
         )
-        .map_err(|e| ApiError::validation(e))?;
+        .map_err(ApiError::validation)?;
 
         let prompt = engine.prd_build_generate_prompt(
             &brief_content,

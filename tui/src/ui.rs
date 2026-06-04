@@ -187,14 +187,10 @@ pub fn header_lines(ctx: &HeaderContext<'_>, t: &Theme) -> Vec<Line<'static>> {
     }
 
     if let Some(overrides) = &ctx.override_strip {
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!("overrides: {}", overrides),
-                Style::default()
-                    .fg(t.warn)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]));
+        lines.push(Line::from(vec![Span::styled(
+            format!("overrides: {}", overrides),
+            Style::default().fg(t.warn).add_modifier(Modifier::BOLD),
+        )]));
     }
 
     if let Some((lvl, msg)) = &ctx.status {

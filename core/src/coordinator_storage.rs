@@ -1259,26 +1259,37 @@ impl SqliteStorage {
     ) -> Result<()> {
         let task_id = &task.id;
         let runtime = &task.task_runtime;
-        
-        let claim_id = runtime.claim_id.as_deref()
+
+        let claim_id = runtime
+            .claim_id
+            .as_deref()
             .filter(|s| !s.is_empty())
             .or(runtime.active_session_id.as_deref())
             .unwrap_or(&format!("unclaimed-{}", task_id))
             .to_string();
-            
+
         let run_id = runtime.run_id.as_deref().unwrap_or("-");
         let coordinator_epoch = runtime.coordinator_epoch.unwrap_or(0);
         let workflow_state = &task.state;
         let runtime_status = runtime.status.as_deref().unwrap_or("idle");
         let phase = runtime.current_phase.as_deref();
         let tool = task.tool.as_deref();
-        
-        let worktree_slot_id = runtime.extra.get("worktree_slot_id").and_then(Value::as_str);
-        
-        let worktree_path = task.worktree.as_ref().and_then(|w| w.worktree_path.as_deref());
+
+        let worktree_slot_id = runtime
+            .extra
+            .get("worktree_slot_id")
+            .and_then(Value::as_str);
+
+        let worktree_path = task
+            .worktree
+            .as_ref()
+            .and_then(|w| w.worktree_path.as_deref());
         let branch = task.worktree.as_ref().and_then(|w| w.branch.as_deref());
-        let base_branch = task.worktree.as_ref().and_then(|w| w.base_branch.as_deref());
-        
+        let base_branch = task
+            .worktree
+            .as_ref()
+            .and_then(|w| w.base_branch.as_deref());
+
         let pid = runtime.pid;
         let process_group_id = runtime.process_group_id;
         let started_at = runtime.started_at.as_deref();
@@ -1286,17 +1297,22 @@ impl SqliteStorage {
         let heartbeat_seq = runtime.heartbeat_seq.unwrap_or(0);
         let lease_expires_at = runtime.lease_expires_at.as_deref();
         let attempt = runtime.attempt.unwrap_or(0);
-        
-        let locked_resources_json = runtime.locked_resources_json.as_deref()
+
+        let locked_resources_json = runtime
+            .locked_resources_json
+            .as_deref()
             .map(|s| s.to_string())
             .unwrap_or_else(|| {
-                serde_json::to_string(&task.exclusive_resources).unwrap_or_else(|_| "[]".to_string())
+                serde_json::to_string(&task.exclusive_resources)
+                    .unwrap_or_else(|_| "[]".to_string())
             });
-            
+
         let last_error_code = runtime.last_error_code.as_deref();
-        let last_error_message = runtime.last_error_message.as_deref()
+        let last_error_message = runtime
+            .last_error_message
+            .as_deref()
             .or(runtime.last_error.as_deref());
-            
+
         let runtime_raw = serde_json::to_string(runtime).map_err(|e| MaccError::Storage {
             backend: "sqlite",
             message: format!(
@@ -1306,8 +1322,11 @@ impl SqliteStorage {
         })?;
 
         // Delete any existing row with the same task_id to prevent duplicates when claim_id changes
-        tx.execute("DELETE FROM task_runtime WHERE task_id=?1", params![task_id])
-            .map_err(sql_err)?;
+        tx.execute(
+            "DELETE FROM task_runtime WHERE task_id=?1",
+            params![task_id],
+        )
+        .map_err(sql_err)?;
 
         tx.execute(
             "INSERT INTO task_runtime (
@@ -1408,11 +1427,14 @@ impl SqliteStorage {
                 .filter(|v| !v.is_empty())
                 .unwrap_or(now)
                 .to_string();
-            let claim_id = task.task_runtime.claim_id.clone()
+            let claim_id = task
+                .task_runtime
+                .claim_id
+                .clone()
                 .filter(|s| !s.is_empty())
                 .or(task.task_runtime.active_session_id.clone())
                 .unwrap_or_else(|| format!("unclaimed-{}", task.id));
-                
+
             let expires_at = task.task_runtime.lease_expires_at.clone();
 
             for resource_name in &task.exclusive_resources {
@@ -1668,7 +1690,10 @@ impl CoordinatorStorage for SqliteStorage {
 
             let runtime_status = task.task_runtime.status.as_deref().unwrap_or("idle");
             let pid = task.task_runtime.pid;
-            let runtime_updated = task.task_runtime.extra.get("updated_at")
+            let runtime_updated = task
+                .task_runtime
+                .extra
+                .get("updated_at")
                 .and_then(Value::as_str)
                 .unwrap_or(task_updated);
             self.upsert_task_runtime_row(&tx, task, runtime_updated)?;
@@ -2183,7 +2208,10 @@ fn parse_task_payload(task_id: &str, raw: &str) -> Result<Task> {
 fn sql_err(e: rusqlite::Error) -> MaccError {
     MaccError::Coordinator {
         code: "E411",
-        message: format!("SQLite coordinator storage error (Runtime ledger write failed): {}", e),
+        message: format!(
+            "SQLite coordinator storage error (Runtime ledger write failed): {}",
+            e
+        ),
     }
 }
 

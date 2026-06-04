@@ -32,11 +32,16 @@ pub fn build_generate_prompt(
     if let Some(ms) = model_selection {
         match ms.mode {
             ModelRoutingMode::Auto => {
-                prompt.push_str("Model routing: auto (MACC selects the lightest sufficient model)\n\n");
+                prompt.push_str(
+                    "Model routing: auto (MACC selects the lightest sufficient model)\n\n",
+                );
             }
             ModelRoutingMode::Manual => {
                 let model_label = ms.model.as_deref().unwrap_or("(unspecified)");
-                prompt.push_str(&format!("Model routing: manual — use model: {}\n\n", model_label));
+                prompt.push_str(&format!(
+                    "Model routing: manual — use model: {}\n\n",
+                    model_label
+                ));
             }
         }
     }
@@ -83,15 +88,14 @@ pub fn build_generate_prompt(
     prompt.push_str("- Write output files only inside the target output directory above.\n");
     prompt.push_str("- Do not edit source files, run commands, or execute remote code.\n");
     prompt.push_str("- Do not include concrete provider model names in routing_hints.\n");
-    prompt.push_str(&format!(
-        "  Allowed routing_hints keys: execution_mode, reasoning_depth, context_scope, risk_level, validation_profile.\n"
-    ));
-    prompt.push_str("- Task IDs must be unique and stable (never rename or delete existing IDs).\n\n");
+    prompt.push_str("  Allowed routing_hints keys: execution_mode, reasoning_depth, context_scope, risk_level, validation_profile.\n");
+    prompt.push_str(
+        "- Task IDs must be unique and stable (never rename or delete existing IDs).\n\n",
+    );
 
     prompt.push_str("## Output contract\n\n");
-    prompt.push_str(&format!(
-        "Write `prd.json` (and optionally `prd.summary.md`) to the target directory.\n"
-    ));
+    prompt
+        .push_str("Write `prd.json` (and optionally `prd.summary.md`) to the target directory.\n");
     prompt.push_str("At the end, print a short status line (e.g. `prd.json written`).\n");
 
     prompt
@@ -139,4 +143,3 @@ pub fn resolve_tool(
     }
     enabled_tools.first().cloned()
 }
-

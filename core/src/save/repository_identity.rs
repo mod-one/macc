@@ -1,7 +1,7 @@
-use std::path::Path;
-use sha2::{Digest, Sha256};
-use serde::{Deserialize, Serialize};
 use super::manifest::MatchStrength;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RepositoryIdentity {
@@ -40,7 +40,11 @@ fn normalize_git_url(url: &str) -> String {
 }
 
 fn get_git_remote_url(repo_root: &Path) -> Option<String> {
-    if let Ok(out) = crate::git::run_git_output_mapped(repo_root, &["remote", "get-url", "origin"], "get remote url") {
+    if let Ok(out) = crate::git::run_git_output_mapped(
+        repo_root,
+        &["remote", "get-url", "origin"],
+        "get remote url",
+    ) {
         let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if !url.is_empty() {
             return Some(url);
@@ -50,7 +54,11 @@ fn get_git_remote_url(repo_root: &Path) -> Option<String> {
 }
 
 fn get_git_current_branch(repo_root: &Path) -> Option<String> {
-    if let Ok(out) = crate::git::run_git_output_mapped(repo_root, &["rev-parse", "--abbrev-ref", "HEAD"], "get current branch") {
+    if let Ok(out) = crate::git::run_git_output_mapped(
+        repo_root,
+        &["rev-parse", "--abbrev-ref", "HEAD"],
+        "get current branch",
+    ) {
         let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if !branch.is_empty() {
             return Some(branch);
@@ -60,9 +68,13 @@ fn get_git_current_branch(repo_root: &Path) -> Option<String> {
 }
 
 fn get_git_default_branch(repo_root: &Path) -> Option<String> {
-    if let Ok(out) = crate::git::run_git_output_mapped(repo_root, &["symbolic-ref", "refs/remotes/origin/HEAD"], "get default branch") {
+    if let Ok(out) = crate::git::run_git_output_mapped(
+        repo_root,
+        &["symbolic-ref", "refs/remotes/origin/HEAD"],
+        "get default branch",
+    ) {
         let ref_path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if let Some(branch) = ref_path.split('/').last() {
+        if let Some(branch) = ref_path.split('/').next_back() {
             return Some(branch.to_string());
         }
     }
@@ -70,7 +82,9 @@ fn get_git_default_branch(repo_root: &Path) -> Option<String> {
 }
 
 fn get_git_head_sha(repo_root: &Path) -> Option<String> {
-    if let Ok(out) = crate::git::run_git_output_mapped(repo_root, &["rev-parse", "HEAD"], "get HEAD sha") {
+    if let Ok(out) =
+        crate::git::run_git_output_mapped(repo_root, &["rev-parse", "HEAD"], "get HEAD sha")
+    {
         let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if !sha.is_empty() {
             return Some(sha);
@@ -80,22 +94,25 @@ fn get_git_head_sha(repo_root: &Path) -> Option<String> {
 }
 
 pub fn get_repository_identity(repo_root: &Path) -> RepositoryIdentity {
-    let root_name = repo_root.file_name()
+    let root_name = repo_root
+        .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "unknown".to_string());
-    
+
     let root_path_hash = hash_string(&repo_root.to_string_lossy());
-    
+
     let remote_url = get_git_remote_url(repo_root);
     let git_remote_url_hash = remote_url
         .as_ref()
         .map(|url| hash_string(&normalize_git_url(url)))
-        .unwrap_or_else(|| "".to_string());
-        
-    let git_current_branch = get_git_current_branch(repo_root).unwrap_or_else(|| "main".to_string());
-    let git_default_branch = get_git_default_branch(repo_root).unwrap_or_else(|| "main".to_string());
-    let git_head_sha = get_git_head_sha(repo_root).unwrap_or_else(|| "".to_string());
-    
+        .unwrap_or_default();
+
+    let git_current_branch =
+        get_git_current_branch(repo_root).unwrap_or_else(|| "main".to_string());
+    let git_default_branch =
+        get_git_default_branch(repo_root).unwrap_or_else(|| "main".to_string());
+    let git_head_sha = get_git_head_sha(repo_root).unwrap_or_default();
+
     let identity_strength = if !git_remote_url_hash.is_empty() {
         "strong".to_string()
     } else if !git_head_sha.is_empty() {
@@ -115,10 +132,17 @@ pub fn get_repository_identity(repo_root: &Path) -> RepositoryIdentity {
     }
 }
 
-pub fn compute_match_strength(current: &RepositoryIdentity, manifest: &RepositoryIdentity) -> MatchStrength {
-    if !current.git_remote_url_hash.is_empty() && current.git_remote_url_hash == manifest.git_remote_url_hash {
+pub fn compute_match_strength(
+    current: &RepositoryIdentity,
+    manifest: &RepositoryIdentity,
+) -> MatchStrength {
+    if !current.git_remote_url_hash.is_empty()
+        && current.git_remote_url_hash == manifest.git_remote_url_hash
+    {
         MatchStrength::Strong
-    } else if current.root_name == manifest.root_name && current.root_path_hash == manifest.root_path_hash {
+    } else if current.root_name == manifest.root_name
+        && current.root_path_hash == manifest.root_path_hash
+    {
         MatchStrength::Medium
     } else if current.root_name == manifest.root_name {
         MatchStrength::Weak

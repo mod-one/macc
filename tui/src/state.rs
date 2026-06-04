@@ -14,6 +14,7 @@ use macc_core::process_ownership::{
     ClientIdentity, ClientKind, OwnershipStatus, ProcessHandle, ProcessKind, TakeoverRequest,
 };
 use macc_core::resolve::{resolve, resolve_fetch_units, CliOverrides};
+use macc_core::runtime::RuntimeSnapshot;
 use macc_core::service::coordinator::CoordinatorManagedCommandState;
 use macc_core::service::coordinator_workflow::{
     coordinator_command_display_name, CoordinatorCommand, CoordinatorCommandRequest,
@@ -21,7 +22,6 @@ use macc_core::service::coordinator_workflow::{
 use macc_core::service::process_ownership::{ProcessOwnershipGuard, ProcessViewerGuard};
 use macc_core::service::process_ownership_gate::{gate_owner_action, ClientContext};
 use macc_core::tool::{ActionKind, FieldDefault, FieldKind, ToolDescriptor, ToolField};
-use macc_core::runtime::RuntimeSnapshot;
 use macc_core::{find_project_root, Engine, MaccError, ProjectPaths};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap};
@@ -519,7 +519,9 @@ impl AppState {
         };
 
         let max_parallel = 2u32;
-        let findings = self.engine.collect_diagnostic_findings(&paths, max_parallel);
+        let findings = self
+            .engine
+            .collect_diagnostic_findings(&paths, max_parallel);
 
         let errors: Vec<_> = findings
             .iter()
@@ -787,11 +789,7 @@ impl AppState {
             } else {
                 task.state.to_ascii_lowercase()
             };
-            let runtime_status = task
-                .task_runtime
-                .status
-                .as_deref()
-                .unwrap_or("-");
+            let runtime_status = task.task_runtime.status.as_deref().unwrap_or("-");
             let is_live_active = matches!(
                 state.as_str(),
                 "claimed"
@@ -805,17 +803,17 @@ impl AppState {
 
             match state.as_str() {
                 "todo" => snapshot.todo += 1,
-                "claimed"
-                | "in_progress"
-                | "testing"
-                | "reviewing"
-                | "pr_open"
-                | "changes_requested"
-                | "queued"
+                "claimed" | "in_progress" | "testing" | "reviewing" | "pr_open"
+                | "changes_requested" | "queued"
                     if is_live_active =>
                 {
                     snapshot.active += 1;
-                    snapshot.active_tasks.push(macc_core::coordinator::view_model::LiveTaskRow::from_task(task, Utc::now()));
+                    snapshot.active_tasks.push(
+                        macc_core::coordinator::view_model::LiveTaskRow::from_task(
+                            task,
+                            Utc::now(),
+                        ),
+                    );
                 }
                 "claimed" => {
                     // Claimed + phase_done can happen after coordinator restart before reconciliation.
@@ -1436,7 +1434,10 @@ impl AppState {
         let env_cfg = self.coordinator_env_cfg();
         let req = macc_core::service::coordinator_workflow::CoordinatorCommandRequest {
             canonical: self.config.as_ref(),
-            coordinator_cfg: self.config.as_ref().and_then(|c| c.automation.coordinator.as_ref()),
+            coordinator_cfg: self
+                .config
+                .as_ref()
+                .and_then(|c| c.automation.coordinator.as_ref()),
             env_cfg: &env_cfg,
             logger: None,
         };
@@ -1504,7 +1505,10 @@ impl AppState {
         let env_cfg = self.coordinator_env_cfg();
         let req = macc_core::service::coordinator_workflow::CoordinatorCommandRequest {
             canonical: self.config.as_ref(),
-            coordinator_cfg: self.config.as_ref().and_then(|c| c.automation.coordinator.as_ref()),
+            coordinator_cfg: self
+                .config
+                .as_ref()
+                .and_then(|c| c.automation.coordinator.as_ref()),
             env_cfg: &env_cfg,
             logger: None,
         };
@@ -2202,7 +2206,11 @@ impl AppState {
                     elapsed_secs: elapsed,
                     finish_reason,
                 }) => {
-                    let base = format!("Coordinator '{}' finished in {}.", command, format_hms(elapsed));
+                    let base = format!(
+                        "Coordinator '{}' finished in {}.",
+                        command,
+                        format_hms(elapsed)
+                    );
                     let msg = match finish_reason {
                         Some(ref reason) => format!("{} {}", base, reason),
                         None => base,
@@ -2803,25 +2811,63 @@ impl AppState {
     // ── Unified config screen ─────────────────────────────────────────────────
 
     /// Tab names shown in the tab bar.
-    pub const CONFIG_TAB_NAMES: &'static [&'static str] =
-        &["General", "Coordinator", "Tools", "Phases", "Reliability", "Admin"];
+    pub const CONFIG_TAB_NAMES: &'static [&'static str] = &[
+        "General",
+        "Coordinator",
+        "Tools",
+        "Phases",
+        "Reliability",
+        "Admin",
+    ];
 
     /// Returns the field list for the given tab as `(source, field_index)` pairs.
     /// `source` 0 = global (settings), 1 = coordinator (automation).
     pub fn config_tab_fields(tab: usize) -> &'static [(u8, usize)] {
         match tab {
             // General: global settings (quiet, offline, debug, web port)
-            0 => &[(0,0),(0,1),(0,3),(0,2)],
+            0 => &[(0, 0), (0, 1), (0, 3), (0, 2)],
             // Coordinator: core coordinator settings
-            1 => &[(1,0),(1,1),(1,7),(1,6),(1,8),(1,32),(1,33)],
+            1 => &[(1, 0), (1, 1), (1, 7), (1, 6), (1, 8), (1, 32), (1, 33)],
             // Tools: routing and priority
-            2 => &[(1,3),(1,4),(1,5),(1,2)],
+            2 => &[(1, 3), (1, 4), (1, 5), (1, 2)],
             // Phases: pipeline phase controls
-            3 => &[(1,34),(1,35),(1,36),(1,37),(1,31),(1,38),(1,39)],
+            3 => &[
+                (1, 34),
+                (1, 35),
+                (1, 36),
+                (1, 37),
+                (1, 31),
+                (1, 38),
+                (1, 39),
+            ],
             // Reliability: stale, merge, retry, lifecycle
-            4 => &[(1,9),(1,10),(1,11),(1,12),(1,13),(1,17),(1,18),(1,19),(1,20),(1,21),(1,30),(1,23),(1,24)],
+            4 => &[
+                (1, 9),
+                (1, 10),
+                (1, 11),
+                (1, 12),
+                (1, 13),
+                (1, 17),
+                (1, 18),
+                (1, 19),
+                (1, 20),
+                (1, 21),
+                (1, 30),
+                (1, 23),
+                (1, 24),
+            ],
             // Admin: rate-limiting, log flush, JSON compat
-            5 => &[(1,26),(1,27),(1,28),(1,29),(1,14),(1,15),(1,16),(1,22),(1,25)],
+            5 => &[
+                (1, 26),
+                (1, 27),
+                (1, 28),
+                (1, 29),
+                (1, 14),
+                (1, 15),
+                (1, 16),
+                (1, 22),
+                (1, 25),
+            ],
             _ => &[],
         }
     }
@@ -3112,7 +3158,10 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
             overrides
                 .split_whitespace()
                 .find(|t| t.starts_with("[testing:"))
-                .and_then(|t| t.strip_prefix("[testing:").and_then(|s| s.strip_suffix(']')))
+                .and_then(|t| {
+                    t.strip_prefix("[testing:")
+                        .and_then(|s| s.strip_suffix(']'))
+                })
                 .map(|m| m.to_string())
         } else {
             None
@@ -3328,14 +3377,22 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
                 let require_clean = coordinator
                     .and_then(|c| c.require_clean_reference_branch)
                     .unwrap_or(true);
-                if require_clean { "true (block)".to_string() } else { "false (warn)".to_string() }
+                if require_clean {
+                    "true (block)".to_string()
+                } else {
+                    "false (warn)".to_string()
+                }
             }
             39 => {
                 let enabled = coordinator
                     .and_then(|c| c.reference_branch_preflight.as_ref())
                     .and_then(|p| p.enabled)
                     .unwrap_or(true);
-                if enabled { "enabled".to_string() } else { "disabled".to_string() }
+                if enabled {
+                    "enabled".to_string()
+                } else {
+                    "disabled".to_string()
+                }
             }
             _ => String::new(),
         }
@@ -3472,9 +3529,18 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
     pub fn begin_automation_field_edit(&mut self) {
         // Fields 0, 3, 4 use special editors — never enter text mode for them.
         match self.automation_field_index {
-            0 => { self.cycle_coordinator_tool(true); return; }
-            3 => { self.start_tool_priority_editor(); return; }
-            4 => { self.start_tool_parallel_editor(); return; }
+            0 => {
+                self.cycle_coordinator_tool(true);
+                return;
+            }
+            3 => {
+                self.start_tool_priority_editor();
+                return;
+            }
+            4 => {
+                self.start_tool_parallel_editor();
+                return;
+            }
             _ => {}
         }
         self.automation_field_input =
@@ -3512,7 +3578,9 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
     /// Field 0 – cycle coordinator tool (next/prev) without free-form text.
     pub fn cycle_coordinator_tool(&mut self, forward: bool) {
         let opts = self.coordinator_tool_options();
-        if opts.is_empty() { return; }
+        if opts.is_empty() {
+            return;
+        }
         let n = opts.len();
         let current = self
             .working_copy
@@ -3529,7 +3597,11 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
         let chosen = opts[self.coordinator_tool_cycle_idx].clone();
         self.snapshot_before_config_change();
         if let Some(coordinator) = self.coordinator_config_mut() {
-            coordinator.coordinator_tool = if chosen.is_empty() { None } else { Some(chosen) };
+            coordinator.coordinator_tool = if chosen.is_empty() {
+                None
+            } else {
+                Some(chosen)
+            };
         }
     }
 
@@ -3544,7 +3616,13 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
             .working_copy
             .as_ref()
             .and_then(|wc| wc.automation.coordinator.as_ref())
-            .map(|c| c.tool_priority.iter().filter(|t| enabled.contains(t)).cloned().collect())
+            .map(|c| {
+                c.tool_priority
+                    .iter()
+                    .filter(|t| enabled.contains(t))
+                    .cloned()
+                    .collect()
+            })
             .unwrap_or_default();
         let mut result = explicit;
         for t in &enabled {
@@ -3597,7 +3675,9 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
             // Move the grabbed tool to a higher-priority position.
             let mut list = self.tool_priority_ordered_list();
             let idx = self.tool_priority_editor_index;
-            if idx == 0 { return; }
+            if idx == 0 {
+                return;
+            }
             list.swap(idx - 1, idx);
             self.tool_priority_editor_index = idx - 1;
             self.snapshot_before_config_change();
@@ -3608,8 +3688,7 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
             // Navigate cursor without reordering.
             let count = self.tool_priority_ordered_list().len();
             if count > 0 {
-                self.tool_priority_editor_index =
-                    self.tool_priority_editor_index.saturating_sub(1);
+                self.tool_priority_editor_index = self.tool_priority_editor_index.saturating_sub(1);
             }
         }
     }
@@ -3620,7 +3699,9 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
             // Move the grabbed tool to a lower-priority position.
             let mut list = self.tool_priority_ordered_list();
             let idx = self.tool_priority_editor_index;
-            if idx + 1 >= list.len() { return; }
+            if idx + 1 >= list.len() {
+                return;
+            }
             list.swap(idx, idx + 1);
             self.tool_priority_editor_index = idx + 1;
             self.snapshot_before_config_change();
@@ -3655,13 +3736,13 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
             .as_ref()
             .map(|wc| wc.tools.enabled.len())
             .unwrap_or(0);
-        if count == 0 { return; }
+        if count == 0 {
+            return;
+        }
         if forward {
-            self.tool_parallel_editor_index =
-                (self.tool_parallel_editor_index + 1).min(count - 1);
+            self.tool_parallel_editor_index = (self.tool_parallel_editor_index + 1).min(count - 1);
         } else {
-            self.tool_parallel_editor_index =
-                self.tool_parallel_editor_index.saturating_sub(1);
+            self.tool_parallel_editor_index = self.tool_parallel_editor_index.saturating_sub(1);
         }
     }
 
@@ -5267,7 +5348,10 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
             }
             35 | 37 => {
                 let v = input.to_lowercase();
-                if !matches!(v.as_str(), "disabled" | "required" | "risk_based" | "manual") {
+                if !matches!(
+                    v.as_str(),
+                    "disabled" | "required" | "risk_based" | "manual"
+                ) {
                     Some("Mode must be one of: disabled, required, risk_based, manual.".to_string())
                 } else {
                     None
@@ -5295,7 +5379,17 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
                 let msg = task.current_message.as_deref().unwrap_or("");
                 let phase = task.phase.compact_label();
                 let status = task.runtime_status.as_str();
-                matches_search(&self.search_query, &[&task.task_id, &msg, &task.worker_id, &task.tool, &phase, &status])
+                matches_search(
+                    &self.search_query,
+                    &[
+                        &task.task_id,
+                        msg,
+                        &task.worker_id,
+                        &task.tool,
+                        phase,
+                        status,
+                    ],
+                )
             })
             .cloned()
             .collect()
@@ -5313,7 +5407,8 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
     pub fn next_live_task(&mut self) {
         let tasks = self.filtered_active_tasks();
         if !tasks.is_empty() {
-            self.coordinator_selected_task_index = (self.coordinator_selected_task_index + 1) % tasks.len();
+            self.coordinator_selected_task_index =
+                (self.coordinator_selected_task_index + 1) % tasks.len();
         }
     }
 
@@ -5352,21 +5447,26 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
             .as_deref()
             .filter(|s| !s.is_empty())
             .or_else(|| {
-                reg_task.worktree
+                reg_task
+                    .worktree
                     .as_ref()
                     .and_then(|w| w.worktree_path.as_deref())
                     .filter(|s| !s.is_empty())
             })
             .map(|p| paths.root.join(p));
 
-        let base_branch = reg_task.worktree
+        let base_branch = reg_task
+            .worktree
             .as_ref()
             .and_then(|w| w.base_branch.clone())
             .filter(|s| !s.is_empty())
             .or_else(|| reg_task.base_branch.clone().filter(|s| !s.is_empty()))
             .unwrap_or_else(|| "main".to_string());
 
-        let commit = reg_task.worktree.as_ref().and_then(|w| w.last_commit.as_ref());
+        let commit = reg_task
+            .worktree
+            .as_ref()
+            .and_then(|w| w.last_commit.as_ref());
 
         if let Some(ref wt) = worktree_path {
             if wt.exists() {
@@ -5384,13 +5484,18 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
             let args = vec!["diff", &diff_target];
             match macc_core::git::run_git_output_mapped(&paths.root, &args, "git diff commit") {
                 Ok(output) => return String::from_utf8_lossy(&output.stdout).into_owned(),
-                Err(e) => return format!("Failed to run git diff for commit {}: {}", commit_sha, e),
+                Err(e) => {
+                    return format!("Failed to run git diff for commit {}: {}", commit_sha, e)
+                }
             }
         }
         "No diff available (worktree does not exist and no commit recorded).".to_string()
     }
 
-    pub fn get_task_explain(&self, task: &macc_core::coordinator::view_model::LiveTaskRow) -> String {
+    pub fn get_task_explain(
+        &self,
+        task: &macc_core::coordinator::view_model::LiveTaskRow,
+    ) -> String {
         let paths = match &self.project_paths {
             Some(p) => p,
             None => return "No project loaded.".to_string(),
@@ -5480,23 +5585,35 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
                 let mut found = false;
                 for line in reader.lines() {
                     let Ok(line) = line else { continue };
-                    let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+                    let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) else {
+                        continue;
+                    };
                     if events_log_path.is_none() {
                         let event_task = val.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
                         if !event_task.eq_ignore_ascii_case(&task.task_id) {
                             continue;
                         }
                     }
-                    let ts = val.get("timestamp").and_then(|v| v.as_str())
+                    let ts = val
+                        .get("timestamp")
+                        .and_then(|v| v.as_str())
                         .or_else(|| val.get("ts").and_then(|v| v.as_str()))
                         .unwrap_or("-");
                     let phase = val.get("phase").and_then(|v| v.as_str()).unwrap_or("-");
-                    let sev = val.get("severity").and_then(|v| v.as_str()).unwrap_or("info");
-                    let message = val.get("message").and_then(|v| v.as_str())
+                    let sev = val
+                        .get("severity")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("info");
+                    let message = val
+                        .get("message")
+                        .and_then(|v| v.as_str())
                         .or_else(|| val.get("msg").and_then(|v| v.as_str()))
                         .unwrap_or("");
                     let time_part = if ts.len() >= 19 { &ts[11..19] } else { ts };
-                    output.push_str(&format!("  {}  {:<6} {:<8} {}\n", time_part, sev, phase, message));
+                    output.push_str(&format!(
+                        "  {}  {:<6} {:<8} {}\n",
+                        time_part, sev, phase, message
+                    ));
                     found = true;
                 }
                 if !found {
@@ -5518,17 +5635,14 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
             .as_ref()
             .ok_or_else(|| "No project loaded.".to_string())?;
         let storage_paths = CoordinatorStoragePaths::from_project_paths(paths);
-        
-        let mut snapshot = match self.load_coordinator_storage_snapshot() {
-            Ok(s) => s,
-            Err(e) => return Err(e),
-        };
-        
+
+        let mut snapshot = self.load_coordinator_storage_snapshot()?;
+
         let task = match snapshot.registry.tasks.iter_mut().find(|t| t.id == task_id) {
             Some(t) => t,
             None => return Err(format!("Task '{}' not found in registry.", task_id)),
         };
-        
+
         task.state = "queued".to_string();
         task.task_runtime.status = Some("idle".to_string());
         task.task_runtime.pid = None;
@@ -5537,19 +5651,19 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
         task.task_runtime.message = Some("Requeued by operator via TUI".to_string());
         task.task_runtime.last_error = None;
         task.task_runtime.last_error_code = None;
-        
+
         snapshot.registry.updated_at = Some(macc_core::coordinator::helpers::now_iso_coordinator());
-        
+
         let store_sqlite = SqliteStorage::new(storage_paths.clone());
         if let Err(e) = store_sqlite.save_snapshot(&snapshot) {
             return Err(format!("Failed to save snapshot to SQLite: {}", e));
         }
-        
+
         if self.allow_legacy_json_fallback() {
             let store_json = JsonStorage::new(storage_paths);
             let _ = store_json.save_snapshot(&snapshot);
         }
-        
+
         self.refresh_coordinator_snapshot();
         Ok(())
     }

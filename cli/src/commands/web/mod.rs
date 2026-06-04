@@ -4,16 +4,13 @@ mod assets;
 mod audit;
 #[allow(clippy::result_large_err)]
 mod backups;
+mod catalog_skills;
 mod config;
 mod coordinator;
-mod failures;
-mod search;
-mod catalog_skills;
-mod skill_runs;
-mod snapshot;
 #[allow(clippy::result_large_err)]
 mod doctor;
 mod errors;
+mod failures;
 #[allow(clippy::result_large_err)]
 mod git;
 #[allow(clippy::result_large_err)]
@@ -26,6 +23,9 @@ mod prd;
 mod prd_generation;
 #[allow(clippy::result_large_err)]
 mod registry;
+mod search;
+mod skill_runs;
+mod snapshot;
 mod sse;
 mod task_endpoints;
 #[allow(clippy::result_large_err)]
@@ -39,17 +39,17 @@ mod worktrees;
 use crate::commands::AppContext;
 use crate::commands::Command;
 use crate::services::engine_provider::SharedEngine;
-#[cfg(unix)]
-use libc;
 use axum::middleware::from_fn_with_state;
 use axum::routing::{delete, get, post, put};
 use axum::Json;
 use axum::Router;
+#[cfg(unix)]
+use libc;
 use macc_core::config::WebAssetsMode;
+use macc_core::coordinator_storage::CoordinatorStorage;
 use macc_core::process_ownership::{ClientKind, ProcessHandle, ProcessKind};
 use macc_core::service::process_ownership::RegisteredProcessGuard;
 use macc_core::{MaccError, ProjectPaths, Result};
-use macc_core::coordinator_storage::CoordinatorStorage;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -511,17 +511,33 @@ async fn health_handler(
 ) -> Json<serde_json::Value> {
     let paths = state.paths.clone();
     let status_res = tokio::task::spawn_blocking(move || {
-        let storage_paths = macc_core::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&paths);
+        let storage_paths =
+            macc_core::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&paths);
         let sqlite = macc_core::coordinator_storage::SqliteStorage::new(storage_paths);
-        
+
         let db_ok = sqlite.load_snapshot().is_ok();
         let last_run = sqlite.get_active_coordinator_run().unwrap_or(None);
-        let active = last_run.as_ref().map(|r| r.status == "running").unwrap_or(false);
-        let mode = last_run.as_ref().map(|r| r.status.clone()).unwrap_or_else(|| "stopped".to_string());
-        let run_id = last_run.as_ref().map(|r| r.run_id.clone()).unwrap_or_default();
-        let last_tick_at = last_run.as_ref().and_then(|r| r.last_tick_at.clone()).unwrap_or_default();
-        let started_at = last_run.as_ref().map(|r| r.started_at.clone()).unwrap_or_default();
-        
+        let active = last_run
+            .as_ref()
+            .map(|r| r.status == "running")
+            .unwrap_or(false);
+        let mode = last_run
+            .as_ref()
+            .map(|r| r.status.clone())
+            .unwrap_or_else(|| "stopped".to_string());
+        let run_id = last_run
+            .as_ref()
+            .map(|r| r.run_id.clone())
+            .unwrap_or_default();
+        let last_tick_at = last_run
+            .as_ref()
+            .and_then(|r| r.last_tick_at.clone())
+            .unwrap_or_default();
+        let started_at = last_run
+            .as_ref()
+            .map(|r| r.started_at.clone())
+            .unwrap_or_default();
+
         let snapshot = sqlite.load_snapshot().ok();
         let (active_tasks, stale_tasks, blocked_tasks) = if let Some(ref snap) = snapshot {
             let mut active_count = 0;
@@ -532,7 +548,8 @@ async fn health_handler(
                     active_count += 1;
                     if let Some(lh) = t.task_runtime.last_heartbeat.as_deref() {
                         if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(lh) {
-                            let elapsed = chrono::Utc::now().timestamp() - parsed.with_timezone(&chrono::Utc).timestamp();
+                            let elapsed = chrono::Utc::now().timestamp()
+                                - parsed.with_timezone(&chrono::Utc).timestamp();
                             if elapsed > 180 {
                                 stale_count += 1;
                             }
@@ -546,26 +563,38 @@ async fn health_handler(
         } else {
             (0, 0, 0)
         };
-        
+
         let db_pids: Vec<i64> = if let Some(ref snap) = snapshot {
-            snap.registry.tasks.iter().filter_map(|t| t.runtime_pid()).collect()
+            snap.registry
+                .tasks
+                .iter()
+                .filter_map(|t| t.runtime_pid())
+                .collect()
         } else {
             Vec::new()
         };
-        
+
         let orphaned_processes = if db_ok {
             let mut candidate_pids = std::collections::HashSet::new();
             if let Ok(pids) = macc_core::coordinator::helpers::pgrep_pids("performer") {
-                for pid in pids { candidate_pids.insert(pid); }
+                for pid in pids {
+                    candidate_pids.insert(pid);
+                }
             }
             if let Ok(pids) = macc_core::coordinator::helpers::pgrep_pids("macc") {
-                for pid in pids { candidate_pids.insert(pid); }
+                for pid in pids {
+                    candidate_pids.insert(pid);
+                }
             }
             let mut count = 0;
             let current_pid = std::process::id() as i32;
             for pid in candidate_pids {
-                if pid == current_pid { continue; }
-                if db_pids.contains(&(pid as i64)) { continue; }
+                if pid == current_pid {
+                    continue;
+                }
+                if db_pids.contains(&(pid as i64)) {
+                    continue;
+                }
                 if macc_core::coordinator::helpers::pid_in_repo(pid, &paths.root) {
                     count += 1;
                 }
@@ -583,18 +612,55 @@ async fn health_handler(
             status = "unhealthy";
         }
 
-        (status, db_ok, active, mode, run_id, last_tick_at, active_tasks, stale_tasks, blocked_tasks, orphaned_processes, started_at)
+        (
+            status,
+            db_ok,
+            active,
+            mode,
+            run_id,
+            last_tick_at,
+            active_tasks,
+            stale_tasks,
+            blocked_tasks,
+            orphaned_processes,
+            started_at,
+        )
     })
     .await;
 
-    let (status, db_ok, active, mode, run_id, last_tick_at, active_tasks, stale_tasks, blocked_tasks, orphaned_processes, started_at) = match status_res {
+    let (
+        status,
+        db_ok,
+        active,
+        mode,
+        run_id,
+        last_tick_at,
+        active_tasks,
+        stale_tasks,
+        blocked_tasks,
+        orphaned_processes,
+        started_at,
+    ) = match status_res {
         Ok(val) => val,
-        Err(_) => ("unhealthy", false, false, "stopped".to_string(), "".to_string(), "".to_string(), 0, 0, 0, 0, "".to_string()),
+        Err(_) => (
+            "unhealthy",
+            false,
+            false,
+            "stopped".to_string(),
+            "".to_string(),
+            "".to_string(),
+            0,
+            0,
+            0,
+            0,
+            "".to_string(),
+        ),
     };
 
     let uptime_seconds = if !started_at.is_empty() {
         if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(&started_at) {
-            let elapsed = chrono::Utc::now().timestamp() - parsed.with_timezone(&chrono::Utc).timestamp();
+            let elapsed =
+                chrono::Utc::now().timestamp() - parsed.with_timezone(&chrono::Utc).timestamp();
             if elapsed > 0 {
                 elapsed as u64
             } else {
@@ -629,7 +695,10 @@ async fn health_handler(
 async fn trust_handler(
     axum::extract::State(state): axum::extract::State<WebState>,
 ) -> std::result::Result<Json<macc_core::ops_motif::TrustSummary>, errors::ApiError> {
-    let config = state.engine.load_canonical_config(&state.paths).map_err(errors::ApiError::from)?;
+    let config = state
+        .engine
+        .load_canonical_config(&state.paths)
+        .map_err(errors::ApiError::from)?;
     let trust = macc_core::ops_motif::calculate_trust_summary(&state.paths, &config);
     Ok(Json(trust))
 }

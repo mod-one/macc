@@ -154,9 +154,17 @@ pub(super) fn append_task_lifecycle_event_with_session(
         seq: seq as i64,
         ts: now,
         source: "coordinator:native".to_string(),
-        task_id: if task_id.is_empty() { None } else { Some(task_id.to_string()) },
+        task_id: if task_id.is_empty() {
+            None
+        } else {
+            Some(task_id.to_string())
+        },
         event_type: event_type.to_string(),
-        phase: if phase.is_empty() { None } else { Some(phase.to_string()) },
+        phase: if phase.is_empty() {
+            None
+        } else {
+            Some(phase.to_string())
+        },
         status: status.to_string(),
         detail: Some(message.to_string()),
         msg: None,
@@ -474,7 +482,10 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                     "phase_completed",
                     task_id,
                     mode,
-                    &format!("Phase {} completed successfully (tool={})", mode, phase_tool),
+                    &format!(
+                        "Phase {} completed successfully (tool={})",
+                        mode, phase_tool
+                    ),
                     "info",
                 );
                 return Ok(Ok(combined_output));

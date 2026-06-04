@@ -1,6 +1,6 @@
 use crate::commands::{AppContext, Command};
-use macc_core::Result;
 use macc_core::ops_motif::get_failure_summary;
+use macc_core::Result;
 
 pub struct FailureCommand {
     _app: AppContext,
@@ -74,7 +74,10 @@ impl macc_core::service::backups::BackupsUi for CliBackupsUi {
 
 impl FailureCommand {
     pub fn new(app: AppContext, subcommand: FailureCommands) -> Self {
-        Self { _app: app, subcommand }
+        Self {
+            _app: app,
+            subcommand,
+        }
     }
 }
 
@@ -87,19 +90,31 @@ impl Command for FailureCommand {
             FailureCommands::List => {
                 println!("Scanning coordinator state for failed tasks...");
                 let registry = macc_core::ops_motif::load_task_registry(&paths, &config)?;
-                let failed_tasks: Vec<_> = registry.tasks.iter()
+                let failed_tasks: Vec<_> = registry
+                    .tasks
+                    .iter()
                     .filter(|t| t.state == "blocked" || t.task_runtime.last_error_code.is_some())
                     .collect();
                 if failed_tasks.is_empty() {
                     println!("No active failed tasks found in task_registry.");
                 } else {
-                    println!("{:<12} {:<30} {:<10} {:<15}", "TASK ID", "TITLE", "ERROR", "RECOMMENDED");
+                    println!(
+                        "{:<12} {:<30} {:<10} {:<15}",
+                        "TASK ID", "TITLE", "ERROR", "RECOMMENDED"
+                    );
                     println!("{:-<12} {:-<30} {:-<10} {:-<15}", "", "", "", "");
                     for task in failed_tasks {
                         let title = task.title.as_deref().unwrap_or("No Title");
-                        let err_code = task.task_runtime.last_error_code.as_deref().unwrap_or("E901");
+                        let err_code = task
+                            .task_runtime
+                            .last_error_code
+                            .as_deref()
+                            .unwrap_or("E901");
                         let state = &task.state;
-                        println!("{:<12} {:<30} {:<10} {:<15}", task.id, title, err_code, state);
+                        println!(
+                            "{:<12} {:<30} {:<10} {:<15}",
+                            task.id, title, err_code, state
+                        );
                     }
                 }
             }
@@ -110,9 +125,15 @@ impl Command for FailureCommand {
                 println!("====================================================");
                 println!("Normalized Cause : {:?}", summary.normalized_cause);
                 println!("Error Code       : {}", summary.error_code);
-                println!("Retryable        : {}", if summary.retryable { "YES" } else { "NO" });
+                println!(
+                    "Retryable        : {}",
+                    if summary.retryable { "YES" } else { "NO" }
+                );
                 println!("Last Safe State  : {}", summary.last_safe_state);
-                println!("Worktree Path    : {}", summary.affected_worktree.as_deref().unwrap_or("None"));
+                println!(
+                    "Worktree Path    : {}",
+                    summary.affected_worktree.as_deref().unwrap_or("None")
+                );
                 println!("Recommended      : {}", summary.recommended_action);
                 println!("----------------------------------------------------");
                 println!("Guarded Actions  : {:?}", summary.guarded_actions);
@@ -133,7 +154,7 @@ impl Command for FailureCommand {
                 task.task_runtime.started_at = None;
                 task.task_runtime.current_phase = None;
                 task.task_runtime.clear_last_error_details();
-                
+
                 let mut args = std::collections::BTreeMap::new();
                 let coord = config.automation.coordinator.as_ref();
                 if let Some(storage_mode) = coord.and_then(|c| c.storage_mode.as_ref()) {
@@ -141,8 +162,12 @@ impl Command for FailureCommand {
                 }
                 let value = serde_json::to_value(&registry)
                     .map_err(|e| macc_core::MaccError::Validation(e.to_string()))?;
-                macc_core::coordinator::state::coordinator_state_registry_save(&paths.root, &args, &value)?;
-                
+                macc_core::coordinator::state::coordinator_state_registry_save(
+                    &paths.root,
+                    &args,
+                    &value,
+                )?;
+
                 macc_core::ops_motif::log_ops_action(&paths, "retry", task_id)?;
                 println!("Retrying task {}...", task_id);
                 println!("Task successfully re-queued in coordinator.");
@@ -153,7 +178,7 @@ impl Command for FailureCommand {
                     macc_core::MaccError::Validation(format!("Task not found: {}", task_id))
                 })?;
                 task.state = "changes_requested".to_string();
-                
+
                 let mut args = std::collections::BTreeMap::new();
                 let coord = config.automation.coordinator.as_ref();
                 if let Some(storage_mode) = coord.and_then(|c| c.storage_mode.as_ref()) {
@@ -161,31 +186,43 @@ impl Command for FailureCommand {
                 }
                 let value = serde_json::to_value(&registry)
                     .map_err(|e| macc_core::MaccError::Validation(e.to_string()))?;
-                macc_core::coordinator::state::coordinator_state_registry_save(&paths.root, &args, &value)?;
-                
+                macc_core::coordinator::state::coordinator_state_registry_save(
+                    &paths.root,
+                    &args,
+                    &value,
+                )?;
+
                 macc_core::ops_motif::log_ops_action(&paths, "salvage", task_id)?;
                 println!("Salvaging branch state and logs for task {}...", task_id);
                 println!("State preserved. Task marked as manual-review.");
             }
             FailureCommands::Restore { task_id } => {
-                println!("WARNING: Restoring files will overwrite any local changes in the worktree.");
-                if !crate::confirm_yes_no("Are you sure you want to proceed with restore [y/N]? ")? {
+                println!(
+                    "WARNING: Restoring files will overwrite any local changes in the worktree."
+                );
+                if !crate::confirm_yes_no("Are you sure you want to proceed with restore [y/N]? ")?
+                {
                     println!("Restore cancelled.");
                     return Ok(());
                 }
-                if !crate::confirm_yes_no("CONFIRM AGAIN: This action is destructive. Proceed [y/N]? ")? {
+                if !crate::confirm_yes_no(
+                    "CONFIRM AGAIN: This action is destructive. Proceed [y/N]? ",
+                )? {
                     println!("Restore cancelled.");
                     return Ok(());
                 }
-                
-                println!("Restoring changes to last safe state for task {}...", task_id);
+
+                println!(
+                    "Restoring changes to last safe state for task {}...",
+                    task_id
+                );
                 self._app.engine.backups_restore(
                     &paths,
                     false, // user
-                    None, // backup
-                    true, // latest
+                    None,  // backup
+                    true,  // latest
                     false, // dry_run
-                    true, // yes
+                    true,  // yes
                     &CliBackupsUi,
                 )?;
                 macc_core::ops_motif::log_ops_action(&paths, "restore", task_id)?;
@@ -196,14 +233,20 @@ impl Command for FailureCommand {
                 let task = registry.find_task(task_id).ok_or_else(|| {
                     macc_core::MaccError::Validation(format!("Task not found: {}", task_id))
                 })?;
-                
-                let wt_dir = task.worktree.as_ref()
+
+                let wt_dir = task
+                    .worktree
+                    .as_ref()
                     .and_then(|w| w.worktree_path.as_ref())
                     .map(|p| paths.root.join(p))
                     .unwrap_or_else(|| paths.root.clone());
-                    
-                println!("Reading diffs for task {} in {}...", task_id, wt_dir.display());
-                
+
+                println!(
+                    "Reading diffs for task {} in {}...",
+                    task_id,
+                    wt_dir.display()
+                );
+
                 let git_args = vec!["diff", "HEAD"];
                 match macc_core::git::run_git_output_mapped(&wt_dir, &git_args, "inspect diff") {
                     Ok(out) => {
@@ -220,16 +263,21 @@ impl Command for FailureCommand {
                 }
             }
             FailureCommands::Abandon { task_id } => {
-                println!("WARNING: Abandoning a task will clear assignment and mark task as abandoned.");
-                if !crate::confirm_yes_no("Are you sure you want to proceed with abandon [y/N]? ")? {
+                println!(
+                    "WARNING: Abandoning a task will clear assignment and mark task as abandoned."
+                );
+                if !crate::confirm_yes_no("Are you sure you want to proceed with abandon [y/N]? ")?
+                {
                     println!("Abandon cancelled.");
                     return Ok(());
                 }
-                if !crate::confirm_yes_no("CONFIRM AGAIN: This action is destructive. Proceed [y/N]? ")? {
+                if !crate::confirm_yes_no(
+                    "CONFIRM AGAIN: This action is destructive. Proceed [y/N]? ",
+                )? {
                     println!("Abandon cancelled.");
                     return Ok(());
                 }
-                
+
                 let mut registry = macc_core::ops_motif::load_task_registry(&paths, &config)?;
                 let task = registry.find_task_mut(task_id).ok_or_else(|| {
                     macc_core::MaccError::Validation(format!("Task not found: {}", task_id))
@@ -241,7 +289,7 @@ impl Command for FailureCommand {
                 task.task_runtime.started_at = None;
                 task.task_runtime.current_phase = None;
                 task.task_runtime.clear_last_error_details();
-                
+
                 let mut args = std::collections::BTreeMap::new();
                 let coord = config.automation.coordinator.as_ref();
                 if let Some(storage_mode) = coord.and_then(|c| c.storage_mode.as_ref()) {
@@ -249,8 +297,12 @@ impl Command for FailureCommand {
                 }
                 let value = serde_json::to_value(&registry)
                     .map_err(|e| macc_core::MaccError::Validation(e.to_string()))?;
-                macc_core::coordinator::state::coordinator_state_registry_save(&paths.root, &args, &value)?;
-                
+                macc_core::coordinator::state::coordinator_state_registry_save(
+                    &paths.root,
+                    &args,
+                    &value,
+                )?;
+
                 macc_core::ops_motif::log_ops_action(&paths, "abandon", task_id)?;
                 println!("Task {} successfully marked as abandoned.", task_id);
             }

@@ -15,6 +15,7 @@ pub struct QuickstartCommand {
 }
 
 impl QuickstartCommand {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         app: AppContext,
         yes: bool,

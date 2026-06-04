@@ -9,7 +9,8 @@ pub fn render_mcp_config_json(config: &AgyConfig) -> String {
     for (name, spec) in &config.mcp_servers {
         let mut mapped_spec = spec.clone();
         if let JsonValue::Object(ref mut spec_map) = mapped_spec {
-            let url = spec_map.remove("url")
+            let url = spec_map
+                .remove("url")
                 .or_else(|| spec_map.remove("httpUrl"))
                 .or_else(|| spec_map.remove("serverUrl"))
                 .or_else(|| spec_map.remove("serverURL"));

@@ -12,7 +12,10 @@ pub struct ValidationResult {
 
 impl ValidationResult {
     pub fn pass() -> Self {
-        Self { ok: true, ..Default::default() }
+        Self {
+            ok: true,
+            ..Default::default()
+        }
     }
 
     pub fn add_warning(&mut self, w: impl Into<String>) {
@@ -143,7 +146,12 @@ fn check_routing_hints_neutral(task: &Value, result: &mut ValidationResult) {
 
 fn looks_like_provider_model(s: &str) -> bool {
     let lower = s.to_lowercase();
-    lower.contains("claude-") || lower.contains("gpt-") || lower.contains("gemini-")
-        || lower.contains("codex-") || lower.contains("opus") || lower.contains("sonnet")
-        || lower.contains("haiku") || lower.contains("mistral")
+    lower.contains("claude-") // macc:allow-tool-name
+        || lower.contains("gpt-")
+        || lower.contains("gemini-") // macc:allow-tool-name
+        || lower.contains("codex-") // macc:allow-tool-name
+        || lower.contains("opus")
+        || lower.contains("sonnet")
+        || lower.contains("haiku")
+        || lower.contains("mistral") // macc:allow-tool-name
 }

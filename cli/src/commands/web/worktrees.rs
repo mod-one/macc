@@ -109,7 +109,9 @@ pub(super) async fn list_worktrees_handler(
 /// Returns the set of canonicalized worktree paths that have an active coordinator task
 /// (state: claimed, in_progress, pr_open, changes_requested, or queued).
 fn load_active_worktree_paths(paths: &macc_core::ProjectPaths) -> HashSet<String> {
-    use macc_core::coordinator_storage::{CoordinatorStorage, CoordinatorStoragePaths, SqliteStorage, JsonStorage};
+    use macc_core::coordinator_storage::{
+        CoordinatorStorage, CoordinatorStoragePaths, JsonStorage, SqliteStorage,
+    };
     let storage_paths = CoordinatorStoragePaths::from_project_paths(paths);
     let sqlite = SqliteStorage::new(storage_paths.clone());
     let snapshot = if sqlite.has_snapshot_data().unwrap_or(false) {
@@ -121,7 +123,11 @@ fn load_active_worktree_paths(paths: &macc_core::ProjectPaths) -> HashSet<String
         .map(|s| s.registry.active_task_worktree_paths())
         .unwrap_or_default()
         .into_iter()
-        .map(|p| canonicalize_path_fallback(std::path::Path::new(&p)).to_string_lossy().into_owned())
+        .map(|p| {
+            canonicalize_path_fallback(std::path::Path::new(&p))
+                .to_string_lossy()
+                .into_owned()
+        })
         .collect()
 }
 
@@ -747,7 +753,11 @@ fn map_entry_to_api(
         slug,
         branch,
         tool,
-        status: Some(derive_worktree_status(entry, dirty, active_paths.contains(&path_str))),
+        status: Some(derive_worktree_status(
+            entry,
+            dirty,
+            active_paths.contains(&path_str),
+        )),
         path: entry.path.to_string_lossy().into_owned(),
         base_branch,
         head: entry.head.clone(),

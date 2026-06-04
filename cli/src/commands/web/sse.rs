@@ -157,7 +157,10 @@ pub(super) fn pending_events_after(
         .collect()
 }
 
-pub(super) fn resolve_source_seq_cursor(events: &[CoordinatorEvent], last_event_id: Option<&str>) -> i64 {
+pub(super) fn resolve_source_seq_cursor(
+    events: &[CoordinatorEvent],
+    last_event_id: Option<&str>,
+) -> i64 {
     last_event_id
         .and_then(|id| {
             events

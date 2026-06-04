@@ -205,10 +205,7 @@ pub fn resolve(canonical: &CanonicalConfig, overrides: &CliOverrides) -> Resolve
         mcp_templates: canonical.mcp_templates.clone(),
         automation: canonical.automation.clone(),
         settings,
-        skills_run_policy: canonical
-            .skills
-            .as_ref()
-            .and_then(|s| s.run_policy.clone()),
+        skills_run_policy: canonical.skills.as_ref().and_then(|s| s.run_policy.clone()),
         context: canonical.context.clone(),
     }
 }
@@ -554,6 +551,14 @@ mod tests {
                 subpath: "skills/s1".into(),
             },
             source: source1.clone(),
+            tools: vec![],
+            recommended_ref: None,
+            risk: None,
+            requires_mcp: false,
+            writes_user_level_config: false,
+            targets: Default::default(),
+            category: None,
+            compatibility: None,
         });
         skills_catalog.entries.push(SkillEntry {
             id: "skill2".into(),
@@ -564,6 +569,14 @@ mod tests {
                 subpath: "skills/s2".into(),
             },
             source: source1, // Same source
+            tools: vec![],
+            recommended_ref: None,
+            risk: None,
+            requires_mcp: false,
+            writes_user_level_config: false,
+            targets: Default::default(),
+            category: None,
+            compatibility: None,
         });
         for required_id in crate::required_skills() {
             skills_catalog.entries.push(SkillEntry {
@@ -581,6 +594,14 @@ mod tests {
                     checksum: None,
                     subpaths: vec![],
                 },
+                tools: vec![],
+                recommended_ref: None,
+                risk: None,
+                requires_mcp: false,
+                writes_user_level_config: false,
+                targets: Default::default(),
+                category: None,
+                compatibility: None,
             });
         }
 
@@ -606,6 +627,8 @@ mod tests {
             mcp_templates: Vec::new(),
             automation: crate::config::AutomationConfig::default(),
             settings: SettingsConfig::default(),
+            context: None,
+            skills_run_policy: None,
         };
 
         let fetch_units = resolve_fetch_units(&paths, &resolved)?;
@@ -666,6 +689,14 @@ mod tests {
                 checksum: None,
                 subpaths: vec![],
             },
+            tools: vec![],
+            recommended_ref: None,
+            risk: None,
+            requires_mcp: false,
+            writes_user_level_config: false,
+            targets: Default::default(),
+            category: None,
+            compatibility: None,
         });
         for required_id in crate::required_skills() {
             skills_catalog.entries.push(SkillEntry {
@@ -683,6 +714,14 @@ mod tests {
                     checksum: None,
                     subpaths: vec![],
                 },
+                tools: vec![],
+                recommended_ref: None,
+                risk: None,
+                requires_mcp: false,
+                writes_user_level_config: false,
+                targets: Default::default(),
+                category: None,
+                compatibility: None,
             });
         }
 
@@ -729,6 +768,8 @@ mod tests {
             mcp_templates: Vec::new(),
             automation: crate::config::AutomationConfig::default(),
             settings: SettingsConfig::default(),
+            context: None,
+            skills_run_policy: None,
         };
 
         let fetch_units = resolve_fetch_units(&paths, &resolved)?;
@@ -787,6 +828,8 @@ mod tests {
             mcp_templates: Vec::new(),
             automation: crate::config::AutomationConfig::default(),
             settings: SettingsConfig::default(),
+            context: None,
+            skills_run_policy: None,
         };
 
         let result = resolve_fetch_units(&paths, &resolved);

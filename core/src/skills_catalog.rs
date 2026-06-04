@@ -4,8 +4,8 @@
 /// All types here are data-only; no network I/O is performed.
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::fmt::Write as _;
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::path::Path;
 
 // ── State model (spec §3) ─────────────────────────────────────────────────────
@@ -262,10 +262,7 @@ impl PackageManifest {
     /// Validate the manifest per spec §7 safety rules.
     pub fn validate(&self) -> Result<(), String> {
         // type allowlist
-        if !matches!(
-            self.manifest_type.as_str(),
-            "skill" | "mcp" | "hook-bundle"
-        ) {
+        if !matches!(self.manifest_type.as_str(), "skill" | "mcp" | "hook-bundle") {
             return Err(format!("Unknown manifest type '{}'", self.manifest_type));
         }
         // id must be non-empty
@@ -273,7 +270,7 @@ impl PackageManifest {
             return Err("Manifest id is empty".to_string());
         }
         // all targets: check for path escapes
-        for (_, targets) in &self.targets {
+        for targets in self.targets.values() {
             for t in targets {
                 if t.src.contains("..") || t.dest.contains("..") {
                     return Err(format!(
@@ -299,9 +296,7 @@ impl PackageManifest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConflictKind {
-    SkillVsSkill {
-        existing_owner: String,
-    },
+    SkillVsSkill { existing_owner: String },
     SkillVsUnmanagedFile,
     SkillVsModifiedManaged,
     PathEscape,
@@ -384,10 +379,7 @@ pub fn detect_conflicts(
                 conflicts.push(InstallConflict {
                     dest: dest.clone(),
                     kind: ConflictKind::SkillVsUnmanagedFile,
-                    message: format!(
-                        "Destination '{}' exists and is not MACC-owned",
-                        dest
-                    ),
+                    message: format!("Destination '{}' exists and is not MACC-owned", dest),
                 });
             }
         }
@@ -421,7 +413,10 @@ fn hex_hash_6(input: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
     let result = hasher.finalize();
-    result[..3].iter().fold(String::new(), |mut s, b| { write!(s, "{:02x}", b).ok(); s })
+    result[..3].iter().fold(String::new(), |mut s, b| {
+        write!(s, "{:02x}", b).ok();
+        s
+    })
 }
 
 // ── Ownership marker (spec §12) ───────────────────────────────────────────────
@@ -435,11 +430,7 @@ pub struct OwnershipMarker {
     pub installed_at: String,
 }
 
-pub fn write_ownership_marker(
-    dir: &Path,
-    skill_id: &str,
-    tool: &str,
-) -> crate::Result<()> {
+pub fn write_ownership_marker(dir: &Path, skill_id: &str, tool: &str) -> crate::Result<()> {
     let marker_path = dir.join(".macc-owned.json");
     let marker = OwnershipMarker {
         owner: "macc".to_string(),
@@ -464,7 +455,10 @@ pub fn sha256_digest(content: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content);
     let result = hasher.finalize();
-    let hex = result.iter().fold(String::new(), |mut s, b| { write!(s, "{:02x}", b).ok(); s });
+    let hex = result.iter().fold(String::new(), |mut s, b| {
+        write!(s, "{:02x}", b).ok();
+        s
+    });
     format!("sha256:{}", hex)
 }
 
@@ -520,26 +514,22 @@ pub fn compute_skills_status(
         }
 
         // Unpinned warning.
-        if !entry.source.pinned {
-            if entry.source.requested_ref.as_deref() == Some("main")
+        if !entry.source.pinned
+            && (entry.source.requested_ref.as_deref() == Some("main")
                 || entry.source.requested_ref.as_deref() == Some("master")
-                || entry.source.resolved_ref.is_none()
-            {
-                warnings.push(format!(
-                    "{} is installed from mutable ref \"{}\".",
-                    entry.id,
-                    entry.source.requested_ref.as_deref().unwrap_or("unknown")
-                ));
-            }
+                || entry.source.resolved_ref.is_none())
+        {
+            warnings.push(format!(
+                "{} is installed from mutable ref \"{}\".",
+                entry.id,
+                entry.source.requested_ref.as_deref().unwrap_or("unknown")
+            ));
         }
 
         let kind = if !all_present {
             SkillStatusKind::MissingFiles
         } else if any_modified {
-            warnings.push(format!(
-                "{} differs from lockfile digest.",
-                entry.id
-            ));
+            warnings.push(format!("{} differs from lockfile digest.", entry.id));
             SkillStatusKind::Modified
         } else if !entry.source.pinned {
             SkillStatusKind::Unpinned
@@ -628,10 +618,7 @@ pub fn verify_skills(
                 skill_id: entry.id.clone(),
                 tool: entry.tool.clone(),
                 kind: "cache-missing".to_string(),
-                message: format!(
-                    "Cache entry not found: {}",
-                    entry.cache.cache_key
-                ),
+                message: format!("Cache entry not found: {}", entry.cache.cache_key),
             });
         }
 
@@ -671,9 +658,7 @@ pub fn diff_skill(
 
     for target in &entry.installed.targets {
         let installed_path = project_root.join(&target.dest);
-        let cache_src_path = cache_dir
-            .join(&entry.cache.cache_key)
-            .join(&target.src);
+        let cache_src_path = cache_dir.join(&entry.cache.cache_key).join(&target.src);
 
         if !installed_path.exists() {
             diffs.push(SkillDiffEntry {
@@ -700,14 +685,8 @@ pub fn diff_skill(
                 };
 
                 let mut lines = Vec::new();
-                lines.push(format!(
-                    "--- a/{} (cache)",
-                    target.src
-                ));
-                lines.push(format!(
-                    "+++ b/{} (installed)",
-                    target.dest
-                ));
+                lines.push(format!("--- a/{} (cache)", target.src));
+                lines.push(format!("+++ b/{} (installed)", target.dest));
 
                 // Simple line diff.
                 let cache_lines: Vec<&str> = cache_content.lines().collect();
@@ -847,7 +826,6 @@ pub const MACC_SKILL_4003: &str = "MACC-SKILL-4003"; // Lockfile drift detected
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
     fn test_git_cache_key_format() {
@@ -955,8 +933,7 @@ mod tests {
                     version: Some("0.3.1".to_string()),
                 },
                 cache: CacheRef {
-                    cache_key: "git/2c92a9/9f31c2a8f3b6b4e1c7e42c9f4c2f8a2c6b73d911"
-                        .to_string(),
+                    cache_key: "git/2c92a9/9f31c2a8f3b6b4e1c7e42c9f4c2f8a2c6b73d911".to_string(),
                 },
                 installed: InstalledTargets {
                     at: "2026-06-01T00:00:00Z".to_string(),
@@ -979,9 +956,7 @@ mod tests {
     #[test]
     fn test_detect_conflicts_path_escape() {
         let lockfile = SkillsLockFile::default();
-        let planned = vec![
-            ("src/foo.md".to_string(), "../../.ssh/config".to_string()),
-        ];
+        let planned = vec![("src/foo.md".to_string(), "../../.ssh/config".to_string())];
         let conflicts = detect_conflicts(&planned, &lockfile, Path::new("/tmp"));
         assert!(!conflicts.is_empty());
         assert!(matches!(conflicts[0].kind, ConflictKind::PathEscape));
@@ -1017,7 +992,9 @@ mod tests {
                 id: "foo".to_string(),
                 version: None,
             },
-            cache: CacheRef { cache_key: "git/aabbcc/def".to_string() },
+            cache: CacheRef {
+                cache_key: "git/aabbcc/def".to_string(),
+            },
             installed: InstalledTargets {
                 at: "2026-06-01T00:00:00Z".to_string(),
                 targets: vec![],

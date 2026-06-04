@@ -1,6 +1,6 @@
 use crate::commands::{AppContext, Command};
+use macc_core::ops_motif::{apply_preset_to_config, get_setting_descriptors, SettingCategory};
 use macc_core::Result;
-use macc_core::ops_motif::{get_setting_descriptors, SettingCategory, apply_preset_to_config};
 use std::fs;
 
 pub struct SettingsCommand {
@@ -41,7 +41,11 @@ impl Command for SettingsCommand {
         let mut config = self.app.canonical_config()?;
 
         match &self.subcommand {
-            SettingsCommands::Show { advanced, admin, profile } => {
+            SettingsCommands::Show {
+                advanced,
+                admin,
+                profile,
+            } => {
                 let max_category = if *admin {
                     SettingCategory::Admin
                 } else if *advanced {
@@ -91,7 +95,9 @@ impl Command for SettingsCommand {
                 }
 
                 // Resolve the config to avoid hardcoded fallbacks
-                let resolved = macc_core::config::CoordinatorConfigResolved::resolve(config.automation.coordinator.as_ref());
+                let resolved = macc_core::config::CoordinatorConfigResolved::resolve(
+                    config.automation.coordinator.as_ref(),
+                );
 
                 println!("====================================================");
                 println!("                MACC SETTINGS                       ");
@@ -102,7 +108,10 @@ impl Command for SettingsCommand {
                     // Check categories
                     let show = match desc.category {
                         SettingCategory::Basic => true,
-                        SettingCategory::Advanced => max_category == SettingCategory::Advanced || max_category == SettingCategory::Admin,
+                        SettingCategory::Advanced => {
+                            max_category == SettingCategory::Advanced
+                                || max_category == SettingCategory::Admin
+                        }
                         SettingCategory::Admin => max_category == SettingCategory::Admin,
                     };
 
@@ -111,18 +120,30 @@ impl Command for SettingsCommand {
                             "quiet" => config.settings.quiet.to_string(),
                             "offline" => config.settings.offline.to_string(),
                             "web_port" => config.settings.web_port.unwrap_or(3450).to_string(),
-                            "coordinator_tool" => resolved.coordinator_tool.clone().unwrap_or_else(|| "Auto-select".to_string()),
+                            "coordinator_tool" => resolved
+                                .coordinator_tool
+                                .clone()
+                                .unwrap_or_else(|| "Auto-select".to_string()),
                             "reference_branch" => resolved.reference_branch.clone(),
                             "max_parallel" => resolved.max_parallel.to_string(),
                             "timeout_seconds" => resolved.timeout_seconds.to_string(),
-                            "prd_file" => resolved.prd_file.clone().unwrap_or_else(|| "prd.json".to_string()),
+                            "prd_file" => resolved
+                                .prd_file
+                                .clone()
+                                .unwrap_or_else(|| "prd.json".to_string()),
                             "max_dispatch" => resolved.max_dispatch.to_string(),
-                            "phase_runner_max_attempts" => resolved.phase_runner_max_attempts.to_string(),
+                            "phase_runner_max_attempts" => {
+                                resolved.phase_runner_max_attempts.to_string()
+                            }
                             "merge_ai_fix" => resolved.merge_ai_fix.to_string(),
                             "safety_policy" => resolved.safety_policy.clone(),
                             "destructive_actions" => resolved.destructive_actions.clone(),
                             "storage_mode" => resolved.storage_mode.clone(),
-                            "task_registry_file" => resolved.task_registry_file.clone().unwrap_or_else(|| ".macc/automation/task/task_registry.json".to_string()),
+                            "task_registry_file" => {
+                                resolved.task_registry_file.clone().unwrap_or_else(|| {
+                                    ".macc/automation/task/task_registry.json".to_string()
+                                })
+                            }
                             _ => desc.default_value.clone(),
                         };
 
@@ -130,25 +151,39 @@ impl Command for SettingsCommand {
                         let source = {
                             let name = desc.name.as_str();
                             let overrides = &self.app.overrides;
-                            if name == "quiet" && overrides.quiet.is_some() {
+                            if (name == "quiet" && overrides.quiet.is_some())
+                                || (name == "offline" && overrides.offline.is_some())
+                            {
                                 "CLI override"
-                            } else if name == "offline" && overrides.offline.is_some() {
-                                "CLI override"
-                            } else if raw_profile_yaml.as_ref().map(|py| {
-                                if name == "quiet" || name == "offline" || name == "web_port" {
-                                    py.get("settings").and_then(|s| s.get(name)).is_some()
-                                } else {
-                                    py.get("automation").and_then(|a| a.get("coordinator")).and_then(|c| c.get(name)).is_some()
-                                }
-                            }).unwrap_or(false) {
+                            } else if raw_profile_yaml
+                                .as_ref()
+                                .map(|py| {
+                                    if name == "quiet" || name == "offline" || name == "web_port" {
+                                        py.get("settings").and_then(|s| s.get(name)).is_some()
+                                    } else {
+                                        py.get("automation")
+                                            .and_then(|a| a.get("coordinator"))
+                                            .and_then(|c| c.get(name))
+                                            .is_some()
+                                    }
+                                })
+                                .unwrap_or(false)
+                            {
                                 "profile"
-                            } else if raw_yaml.as_ref().map(|y| {
-                                if name == "quiet" || name == "offline" || name == "web_port" {
-                                    y.get("settings").and_then(|s| s.get(name)).is_some()
-                                } else {
-                                    y.get("automation").and_then(|a| a.get("coordinator")).and_then(|c| c.get(name)).is_some()
-                                }
-                            }).unwrap_or(false) {
+                            } else if raw_yaml
+                                .as_ref()
+                                .map(|y| {
+                                    if name == "quiet" || name == "offline" || name == "web_port" {
+                                        y.get("settings").and_then(|s| s.get(name)).is_some()
+                                    } else {
+                                        y.get("automation")
+                                            .and_then(|a| a.get("coordinator"))
+                                            .and_then(|c| c.get(name))
+                                            .is_some()
+                                    }
+                                })
+                                .unwrap_or(false)
+                            {
                                 "project config"
                             } else {
                                 "default"
@@ -172,14 +207,16 @@ impl Command for SettingsCommand {
                 println!("Applying preset: {}...", name);
                 apply_preset_to_config(&mut config, name)?;
 
-                let serialized = serde_yaml::to_string(&config)
-                    .map_err(|e| macc_core::MaccError::Validation(format!("serialize config: {}", e)))?;
-                fs::write(&paths.config_path, serialized)
-                    .map_err(|e| macc_core::MaccError::Io {
+                let serialized = serde_yaml::to_string(&config).map_err(|e| {
+                    macc_core::MaccError::Validation(format!("serialize config: {}", e))
+                })?;
+                fs::write(&paths.config_path, serialized).map_err(|e| {
+                    macc_core::MaccError::Io {
                         path: paths.config_path.to_string_lossy().into(),
                         action: "write updated config with preset".into(),
                         source: e,
-                    })?;
+                    }
+                })?;
                 println!("Preset successfully applied and saved to config.");
             }
         }

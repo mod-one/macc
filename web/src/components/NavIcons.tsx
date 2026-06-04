@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components */
 // Lucide-style SVG icons — 16×16 viewport, stroke-based
 const I = (d: string, extra?: string) => () => (
   <svg

@@ -297,16 +297,20 @@ pub fn retry_policy_for_error_code(code: &str) -> RetryPolicy {
         "E101" | "E601" | E603_SESSION_CONFLICT | E403_TASK_STATE_CONFLICT => {
             RetryPolicy::Retryable
         }
-        "E102" | "E103" | "E201" | "E202" | E503_MERGE_BLOCKED_BY_POLICY | "E602" | "E901"
+        "E102"
+        | "E103"
+        | "E201"
+        | "E202"
+        | E503_MERGE_BLOCKED_BY_POLICY
+        | "E602"
+        | "E901"
         | E410_COORDINATOR_LEASE_CONFLICT
         | E411_RUNTIME_LEDGER_WRITE_FAILED
         | E412_RECOVERY_CLASSIFICATION_FAILED
         | E415_ORPHANED_PERFORMER_DETECTED
         | E416_FORCE_TERMINATION_FAILED
         | E417_DIRTY_WORKTREE_BLOCKS_RECOVERY
-        | E418_STALE_EVENT_REJECTED => {
-            RetryPolicy::NotRetryable
-        }
+        | E418_STALE_EVENT_REJECTED => RetryPolicy::NotRetryable,
         E104_PERFORMER_PARTIAL_CHANGES
         | E105_PERFORMER_EXIT_NON_ZERO
         | "E301"
@@ -661,15 +665,42 @@ mod tests {
             error_code_to_canonical_class(E504_POST_MERGE_VALIDATION_FAILED),
             CanonicalClass::PostCommitFailure
         );
-        assert_eq!(error_code_to_canonical_class(E410_COORDINATOR_LEASE_CONFLICT), CanonicalClass::SessionConflict);
-        assert_eq!(error_code_to_canonical_class(E411_RUNTIME_LEDGER_WRITE_FAILED), CanonicalClass::Internal);
-        assert_eq!(error_code_to_canonical_class(E412_RECOVERY_CLASSIFICATION_FAILED), CanonicalClass::Internal);
-        assert_eq!(error_code_to_canonical_class(E413_PERFORMER_HEARTBEAT_STALE), CanonicalClass::Internal);
-        assert_eq!(error_code_to_canonical_class(E414_PERFORMER_PROCESS_DEAD), CanonicalClass::Internal);
-        assert_eq!(error_code_to_canonical_class(E415_ORPHANED_PERFORMER_DETECTED), CanonicalClass::Internal);
-        assert_eq!(error_code_to_canonical_class(E416_FORCE_TERMINATION_FAILED), CanonicalClass::Internal);
-        assert_eq!(error_code_to_canonical_class(E417_DIRTY_WORKTREE_BLOCKS_RECOVERY), CanonicalClass::GitConflict);
-        assert_eq!(error_code_to_canonical_class(E418_STALE_EVENT_REJECTED), CanonicalClass::SessionConflict);
+        assert_eq!(
+            error_code_to_canonical_class(E410_COORDINATOR_LEASE_CONFLICT),
+            CanonicalClass::SessionConflict
+        );
+        assert_eq!(
+            error_code_to_canonical_class(E411_RUNTIME_LEDGER_WRITE_FAILED),
+            CanonicalClass::Internal
+        );
+        assert_eq!(
+            error_code_to_canonical_class(E412_RECOVERY_CLASSIFICATION_FAILED),
+            CanonicalClass::Internal
+        );
+        assert_eq!(
+            error_code_to_canonical_class(E413_PERFORMER_HEARTBEAT_STALE),
+            CanonicalClass::Internal
+        );
+        assert_eq!(
+            error_code_to_canonical_class(E414_PERFORMER_PROCESS_DEAD),
+            CanonicalClass::Internal
+        );
+        assert_eq!(
+            error_code_to_canonical_class(E415_ORPHANED_PERFORMER_DETECTED),
+            CanonicalClass::Internal
+        );
+        assert_eq!(
+            error_code_to_canonical_class(E416_FORCE_TERMINATION_FAILED),
+            CanonicalClass::Internal
+        );
+        assert_eq!(
+            error_code_to_canonical_class(E417_DIRTY_WORKTREE_BLOCKS_RECOVERY),
+            CanonicalClass::GitConflict
+        );
+        assert_eq!(
+            error_code_to_canonical_class(E418_STALE_EVENT_REJECTED),
+            CanonicalClass::SessionConflict
+        );
     }
 
     #[test]
@@ -706,15 +737,42 @@ mod tests {
             retry_policy_for_error_code(E504_POST_MERGE_VALIDATION_FAILED),
             RetryPolicy::Conditional
         );
-        assert_eq!(retry_policy_for_error_code(E410_COORDINATOR_LEASE_CONFLICT), RetryPolicy::NotRetryable);
-        assert_eq!(retry_policy_for_error_code(E411_RUNTIME_LEDGER_WRITE_FAILED), RetryPolicy::NotRetryable);
-        assert_eq!(retry_policy_for_error_code(E412_RECOVERY_CLASSIFICATION_FAILED), RetryPolicy::NotRetryable);
-        assert_eq!(retry_policy_for_error_code(E413_PERFORMER_HEARTBEAT_STALE), RetryPolicy::Conditional);
-        assert_eq!(retry_policy_for_error_code(E414_PERFORMER_PROCESS_DEAD), RetryPolicy::Conditional);
-        assert_eq!(retry_policy_for_error_code(E415_ORPHANED_PERFORMER_DETECTED), RetryPolicy::NotRetryable);
-        assert_eq!(retry_policy_for_error_code(E416_FORCE_TERMINATION_FAILED), RetryPolicy::NotRetryable);
-        assert_eq!(retry_policy_for_error_code(E417_DIRTY_WORKTREE_BLOCKS_RECOVERY), RetryPolicy::NotRetryable);
-        assert_eq!(retry_policy_for_error_code(E418_STALE_EVENT_REJECTED), RetryPolicy::NotRetryable);
+        assert_eq!(
+            retry_policy_for_error_code(E410_COORDINATOR_LEASE_CONFLICT),
+            RetryPolicy::NotRetryable
+        );
+        assert_eq!(
+            retry_policy_for_error_code(E411_RUNTIME_LEDGER_WRITE_FAILED),
+            RetryPolicy::NotRetryable
+        );
+        assert_eq!(
+            retry_policy_for_error_code(E412_RECOVERY_CLASSIFICATION_FAILED),
+            RetryPolicy::NotRetryable
+        );
+        assert_eq!(
+            retry_policy_for_error_code(E413_PERFORMER_HEARTBEAT_STALE),
+            RetryPolicy::Conditional
+        );
+        assert_eq!(
+            retry_policy_for_error_code(E414_PERFORMER_PROCESS_DEAD),
+            RetryPolicy::Conditional
+        );
+        assert_eq!(
+            retry_policy_for_error_code(E415_ORPHANED_PERFORMER_DETECTED),
+            RetryPolicy::NotRetryable
+        );
+        assert_eq!(
+            retry_policy_for_error_code(E416_FORCE_TERMINATION_FAILED),
+            RetryPolicy::NotRetryable
+        );
+        assert_eq!(
+            retry_policy_for_error_code(E417_DIRTY_WORKTREE_BLOCKS_RECOVERY),
+            RetryPolicy::NotRetryable
+        );
+        assert_eq!(
+            retry_policy_for_error_code(E418_STALE_EVENT_REJECTED),
+            RetryPolicy::NotRetryable
+        );
     }
 
     #[test]

@@ -86,24 +86,22 @@ impl Command for PrdCommand {
                 promote,
                 yes,
                 json,
-            } => {
-                run_generate(
-                    &paths,
-                    from_path,
-                    tool.as_deref(),
-                    model_routing.as_deref(),
-                    model.as_deref(),
-                    instructions.as_deref(),
-                    instructions_file.as_deref(),
-                    target_dir.as_deref(),
-                    update_path.as_deref(),
-                    *dry_run,
-                    *promote,
-                    *yes,
-                    *json,
-                    &*self.app.engine,
-                )
-            }
+            } => run_generate(
+                &paths,
+                from_path,
+                tool.as_deref(),
+                model_routing.as_deref(),
+                model.as_deref(),
+                instructions.as_deref(),
+                instructions_file.as_deref(),
+                target_dir.as_deref(),
+                update_path.as_deref(),
+                *dry_run,
+                *promote,
+                *yes,
+                *json,
+                &*self.app.engine,
+            ),
             PrdSubcommand::Audit {
                 prd_path,
                 tool,
@@ -129,16 +127,24 @@ impl Command for PrdCommand {
                 *json,
                 &*self.app.engine,
             ),
-            PrdSubcommand::Promote { source_path, dest_path, yes, json } => {
-                run_promote(&paths, source_path, dest_path.as_deref(), *yes, *json, &*self.app.engine)
-            }
+            PrdSubcommand::Promote {
+                source_path,
+                dest_path,
+                yes,
+                json,
+            } => run_promote(
+                &paths,
+                source_path,
+                dest_path.as_deref(),
+                *yes,
+                *json,
+                &*self.app.engine,
+            ),
             PrdSubcommand::Validate { prd_path, json } => {
                 run_validate(prd_path, *json, &*self.app.engine)
             }
             PrdSubcommand::Runs { json } => run_list_runs(&paths, *json, &*self.app.engine),
-            PrdSubcommand::ShowRun { run_id, json } => {
-                run_show_run(&paths, run_id, *json)
-            }
+            PrdSubcommand::ShowRun { run_id, json } => run_show_run(&paths, run_id, *json),
         }
     }
 }
@@ -181,8 +187,7 @@ fn run_generate(
     let model_selection = build_model_selection(model_routing, model);
 
     // Resolve instructions
-    let resolved_instructions =
-        resolve_instructions(instructions, instructions_file)?;
+    let resolved_instructions = resolve_instructions(instructions, instructions_file)?;
 
     // Resolve run id and target dir
     let run_metadata = macc_core::prd_generation::metadata::GenerationRunMetadata::new(
@@ -190,12 +195,8 @@ fn run_generate(
         tool.map(|s| s.to_string()),
         dry_run,
     );
-    let run_dir = resolve_target_dir(
-        &paths.root,
-        target_dir_override,
-        &run_metadata.run_id,
-    )
-    .map_err(|e| MaccError::Validation(format!("PRD-GEN-PROMPT-FAILED: {}", e)))?;
+    let run_dir = resolve_target_dir(&paths.root, target_dir_override, &run_metadata.run_id)
+        .map_err(|e| MaccError::Validation(format!("PRD-GEN-PROMPT-FAILED: {}", e)))?;
 
     // Existing PRD when --update
     let existing_prd = if let Some(upd) = update_path {
@@ -240,7 +241,9 @@ fn run_generate(
             println!("=== DRY RUN — Prompt (not invoking tool) ===");
             println!("Run ID:     {}", run_metadata.run_id);
             println!("Target dir: {}", run_dir.display());
-            if let Some(t) = tool { println!("Tool:       {}", t); }
+            if let Some(t) = tool {
+                println!("Tool:       {}", t);
+            }
             println!();
             println!("{}", prompt);
         }
@@ -250,7 +253,10 @@ fn run_generate(
     // Resolve tool
     let canonical = load_canonical_config(&paths.config_path)?;
     let prd_cfg = canonical.prd_generation.as_ref();
-    let coordinator_tool = canonical.automation.coordinator.as_ref()
+    let coordinator_tool = canonical
+        .automation
+        .coordinator
+        .as_ref()
         .and_then(|c| c.coordinator_tool.as_deref());
 
     let resolved_tool = resolve_tool(
@@ -262,7 +268,10 @@ fn run_generate(
 
     match resolved_tool {
         Some(t) => {
-            println!("PRD generation: invoking tool '{}' with macc-prd-planner prompt.", t);
+            println!(
+                "PRD generation: invoking tool '{}' with macc-prd-planner prompt.",
+                t
+            );
             println!("Output directory: {}", run_dir.display());
             println!("(Tool will write prd.json to the target directory above.)");
 
@@ -365,7 +374,10 @@ fn run_audit(
     let ref_branch = reference_branch
         .map(|s| s.to_string())
         .or_else(|| {
-            canonical.automation.coordinator.as_ref()
+            canonical
+                .automation
+                .coordinator
+                .as_ref()
                 .and_then(|c| c.reference_branch.clone())
         })
         .unwrap_or_else(|| "main".to_string());
@@ -410,7 +422,10 @@ fn run_audit(
             println!("Hint: use --tool <id> to invoke an AI tool with this prompt.");
         }
     } else {
-        println!("Audit prompt sent to tool '{}'.", tool.unwrap_or("(unknown)"));
+        println!(
+            "Audit prompt sent to tool '{}'.",
+            tool.unwrap_or("(unknown)")
+        );
     }
 
     Ok(())
@@ -502,9 +517,12 @@ fn run_list_runs(
             .collect();
         println!("{}", serde_json::to_string_pretty(&items).unwrap());
     } else if runs.is_empty() {
-        println!("No generation runs found under '{}'.", PRD_GENERATION_DEFAULT_TARGET_DIR);
+        println!(
+            "No generation runs found under '{}'.",
+            PRD_GENERATION_DEFAULT_TARGET_DIR
+        );
     } else {
-        println!("{:<25} {}", "RUN ID", "PATH");
+        println!("{:<25} PATH", "RUN ID");
         println!("{}", "-".repeat(60));
         for (id, path) in &runs {
             println!("{:<25} {}", id, path.display());
@@ -515,11 +533,7 @@ fn run_list_runs(
 
 // ── Show run ──────────────────────────────────────────────────────────────────
 
-fn run_show_run(
-    paths: &macc_core::ProjectPaths,
-    run_id: &str,
-    json: bool,
-) -> Result<()> {
+fn run_show_run(paths: &macc_core::ProjectPaths, run_id: &str, json: bool) -> Result<()> {
     use macc_core::MaccError;
 
     let run_dir = paths
@@ -612,4 +626,3 @@ fn print_validation_result(result: &ValidationResult, json: bool) {
         println!("  WARN:  {}", w);
     }
 }
-
