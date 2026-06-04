@@ -2772,11 +2772,11 @@ impl AppState {
     }
 
     pub fn next_settings_field(&mut self) {
-        self.settings_field_index = next_index(self.settings_field_index, 3);
+        self.settings_field_index = next_index(self.settings_field_index, 4);
     }
 
     pub fn prev_settings_field(&mut self) {
-        self.settings_field_index = prev_index(self.settings_field_index, 3);
+        self.settings_field_index = prev_index(self.settings_field_index, 4);
     }
 
     pub fn is_automation_field_editing(&self) -> bool {
@@ -3143,6 +3143,7 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
             0 => "[Basic] Silent Mode",
             1 => "[Basic] Offline Mode",
             2 => "[Basic] Web Interface Port",
+            3 => "[Basic] Debug Mode",
             _ => "",
         }
     }
@@ -3152,6 +3153,7 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
             0 => "Suppress all non-essential output from AI tools.",
             1 => "Disable all remote fetching and updates.",
             2 => "The port number for the MACC web interface.",
+            3 => "Enable verbose performer logs: prompt dump, runner line, [MACC] invoke. Equivalent to MACC_DEBUG=1 or macc --verbose.",
             _ => "",
         }
     }
@@ -3168,6 +3170,7 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
                 .web_port
                 .map(|p| p.to_string())
                 .unwrap_or_else(|| "default (3450)".to_string()),
+            3 => config.settings.debug.to_string(),
             _ => String::new(),
         }
     }
@@ -3194,7 +3197,7 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
     }
 
     pub fn toggle_settings_field(&mut self) {
-        if matches!(self.settings_field_index, 0 | 1) {
+        if matches!(self.settings_field_index, 0 | 1 | 3) {
             let current = self.settings_field_display_value(self.settings_field_index) == "true";
             self.set_settings_field_bool(self.settings_field_index, !current);
             return;
@@ -3211,7 +3214,7 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
         self.settings_field_editing = false;
 
         let result = match idx {
-            0 | 1 => {
+            0 | 1 | 3 => {
                 let value = input.to_lowercase();
                 if value == "true" {
                     self.set_settings_field_bool(idx, true);
@@ -3244,6 +3247,7 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
             match idx {
                 0 => config.settings.quiet = value,
                 1 => config.settings.offline = value,
+                3 => config.settings.debug = value,
                 _ => {}
             }
         }

@@ -217,6 +217,7 @@ export interface ApiConfigResponse {
   selectedAgents: string[];
   selectedMcp: string[];
   quiet: boolean;
+  debug: boolean;
   offline: boolean;
   webPort: number | null;
   webAssets: ApiWebAssetsMode | null;
@@ -278,6 +279,7 @@ export interface ApiConfigUpdateRequest {
   selectedAgents?: string[];
   selectedMcp?: string[];
   quiet?: boolean;
+  debug?: boolean;
   offline?: boolean;
   webPort?: number | null;
   webAssets?: ApiWebAssetsMode | null;

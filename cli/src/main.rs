@@ -1338,7 +1338,12 @@ fn main() {
     let cli = Cli::parse();
     init_tracing(cli.verbose);
 
+    // Propagate debug mode to child processes (coordinator, performers, workers).
+    // MACC_DEBUG=1 is read by performer_lib.sh and performer.sh to control
+    // verbosity of logs (prompt dump, runner line, [MACC] invoke lines).
+    // Activated by --verbose CLI flag or settings.debug in macc.yaml.
     if cli.verbose {
+        std::env::set_var("MACC_DEBUG", "1");
         info!("Verbose mode enabled");
     }
 
@@ -1409,6 +1414,18 @@ fn run_with_engine_provider(
 
     // Try to canonicalize to resolve .. and symlinks if it exists
     let absolute_cwd = absolute_cwd.canonicalize().unwrap_or(absolute_cwd);
+
+    // Apply settings.debug from macc.yaml when --verbose was not already set.
+    if std::env::var("MACC_DEBUG").is_err() {
+        if let Ok(paths) = macc_core::find_project_root(&absolute_cwd) {
+            if let Ok(config) = macc_core::load_canonical_config(&paths.config_path) {
+                if config.settings.debug {
+                    std::env::set_var("MACC_DEBUG", "1");
+                }
+            }
+        }
+    }
+
     let engine = provider.shared();
     let app = commands::AppContext::new(
         absolute_cwd.clone(),

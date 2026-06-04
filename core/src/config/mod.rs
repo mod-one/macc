@@ -35,6 +35,11 @@ pub struct CanonicalConfig {
 pub struct SettingsConfig {
     #[serde(default)]
     pub quiet: bool,
+    /// Enable debug mode: verbose performer logs (prompt dump, runner line,
+    /// [MACC] invoke lines). Equivalent to setting `MACC_DEBUG=1` in the
+    /// environment. Also activated by `macc --verbose`.
+    #[serde(default)]
+    pub debug: bool,
     #[serde(default)]
     pub offline: bool,
     #[serde(skip_serializing_if = "Option::is_none")]

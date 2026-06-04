@@ -157,6 +157,7 @@ impl From<CanonicalConfig> for ApiConfigResponse {
             selected_agents: selections.agents,
             selected_mcp: selections.mcp,
             quiet: config.settings.quiet,
+            debug: config.settings.debug,
             offline: config.settings.offline,
             web_port: config.settings.web_port,
             web_assets: config.settings.web_assets,
@@ -316,6 +317,9 @@ fn apply_selection_update(config: &mut CanonicalConfig, request: &ApiConfigUpdat
 fn apply_settings_update(config: &mut CanonicalConfig, request: &ApiConfigUpdateRequest) {
     if let Some(quiet) = request.quiet {
         config.settings.quiet = quiet;
+    }
+    if let Some(debug) = request.debug {
+        config.settings.debug = debug;
     }
     if let Some(offline) = request.offline {
         config.settings.offline = offline;

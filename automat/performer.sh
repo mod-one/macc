@@ -204,6 +204,17 @@ log_task_line() {
   fi
 }
 
+# log_debug_line: write to task log only when MACC_DEBUG=1 is set.
+# Use this for verbose entries that add noise in normal operation:
+#   - full prompt dump (### Prompt)
+#   - runner invocation line (- Runner:)
+#   - attempt headers (## Attempt N/M)
+log_debug_line() {
+  if [[ "${MACC_DEBUG:-0}" == "1" ]]; then
+    log_task_line "$@"
+  fi
+}
+
 next_event_seq() {
   if [[ -z "${EVENT_SEQ_FILE:-}" ]]; then
     EVENT_SEQ=$((EVENT_SEQ + 1))
@@ -734,11 +745,11 @@ run_tool() {
   fi
   output_capture="$(mktemp)"
 
-  log_task_line "## Attempt ${attempt}/${max_attempts}"
-  log_task_line ""
-  log_task_line "- Runner: \`${script}\`"
-  log_task_line "- Started: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-  log_task_line ""
+  log_debug_line "## Attempt ${attempt}/${max_attempts}"
+  log_debug_line ""
+  log_debug_line "- Runner: \`${script}\`"
+  log_debug_line "- Started: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  log_debug_line ""
   log_task_line '```text'
   set +e
   emit_performer_event "progress" "$CURRENT_PHASE" "running" "$(jq -nc --arg attempt "$attempt" --arg max "$max_attempts" '{attempt:($attempt|tonumber?), max_attempts:($max|tonumber?)}')"
@@ -960,12 +971,14 @@ for ((i=1; i<=PERFORMER_MAX_ITERATIONS; i++)); do
 
   prompt_file="$(mktemp)"
   build_prompt "$next_task_json" "$next_id" "$next_title" >"$prompt_file"
-  log_task_line "### Prompt"
-  log_task_line ""
-  log_task_line '```text'
-  cat "$prompt_file" >>"$task_log_file"
-  log_task_line '```'
-  log_task_line ""
+  if [[ "${MACC_DEBUG:-0}" == "1" ]]; then
+    log_task_line "### Prompt"
+    log_task_line ""
+    log_task_line '```text'
+    cat "$prompt_file" >>"$task_log_file"
+    log_task_line '```'
+    log_task_line ""
+  fi
 
   tool_success=false
   for ((attempt=1; attempt<=PERFORMER_TOOL_MAX_ATTEMPTS; attempt++)); do

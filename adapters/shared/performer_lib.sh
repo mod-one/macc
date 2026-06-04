@@ -342,7 +342,7 @@ run_and_capture() {
   local output_file="$1"
   shift
   local rc=0
-  printf '[MACC] invoke (${TOOL_LOG_PREFIX} 1): %s\n' "$*" >&2
+  [[ "${MACC_DEBUG:-0}" == "1" ]] && printf '[MACC] invoke (%s 1): %s\n' "${TOOL_LOG_PREFIX}" "$*" >&2
   "$@" 2>&1 | tee "$output_file"
   rc=${PIPESTATUS[0]}
   return "$rc"
@@ -651,9 +651,11 @@ run_default_call() {
     run_and_capture "$output_capture" "$command" "${final_call_args[@]}" "$prompt_arg" "$prompt_text"
   else
     local rc=0
-    printf '[MACC] invoke (${TOOL_LOG_PREFIX} 2): %s' "$command" >&2
-    printf ' %q' "${final_call_args[@]}" >&2
-    printf '\n' >&2
+    if [[ "${MACC_DEBUG:-0}" == "1" ]]; then
+      printf '[MACC] invoke (%s 2): %s' "${TOOL_LOG_PREFIX}" "$command" >&2
+      printf ' %q' "${final_call_args[@]}" >&2
+      printf '\n' >&2
+    fi
     printf "%s" "$prompt_text" | "$command" "${final_call_args[@]}" 2>&1 | tee "$output_capture"
     rc=${PIPESTATUS[1]}
     return "$rc"

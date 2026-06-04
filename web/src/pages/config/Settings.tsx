@@ -567,6 +567,12 @@ function BasicTab({
           onChange={(v) => update({ quiet: v })}
           helpText="Suppress non-essential stdout output from the CLI."
         />
+        <BooleanField
+          label="Debug Mode"
+          value={draft.debug}
+          onChange={(v) => update({ debug: v })}
+          helpText="Enable verbose performer logs: full prompt dump, runner line, [MACC] invoke lines. Equivalent to MACC_DEBUG=1 or macc --verbose."
+        />
       </div>
 
       <SectionHeading>Task Execution &amp; Routing</SectionHeading>

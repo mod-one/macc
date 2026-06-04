@@ -44,6 +44,9 @@ pub(crate) struct ApiConfigResponse {
     pub selected_mcp: Vec<String>,
     /// Whether normal CLI output should be reduced.
     pub quiet: bool,
+    /// Whether debug mode is enabled (verbose performer logs: prompt dump, runner line, [MACC] invoke).
+    /// Equivalent to setting MACC_DEBUG=1 or using `macc --verbose`.
+    pub debug: bool,
     /// Whether network-backed operations should avoid remote access.
     pub offline: bool,
     /// Configured web server port.
@@ -170,6 +173,8 @@ pub(crate) struct ApiConfigUpdateRequest {
     pub selected_mcp: Option<Vec<String>>,
     /// Updated quiet-mode flag.
     pub quiet: Option<bool>,
+    /// Updated debug-mode flag.
+    pub debug: Option<bool>,
     /// Updated offline-mode flag.
     pub offline: Option<bool>,
     /// Updated web server port.
