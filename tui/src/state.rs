@@ -172,6 +172,10 @@ pub struct AppState {
     pub settings_field_index: usize,
     pub settings_field_editing: bool,
     pub settings_field_input: String,
+    /// Unified config screen: active tab (0=General 1=Coordinator 2=Tools 3=Phases 4=Reliability 5=Admin)
+    pub config_tab_index: usize,
+    /// Unified config screen: selected row within the current tab
+    pub config_view_index: usize,
     pub skills: Vec<Skill>,
     pub agents: Vec<Agent>,
     pub skill_selection_index: usize,
@@ -305,6 +309,8 @@ impl AppState {
             settings_field_index: 0,
             settings_field_editing: false,
             settings_field_input: String::new(),
+            config_tab_index: 0,
+            config_view_index: 0,
             skills: Vec::new(),
             agents: Vec::new(),
             skill_selection_index: 0,
@@ -2791,6 +2797,204 @@ impl AppState {
         self.settings_field_editing
     }
 
+    // ── Unified config screen ─────────────────────────────────────────────────
+
+    /// Tab names shown in the tab bar.
+    pub const CONFIG_TAB_NAMES: &'static [&'static str] =
+        &["General", "Coordinator", "Tools", "Phases", "Reliability", "Admin"];
+
+    /// Returns the field list for the given tab as `(source, field_index)` pairs.
+    /// `source` 0 = global (settings), 1 = coordinator (automation).
+    pub fn config_tab_fields(tab: usize) -> &'static [(u8, usize)] {
+        match tab {
+            // General: global settings (quiet, offline, debug, web port)
+            0 => &[(0,0),(0,1),(0,3),(0,2)],
+            // Coordinator: core coordinator settings
+            1 => &[(1,0),(1,1),(1,7),(1,6),(1,8),(1,32),(1,33)],
+            // Tools: routing and priority
+            2 => &[(1,3),(1,4),(1,5),(1,2)],
+            // Phases: pipeline phase controls
+            3 => &[(1,34),(1,35),(1,36),(1,37),(1,31),(1,38),(1,39)],
+            // Reliability: stale, merge, retry, lifecycle
+            4 => &[(1,9),(1,10),(1,11),(1,12),(1,13),(1,17),(1,18),(1,19),(1,20),(1,21),(1,30),(1,23),(1,24)],
+            // Admin: rate-limiting, log flush, JSON compat
+            5 => &[(1,26),(1,27),(1,28),(1,29),(1,14),(1,15),(1,16),(1,22),(1,25)],
+            _ => &[],
+        }
+    }
+
+    /// Returns the `(source, field_index)` pair for the currently selected config row,
+    /// or `None` if the current tab is empty.
+    pub fn current_config_field(&self) -> Option<(u8, usize)> {
+        let fields = Self::config_tab_fields(self.config_tab_index);
+        fields.get(self.config_view_index).copied()
+    }
+
+    /// Keep `automation_field_index` and `settings_field_index` in sync with `config_view_index`.
+    pub fn sync_config_indices(&mut self) {
+        if let Some((source, idx)) = self.current_config_field() {
+            if source == 0 {
+                self.settings_field_index = idx;
+            } else {
+                self.automation_field_index = idx;
+            }
+        }
+    }
+
+    /// Move the selection down within the current tab.
+    pub fn navigate_config_next(&mut self) {
+        let len = Self::config_tab_fields(self.config_tab_index).len();
+        if len > 0 {
+            self.config_view_index = (self.config_view_index + 1).min(len.saturating_sub(1));
+            self.sync_config_indices();
+        }
+    }
+
+    /// Move the selection up within the current tab.
+    pub fn navigate_config_prev(&mut self) {
+        self.config_view_index = self.config_view_index.saturating_sub(1);
+        self.sync_config_indices();
+    }
+
+    /// Switch to the next config tab (wraps around).
+    pub fn next_config_tab(&mut self) {
+        self.config_tab_index = (self.config_tab_index + 1) % Self::CONFIG_TAB_NAMES.len();
+        self.config_view_index = 0;
+        self.sync_config_indices();
+    }
+
+    /// Switch to the previous config tab (wraps around).
+    pub fn prev_config_tab(&mut self) {
+        let n = Self::CONFIG_TAB_NAMES.len();
+        self.config_tab_index = (self.config_tab_index + n - 1) % n;
+        self.config_view_index = 0;
+        self.sync_config_indices();
+    }
+
+    /// Jump directly to a specific tab by index.
+    pub fn jump_config_tab(&mut self, tab: usize) {
+        if tab < Self::CONFIG_TAB_NAMES.len() {
+            self.config_tab_index = tab;
+            self.config_view_index = 0;
+            self.sync_config_indices();
+        }
+    }
+
+    /// Returns the display label for a config field, with the `[Category] ` prefix stripped.
+    pub fn config_field_label(&self, source: u8, idx: usize) -> &'static str {
+        let raw = if source == 0 {
+            self.settings_field_label(idx)
+        } else {
+            self.automation_field_label(idx)
+        };
+        // Strip leading "[Category] " prefix for display within a tab
+        if let Some(rest) = raw.strip_prefix('[') {
+            if let Some(end) = rest.find(']') {
+                return rest[end + 1..].trim_start();
+            }
+        }
+        raw
+    }
+
+    /// Returns the current display value for a config field.
+    pub fn config_field_value(&self, source: u8, idx: usize) -> String {
+        if source == 0 {
+            self.settings_field_display_value(idx)
+        } else {
+            self.automation_field_display_value(idx)
+        }
+    }
+
+    /// Returns the help text for a config field.
+    pub fn config_field_help(&self, source: u8, idx: usize) -> &'static str {
+        if source == 0 {
+            self.settings_field_help(idx)
+        } else {
+            self.automation_field_help(idx)
+        }
+    }
+
+    /// Whether any config field is currently in text-editing mode.
+    pub fn is_config_editing(&self) -> bool {
+        self.automation_field_editing
+            || self.tool_priority_editor_active
+            || self.tool_parallel_editor_active
+            || self.settings_field_editing
+    }
+
+    /// Toggle or begin editing for whichever config field is currently selected.
+    pub fn toggle_current_config_field(&mut self) {
+        if let Some((source, idx)) = self.current_config_field() {
+            if source == 0 {
+                self.settings_field_index = idx;
+                self.toggle_settings_field();
+            } else {
+                self.automation_field_index = idx;
+                self.toggle_automation_field();
+            }
+        }
+    }
+
+    /// Begin text editing for the currently selected config field.
+    pub fn begin_current_config_edit(&mut self) {
+        if let Some((source, idx)) = self.current_config_field() {
+            if source == 0 {
+                self.settings_field_index = idx;
+                self.begin_settings_field_edit();
+            } else {
+                self.automation_field_index = idx;
+                self.begin_automation_field_edit();
+            }
+        }
+    }
+
+    /// Append a character to whichever config field input is active.
+    pub fn append_config_char(&mut self, ch: char) {
+        if self.automation_field_editing {
+            self.append_automation_field_char(ch);
+        } else if self.settings_field_editing {
+            self.append_settings_field_char(ch);
+        }
+    }
+
+    /// Pop the last character from whichever config field input is active.
+    pub fn pop_config_char(&mut self) {
+        if self.automation_field_editing {
+            self.pop_automation_field_char();
+        } else if self.settings_field_editing {
+            self.pop_settings_field_char();
+        }
+    }
+
+    /// Commit whichever config field edit is active.
+    pub fn commit_config_edit(&mut self) {
+        if self.automation_field_editing {
+            self.commit_automation_field_edit();
+        } else if self.settings_field_editing {
+            self.commit_settings_field_edit();
+        }
+    }
+
+    /// Cancel whichever config field edit is active.
+    pub fn cancel_config_edit(&mut self) {
+        if self.automation_field_editing {
+            self.cancel_automation_field_edit();
+        } else if self.settings_field_editing {
+            self.cancel_settings_field_edit();
+        }
+    }
+
+    /// Returns the current config text input value (for the active editing field).
+    pub fn config_field_input_display(&self) -> Option<String> {
+        if self.automation_field_editing {
+            Some(format!("{}_", self.automation_field_input))
+        } else if self.settings_field_editing {
+            Some(format!("{}_", self.settings_field_input))
+        } else {
+            None
+        }
+    }
+
     pub fn automation_field_label(&self, index: usize) -> &'static str {
         match index {
             0 => "[Basic] Coordinator Tool",
@@ -4402,8 +4606,8 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
     pub fn navigate_next(&mut self) {
         match self.current_screen() {
             Screen::Tools => self.next_tool(),
-            Screen::Automation => self.next_automation_field(),
-            Screen::Settings => self.next_settings_field(),
+            // Both Automation and Settings use the unified config navigation.
+            Screen::Automation | Screen::Settings => self.navigate_config_next(),
             Screen::Logs => self.next_log(),
             Screen::Skills => self.next_skill(),
             Screen::Agents => self.next_agent(),
@@ -4429,8 +4633,7 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
     pub fn navigate_prev(&mut self) {
         match self.current_screen() {
             Screen::Tools => self.prev_tool(),
-            Screen::Automation => self.prev_automation_field(),
-            Screen::Settings => self.prev_settings_field(),
+            Screen::Automation | Screen::Settings => self.navigate_config_prev(),
             Screen::Logs => self.prev_log(),
             Screen::Skills => self.prev_skill(),
             Screen::Agents => self.prev_agent(),
@@ -4448,8 +4651,7 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
     pub fn navigate_toggle(&mut self) {
         match self.current_screen() {
             Screen::Tools => self.toggle_selected_tool(),
-            Screen::Automation => self.toggle_automation_field(),
-            Screen::Settings => self.toggle_settings_field(),
+            Screen::Automation | Screen::Settings => self.toggle_current_config_field(),
             Screen::Skills => self.toggle_skill(),
             Screen::Agents => self.toggle_agent(),
             Screen::ToolSettings => self.toggle_tool_field(),
@@ -4483,8 +4685,7 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
                     self.push_screen(Screen::ToolSettings);
                 }
             }
-            Screen::Automation => self.toggle_automation_field(),
-            Screen::Settings => self.toggle_settings_field(),
+            Screen::Automation | Screen::Settings => self.toggle_current_config_field(),
             Screen::Skills => self.toggle_skill(),
             Screen::Agents => self.toggle_agent(),
             Screen::ToolSettings => self.toggle_tool_field(),

@@ -750,7 +750,6 @@ run_tool() {
   log_debug_line "- Runner: \`${script}\`"
   log_debug_line "- Started: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   log_debug_line ""
-  log_task_line '```text'
   set +e
   emit_performer_event "progress" "$CURRENT_PHASE" "running" "$(jq -nc --arg attempt "$attempt" --arg max "$max_attempts" '{attempt:($attempt|tonumber?), max_attempts:($max|tonumber?)}')"
   spinner_start "Running ${tool} (attempt ${attempt}/${max_attempts})"
@@ -816,7 +815,6 @@ run_tool() {
     fi
     must_emit_performer_event "phase_result" "$CURRENT_PHASE" "failed" "$(jq -nc --arg attempt "$attempt" --arg status "$status" --arg code "$LAST_ERROR_CODE" --arg origin "$LAST_ERROR_ORIGIN" --arg message "$LAST_ERROR_MESSAGE" '{attempt:($attempt|tonumber?), exit_status:($status|tonumber?), error_code:($code|select(length>0)), origin:($origin|select(length>0)), message:($message|select(length>0))}')"
   fi
-  log_task_line '```'
   log_task_line ""
   log_task_line "- Exit status: ${status}"
   log_task_line ""
@@ -972,12 +970,10 @@ for ((i=1; i<=PERFORMER_MAX_ITERATIONS; i++)); do
   prompt_file="$(mktemp)"
   build_prompt "$next_task_json" "$next_id" "$next_title" >"$prompt_file"
   if [[ "${MACC_DEBUG:-0}" == "1" ]]; then
-    log_task_line "### Prompt"
-    log_task_line ""
-    log_task_line '```text'
+    log_task_line "### Prompt \r\n"
+    log_task_line '---\r\n'
     cat "$prompt_file" >>"$task_log_file"
-    log_task_line '```'
-    log_task_line ""
+    log_task_line '--- \r\n'
   fi
 
   tool_success=false

@@ -243,25 +243,34 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
             _ => {}
         }
     }
-    if current_screen == Screen::Automation && state.is_automation_field_editing() {
+    // Unified config text-editing handler (covers both global and coordinator fields).
+    if (current_screen == Screen::Automation || current_screen == Screen::Settings)
+        && (state.automation_field_editing || state.settings_field_editing)
+    {
         match key {
-            KeyCode::Enter => state.commit_automation_field_edit(),
-            KeyCode::Esc => state.cancel_automation_field_edit(),
-            KeyCode::Backspace => state.pop_automation_field_char(),
-            KeyCode::Char(c) => state.append_automation_field_char(c),
+            KeyCode::Enter => state.commit_config_edit(),
+            KeyCode::Esc => state.cancel_config_edit(),
+            KeyCode::Backspace => state.pop_config_char(),
+            KeyCode::Char(c) => state.append_config_char(c),
             _ => {}
         }
         return;
     }
-    if current_screen == Screen::Settings && state.is_settings_field_editing() {
+    // Config screen tab switching (when not in an edit mode)
+    if (current_screen == Screen::Automation || current_screen == Screen::Settings)
+        && !state.is_config_editing()
+    {
         match key {
-            KeyCode::Enter => state.commit_settings_field_edit(),
-            KeyCode::Esc => state.cancel_settings_field_edit(),
-            KeyCode::Backspace => state.pop_settings_field_char(),
-            KeyCode::Char(c) => state.append_settings_field_char(c),
+            KeyCode::Tab => { state.next_config_tab(); return; }
+            KeyCode::BackTab => { state.prev_config_tab(); return; }
+            KeyCode::Char('1') => { state.jump_config_tab(0); return; }
+            KeyCode::Char('2') => { state.jump_config_tab(1); return; }
+            KeyCode::Char('3') => { state.jump_config_tab(2); return; }
+            KeyCode::Char('4') => { state.jump_config_tab(3); return; }
+            KeyCode::Char('5') => { state.jump_config_tab(4); return; }
+            KeyCode::Char('6') => { state.jump_config_tab(5); return; }
             _ => {}
         }
-        return;
     }
     if current_screen == Screen::Tools && state.is_tool_install_confirmation_open() {
         match key {
@@ -346,11 +355,18 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
         // Navigation: 'h' for Home, 't' for Tools
         KeyCode::Char('h') => state.goto_screen(Screen::Home),
         KeyCode::Char('t') => state.push_screen(Screen::Tools),
-        KeyCode::Char('o') => state.push_screen(Screen::Automation),
+        // 'o' → Settings, Coordinator tab; 'e' → Settings, General tab
+        KeyCode::Char('o') => {
+            state.jump_config_tab(1); // Coordinator tab
+            state.push_screen(Screen::Automation);
+        }
+        KeyCode::Char('e') if current_screen != Screen::CoordinatorLive => {
+            state.jump_config_tab(0); // General tab
+            state.push_screen(Screen::Automation);
+        }
         KeyCode::Char('v') if current_screen != Screen::CoordinatorLive => state.push_screen(Screen::CoordinatorLive),
         KeyCode::Char('m') => state.push_screen(Screen::Mcp),
         KeyCode::Char('g') => state.push_screen(Screen::Logs),
-        KeyCode::Char('e') if current_screen != Screen::CoordinatorLive => state.push_screen(Screen::Settings),
         KeyCode::Char('p') => state.open_preview(),
         KeyCode::Char('x') if current_screen != Screen::Apply => {
             state.open_apply_screen();
@@ -1348,177 +1364,177 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             f.render_widget(steps_para, body_chunks[1]);
         }
         Screen::Settings => {
-            let body_chunks = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
-                .split(chunks[1]);
-
-            let mut list_state = ListState::default();
-            let settings_count = state.settings_field_count();
-            list_state.select(Some(
-                state
-                    .settings_field_index
-                    .min(settings_count.saturating_sub(1)),
-            ));
-            let items: Vec<ListItem> = (0..settings_count)
-                .map(|i| {
-                    let label = state.settings_field_label(i);
-                    let value =
-                        if i == state.settings_field_index && state.is_settings_field_editing() {
-                            format!("{}_", state.settings_field_input)
-                        } else {
-                            state.settings_field_display_value(i)
-                        };
-                    ListItem::new(Line::from(vec![
-                        Span::styled(format!("{:<30}", label), Style::default().fg(theme.muted)),
-                        Span::raw(" "),
-                        Span::raw(value),
-                    ]))
-                })
-                .collect();
-
-            let list = List::new(items)
-                .block(panel("Global Settings"))
-                .highlight_symbol("› ")
-                .highlight_style(Style::default().bg(theme.highlight_bg));
-            f.render_stateful_widget(list, body_chunks[0], &mut list_state);
-
-            let help = state.settings_field_help(state.settings_field_index);
-            let help_para = Paragraph::new(help)
-                .block(panel("Setting Description"))
-                .wrap(Wrap { trim: true });
-            f.render_widget(help_para, body_chunks[1]);
+            // Settings has been merged into Coordinator Settings (Screen::Automation).
+            // This screen is no longer the primary destination — it acts as a redirect notice.
+            let notice = Paragraph::new(
+                "Settings have been merged into the unified Configuration screen.\n\n\
+                 Press 'o' to open Coordinator settings.\n\
+                 Press 'e' to open General (global) settings.\n\
+                 Press Backspace to go back.",
+            )
+            .block(panel("Settings — Moved"))
+            .wrap(Wrap { trim: false });
+            f.render_widget(notice, chunks[1]);
         }
         Screen::Automation => {
+            // ── Unified tabbed configuration screen ───────────────────────────
+            // Layout: tab bar (1 line) + two-column body (55% list / 45% detail).
+            let outer_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(1), Constraint::Min(0)])
+                .split(chunks[1]);
+
+            // ── Tab bar ───────────────────────────────────────────────────────
+            let tab_spans: Vec<Span> = AppState::CONFIG_TAB_NAMES
+                .iter()
+                .enumerate()
+                .flat_map(|(i, name)| {
+                    let (label_style, sep_style) = if i == state.config_tab_index {
+                        (
+                            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+                            Style::default().fg(theme.muted),
+                        )
+                    } else {
+                        (
+                            Style::default().fg(theme.muted),
+                            Style::default().fg(theme.muted),
+                        )
+                    };
+                    let tab_str = if i == state.config_tab_index {
+                        format!("[{}]", name)
+                    } else {
+                        name.to_string()
+                    };
+                    let mut spans = vec![Span::styled(tab_str, label_style)];
+                    if i + 1 < AppState::CONFIG_TAB_NAMES.len() {
+                        spans.push(Span::styled("  ", sep_style));
+                    }
+                    spans
+                })
+                .collect();
+            let tab_bar = Paragraph::new(Line::from(tab_spans));
+            f.render_widget(tab_bar, outer_chunks[0]);
+
+            // ── Two-column body ───────────────────────────────────────────────
             let body_chunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
-                .split(chunks[1]);
+                .split(outer_chunks[1]);
 
+            // ── Field list ────────────────────────────────────────────────────
+            let tab_fields = AppState::config_tab_fields(state.config_tab_index);
             let mut list_state = ListState::default();
-            let automation_count = state.automation_field_count();
             list_state.select(Some(
-                state
-                    .automation_field_index
-                    .min(automation_count.saturating_sub(1)),
+                state.config_view_index.min(tab_fields.len().saturating_sub(1)),
             ));
-            let items: Vec<ListItem> = (0..automation_count)
-                .map(|i| {
-                    let label = state.automation_field_label(i);
-                    let value = if i == state.automation_field_index
-                        && state.is_automation_field_editing()
-                    {
-                        format!("{}_", state.automation_field_input)
-                    } else if i == 3 && state.tool_priority_editor_active {
-                        if state.tool_priority_editor_grabbed {
-                            "[GRABBED — ↑↓ to move, Space to drop]".to_string()
+
+            let items: Vec<ListItem> = tab_fields
+                .iter()
+                .enumerate()
+                .map(|(view_i, &(source, field_idx))| {
+                    let label = state.config_field_label(source, field_idx);
+                    let is_selected = view_i == state.config_view_index;
+
+                    let value = if is_selected {
+                        if let Some(input) = state.config_field_input_display() {
+                            // Text-editing cursor active for this field
+                            input
+                        } else if source == 1 && field_idx == 3 && state.tool_priority_editor_active {
+                            if state.tool_priority_editor_grabbed {
+                                "[GRABBED — ↑↓ to move, Space to drop]".to_string()
+                            } else {
+                                "[reorder — ↑↓ navigate, Space to grab]".to_string()
+                            }
+                        } else if source == 1 && field_idx == 4 && state.tool_parallel_editor_active {
+                            "[edit — ↑↓ select, ←→ adjust, Enter done]".to_string()
                         } else {
-                            "[reorder mode — ↑↓ navigate, Space to grab]".to_string()
+                            state.config_field_value(source, field_idx)
                         }
-                    } else if i == 4 && state.tool_parallel_editor_active {
-                        "[edit mode — ↑↓ select, ←→ adjust, Enter done]".to_string()
                     } else {
-                        state.automation_field_display_value(i)
+                        state.config_field_value(source, field_idx)
                     };
-                    // §18/§19: highlight phase fields in warning colour when a CLI override is active
-                    let has_override = state.phase_override_notice_for_field(i).is_some();
+
+                    // Highlight phase-override fields in warning color
+                    let has_override = source == 1
+                        && state.phase_override_notice_for_field(field_idx).is_some();
                     let value_style = if has_override {
                         Style::default().fg(theme.warn)
-                    } else if (i == 3 && state.tool_priority_editor_active)
-                        || (i == 4 && state.tool_parallel_editor_active)
+                    } else if is_selected
+                        && ((source == 1 && field_idx == 3 && state.tool_priority_editor_active)
+                            || (source == 1 && field_idx == 4 && state.tool_parallel_editor_active))
                     {
                         Style::default().fg(theme.accent)
                     } else {
                         Style::default()
                     };
+
                     ListItem::new(Line::from(vec![
-                        Span::styled(format!("{:<30}", label), Style::default().fg(theme.muted)),
+                        Span::styled(format!("{:<28}", label), Style::default().fg(theme.muted)),
                         Span::raw(" "),
                         Span::styled(value, value_style),
                     ]))
                 })
                 .collect();
 
+            let tab_name = AppState::CONFIG_TAB_NAMES
+                .get(state.config_tab_index)
+                .copied()
+                .unwrap_or("Settings");
+            let list_title = format!("Configuration — {}", tab_name);
             let list = List::new(items)
-                .block(panel("Coordinator Settings"))
+                .block(panel(&list_title))
                 .highlight_symbol("› ")
                 .highlight_style(Style::default().bg(theme.highlight_bg));
             f.render_stateful_widget(list, body_chunks[0], &mut list_state);
 
-            let idx = state
-                .automation_field_index
-                .min(automation_count.saturating_sub(1));
-            // §18/§19: prepend a CLI override warning for phase fields when an override is active
-            let override_prefix = state
-                .phase_override_notice_for_field(idx)
-                .map(|notice| format!("⚠ {notice}\n\n"))
-                .unwrap_or_default();
-            // ── Special editor detail panes ──────────────────────────────────
+            // ── Detail pane ───────────────────────────────────────────────────
+            // Special editors override the detail pane entirely.
             let detail_para = if state.tool_priority_editor_active {
-                // Field 3: priority reorder editor — show ordered list in detail pane
                 let list = state.tool_priority_ordered_list();
                 let sel = state.tool_priority_editor_index;
                 let grabbed = state.tool_priority_editor_grabbed;
-
-                let title = if grabbed {
-                    "Tool Priority — GRABBED (moving)"
-                } else {
-                    "Tool Priority — Select & Reorder"
-                };
-
+                let title = if grabbed { "Tool Priority — GRABBED" } else { "Tool Priority — Reorder" };
                 let mut lines: Vec<String> = if grabbed {
                     vec![
-                        "A tool is grabbed — it will move with ↑/↓.".to_string(),
+                        "Tool grabbed — moves with ↑/↓.".to_string(),
                         String::new(),
-                        "↑/k  Move tool up (higher priority)".to_string(),
-                        "↓/j  Move tool down (lower priority)".to_string(),
-                        "Space/Enter  Drop here (release grab)".to_string(),
-                        "s    Save order and exit".to_string(),
-                        "Esc  Release grab (do not exit)".to_string(),
+                        "↑/k  Move up".to_string(),
+                        "↓/j  Move down".to_string(),
+                        "Space/Enter  Drop here".to_string(),
+                        "s    Save and exit".to_string(),
+                        "Esc  Release grab".to_string(),
                     ]
                 } else {
                     vec![
-                        "Navigate with ↑/↓, then Space to grab.".to_string(),
+                        "Navigate with ↑/↓, Space to grab.".to_string(),
                         String::new(),
-                        "↑/k  Move cursor up".to_string(),
-                        "↓/j  Move cursor down".to_string(),
-                        "Space  Grab selected tool for moving".to_string(),
-                        "Enter/s  Save order and exit".to_string(),
-                        "Esc  Cancel (discard changes)".to_string(),
+                        "↑/k  Cursor up".to_string(),
+                        "↓/j  Cursor down".to_string(),
+                        "Space  Grab tool".to_string(),
+                        "Enter/s  Save and exit".to_string(),
+                        "Esc  Cancel".to_string(),
                     ]
                 };
                 lines.push(String::new());
-
                 for (i, tool) in list.iter().enumerate() {
-                    let cursor = if i == sel {
-                        if grabbed { "✦ " } else { "› " }
-                    } else {
-                        "  "
-                    };
+                    let cursor = if i == sel { if grabbed { "✦ " } else { "› " } } else { "  " };
                     lines.push(format!("{}{}. {}", cursor, i + 1, tool));
                 }
                 wrapped_paragraph(lines.join("\n"), title)
             } else if state.tool_parallel_editor_active {
-                // Field 4: per-tool parallel count editor
-                let enabled = state
-                    .working_copy
-                    .as_ref()
-                    .map(|wc| wc.tools.enabled.clone())
-                    .unwrap_or_default();
-                let counts: std::collections::BTreeMap<String, usize> = state
-                    .working_copy
-                    .as_ref()
+                let enabled = state.working_copy.as_ref().map(|wc| wc.tools.enabled.clone()).unwrap_or_default();
+                let counts: std::collections::BTreeMap<String, usize> = state.working_copy.as_ref()
                     .and_then(|wc| wc.automation.coordinator.as_ref())
                     .map(|c| c.max_parallel_per_tool.clone())
                     .unwrap_or_default();
                 let sel = state.tool_parallel_editor_index;
                 let mut lines = vec![
-                    "Max Parallel Per Tool — Edit Mode".to_string(),
+                    "Max Parallel Per Tool".to_string(),
                     String::new(),
-                    "↑/k    Select previous tool".to_string(),
-                    "↓/j    Select next tool".to_string(),
-                    "←/−    Decrease count (min 1)".to_string(),
-                    "→/+    Increase count".to_string(),
+                    "↑/k  Previous tool".to_string(),
+                    "↓/j  Next tool".to_string(),
+                    "←/−  Decrease (min 1)".to_string(),
+                    "→/+  Increase".to_string(),
                     "Enter/s  Exit editor".to_string(),
                     String::new(),
                 ];
@@ -1527,17 +1543,16 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                     let marker = if i == sel { "› " } else { "  " };
                     lines.push(format!("{}{}: {}", marker, tool, count));
                 }
-                wrapped_paragraph(lines.join("\n"), "Max Parallel Per Tool Editor")
-            } else if idx == 0 {
-                // Field 0: coordinator tool — show available options
-                let enabled = state
-                    .working_copy
-                    .as_ref()
-                    .map(|wc| wc.tools.enabled.clone())
-                    .unwrap_or_default();
+                wrapped_paragraph(lines.join("\n"), "Parallel Per Tool Editor")
+            } else if matches!(state.current_config_field(), Some((1, 0))) {
+                // Coordinator tool field — show available tools for cycling
+                let enabled = state.working_copy.as_ref().map(|wc| wc.tools.enabled.clone()).unwrap_or_default();
                 let current = state.automation_field_display_value(0);
+                let override_prefix = state.phase_override_notice_for_field(0)
+                    .map(|n| format!("⚠ {n}\n\n"))
+                    .unwrap_or_default();
                 let mut lines = vec![
-                    format!("{}Field: {}", override_prefix, state.automation_field_label(0)),
+                    format!("{}Field: Coordinator Tool", override_prefix),
                     String::new(),
                     state.automation_field_help(0).to_string(),
                     String::new(),
@@ -1551,23 +1566,44 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                     lines.push(format!("{}{}", marker, t));
                 }
                 lines.push(String::new());
-                lines.push("Space/Enter or ←/→ to cycle".to_string());
+                lines.push("←/→ or Space/Enter to cycle".to_string());
                 lines.push("s — Save to .macc/macc.yaml".to_string());
                 wrapped_paragraph(lines.join("\n"), "Field Info")
             } else {
-                // Default detail pane for all other fields
-                let mut detail = format!(
-                    "{}Field: {}\n\n{}\n\nSaved config: {}\n\nShortcuts:\nSpace/Enter - Edit or cycle\nEsc - Cancel edit\ns - Save to .macc/macc.yaml",
-                    override_prefix,
-                    state.automation_field_label(idx),
-                    state.automation_field_help(idx),
-                    state.automation_field_display_value(idx),
-                );
-                if let Some(validation) = state.current_automation_field_validation() {
-                    detail.push_str(&format!("\n\nValidation:\n{}", validation));
-                }
-                detail.push_str("\n\nRuntime monitoring moved to Coordinator Live.\nPress 'v' to open live status, active tasks, and events.");
-                wrapped_paragraph(detail, "Field Info")
+                // Default: show field description and current value.
+                let detail_text = if let Some((source, field_idx)) = state.current_config_field() {
+                    let override_prefix = if source == 1 {
+                        state.phase_override_notice_for_field(field_idx)
+                            .map(|n| format!("⚠ {n}\n\n"))
+                            .unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
+                    let raw_label = if source == 0 {
+                        state.settings_field_label(field_idx)
+                    } else {
+                        state.automation_field_label(field_idx)
+                    };
+                    let mut text = format!(
+                        "{}Field: {}\n\n{}\n\nValue: {}",
+                        override_prefix,
+                        raw_label,
+                        state.config_field_help(source, field_idx),
+                        state.config_field_value(source, field_idx),
+                    );
+                    if source == 1 {
+                        if let Some(validation) = state.current_automation_field_validation() {
+                            text.push_str(&format!("\n\nValidation: {}", validation));
+                        }
+                    }
+                    text.push_str(
+                        "\n\nShortcuts:\nSpace/Enter  edit or cycle\nEsc          cancel edit\ns            save to .macc/macc.yaml\nTab          next tab\n1-6          jump to tab",
+                    );
+                    text
+                } else {
+                    "No field selected.".to_string()
+                };
+                wrapped_paragraph(detail_text, "Field Info")
             };
             f.render_widget(detail_para, body_chunks[1]);
         }
@@ -2158,6 +2194,7 @@ fn build_readiness_text(
         out.push_str("  [a] Apply config\n");
         out.push_str("  [r] Start coordinator\n");
         out.push_str("  [v] Coordinator live view\n");
+        out.push_str("  [?] All Keybindings\n");
         out.push_str("  CLI: macc quickstart");
     }
     out

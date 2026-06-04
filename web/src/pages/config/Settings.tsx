@@ -1,11 +1,10 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 import { getConfig, updateConfig, ApiClientError } from '../../api/client';
 import type { ApiConfigResponse, ApiConfigUpdateRequest } from '../../api/models';
-import { Button, ErrorBanner, LoadingSpinner, Toast } from '../../components';
-import { cn } from '../../components/styles';
+import { ErrorBanner, LoadingSpinner, Toast } from '../../components';
 
-
+/* ── Types ───────────────────────────────────────────────────── */
 interface ToastState {
   open: boolean;
   title: string;
@@ -13,20 +12,21 @@ interface ToastState {
   variant: 'success' | 'error' | 'warning';
 }
 
+type SettingsSection = 'basic' | 'advanced' | 'admin' | 'raw';
+
+/* ── Helpers ─────────────────────────────────────────────────── */
 function formatError(error: unknown): string {
-  if (error instanceof ApiClientError) {
-    return `${error.envelope.error.message} (${error.envelope.error.code})`;
-  }
+  if (error instanceof ApiClientError) return `${error.envelope.error.message} (${error.envelope.error.code})`;
   if (error instanceof Error) return error.message;
   return 'Unexpected error.';
 }
 
-function ensureStringArray(value: unknown): string[] {
-  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string') : [];
+function ensureStringArray(v: unknown): string[] {
+  return Array.isArray(v) ? v.filter((e): e is string => typeof e === 'string') : [];
 }
 
-function ensureRecord<T>(value: unknown): Record<string, T> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, T>) : {};
+function ensureRecord<T>(v: unknown): Record<string, T> {
+  return v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, T>) : {};
 }
 
 function normalizeConfigResponse(config: ApiConfigResponse): ApiConfigResponse {
@@ -46,111 +46,155 @@ function normalizeConfigResponse(config: ApiConfigResponse): ApiConfigResponse {
   };
 }
 
-/* ------------------------------------------------------------------ */
-/*  Field helpers                                                      */
-/* ------------------------------------------------------------------ */
+/* ── Base field styles ───────────────────────────────────────── */
+const inputStyle: React.CSSProperties = {
+  height: 32,
+  borderRadius: 'var(--radius-md)',
+  border: '1px solid var(--border)',
+  background: 'var(--bg-secondary)',
+  color: 'var(--text-primary)',
+  fontSize: 'var(--text-sm)',
+  padding: '0 10px',
+  outline: 'none',
+  width: '100%',
+  transition: 'border-color 100ms',
+  fontFamily: 'var(--font-ui)',
+};
 
-function NumberField({
-  label,
-  value,
-  onChange,
-  placeholder,
-  helpText,
-}: {
-  label: string;
-  value: number | null;
-  onChange: (v: number | null) => void;
-  placeholder?: string;
-  helpText?: string;
-}) {
+/* ── Field primitives ────────────────────────────────────────── */
+function Label({ children }: { children: React.ReactNode }) {
   return (
-    <label className="flex flex-col gap-1.5">
-      <span className="text-xs font-medium text-[var(--text-secondary)]">{label}</span>
-      <input
-        type="number"
-        className="rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
-        value={value ?? ''}
-        onChange={(e) => onChange(e.target.value === '' ? null : Number(e.target.value))}
-        placeholder={placeholder}
-      />
-      {helpText && <span className="text-[10px] text-[var(--text-muted)]">{helpText}</span>}
-    </label>
+    <span style={{ fontSize: '11px', fontWeight: 500, color: 'var(--text-muted)', display: 'block', marginBottom: 5 }}>
+      {children}
+    </span>
   );
 }
 
-function TextField({
-  label,
-  value,
-  onChange,
-  placeholder,
-  helpText,
-}: {
-  label: string;
-  value: string | null;
-  onChange: (v: string | null) => void;
-  placeholder?: string;
-  helpText?: string;
-}) {
+function Help({ children }: { children: React.ReactNode }) {
   return (
-    <label className="flex flex-col gap-1.5">
-      <span className="text-xs font-medium text-[var(--text-secondary)]">{label}</span>
-      <input
-        type="text"
-        className="rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
-        value={value ?? ''}
-        onChange={(e) => onChange(e.target.value === '' ? null : e.target.value)}
-        placeholder={placeholder}
-      />
-      {helpText && <span className="text-[10px] text-[var(--text-muted)]">{helpText}</span>}
-    </label>
+    <span style={{ fontSize: '10px', color: 'var(--text-muted)', display: 'block', marginTop: 4, lineHeight: 1.45 }}>
+      {children}
+    </span>
   );
 }
 
-
-function BooleanField({
-  label,
-  value,
-  onChange,
-  helpText,
-}: {
-  label: string;
-  value: boolean | null;
-  onChange: (v: boolean) => void;
-  helpText?: string;
-}) {
+function Field({ label, help, children }: { label: string; help?: string; children: React.ReactNode }) {
   return (
-    <label className="flex items-center gap-3">
+    <div>
+      <Label>{label}</Label>
+      {children}
+      {help && <Help>{help}</Help>}
+    </div>
+  );
+}
+
+function NumberInput({ value, onChange, placeholder }: { value: number | null; onChange: (v: number | null) => void; placeholder?: string }) {
+  return (
+    <input
+      type="number"
+      style={inputStyle}
+      value={value ?? ''}
+      placeholder={placeholder}
+      onChange={(e) => onChange(e.target.value === '' ? null : Number(e.target.value))}
+      onFocus={(e) => { (e.target as HTMLInputElement).style.borderColor = 'var(--accent)'; }}
+      onBlur={(e) => { (e.target as HTMLInputElement).style.borderColor = 'var(--border)'; }}
+    />
+  );
+}
+
+function TextInput({ value, onChange, placeholder, mono }: { value: string | null; onChange: (v: string | null) => void; placeholder?: string; mono?: boolean }) {
+  return (
+    <input
+      type="text"
+      style={{ ...inputStyle, fontFamily: mono ? 'var(--font-mono)' : 'var(--font-ui)', fontSize: mono ? '11px' : 'var(--text-sm)' }}
+      value={value ?? ''}
+      placeholder={placeholder}
+      onChange={(e) => onChange(e.target.value === '' ? null : e.target.value)}
+      onFocus={(e) => { (e.target as HTMLInputElement).style.borderColor = 'var(--accent)'; }}
+      onBlur={(e) => { (e.target as HTMLInputElement).style.borderColor = 'var(--border)'; }}
+    />
+  );
+}
+
+function SelectInput({ value, onChange, options }: { value: string | null; onChange: (v: string) => void; options: { value: string; label: string }[] }) {
+  return (
+    <select
+      style={{ ...inputStyle, cursor: 'pointer', paddingRight: 28, appearance: 'none',
+        backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23737373' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E")`,
+        backgroundRepeat: 'no-repeat', backgroundPosition: 'right 8px center' }}
+      value={value ?? ''}
+      onChange={(e) => onChange(e.target.value)}
+      onFocus={(e) => { (e.target as HTMLSelectElement).style.borderColor = 'var(--accent)'; }}
+      onBlur={(e) => { (e.target as HTMLSelectElement).style.borderColor = 'var(--border)'; }}
+    >
+      {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+    </select>
+  );
+}
+
+function Toggle({ checked, onChange }: { checked: boolean | null; onChange: (v: boolean) => void }) {
+  const on = checked ?? false;
+  return (
+    <label style={{ position: 'relative', display: 'inline-flex', cursor: 'pointer', flexShrink: 0 }}>
       <input
         type="checkbox"
-        className="h-4 w-4 accent-[var(--accent)]"
-        checked={value ?? false}
+        checked={on}
         onChange={(e) => onChange(e.target.checked)}
+        style={{ position: 'absolute', opacity: 0, width: 0, height: 0 }}
       />
-      <div className="flex flex-col">
-        <span className="text-sm text-[var(--text-primary)]">{label}</span>
-        {helpText && <span className="text-[10px] text-[var(--text-muted)]">{helpText}</span>}
+      <div
+        style={{
+          width: 34, height: 18, borderRadius: 9,
+          background: on ? 'var(--accent)' : 'var(--bg-elevated)',
+          border: `1px solid ${on ? 'var(--accent)' : 'var(--border)'}`,
+          transition: 'background 150ms, border-color 150ms',
+          position: 'relative',
+        }}
+      >
+        <div
+          style={{
+            position: 'absolute', top: 2,
+            left: on ? 16 : 2,
+            width: 12, height: 12, borderRadius: 6,
+            background: on ? '#fff' : 'var(--text-muted)',
+            transition: 'left 150ms cubic-bezier(0.16, 1, 0.3, 1), background 150ms',
+            boxShadow: on ? '0 1px 2px rgba(0,0,0,0.3)' : 'none',
+          }}
+        />
       </div>
     </label>
   );
 }
 
-/* ------------------------------------------------------------------ */
-/*  Tool-aware field components (never ask users to type tool names)   */
-/* ------------------------------------------------------------------ */
+function ToggleRow({ label, help, checked, onChange }: { label: string; help?: string; checked: boolean | null; onChange: (v: boolean) => void }) {
+  return (
+    <label style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, cursor: 'pointer', padding: '2px 0' }}>
+      <div>
+        <div style={{ fontSize: 'var(--text-sm)', color: 'var(--text-primary)', fontWeight: 400 }}>{label}</div>
+        {help && <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: 2, lineHeight: 1.4 }}>{help}</div>}
+      </div>
+      <Toggle checked={checked} onChange={onChange} />
+    </label>
+  );
+}
 
-/** Reorderable list of enabled tools — ↑↓ buttons, no manual typing. */
+/* ── Section separator ───────────────────────────────────────── */
+function SectionLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <p style={{ fontSize: '11px', fontWeight: 500, color: 'var(--text-muted)', marginBottom: 12, marginTop: 4, userSelect: 'none' }}>
+      {children}
+    </p>
+  );
+}
+
+function SectionDivider() {
+  return <div style={{ height: 1, background: 'var(--border-subtle)', margin: '20px 0' }} />;
+}
+
+/* ── Tool-aware components ───────────────────────────────────── */
 function ToolPriorityField({
-  value,
-  enabledTools,
-  onChange,
-  helpText,
-}: {
-  value: string[];
-  enabledTools: string[];
-  onChange: (v: string[]) => void;
-  helpText?: string;
-}) {
-  // Build the full list: explicitly ordered tools first, then remaining enabled tools in insertion order
+  value, enabledTools, onChange, help,
+}: { value: string[]; enabledTools: string[]; onChange: (v: string[]) => void; help?: string }) {
   const buildFull = (explicit: string[], all: string[]): string[] => {
     const result = explicit.filter((t) => all.includes(t));
     for (const t of all) if (!result.includes(t)) result.push(t);
@@ -168,157 +212,130 @@ function ToolPriorityField({
 
   if (enabledTools.length === 0)
     return (
-      <div className="flex flex-col gap-1.5">
-        <span className="text-xs font-medium text-[var(--text-secondary)]">Tool Priority</span>
-        <p className="text-xs text-[var(--text-muted)] px-2 py-2">No tools enabled.</p>
-      </div>
+      <Field label="Tool Priority">
+        <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text-muted)' }}>No tools enabled.</p>
+      </Field>
     );
 
   return (
-    <div className="flex flex-col gap-1.5">
-      <span className="text-xs font-medium text-[var(--text-secondary)]">Tool Priority</span>
-      <div className="rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)] p-2 flex flex-col gap-0.5">
+    <div>
+      <Label>Tool Priority</Label>
+      <div style={{ border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', overflow: 'hidden' }}>
         {list.map((tool, idx) => {
           const isExplicit = value.includes(tool);
           return (
             <div
               key={tool}
-              className="flex items-center justify-between px-2 py-1 rounded hover:bg-[var(--bg-hover)]"
+              style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                padding: '7px 10px',
+                borderBottom: idx < list.length - 1 ? '1px solid var(--border-subtle)' : 'none',
+                background: 'var(--bg-secondary)',
+              }}
             >
-              <div className="flex items-center gap-2">
-                <span
-                  className={cn(
-                    'text-[10px] tabular-nums w-5 text-right select-none',
-                    isExplicit ? 'text-[var(--accent)]' : 'text-[var(--text-muted)]',
-                  )}
-                >
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ fontSize: '10px', color: isExplicit ? 'var(--accent)' : 'var(--text-muted)', fontFamily: 'var(--font-mono)', width: 16, textAlign: 'right', flexShrink: 0 }}>
                   {idx + 1}.
                 </span>
-                <span
-                  className={cn(
-                    'text-xs font-mono',
-                    isExplicit ? 'text-[var(--text-primary)]' : 'text-[var(--text-muted)]',
-                  )}
-                >
+                <span style={{ fontSize: 'var(--text-sm)', fontFamily: 'var(--font-mono)', color: isExplicit ? 'var(--text-primary)' : 'var(--text-muted)' }}>
                   {tool}
                 </span>
-                {!isExplicit && (
-                  <span className="text-[9px] text-[var(--text-muted)] italic">(default)</span>
-                )}
+                {!isExplicit && <span style={{ fontSize: '10px', color: 'var(--text-muted)', fontStyle: 'italic' }}>default</span>}
               </div>
-              <div className="flex gap-1">
-                <button
-                  onClick={() => move(idx, -1)}
-                  disabled={idx === 0}
-                  title="Move up"
-                  className="w-6 h-5 flex items-center justify-center text-[11px] rounded border border-[var(--border)] bg-[var(--bg-card)] hover:bg-[var(--bg-hover)] disabled:opacity-25 disabled:cursor-not-allowed"
-                >
-                  ↑
-                </button>
-                <button
-                  onClick={() => move(idx, 1)}
-                  disabled={idx === list.length - 1}
-                  title="Move down"
-                  className="w-6 h-5 flex items-center justify-center text-[11px] rounded border border-[var(--border)] bg-[var(--bg-card)] hover:bg-[var(--bg-hover)] disabled:opacity-25 disabled:cursor-not-allowed"
-                >
-                  ↓
-                </button>
+              <div style={{ display: 'flex', gap: 3 }}>
+                <ArrowBtn onClick={() => move(idx, -1)} disabled={idx === 0} label="Move up">↑</ArrowBtn>
+                <ArrowBtn onClick={() => move(idx, 1)} disabled={idx === list.length - 1} label="Move down">↓</ArrowBtn>
               </div>
             </div>
           );
         })}
       </div>
-      {helpText && <span className="text-[10px] text-[var(--text-muted)]">{helpText}</span>}
+      {help && <Help>{help}</Help>}
     </div>
   );
 }
 
-/** Per-tool parallel count stepper — no JSON required. */
+function ArrowBtn({ children, onClick, disabled, label }: { children: React.ReactNode; onClick: () => void; disabled?: boolean; label: string }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={label}
+      style={{
+        width: 22, height: 22,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        fontSize: 11,
+        border: '1px solid var(--border)',
+        borderRadius: 'var(--radius-sm)',
+        background: 'var(--bg-card)',
+        color: disabled ? 'var(--text-muted)' : 'var(--text-secondary)',
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        opacity: disabled ? 0.35 : 1,
+        transition: 'background 80ms',
+      }}
+      onMouseEnter={(e) => { if (!disabled) (e.currentTarget as HTMLElement).style.background = 'var(--bg-elevated)'; }}
+      onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--bg-card)'; }}
+    >
+      {children}
+    </button>
+  );
+}
+
 function MaxParallelPerToolField({
-  value,
-  enabledTools,
-  onChange,
-  helpText,
-}: {
-  value: Record<string, number>;
-  enabledTools: string[];
-  onChange: (v: Record<string, number>) => void;
-  helpText?: string;
-}) {
+  value, enabledTools, onChange, help,
+}: { value: Record<string, number>; enabledTools: string[]; onChange: (v: Record<string, number>) => void; help?: string }) {
   const adjust = (tool: string, delta: number) => {
     const current = value[tool] ?? 1;
-    const next = Math.max(1, current + delta);
-    onChange({ ...value, [tool]: next });
+    onChange({ ...value, [tool]: Math.max(1, current + delta) });
   };
 
   if (enabledTools.length === 0)
     return (
-      <div className="flex flex-col gap-1.5">
-        <span className="text-xs font-medium text-[var(--text-secondary)]">Max Parallel Per Tool</span>
-        <p className="text-xs text-[var(--text-muted)] px-2 py-2">No tools enabled.</p>
-      </div>
+      <Field label="Max Parallel Per Tool">
+        <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text-muted)' }}>No tools enabled.</p>
+      </Field>
     );
 
   return (
-    <div className="flex flex-col gap-1.5">
-      <span className="text-xs font-medium text-[var(--text-secondary)]">Max Parallel Per Tool</span>
-      <div className="rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)] p-2 flex flex-col gap-0.5">
-        {enabledTools.map((tool) => {
+    <div>
+      <Label>Max Parallel Per Tool</Label>
+      <div style={{ border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', overflow: 'hidden' }}>
+        {enabledTools.map((tool, idx) => {
           const count = value[tool] ?? 1;
           return (
             <div
               key={tool}
-              className="flex items-center justify-between px-2 py-1 rounded hover:bg-[var(--bg-hover)]"
+              style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                padding: '7px 10px',
+                borderBottom: idx < enabledTools.length - 1 ? '1px solid var(--border-subtle)' : 'none',
+                background: 'var(--bg-secondary)',
+              }}
             >
-              <span className="text-xs font-mono text-[var(--text-primary)]">{tool}</span>
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => adjust(tool, -1)}
-                  disabled={count <= 1}
-                  title="Decrease"
-                  className="w-6 h-6 flex items-center justify-center text-sm rounded border border-[var(--border)] bg-[var(--bg-card)] hover:bg-[var(--bg-hover)] disabled:opacity-25 disabled:cursor-not-allowed"
-                >
-                  −
-                </button>
-                <span className="text-xs tabular-nums w-6 text-center font-medium text-[var(--text-primary)] select-none">
-                  {count}
-                </span>
-                <button
-                  onClick={() => adjust(tool, 1)}
-                  title="Increase"
-                  className="w-6 h-6 flex items-center justify-center text-sm rounded border border-[var(--border)] bg-[var(--bg-card)] hover:bg-[var(--bg-hover)]"
-                >
-                  +
-                </button>
+              <span style={{ fontSize: 'var(--text-sm)', fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>{tool}</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <ArrowBtn onClick={() => adjust(tool, -1)} disabled={count <= 1} label="Decrease">−</ArrowBtn>
+                <span style={{ fontSize: 'var(--text-sm)', fontFamily: 'var(--font-mono)', color: 'var(--text-primary)', width: 20, textAlign: 'center', fontWeight: 500 }}>{count}</span>
+                <ArrowBtn onClick={() => adjust(tool, 1)} label="Increase">+</ArrowBtn>
               </div>
             </div>
           );
         })}
       </div>
-      {helpText && <span className="text-[10px] text-[var(--text-muted)]">{helpText}</span>}
+      {help && <Help>{help}</Help>}
     </div>
   );
 }
 
-/** Category → tools mapping editor — toggleable chips per category, no JSON. */
 function ToolSpecializationsField({
-  value,
-  enabledTools,
-  onChange,
-  helpText,
-}: {
-  value: Record<string, string[]>;
-  enabledTools: string[];
-  onChange: (v: Record<string, string[]>) => void;
-  helpText?: string;
-}) {
+  value, enabledTools, onChange, help,
+}: { value: Record<string, string[]>; enabledTools: string[]; onChange: (v: Record<string, string[]>) => void; help?: string }) {
   const [newCat, setNewCat] = useState('');
 
   const toggleTool = (cat: string, tool: string) => {
     const current = (value[cat] as string[]) ?? [];
-    const next = current.includes(tool)
-      ? current.filter((t) => t !== tool)
-      : [...current, tool];
+    const next = current.includes(tool) ? current.filter((t) => t !== tool) : [...current, tool];
     onChange({ ...value, [cat]: next });
   };
 
@@ -336,42 +353,56 @@ function ToolSpecializationsField({
   };
 
   return (
-    <div className="flex flex-col gap-1.5">
-      <span className="text-xs font-medium text-[var(--text-secondary)]">Tool Specializations</span>
-      <div className="rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)] p-2 flex flex-col gap-2">
+    <div>
+      <Label>Tool Specializations</Label>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
         {Object.keys(value).length === 0 && (
-          <p className="text-xs text-[var(--text-muted)] px-1 py-0.5">
-            No specializations — all tools handle all categories.
+          <p style={{ fontSize: 'var(--text-sm)', color: 'var(--text-muted)', padding: '6px 0' }}>
+            No categories — all tools handle all task types.
           </p>
         )}
         {Object.entries(value).map(([cat, tools]) => (
-          <div key={cat} className="rounded border border-[var(--border)] p-2 flex flex-col gap-1.5">
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] font-mono font-semibold text-[var(--text-primary)]">{cat}</span>
+          <div
+            key={cat}
+            style={{
+              border: '1px solid var(--border)',
+              borderRadius: 'var(--radius-md)',
+              padding: '8px 10px',
+              background: 'var(--bg-secondary)',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+              <span style={{ fontSize: '11px', fontFamily: 'var(--font-mono)', fontWeight: 600, color: 'var(--text-primary)' }}>{cat}</span>
               <button
+                type="button"
                 onClick={() => removeCat(cat)}
-                className="text-[10px] text-[var(--text-muted)] hover:text-[var(--error)] px-1"
-                title="Remove category"
+                style={{ fontSize: '10px', color: 'var(--text-muted)', background: 'none', border: 'none', cursor: 'pointer', padding: '2px 4px' }}
+                onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--error)'; }}
+                onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--text-muted)'; }}
               >
-                ✕
+                Remove
               </button>
             </div>
-            <div className="flex flex-wrap gap-1">
-              {enabledTools.length === 0 && (
-                <span className="text-[10px] text-[var(--text-muted)]">No tools enabled.</span>
-              )}
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+              {enabledTools.length === 0 && <span style={{ fontSize: '10px', color: 'var(--text-muted)' }}>No tools enabled.</span>}
               {enabledTools.map((tool) => {
                 const active = (tools as string[]).includes(tool);
                 return (
                   <button
                     key={tool}
+                    type="button"
                     onClick={() => toggleTool(cat, tool)}
-                    className={cn(
-                      'px-2 py-0.5 text-[10px] rounded-full border font-mono transition-colors',
-                      active
-                        ? 'border-[var(--accent)] bg-[var(--accent)]/15 text-[var(--accent)]'
-                        : 'border-[var(--border)] bg-[var(--bg-card)] text-[var(--text-muted)] hover:border-[var(--accent)]/50',
-                    )}
+                    style={{
+                      padding: '3px 9px',
+                      fontSize: '11px',
+                      fontFamily: 'var(--font-mono)',
+                      borderRadius: 999,
+                      border: `1px solid ${active ? 'var(--accent)' : 'var(--border)'}`,
+                      background: active ? 'var(--accent-bg)' : 'var(--bg-card)',
+                      color: active ? 'var(--accent)' : 'var(--text-muted)',
+                      cursor: 'pointer',
+                      transition: 'background 80ms, border-color 80ms, color 80ms',
+                    }}
                   >
                     {tool}
                   </button>
@@ -380,568 +411,364 @@ function ToolSpecializationsField({
             </div>
           </div>
         ))}
-        {/* Add new category */}
-        <div className="flex gap-2 pt-1">
+        <div style={{ display: 'flex', gap: 6 }}>
           <input
             type="text"
-            className="flex-1 text-xs rounded border border-[var(--border)] bg-[var(--bg-card)] px-2 py-1 text-[var(--text-primary)] outline-none focus:border-[var(--accent)] placeholder-[var(--text-muted)]"
+            style={{ ...inputStyle, height: 30, flex: 1, fontSize: '12px' }}
             placeholder="New category (e.g. frontend)"
             value={newCat}
             onChange={(e) => setNewCat(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && addCat()}
+            onFocus={(e) => { (e.target as HTMLInputElement).style.borderColor = 'var(--accent)'; }}
+            onBlur={(e) => { (e.target as HTMLInputElement).style.borderColor = 'var(--border)'; }}
           />
           <button
+            type="button"
             onClick={addCat}
             disabled={!newCat.trim()}
-            className="px-2 py-1 text-xs rounded border border-[var(--border)] bg-[var(--bg-card)] hover:bg-[var(--bg-hover)] text-[var(--text-primary)] disabled:opacity-30"
+            style={{
+              height: 30, padding: '0 12px',
+              fontSize: '12px',
+              border: '1px solid var(--border)',
+              borderRadius: 'var(--radius-md)',
+              background: 'var(--bg-card)',
+              color: 'var(--text-secondary)',
+              cursor: newCat.trim() ? 'pointer' : 'not-allowed',
+              opacity: newCat.trim() ? 1 : 0.4,
+              transition: 'background 80ms',
+            }}
           >
-            + Add
+            Add
           </button>
         </div>
       </div>
-      {helpText && <span className="text-[10px] text-[var(--text-muted)]">{helpText}</span>}
+      {help && <Help>{help}</Help>}
     </div>
   );
 }
 
-function SectionHeading({ children }: { children: React.ReactNode }) {
+/* ── Notice box ──────────────────────────────────────────────── */
+function Notice({ children }: { children: React.ReactNode }) {
   return (
-    <h3 className="mb-3 border-b border-[var(--border)] pb-2 text-sm font-semibold text-[var(--text-primary)]">
+    <div
+      style={{
+        padding: '10px 12px',
+        borderRadius: 'var(--radius-md)',
+        background: 'oklch(0.75 0.17 80 / 0.08)',
+        border: '1px solid oklch(0.75 0.17 80 / 0.25)',
+        fontSize: '12px',
+        color: 'var(--warning)',
+        lineHeight: 1.5,
+        marginBottom: 20,
+      }}
+    >
       {children}
-    </h3>
-  );
-}
-
-/* ------------------------------------------------------------------ */
-/*  Tab: General                                                       */
-/* ------------------------------------------------------------------ */
-
-/* ------------------------------------------------------------------ */
-/*  Tab Components & Helpers                                           */
-/* ------------------------------------------------------------------ */
-
-function WarningBanner({ message }: { message: string }) {
-  return (
-    <div className="mb-6 rounded-lg border border-[var(--warning)]/30 bg-[var(--warning)]/10 px-4 py-3 text-xs text-[var(--warning)] flex items-start gap-2">
-      <span className="font-semibold select-none">⚠️</span>
-      <div>{message}</div>
     </div>
   );
 }
 
-function SelectField({
-  label,
-  value,
-  onChange,
-  options,
-  helpText,
-}: {
-  label: string;
-  value: string | null;
-  onChange: (v: string) => void;
-  options: { value: string; label: string }[];
-  helpText?: string;
-}) {
+/* ── Field grid layouts ──────────────────────────────────────── */
+function FieldGrid({ cols = 2, children }: { cols?: number; children: React.ReactNode }) {
   return (
-    <label className="flex flex-col gap-1.5">
-      <span className="text-xs font-medium text-[var(--text-secondary)]">{label}</span>
-      <select
-        className="rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)] px-3 py-2 text-sm text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
-        value={value ?? ''}
-        onChange={(e) => onChange(e.target.value)}
-      >
-        {options.map((opt) => (
-          <option key={opt.value} value={opt.value}>
-            {opt.label}
-          </option>
-        ))}
-      </select>
-      {helpText && <span className="text-[10px] text-[var(--text-muted)]">{helpText}</span>}
-    </label>
+    <div style={{ display: 'grid', gridTemplateColumns: `repeat(${cols}, 1fr)`, gap: '14px 20px' }}>
+      {children}
+    </div>
   );
 }
 
-function PresetSelector({
-  onApplyPreset,
-}: {
-  onApplyPreset: (preset: 'conservative' | 'balanced' | 'throughput') => void;
-}) {
+function FullWidth({ children }: { children: React.ReactNode }) {
+  return <div style={{ gridColumn: '1 / -1' }}>{children}</div>;
+}
+
+/* ── Preset selector ─────────────────────────────────────────── */
+function PresetBar({ onApply }: { onApply: (preset: 'conservative' | 'balanced' | 'throughput') => void }) {
   return (
-    <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-secondary)] p-4 mb-6">
-      <h4 className="text-xs font-semibold text-[var(--text-primary)] mb-1">Configuration Presets</h4>
-      <p className="text-[10px] text-[var(--text-muted)] mb-3">
-        Apply predefined performance and safety profiles. This overrides individual settings below.
-      </p>
-      <div className="flex gap-2">
-        <Button
-          onClick={() => onApplyPreset('conservative')}
-          className="text-xs px-3 py-1.5 border border-[var(--border)] bg-[var(--bg-card)] hover:bg-[var(--bg-hover)] text-[var(--text-primary)]"
-        >
-          Conservative
-        </Button>
-        <Button
-          onClick={() => onApplyPreset('balanced')}
-          className="text-xs px-3 py-1.5 border border-[var(--border)] bg-[var(--bg-card)] hover:bg-[var(--bg-hover)] text-[var(--text-primary)]"
-        >
-          Balanced
-        </Button>
-        <Button
-          onClick={() => onApplyPreset('throughput')}
-          className="text-xs px-3 py-1.5 border border-[var(--border)] bg-[var(--bg-card)] hover:bg-[var(--bg-hover)] text-[var(--text-primary)]"
-        >
-          Throughput
-        </Button>
+    <div style={{ marginBottom: 20 }}>
+      <SectionLabel>Presets</SectionLabel>
+      <div style={{ display: 'flex', gap: 6 }}>
+        {(['conservative', 'balanced', 'throughput'] as const).map((p) => (
+          <button
+            key={p}
+            type="button"
+            onClick={() => onApply(p)}
+            style={{
+              padding: '5px 12px',
+              fontSize: '12px',
+              fontWeight: 500,
+              border: '1px solid var(--border)',
+              borderRadius: 'var(--radius-md)',
+              background: 'var(--bg-elevated)',
+              color: 'var(--text-secondary)',
+              cursor: 'pointer',
+              transition: 'background 80ms, color 80ms',
+              textTransform: 'capitalize',
+            }}
+            onMouseEnter={(e) => { const el = e.currentTarget; el.style.background = 'var(--accent-bg)'; el.style.color = 'var(--accent)'; el.style.borderColor = 'oklch(0.60 0.15 255 / 0.4)'; }}
+            onMouseLeave={(e) => { const el = e.currentTarget; el.style.background = 'var(--bg-elevated)'; el.style.color = 'var(--text-secondary)'; el.style.borderColor = 'var(--border)'; }}
+          >
+            {p}
+          </button>
+        ))}
       </div>
     </div>
   );
 }
 
-/* ------------------------------------------------------------------ */
-/*  Tab: Basic settings                                                */
-/* ------------------------------------------------------------------ */
-
-function BasicTab({
-  draft,
-  update,
-}: {
-  draft: ApiConfigResponse;
-  update: (patch: Partial<ApiConfigUpdateRequest>) => void;
-}) {
-  const handleApplyPreset = (preset: 'conservative' | 'balanced' | 'throughput') => {
-    switch (preset) {
-      case 'conservative':
-        update({
-          maxParallel: 1,
-          rateLimitFallbackEnabled: false,
-          rateLimitThrottleParallel: false,
-          mergeAiFix: false,
-          safetyPolicy: 'strict',
-          destructiveActions: 'double_confirm',
-        });
-        break;
-      case 'balanced':
-        update({
-          maxParallel: 3,
-          rateLimitFallbackEnabled: true,
-          rateLimitThrottleParallel: false,
-          mergeAiFix: true,
-          safetyPolicy: 'standard',
-          destructiveActions: 'double_confirm',
-        });
-        break;
-      case 'throughput':
-        update({
-          maxParallel: 6,
-          rateLimitFallbackEnabled: true,
-          rateLimitThrottleParallel: true,
-          mergeAiFix: true,
-          safetyPolicy: 'standard',
-          destructiveActions: 'double_confirm',
-        });
-        break;
-    }
+/* ── Tab sections ────────────────────────────────────────────── */
+function BasicTab({ draft, update }: { draft: ApiConfigResponse; update: (p: Partial<ApiConfigUpdateRequest>) => void }) {
+  const handlePreset = (p: 'conservative' | 'balanced' | 'throughput') => {
+    if (p === 'conservative') update({ maxParallel: 1, rateLimitFallbackEnabled: false, rateLimitThrottleParallel: false, mergeAiFix: false, safetyPolicy: 'strict', destructiveActions: 'double_confirm' });
+    if (p === 'balanced') update({ maxParallel: 3, rateLimitFallbackEnabled: true, rateLimitThrottleParallel: false, mergeAiFix: true, safetyPolicy: 'standard', destructiveActions: 'double_confirm' });
+    if (p === 'throughput') update({ maxParallel: 6, rateLimitFallbackEnabled: true, rateLimitThrottleParallel: true, mergeAiFix: true, safetyPolicy: 'standard', destructiveActions: 'double_confirm' });
   };
 
   return (
-    <div className="flex flex-col gap-6">
-      <PresetSelector onApplyPreset={handleApplyPreset} />
+    <div>
+      <PresetBar onApply={handlePreset} />
 
-      <SectionHeading>General Settings</SectionHeading>
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <NumberField
-          label="Web Interface Port"
-          value={draft.webPort}
-          onChange={(v) => update({ webPort: v })}
-          placeholder="3450"
-          helpText="Port the local dashboard Axum server binds to."
-        />
-        <BooleanField
-          label="Offline Mode"
-          value={draft.offline}
-          onChange={(v) => update({ offline: v })}
-          helpText="Prevent all remote network requests and catalog checking."
-        />
-        <BooleanField
-          label="Quiet Mode"
-          value={draft.quiet}
-          onChange={(v) => update({ quiet: v })}
-          helpText="Suppress non-essential stdout output from the CLI."
-        />
-        <BooleanField
-          label="Debug Mode"
-          value={draft.debug}
-          onChange={(v) => update({ debug: v })}
-          helpText="Enable verbose performer logs: full prompt dump, runner line, [MACC] invoke lines. Equivalent to MACC_DEBUG=1 or macc --verbose."
-        />
+      <SectionLabel>General</SectionLabel>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 4 }}>
+        <ToggleRow label="Quiet mode" help="Suppress non-essential CLI output." checked={draft.quiet} onChange={(v) => update({ quiet: v })} />
+        <ToggleRow label="Offline mode" help="Disable all remote network requests." checked={draft.offline} onChange={(v) => update({ offline: v })} />
+        <ToggleRow label="Debug mode" help="Verbose performer logs — prompt dump, runner line, [MACC] invoke. Equivalent to MACC_DEBUG=1." checked={draft.debug} onChange={(v) => update({ debug: v })} />
       </div>
 
-      <SectionHeading>Task Execution &amp; Routing</SectionHeading>
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <SelectField
-          label="Coordinator Tool"
-          value={draft.coordinatorTool}
-          onChange={(v) => update({ coordinatorTool: v || null })}
-          options={[
-            { value: '', label: '— Auto-select —' },
-            ...draft.enabledTools.map((t) => ({ value: t, label: t })),
-          ]}
-          helpText="AI tool used for coordinator phases (review, fix). Empty = auto-select from enabled tools."
-        />
-        <NumberField
-          label="Max Parallel"
-          value={draft.maxParallel}
-          onChange={(v) => update({ maxParallel: v })}
-          placeholder="3"
-          helpText="Maximum tasks the coordinator can run in parallel."
-        />
-        <NumberField
-          label="Timeout (seconds)"
-          value={draft.timeoutSeconds}
-          onChange={(v) => update({ timeoutSeconds: v })}
-          placeholder="0"
-          helpText="Global wall-clock timeout (0 is unlimited)."
-        />
-        <TextField
-          label="Reference Branch"
-          value={draft.referenceBranch}
-          onChange={(v) => update({ referenceBranch: v })}
-          placeholder="master"
-          helpText="Branch where completed task worktrees are merged."
-        />
-      </div>
+      <SectionDivider />
+      <SectionLabel>Coordinator</SectionLabel>
+      <FieldGrid cols={2}>
+        <Field label="Coordinator tool" help="AI tool for coordinator phases (review, fix). Empty = auto-select.">
+          <SelectInput
+            value={draft.coordinatorTool}
+            onChange={(v) => update({ coordinatorTool: v || null })}
+            options={[
+              { value: '', label: '— Auto-select —' },
+              ...draft.enabledTools.map((t) => ({ value: t, label: t })),
+            ]}
+          />
+        </Field>
+        <Field label="Reference branch" help="Branch where completed worktrees are merged.">
+          <TextInput value={draft.referenceBranch} onChange={(v) => update({ referenceBranch: v })} placeholder="main" />
+        </Field>
+        <Field label="Max parallel" help="Concurrent tasks the coordinator can run.">
+          <NumberInput value={draft.maxParallel} onChange={(v) => update({ maxParallel: v })} placeholder="3" />
+        </Field>
+        <Field label="Timeout (s)" help="Global wall-clock timeout. 0 = unlimited.">
+          <NumberInput value={draft.timeoutSeconds} onChange={(v) => update({ timeoutSeconds: v })} placeholder="0" />
+        </Field>
+        <Field label="Web port" help="Port the local dashboard server binds to.">
+          <NumberInput value={draft.webPort} onChange={(v) => update({ webPort: v })} placeholder="3450" />
+        </Field>
+      </FieldGrid>
 
-      <SectionHeading>Safety &amp; Confirmation</SectionHeading>
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <SelectField
-          label="Safety Policy"
-          value={draft.safetyPolicy ?? null}
-          onChange={(v) => update({ safetyPolicy: v })}
-          options={[
-            { value: 'standard', label: 'Standard (Verify modifications)' },
-            { value: 'strict', label: 'Strict (Strict sandbox constraints)' },
-          ]}
-          helpText="Verification policy applied to tool write operations."
-        />
-        <SelectField
-          label="Destructive Actions"
-          value={draft.destructiveActions ?? null}
-          onChange={(v) => update({ destructiveActions: v })}
-          options={[
-            { value: 'double_confirm', label: 'Double Confirm (Prompt twice)' },
-            { value: 'single_confirm', label: 'Single Confirm (Prompt once)' },
-          ]}
-          helpText="Prompt confirmation rules for forced updates/checkouts."
-        />
-      </div>
+      <SectionDivider />
+      <SectionLabel>Safety</SectionLabel>
+      <FieldGrid cols={2}>
+        <Field label="Safety policy" help="Verification applied to tool write operations.">
+          <SelectInput
+            value={draft.safetyPolicy ?? null}
+            onChange={(v) => update({ safetyPolicy: v })}
+            options={[
+              { value: 'standard', label: 'Standard' },
+              { value: 'strict', label: 'Strict' },
+            ]}
+          />
+        </Field>
+        <Field label="Destructive actions" help="Confirmation required for forced updates and checkouts.">
+          <SelectInput
+            value={draft.destructiveActions ?? null}
+            onChange={(v) => update({ destructiveActions: v })}
+            options={[
+              { value: 'double_confirm', label: 'Double confirm' },
+              { value: 'single_confirm', label: 'Single confirm' },
+            ]}
+          />
+        </Field>
+      </FieldGrid>
     </div>
   );
 }
 
-/* ------------------------------------------------------------------ */
-/*  Tab: Advanced settings                                             */
-/* ------------------------------------------------------------------ */
-
-function AdvancedTab({
-  draft,
-  update,
-}: {
-  draft: ApiConfigResponse;
-  update: (patch: Partial<ApiConfigUpdateRequest>) => void;
-}) {
+function AdvancedTab({ draft, update }: { draft: ApiConfigResponse; update: (p: Partial<ApiConfigUpdateRequest>) => void }) {
   return (
-    <div className="flex flex-col gap-6">
-      <WarningBanner message="Advanced Settings: These controls adjust low-level task scheduling, staleness checks, and retry mechanisms. Misconfiguration can affect stability or rate limits." />
+    <div>
+      <Notice>
+        Advanced settings control task scheduling, staleness thresholds, and retry behavior. Changes here can affect coordinator stability.
+      </Notice>
 
-      <SectionHeading>Routing &amp; Priorities</SectionHeading>
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <ToolPriorityField
-          value={draft.toolPriority}
-          enabledTools={draft.enabledTools}
-          onChange={(v) => update({ toolPriority: v })}
-          helpText="Drag-free reordering — ↑↓ to change priority. Tools not listed use default order."
-        />
-        <MaxParallelPerToolField
-          value={draft.maxParallelPerTool as Record<string, number>}
-          enabledTools={draft.enabledTools}
-          onChange={(v) => update({ maxParallelPerTool: v })}
-          helpText="Maximum concurrent runs per tool. Default is 1 per tool."
-        />
-        <ToolSpecializationsField
-          value={draft.toolSpecializations as Record<string, string[]>}
-          enabledTools={draft.enabledTools}
-          onChange={(v) => update({ toolSpecializations: v })}
-          helpText="Route task categories to specific tools. Empty = all tools handle all categories."
-        />
-        <TextField
-          label="PRD File"
-          value={draft.prdFile}
-          onChange={(v) => update({ prdFile: v })}
-          placeholder="prd.json"
-          helpText="Path to the task sequence definition file."
-        />
-      </div>
+      <SectionLabel>Routing</SectionLabel>
+      <FieldGrid cols={2}>
+        <FullWidth>
+          <ToolPriorityField value={draft.toolPriority} enabledTools={draft.enabledTools} onChange={(v) => update({ toolPriority: v })} help="↑↓ buttons reorder priority. Tools not listed use default order." />
+        </FullWidth>
+        <FullWidth>
+          <MaxParallelPerToolField value={draft.maxParallelPerTool as Record<string, number>} enabledTools={draft.enabledTools} onChange={(v) => update({ maxParallelPerTool: v })} help="Per-tool concurrency cap. Default is 1." />
+        </FullWidth>
+        <FullWidth>
+          <ToolSpecializationsField value={draft.toolSpecializations as Record<string, string[]>} enabledTools={draft.enabledTools} onChange={(v) => update({ toolSpecializations: v })} help="Route task categories to specific tools. Empty = all tools handle all categories." />
+        </FullWidth>
+        <Field label="PRD file" help="Path to the task sequence definition file.">
+          <TextInput value={draft.prdFile} onChange={(v) => update({ prdFile: v })} placeholder="prd.json" mono />
+        </Field>
+        <Field label="Max dispatch" help="Tasks dispatched per run. 0 = unlimited.">
+          <NumberInput value={draft.maxDispatch} onChange={(v) => update({ maxDispatch: v })} placeholder="10" />
+        </Field>
+      </FieldGrid>
 
-      <SectionHeading>Stale Thresholds</SectionHeading>
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        <NumberField
-          label="Stale Claimed (seconds)"
-          value={draft.staleClaimedSeconds}
-          onChange={(v) => update({ staleClaimedSeconds: v })}
-          helpText="Auto-stale timeout for claimed tasks (0 disables)."
-        />
-        <NumberField
-          label="In-Progress Timeout (seconds)"
-          value={draft.staleInProgressSeconds}
-          onChange={(v) => update({ staleInProgressSeconds: v })}
-          helpText="Hard kill timeout for performer processes (0 disables)."
-        />
-        <NumberField
-          label="Stale Changes-Requested (seconds)"
-          value={draft.staleChangesRequestedSeconds}
-          onChange={(v) => update({ staleChangesRequestedSeconds: v })}
-          helpText="Auto-stale timeout for changes-requested tasks (0 disables)."
-        />
-        <TextField
-          label="Stale Action"
-          value={draft.staleAction}
-          onChange={(v) => update({ staleAction: v })}
-          placeholder="block"
-          helpText="Action on stale task: block | retry | requeue"
-        />
-      </div>
+      <SectionDivider />
+      <SectionLabel>Stale thresholds</SectionLabel>
+      <FieldGrid cols={3}>
+        <Field label="Stale claimed (s)" help="Auto-stale timeout for claimed tasks. 0 = disabled.">
+          <NumberInput value={draft.staleClaimedSeconds} onChange={(v) => update({ staleClaimedSeconds: v })} />
+        </Field>
+        <Field label="In-progress timeout (s)" help="Hard kill timeout for performer processes. 0 = disabled.">
+          <NumberInput value={draft.staleInProgressSeconds} onChange={(v) => update({ staleInProgressSeconds: v })} />
+        </Field>
+        <Field label="Changes-requested (s)" help="Auto-stale for changes-requested tasks. 0 = disabled.">
+          <NumberInput value={draft.staleChangesRequestedSeconds} onChange={(v) => update({ staleChangesRequestedSeconds: v })} />
+        </Field>
+        <Field label="Stale action" help="Action on stale: block, retry, or requeue.">
+          <SelectInput
+            value={draft.staleAction ?? null}
+            onChange={(v) => update({ staleAction: v })}
+            options={[
+              { value: 'block', label: 'Block' },
+              { value: 'retry', label: 'Retry' },
+              { value: 'requeue', label: 'Requeue' },
+            ]}
+          />
+        </Field>
+      </FieldGrid>
 
-      <SectionHeading>Error Retry</SectionHeading>
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <TextField
-          label="Error Code Retry List"
-          value={draft.errorCodeRetryList}
-          onChange={(v) => update({ errorCodeRetryList: v })}
-          placeholder="E101,E102,E103,E301,E302,E303,E601,E603"
-          helpText="Comma-separated error codes eligible for auto-retry."
-        />
-        <NumberField
-          label="Error Code Retry Max"
-          value={draft.errorCodeRetryMax}
-          onChange={(v) => update({ errorCodeRetryMax: v })}
-          placeholder="2"
-          helpText="Maximum retry attempts per task."
-        />
-      </div>
+      <SectionDivider />
+      <SectionLabel>Error retry</SectionLabel>
+      <FieldGrid cols={2}>
+        <Field label="Retry error codes" help="Comma-separated codes eligible for auto-retry.">
+          <TextInput value={draft.errorCodeRetryList} onChange={(v) => update({ errorCodeRetryList: v })} placeholder="E601,E603" mono />
+        </Field>
+        <Field label="Max retries" help="Maximum retry attempts per task.">
+          <NumberInput value={draft.errorCodeRetryMax} onChange={(v) => update({ errorCodeRetryMax: v })} placeholder="2" />
+        </Field>
+      </FieldGrid>
 
-      <SectionHeading>Rate Limiting</SectionHeading>
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        <NumberField
-          label="Backoff Base (seconds)"
-          value={draft.rateLimitBackoffBaseSeconds}
-          onChange={(v) => update({ rateLimitBackoffBaseSeconds: v })}
-          placeholder="30"
-          helpText="Initial E601 backoff delay."
-        />
-        <NumberField
-          label="Backoff Max (seconds)"
-          value={draft.rateLimitBackoffMaxSeconds}
-          onChange={(v) => update({ rateLimitBackoffMaxSeconds: v })}
-          placeholder="300"
-          helpText="Backoff cap for exponential growth."
-        />
-        <BooleanField
-          label="Fallback Enabled"
-          value={draft.rateLimitFallbackEnabled}
-          onChange={(v) => update({ rateLimitFallbackEnabled: v })}
-          helpText="Fall back to next tool on rate-limit."
-        />
-        <BooleanField
-          label="Throttle Parallel"
-          value={draft.rateLimitThrottleParallel}
-          onChange={(v) => update({ rateLimitThrottleParallel: v })}
-          helpText="Reduce concurrency on rate-limit."
-        />
-      </div>
+      <SectionDivider />
+      <SectionLabel>Rate limiting</SectionLabel>
+      <FieldGrid cols={2}>
+        <Field label="Backoff base (s)" help="Initial delay on first E601 rate-limit.">
+          <NumberInput value={draft.rateLimitBackoffBaseSeconds} onChange={(v) => update({ rateLimitBackoffBaseSeconds: v })} placeholder="30" />
+        </Field>
+        <Field label="Backoff max (s)" help="Cap for exponential backoff growth.">
+          <NumberInput value={draft.rateLimitBackoffMaxSeconds} onChange={(v) => update({ rateLimitBackoffMaxSeconds: v })} placeholder="300" />
+        </Field>
+        <FullWidth>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <ToggleRow label="Rate-limit fallback" help="On throttle, fall back to the next available tool." checked={draft.rateLimitFallbackEnabled} onChange={(v) => update({ rateLimitFallbackEnabled: v })} />
+            <ToggleRow label="Throttle parallel" help="Reduce concurrency automatically on rate-limit." checked={draft.rateLimitThrottleParallel} onChange={(v) => update({ rateLimitThrottleParallel: v })} />
+          </div>
+        </FullWidth>
+      </FieldGrid>
 
-      <SectionHeading>Merge Behavior</SectionHeading>
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        <BooleanField
-          label="Merge AI Fix"
-          value={draft.mergeAiFix}
-          onChange={(v) => update({ mergeAiFix: v })}
-          helpText="Enable AI-driven resolution for merge conflicts."
-        />
-        <NumberField
-          label="Merge Job Timeout (seconds)"
-          value={draft.mergeJobTimeoutSeconds}
-          onChange={(v) => update({ mergeJobTimeoutSeconds: v })}
-          helpText="Timeout for git merge operations."
-        />
-        <NumberField
-          label="Merge Hook Timeout (seconds)"
-          value={draft.mergeHookTimeoutSeconds}
-          onChange={(v) => update({ mergeHookTimeoutSeconds: v })}
-          placeholder="90"
-          helpText="Timeout for AI merge-fix hook execution."
-        />
-      </div>
+      <SectionDivider />
+      <SectionLabel>Merge behavior</SectionLabel>
+      <FieldGrid cols={2}>
+        <ToggleRow label="AI merge fix" help="Enable AI-driven resolution for merge conflicts." checked={draft.mergeAiFix} onChange={(v) => update({ mergeAiFix: v })} />
+        <Field label="Merge job timeout (s)" help="Timeout for git merge operations.">
+          <NumberInput value={draft.mergeJobTimeoutSeconds} onChange={(v) => update({ mergeJobTimeoutSeconds: v })} />
+        </Field>
+        <Field label="Merge hook timeout (s)" help="Timeout for AI merge-fix hook execution." >
+          <NumberInput value={draft.mergeHookTimeoutSeconds} onChange={(v) => update({ mergeHookTimeoutSeconds: v })} placeholder="90" />
+        </Field>
+      </FieldGrid>
 
-      <SectionHeading>Process Lifecycle</SectionHeading>
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        <NumberField
-          label="Ghost Heartbeat Grace (seconds)"
-          value={draft.ghostHeartbeatGraceSeconds}
-          onChange={(v) => update({ ghostHeartbeatGraceSeconds: v })}
-          placeholder="30"
-          helpText="Grace period before treating a dead process as a ghost."
-        />
-        <NumberField
-          label="Dispatch Cooldown (seconds)"
-          value={draft.dispatchCooldownSeconds}
-          onChange={(v) => update({ dispatchCooldownSeconds: v })}
-          placeholder="2"
-          helpText="Wait between dispatch cycles."
-        />
-        <NumberField
-          label="Force-Kill Grace (seconds)"
-          value={draft.forceKillGraceSeconds}
-          onChange={(v) => update({ forceKillGraceSeconds: v })}
-          helpText="Wait after IPC failure before force-killing a performer."
-        />
-        <NumberField
-          label="Max Review Cycles"
-          value={draft.maxReviewCycles ?? null}
-          onChange={(v) => update({ maxReviewCycles: v })}
-          helpText="Max review loop cycles per task (0 to skip review)."
-        />
-        <NumberField
-          label="Max Dispatch"
-          value={draft.maxDispatch}
-          onChange={(v) => update({ maxDispatch: v })}
-          placeholder="10"
-          helpText="Maximum tasks dispatched per run (0 is unlimited)."
-        />
-        <NumberField
-          label="Phase Runner Max Attempts"
-          value={draft.phaseRunnerMaxAttempts}
-          onChange={(v) => update({ phaseRunnerMaxAttempts: v })}
-          placeholder="1"
-          helpText="Max attempts for phase runner fallback."
-        />
-      </div>
+      <SectionDivider />
+      <SectionLabel>Lifecycle</SectionLabel>
+      <FieldGrid cols={3}>
+        <Field label="Phase runner attempts" help="Max attempts for phase runner fallback.">
+          <NumberInput value={draft.phaseRunnerMaxAttempts} onChange={(v) => update({ phaseRunnerMaxAttempts: v })} placeholder="1" />
+        </Field>
+        <Field label="Dispatch cooldown (s)" help="Wait between dispatch cycles.">
+          <NumberInput value={draft.dispatchCooldownSeconds} onChange={(v) => update({ dispatchCooldownSeconds: v })} placeholder="2" />
+        </Field>
+        <Field label="Force-kill grace (s)" help="Wait after IPC failure before force-killing.">
+          <NumberInput value={draft.forceKillGraceSeconds} onChange={(v) => update({ forceKillGraceSeconds: v })} />
+        </Field>
+        <Field label="Ghost heartbeat grace (s)" help="Grace before treating a dead process as a ghost.">
+          <NumberInput value={draft.ghostHeartbeatGraceSeconds} onChange={(v) => update({ ghostHeartbeatGraceSeconds: v })} placeholder="30" />
+        </Field>
+        <Field label="Max review cycles" help="Max review loops per task. 0 = skip review.">
+          <NumberInput value={draft.maxReviewCycles ?? null} onChange={(v) => update({ maxReviewCycles: v })} />
+        </Field>
+      </FieldGrid>
     </div>
   );
 }
 
-/* ------------------------------------------------------------------ */
-/*  Tab: Admin settings                                                */
-/* ------------------------------------------------------------------ */
-
-function AdminTab({
-  draft,
-  update,
-}: {
-  draft: ApiConfigResponse;
-  update: (patch: Partial<ApiConfigUpdateRequest>) => void;
-}) {
+function AdminTab({ draft, update }: { draft: ApiConfigResponse; update: (p: Partial<ApiConfigUpdateRequest>) => void }) {
   return (
-    <div className="flex flex-col gap-6">
-      <WarningBanner message="Administrative Settings: These settings control raw storage engines, migration layers, and low-level runtime gates. Modifying these is recommended only for systems administrators or developers debugging internal runner state." />
+    <div>
+      <Notice>
+        Admin settings control storage engines, migration layers, and internal runtime gates. For system administrators and debugging only.
+      </Notice>
 
-      <SectionHeading>Database &amp; Storage</SectionHeading>
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <TextField
-          label="Storage Mode"
-          value={draft.storageMode}
-          onChange={(v) => update({ storageMode: v })}
-          placeholder="json"
-          helpText="Coordinator storage engine mode: json | sqlite"
-        />
-        <TextField
-          label="Task Registry File"
-          value={draft.taskRegistryFile}
-          onChange={(v) => update({ taskRegistryFile: v })}
-          placeholder=".macc/automation/task/task_registry.json"
-          helpText="Underlying file path for local task registry state."
-        />
+      <SectionLabel>Storage</SectionLabel>
+      <FieldGrid cols={2}>
+        <Field label="Storage mode" help="Coordinator storage engine: json or sqlite.">
+          <SelectInput
+            value={draft.storageMode ?? null}
+            onChange={(v) => update({ storageMode: v })}
+            options={[
+              { value: 'json', label: 'JSON' },
+              { value: 'sqlite', label: 'SQLite' },
+              { value: 'dual-write', label: 'Dual-write' },
+            ]}
+          />
+        </Field>
+        <Field label="Task registry file" help="File path for local task registry state.">
+          <TextInput value={draft.taskRegistryFile} onChange={(v) => update({ taskRegistryFile: v })} placeholder=".macc/automation/task/task_registry.json" mono />
+        </Field>
+      </FieldGrid>
+
+      <SectionDivider />
+      <SectionLabel>Log flushing</SectionLabel>
+      <FieldGrid cols={3}>
+        <Field label="Flush every N lines" help="0 uses runtime default.">
+          <NumberInput value={draft.logFlushLines} onChange={(v) => update({ logFlushLines: v })} />
+        </Field>
+        <Field label="Flush every N ms" help="0 uses runtime default.">
+          <NumberInput value={draft.logFlushMs} onChange={(v) => update({ logFlushMs: v })} />
+        </Field>
+        <Field label="Mirror JSON debounce (ms)" help="Debounce SQLite-to-JSON compatibility export.">
+          <NumberInput value={draft.mirrorJsonDebounceMs} onChange={(v) => update({ mirrorJsonDebounceMs: v })} />
+        </Field>
+      </FieldGrid>
+
+      <SectionDivider />
+      <SectionLabel>Compatibility</SectionLabel>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        <ToggleRow label="JSON compatibility" help="Enable JSON snapshot export for external tool compatibility." checked={draft.jsonCompat} onChange={(v) => update({ jsonCompat: v })} />
+        <ToggleRow label="Legacy JSON fallback" help="Fall back to JSON registry if SQLite is corrupted." checked={draft.legacyJsonFallback} onChange={(v) => update({ legacyJsonFallback: v })} />
       </div>
 
-      <SectionHeading>Flush Behavior</SectionHeading>
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <NumberField
-          label="Log Flush Lines"
-          value={draft.logFlushLines}
-          onChange={(v) => update({ logFlushLines: v })}
-          helpText="Flush logs every N lines. 0 uses runtime default."
-        />
-        <NumberField
-          label="Log Flush Milliseconds"
-          value={draft.logFlushMs}
-          onChange={(v) => update({ logFlushMs: v })}
-          helpText="Flush logs every N ms. 0 uses runtime default."
-        />
-      </div>
-
-      <SectionHeading>Compatibility Flags</SectionHeading>
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        <BooleanField
-          label="JSON Compatibility"
-          value={draft.jsonCompat}
-          onChange={(v) => update({ jsonCompat: v })}
-          helpText="Enable JSON snapshot export for external tool compatibility."
-        />
-        <BooleanField
-          label="Legacy JSON Fallback"
-          value={draft.legacyJsonFallback}
-          onChange={(v) => update({ legacyJsonFallback: v })}
-          helpText="Fallback to JSON registry if SQLite is corrupted."
-        />
-        <NumberField
-          label="Mirror JSON Debounce (ms)"
-          value={draft.mirrorJsonDebounceMs}
-          onChange={(v) => update({ mirrorJsonDebounceMs: v })}
-          helpText="Debounce SQLite-to-JSON compatibility export."
-        />
-      </div>
-
-      <SectionHeading>Cutover Controls</SectionHeading>
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        <NumberField
-          label="Cutover Gate Window Events"
-          value={draft.cutoverGateWindowEvents}
-          onChange={(v) => update({ cutoverGateWindowEvents: v })}
-          placeholder="2000"
-          helpText="Recent events inspected by cutover gate to assess storage health."
-        />
-        <NumberField
-          label="Max Blocked Ratio"
-          value={draft.cutoverGateMaxBlockedRatio}
-          onChange={(v) => update({ cutoverGateMaxBlockedRatio: v })}
-          placeholder="0.25"
-          helpText="Maximum ratio of blocked events allowed before cutover block."
-        />
-        <NumberField
-          label="Max Stale Ratio"
-          value={draft.cutoverGateMaxStaleRatio}
-          onChange={(v) => update({ cutoverGateMaxStaleRatio: v })}
-          placeholder="0.25"
-          helpText="Maximum ratio of stale events allowed before cutover block."
-        />
-      </div>
+      <SectionDivider />
+      <SectionLabel>Cutover gate</SectionLabel>
+      <FieldGrid cols={3}>
+        <Field label="Window events" help="Recent events inspected to assess storage health.">
+          <NumberInput value={draft.cutoverGateWindowEvents} onChange={(v) => update({ cutoverGateWindowEvents: v })} placeholder="2000" />
+        </Field>
+        <Field label="Max blocked ratio" help="Maximum ratio of blocked events before cutover block.">
+          <NumberInput value={draft.cutoverGateMaxBlockedRatio} onChange={(v) => update({ cutoverGateMaxBlockedRatio: v })} placeholder="0.25" />
+        </Field>
+        <Field label="Max stale ratio" help="Maximum ratio of stale events before cutover block.">
+          <NumberInput value={draft.cutoverGateMaxStaleRatio} onChange={(v) => update({ cutoverGateMaxStaleRatio: v })} placeholder="0.25" />
+        </Field>
+      </FieldGrid>
     </div>
   );
 }
 
-/* ------------------------------------------------------------------ */
-/*  Tab: Raw (raw JSON editor)                                         */
-/* ------------------------------------------------------------------ */
-
-function RawTab({
-  config,
-  onApplyRaw,
-}: {
-  config: ApiConfigResponse;
-  onApplyRaw: (raw: string) => void;
-}) {
+function RawTab({ config, onApplyRaw }: { config: ApiConfigResponse; onApplyRaw: (raw: string) => void }) {
   const [rawText, setRawText] = useState(() => JSON.stringify(config, null, 2));
   const [parseError, setParseError] = useState<string | null>(null);
   const [prevConfig, setPrevConfig] = useState(config);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   if (config !== prevConfig) {
     setPrevConfig(config);
@@ -960,61 +787,124 @@ function RawTab({
   }, [rawText, onApplyRaw]);
 
   return (
-    <div className="flex flex-col gap-4">
-      <SectionHeading>Raw Configuration (JSON)</SectionHeading>
-      <p className="text-xs text-[var(--text-muted)]">
-        Edit the full configuration as JSON. Changes apply when you click Save.
+    <div>
+      <SectionLabel>Raw JSON</SectionLabel>
+      <p style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: 12, lineHeight: 1.5 }}>
+        Edit the full configuration as JSON. Changes apply when you click "Apply JSON" and then save.
       </p>
       {parseError && <ErrorBanner message={parseError} />}
       <textarea
-        ref={textareaRef}
-        className="min-h-[420px] w-full rounded-lg border border-[var(--border)] bg-[var(--bg-secondary)] p-4 font-mono text-xs leading-relaxed text-[var(--text-primary)] outline-none focus:border-[var(--accent)]"
-        value={rawText}
-        onChange={(e) => {
-          setRawText(e.target.value);
-          setParseError(null);
+        style={{
+          width: '100%', minHeight: 400,
+          borderRadius: 'var(--radius-md)',
+          border: `1px solid ${parseError ? 'var(--error)' : 'var(--border)'}`,
+          background: 'var(--bg-secondary)',
+          color: 'var(--text-primary)',
+          padding: 14,
+          fontFamily: 'var(--font-mono)',
+          fontSize: '11px',
+          lineHeight: 1.6,
+          outline: 'none',
+          resize: 'vertical',
+          boxSizing: 'border-box',
+          transition: 'border-color 100ms',
         }}
+        value={rawText}
+        onChange={(e) => { setRawText(e.target.value); setParseError(null); }}
         spellCheck={false}
+        onFocus={(e) => { (e.target as HTMLTextAreaElement).style.borderColor = parseError ? 'var(--error)' : 'var(--accent)'; }}
+        onBlur={(e) => { (e.target as HTMLTextAreaElement).style.borderColor = parseError ? 'var(--error)' : 'var(--border)'; }}
       />
-      <div className="flex justify-end">
-        <Button
-          onClick={handleApply}
-          className="rounded-lg bg-[var(--accent)] px-4 py-2 text-xs font-medium text-white transition-colors hover:opacity-90"
-        >
-          Apply JSON
-        </Button>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 10 }}>
+        <SaveBtn onClick={handleApply} label="Apply JSON" />
       </div>
     </div>
   );
 }
 
-/* ------------------------------------------------------------------ */
-/*  Main Settings Page                                                 */
-/* ------------------------------------------------------------------ */
+/* ── Save / discard buttons ──────────────────────────────────── */
+function SaveBtn({ onClick, label, disabled, loading }: { onClick: () => void; label?: string; disabled?: boolean; loading?: boolean }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        height: 32,
+        padding: '0 16px',
+        borderRadius: 'var(--radius-md)',
+        border: 'none',
+        background: disabled ? 'var(--accent-bg)' : 'var(--accent)',
+        color: disabled ? 'var(--accent-muted)' : '#fff',
+        fontSize: 'var(--text-sm)',
+        fontWeight: 500,
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        transition: 'background 100ms, opacity 100ms',
+        opacity: disabled ? 0.5 : 1,
+      }}
+      onMouseEnter={(e) => { if (!disabled) (e.currentTarget as HTMLElement).style.background = 'var(--accent-hover)'; }}
+      onMouseLeave={(e) => { if (!disabled) (e.currentTarget as HTMLElement).style.background = 'var(--accent)'; }}
+    >
+      {loading ? 'Saving…' : (label ?? 'Save changes')}
+    </button>
+  );
+}
 
-type SettingsTab = 'basic' | 'advanced' | 'admin' | 'raw';
+function DiscardBtn({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        height: 32, padding: '0 12px',
+        borderRadius: 'var(--radius-md)',
+        border: '1px solid var(--border)',
+        background: 'none',
+        color: 'var(--text-muted)',
+        fontSize: 'var(--text-sm)',
+        cursor: 'pointer',
+        transition: 'color 100ms, border-color 100ms',
+      }}
+      onMouseEnter={(e) => { const el = e.currentTarget; el.style.color = 'var(--text-primary)'; el.style.borderColor = 'var(--text-muted)'; }}
+      onMouseLeave={(e) => { const el = e.currentTarget; el.style.color = 'var(--text-muted)'; el.style.borderColor = 'var(--border)'; }}
+    >
+      Discard
+    </button>
+  );
+}
 
-const TABS: { key: SettingsTab; label: string }[] = [
-  { key: 'basic', label: 'Basic' },
-  { key: 'advanced', label: 'Advanced' },
-  { key: 'admin', label: 'Admin' },
-  { key: 'raw', label: 'Raw JSON' },
+/* ── Navigation items ────────────────────────────────────────── */
+const NAV: { key: SettingsSection; label: string; sub: string }[] = [
+  { key: 'basic',    label: 'Basic',    sub: 'Coordinator & general' },
+  { key: 'advanced', label: 'Advanced', sub: 'Scheduling & routing' },
+  { key: 'admin',    label: 'Admin',    sub: 'Storage & compat.' },
+  { key: 'raw',      label: 'Raw JSON', sub: 'Direct editing' },
 ];
 
+const BASIC_KEYS = ['webPort','offline','quiet','debug','coordinatorTool','maxParallel','timeoutSeconds','safetyPolicy','destructiveActions','referenceBranch'];
+const ADVANCED_KEYS = ['prdFile','toolPriority','maxParallelPerTool','toolSpecializations','maxDispatch','phaseRunnerMaxAttempts','dispatchCooldownSeconds','staleClaimedSeconds','staleInProgressSeconds','staleChangesRequestedSeconds','staleAction','mergeAiFix','mergeJobTimeoutSeconds','mergeHookTimeoutSeconds','ghostHeartbeatGraceSeconds','errorCodeRetryList','errorCodeRetryMax','rateLimitBackoffBaseSeconds','rateLimitBackoffMaxSeconds','rateLimitFallbackEnabled','rateLimitThrottleParallel','forceKillGraceSeconds','maxReviewCycles'];
+const ADMIN_KEYS = ['storageMode','taskRegistryFile','logFlushLines','logFlushMs','mirrorJsonDebounceMs','jsonCompat','legacyJsonFallback','cutoverGateWindowEvents','cutoverGateMaxBlockedRatio','cutoverGateMaxStaleRatio'];
+
+function sectionForKey(key: string): SettingsSection {
+  if (BASIC_KEYS.some((k) => key.startsWith(k))) return 'basic';
+  if (ADVANCED_KEYS.some((k) => key.startsWith(k))) return 'advanced';
+  if (ADMIN_KEYS.some((k) => key.startsWith(k))) return 'admin';
+  return 'raw';
+}
+
+/* ── Main Settings page ──────────────────────────────────────── */
 const Settings: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [config, setConfig] = useState<ApiConfigResponse | null>(null);
   const [draft, setDraft] = useState<ApiConfigResponse | null>(null);
-  const [activeTab, setActiveTab] = useState<SettingsTab>('basic');
-  const [focusedSettingKey, setFocusedSettingKey] = useState<string | null>(null);
+  const [activeSection, setActiveSection] = useState<SettingsSection>('basic');
   const [toast, setToast] = useState<ToastState>({ open: false, title: '', variant: 'success' });
   const location = useLocation();
 
   const isDirty = config !== null && draft !== null && JSON.stringify(config) !== JSON.stringify(draft);
 
-  /* Load config */
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
@@ -1022,109 +912,28 @@ const Settings: React.FC = () => {
     getConfig()
       .then((res) => {
         if (cancelled) return;
-        const normalized = normalizeConfigResponse(res);
-        setConfig(normalized);
-        setDraft(normalized);
+        const n = normalizeConfigResponse(res);
+        setConfig(n);
+        setDraft(n);
       })
-      .catch((err) => {
-        if (cancelled) return;
-        setError(formatError(err));
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
+      .catch((err) => { if (!cancelled) setError(formatError(err)); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
   }, []);
 
   useEffect(() => {
     const state = location.state as { highlightSettingKey?: string } | null;
-    if (!state?.highlightSettingKey) {
-      return;
+    if (state?.highlightSettingKey) {
+      setActiveSection(sectionForKey(state.highlightSettingKey));
     }
-
-    setFocusedSettingKey(state.highlightSettingKey);
-
-    const basicKeys = [
-      'webPort',
-      'offline',
-      'quiet',
-      'coordinatorTool',
-      'maxParallel',
-      'timeoutSeconds',
-      'safetyPolicy',
-      'destructiveActions',
-      'referenceBranch',
-    ];
-    const advancedKeys = [
-      'prdFile',
-      'toolPriority',
-      'maxParallelPerTool',
-      'toolSpecializations',
-      'maxDispatch',
-      'phaseRunnerMaxAttempts',
-      'dispatchCooldownSeconds',
-      'staleClaimedSeconds',
-      'staleInProgressSeconds',
-      'staleChangesRequestedSeconds',
-      'staleAction',
-      'mergeAiFix',
-      'mergeJobTimeoutSeconds',
-      'mergeHookTimeoutSeconds',
-      'ghostHeartbeatGraceSeconds',
-      'errorCodeRetryList',
-      'errorCodeRetryMax',
-      'rateLimitBackoffBaseSeconds',
-      'rateLimitBackoffMaxSeconds',
-      'rateLimitFallbackEnabled',
-      'rateLimitThrottleParallel',
-      'forceKillGraceSeconds',
-      'maxReviewCycles',
-    ];
-    const adminKeys = [
-      'storageMode',
-      'taskRegistryFile',
-      'logFlushLines',
-      'logFlushMs',
-      'mirrorJsonDebounceMs',
-      'jsonCompat',
-      'legacyJsonFallback',
-      'cutoverGateWindowEvents',
-      'cutoverGateMaxBlockedRatio',
-      'cutoverGateMaxStaleRatio',
-    ];
-
-    const key = state.highlightSettingKey;
-    if (basicKeys.some((prefix) => key.startsWith(prefix))) {
-      setActiveTab('basic');
-      return;
-    }
-
-    if (advancedKeys.some((prefix) => key.startsWith(prefix))) {
-      setActiveTab('advanced');
-      return;
-    }
-
-    if (adminKeys.some((prefix) => key.startsWith(prefix))) {
-      setActiveTab('admin');
-      return;
-    }
-
-    setActiveTab('raw');
   }, [location.state]);
 
-  /* Patch draft */
   const updateDraft = useCallback((patch: Partial<ApiConfigUpdateRequest>) => {
     setDraft((prev) => (prev ? { ...prev, ...patch } : prev));
   }, []);
 
-  /* Discard */
-  const handleDiscard = useCallback(() => {
-    setDraft(config);
-  }, [config]);
+  const handleDiscard = useCallback(() => { setDraft(config); }, [config]);
 
-  /* Save */
   const handleSave = useCallback(async () => {
     if (!draft) return;
     setSaving(true);
@@ -1134,120 +943,95 @@ const Settings: React.FC = () => {
       setDraft(updated);
       setToast({ open: true, title: 'Settings saved', variant: 'success' });
     } catch (err) {
-      setToast({
-        open: true,
-        title: 'Failed to save',
-        description: formatError(err),
-        variant: 'error',
-      });
+      setToast({ open: true, title: 'Failed to save', description: formatError(err), variant: 'error' });
     } finally {
       setSaving(false);
     }
   }, [draft]);
 
-  /* Apply raw JSON from Advanced tab */
-  const handleApplyRaw = useCallback(
-    (raw: string) => {
-      try {
-        const parsed = normalizeConfigResponse(JSON.parse(raw) as ApiConfigResponse);
-        setDraft(parsed);
-      } catch {
-        /* validation handled in AdvancedTab */
-      }
-    },
-    [],
-  );
+  const handleApplyRaw = useCallback((raw: string) => {
+    try {
+      const parsed = normalizeConfigResponse(JSON.parse(raw) as ApiConfigResponse);
+      setDraft(parsed);
+    } catch { /* handled in RawTab */ }
+  }, []);
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center py-20">
-        <LoadingSpinner label="Loading settings..." />
-      </div>
-    );
-  }
-
-  if (error || !draft || !config) {
-    return (
-      <div className="flex flex-col gap-6 p-6">
-        <ErrorBanner message={error ?? 'Failed to load configuration.'} />
-      </div>
-    );
-  }
+  if (loading) return <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '60px 0' }}><LoadingSpinner label="Loading settings…" /></div>;
+  if (error || !draft || !config) return <div style={{ padding: '24px 0' }}><ErrorBanner message={error ?? 'Failed to load configuration.'} /></div>;
 
   return (
-    <div className="flex flex-col gap-6">
-      {/* Header */}
-      <header className="flex items-center justify-between rounded-[2rem] border border-[var(--border)] bg-[var(--bg-card)] p-6 shadow-[var(--shadow-soft)]">
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+      {/* Page header */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
         <div>
-          <h1 className="text-3xl font-semibold tracking-tight text-[var(--text-primary)]">Settings</h1>
-          <p className="mt-1 text-sm text-[var(--text-secondary)]">
-            Basic, advanced, and administrative configuration.
-          </p>
-          {focusedSettingKey && (
-            <p className="mt-3 inline-flex rounded-full border border-[var(--accent)]/30 bg-[var(--accent)]/10 px-3 py-1 text-xs font-medium text-[var(--accent)]">
-              Focused key: {focusedSettingKey}
-            </p>
-          )}
-        </div>
-        <div className="flex items-center gap-2">
+          <h1 style={{ fontSize: '16px', fontWeight: 600, color: 'var(--text-primary)', letterSpacing: '-0.01em', margin: 0 }}>Settings</h1>
           {isDirty && (
-            <Button
-              onClick={handleDiscard}
-              className="rounded-lg border border-[var(--border)] bg-transparent px-4 py-2 text-xs font-medium text-[var(--text-secondary)] transition-colors hover:bg-white/5"
-            >
-              Discard
-            </Button>
+            <p style={{ fontSize: '11px', color: 'var(--warning)', marginTop: 3 }}>Unsaved changes</p>
           )}
-          <Button
-            onClick={handleSave}
-            disabled={!isDirty || saving}
-            className={cn(
-              'rounded-lg px-4 py-2 text-xs font-medium text-white transition-colors',
-              isDirty ? 'bg-[var(--accent)] hover:opacity-90' : 'bg-[var(--accent)]/50 cursor-not-allowed opacity-50',
-            )}
-          >
-            {saving ? 'Saving...' : 'Save'}
-          </Button>
         </div>
-      </header>
-
-      {/* Tabs */}
-      <div className="flex rounded-lg border border-[var(--border)] overflow-hidden">
-        {TABS.map((tab) => (
-          <button
-            key={tab.key}
-            onClick={() => setActiveTab(tab.key)}
-            className={cn(
-              'flex items-center gap-1.5 px-4 py-2.5 text-xs font-medium transition-colors',
-              activeTab === tab.key
-                ? 'bg-[var(--accent)] text-white'
-                : 'bg-[var(--bg-secondary)] text-[var(--text-muted)] hover:bg-[var(--bg-hover)]',
-            )}
-          >
-            {tab.label}
-          </button>
-        ))}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          {isDirty && <DiscardBtn onClick={handleDiscard} />}
+          <SaveBtn onClick={handleSave} disabled={!isDirty || saving} loading={saving} />
+        </div>
       </div>
 
-      {/* Unsaved indicator */}
-      {isDirty && (
-        <div className="rounded-lg border border-[var(--warning)]/30 bg-[var(--warning)]/10 px-4 py-2 text-xs text-[var(--warning)]">
-          You have unsaved changes.
-        </div>
-      )}
+      {/* Two-column layout */}
+      <div style={{ display: 'grid', gridTemplateColumns: '156px 1fr', gap: 24, alignItems: 'start' }}>
+        {/* Sidebar nav */}
+        <nav style={{ position: 'sticky', top: 0 }}>
+          {NAV.map((item) => {
+            const active = activeSection === item.key;
+            return (
+              <button
+                key={item.key}
+                type="button"
+                onClick={() => setActiveSection(item.key)}
+                style={{
+                  display: 'block',
+                  width: '100%',
+                  textAlign: 'left',
+                  padding: '8px 10px',
+                  borderRadius: 'var(--radius-md)',
+                  border: 'none',
+                  background: active ? 'var(--accent-bg)' : 'none',
+                  cursor: 'pointer',
+                  transition: 'background 100ms',
+                  marginBottom: 2,
+                }}
+                onMouseEnter={(e) => { if (!active) (e.currentTarget as HTMLElement).style.background = 'var(--bg-elevated)'; }}
+                onMouseLeave={(e) => { if (!active) (e.currentTarget as HTMLElement).style.background = 'none'; }}
+              >
+                <div style={{ fontSize: 'var(--text-sm)', fontWeight: active ? 500 : 400, color: active ? 'var(--accent)' : 'var(--text-secondary)' }}>
+                  {item.label}
+                </div>
+                <div style={{ fontSize: '10px', color: active ? 'var(--accent-muted)' : 'var(--text-muted)', marginTop: 1 }}>
+                  {item.sub}
+                </div>
+              </button>
+            );
+          })}
+        </nav>
 
-      {/* Tab content */}
-      <div className="rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-card)] p-6 shadow-[var(--shadow-soft)]">
-        {activeTab === 'basic' && <BasicTab draft={draft} update={updateDraft} />}
-        {activeTab === 'advanced' && <AdvancedTab draft={draft} update={updateDraft} />}
-        {activeTab === 'admin' && <AdminTab draft={draft} update={updateDraft} />}
-        {activeTab === 'raw' && <RawTab config={draft} onApplyRaw={handleApplyRaw} />}
+        {/* Content panel */}
+        <div
+          style={{
+            background: 'var(--bg-card)',
+            border: '1px solid var(--border)',
+            borderRadius: 'var(--radius-lg)',
+            padding: '20px 24px',
+            minWidth: 0,
+          }}
+        >
+          {activeSection === 'basic'    && <BasicTab    draft={draft} update={updateDraft} />}
+          {activeSection === 'advanced' && <AdvancedTab draft={draft} update={updateDraft} />}
+          {activeSection === 'admin'    && <AdminTab    draft={draft} update={updateDraft} />}
+          {activeSection === 'raw'      && <RawTab config={draft} onApplyRaw={handleApplyRaw} />}
+        </div>
       </div>
 
-      {/* Toast */}
       <Toast
         open={toast.open}
-        onOpenChange={(open) => setToast((prev) => ({ ...prev, open }))}
+        onOpenChange={(open) => setToast((p) => ({ ...p, open }))}
         title={toast.title}
         description={toast.description}
         variant={toast.variant}
