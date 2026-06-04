@@ -23,6 +23,8 @@ performer:
   retry:
     command: claude
     args: ["--model", "{model}", "--session-id", "{session_id}", "--output-format", "text", "--dangerously-skip-permissions"]
+  # Claude CLI accepts --effort <low|medium|high|xhigh|max> to set reasoning depth.
+  effort_flag: "--effort"
 model_tiers:
   mini:
     model: haiku

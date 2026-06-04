@@ -88,14 +88,21 @@ pub struct ToolPerformerSpec {
     pub prompt: Option<ToolPerformerPrompt>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session: Option<ToolPerformerSessionSpec>,
-    /// CLI flag used to pass effort/reasoning level to the tool (e.g. "--reasoning-effort").
-    /// When set, performer_lib.sh appends `<effort_flag> <tier.effort>` to the command.
+    /// CLI flag for effort/reasoning level (e.g. "--reasoning-effort").
+    /// performer_lib.sh appends `<effort_flag> <tier.effort>` to the command args.
+    /// Use this only for tools whose CLI accepts an effort flag directly.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort_flag: Option<String>,
     /// Config-file-based model override for tools without a `--model` CLI flag.
     /// performer_lib.sh writes the tier model to this file before invoking the tool.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_config: Option<ModelConfigSpec>,
+    /// Config-file-based effort override for tools that do not accept an effort CLI flag
+    /// but read the reasoning/effort level from a settings file (e.g. codex reads
+    /// `model_reasoning_effort` from `.codex/config.toml`).
+    /// Takes precedence over `effort_flag` when both are set for a given tool.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort_config: Option<ModelConfigSpec>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

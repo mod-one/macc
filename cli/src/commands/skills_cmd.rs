@@ -16,8 +16,8 @@ pub enum SkillsSubcommand {
     // ── Catalog/package lifecycle (spec §4) ─────────────────────────────────
     Available { tool: Option<String>, source: Option<String>, tag: Option<String>, json: bool },
     CatalogStatus { tool: Option<String>, verbose: bool, json: bool },
-    Install { id: String, tool: String, source: Option<String>, reference: Option<String>, pin: bool, dry_run: bool },
-    Update { id: Option<String>, tool: Option<String>, dry_run: bool, latest: bool },
+    Install { id: String, tool: String, reference: Option<String>, pin: bool, dry_run: bool },
+    Update { id: Option<String>, tool: Option<String>, dry_run: bool },
     Verify { tool: Option<String>, json: bool },
     Prune { tool: Option<String>, dry_run: bool },
     Diff { id: Option<String>, tool: Option<String> },
@@ -203,7 +203,7 @@ impl Command for SkillsCmdCommand {
             // ── Catalog lifecycle ────────────────────────────────────────────
 
             SkillsSubcommand::Available { tool, source, tag, json } => {
-                use macc_core::engine::Engine;
+
                 let entries = self.app.engine.catalog_skills_available(&paths, tool.as_deref());
                 let filtered: Vec<_> = entries
                     .into_iter()
@@ -243,7 +243,7 @@ impl Command for SkillsCmdCommand {
             }
 
             SkillsSubcommand::CatalogStatus { tool, verbose, json } => {
-                use macc_core::engine::Engine;
+
                 let statuses = self.app.engine.skills_status(&paths, tool.as_deref())?;
 
                 if *json {
@@ -287,13 +287,13 @@ impl Command for SkillsCmdCommand {
                 }
             }
 
-            SkillsSubcommand::Install { id, tool, source: _, reference, pin, dry_run } => {
+            SkillsSubcommand::Install { id, tool, reference, pin, dry_run } => {
                 use macc_core::skills_catalog::{
-                    SkillsLockFile, SkillLockEntry, LockedSource, LockedPackage,
-                    CacheRef, InstalledTargets, git_cache_key, SkillsPolicy,
+                    SkillLockEntry, LockedSource, LockedPackage,
+                    CacheRef, InstalledTargets, git_cache_key,
                     detect_conflicts,
                 };
-                use macc_core::engine::Engine;
+
 
                 let catalog_entries = self.app.engine.catalog_skills_available(&paths, Some(tool.as_str()));
                 let entry = catalog_entries.iter().find(|e| e.id == id.as_str());
@@ -412,8 +412,8 @@ impl Command for SkillsCmdCommand {
                 println!("Run 'macc apply' to materialize the skill files.");
             }
 
-            SkillsSubcommand::Update { id, tool, dry_run, latest: _ } => {
-                use macc_core::engine::Engine;
+            SkillsSubcommand::Update { id, tool, dry_run } => {
+
                 let statuses = self.app.engine.skills_status(&paths, tool.as_deref())?;
                 let to_check: Vec<_> = statuses
                     .iter()
@@ -444,7 +444,7 @@ impl Command for SkillsCmdCommand {
             }
 
             SkillsSubcommand::Verify { tool, json } => {
-                use macc_core::engine::Engine;
+
                 let findings = self.app.engine.skills_verify(&paths)?;
                 let filtered: Vec<_> = findings
                     .iter()
@@ -471,7 +471,7 @@ impl Command for SkillsCmdCommand {
             }
 
             SkillsSubcommand::Prune { tool, dry_run } => {
-                use macc_core::engine::Engine;
+
                 let lockfile = self.app.engine.skills_lockfile(&paths)?;
 
                 // Find lockfile entries whose installed files exist.
@@ -505,7 +505,7 @@ impl Command for SkillsCmdCommand {
             }
 
             SkillsSubcommand::Diff { id, tool } => {
-                use macc_core::engine::Engine;
+
                 let lockfile = self.app.engine.skills_lockfile(&paths)?;
                 let entries: Vec<_> = lockfile.skills.iter()
                     .filter(|e| id.as_deref().map_or(true, |fid| e.id == fid))
@@ -534,7 +534,7 @@ impl Command for SkillsCmdCommand {
             }
 
             SkillsSubcommand::Uninstall { id, tool, all_tools } => {
-                use macc_core::engine::Engine;
+
                 let mut lockfile = self.app.engine.skills_lockfile(&paths)?;
 
                 let tools_to_remove: Vec<String> = if *all_tools {

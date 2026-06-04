@@ -398,15 +398,24 @@ run_resume_and_capture() {
   done
 
   # Apply tier model override to resume args.
-  # Strategy A (CLI flag) only — config file was already updated by _apply_tier_model_to_args.
+  # Config-file updates (model_config, effort_config) were already done by
+  # _apply_tier_model_to_args before the first call — no need to repeat them.
+  # Only re-apply the --model arg replacement to the resume-specific arg list.
   if [[ -n "$_tier_model" ]]; then
     local _r_prev_applied="$_tier_model_applied_via_args"
     _tier_model_applied_via_args=false
     _replace_model_in_args final_args
+    # Append effort CLI flag if the model was replaced and the tool uses effort_flag
+    # (not effort_config — that was already written to disk above).
     if $_tier_model_applied_via_args && [[ -n "$_tier_effort" && -n "$_effort_flag" ]]; then
-      local _r_has=false
-      for _r_a in "${final_args[@]}"; do [[ "$_r_a" == "$_effort_flag" ]] && _r_has=true && break; done
-      $_r_has || final_args+=("$_effort_flag" "$_tier_effort")
+      # Only use effort_flag when no effort_config is declared for this tool.
+      local _ecfg_chk
+      _ecfg_chk="$(jq -r '.performer.effort_config.path // empty' "$tool_json" 2>/dev/null || true)"
+      if [[ -z "$_ecfg_chk" ]]; then
+        local _r_has=false
+        for _r_a in "${final_args[@]}"; do [[ "$_r_a" == "$_effort_flag" ]] && _r_has=true && break; done
+        $_r_has || final_args+=("$_effort_flag" "$_tier_effort")
+      fi
     fi
     _tier_model_applied_via_args="$_r_prev_applied"
   fi
@@ -568,11 +577,23 @@ _apply_tier_model_to_args() {
   _replace_model_in_args args
 
   if $_tier_model_applied_via_args; then
-    # Append effort/reasoning flag for CLI-flag tools (e.g. codex --reasoning-effort).
-    if [[ -n "$_tier_effort" && -n "$_effort_flag" ]]; then
-      local _has=false
-      for _a in "${args[@]}"; do [[ "$_a" == "$_effort_flag" ]] && _has=true && break; done
-      $_has || args+=("$_effort_flag" "$_tier_effort")
+    # Model applied via --model CLI arg. Now handle effort:
+    #   Priority 1: effort_config (write to config file, e.g. codex's config.toml).
+    #   Priority 2: effort_flag (append as CLI arg, for tools that accept it).
+    if [[ -n "$_tier_effort" ]]; then
+      local _ecfg_path _ecfg_fmt _ecfg_key
+      _ecfg_path="$(jq -r '.performer.effort_config.path // empty' "$tool_json" 2>/dev/null || true)"
+      _ecfg_fmt="$(jq -r '.performer.effort_config.format // empty' "$tool_json" 2>/dev/null || true)"
+      _ecfg_key="$(jq -r '.performer.effort_config.key // "model_reasoning_effort"' "$tool_json" 2>/dev/null || true)"
+      if [[ -n "$_ecfg_path" && -n "$_ecfg_fmt" ]]; then
+        # Write effort to config file — do NOT append a CLI flag.
+        _apply_tier_model_via_config_file "$_ecfg_path" "$_ecfg_fmt" "$_ecfg_key" "$_tier_effort"
+      elif [[ -n "$_effort_flag" ]]; then
+        # Fall back to CLI flag only when no effort_config is declared.
+        local _has=false
+        for _a in "${args[@]}"; do [[ "$_a" == "$_effort_flag" ]] && _has=true && break; done
+        $_has || args+=("$_effort_flag" "$_tier_effort")
+      fi
     fi
   else
     # Strategy B: tool reads model from a config file (e.g. vibe, agy).
@@ -582,6 +603,16 @@ _apply_tier_model_to_args() {
     _cfg_key="$(jq -r '.performer.model_config.key // "model"' "$tool_json" 2>/dev/null || true)"
     if [[ -n "$_cfg_path" && -n "$_cfg_fmt" ]]; then
       _apply_tier_model_via_config_file "$_cfg_path" "$_cfg_fmt" "$_cfg_key" "$_tier_model"
+    fi
+    # For config-file-model tools, also write effort to a config file if declared.
+    if [[ -n "$_tier_effort" ]]; then
+      local _ecfg_path _ecfg_fmt _ecfg_key
+      _ecfg_path="$(jq -r '.performer.effort_config.path // empty' "$tool_json" 2>/dev/null || true)"
+      _ecfg_fmt="$(jq -r '.performer.effort_config.format // empty' "$tool_json" 2>/dev/null || true)"
+      _ecfg_key="$(jq -r '.performer.effort_config.key // "model_reasoning_effort"' "$tool_json" 2>/dev/null || true)"
+      if [[ -n "$_ecfg_path" && -n "$_ecfg_fmt" ]]; then
+        _apply_tier_model_via_config_file "$_ecfg_path" "$_ecfg_fmt" "$_ecfg_key" "$_tier_effort"
+      fi
     fi
   fi
 }

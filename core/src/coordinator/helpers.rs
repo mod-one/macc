@@ -1242,12 +1242,10 @@ pub fn write_worktree_prd_for_task(
         ))
     })?;
     let payload = serde_json::json!({
+        "source_repositories": prd.get("source_repositories").cloned().unwrap_or_else(|| serde_json::json!({})),
+        "integration_policy": prd.get("integration_policy").cloned().unwrap_or_else(|| serde_json::json!({})),
+        "global_constraints": prd.get("global_constraints").cloned().unwrap_or_else(|| serde_json::json!([])),
         "lot": prd.get("lot").cloned().unwrap_or(serde_json::Value::Null),
-        "version": prd.get("version").cloned().unwrap_or(serde_json::Value::Null),
-        "generated_at": prd.get("generated_at").cloned().unwrap_or(serde_json::Value::Null),
-        "timezone": prd.get("timezone").cloned().unwrap_or(serde_json::Value::String("UTC".to_string())),
-        "priority_mapping": prd.get("priority_mapping").cloned().unwrap_or_else(|| serde_json::json!({})),
-        "assumptions": prd.get("assumptions").cloned().unwrap_or_else(|| serde_json::json!([])),
         "tasks": [selected],
     });
     let out_path = worktree_path.join("worktree.prd.json");

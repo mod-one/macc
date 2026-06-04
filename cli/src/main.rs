@@ -1838,22 +1838,20 @@ fn run_with_engine_provider(
                         json: *json,
                     }
                 }
-                SkillsSubcommands::Install { id, tool, source, reference, pin, dry_run } => {
+                SkillsSubcommands::Install { id, tool, source: _, reference, pin, dry_run } => {
                     SkillsSubcommand::Install {
                         id: id.clone(),
                         tool: tool.clone(),
-                        source: source.clone(),
                         reference: reference.clone(),
                         pin: *pin,
                         dry_run: *dry_run,
                     }
                 }
-                SkillsSubcommands::Update { id, tool, dry_run, latest } => {
+                SkillsSubcommands::Update { id, tool, dry_run, latest: _ } => {
                     SkillsSubcommand::Update {
                         id: id.clone(),
                         tool: tool.clone(),
                         dry_run: *dry_run,
-                        latest: *latest,
                     }
                 }
                 SkillsSubcommands::Verify { tool, json } => {
@@ -1905,7 +1903,7 @@ fn run_with_engine_provider(
                 }},
                 PrdSubcommands::Audit {
                     prd_path, tool, model_routing, model, model_tier, instructions,
-                    instructions_file, reference_branch, diff_stat, dry_run, yes, json,
+                    instructions_file, reference_branch, diff_stat, dry_run, yes: _, json,
                 } => {
                     if let Some(tier) = model_tier {
                         std::env::set_var("MACC_MODEL_TIER", tier);
@@ -1921,7 +1919,6 @@ fn run_with_engine_provider(
                     reference_branch: reference_branch.clone(),
                     diff_stat: *diff_stat,
                     dry_run: *dry_run,
-                    yes: *yes,
                     json: *json,
                 }},
                 PrdSubcommands::Promote { source_path, dest_path, yes, json } => {

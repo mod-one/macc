@@ -9,7 +9,12 @@ performer:
   runner: adapters/codex/codex.performer.sh
   command: codex
   args: ["--model", "{model}", "--yolo", "exec", "-"]
-  effort_flag: "--reasoning-effort"
+  # Codex reads reasoning effort from .codex/config.toml (model_reasoning_effort),
+  # not from a CLI flag. effort_config writes the tier effort there automatically.
+  effort_config:
+    path: ".codex/config.toml"
+    format: toml
+    key: model_reasoning_effort
   prompt:
     mode: stdin
   session:

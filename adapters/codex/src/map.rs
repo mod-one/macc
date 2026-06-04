@@ -1,12 +1,9 @@
 use macc_core::resolve::ResolvedConfig;
 use serde_json::Value;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct CodexConfig {
-    pub standards_inline: BTreeMap<String, String>,
-    pub standards_path: Option<String>,
     pub skills: Vec<String>,
     pub tool_config: CodexToolConfig,
 }
@@ -19,9 +16,6 @@ pub struct CodexToolConfig {
     pub sandbox_mode: Option<String>,
     pub features_undo: Option<bool>,
     pub features_shell_snapshot: Option<bool>,
-    pub profile_deep_review_model: Option<String>,
-    pub profile_deep_review_model_reasoning_effort: Option<String>,
-    pub profile_deep_review_approval_policy: Option<String>,
     pub rules_enabled: Option<bool>,
     pub raw: serde_json::Value,
 }
@@ -45,8 +39,6 @@ impl CodexConfig {
         }
 
         Self {
-            standards_inline: resolved.standards.inline.clone(),
-            standards_path: resolved.standards.path.clone(),
             skills: skills_set.into_iter().collect(),
             tool_config,
         }
@@ -75,15 +67,6 @@ fn extract_tool_config(resolved: &ResolvedConfig) -> CodexToolConfig {
         sandbox_mode: get_string(tool_config, &["sandbox_mode"]),
         features_undo: get_bool(tool_config, &["features", "undo"]),
         features_shell_snapshot: get_bool(tool_config, &["features", "shell_snapshot"]),
-        profile_deep_review_model: get_string(tool_config, &["profiles", "deep-review", "model"]),
-        profile_deep_review_model_reasoning_effort: get_string(
-            tool_config,
-            &["profiles", "deep-review", "model_reasoning_effort"],
-        ),
-        profile_deep_review_approval_policy: get_string(
-            tool_config,
-            &["profiles", "deep-review", "approval_policy"],
-        ),
         rules_enabled: get_bool(tool_config, &["rules_enabled"]),
     }
 }

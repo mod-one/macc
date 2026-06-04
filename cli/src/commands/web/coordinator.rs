@@ -771,7 +771,7 @@ pub(super) async fn coordinator_preflight_create_branch_handler(
     headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> std::result::Result<Json<ApiCreateBranchResponse>, ApiError> {
-    use macc_core::coordinator::preflight::{self, BranchCreateSource};
+    use macc_core::coordinator::preflight::BranchCreateSource;
 
     crate::commands::web::mutation_gate::require_project_owner(&state, &headers)?;
 

@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 // ── Request / response DTOs ───────────────────────────────────────────────────
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ApiPrdGenerateRequest {

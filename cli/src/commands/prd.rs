@@ -37,7 +37,6 @@ pub enum PrdSubcommand {
         reference_branch: Option<String>,
         diff_stat: bool,
         dry_run: bool,
-        yes: bool,
         json: bool,
     },
     Promote {
@@ -115,7 +114,6 @@ impl Command for PrdCommand {
                 reference_branch,
                 diff_stat,
                 dry_run,
-                yes: _,
                 json,
             } => run_audit(
                 &paths,

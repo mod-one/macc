@@ -3,8 +3,7 @@ use macc_adapter_shared::render::format::ensure_trailing_newline;
 
 pub fn render_config_toml(config: &VibeConfig) -> String {
     let mut toml_str = String::new();
-
-    toml_str.push_str("# MACC Generated Mistral Vibe Settings - DO NOT EDIT MANUALLY\n\n");
+    
     toml_str.push_str(&format!("default_agent = \"{}\"\n", config.agent));
     toml_str.push_str(&format!("active_model = \"{}\"\n", config.model));
     toml_str.push_str("enable_telemetry = false\n");

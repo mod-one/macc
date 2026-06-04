@@ -3,7 +3,6 @@ use super::errors::ApiError;
 use super::WebState;
 use axum::extract::State;
 use axum::Json;
-use macc_core::Engine as _;
 
 // ── GET /api/v1/catalog/skills/available ─────────────────────────────────────
 

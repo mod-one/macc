@@ -618,11 +618,9 @@ build_prompt() {
   local task_id="$2"
   local task_title="$3"
   cat <<PROMPT
-You are an autonomous coding agent working inside a MACC worktree.
 
 Context:
 - Worktree: ${worktree}
-- Task file: ${prd}
 - Task ID: ${task_id}
 - Task Title: ${task_title}
 
@@ -631,11 +629,11 @@ ${task_json}
 
 Instructions:
 1) Implement ONLY the task above.
-2) Do NOT edit ${prd}; the runner will update it.
+2) Do NOT edit or read ${prd}; the runner will update it.
 3) Do NOT commit; the runner will commit if all tasks are done.
 4) Keep output concise; avoid dumping large files.
 5) Use concise professional fragments by default.
-6) Avoid explaining unchanged code.
+6) Avoid explaining code.
 7) Avoid repeated task restatements
 8) Avoid broad educational explanations
 9) If the task acceptance criteria are already satisfied before any code change, this is a valid success. Verify it explicitly and do not make unnecessary edits.
@@ -649,7 +647,7 @@ Instructions:
 12) Use error_with_changes or error_without_changes when you cannot complete the task (sandbox failures, environment issues, missing dependencies, permission errors, etc.). Include a brief explanation of why on the line before the marker.
 13) If you finish successfully but forget the marker, the runner will infer the result from repository state; still print the marker explicitly.
 
-Now implement the task.
+Now implement the task !
 PROMPT
 }
 

@@ -631,8 +631,8 @@ fn run_reference_branch_preflight(
     coordinator_cfg: Option<&macc_core::config::CoordinatorConfig>,
     input: &CoordinatorCommandInput,
 ) -> Result<()> {
+    #[allow(unused_imports)]
     use macc_core::coordinator::preflight::{self, BranchCreateSource, ReferencePreflightAction};
-    use macc_core::Engine as _;
 
     let repo_root = &paths.root;
 
@@ -1315,48 +1315,6 @@ fn spawn_web_daemon(project_root: &Path) -> Result<()> {
         source: e,
     })?;
     Ok(())
-}
-
-// Legacy alias kept so the large polling loop below compiles; unused now.
-#[allow(dead_code)]
-fn run_headless_coordinator(
-    paths: &macc_core::ProjectPaths,
-    coordinator_cfg: Option<&macc_core::config::CoordinatorConfig>,
-) -> Result<()> {
-    run_coordinator_daemon(paths, coordinator_cfg).map(|_| ())
-}
-
-/// Dead code: the blocking poll loop below is retained only for reference.
-/// `run_coordinator_daemon` replaces it.
-#[allow(dead_code)]
-fn _poll_coordinator_until_done(
-    paths: &macc_core::ProjectPaths,
-) -> Result<()> {
-    use macc_core::service::coordinator::{
-        coordinator_poll_managed_command_process,
-        CoordinatorManagedCommandPoll,
-    };
-    loop {
-        match coordinator_poll_managed_command_process(paths)? {
-            CoordinatorManagedCommandPoll::Idle => return Ok(()),
-            CoordinatorManagedCommandPoll::Running { elapsed_secs, .. } => {
-                if elapsed_secs % 30 == 0 && elapsed_secs > 0 {
-                    println!("Coordinator running… {}s elapsed", elapsed_secs);
-                }
-                std::thread::sleep(std::time::Duration::from_millis(500));
-            }
-            CoordinatorManagedCommandPoll::Exited { success, code, command, .. } => {
-                if success {
-                    println!("Coordinator '{}' completed.", command);
-                    return Ok(());
-                }
-                return Err(MaccError::Validation(format!(
-                    "Coordinator '{}' exited with code {:?}.",
-                    command, code
-                )));
-            }
-        }
-    }
 }
 
 #[cfg(test)]
