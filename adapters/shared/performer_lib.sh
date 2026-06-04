@@ -644,11 +644,14 @@ run_default_call() {
   expand_config_args "$sid" final_call_args
 
   if [[ "$prompt_mode" == "arg" ]]; then
-    if [[ -z "$prompt_arg" ]]; then
-      echo "Error: performer.prompt.arg required for arg mode" >&2
-      return 1
+    if [[ -n "$prompt_arg" ]]; then
+      # Explicit flag form, e.g. claude: -p "<prompt>"
+      run_and_capture "$output_capture" "$command" "${final_call_args[@]}" "$prompt_arg" "$prompt_text"
+    else
+      # Bare positional form — prompt appended as the last argument, no flag, no stdin.
+      # Used by tools (e.g. Codex) that accept instructions as a plain positional: codex exec "<prompt>"
+      run_and_capture "$output_capture" "$command" "${final_call_args[@]}" "$prompt_text"
     fi
-    run_and_capture "$output_capture" "$command" "${final_call_args[@]}" "$prompt_arg" "$prompt_text"
   else
     local rc=0
     if [[ "${MACC_DEBUG:-0}" == "1" ]]; then

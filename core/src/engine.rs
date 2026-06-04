@@ -879,13 +879,26 @@ pub trait Engine {
         counts.blocked = blocked;
         counts.merged = merged;
 
-        if let Some(pause) =
-            coordinator::state_runtime::read_coordinator_pause_file(&project_paths.root)?
-        {
-            counts.paused = true;
-            counts.pause_reason = Some(pause.reason);
-            counts.pause_task_id = Some(pause.task_id);
-            counts.pause_phase = Some(pause.phase);
+        // Only surface the pause file when the coordinator is not actively
+        // running. If a coordinator is alive the pause file is a stale artifact
+        // from a previous crash/error that was never cleaned up, and showing it
+        // would mislead the operator.
+        let coordinator_alive = sqlite
+            .get_active_coordinator_run()
+            .ok()
+            .flatten()
+            .map(|run| crate::doctor::is_pid_alive_pub(run.pid as u32))
+            .unwrap_or(false);
+
+        if !coordinator_alive {
+            if let Some(pause) =
+                coordinator::state_runtime::read_coordinator_pause_file(&project_paths.root)?
+            {
+                counts.paused = true;
+                counts.pause_reason = Some(pause.reason);
+                counts.pause_task_id = Some(pause.task_id);
+                counts.pause_phase = Some(pause.phase);
+            }
         }
 
         Ok(counts)

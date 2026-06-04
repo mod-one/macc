@@ -2421,6 +2421,9 @@ impl AppState {
     }
 
     pub fn push_screen(&mut self, screen: Screen) {
+        if self.screen_stack.last() == Some(&screen) {
+            return;
+        }
         self.screen_stack.push(screen);
         self.search_editing = false;
     }

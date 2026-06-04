@@ -1480,7 +1480,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 .get(state.config_tab_index)
                 .copied()
                 .unwrap_or("Settings");
-            let list_title = format!("Configuration — {}", tab_name);
+            let list_title = format!("Configuration  {}", tab_name);
             let list = List::new(items)
                 .block(panel(&list_title))
                 .highlight_symbol("› ")

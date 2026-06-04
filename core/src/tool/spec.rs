@@ -469,12 +469,8 @@ impl ToolSpec {
                         self.id
                     )));
                 }
-                if mode == "arg" && prompt.arg.as_deref().unwrap_or("").is_empty() {
-                    return Err(MaccError::Validation(format!(
-                        "Performer prompt arg must be set for tool '{}'",
-                        self.id
-                    )));
-                }
+                // `arg` may be absent for bare-positional mode (prompt appended
+                // directly as the last argument without a flag name).
             }
             if let Some(session) = &performer.session {
                 if let Some(scope) = &session.scope {

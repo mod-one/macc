@@ -1950,6 +1950,10 @@ pub async fn run_native_control_plane(
         reason: None,
     });
 
+    // Clear any stale pause file left by a previous crash so clients don't
+    // show a spurious "paused" banner while this run is actively running.
+    let _ = clear_coordinator_pause_file(repo_root);
+
     let _ = crate::coordinator::helpers::append_coordinator_event_with_severity(
         repo_root,
         "command_start",

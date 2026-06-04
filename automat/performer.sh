@@ -970,10 +970,12 @@ for ((i=1; i<=PERFORMER_MAX_ITERATIONS; i++)); do
   prompt_file="$(mktemp)"
   build_prompt "$next_task_json" "$next_id" "$next_title" >"$prompt_file"
   if [[ "${MACC_DEBUG:-0}" == "1" ]]; then
-    log_task_line "### Prompt \r\n"
-    log_task_line '---\r\n'
+    log_task_line "### Prompt"
+    log_task_line '---'
+    log_task_line ""
     cat "$prompt_file" >>"$task_log_file"
-    log_task_line '--- \r\n'
+    log_task_line '---'
+    log_task_line ""
   fi
 
   tool_success=false

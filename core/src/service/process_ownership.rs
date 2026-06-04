@@ -271,6 +271,29 @@ pub fn heartbeat(repo_root: &Path, _handle: &ProcessHandle, client_id: &str) -> 
     })
 }
 
+/// Force-clear the project-wide owner without checking whether the caller is
+/// the current owner. Returns the evicted owner's client_id, or None if there
+/// was no owner. Use this as a recovery tool when a client died without
+/// releasing ownership and you cannot wait for the heartbeat TTL to expire.
+pub fn force_release_project_owner(repo_root: &Path) -> Result<Option<String>> {
+    let lease = project_lease_handle(repo_root);
+    let mut evicted: Option<String> = None;
+    OwnershipStore::load_and_modify(repo_root, |store| {
+        if let Some(record) = store
+            .records
+            .iter_mut()
+            .find(|r| r.process == lease)
+        {
+            if let Some(owner) = record.owner.take() {
+                evicted = Some(owner.client_id);
+                record.takeover_request = None;
+            }
+        }
+        Ok(())
+    })?;
+    Ok(evicted)
+}
+
 pub fn get_record(repo_root: &Path, handle: &ProcessHandle) -> Result<Option<OwnershipRecord>> {
     let store = OwnershipStore::load(repo_root)?;
     Ok(store.get_record(handle).cloned())

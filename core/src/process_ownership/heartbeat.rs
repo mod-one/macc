@@ -32,7 +32,9 @@ pub struct HeartbeatConfig {
 impl Default for HeartbeatConfig {
     fn default() -> Self {
         Self {
-            ttl_seconds: 60,
+            // 15s: short enough that a killed client clears quickly, long enough
+            // to survive a slow tick cycle without false eviction.
+            ttl_seconds: 15,
             takeover_timeout_seconds: 60,
             takeover_default_response: TakeoverDefaultResponse::Deny,
         }
