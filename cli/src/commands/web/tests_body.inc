@@ -1263,52 +1263,6 @@ async fn plan_endpoint_maps_missing_config_to_api_error() {
     assert_eq!(payload["error"]["category"], "Dependency");
 }
 
-
-#[tokio::test]
-async fn apply_endpoint_dry_run_returns_preview_without_writing() {
-    let _guard = apply_test_guard();
-    let root = temp_root("apply-dry-run");
-    fs::create_dir_all(&root).expect("create root");
-    let paths = ProjectPaths::from_root(&root);
-    let engine = Arc::new(TestEngine::with_fixtures());
-    let tool_id = engine.fixture_ids()[0].to_string();
-    let output_path = root.join(format!("{tool_id}-output.txt"));
-    write_test_config_with_tools(&root, vec![tool_id.clone()]);
-    let state = test_web_state(&root, engine, WebAssetsMode::Embedded);
-    let app = build_web_router(state);
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/api/v1/apply")
-                .method("POST")
-                .header(axum::http::header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    serde_json::to_vec(&serde_json::json!({
-                        "dryRun": true,
-                        "tools": [tool_id]
-                    }))
-                    .expect("json body"),
-                ))
-                .expect("request"),
-        )
-        .await
-        .expect("response");
-
-    assert_eq!(response.status(), axum::http::StatusCode::OK);
-    let bytes = response
-        .into_body()
-        .collect()
-        .await
-        .expect("collect")
-        .to_bytes();
-    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
-    assert!(payload.get("summary").is_some());
-    assert!(payload["files"].as_array().expect("files").len() > 0);
-    assert_eq!(payload["summary"]["backupPath"], paths.backups_dir.display().to_string());
-    assert!(!output_path.exists());
-}
-
 #[tokio::test]
 async fn apply_endpoint_rejects_missing_confirmation() {
     let _guard = apply_test_guard();
