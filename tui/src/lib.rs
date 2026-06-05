@@ -2835,7 +2835,6 @@ mod tests {
         fs::create_dir_all(&macc_dir).expect("create .macc");
         fs::write(macc_dir.join("macc.yaml"), "tools:\n  enabled: []\n").expect("write config");
     }
-
 }
 
 fn render_coordinator_pause_overlay(f: &mut Frame, state: &AppState) {
