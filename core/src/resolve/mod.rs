@@ -224,13 +224,20 @@ pub fn resolve_fetch_units(
     skill_ids.dedup();
 
     for id in &skill_ids {
-        let entry = skills_catalog
-            .entries
-            .iter()
-            .find(|e| &e.id == id)
-            .ok_or_else(|| {
-                MaccError::Validation(format!("Skill ID not found in catalog: {}", id))
-            })?;
+        let entry = match skills_catalog.entries.iter().find(|e| &e.id == id) {
+            Some(e) => e,
+            None if crate::is_required_skill(id) => {
+                // Required (built-in) skills are provided by MACC itself and are
+                // not fetched from a remote catalog. Skip silently.
+                continue;
+            }
+            None => {
+                return Err(MaccError::Validation(format!(
+                    "Skill ID not found in catalog: {}",
+                    id
+                )));
+            }
+        };
         raw_selections.push((
             entry.source.clone(),
             Selection {
