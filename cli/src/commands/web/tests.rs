@@ -392,44 +392,6 @@ impl WebTestEngine {
         }
     }
 
-    fn with_plan_result(plan: std::result::Result<macc_core::plan::ActionPlan, MaccError>) -> Self {
-        Self {
-            inner: TestEngine::with_fixtures(),
-            use_fixture_plan_from_overrides: false,
-            real_tool_cooldown_commands: false,
-            plan_result: std::sync::Mutex::new(Some(plan)),
-            run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
-            managed_run_result: std::sync::Mutex::new(None),
-            worktree_run_result: std::sync::Mutex::new(Some(Ok(()))),
-            worktree_run_calls: std::sync::Mutex::new(Vec::new()),
-            cleanup_result: std::sync::Mutex::new(Some(Ok(()))),
-            stop_result: std::sync::Mutex::new(Some(Ok(()))),
-            resume_result: std::sync::Mutex::new(Some(Ok(()))),
-            doctor_snapshots: std::sync::Mutex::new(None),
-            doctor_fix_result: std::sync::Mutex::new(None),
-            coordinator_events: std::sync::Mutex::new(vec![Vec::new()]),
-        }
-    }
-
-    fn with_fixture_plan_from_overrides() -> Self {
-        Self {
-            inner: TestEngine::with_fixtures(),
-            use_fixture_plan_from_overrides: true,
-            real_tool_cooldown_commands: false,
-            plan_result: std::sync::Mutex::new(None),
-            run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
-            managed_run_result: std::sync::Mutex::new(None),
-            worktree_run_result: std::sync::Mutex::new(Some(Ok(()))),
-            worktree_run_calls: std::sync::Mutex::new(Vec::new()),
-            cleanup_result: std::sync::Mutex::new(Some(Ok(()))),
-            stop_result: std::sync::Mutex::new(Some(Ok(()))),
-            resume_result: std::sync::Mutex::new(Some(Ok(()))),
-            doctor_snapshots: std::sync::Mutex::new(None),
-            doctor_fix_result: std::sync::Mutex::new(None),
-            coordinator_events: std::sync::Mutex::new(vec![Vec::new()]),
-        }
-    }
-
     fn with_worktree_run_result(result: std::result::Result<(), MaccError>) -> Self {
         Self {
             inner: TestEngine::with_fixtures(),

@@ -2474,6 +2474,9 @@ mod tests {
         fs::create_dir_all(&repo).expect("create temp repo");
 
         run_git(&repo, &["init"]);
+        // Set local git identity so merge commits succeed on CI (no global identity configured).
+        run_git(&repo, &["config", "user.name", "MACC Test"]);
+        run_git(&repo, &["config", "user.email", "macc-test@example.com"]);
         run_git(&repo, &["checkout", "-b", base_branch]);
         fs::write(repo.join("fixture.txt"), "base\n").expect("write base fixture");
         run_git(&repo, &["add", "fixture.txt"]);

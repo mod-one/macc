@@ -276,7 +276,7 @@ function buildPath(path: string, query?: Record<string, QueryValue>): string {
   return queryString ? `${path}?${queryString}` : path;
 }
 
-async function sendJson<TResponse, TBody = undefined>(
+export async function sendJson<TResponse, TBody = undefined>(
   path: string,
   method: string,
   options: ApiQueryOptions = {},
