@@ -9,7 +9,7 @@ gitignore:
 performer:
   runner: adapters/agy/agy.performer.sh
   command: agy
-  args: ["--dangerously-skip-permissions", "-p"]
+  args: ["--dangerously-skip-permissions"]
   model_config:
     path: ".agents/settings.json"
     format: json
@@ -24,10 +24,10 @@ performer:
     extract_regex: "([0-9a-fA-F]{8}-[0-9a-fA-F-]{27})"
     resume:
       command: agy
-      args: ["--conversation", "{session_id}", "--dangerously-skip-permissions", "-p"]
+      args: ["--conversation", "{session_id}", "--dangerously-skip-permissions"]
   retry:
     command: agy
-    args: ["--conversation", "{session_id}", "--dangerously-skip-permissions", "-p"]
+    args: ["--conversation", "{session_id}", "--dangerously-skip-permissions"]
 model_tiers:
   mini:
     model: "Gemini 3.5 Flash (Low)"
