@@ -82,6 +82,31 @@ pub struct SkillEntry {
     pub tags: Vec<String>,
     pub selector: Selector,
     pub source: Source,
+    // ── Spec §6 lifecycle fields (optional for backward compatibility) ─────
+    /// Tool adapters this skill supports (e.g. `["tool-a", "tool-b"]`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<String>,
+    /// Preferred ref (tag, branch, SHA).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recommended_ref: Option<String>,
+    /// Install risk level: `low`, `medium`, `high`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub risk: Option<String>,
+    /// Whether this skill requires an MCP server.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub requires_mcp: bool,
+    /// Whether this skill writes user-level config outside the project.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub writes_user_level_config: bool,
+    /// Preview of install target directories per tool.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub targets: std::collections::BTreeMap<String, Vec<String>>,
+    /// Skill category, e.g. `hook-bundle`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    /// Compatibility constraints.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compatibility: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -299,6 +324,14 @@ fn discover_local_skill_entries(paths: &ProjectPaths) -> Vec<SkillEntry> {
                 checksum: None,
                 subpaths: vec![],
             },
+            tools: vec![],
+            recommended_ref: None,
+            risk: None,
+            requires_mcp: false,
+            writes_user_level_config: false,
+            targets: Default::default(),
+            category: None,
+            compatibility: None,
         });
     }
 
@@ -630,6 +663,14 @@ mod tests {
                 checksum: None,
                 subpaths: vec![],
             },
+            tools: vec![],
+            recommended_ref: None,
+            risk: None,
+            requires_mcp: false,
+            writes_user_level_config: false,
+            targets: Default::default(),
+            category: None,
+            compatibility: None,
         });
 
         catalog.save_atomically(&paths, &path).unwrap();
@@ -704,6 +745,14 @@ mod tests {
                 checksum: None,
                 subpaths: vec![],
             },
+            tools: vec![],
+            recommended_ref: None,
+            risk: None,
+            requires_mcp: false,
+            writes_user_level_config: false,
+            targets: Default::default(),
+            category: None,
+            compatibility: None,
         };
 
         // Upsert new
@@ -856,6 +905,14 @@ mod tests {
                 checksum: None,
                 subpaths: vec![],
             },
+            tools: vec![],
+            recommended_ref: None,
+            risk: None,
+            requires_mcp: false,
+            writes_user_level_config: false,
+            targets: Default::default(),
+            category: None,
+            compatibility: None,
         });
         user_skills
             .save_atomically(&paths, &paths.skills_catalog_path())
@@ -877,6 +934,14 @@ mod tests {
                 checksum: None,
                 subpaths: vec![],
             },
+            tools: vec![],
+            recommended_ref: None,
+            risk: None,
+            requires_mcp: false,
+            writes_user_level_config: false,
+            targets: Default::default(),
+            category: None,
+            compatibility: None,
         });
         project_skills
             .save_atomically(&paths, &paths.project_skills_catalog_path())

@@ -77,7 +77,17 @@ pub fn worktree_run_task(paths: &ProjectPaths, id: &str) -> Result<()> {
     let (event_source, event_task_id) = resolve_worktree_event_context(&task_id)?;
     if performer_ipc_addr.is_none() {
         return Err(MaccError::Validation(
-            "Performer run refused: no coordinator IPC address".to_string(),
+            "No MACC coordinator is running.\n\n\
+             The performer needs a coordinator IPC address, but none was found.\n\n\
+             Start a coordinator:\n\
+             \x20 macc coordinator run\n\n\
+             Then retry:\n\
+             \x20 macc worktree run <id>\n\n\
+             Inspect:\n\
+             \x20 macc status\n\
+             \x20 macc doctor --coordinator\n\n\
+             Error code: MACC-COORDINATOR-IPC-MISSING"
+                .to_string(),
         ));
     }
 
@@ -104,6 +114,14 @@ pub fn worktree_run_task(paths: &ProjectPaths, id: &str) -> Result<()> {
     if let Some(ipc_addr) = performer_ipc_addr {
         cmd.env("MACC_COORDINATOR_IPC_ADDR", ipc_addr);
     }
+    // Also pass the well-known path to the coordinator IPC address file.
+    // When the coordinator restarts (e.g., after SSH disconnect), this lets
+    // the performer re-read the new address and reconnect rather than failing
+    // permanently with a stale baked-in address.
+    cmd.env(
+        "MACC_COORDINATOR_IPC_ADDR_FILE",
+        crate::coordinator::ipc::performer_ipc_addr_path_pub(&paths.root),
+    );
 
     let status = cmd.status().map_err(|e| MaccError::Io {
         path: performer_path.to_string_lossy().into(),

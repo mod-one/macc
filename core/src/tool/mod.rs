@@ -7,7 +7,10 @@ pub use descriptor::{
     ActionKind, FieldDefault, FieldKind, ToolDescriptor, ToolField, ToolInstallDescriptor,
 };
 pub use loader::{ToolDiagnostic, ToolSpecLoader};
-pub use registry::{AdapterRegistration, MockAdapter, TestAdapter, ToolAdapter, ToolRegistry};
+pub use registry::{
+    AdapterRegistration, MockAdapter, ProjectContextSection, TestAdapter, ToolAdapter,
+    ToolRegistry, AGENTS_MD_ORCHESTRATOR,
+};
 pub use spec::*;
 
 #[cfg(test)]
@@ -47,6 +50,8 @@ mod tests {
             mcp_templates: Vec::new(),
             automation: crate::config::AutomationConfig::default(),
             settings: crate::config::SettingsConfig::default(),
+            context: None,
+            skills_run_policy: None,
         };
 
         let ctx = PlanningContext {

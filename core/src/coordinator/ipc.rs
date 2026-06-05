@@ -27,6 +27,13 @@ fn performer_ipc_addr_path(repo_root: &Path) -> std::path::PathBuf {
     repo_root.join(COORDINATOR_IPC_ADDR_REL_PATH)
 }
 
+/// Public accessor for the well-known IPC address file path, so callers
+/// (e.g., task runner) can pass it to performers as an env var for
+/// reconnection after coordinator restarts.
+pub fn performer_ipc_addr_path_pub(repo_root: &Path) -> std::path::PathBuf {
+    performer_ipc_addr_path(repo_root)
+}
+
 fn write_performer_ipc_addr(repo_root: &Path, addr: &str) -> Result<()> {
     let path = performer_ipc_addr_path(repo_root);
     if let Some(parent) = path.parent() {
@@ -243,6 +250,45 @@ fn process_ipc_event(
             error: Some("Rejected performer IPC event: missing identity".to_string()),
         };
     }
+    if event.is_performer_runtime_event() {
+        let current_epoch = std::env::var("COORDINATOR_EPOCH")
+            .ok()
+            .and_then(|s| s.parse::<i64>().ok());
+        if let Some(cur_epoch) = current_epoch {
+            let ev_epoch = event.coordinator_epoch.unwrap_or(0);
+            if ev_epoch < cur_epoch {
+                return PerformerIpcAck {
+                    ok: false,
+                    event_id,
+                    error: Some("E418: Stale event rejected: older coordinator epoch".to_string()),
+                };
+            }
+        }
+        if let Some(ref task_id) = event.task_id {
+            let ev_claim_id = event.claim_id.as_deref().unwrap_or("");
+            let paths =
+                coordinator_storage::CoordinatorStoragePaths::from_project_paths(project_paths);
+            if let Ok(conn) = rusqlite::Connection::open(&paths.sqlite_path) {
+                let db_claim_id: std::result::Result<String, _> = conn.query_row(
+                    "SELECT claim_id FROM task_runtime WHERE task_id = ?1",
+                    [task_id],
+                    |row| row.get(0),
+                );
+                if let Ok(active_claim_id) = db_claim_id {
+                    if !active_claim_id.starts_with("unclaimed-") && ev_claim_id != active_claim_id
+                    {
+                        return PerformerIpcAck {
+                            ok: false,
+                            event_id,
+                            error: Some(
+                                "E418: Stale event rejected: mismatched claim ID".to_string(),
+                            ),
+                        };
+                    }
+                }
+            }
+        }
+    }
     if let Err(err) = coordinator_storage::append_event_record_sqlite(project_paths, &event) {
         return PerformerIpcAck {
             ok: false,
@@ -253,6 +299,8 @@ fn process_ipc_event(
             )),
         };
     }
+    let _ =
+        crate::coordinator::helpers::append_structured_event_record(&project_paths.root, &event);
     if let Some(runtime_event) = raw_event_to_runtime_event(&event) {
         let _ = runtime_event_bus_tx.send(runtime_event);
     }

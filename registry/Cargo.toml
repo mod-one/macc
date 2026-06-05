@@ -1,13 +1,24 @@
 [package]
 name = "macc-registry"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [dependencies]
 macc-core = { path = "../core" }
-macc-adapter-claude = { path = "../adapters/claude" }
-macc-adapter-codex = { path = "../adapters/codex" }
-macc-adapter-gemini = { path = "../adapters/gemini" }
+macc-adapter-shared = { path = "../adapters/shared" }
+macc-adapter-claude = { path = "../adapters/claude", optional = true }
+macc-adapter-codex = { path = "../adapters/codex", optional = true }
+macc-adapter-gemini = { path = "../adapters/gemini", optional = true }
+macc-adapter-vibe = { path = "../adapters/vibe", optional = true }
+macc-adapter-agy = { path = "../adapters/agy", optional = true }
+
+[features]
+default = ["claude", "codex", "gemini", "vibe", "agy"]
+claude = ["dep:macc-adapter-claude"]
+codex = ["dep:macc-adapter-codex"]
+gemini = ["dep:macc-adapter-gemini"]
+vibe = ["dep:macc-adapter-vibe"]
+agy = ["dep:macc-adapter-agy"]
 
 [dev-dependencies]
 serde_json = "1.0"

@@ -59,23 +59,6 @@ const PRESET_BY_ID: Record<PresetId, StandardsPreset> = {
   none: PRESETS[2],
 };
 
-const EMPTY_PREVIEW_CARDS: PreviewCard[] = [
-  {
-    id: 'codex',
-    title: 'Codex - AGENTS.md (rendered)',
-    content: 'Loading preview...',
-  },
-  {
-    id: 'claude',
-    title: 'Claude - CLAUDE.md (rendered)',
-    content: 'Loading preview...',
-  },
-  {
-    id: 'gemini',
-    title: 'Gemini - GEMINI.md (rendered)',
-    content: 'Loading preview...',
-  },
-];
 
 function formatError(error: unknown): string {
   if (error instanceof ApiClientError) {
@@ -247,7 +230,7 @@ const Standards: React.FC = () => {
   const [newOverrideValue, setNewOverrideValue] = React.useState('');
   const [isPreviewLoading, setIsPreviewLoading] = React.useState(false);
   const [previewError, setPreviewError] = React.useState<string | null>(null);
-  const [previewCards, setPreviewCards] = React.useState<PreviewCard[]>(EMPTY_PREVIEW_CARDS);
+  const [previewCards, setPreviewCards] = React.useState<PreviewCard[]>([]);
   const [toast, setToast] = React.useState<ToastState>({
     open: false,
     title: '',
@@ -338,12 +321,7 @@ const Standards: React.FC = () => {
           }
           const message = formatError(previewLoadError);
           setPreviewError(message);
-          setPreviewCards(
-            EMPTY_PREVIEW_CARDS.map((card) => ({
-              ...card,
-              content: 'Preview unavailable.',
-            })),
-          );
+          setPreviewCards([]);
         })
         .finally(() => {
           if (active) {

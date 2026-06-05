@@ -118,9 +118,9 @@ export const WorktreeWizard: React.FC<WorktreeWizardProps> = ({
 
   const idPreview = React.useMemo(() => {
     if (form.count === 1) {
-      return [`${form.slug || '<slug>'}-<suffix>`];
+      return [`${form.slug || '<slug>'}`];
     }
-    return Array.from({ length: form.count }, (_, index) => `${form.slug || '<slug>'}-<suffix>-${String(index + 1).padStart(2, '0')}`);
+    return Array.from({ length: form.count }, (_, index) => `${form.slug || '<slug>'}-${String(index + 1).padStart(2, '0')}`);
   }, [form.count, form.slug]);
 
   const inferredRoot = React.useMemo(() => {

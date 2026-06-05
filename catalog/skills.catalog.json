@@ -1,7 +1,7 @@
 {
   "schema_version": "1.0",
   "type": "skills",
-  "updated_at": "2026-01-30",
+  "updated_at": "2026-06-01",
   "entries": [
     {
       "id": "macc-reviewer",
@@ -118,7 +118,7 @@
     {
       "id": "fdevelop-web-gamea",
       "name": "develop web game",
-      "description": "Build games in small steps and validate every change. Treat each iteration as: implement → act → pause → observe → adjust.",
+      "description": "Build games in small steps and validate every change. Treat each iteration as: implement \u2192 act \u2192 pause \u2192 observe \u2192 adjust.",
       "tags": [
         "develop",
         "web",
@@ -427,6 +427,238 @@
         "url": "https://github.com/speakeasy-api/gram.git",
         "ref": "main",
         "checksum": null
+      }
+    },
+    {
+      "id": "test-output-failures-only",
+      "name": "Test Output Failures Only",
+      "description": "Filters test logs so only failures, summaries, and actionable stack traces enter assistant context.",
+      "tags": [
+        "hook-bundle",
+        "testing",
+        "token-saving"
+      ],
+      "selector": {
+        "subpath": "hooks/test-output-failures-only"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/mod-one/skills.git",
+        "ref": "main",
+        "checksum": null
+      },
+      "tools": [
+        "claude",
+        "codex",
+        "gemini"
+      ],
+      "recommended_ref": "main",
+      "risk": "low",
+      "category": "hook-bundle",
+      "targets": {
+        "claude": [
+          ".claude/hooks/test-output-failures-only.md"
+        ],
+        "gemini": [
+          ".gemini/hooks/test-output-failures-only.json"
+        ]
+      }
+    },
+    {
+      "id": "lint-errors-only",
+      "name": "Lint Errors Only",
+      "description": "Keeps lint errors and actionable warnings; collapses successful lint output.",
+      "tags": [
+        "hook-bundle",
+        "linting",
+        "token-saving"
+      ],
+      "selector": {
+        "subpath": "hooks/lint-errors-only"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/mod-one/skills.git",
+        "ref": "main",
+        "checksum": null
+      },
+      "tools": [
+        "claude",
+        "codex",
+        "gemini"
+      ],
+      "recommended_ref": "main",
+      "risk": "low",
+      "category": "hook-bundle",
+      "targets": {
+        "claude": [
+          ".claude/hooks/lint-errors-only.md"
+        ]
+      }
+    },
+    {
+      "id": "stacktrace-collapse",
+      "name": "Stacktrace Collapse",
+      "description": "Collapses repetitive stack frames while preserving top error, cause chain, and project frames.",
+      "tags": [
+        "hook-bundle",
+        "debugging",
+        "token-saving"
+      ],
+      "selector": {
+        "subpath": "hooks/stacktrace-collapse"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/mod-one/skills.git",
+        "ref": "main",
+        "checksum": null
+      },
+      "tools": [
+        "claude",
+        "codex",
+        "gemini"
+      ],
+      "recommended_ref": "main",
+      "risk": "low",
+      "category": "hook-bundle",
+      "targets": {
+        "claude": [
+          ".claude/hooks/stacktrace-collapse.md"
+        ],
+        "gemini": [
+          ".gemini/hooks/stacktrace-collapse.json"
+        ]
+      }
+    },
+    {
+      "id": "git-diff-stat-before-full-diff",
+      "name": "Git Diff Stat Before Full Diff",
+      "description": "Shows diff stat and changed files before exposing the full diff.",
+      "tags": [
+        "hook-bundle",
+        "git",
+        "token-saving"
+      ],
+      "selector": {
+        "subpath": "hooks/git-diff-stat-before-full-diff"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/mod-one/skills.git",
+        "ref": "main",
+        "checksum": null
+      },
+      "tools": [
+        "claude",
+        "codex",
+        "gemini"
+      ],
+      "recommended_ref": "main",
+      "risk": "low",
+      "category": "hook-bundle",
+      "targets": {
+        "claude": [
+          ".claude/hooks/git-diff-stat-before-full-diff.md"
+        ]
+      }
+    },
+    {
+      "id": "log-grep-error-first",
+      "name": "Log Grep Error First",
+      "description": "Surfaces error, warn, fatal, panic, exception, and recent context first.",
+      "tags": [
+        "hook-bundle",
+        "logging",
+        "token-saving"
+      ],
+      "selector": {
+        "subpath": "hooks/log-grep-error-first"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/mod-one/skills.git",
+        "ref": "main",
+        "checksum": null
+      },
+      "tools": [
+        "claude",
+        "codex",
+        "gemini"
+      ],
+      "recommended_ref": "main",
+      "risk": "low",
+      "category": "hook-bundle",
+      "targets": {
+        "claude": [
+          ".claude/hooks/log-grep-error-first.md"
+        ]
+      }
+    },
+    {
+      "id": "coordinator-event-summarizer",
+      "name": "Coordinator Event Summarizer",
+      "description": "Summarizes MACC coordinator event streams by task, phase, and state transition.",
+      "tags": [
+        "hook-bundle",
+        "macc",
+        "coordinator",
+        "token-saving"
+      ],
+      "selector": {
+        "subpath": "hooks/coordinator-event-summarizer"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/mod-one/skills.git",
+        "ref": "main",
+        "checksum": null
+      },
+      "tools": [
+        "claude",
+        "codex",
+        "gemini"
+      ],
+      "recommended_ref": "main",
+      "risk": "low",
+      "category": "hook-bundle",
+      "targets": {
+        "claude": [
+          ".claude/hooks/coordinator-event-summarizer.md"
+        ]
+      }
+    },
+    {
+      "id": "performer-log-summary",
+      "name": "Performer Log Summary",
+      "description": "Summarizes long performer logs into action/result/error sections.",
+      "tags": [
+        "hook-bundle",
+        "macc",
+        "performer",
+        "token-saving"
+      ],
+      "selector": {
+        "subpath": "hooks/performer-log-summary"
+      },
+      "source": {
+        "kind": "git",
+        "url": "https://github.com/mod-one/skills.git",
+        "ref": "main",
+        "checksum": null
+      },
+      "tools": [
+        "claude",
+        "codex",
+        "gemini"
+      ],
+      "recommended_ref": "main",
+      "risk": "low",
+      "category": "hook-bundle",
+      "targets": {
+        "claude": [
+          ".claude/hooks/performer-log-summary.md"
+        ]
       }
     }
   ]

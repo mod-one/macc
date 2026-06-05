@@ -63,6 +63,8 @@ fn sanitize_raw_config(raw: &JsonValue) -> JsonValue {
     map.remove("agents");
     map.remove("rules_enabled");
     map.remove("user_mcp_merge");
+    // model_tiers is a MACC routing concept — Claude Code does not understand it.
+    map.remove("model_tiers");
 
     value
 }

@@ -67,6 +67,17 @@ impl<'a> Command for ProcessCommand<'a> {
                 );
                 Ok(())
             }
+            ProcessCommands::ReleaseStale => {
+                let cleared_id =
+                    macc_core::service::process_ownership::force_release_project_owner(
+                        &paths.root,
+                    )?;
+                match cleared_id {
+                    Some(id) => println!("Cleared stale owner: {id}"),
+                    None => println!("No owner to clear."),
+                }
+                Ok(())
+            }
             ProcessCommands::Takeover { takeover_command } => match takeover_command {
                 TakeoverCommands::Request { kind, pid } => {
                     let handle = build_handle(&paths.root, *kind, *pid);
@@ -145,6 +156,12 @@ pub enum ProcessCommands {
         #[arg(long)]
         client_id: String,
     },
+    /// Force-clear the project owner without requiring ownership.
+    ///
+    /// Use this to recover when a client died without releasing ownership
+    /// and you cannot wait for the heartbeat TTL to expire. The cleared
+    /// owner's client ID is printed so you can audit what was removed.
+    ReleaseStale,
     /// Request, accept, or reject a process takeover.
     Takeover {
         #[command(subcommand)]

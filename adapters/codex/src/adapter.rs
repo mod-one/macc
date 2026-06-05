@@ -1,8 +1,9 @@
-use crate::emit::{agents_md, config_toml, rules};
+use crate::emit::{config_toml, rules};
 use crate::map::CodexConfig;
 use macc_core::plan::builders as plan_builders;
 use macc_core::plan::ActionPlan;
 use macc_core::resolve::{PlanningContext, SelectionKind};
+use macc_core::tool::ProjectContextSection;
 use macc_core::ToolAdapter;
 use std::collections::BTreeSet;
 
@@ -13,17 +14,18 @@ impl ToolAdapter for CodexAdapter {
         "codex".to_string()
     }
 
+    fn context_file_target(&self) -> Option<String> {
+        Some("AGENTS.md".to_string())
+    }
+
+    fn context_file_fallback(&self) -> Option<String> {
+        Some("AGENTS.md is not generated when codex.rules_enabled is false.\n".to_string())
+    }
+
     fn plan(&self, ctx: &PlanningContext) -> macc_core::Result<ActionPlan> {
         let config = CodexConfig::from_resolved(ctx.resolved);
         let mut plan = ActionPlan::new();
 
-        if config.tool_config.rules_enabled.unwrap_or(false) {
-            plan_builders::write_text(
-                &mut plan,
-                "AGENTS.md",
-                &agents_md::render_agents_md(&config),
-            );
-        }
         plan_builders::write_text(
             &mut plan,
             ".codex/config.toml",
@@ -41,6 +43,21 @@ impl ToolAdapter for CodexAdapter {
         }
 
         Ok(plan)
+    }
+
+    fn context_file_sections(
+        &self,
+        ctx: &PlanningContext,
+    ) -> macc_core::Result<Vec<ProjectContextSection>> {
+        let config = CodexConfig::from_resolved(ctx.resolved);
+        let mut sections = Vec::new();
+        if config.tool_config.rules_enabled.unwrap_or(false) {
+            sections.push(ProjectContextSection {
+                heading: "Codex Skills".to_string(),
+                content: "- Use `validate` to run the standard validation pipeline.\n- Use `implement` for full implementation workflow.\n".to_string(),
+            });
+        }
+        Ok(sections)
     }
 }
 

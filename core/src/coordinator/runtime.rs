@@ -47,31 +47,21 @@ const TIMEOUT_KILL_GRACE_SECONDS: u64 = 10;
 async fn kill_process_tree(pid: Option<i64>, child: &mut tokio::process::Child) {
     #[cfg(unix)]
     if let Some(pid) = pid {
-        let pgid = pid; // child is process group leader, so PGID == PID
-                        // SIGTERM the entire process group
-        let _ = std::process::Command::new("kill")
-            .args(["-TERM", "--", &format!("-{}", pgid)])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-
-        // Give processes time to shut down gracefully
-        let grace = std::time::Duration::from_secs(TIMEOUT_KILL_GRACE_SECONDS);
-        if tokio::time::timeout(grace, child.wait()).await.is_ok() {
-            return; // exited within grace period
+        if pid > 0 {
+            unsafe {
+                let _ = libc::killpg(pid as libc::pid_t, libc::SIGTERM);
+            }
+            let grace = std::time::Duration::from_secs(TIMEOUT_KILL_GRACE_SECONDS);
+            if tokio::time::timeout(grace, child.wait()).await.is_ok() {
+                return;
+            }
+            unsafe {
+                let _ = libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+            }
+            let _ = child.wait().await;
+            return;
         }
-        // still alive, escalate to SIGKILL
-
-        // SIGKILL the entire process group
-        let _ = std::process::Command::new("kill")
-            .args(["-KILL", "--", &format!("-{}", pgid)])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        let _ = child.wait().await; // reap the zombie
-        return;
     }
-    // Fallback: no PID available (shouldn't happen), just kill the direct child
     let _ = child.kill().await;
 }
 
@@ -79,13 +69,10 @@ async fn kill_process_tree(pid: Option<i64>, child: &mut tokio::process::Child) 
 /// in control_plane.rs when a failure-signaled process exceeds the grace period.
 pub fn kill_process_group_sync(pid: i64) {
     #[cfg(unix)]
-    {
-        // SIGKILL the entire process group (PGID == PID because of process_group(0))
-        let _ = std::process::Command::new("kill")
-            .args(["-KILL", "--", &format!("-{}", pid)])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
+    if pid > 0 {
+        unsafe {
+            let _ = libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+        }
     }
 }
 
@@ -116,7 +103,13 @@ pub struct CoordinatorMergeEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoordinatorRuntimeEventKind {
-    Heartbeat,
+    Heartbeat {
+        run_id: Option<String>,
+        coordinator_epoch: Option<i64>,
+        claim_id: Option<String>,
+        event_id: String,
+        heartbeat_seq: i64,
+    },
     TaskDispatched {
         session_id: Option<String>,
     },
@@ -842,7 +835,13 @@ pub fn raw_event_to_runtime_event(
         .as_str()
         .to_string();
     let kind = match event_type {
-        "heartbeat" => CoordinatorRuntimeEventKind::Heartbeat,
+        "heartbeat" => CoordinatorRuntimeEventKind::Heartbeat {
+            run_id: event.run_id.clone(),
+            coordinator_epoch: event.coordinator_epoch,
+            claim_id: event.claim_id.clone(),
+            event_id: event.event_id.clone(),
+            heartbeat_seq: event.seq,
+        },
         "task_dispatched" => CoordinatorRuntimeEventKind::TaskDispatched {
             session_id: event
                 .payload
@@ -1156,15 +1155,67 @@ pub fn spawn_performer_job(
     join_set: &mut tokio::task::JoinSet<()>,
     phase_timeout_seconds: usize,
     performer_ipc_addr: Option<&str>,
+    claim_id: &str,
+    coordinator_epoch: i64,
+    // Extra env vars to forward (e.g. MACC_MODEL_TIER, MACC_REASONING_DEPTH).
+    extra_env: &[(&str, String)],
 ) -> Result<Option<i64>> {
     let effective_ipc_addr = performer_ipc_addr
         .filter(|value| !value.trim().is_empty())
         .map(|value| value.to_string());
     if effective_ipc_addr.is_none() {
         return Err(MaccError::Validation(
-            "performer spawn refused: no coordinator IPC address".to_string(),
+            "No MACC coordinator is running.\n\n\
+             The performer needs a coordinator IPC address, but none was found.\n\n\
+             Start a coordinator:\n\
+             \x20 macc coordinator run\n\n\
+             Inspect:\n\
+             \x20 macc status\n\
+             \x20 macc doctor --coordinator\n\n\
+             Error code: MACC-COORDINATOR-IPC-MISSING"
+                .to_string(),
         ));
     }
+    let run_id = std::env::var("COORDINATOR_RUN_ID").unwrap_or_else(|_| {
+        format!(
+            "run-{}-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default(),
+            std::process::id()
+        )
+    });
+
+    let log_dir = repo_root
+        .join(".macc")
+        .join("log")
+        .join("performer")
+        .join(task_id);
+    let _ = std::fs::create_dir_all(&log_dir);
+
+    let stdout_path = log_dir.join(format!("{}.stdout.log", run_id));
+    let stderr_path = log_dir.join(format!("{}.stderr.log", run_id));
+
+    let stdout_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&stdout_path)
+        .map_err(|e| MaccError::Io {
+            path: stdout_path.to_string_lossy().into(),
+            action: "create performer stdout log file".into(),
+            source: e,
+        })?;
+
+    let stderr_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&stderr_path)
+        .map_err(|e| MaccError::Io {
+            path: stderr_path.to_string_lossy().into(),
+            action: "create performer stderr log file".into(),
+            source: e,
+        })?;
+
     let mut run_cmd = tokio::process::Command::new(executable_path);
     // Create a new process group so we can kill the entire subprocess tree on
     // timeout by sending signals to the negative PGID.
@@ -1178,19 +1229,14 @@ pub fn spawn_performer_job(
     run_cmd
         .current_dir(repo_root)
         .env("MACC_INTERNAL_INVOCATION", "1")
-        .env(
-            "COORDINATOR_RUN_ID",
-            std::env::var("COORDINATOR_RUN_ID").unwrap_or_else(|_| {
-                format!(
-                    "run-{}-{}",
-                    chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default(),
-                    std::process::id()
-                )
-            }),
-        )
+        .env("COORDINATOR_RUN_ID", &run_id)
+        .env("COORDINATOR_EPOCH", coordinator_epoch.to_string())
+        .env("MACC_CLAIM_ID", claim_id)
         .env("MACC_EVENT_SOURCE", event_source.clone())
         .env("MACC_EVENT_TASK_ID", task_id)
         .env_remove(crate::coordinator::ipc::COORDINATOR_IPC_ADDR_ENV)
+        .stdout(stdout_file)
+        .stderr(stderr_file)
         .arg("--cwd")
         .arg(repo_root)
         .arg("worktree")
@@ -1198,6 +1244,17 @@ pub fn spawn_performer_job(
         .arg(worktree_path.to_string_lossy().to_string());
     if let Some(ipc_addr) = effective_ipc_addr.as_deref() {
         run_cmd.env(crate::coordinator::ipc::COORDINATOR_IPC_ADDR_ENV, ipc_addr);
+    }
+    // Pass the well-known IPC address file path so the performer can re-read
+    // the current coordinator address on IPC failure and reconnect after a
+    // coordinator restart (e.g., from SSH disconnect or supervisor recovery).
+    run_cmd.env(
+        "MACC_COORDINATOR_IPC_ADDR_FILE",
+        crate::coordinator::ipc::performer_ipc_addr_path_pub(repo_root),
+    );
+    // Inject model routing env vars so tool adapters can select the right model.
+    for (key, val) in extra_env {
+        run_cmd.env(*key, val);
     }
     let mut child = run_cmd.spawn().map_err(|e| MaccError::Io {
         path: worktree_path.to_string_lossy().into(),
@@ -1625,14 +1682,13 @@ pub fn terminate_active_jobs(state: &CoordinatorRunState) -> Vec<(String, i64)> 
         let Some(pid) = job.pid else {
             continue;
         };
-        let _ = std::process::Command::new("kill")
-            .arg("-TERM")
-            .arg(pid.to_string())
-            .status();
-        let _ = std::process::Command::new("kill")
-            .arg("-TERM")
-            .arg(format!("-{}", pid))
-            .status();
+        #[cfg(unix)]
+        if pid > 0 {
+            unsafe {
+                let _ = libc::kill(pid as libc::pid_t, libc::SIGTERM);
+                let _ = libc::killpg(pid as libc::pid_t, libc::SIGTERM);
+            }
+        }
         terminated.push((task_id.clone(), pid));
     }
     terminated
@@ -2362,6 +2418,24 @@ pub fn report_branch_cleanup_outcome<FE, FW>(
                     attempts: 0,
                 },
             );
+        }
+    }
+}
+
+pub fn terminate_process_group_gracefully(pgid: i64, grace_secs: u64) {
+    #[cfg(unix)]
+    {
+        if pgid <= 0 {
+            return;
+        }
+        unsafe {
+            let _ = libc::killpg(pgid as libc::pid_t, libc::SIGTERM);
+        }
+
+        std::thread::sleep(std::time::Duration::from_secs(grace_secs));
+
+        unsafe {
+            let _ = libc::killpg(pgid as libc::pid_t, libc::SIGKILL);
         }
     }
 }

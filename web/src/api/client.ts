@@ -32,6 +32,13 @@ import type {
   ApiTakeoverRequestResponse,
   ApiWorktree,
   ApiWorktreeCreateRequest,
+  ApiTrustSummary,
+  ApiRuntimeSnapshot,
+  ApiSkillItem,
+  ApiCatalogSkillEntry,
+  ApiCatalogSkillStatus,
+  ApiSkillLockEntry,
+  ApiVerifyFinding,
   GitCommit,
   GitGraphResponse,
 } from './models';
@@ -269,7 +276,7 @@ function buildPath(path: string, query?: Record<string, QueryValue>): string {
   return queryString ? `${path}?${queryString}` : path;
 }
 
-async function sendJson<TResponse, TBody = undefined>(
+export async function sendJson<TResponse, TBody = undefined>(
   path: string,
   method: string,
   options: ApiQueryOptions = {},
@@ -721,5 +728,74 @@ export async function clearToolCooldown(
     `/coordinator/tool-cooldown/${encodeURIComponent(tool)}`,
     'DELETE',
     options,
+  );
+}
+export async function getTrust(
+  options: ApiRequestOptions = {},
+): Promise<ApiTrustSummary> {
+  return sendJson<ApiTrustSummary>('/trust', 'GET', options);
+}
+
+// ── Shared runtime snapshot (spec §6.7 / §4.21) ──────────────────────────────
+
+export async function getSnapshot(
+  options: ApiRequestOptions = {},
+): Promise<ApiRuntimeSnapshot> {
+  return requestJson<ApiRuntimeSnapshot>(
+    '/snapshot',
+    { method: 'GET', signal: options.signal },
+    options.baseUrl,
+  );
+}
+
+export async function listSkills(
+  options: ApiRequestOptions = {},
+): Promise<ApiSkillItem[]> {
+  return requestJson<ApiSkillItem[]>(
+    '/skills',
+    { method: 'GET', signal: options.signal },
+    options.baseUrl,
+  );
+}
+
+// ── Catalog skills lifecycle (spec §15 / §16) ─────────────────────────────────
+
+export async function getCatalogSkillsAvailable(
+  options: ApiRequestOptions = {},
+): Promise<{ skills: ApiCatalogSkillEntry[] }> {
+  return requestJson<{ skills: ApiCatalogSkillEntry[] }>(
+    '/catalog/skills/available',
+    { method: 'GET', signal: options.signal },
+    options.baseUrl,
+  );
+}
+
+export async function getCatalogSkillsStatus(
+  options: ApiRequestOptions = {},
+): Promise<{ skills: ApiCatalogSkillStatus[]; warnings: string[] }> {
+  return requestJson<{ skills: ApiCatalogSkillStatus[]; warnings: string[] }>(
+    '/catalog/skills/status',
+    { method: 'GET', signal: options.signal },
+    options.baseUrl,
+  );
+}
+
+export async function getCatalogSkillsInstalled(
+  options: ApiRequestOptions = {},
+): Promise<{ skills: ApiSkillLockEntry[]; version: number }> {
+  return requestJson<{ skills: ApiSkillLockEntry[]; version: number }>(
+    '/catalog/skills/installed',
+    { method: 'GET', signal: options.signal },
+    options.baseUrl,
+  );
+}
+
+export async function postCatalogSkillsVerify(
+  options: ApiRequestOptions = {},
+): Promise<{ ok: boolean; findings: ApiVerifyFinding[]; finding_count: number }> {
+  return requestJson<{ ok: boolean; findings: ApiVerifyFinding[]; finding_count: number }>(
+    '/catalog/skills/verify',
+    { method: 'POST', signal: options.signal },
+    options.baseUrl,
   );
 }

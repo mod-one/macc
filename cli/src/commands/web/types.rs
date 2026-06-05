@@ -44,6 +44,9 @@ pub(crate) struct ApiConfigResponse {
     pub selected_mcp: Vec<String>,
     /// Whether normal CLI output should be reduced.
     pub quiet: bool,
+    /// Whether debug mode is enabled (verbose performer logs: prompt dump, runner line, [MACC] invoke).
+    /// Equivalent to setting MACC_DEBUG=1 or using `macc --verbose`.
+    pub debug: bool,
     /// Whether network-backed operations should avoid remote access.
     pub offline: bool,
     /// Configured web server port.
@@ -135,6 +138,10 @@ pub(crate) struct ApiConfigResponse {
     pub force_kill_grace_seconds: Option<u64>,
     /// Max review cycles per task (0=skip, 1=one review+fix, N=N loops, None=unlimited).
     pub max_review_cycles: Option<usize>,
+    /// safety policy
+    pub safety_policy: Option<String>,
+    /// destructive actions confirmation
+    pub destructive_actions: Option<String>,
     /// Whether managed environment constraints were detected.
     pub requirements_detected: bool,
     /// Managed-environment warnings surfaced to the UI.
@@ -166,6 +173,8 @@ pub(crate) struct ApiConfigUpdateRequest {
     pub selected_mcp: Option<Vec<String>>,
     /// Updated quiet-mode flag.
     pub quiet: Option<bool>,
+    /// Updated debug-mode flag.
+    pub debug: Option<bool>,
     /// Updated offline-mode flag.
     pub offline: Option<bool>,
     /// Updated web server port.
@@ -254,6 +263,10 @@ pub(crate) struct ApiConfigUpdateRequest {
     pub force_kill_grace_seconds: Option<u64>,
     /// Updated max review cycles.
     pub max_review_cycles: Option<usize>,
+    /// Updated safety policy
+    pub safety_policy: Option<String>,
+    /// Updated destructive actions setting
+    pub destructive_actions: Option<String>,
 }
 
 /// Tool descriptor payload used by the web tools configuration screen.
@@ -878,9 +891,36 @@ pub(crate) struct ApiDoctorReport {
     /// Counts of issues grouped by doctor category.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub issues_by_category: BTreeMap<String, usize>,
-    /// Individual issues returned by doctor checks.
+    /// Individual issues returned by doctor checks (legacy tool-check model).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub issues: Vec<ApiDoctorIssue>,
+    /// Structured diagnostic findings from extended checks (spec §14.2).
+    /// Carries stable MACC codes, "why it matters" messages, and recommended actions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub findings: Vec<ApiDiagnosticFinding>,
+    /// Whether the system is ready to dispatch a task (no blocking findings).
+    pub ready: bool,
+}
+
+/// A single structured diagnostic finding (spec §14.2 `DiagnosticFinding`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ApiDiagnosticFinding {
+    /// Stable MACC error code, e.g. `MACC-GIT-IDENTITY-MISSING`.
+    pub id: String,
+    /// Short human-readable title.
+    pub title: String,
+    /// Severity: `"ok"`, `"info"`, `"warning"`, or `"error"`.
+    pub severity: String,
+    /// Category: `"git"`, `"coordinator"`, `"tools"`, `"tasks"`, `"worktrees"`, `"project"`.
+    pub category: String,
+    /// Explanation of why this matters (the "why it matters" line in the issue card).
+    pub message: String,
+    /// Exact command(s) to run to fix the issue.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recommended_action: Option<String>,
+    /// Whether the doctor fix flow can attempt an automated repair.
+    pub fix_available: bool,
 }
 
 /// Single doctor issue item surfaced to the web UI.

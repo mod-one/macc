@@ -4,13 +4,15 @@ import { useNavigate } from 'react-router-dom';
 import {
   createWorktree,
   getDoctorReport,
+  getSnapshot,
+  listSkills,
   runApply,
   runPlan,
 } from '../api/client';
-import type { ApiCoordinatorAction } from '../api/models';
+import type { ApiCoordinatorAction, ApiSkillItem } from '../api/models';
 import { useCoordinatorStore } from '../store';
 
-type CommandGroup = 'Navigation' | 'Coordinator' | 'Config' | 'Tools';
+type CommandGroup = 'Navigation' | 'Coordinator' | 'Config' | 'Tools' | 'Skills';
 
 interface CommandItem {
   id: string;
@@ -21,7 +23,7 @@ interface CommandItem {
   run: () => Promise<unknown> | void;
 }
 
-const GROUP_ORDER: CommandGroup[] = ['Navigation', 'Coordinator', 'Config', 'Tools'];
+const GROUP_ORDER: CommandGroup[] = ['Navigation', 'Coordinator', 'Config', 'Tools', 'Skills'];
 const TOP_HIT_LIMIT = 50;
 
 function normalize(value: string): string {
@@ -76,6 +78,14 @@ const CommandPalette: React.FC<CommandPaletteProps> = ({ open, onOpenChange }) =
   const runCoordinatorAction = useCoordinatorStore((state) => state.runAction);
   const [query, setQuery] = React.useState('');
   const [selectedIndex, setSelectedIndex] = React.useState(0);
+  const [skills, setSkills] = React.useState<ApiSkillItem[]>([]);
+
+  // Load skills once when the palette opens so skill commands are searchable.
+  React.useEffect(() => {
+    if (open && skills.length === 0) {
+      void listSkills().then(setSkills).catch(() => undefined);
+    }
+  }, [open, skills.length]);
 
   const commands = React.useMemo<CommandItem[]>(() => {
     const nav = (path: string) => () => navigate(path);
@@ -158,8 +168,30 @@ const CommandPalette: React.FC<CommandPaletteProps> = ({ open, onOpenChange }) =
           navigate('/ops/diagnostics');
         },
       },
+      // Spec §4.14: skill runner navigation and snapshot commands
+      { id: 'nav-skill-runner', label: 'Go to Skill Runner', group: 'Navigation', keywords: ['run', 'ops', 'skills'], shortcut: 'G K', run: nav('/ops/skill-runner') },
+      {
+        id: 'tools-view-snapshot',
+        label: 'View Runtime Snapshot',
+        group: 'Tools',
+        keywords: ['status', 'workers', 'queue', 'observer'],
+        shortcut: 'S N',
+        run: async () => {
+          await getSnapshot();
+          navigate('/dashboard');
+        },
+      },
+      // Dynamic skill commands — populated from /api/v1/skills after the palette opens.
+      ...skills.map((skill) => ({
+        id: `skill-run-${skill.id}`,
+        label: `Run skill: ${skill.id}`,
+        group: 'Skills' as CommandGroup,
+        keywords: [skill.title, skill.kind, skill.risk, 'run'],
+        shortcut: '',
+        run: () => navigate(`/ops/skill-runner`),
+      })),
     ];
-  }, [navigate, runCoordinatorAction]);
+  }, [navigate, runCoordinatorAction, skills]);
 
   const filteredCommands = React.useMemo(() => {
     const rows = commands

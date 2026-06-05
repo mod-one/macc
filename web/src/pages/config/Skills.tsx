@@ -2,6 +2,8 @@ import React from 'react';
 import { ApiClientError, getConfig, updateConfig } from '../../api/client';
 import type { ApiConfigResponse, ApiConfigUpdateRequest } from '../../api/models';
 import { Button, ConfirmDialog, ErrorBanner, LoadingSpinner } from '../../components';
+import { SearchIcon, PlusIcon, RefreshIcon, CheckIcon, XIcon } from '../../components/icons';
+import { cn } from '../../components/styles';
 import SkillsInstallModal from './SkillsInstallModal';
 import {
   CACHED_ITEMS_STORAGE_KEY,
@@ -46,6 +48,26 @@ function normalizeConfigResponse(config: ApiConfigResponse): ApiConfigResponse {
     toolPriority: ensureStringArray(config.toolPriority),
     managedEnvironmentWarnings: ensureStringArray(config.managedEnvironmentWarnings),
   };
+}
+
+function kindChipStyle(kind: CatalogKind): React.CSSProperties {
+  switch (kind) {
+    case 'skill':
+      return {
+        backgroundColor: 'color-mix(in oklch, var(--accent) 16%, transparent)',
+        color: 'var(--accent)',
+      };
+    case 'agent':
+      return {
+        backgroundColor: 'oklch(0.65 0.15 300 / 0.16)',
+        color: 'oklch(0.72 0.14 300)',
+      };
+    case 'mcp':
+      return {
+        backgroundColor: 'oklch(0.75 0.17 80 / 0.16)',
+        color: 'var(--warning)',
+      };
+  }
 }
 
 const Skills: React.FC = () => {
@@ -98,15 +120,11 @@ const Skills: React.FC = () => {
       }
     }
 
-    if (!config) {
-      return merged;
-    }
+    if (!config) return merged;
 
     const addMissing = (kind: CatalogKind, id: string): void => {
       const key = itemKey(kind, id);
-      if (merged.some((entry) => itemKey(entry.kind, entry.id) === key)) {
-        return;
-      }
+      if (merged.some((entry) => itemKey(entry.kind, entry.id) === key)) return;
       merged.push({
         id,
         name: id,
@@ -130,10 +148,7 @@ const Skills: React.FC = () => {
   }, [config, customCatalog]);
 
   const installedKeys = React.useMemo(() => {
-    if (!config) {
-      return new Set<string>();
-    }
-
+    if (!config) return new Set<string>();
     return new Set<string>([
       ...config.selectedSkills.map((id) => itemKey('skill', id)),
       ...config.selectedAgents.map((id) => itemKey('agent', id)),
@@ -145,12 +160,10 @@ const Skills: React.FC = () => {
     const tools = new Set<string>();
     for (const item of catalog) {
       for (const tool of item.toolCompatibility) {
-        if (tool.trim().length > 0) {
-          tools.add(tool);
-        }
+        if (tool.trim().length > 0) tools.add(tool);
       }
     }
-    return Array.from(tools).sort((left, right) => left.localeCompare(right));
+    return Array.from(tools).sort((a, b) => a.localeCompare(b));
   }, [catalog]);
 
   const filteredItems = React.useMemo(() => {
@@ -158,21 +171,11 @@ const Skills: React.FC = () => {
     return catalog.filter((item) => {
       const key = itemKey(item.kind, item.id);
       const installed = installedKeys.has(key);
-      if (kindFilter !== 'all' && item.kind !== kindFilter) {
-        return false;
-      }
-      if (toolFilter !== 'all' && !item.toolCompatibility.includes(toolFilter)) {
-        return false;
-      }
-      if (installedFilter === 'installed' && !installed) {
-        return false;
-      }
-      if (installedFilter === 'not-installed' && installed) {
-        return false;
-      }
-      if (search.length === 0) {
-        return true;
-      }
+      if (kindFilter !== 'all' && item.kind !== kindFilter) return false;
+      if (toolFilter !== 'all' && !item.toolCompatibility.includes(toolFilter)) return false;
+      if (installedFilter === 'installed' && !installed) return false;
+      if (installedFilter === 'not-installed' && installed) return false;
+      if (search.length === 0) return true;
       const haystack = [item.id, item.name, item.description, item.sourceUrl ?? '', ...item.toolCompatibility]
         .join(' ')
         .toLowerCase();
@@ -197,9 +200,7 @@ const Skills: React.FC = () => {
 
   const onInstall = React.useCallback(
     async (manifestText: string, draft: InstallDraft) => {
-      if (!config) {
-        return;
-      }
+      if (!config) return;
 
       let manifest: Record<string, unknown>;
       try {
@@ -227,15 +228,9 @@ const Skills: React.FC = () => {
       const nextAgents = [...config.selectedAgents];
       const nextMcp = [...config.selectedMcp];
 
-      if (draft.kind === 'skill' && !nextSkills.includes(targetId)) {
-        nextSkills.push(targetId);
-      }
-      if (draft.kind === 'agent' && !nextAgents.includes(targetId)) {
-        nextAgents.push(targetId);
-      }
-      if (draft.kind === 'mcp' && !nextMcp.includes(targetId)) {
-        nextMcp.push(targetId);
-      }
+      if (draft.kind === 'skill' && !nextSkills.includes(targetId)) nextSkills.push(targetId);
+      if (draft.kind === 'agent' && !nextAgents.includes(targetId)) nextAgents.push(targetId);
+      if (draft.kind === 'mcp' && !nextMcp.includes(targetId)) nextMcp.push(targetId);
 
       const normalizedItem: CatalogItem = {
         id: targetId,
@@ -254,7 +249,7 @@ const Skills: React.FC = () => {
               return parsed as Record<string, unknown>;
             }
           } catch {
-            // Ignore invalid custom configuration payload.
+            // ignore
           }
           return {};
         })(),
@@ -263,16 +258,13 @@ const Skills: React.FC = () => {
 
       try {
         await saveConfigSelection({ selectedSkills: nextSkills, selectedAgents: nextAgents, selectedMcp: nextMcp });
-
         const nextCatalog = upsertCatalogItem(customCatalog, normalizedItem);
         setCustomCatalog(nextCatalog);
         writeStoredCatalog(nextCatalog);
-
         const nextCached = new Set(cachedItemKeys);
         nextCached.add(itemKey(normalizedItem.kind, normalizedItem.id));
         setCachedItemKeys(nextCached);
         writeStoredStringArray(CACHED_ITEMS_STORAGE_KEY, Array.from(nextCached));
-
         setInstallDraft(null);
       } catch (saveError) {
         setError(formatError(saveError));
@@ -284,13 +276,9 @@ const Skills: React.FC = () => {
   );
 
   const removeInstalledItem = React.useCallback(async () => {
-    if (!config || !removeCandidate) {
-      return;
-    }
-
+    if (!config || !removeCandidate) return;
     setIsSaving(true);
     setError(null);
-
     const nextSkills = config.selectedSkills.filter(
       (id) => !(removeCandidate.kind === 'skill' && id === removeCandidate.id),
     );
@@ -300,7 +288,6 @@ const Skills: React.FC = () => {
     const nextMcp = config.selectedMcp.filter(
       (id) => !(removeCandidate.kind === 'mcp' && id === removeCandidate.id),
     );
-
     try {
       await saveConfigSelection({ selectedSkills: nextSkills, selectedAgents: nextAgents, selectedMcp: nextMcp });
       setRemoveCandidate(null);
@@ -315,119 +302,304 @@ const Skills: React.FC = () => {
     return <LoadingSpinner label="Loading catalog..." />;
   }
 
+  const installedCount = filteredItems.filter((item) => installedKeys.has(itemKey(item.kind, item.id))).length;
+  const activeFilters = searchTerm || kindFilter !== 'all' || toolFilter !== 'all' || installedFilter !== 'all';
+
+  const clearFilters = () => {
+    setSearchTerm('');
+    setKindFilter('all');
+    setToolFilter('all');
+    setInstalledFilter('all');
+  };
+
   return (
-    <div className="flex flex-col gap-6">
-      <header className="rounded-[2rem] border border-slate-200 bg-white p-6 shadow-sm">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h1 className="text-5xl font-semibold tracking-tight text-slate-950">Skills &amp; Catalog</h1>
-            <p className="mt-3 text-base text-slate-600">
-              Browse skills, agents, and MCP servers. Review permissions before install.
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            <Button className="border-slate-300 bg-slate-100 text-slate-800 hover:bg-slate-200" onClick={() => void loadConfig()}>
-              Refresh
-            </Button>
-            <Button className="border-slate-900 bg-slate-900 text-white hover:bg-slate-700" onClick={openAddByUrl}>
-              Add by URL
-            </Button>
-          </div>
+    <div className="flex flex-col gap-5">
+      {/* Page header */}
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-semibold tracking-tight text-[var(--text-primary)]">
+            Skills &amp; Catalog
+          </h1>
+          <p className="mt-0.5 text-sm text-[var(--text-secondary)]">
+            Browse and install skills, agents, and MCP servers. Review permissions before installing.
+          </p>
         </div>
-      </header>
-
-      {error && <ErrorBanner message={error} title="Catalog Error" />}
-
-      <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
-          <label className="flex flex-col gap-1 text-xs font-medium uppercase tracking-wide text-slate-500">
-            Search
-            <input className="rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 outline-none focus:border-slate-900" onChange={(event) => setSearchTerm(event.target.value)} placeholder="Search by name, id, tool or URL" value={searchTerm} />
-          </label>
-          <label className="flex flex-col gap-1 text-xs font-medium uppercase tracking-wide text-slate-500">
-            Kind
-            <select className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-slate-900" onChange={(event) => setKindFilter(event.target.value as 'all' | CatalogKind)} value={kindFilter}>
-              <option value="all">All</option>
-              <option value="skill">Skill</option>
-              <option value="agent">Agent</option>
-              <option value="mcp">MCP</option>
-            </select>
-          </label>
-          <label className="flex flex-col gap-1 text-xs font-medium uppercase tracking-wide text-slate-500">
-            Tool
-            <select className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-slate-900" onChange={(event) => setToolFilter(event.target.value)} value={toolFilter}>
-              <option value="all">All tools</option>
-              {availableTools.map((tool) => (
-                <option key={tool} value={tool}>
-                  {tool}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="flex flex-col gap-1 text-xs font-medium uppercase tracking-wide text-slate-500">
-            Installed
-            <select className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-slate-900" onChange={(event) => setInstalledFilter(event.target.value as InstalledFilter)} value={installedFilter}>
-              <option value="all">All</option>
-              <option value="installed">Installed</option>
-              <option value="not-installed">Not installed</option>
-            </select>
-          </label>
+        <div className="flex items-center gap-2">
+          <Button
+            className="h-8 border-[var(--border)] bg-[var(--bg-card)] px-3 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+            onClick={() => void loadConfig()}
+            type="button"
+          >
+            <RefreshIcon className="mr-1.5 h-3.5 w-3.5" />
+            Refresh
+          </Button>
+          <Button
+            className="h-8 px-3 text-xs"
+            onClick={openAddByUrl}
+            style={{
+              borderColor: 'color-mix(in oklch, var(--accent) 40%, transparent)',
+              backgroundColor: 'var(--accent-bg)',
+              color: 'var(--accent)',
+            }}
+            type="button"
+          >
+            <PlusIcon className="mr-1.5 h-3.5 w-3.5" />
+            Add by URL
+          </Button>
         </div>
-      </section>
+      </div>
 
-      <section className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-        {filteredItems.length === 0 && <div className="rounded-2xl border border-slate-200 bg-white p-6 text-sm text-slate-600">No catalog items match the current filters.</div>}
+      {error && <ErrorBanner message={error} title="Catalog error" />}
 
-        {filteredItems.map((item) => {
-          const key = itemKey(item.kind, item.id);
-          const installed = installedKeys.has(key);
-          const cached = cachedItemKeys.has(key);
+      {/* Filter bar */}
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="relative min-w-[180px] flex-1">
+          <SearchIcon className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--text-muted)]" />
+          <input
+            className="h-8 w-full rounded-md border border-[var(--border)] bg-[var(--bg-card)] pl-8 pr-3 text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)]/50"
+            onChange={(event) => setSearchTerm(event.target.value)}
+            placeholder="Search name, id, tool"
+            value={searchTerm}
+          />
+        </div>
 
-          return (
-            <article key={key} className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <h2 className="text-lg font-semibold text-slate-950">{item.name}</h2>
-                  <p className="text-xs uppercase tracking-wide text-slate-500">{item.id}</p>
-                </div>
-                <div className="flex flex-wrap items-center gap-2 text-xs">
-                  <span className="rounded-full border border-slate-300 px-2 py-0.5 text-slate-600">{kindLabel(item.kind)}</span>
-                  <span className={`rounded-full px-2 py-0.5 ${item.verified ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>{item.verified ? 'Verified' : 'Unverified'}</span>
-                  <span className="rounded-full bg-slate-100 px-2 py-0.5 text-slate-700">{item.sourceKind}</span>
-                  <span className={`rounded-full px-2 py-0.5 ${cached ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-500'}`}>Cache: {cached ? 'cached' : 'not cached'}</span>
-                </div>
-              </div>
-              <p className="mt-3 text-sm text-slate-600">{item.description}</p>
-              <div className="mt-3 flex flex-wrap gap-2">
-                {item.toolCompatibility.length > 0 ? item.toolCompatibility.map((tool) => <span key={tool} className="rounded-full border border-slate-300 bg-slate-50 px-2 py-0.5 text-xs text-slate-700">{tool}</span>) : <span className="rounded-full border border-slate-300 bg-slate-50 px-2 py-0.5 text-xs text-slate-500">No tool compatibility metadata</span>}
-              </div>
-              <div className="mt-4 flex items-center justify-between gap-2">
-                <span className={`rounded-full px-2 py-0.5 text-xs ${installed ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-600'}`}>{installed ? 'Installed' : 'Not installed'}</span>
-                <div className="flex items-center gap-2">
-                  <Button className="border-slate-300 bg-slate-100 text-slate-800 hover:bg-slate-200" onClick={() => setInstallDraft(toInstallDraft(item))}>Review</Button>
-                  {installed ? (
-                    <Button className="border-rose-300 bg-rose-100 text-rose-700 hover:bg-rose-200" onClick={() => setRemoveCandidate({ kind: item.kind, id: item.id })}>Remove</Button>
-                  ) : (
-                    <Button className="border-slate-900 bg-slate-900 text-white hover:bg-slate-700" onClick={() => setInstallDraft(toInstallDraft(item))}>Install</Button>
+        <select
+          aria-label="Filter by kind"
+          className="h-8 rounded-md border border-[var(--border)] bg-[var(--bg-card)] px-2 pr-6 text-sm text-[var(--text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)]/50"
+          onChange={(event) => setKindFilter(event.target.value as 'all' | CatalogKind)}
+          value={kindFilter}
+        >
+          <option value="all">All types</option>
+          <option value="skill">Skills</option>
+          <option value="agent">Agents</option>
+          <option value="mcp">MCP</option>
+        </select>
+
+        {availableTools.length > 0 && (
+          <select
+            aria-label="Filter by tool"
+            className="h-8 rounded-md border border-[var(--border)] bg-[var(--bg-card)] px-2 pr-6 text-sm text-[var(--text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)]/50"
+            onChange={(event) => setToolFilter(event.target.value)}
+            value={toolFilter}
+          >
+            <option value="all">All tools</option>
+            {availableTools.map((tool) => (
+              <option key={tool} value={tool}>
+                {tool}
+              </option>
+            ))}
+          </select>
+        )}
+
+        <div className="inline-flex rounded-md border border-[var(--border)] bg-[var(--bg-card)] p-0.5" role="group">
+          {(['all', 'installed', 'not-installed'] as InstalledFilter[]).map((value) => {
+            const label = value === 'all' ? 'All' : value === 'installed' ? 'Installed' : 'Available';
+            return (
+              <button
+                key={value}
+                className={cn(
+                  'rounded px-2.5 py-1 text-xs font-medium transition-colors',
+                  installedFilter === value
+                    ? 'bg-[var(--accent)] text-white'
+                    : 'text-[var(--text-secondary)] hover:bg-white/8 hover:text-[var(--text-primary)]',
+                )}
+                onClick={() => setInstalledFilter(value)}
+                type="button"
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Results line */}
+      <div className="flex items-center gap-2 text-xs text-[var(--text-muted)]">
+        <span>
+          {filteredItems.length} {filteredItems.length === 1 ? 'item' : 'items'}
+        </span>
+        {installedCount > 0 && (
+          <>
+            <span aria-hidden>·</span>
+            <span style={{ color: 'var(--success)' }}>{installedCount} installed</span>
+          </>
+        )}
+        {activeFilters && (
+          <>
+            <span aria-hidden>·</span>
+            <button
+              className="hover:underline"
+              onClick={clearFilters}
+              style={{ color: 'var(--accent)' }}
+              type="button"
+            >
+              Clear filters
+            </button>
+          </>
+        )}
+      </div>
+
+      {/* Catalog list */}
+      {filteredItems.length === 0 ? (
+        <div
+          className="rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-card)] px-5 py-12 text-center"
+          style={{ boxShadow: 'var(--shadow-soft)' }}
+        >
+          <p className="text-sm text-[var(--text-secondary)]">No items match the current filters.</p>
+          {activeFilters && (
+            <button
+              className="mt-2 text-xs hover:underline"
+              onClick={clearFilters}
+              style={{ color: 'var(--accent)' }}
+              type="button"
+            >
+              Clear filters
+            </button>
+          )}
+        </div>
+      ) : (
+        <ul
+          className="overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)]"
+          style={{ boxShadow: 'var(--shadow-soft)' }}
+        >
+          {filteredItems.map((item, index) => {
+            const key = itemKey(item.kind, item.id);
+            const installed = installedKeys.has(key);
+
+            return (
+              <li
+                key={key}
+                className={cn(
+                  'flex flex-wrap items-start gap-3 px-4 py-3 transition-colors sm:flex-nowrap',
+                  index > 0 && 'border-t border-[var(--border-subtle)]',
+                  installed
+                    ? 'bg-[var(--accent-bg)] hover:bg-[var(--accent-bg-hover)]'
+                    : 'bg-[var(--bg-card)] hover:bg-[var(--bg-elevated)]',
+                )}
+              >
+                {/* Kind badge */}
+                <span
+                  className="mt-0.5 shrink-0 rounded px-2 py-0.5 text-[10px] font-semibold"
+                  style={kindChipStyle(item.kind)}
+                >
+                  {kindLabel(item.kind)}
+                </span>
+
+                {/* Main content */}
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-baseline gap-x-2">
+                    <span className="text-sm font-semibold text-[var(--text-primary)]">{item.name}</span>
+                    <span
+                      className="font-mono text-[11px] text-[var(--text-muted)]"
+                      title={item.id}
+                    >
+                      {item.id}
+                    </span>
+                  </div>
+                  <p className="mt-0.5 line-clamp-1 text-sm text-[var(--text-secondary)]">
+                    {item.description}
+                  </p>
+                  {item.toolCompatibility.length > 0 && (
+                    <div className="mt-1.5 flex flex-wrap gap-1">
+                      {item.toolCompatibility.map((tool) => (
+                        <span
+                          key={tool}
+                          className="rounded border border-[var(--border)] bg-[var(--bg-secondary)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--text-muted)]"
+                        >
+                          {tool}
+                        </span>
+                      ))}
+                    </div>
                   )}
                 </div>
-              </div>
-            </article>
-          );
-        })}
-      </section>
 
-      <SkillsInstallModal draft={installDraft} isSaving={isSaving} onClose={() => setInstallDraft(null)} onInstall={(manifestText, draft) => void onInstall(manifestText, draft)} />
+                {/* Status + actions */}
+                <div className="flex shrink-0 flex-wrap items-center gap-2 sm:ml-auto">
+                  {item.verified && (
+                    <span
+                      className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium"
+                      style={{
+                        backgroundColor: 'oklch(0.65 0.18 145 / 0.14)',
+                        color: 'var(--success)',
+                      }}
+                    >
+                      <CheckIcon className="h-2.5 w-2.5" />
+                      Verified
+                    </span>
+                  )}
+                  {installed && (
+                    <span
+                      className="rounded px-1.5 py-0.5 text-[10px] font-medium"
+                      style={{
+                        backgroundColor: 'color-mix(in oklch, var(--accent) 14%, transparent)',
+                        color: 'var(--accent)',
+                      }}
+                    >
+                      Installed
+                    </span>
+                  )}
+
+                  <Button
+                    className="h-7 border-[var(--border)] bg-[var(--bg-secondary)] px-2.5 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+                    onClick={() => setInstallDraft(toInstallDraft(item))}
+                    type="button"
+                  >
+                    Review
+                  </Button>
+
+                  {installed ? (
+                    <Button
+                      className="h-7 px-2.5 text-xs"
+                      onClick={() => setRemoveCandidate({ kind: item.kind, id: item.id })}
+                      style={{
+                        borderColor: 'oklch(0.62 0.22 25 / 0.35)',
+                        backgroundColor: 'oklch(0.62 0.22 25 / 0.1)',
+                        color: 'var(--error)',
+                      }}
+                      type="button"
+                    >
+                      <XIcon className="mr-1 h-3 w-3" />
+                      Remove
+                    </Button>
+                  ) : (
+                    <Button
+                      className="h-7 px-2.5 text-xs"
+                      onClick={() => setInstallDraft(toInstallDraft(item))}
+                      style={{
+                        borderColor: 'color-mix(in oklch, var(--accent) 40%, transparent)',
+                        backgroundColor: 'var(--accent-bg)',
+                        color: 'var(--accent)',
+                      }}
+                      type="button"
+                    >
+                      Install
+                    </Button>
+                  )}
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+
+      <SkillsInstallModal
+        draft={installDraft}
+        isSaving={isSaving}
+        onClose={() => setInstallDraft(null)}
+        onInstall={(manifestText, draft) => void onInstall(manifestText, draft)}
+      />
 
       <ConfirmDialog
         confirmationPhrase={removeCandidate?.id ?? 'CONFIRM'}
-        description={removeCandidate ? `Remove ${removeCandidate.id} from selected ${kindLabel(removeCandidate.kind).toLowerCase()} entries?` : 'Remove selected package?'}
+        description={
+          removeCandidate
+            ? `Remove ${removeCandidate.id} from selected ${kindLabel(removeCandidate.kind).toLowerCase()} entries?`
+            : 'Remove selected package?'
+        }
         intent="danger"
         onConfirm={() => void removeInstalledItem()}
         onOpenChange={(open) => {
-          if (!open) {
-            setRemoveCandidate(null);
-          }
+          if (!open) setRemoveCandidate(null);
         }}
         open={Boolean(removeCandidate)}
         title="Remove installed item"

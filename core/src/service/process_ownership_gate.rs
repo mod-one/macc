@@ -22,6 +22,11 @@ pub struct ClientContext {
 ///
 /// The `handle` is preserved only so the error payload tells callers which
 /// process they were trying to mutate.
+///
+/// Eviction of stale owners (heartbeat TTL) is run on every read via
+/// `OwnershipStore::load()`. The persisted eviction is handled by writing
+/// back through `force_release_project_owner` when a dead owner is detected,
+/// but for the gate check the in-memory eviction is authoritative.
 pub fn gate_owner_action(ctx: &ClientContext, handle: &ProcessHandle) -> Result<()> {
     let project_handle = ProcessHandle {
         kind: ProcessKind::Project,

@@ -21,6 +21,14 @@ impl ToolAdapter for ClaudeAdapter {
         "claude".to_string()
     }
 
+    fn context_file_target(&self) -> Option<String> {
+        Some("CLAUDE.md".to_string()) // macc:allow-tool-name
+    }
+
+    fn context_file_fallback(&self) -> Option<String> {
+        Some("CLAUDE.md preview unavailable.\n".to_string()) // macc:allow-tool-name
+    }
+
     fn plan(&self, ctx: &PlanningContext) -> macc_core::Result<ActionPlan> {
         let config = ClaudeConfig::from_resolved(ctx.resolved);
         let mut plan = ActionPlan::new();

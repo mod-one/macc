@@ -1,0 +1,120 @@
+api_version: v1
+id: agy
+display_name: Antigravity
+description: Workspace settings for Google Antigravity CLI.
+gitignore:
+  - .antigravitycli/
+  - .agents/
+  - GEMINI.md
+performer:
+  runner: adapters/agy/agy.performer.sh
+  command: agy
+  args: ["--dangerously-skip-permissions", "-p"]
+  model_config:
+    path: ".agents/settings.json"
+    format: json
+    key: model
+  prompt:
+    mode: arg
+    arg: "-p"
+  session:
+    enabled: true
+    scope: worktree
+    init_prompt: "Hello"
+    extract_regex: "([0-9a-fA-F]{8}-[0-9a-fA-F-]{27})"
+    resume:
+      command: agy
+      args: ["--conversation", "{session_id}", "--dangerously-skip-permissions", "-p"]
+  retry:
+    command: agy
+    args: ["--conversation", "{session_id}", "--dangerously-skip-permissions", "-p"]
+model_tiers:
+  mini:
+    model: "Gemini 3.5 Flash (Low)"
+  standard:
+    model: "Gemini 3.5 Flash (Medium)"
+  heavy:
+    model: "Gemini 3.5 Flash (High)"
+defaults:
+  sandbox: true
+install:
+  confirm_message: "Google Antigravity CLI install requires a Google account/API key. Continue?"
+  commands:
+    - command: npm
+      args: ["install", "-g", "@google/antigravity-cli"]
+  post_install:
+    command: agy
+    args: ["--version"]
+update:
+  confirm_message: "Google Antigravity CLI update may change behavior. Continue?"
+  commands:
+    - command: npm
+      args: ["install", "-g", "@google/antigravity-cli@latest"]
+  post_install:
+    command: agy
+    args: ["--version"]
+version_check:
+  current:
+    command: agy
+    args: ["--version"]
+  latest:
+    command: npm
+    args: ["view", "@google/antigravity-cli", "version"]
+fields:
+  - id: model
+    label: Model
+    kind:
+      type: enum
+      options: ["Gemini 3.5 Flash (Low)", "Gemini 3.5 Flash (Medium)", "Gemini 3.5 Flash (High)", "Gemini 3.1 Pro (Low)", "Gemini 3.1 Pro (High)", "Claude Sonnet 4.6 (Thinking)", "Claude Opus 4.6 (Thinking)", "GPT-OSS 120B (Medium)"]
+    help: Antigravity model preset for workspace settings.
+    pointer: /tools/config/agy/model
+    default: "Gemini 3.5 Flash (Medium)"
+  - id: sandbox
+    label: Sandbox
+    kind:
+      type: bool
+    help: Enable sandbox execution.
+    pointer: /tools/config/agy/sandbox
+    default: true
+  - id: skills
+    label: Skills
+    kind:
+      type: action
+      action: open_skills
+      target_pointer: /tools/config/agy/skills
+    help: "Open Antigravity skills selector."
+  - id: mcp_servers
+    label: MCP Servers
+    kind:
+      type: action
+      action: open_mcp
+      target_pointer: /selections/mcp
+    help: "Configure Model Context Protocol servers."
+  - id: tier_mini_model
+    label: Mini tier — model
+    kind:
+      type: enum
+      options: ["Gemini 3.5 Flash (Low)", "Gemini 3.5 Flash (Medium)", "Gemini 3.5 Flash (High)", "Gemini 3.1 Pro (Low)", "Gemini 3.1 Pro (High)", "Claude Sonnet 4.6 (Thinking)", "Claude Opus 4.6 (Thinking)", "GPT-OSS 120B (Medium)"]
+    help: "Model used when routing tier = mini."
+    pointer: /tools/config/agy/model_tiers/mini/model
+    default: "Gemini 3.5 Flash (Low)"
+  - id: tier_standard_model
+    label: Standard tier — model
+    kind:
+      type: enum
+      options: ["Gemini 3.5 Flash (Low)", "Gemini 3.5 Flash (Medium)", "Gemini 3.5 Flash (High)", "Gemini 3.1 Pro (Low)", "Gemini 3.1 Pro (High)", "Claude Sonnet 4.6 (Thinking)", "Claude Opus 4.6 (Thinking)", "GPT-OSS 120B (Medium)"]
+    help: "Model used when routing tier = standard."
+    pointer: /tools/config/agy/model_tiers/standard/model
+    default: "Gemini 3.5 Flash (Medium)"
+  - id: tier_heavy_model
+    label: Heavy tier — model
+    kind:
+      type: enum
+      options: ["Gemini 3.5 Flash (Low)", "Gemini 3.5 Flash (Medium)", "Gemini 3.5 Flash (High)", "Gemini 3.1 Pro (Low)", "Gemini 3.1 Pro (High)", "Claude Sonnet 4.6 (Thinking)", "Claude Opus 4.6 (Thinking)", "GPT-OSS 120B (Medium)"]
+    help: "Model used when routing tier = heavy."
+    pointer: /tools/config/agy/model_tiers/heavy/model
+    default: "Gemini 3.5 Flash (High)"
+doctor:
+  - kind: which
+    value: agy
+    severity: error

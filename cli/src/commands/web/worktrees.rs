@@ -90,16 +90,45 @@ pub(super) async fn list_worktrees_handler(
     let session_labels =
         load_worktree_session_labels(Some(&state.paths)).map_err(ApiError::from)?;
     let root = canonicalize_path_fallback(&state.paths.root);
-    let mut worktrees = Vec::new();
 
+    // Load the coordinator registry to determine which worktrees are actively
+    // running a task. This powers the "Active" filter on the Console page.
+    let active_paths = load_active_worktree_paths(&state.paths);
+
+    let mut worktrees = Vec::new();
     for entry in entries {
         if canonicalize_path_fallback(&entry.path) == root {
             continue;
         }
-        worktrees.push(map_entry_to_api(&entry, &session_labels)?);
+        worktrees.push(map_entry_to_api(&entry, &session_labels, &active_paths)?);
     }
 
     Ok(Json(worktrees))
+}
+
+/// Returns the set of canonicalized worktree paths that have an active coordinator task
+/// (state: claimed, in_progress, pr_open, changes_requested, or queued).
+fn load_active_worktree_paths(paths: &macc_core::ProjectPaths) -> HashSet<String> {
+    use macc_core::coordinator_storage::{
+        CoordinatorStorage, CoordinatorStoragePaths, JsonStorage, SqliteStorage,
+    };
+    let storage_paths = CoordinatorStoragePaths::from_project_paths(paths);
+    let sqlite = SqliteStorage::new(storage_paths.clone());
+    let snapshot = if sqlite.has_snapshot_data().unwrap_or(false) {
+        sqlite.load_snapshot().ok()
+    } else {
+        JsonStorage::new(storage_paths).load_snapshot().ok()
+    };
+    snapshot
+        .map(|s| s.registry.active_task_worktree_paths())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| {
+            canonicalize_path_fallback(std::path::Path::new(&p))
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect()
 }
 
 pub(super) async fn create_worktree_handler(
@@ -161,7 +190,7 @@ pub(super) async fn create_worktree_handler(
             continue;
         }
         if let Some(entry) = by_path.get(&path) {
-            response.push(map_entry_to_api(entry, &session_labels)?);
+            response.push(map_entry_to_api(entry, &session_labels, &HashSet::new())?);
         } else {
             response.push(map_created_to_api(&created_entry, &session_labels)?);
         }
@@ -691,14 +720,16 @@ fn normalize_optional(value: Option<String>) -> Option<String> {
 fn map_entry_to_api(
     entry: &WorktreeEntry,
     session_labels: &BTreeMap<PathBuf, String>,
+    active_paths: &HashSet<String>,
 ) -> std::result::Result<ApiWorktree, ApiError> {
     let metadata = macc_core::read_worktree_metadata(&entry.path).map_err(ApiError::from)?;
     let path_key = canonicalize_path_fallback(&entry.path);
     let dirty = git_worktree_is_dirty(&entry.path).map_err(ApiError::from)?;
+    let path_str = path_key.to_string_lossy().into_owned();
     let (id, slug, branch, tool, base_branch, scope, feature) = if let Some(metadata) = metadata {
         (
             metadata.id.clone(),
-            derive_slug_from_id(&metadata.id),
+            Some(metadata.slug.clone()),
             Some(metadata.branch),
             Some(metadata.tool),
             Some(metadata.base),
@@ -722,7 +753,11 @@ fn map_entry_to_api(
         slug,
         branch,
         tool,
-        status: Some(derive_worktree_status(entry, dirty)),
+        status: Some(derive_worktree_status(
+            entry,
+            dirty,
+            active_paths.contains(&path_str),
+        )),
         path: entry.path.to_string_lossy().into_owned(),
         base_branch,
         head: entry.head.clone(),
@@ -746,7 +781,7 @@ fn map_created_to_api(
 
     Ok(ApiWorktree {
         id: entry.id.clone(),
-        slug: derive_slug_from_id(&entry.id),
+        slug: metadata.as_ref().map(|m| m.slug.clone()),
         branch: Some(entry.branch.clone()),
         tool: metadata.as_ref().map(|value| value.tool.clone()),
         status: Some(if dirty { "dirty" } else { "clean" }.to_string()),
@@ -768,8 +803,12 @@ fn normalize_branch_name(branch: &str) -> String {
         .to_string()
 }
 
-fn derive_worktree_status(entry: &WorktreeEntry, dirty: bool) -> String {
-    if entry.prunable {
+fn derive_worktree_status(entry: &WorktreeEntry, dirty: bool, has_active_task: bool) -> String {
+    if has_active_task {
+        // Coordinator has an active task on this worktree — surface this as the
+        // primary status so the Console "Active" filter works correctly.
+        "in_progress".to_string()
+    } else if entry.prunable {
         "prunable".to_string()
     } else if entry.locked {
         "locked".to_string()
@@ -778,23 +817,6 @@ fn derive_worktree_status(entry: &WorktreeEntry, dirty: bool) -> String {
     } else {
         "clean".to_string()
     }
-}
-
-fn derive_slug_from_id(id: &str) -> Option<String> {
-    let trimmed = id
-        .rsplit_once('-')
-        .map(|(prefix, suffix)| {
-            if suffix.len() == 2 && suffix.chars().all(|ch| ch.is_ascii_digit()) {
-                prefix
-            } else {
-                id
-            }
-        })
-        .unwrap_or(id);
-    trimmed
-        .rsplit_once('-')
-        .map(|(slug, _)| slug.to_string())
-        .filter(|slug| !slug.is_empty())
 }
 
 fn fallback_worktree_id(path: &StdPath) -> String {

@@ -11,6 +11,8 @@ use macc_core::supervisor::SupervisorReport;
 use macc_core::{MaccError, Result};
 use serde_json::Value;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 use std::time::{Duration, Instant};
@@ -56,6 +58,7 @@ impl<'a> SupervisorCommand<'a> {
             stall_threshold_seconds: supervisor_cfg.log_analysis_window_seconds.max(1),
             crash_debounce_checks: supervisor_cfg.crash_debounce_checks.max(1),
             events_log_path: resolve_project_path(&paths.root, &supervisor_cfg.events_log_path),
+            max_restart_attempts: supervisor_cfg.max_restart_attempts,
             ..WatchdogConfig::default()
         };
         watchdog_cfg.health_status_path = paths.root.join(SUPERVISOR_HEALTH_REL_PATH);
@@ -69,7 +72,8 @@ impl<'a> SupervisorCommand<'a> {
                 source: e,
             })?;
 
-            let child = ProcessCommand::new(current_exe)
+            let mut daemon_cmd = ProcessCommand::new(current_exe);
+            daemon_cmd
                 .current_dir(&paths.root)
                 .arg("--cwd")
                 .arg(&paths.root)
@@ -85,13 +89,28 @@ impl<'a> SupervisorCommand<'a> {
                 .env("MACC_INTERNAL_INVOCATION", "1")
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .map_err(|e| MaccError::Io {
-                    path: paths.root.to_string_lossy().into(),
-                    action: "spawn supervisor daemon".into(),
-                    source: e,
-                })?;
+                .stderr(Stdio::null());
+
+            // UNIX daemonization: call setsid() in the child after fork but before
+            // exec so the daemon gets its own session with no controlling terminal.
+            // Without this, SIGHUP from terminal close propagates to the entire
+            // original session and kills the supervisor together with the coordinator.
+            #[cfg(unix)]
+            // SAFETY: setsid(2) is async-signal-safe. The only restriction is that
+            // the calling process must not be a process-group leader, which is
+            // always true for a freshly forked child.
+            unsafe {
+                daemon_cmd.pre_exec(|| {
+                    libc::setsid();
+                    Ok(())
+                });
+            }
+
+            let child = daemon_cmd.spawn().map_err(|e| MaccError::Io {
+                path: paths.root.to_string_lossy().into(),
+                action: "spawn supervisor daemon".into(),
+                source: e,
+            })?;
 
             println!("Supervisor started in daemon mode (pid {}).", child.id());
             return Ok(());
@@ -158,10 +177,39 @@ impl<'a> SupervisorCommand<'a> {
 
         let result = runtime.block_on(async {
             if attach {
+                let mut recovery = ModeCRecovery::new(ModeCConfig {
+                    events_log_path: resolve_project_path(
+                        &paths.root,
+                        &supervisor_cfg.events_log_path,
+                    ),
+                    max_restart_attempts: supervisor_cfg.max_restart_attempts,
+                    ..ModeCConfig::default()
+                });
+
                 loop {
                     let status = watchdog.check_once().await.map_err(|err| {
                         MaccError::Validation(format!("supervisor attach check failed: {}", err))
                     })?;
+
+                    if matches!(
+                        status.health,
+                        macc_core::supervisor::HealthCheckResult::Healthy
+                    ) {
+                        recovery = ModeCRecovery::new(ModeCConfig {
+                            events_log_path: resolve_project_path(
+                                &paths.root,
+                                &supervisor_cfg.events_log_path,
+                            ),
+                            max_restart_attempts: supervisor_cfg.max_restart_attempts,
+                            ..ModeCConfig::default()
+                        });
+                    }
+
+                    if status.health.is_running() {
+                        if let Err(err) = watchdog.run_mode_b_if_needed().await {
+                            tracing::warn!("supervisor attach: Mode B analysis failed: {}", err);
+                        }
+                    }
 
                     if let Some(pid) = status.coordinator_pid {
                         if !is_pid_running(pid) {
@@ -169,32 +217,35 @@ impl<'a> SupervisorCommand<'a> {
                                 &paths.root,
                                 &supervisor_cfg.events_log_path,
                             ))?;
+                            // Clean exit: coordinator finished successfully.
                             if matches!(result.as_deref(), Some("success")) {
                                 return Ok(());
                             }
-                            let mut recovery = ModeCRecovery::new(ModeCConfig {
-                                events_log_path: resolve_project_path(
-                                    &paths.root,
-                                    &supervisor_cfg.events_log_path,
-                                ),
-                                ..ModeCConfig::default()
-                            });
-                            let exit_code = match status.health {
-                                macc_core::supervisor::HealthCheckResult::Crashed { exit_code } => {
-                                    exit_code
-                                }
-                                _ => None,
-                            };
-                            recovery
-                                .run_recovery(&process_manager, exit_code)
-                                .await
-                                .map_err(|err| {
-                                    MaccError::Validation(format!(
-                                        "supervisor attach recovery failed: {}",
-                                        err
-                                    ))
-                                })?;
-                            return Ok(());
+                            // Only attempt recovery when there is an explicit failure result.
+                            // A None result means the coordinator exited without writing a
+                            // result event (e.g. the run completed before an event was flushed),
+                            // which is not a crash. Exit the supervisor cleanly in that case.
+                            if matches!(result.as_deref(), Some("failed")) {
+                                let exit_code = match status.health {
+                                    macc_core::supervisor::HealthCheckResult::Crashed {
+                                        exit_code,
+                                    } => exit_code,
+                                    _ => None,
+                                };
+                                recovery
+                                    .run_recovery(&process_manager, exit_code)
+                                    .await
+                                    .map_err(|err| {
+                                        MaccError::Validation(format!(
+                                            "supervisor attach recovery failed: {}",
+                                            err
+                                        ))
+                                    })?;
+                            } else {
+                                // result is None — coordinator PID is gone with no clear failure.
+                                // Exit the supervisor cleanly instead of looping or recovering.
+                                return Ok(());
+                            }
                         }
                     } else {
                         let result = read_last_coordinator_result(&resolve_project_path(
@@ -205,13 +256,6 @@ impl<'a> SupervisorCommand<'a> {
                             return Ok(());
                         }
                         if matches!(result.as_deref(), Some("failed")) {
-                            let mut recovery = ModeCRecovery::new(ModeCConfig {
-                                events_log_path: resolve_project_path(
-                                    &paths.root,
-                                    &supervisor_cfg.events_log_path,
-                                ),
-                                ..ModeCConfig::default()
-                            });
                             let exit_code = match status.health {
                                 macc_core::supervisor::HealthCheckResult::Crashed { exit_code } => {
                                     exit_code
@@ -227,7 +271,6 @@ impl<'a> SupervisorCommand<'a> {
                                         err
                                     ))
                                 })?;
-                            return Ok(());
                         }
                     }
                     tokio::time::sleep(Duration::from_secs(
@@ -411,7 +454,8 @@ fn read_last_coordinator_result(path: &Path) -> Result<Option<String>> {
             continue;
         }
         if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
-            let result = value
+            // Prefer an explicit `result` field (forward-compatible path).
+            let explicit = value
                 .get("result")
                 .and_then(Value::as_str)
                 .or_else(|| {
@@ -421,7 +465,31 @@ fn read_last_coordinator_result(path: &Path) -> Result<Option<String>> {
                         .and_then(Value::as_str)
                 })
                 .map(|v| v.to_ascii_lowercase());
-            return Ok(result);
+            if explicit.is_some() {
+                return Ok(explicit);
+            }
+
+            // Coordinator events use `"type"` + `"status"` rather than `"result"`.
+            // Map the coordinator's native termination events to success/failed.
+            let event_type = value
+                .get("type")
+                .or_else(|| value.get("event_type"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let status = value
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+
+            match (event_type, status) {
+                // `command_end` with `status: done` is a clean coordinator finish.
+                ("command_end", "done") => return Ok(Some("success".to_string())),
+                // Any event with status `failed` or `error` is a failure.
+                (_, "failed" | "error") => return Ok(Some("failed".to_string())),
+                // `command_error` events always indicate failure.
+                ("command_error", _) => return Ok(Some("failed".to_string())),
+                _ => return Ok(None),
+            }
         }
     }
     Ok(None)

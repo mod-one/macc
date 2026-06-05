@@ -6,3 +6,7 @@ gpt-3.5
 anthropic
 google
 openai
+vibe
+mistral
+agy
+antigravity

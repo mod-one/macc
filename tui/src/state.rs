@@ -14,6 +14,7 @@ use macc_core::process_ownership::{
     ClientIdentity, ClientKind, OwnershipStatus, ProcessHandle, ProcessKind, TakeoverRequest,
 };
 use macc_core::resolve::{resolve, resolve_fetch_units, CliOverrides};
+use macc_core::runtime::RuntimeSnapshot;
 use macc_core::service::coordinator::CoordinatorManagedCommandState;
 use macc_core::service::coordinator_workflow::{
     coordinator_command_display_name, CoordinatorCommand, CoordinatorCommandRequest,
@@ -96,24 +97,9 @@ pub struct CoordinatorTaskSnapshot {
     pub active: usize,
     pub blocked: usize,
     pub merged: usize,
-    pub active_tasks: Vec<CoordinatorActiveTask>,
+    pub active_tasks: Vec<macc_core::coordinator::view_model::LiveTaskRow>,
     /// RL-TUI-007: tools currently throttled due to rate-limiting.
     pub throttled_tools: Vec<ThrottledToolInfo>,
-}
-
-#[derive(Clone)]
-pub struct CoordinatorActiveTask {
-    pub id: String,
-    pub state: String,
-    pub tool: String,
-    pub worktree: String,
-    pub updated_at: String,
-    pub runtime_status: String,
-    pub current_phase: String,
-    pub last_error: String,
-    pub last_heartbeat: String,
-    /// Most recent error code (e.g. "E601", "E602") for this task.
-    pub last_error_code: String,
 }
 
 /// RL-TUI-007: per-tool throttle state for TUI display.
@@ -169,9 +155,27 @@ pub struct AppState {
     pub automation_field_index: usize,
     pub automation_field_editing: bool,
     pub automation_field_input: String,
+    // ── Tool-aware special editors (no manual typing of tool names) ──
+    /// Field 0: index into ["" (auto), ...enabled_tools] for coordinator tool cycling.
+    pub coordinator_tool_cycle_idx: usize,
+    /// Field 3: active reorder mode for tool priority list.
+    pub tool_priority_editor_active: bool,
+    /// Field 3: index of the currently-highlighted (and moving) tool in the priority list.
+    pub tool_priority_editor_index: usize,
+    /// Field 4: active per-tool parallel count editor.
+    pub tool_parallel_editor_active: bool,
+    /// Field 4: index of the currently-selected tool in the parallel editor.
+    pub tool_parallel_editor_index: usize,
+    /// Field 3: whether the currently-selected tool is "grabbed" (ready to be moved).
+    /// When true, ↑/↓ moves the tool; when false, ↑/↓ only navigates the cursor.
+    pub tool_priority_editor_grabbed: bool,
     pub settings_field_index: usize,
     pub settings_field_editing: bool,
     pub settings_field_input: String,
+    /// Unified config screen: active tab (0=General 1=Coordinator 2=Tools 3=Phases 4=Reliability 5=Admin)
+    pub config_tab_index: usize,
+    /// Unified config screen: selected row within the current tab
+    pub config_view_index: usize,
     pub skills: Vec<Skill>,
     pub agents: Vec<Agent>,
     pub skill_selection_index: usize,
@@ -237,10 +241,30 @@ pub struct AppState {
     pub coordinator_ownership: crate::ownership::TuiOwnershipState,
     coordinator_ownership_last_heartbeat: Option<Instant>,
     coordinator_ownership_last_refresh: Option<Instant>,
+    pub coordinator_stop_dialog_open: bool,
+    pub coordinator_stop_dialog_selection: usize,
+    pub coordinator_recover_dialog_open: bool,
+    pub coordinator_recover_dialog_selection: usize,
+    /// §18: Human-readable summary of active runtime phase overrides, e.g. "[testing:off] [review:required]".
+    /// Set at launch time; None when no overrides are active.
+    pub coordinator_phase_overrides: Option<String>,
+    pub coordinator_selected_task_index: usize,
+    pub coordinator_log_pane_visible: bool,
+    pub coordinator_task_diff_popup: Option<String>,
+    pub coordinator_task_explain_popup: Option<String>,
+    pub watch_control_enabled: bool,
+    pub watch_logs_only: bool,
+    pub watch_events_only: bool,
+    pub watch_selected_worker: usize,
+    pub watch_snapshot: Option<RuntimeSnapshot>,
+    pub watch_log_tail: Vec<String>,
+    pub watch_last_refresh: Option<Instant>,
+    /// Last doctor check result displayed in the Home readiness panel.
+    pub home_doctor_summary: Option<String>,
 }
 
 impl AppState {
-    const AUTOMATION_FIELD_COUNT: usize = 32;
+    const AUTOMATION_FIELD_COUNT: usize = 40;
     const COORDINATOR_EVENTS_EWMA_ALPHA: f64 = 0.30;
     const COORDINATOR_PAUSE_REL_PATH: &'static str = ".macc/automation/task/coordinator.pause.json";
 
@@ -276,9 +300,17 @@ impl AppState {
             automation_field_index: 0,
             automation_field_editing: false,
             automation_field_input: String::new(),
+            coordinator_tool_cycle_idx: 0,
+            tool_priority_editor_active: false,
+            tool_priority_editor_index: 0,
+            tool_priority_editor_grabbed: false,
+            tool_parallel_editor_active: false,
+            tool_parallel_editor_index: 0,
             settings_field_index: 0,
             settings_field_editing: false,
             settings_field_input: String::new(),
+            config_tab_index: 0,
+            config_view_index: 0,
             skills: Vec::new(),
             agents: Vec::new(),
             skill_selection_index: 0,
@@ -336,6 +368,18 @@ impl AppState {
             ownership_state: crate::ownership::TuiOwnershipState::new(),
             ownership_guard: None,
             viewer_guards: Vec::new(),
+            coordinator_selected_task_index: 0,
+            coordinator_log_pane_visible: true,
+            coordinator_task_diff_popup: None,
+            coordinator_task_explain_popup: None,
+            watch_control_enabled: false,
+            watch_logs_only: false,
+            watch_events_only: false,
+            watch_selected_worker: 0,
+            watch_snapshot: None,
+            watch_log_tail: Vec::new(),
+            watch_last_refresh: None,
+            home_doctor_summary: None,
             client_context: ClientContext {
                 client_id: client_identity.client_id.clone(),
                 project_root: PathBuf::new(),
@@ -344,6 +388,11 @@ impl AppState {
             coordinator_ownership: crate::ownership::TuiOwnershipState::new(),
             coordinator_ownership_last_heartbeat: None,
             coordinator_ownership_last_refresh: None,
+            coordinator_stop_dialog_open: false,
+            coordinator_stop_dialog_selection: 0,
+            coordinator_recover_dialog_open: false,
+            coordinator_recover_dialog_selection: 0,
+            coordinator_phase_overrides: None,
         };
 
         state.refresh_tools();
@@ -455,6 +504,78 @@ impl AppState {
         if self.mcp_selection_index >= self.mcp_entries.len() {
             self.mcp_selection_index = 0;
         }
+    }
+
+    /// Run doctor checks synchronously and store a summary for the Home readiness panel.
+    /// Called when the user presses 'd' on the Home screen (spec §13.1).
+    pub fn run_home_doctor_check(&mut self) {
+        let Some(paths) = self.project_paths.clone() else {
+            self.set_status(
+                UiStatusLevel::Warning,
+                "No project loaded — run macc init first.",
+                Some(std::time::Duration::from_secs(4)),
+            );
+            return;
+        };
+
+        let max_parallel = 2u32;
+        let findings = self
+            .engine
+            .collect_diagnostic_findings(&paths, max_parallel);
+
+        let errors: Vec<_> = findings
+            .iter()
+            .filter(|f| matches!(f.severity, macc_core::doctor::DiagnosticSeverity::Error))
+            .collect();
+        let warnings: Vec<_> = findings
+            .iter()
+            .filter(|f| matches!(f.severity, macc_core::doctor::DiagnosticSeverity::Warning))
+            .collect();
+
+        let summary = if errors.is_empty() && warnings.is_empty() {
+            "✅ All checks passed".to_string()
+        } else {
+            let mut parts = Vec::new();
+            if !errors.is_empty() {
+                parts.push(format!("{} error(s)", errors.len()));
+            }
+            if !warnings.is_empty() {
+                parts.push(format!("{} warning(s)", warnings.len()));
+            }
+            format!("⚠ Doctor: {}", parts.join(", "))
+        };
+
+        // Build detailed text for the Home panel.
+        let mut detail = String::from("Last doctor check\n\n");
+        for f in &findings {
+            let sym = match f.severity {
+                macc_core::doctor::DiagnosticSeverity::Ok => "✅",
+                macc_core::doctor::DiagnosticSeverity::Info => "ℹ",
+                macc_core::doctor::DiagnosticSeverity::Warning => "⚠",
+                macc_core::doctor::DiagnosticSeverity::Error => "❌",
+            };
+            detail.push_str(&format!("{} {}\n", sym, f.title));
+            if !f.message.is_empty()
+                && !matches!(f.severity, macc_core::doctor::DiagnosticSeverity::Ok)
+            {
+                for line in f.message.lines() {
+                    detail.push_str(&format!("   {}\n", line));
+                }
+            }
+        }
+        if errors.is_empty() {
+            detail.push_str("\n✅ Ready to dispatch a task\n");
+        } else {
+            detail.push_str(&format!("\n❌ {} blocking issue(s)\n", errors.len()));
+        }
+
+        self.home_doctor_summary = Some(detail);
+        let (level, ttl) = if errors.is_empty() {
+            (UiStatusLevel::Success, std::time::Duration::from_secs(4))
+        } else {
+            (UiStatusLevel::Warning, std::time::Duration::from_secs(6))
+        };
+        self.set_status(level, summary, Some(ttl));
     }
 
     pub fn refresh_logs(&mut self) {
@@ -578,7 +699,7 @@ impl AppState {
         )
     }
 
-    fn load_coordinator_storage_snapshot(&self) -> Result<CoordinatorSnapshot, String> {
+    pub fn load_coordinator_storage_snapshot(&self) -> Result<CoordinatorSnapshot, String> {
         let paths = self
             .project_paths
             .as_ref()
@@ -663,70 +784,36 @@ impl AppState {
         }
         snapshot.throttled_tools = throttle_map.into_values().collect();
         for task in &root.tasks {
-            let id = if task.id.is_empty() {
-                "-".to_string()
-            } else {
-                task.id.clone()
-            };
             let state = if task.state.is_empty() {
                 "todo".to_string()
             } else {
                 task.state.to_ascii_lowercase()
             };
-            let tool = task.tool.clone().unwrap_or_else(|| "-".to_string());
-            let worktree = task
-                .worktree
-                .as_ref()
-                .and_then(|w| w.worktree_path.clone())
-                .unwrap_or_else(|| "-".to_string());
-            let updated_at = task
-                .state_changed_at
-                .clone()
-                .unwrap_or_else(|| "-".to_string());
-            let runtime_status = task
-                .task_runtime
-                .status
-                .clone()
-                .unwrap_or_else(|| "-".to_string());
-            let current_phase = task
-                .task_runtime
-                .current_phase
-                .clone()
-                .unwrap_or_else(|| "-".to_string());
-            let last_error = task.task_runtime.last_error.clone().unwrap_or_default();
-            let last_error_code = task
-                .task_runtime
-                .last_error_code
-                .clone()
-                .unwrap_or_default();
-            let last_heartbeat = task
-                .task_runtime
-                .last_heartbeat
-                .clone()
-                .unwrap_or_else(|| "-".to_string());
+            let runtime_status = task.task_runtime.status.as_deref().unwrap_or("-");
             let is_live_active = matches!(
                 state.as_str(),
-                "claimed" | "in_progress" | "pr_open" | "changes_requested" | "queued"
+                "claimed"
+                    | "in_progress"
+                    | "testing"
+                    | "reviewing"
+                    | "pr_open"
+                    | "changes_requested"
+                    | "queued"
             ) && !(state == "claimed" && runtime_status == "phase_done");
 
             match state.as_str() {
                 "todo" => snapshot.todo += 1,
-                "claimed" | "in_progress" | "pr_open" | "changes_requested" | "queued"
+                "claimed" | "in_progress" | "testing" | "reviewing" | "pr_open"
+                | "changes_requested" | "queued"
                     if is_live_active =>
                 {
                     snapshot.active += 1;
-                    snapshot.active_tasks.push(CoordinatorActiveTask {
-                        id,
-                        state,
-                        tool,
-                        worktree,
-                        updated_at,
-                        runtime_status,
-                        current_phase,
-                        last_error,
-                        last_heartbeat,
-                        last_error_code,
-                    });
+                    snapshot.active_tasks.push(
+                        macc_core::coordinator::view_model::LiveTaskRow::from_task(
+                            task,
+                            Utc::now(),
+                        ),
+                    );
                 }
                 "claimed" => {
                     // Claimed + phase_done can happen after coordinator restart before reconciliation.
@@ -753,6 +840,23 @@ impl AppState {
             }
             Err(err) => {
                 self.coordinator_last_result = Some(format_actionable_error(&err));
+            }
+        }
+    }
+
+    pub fn refresh_watch_snapshot(&mut self) {
+        let Some(paths) = self.project_paths.as_ref() else {
+            return;
+        };
+        match self.engine.runtime_snapshot(paths) {
+            Ok(snapshot) => {
+                self.watch_snapshot = Some(snapshot);
+                self.watch_last_refresh = Some(Instant::now());
+            }
+            Err(_) => {
+                // Snapshot unavailable (coordinator not running or storage missing).
+                // Leave the previous snapshot in place so the screen is not blanked.
+                self.watch_last_refresh = Some(Instant::now());
             }
         }
     }
@@ -802,6 +906,10 @@ impl AppState {
                 | "concurrency_adjusted"
                 | "tool_fallback"
                 | "quota_exhausted"
+                // Periodic coordinator-alive signal (emitted every 30s while the
+                // coordinator is running, so viewer TUIs see activity even when
+                // no task lifecycle events are occurring).
+                | "coordinator_heartbeat"
         )
     }
 
@@ -1169,7 +1277,9 @@ impl AppState {
             return;
         };
         if let Err(err) = self.gate_coordinator_action(&CoordinatorCommand::Stop {
+            drain: false,
             graceful: false,
+            force: false,
             remove_worktrees: false,
             remove_branches: false,
             reason: "tui stop".to_string(),
@@ -1226,6 +1336,202 @@ impl AppState {
                 self.set_status(
                     UiStatusLevel::Warning,
                     "Coordinator stopped, but child cleanup may be incomplete.",
+                    Some(Duration::from_secs(6)),
+                );
+            }
+        }
+    }
+
+    pub fn open_coordinator_stop_dialog(&mut self) {
+        self.coordinator_stop_dialog_open = true;
+        self.coordinator_stop_dialog_selection = 0;
+    }
+
+    pub fn close_coordinator_stop_dialog(&mut self) {
+        self.coordinator_stop_dialog_open = false;
+    }
+
+    pub fn open_coordinator_recover_dialog(&mut self) {
+        self.coordinator_recover_dialog_open = true;
+        self.coordinator_recover_dialog_selection = 0;
+    }
+
+    pub fn close_coordinator_recover_dialog(&mut self) {
+        self.coordinator_recover_dialog_open = false;
+    }
+
+    pub fn stop_coordinator_with_selected_mode(&mut self) {
+        let mode = match self.coordinator_stop_dialog_selection {
+            0 => "drain",
+            1 => "graceful",
+            2 => "force",
+            3 => "force_cleanup",
+            _ => return,
+        };
+        self.close_coordinator_stop_dialog();
+        self.stop_coordinator_command_with_mode(mode);
+    }
+
+    pub fn stop_coordinator_command_with_mode(&mut self, mode: &str) {
+        let Some(paths) = self.project_paths.clone() else {
+            self.set_status(
+                UiStatusLevel::Warning,
+                "No project loaded.",
+                Some(Duration::from_secs(4)),
+            );
+            return;
+        };
+
+        let cmd = match mode {
+            "drain" => CoordinatorCommand::Stop {
+                drain: true,
+                graceful: false,
+                force: false,
+                remove_worktrees: false,
+                remove_branches: false,
+                reason: "tui drain".to_string(),
+            },
+            "graceful" => CoordinatorCommand::Stop {
+                drain: false,
+                graceful: true,
+                force: false,
+                remove_worktrees: false,
+                remove_branches: false,
+                reason: "tui graceful stop".to_string(),
+            },
+            "force" => CoordinatorCommand::Stop {
+                drain: false,
+                graceful: false,
+                force: true,
+                remove_worktrees: false,
+                remove_branches: false,
+                reason: "tui force stop".to_string(),
+            },
+            "force_cleanup" => CoordinatorCommand::Stop {
+                drain: false,
+                graceful: false,
+                force: true,
+                remove_worktrees: true,
+                remove_branches: true,
+                reason: "tui force stop + cleanup".to_string(),
+            },
+            _ => return,
+        };
+
+        if let Err(err) = self.gate_coordinator_action(&cmd) {
+            self.set_status(
+                UiStatusLevel::Error,
+                format!(
+                    "Failed to run '{}': {}",
+                    mode,
+                    format_actionable_error(&err.to_string())
+                ),
+                Some(Duration::from_secs(6)),
+            );
+            return;
+        }
+
+        let env_cfg = self.coordinator_env_cfg();
+        let req = macc_core::service::coordinator_workflow::CoordinatorCommandRequest {
+            canonical: self.config.as_ref(),
+            coordinator_cfg: self
+                .config
+                .as_ref()
+                .and_then(|c| c.automation.coordinator.as_ref()),
+            env_cfg: &env_cfg,
+            logger: None,
+        };
+
+        match self.engine.coordinator_execute_command(&paths, cmd, req) {
+            Ok(_) => {
+                self.coordinator_pause_next_action = None;
+                self.coordinator_running_command = None;
+                self.coordinator_running_elapsed_secs = None;
+                let _ = self
+                    .engine
+                    .coordinator_reconcile_workflow(&paths, &env_cfg, None, None);
+                self.refresh_coordinator_snapshot();
+                self.refresh_coordinator_events();
+                self.set_status(
+                    UiStatusLevel::Success,
+                    format!("Stop mode '{}' applied successfully.", mode),
+                    Some(Duration::from_secs(4)),
+                );
+            }
+            Err(err) => {
+                self.set_status(
+                    UiStatusLevel::Error,
+                    format!("Stop command failed: {}", err),
+                    Some(Duration::from_secs(6)),
+                );
+            }
+        }
+    }
+
+    pub fn recover_coordinator_with_selected_mode(&mut self) {
+        let dry_run = match self.coordinator_recover_dialog_selection {
+            0 => false,
+            1 => true,
+            _ => return,
+        };
+        self.close_coordinator_recover_dialog();
+        self.recover_coordinator_command(dry_run);
+    }
+
+    pub fn recover_coordinator_command(&mut self, dry_run: bool) {
+        let Some(paths) = self.project_paths.clone() else {
+            self.set_status(
+                UiStatusLevel::Warning,
+                "No project loaded.",
+                Some(Duration::from_secs(4)),
+            );
+            return;
+        };
+
+        let cmd = CoordinatorCommand::Recover { dry_run };
+
+        if let Err(err) = self.gate_coordinator_action(&cmd) {
+            self.set_status(
+                UiStatusLevel::Error,
+                format!(
+                    "Failed to run recover: {}",
+                    format_actionable_error(&err.to_string())
+                ),
+                Some(Duration::from_secs(6)),
+            );
+            return;
+        }
+
+        let env_cfg = self.coordinator_env_cfg();
+        let req = macc_core::service::coordinator_workflow::CoordinatorCommandRequest {
+            canonical: self.config.as_ref(),
+            coordinator_cfg: self
+                .config
+                .as_ref()
+                .and_then(|c| c.automation.coordinator.as_ref()),
+            env_cfg: &env_cfg,
+            logger: None,
+        };
+
+        match self.engine.coordinator_execute_command(&paths, cmd, req) {
+            Ok(res) => {
+                self.refresh_coordinator_snapshot();
+                self.refresh_coordinator_events();
+                let report_msg = if let Some(reports) = res.recovery_report {
+                    format!("Recovery complete: {} tasks classified.", reports.len())
+                } else {
+                    "Recovery command succeeded.".to_string()
+                };
+                self.set_status(
+                    UiStatusLevel::Success,
+                    report_msg,
+                    Some(Duration::from_secs(6)),
+                );
+            }
+            Err(err) => {
+                self.set_status(
+                    UiStatusLevel::Error,
+                    format!("Recovery failed: {}", err),
                     Some(Duration::from_secs(6)),
                 );
             }
@@ -1898,15 +2204,18 @@ impl AppState {
                 Ok(CoordinatorManagedCommandState::Succeeded {
                     command,
                     elapsed_secs: elapsed,
+                    finish_reason,
                 }) => {
-                    finished_message = Some((
-                        UiStatusLevel::Success,
-                        format!(
-                            "Coordinator '{}' finished in {}.",
-                            command,
-                            format_hms(elapsed)
-                        ),
-                    ));
+                    let base = format!(
+                        "Coordinator '{}' finished in {}.",
+                        command,
+                        format_hms(elapsed)
+                    );
+                    let msg = match finish_reason {
+                        Some(ref reason) => format!("{} {}", base, reason),
+                        None => base,
+                    };
+                    finished_message = Some((UiStatusLevel::Success, msg));
                     post_success_action = self.coordinator_pause_next_action.take();
                     self.coordinator_pause_error = None;
                     self.coordinator_pause_command = None;
@@ -2030,6 +2339,19 @@ impl AppState {
             self.refresh_coordinator_events();
             self.scan_for_takeover_requests();
         }
+
+        // Watch screen: refresh RuntimeSnapshot every 2 seconds, independent of
+        // the CoordinatorLive snapshot so the Observer works without the coordinator
+        // live screen ever being visited.
+        if self.current_screen() == Screen::Watch {
+            let should_refresh_watch = self
+                .watch_last_refresh
+                .map(|ts| ts.elapsed() >= Duration::from_secs(2))
+                .unwrap_or(true);
+            if should_refresh_watch {
+                self.refresh_watch_snapshot();
+            }
+        }
     }
 
     fn scan_for_takeover_requests(&mut self) {
@@ -2107,6 +2429,9 @@ impl AppState {
     }
 
     pub fn push_screen(&mut self, screen: Screen) {
+        if self.screen_stack.last() == Some(&screen) {
+            return;
+        }
         self.screen_stack.push(screen);
         self.search_editing = false;
     }
@@ -2464,55 +2789,304 @@ impl AppState {
     }
 
     pub fn next_settings_field(&mut self) {
-        self.settings_field_index = next_index(self.settings_field_index, 3);
+        self.settings_field_index = next_index(self.settings_field_index, 4);
     }
 
     pub fn prev_settings_field(&mut self) {
-        self.settings_field_index = prev_index(self.settings_field_index, 3);
+        self.settings_field_index = prev_index(self.settings_field_index, 4);
     }
 
     pub fn is_automation_field_editing(&self) -> bool {
+        // Text editing AND special-mode editors all count as "editing" for
+        // purposes of blocking global key handlers.
         self.automation_field_editing
+            || self.tool_priority_editor_active
+            || self.tool_parallel_editor_active
     }
 
     pub fn is_settings_field_editing(&self) -> bool {
         self.settings_field_editing
     }
 
+    // ── Unified config screen ─────────────────────────────────────────────────
+
+    /// Tab names shown in the tab bar.
+    pub const CONFIG_TAB_NAMES: &'static [&'static str] = &[
+        "General",
+        "Coordinator",
+        "Tools",
+        "Phases",
+        "Reliability",
+        "Admin",
+    ];
+
+    /// Returns the field list for the given tab as `(source, field_index)` pairs.
+    /// `source` 0 = global (settings), 1 = coordinator (automation).
+    pub fn config_tab_fields(tab: usize) -> &'static [(u8, usize)] {
+        match tab {
+            // General: global settings (quiet, offline, debug, web port)
+            0 => &[(0, 0), (0, 1), (0, 3), (0, 2)],
+            // Coordinator: core coordinator settings
+            1 => &[(1, 0), (1, 1), (1, 7), (1, 6), (1, 8), (1, 32), (1, 33)],
+            // Tools: routing and priority
+            2 => &[(1, 3), (1, 4), (1, 5), (1, 2)],
+            // Phases: pipeline phase controls
+            3 => &[
+                (1, 34),
+                (1, 35),
+                (1, 36),
+                (1, 37),
+                (1, 31),
+                (1, 38),
+                (1, 39),
+            ],
+            // Reliability: stale, merge, retry, lifecycle
+            4 => &[
+                (1, 9),
+                (1, 10),
+                (1, 11),
+                (1, 12),
+                (1, 13),
+                (1, 17),
+                (1, 18),
+                (1, 19),
+                (1, 20),
+                (1, 21),
+                (1, 30),
+                (1, 23),
+                (1, 24),
+            ],
+            // Admin: rate-limiting, log flush, JSON compat
+            5 => &[
+                (1, 26),
+                (1, 27),
+                (1, 28),
+                (1, 29),
+                (1, 14),
+                (1, 15),
+                (1, 16),
+                (1, 22),
+                (1, 25),
+            ],
+            _ => &[],
+        }
+    }
+
+    /// Returns the `(source, field_index)` pair for the currently selected config row,
+    /// or `None` if the current tab is empty.
+    pub fn current_config_field(&self) -> Option<(u8, usize)> {
+        let fields = Self::config_tab_fields(self.config_tab_index);
+        fields.get(self.config_view_index).copied()
+    }
+
+    /// Keep `automation_field_index` and `settings_field_index` in sync with `config_view_index`.
+    pub fn sync_config_indices(&mut self) {
+        if let Some((source, idx)) = self.current_config_field() {
+            if source == 0 {
+                self.settings_field_index = idx;
+            } else {
+                self.automation_field_index = idx;
+            }
+        }
+    }
+
+    /// Move the selection down within the current tab.
+    pub fn navigate_config_next(&mut self) {
+        let len = Self::config_tab_fields(self.config_tab_index).len();
+        if len > 0 {
+            self.config_view_index = (self.config_view_index + 1).min(len.saturating_sub(1));
+            self.sync_config_indices();
+        }
+    }
+
+    /// Move the selection up within the current tab.
+    pub fn navigate_config_prev(&mut self) {
+        self.config_view_index = self.config_view_index.saturating_sub(1);
+        self.sync_config_indices();
+    }
+
+    /// Switch to the next config tab (wraps around).
+    pub fn next_config_tab(&mut self) {
+        self.config_tab_index = (self.config_tab_index + 1) % Self::CONFIG_TAB_NAMES.len();
+        self.config_view_index = 0;
+        self.sync_config_indices();
+    }
+
+    /// Switch to the previous config tab (wraps around).
+    pub fn prev_config_tab(&mut self) {
+        let n = Self::CONFIG_TAB_NAMES.len();
+        self.config_tab_index = (self.config_tab_index + n - 1) % n;
+        self.config_view_index = 0;
+        self.sync_config_indices();
+    }
+
+    /// Jump directly to a specific tab by index.
+    pub fn jump_config_tab(&mut self, tab: usize) {
+        if tab < Self::CONFIG_TAB_NAMES.len() {
+            self.config_tab_index = tab;
+            self.config_view_index = 0;
+            self.sync_config_indices();
+        }
+    }
+
+    /// Returns the display label for a config field, with the `[Category] ` prefix stripped.
+    pub fn config_field_label(&self, source: u8, idx: usize) -> &'static str {
+        let raw = if source == 0 {
+            self.settings_field_label(idx)
+        } else {
+            self.automation_field_label(idx)
+        };
+        // Strip leading "[Category] " prefix for display within a tab
+        if let Some(rest) = raw.strip_prefix('[') {
+            if let Some(end) = rest.find(']') {
+                return rest[end + 1..].trim_start();
+            }
+        }
+        raw
+    }
+
+    /// Returns the current display value for a config field.
+    pub fn config_field_value(&self, source: u8, idx: usize) -> String {
+        if source == 0 {
+            self.settings_field_display_value(idx)
+        } else {
+            self.automation_field_display_value(idx)
+        }
+    }
+
+    /// Returns the help text for a config field.
+    pub fn config_field_help(&self, source: u8, idx: usize) -> &'static str {
+        if source == 0 {
+            self.settings_field_help(idx)
+        } else {
+            self.automation_field_help(idx)
+        }
+    }
+
+    /// Whether any config field is currently in text-editing mode.
+    pub fn is_config_editing(&self) -> bool {
+        self.automation_field_editing
+            || self.tool_priority_editor_active
+            || self.tool_parallel_editor_active
+            || self.settings_field_editing
+    }
+
+    /// Toggle or begin editing for whichever config field is currently selected.
+    pub fn toggle_current_config_field(&mut self) {
+        if let Some((source, idx)) = self.current_config_field() {
+            if source == 0 {
+                self.settings_field_index = idx;
+                self.toggle_settings_field();
+            } else {
+                self.automation_field_index = idx;
+                self.toggle_automation_field();
+            }
+        }
+    }
+
+    /// Begin text editing for the currently selected config field.
+    pub fn begin_current_config_edit(&mut self) {
+        if let Some((source, idx)) = self.current_config_field() {
+            if source == 0 {
+                self.settings_field_index = idx;
+                self.begin_settings_field_edit();
+            } else {
+                self.automation_field_index = idx;
+                self.begin_automation_field_edit();
+            }
+        }
+    }
+
+    /// Append a character to whichever config field input is active.
+    pub fn append_config_char(&mut self, ch: char) {
+        if self.automation_field_editing {
+            self.append_automation_field_char(ch);
+        } else if self.settings_field_editing {
+            self.append_settings_field_char(ch);
+        }
+    }
+
+    /// Pop the last character from whichever config field input is active.
+    pub fn pop_config_char(&mut self) {
+        if self.automation_field_editing {
+            self.pop_automation_field_char();
+        } else if self.settings_field_editing {
+            self.pop_settings_field_char();
+        }
+    }
+
+    /// Commit whichever config field edit is active.
+    pub fn commit_config_edit(&mut self) {
+        if self.automation_field_editing {
+            self.commit_automation_field_edit();
+        } else if self.settings_field_editing {
+            self.commit_settings_field_edit();
+        }
+    }
+
+    /// Cancel whichever config field edit is active.
+    pub fn cancel_config_edit(&mut self) {
+        if self.automation_field_editing {
+            self.cancel_automation_field_edit();
+        } else if self.settings_field_editing {
+            self.cancel_settings_field_edit();
+        }
+    }
+
+    /// Returns the current config text input value (for the active editing field).
+    pub fn config_field_input_display(&self) -> Option<String> {
+        if self.automation_field_editing {
+            Some(format!("{}_", self.automation_field_input))
+        } else if self.settings_field_editing {
+            Some(format!("{}_", self.settings_field_input))
+        } else {
+            None
+        }
+    }
+
     pub fn automation_field_label(&self, index: usize) -> &'static str {
         match index {
-            0 => "Coordinator Tool",
-            1 => "Reference Branch",
-            2 => "PRD File",
-            3 => "Tool Priority (CSV)",
-            4 => "Max Parallel Per Tool (JSON)",
-            5 => "Tool Specializations (JSON)",
-            6 => "Max Dispatch",
-            7 => "Max Parallel",
-            8 => "Timeout Seconds",
-            9 => "Phase Runner Max Attempts",
-            10 => "Stale Claimed Seconds",
-            11 => "Stale In Progress Seconds",
-            12 => "Stale Changes Requested Seconds",
-            13 => "Stale Action",
-            14 => "Log Flush Lines",
-            15 => "Log Flush Interval (ms)",
-            16 => "JSON Export Debounce (ms)",
-            17 => "Merge AI Fix",
-            18 => "Merge Job Timeout (s)",
-            19 => "Merge Hook Timeout (s)",
-            20 => "Ghost Heartbeat Grace (s)",
-            21 => "Dispatch Cooldown (s)",
-            22 => "JSON Compatibility",
-            23 => "Retry Error Codes (CSV)",
-            24 => "Max Auto Retries",
-            25 => "Legacy JSON Fallback",
-            26 => "RL Backoff Base (s)",
-            27 => "RL Backoff Max (s)",
-            28 => "RL Fallback Enabled",
-            29 => "RL Throttle Parallel",
-            30 => "Force-Kill Grace (s)",
-            31 => "Max Review Cycles",
+            0 => "[Basic] Coordinator Tool",
+            1 => "[Basic] Reference Branch",
+            2 => "[Advanced] PRD File",
+            3 => "[Basic] Tool Priority (CSV)",
+            4 => "[Advanced] Max Parallel Per Tool (JSON)",
+            5 => "[Advanced] Tool Specializations (JSON)",
+            6 => "[Advanced] Max Dispatch",
+            7 => "[Basic] Max Parallel",
+            8 => "[Basic] Timeout Seconds",
+            9 => "[Advanced] Phase Runner Max Attempts",
+            10 => "[Advanced] Stale Claimed Seconds",
+            11 => "[Advanced] Stale In Progress Seconds",
+            12 => "[Advanced] Stale Changes Requested Seconds",
+            13 => "[Advanced] Stale Action",
+            14 => "[Admin] Log Flush Lines",
+            15 => "[Admin] Log Flush Interval (ms)",
+            16 => "[Admin] JSON Export Debounce (ms)",
+            17 => "[Advanced] Merge AI Fix",
+            18 => "[Advanced] Merge Job Timeout (s)",
+            19 => "[Advanced] Merge Hook Timeout (s)",
+            20 => "[Advanced] Ghost Heartbeat Grace (s)",
+            21 => "[Advanced] Dispatch Cooldown (s)",
+            22 => "[Admin] JSON Compatibility",
+            23 => "[Advanced] Retry Error Codes (CSV)",
+            24 => "[Advanced] Max Auto Retries",
+            25 => "[Admin] Legacy JSON Fallback",
+            26 => "[Advanced] RL Backoff Base (s)",
+            27 => "[Advanced] RL Backoff Max (s)",
+            28 => "[Advanced] RL Fallback Enabled",
+            29 => "[Advanced] RL Throttle Parallel",
+            30 => "[Advanced] Force-Kill Grace (s)",
+            31 => "[Advanced] Max Review Cycles",
+            32 => "[Basic] Safety Policy",
+            33 => "[Basic] Destructive Actions",
+            // §19: Phase pipeline toggles — saved config only; runtime CLI overrides take precedence
+            34 => "[Phases] Testing Phase Enabled",
+            35 => "[Phases] Testing Phase Mode",
+            36 => "[Phases] Review Phase Enabled",
+            37 => "[Phases] Review Phase Mode",
+            38 => "[Preflight] Require Clean Reference Branch",
+            39 => "[Preflight] Preflight Enabled",
             _ => "",
         }
     }
@@ -2551,7 +3125,72 @@ impl AppState {
             29 => "Reduce effective_max_parallel by 1 on each E601; restore on recovery.",
             30 => "Seconds to wait after a performer signals failure via IPC before force-killing it (default: 30).",
             31 => "Max review cycles per task. 0=skip review, 1=one review+fix (no loopback), N=N loops. Empty=unlimited.",
+            32 => "Permitted tool write scopes and validations (strict, standard).",
+            33 => "Risk policy for destructive actions (single_confirm, double_confirm).",
+            // §19: phase controls — CLI flags (--disable-testing etc.) override these saved settings
+            34 => "Enable the dedicated Tester agent phase after the Performer. \
+Saved in .macc/macc.yaml; CLI flag --disable-testing/--testing= overrides at runtime without modifying this file.",
+            35 => "Tester activation mode: disabled | required | risk_based | manual. \
+Saved in .macc/macc.yaml; CLI flag --testing=<mode> overrides at runtime.",
+            36 => "Enable the dedicated Reviewer agent phase after testing (or after dev if testing disabled). \
+Saved in .macc/macc.yaml; CLI flag --disable-review/--review= overrides at runtime.",
+            37 => "Reviewer activation mode: disabled | required | risk_based | manual. \
+Saved in .macc/macc.yaml; CLI flag --review=<mode> overrides at runtime.",
+            38 => "Block coordinator run when the reference branch worktree has uncommitted changes. \
+Default: true. Override per-run with --allow-dirty-reference.",
+            39 => "Enable the reference branch preflight gate before coordinator run. \
+Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
             _ => "",
+        }
+    }
+
+    /// §18/§19: Returns a human-readable description of any active CLI runtime override
+    /// that affects the given phase settings field (indices 34-37).
+    /// Returns `None` when no override is active for that field.
+    pub fn phase_override_notice_for_field(&self, index: usize) -> Option<String> {
+        let overrides = self.coordinator_phase_overrides.as_deref()?;
+        // Only relevant for phase fields
+        if !matches!(index, 34..=37) {
+            return None;
+        }
+        // Parse the override tokens to extract testing/review info
+        let testing_override = if overrides.contains("[testing:") {
+            overrides
+                .split_whitespace()
+                .find(|t| t.starts_with("[testing:"))
+                .and_then(|t| {
+                    t.strip_prefix("[testing:")
+                        .and_then(|s| s.strip_suffix(']'))
+                })
+                .map(|m| m.to_string())
+        } else {
+            None
+        };
+        let review_override = if overrides.contains("[review:") {
+            overrides
+                .split_whitespace()
+                .find(|t| t.starts_with("[review:"))
+                .and_then(|t| t.strip_prefix("[review:").and_then(|s| s.strip_suffix(']')))
+                .map(|m| m.to_string())
+        } else {
+            None
+        };
+        match index {
+            34 | 35 => testing_override.map(|m| {
+                format!(
+                    "CLI OVERRIDE ACTIVE: --testing={m} (or --disable-testing)\n\
+                     Effective mode: {m}\n\
+                     The saved config below is NOT in effect for the running coordinator."
+                )
+            }),
+            36 | 37 => review_override.map(|m| {
+                format!(
+                    "CLI OVERRIDE ACTIVE: --review={m} (or --disable-review)\n\
+                     Effective mode: {m}\n\
+                     The saved config below is NOT in effect for the running coordinator."
+                )
+            }),
+            _ => None,
         }
     }
 
@@ -2687,6 +3326,74 @@ impl AppState {
                 .and_then(|c| c.max_review_cycles)
                 .map(|v| v.to_string())
                 .unwrap_or_default(),
+            32 => coordinator
+                .and_then(|c| c.safety_policy.clone())
+                .unwrap_or_else(|| "standard".to_string()),
+            33 => coordinator
+                .and_then(|c| c.destructive_actions.clone())
+                .unwrap_or_else(|| "double_confirm".to_string()),
+            // §19: phase pipeline toggles — show saved config value; annotate if overridden at runtime
+            34 => {
+                let saved = coordinator
+                    .map(|c| c.phases.testing.enabled.to_string())
+                    .unwrap_or_else(|| "false".to_string());
+                if self.phase_override_notice_for_field(34).is_some() {
+                    format!("{saved} [CLI OVERRIDE ACTIVE]")
+                } else {
+                    saved
+                }
+            }
+            35 => {
+                let saved = coordinator
+                    .map(|c| c.phases.testing.mode.clone())
+                    .unwrap_or_else(|| "disabled".to_string());
+                if self.phase_override_notice_for_field(35).is_some() {
+                    format!("{saved} [CLI OVERRIDE ACTIVE]")
+                } else {
+                    saved
+                }
+            }
+            36 => {
+                let saved = coordinator
+                    .map(|c| c.phases.review.enabled.to_string())
+                    .unwrap_or_else(|| "true".to_string());
+                if self.phase_override_notice_for_field(36).is_some() {
+                    format!("{saved} [CLI OVERRIDE ACTIVE]")
+                } else {
+                    saved
+                }
+            }
+            37 => {
+                let saved = coordinator
+                    .map(|c| c.phases.review.mode.clone())
+                    .unwrap_or_else(|| "required".to_string());
+                if self.phase_override_notice_for_field(37).is_some() {
+                    format!("{saved} [CLI OVERRIDE ACTIVE]")
+                } else {
+                    saved
+                }
+            }
+            38 => {
+                let require_clean = coordinator
+                    .and_then(|c| c.require_clean_reference_branch)
+                    .unwrap_or(true);
+                if require_clean {
+                    "true (block)".to_string()
+                } else {
+                    "false (warn)".to_string()
+                }
+            }
+            39 => {
+                let enabled = coordinator
+                    .and_then(|c| c.reference_branch_preflight.as_ref())
+                    .and_then(|p| p.enabled)
+                    .unwrap_or(true);
+                if enabled {
+                    "enabled".to_string()
+                } else {
+                    "disabled".to_string()
+                }
+            }
             _ => String::new(),
         }
     }
@@ -2697,9 +3404,10 @@ impl AppState {
 
     pub fn settings_field_label(&self, index: usize) -> &'static str {
         match index {
-            0 => "Silent Mode",
-            1 => "Offline Mode",
-            2 => "Web Interface Port",
+            0 => "[Basic] Silent Mode",
+            1 => "[Basic] Offline Mode",
+            2 => "[Basic] Web Interface Port",
+            3 => "[Basic] Debug Mode",
             _ => "",
         }
     }
@@ -2709,6 +3417,7 @@ impl AppState {
             0 => "Suppress all non-essential output from AI tools.",
             1 => "Disable all remote fetching and updates.",
             2 => "The port number for the MACC web interface.",
+            3 => "Enable verbose performer logs: prompt dump, runner line, [MACC] invoke. Equivalent to MACC_DEBUG=1 or macc --verbose.",
             _ => "",
         }
     }
@@ -2725,6 +3434,7 @@ impl AppState {
                 .web_port
                 .map(|p| p.to_string())
                 .unwrap_or_else(|| "default (3450)".to_string()),
+            3 => config.settings.debug.to_string(),
             _ => String::new(),
         }
     }
@@ -2751,7 +3461,7 @@ impl AppState {
     }
 
     pub fn toggle_settings_field(&mut self) {
-        if matches!(self.settings_field_index, 0 | 1) {
+        if matches!(self.settings_field_index, 0 | 1 | 3) {
             let current = self.settings_field_display_value(self.settings_field_index) == "true";
             self.set_settings_field_bool(self.settings_field_index, !current);
             return;
@@ -2768,7 +3478,7 @@ impl AppState {
         self.settings_field_editing = false;
 
         let result = match idx {
-            0 | 1 => {
+            0 | 1 | 3 => {
                 let value = input.to_lowercase();
                 if value == "true" {
                     self.set_settings_field_bool(idx, true);
@@ -2801,6 +3511,7 @@ impl AppState {
             match idx {
                 0 => config.settings.quiet = value,
                 1 => config.settings.offline = value,
+                3 => config.settings.debug = value,
                 _ => {}
             }
         }
@@ -2816,6 +3527,22 @@ impl AppState {
     }
 
     pub fn begin_automation_field_edit(&mut self) {
+        // Fields 0, 3, 4 use special editors — never enter text mode for them.
+        match self.automation_field_index {
+            0 => {
+                self.cycle_coordinator_tool(true);
+                return;
+            }
+            3 => {
+                self.start_tool_priority_editor();
+                return;
+            }
+            4 => {
+                self.start_tool_parallel_editor();
+                return;
+            }
+            _ => {}
+        }
         self.automation_field_input =
             self.automation_field_display_value(self.automation_field_index);
         self.automation_field_editing = true;
@@ -2837,7 +3564,227 @@ impl AppState {
         self.automation_field_editing = false;
     }
 
+    // ── Tool-aware field helpers ──────────────────────────────────────────────
+
+    /// Return the list `["", ...enabled_tools]` used for coordinator tool cycling.
+    fn coordinator_tool_options(&self) -> Vec<String> {
+        let mut opts = vec![String::new()];
+        if let Some(wc) = &self.working_copy {
+            opts.extend(wc.tools.enabled.iter().cloned());
+        }
+        opts
+    }
+
+    /// Field 0 – cycle coordinator tool (next/prev) without free-form text.
+    pub fn cycle_coordinator_tool(&mut self, forward: bool) {
+        let opts = self.coordinator_tool_options();
+        if opts.is_empty() {
+            return;
+        }
+        let n = opts.len();
+        let current = self
+            .working_copy
+            .as_ref()
+            .and_then(|wc| wc.automation.coordinator.as_ref())
+            .and_then(|c| c.coordinator_tool.clone())
+            .unwrap_or_default();
+        let idx = opts.iter().position(|o| o == &current).unwrap_or(0);
+        self.coordinator_tool_cycle_idx = if forward {
+            (idx + 1) % n
+        } else {
+            (idx + n - 1) % n
+        };
+        let chosen = opts[self.coordinator_tool_cycle_idx].clone();
+        self.snapshot_before_config_change();
+        if let Some(coordinator) = self.coordinator_config_mut() {
+            coordinator.coordinator_tool = if chosen.is_empty() {
+                None
+            } else {
+                Some(chosen)
+            };
+        }
+    }
+
+    /// Return enabled tools ordered by current priority setting (unordered tools appended at end).
+    pub fn tool_priority_ordered_list(&self) -> Vec<String> {
+        let enabled: Vec<String> = self
+            .working_copy
+            .as_ref()
+            .map(|wc| wc.tools.enabled.clone())
+            .unwrap_or_default();
+        let explicit: Vec<String> = self
+            .working_copy
+            .as_ref()
+            .and_then(|wc| wc.automation.coordinator.as_ref())
+            .map(|c| {
+                c.tool_priority
+                    .iter()
+                    .filter(|t| enabled.contains(t))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut result = explicit;
+        for t in &enabled {
+            if !result.contains(t) {
+                result.push(t.clone());
+            }
+        }
+        result
+    }
+
+    /// Field 3 – enter the priority reorder editor.
+    pub fn start_tool_priority_editor(&mut self) {
+        self.tool_priority_editor_index = 0;
+        self.tool_priority_editor_grabbed = false;
+        self.tool_priority_editor_active = true;
+    }
+
+    /// Field 3 – commit priority editor (saves current order to config).
+    pub fn commit_tool_priority_editor(&mut self) {
+        let ordered = self.tool_priority_ordered_list();
+        self.snapshot_before_config_change();
+        if let Some(coordinator) = self.coordinator_config_mut() {
+            coordinator.tool_priority = ordered;
+        }
+        self.tool_priority_editor_grabbed = false;
+        self.tool_priority_editor_active = false;
+    }
+
+    /// Field 3 – cancel priority editor (releases grab first if held).
+    pub fn cancel_tool_priority_editor(&mut self) {
+        if self.tool_priority_editor_grabbed {
+            // First Esc releases grab without closing the editor.
+            self.tool_priority_editor_grabbed = false;
+        } else {
+            self.tool_priority_editor_active = false;
+        }
+    }
+
+    /// Field 3 – toggle the "grabbed" state for the currently-selected tool.
+    ///
+    /// When grabbed = false → ↑/↓ only navigate the cursor.
+    /// When grabbed = true  → ↑/↓ move the tool in the list.
+    pub fn tool_priority_toggle_grab(&mut self) {
+        self.tool_priority_editor_grabbed = !self.tool_priority_editor_grabbed;
+    }
+
+    /// Field 3 – ↑ key: navigate cursor up OR move grabbed tool up.
+    pub fn tool_priority_editor_up(&mut self) {
+        if self.tool_priority_editor_grabbed {
+            // Move the grabbed tool to a higher-priority position.
+            let mut list = self.tool_priority_ordered_list();
+            let idx = self.tool_priority_editor_index;
+            if idx == 0 {
+                return;
+            }
+            list.swap(idx - 1, idx);
+            self.tool_priority_editor_index = idx - 1;
+            self.snapshot_before_config_change();
+            if let Some(coordinator) = self.coordinator_config_mut() {
+                coordinator.tool_priority = list;
+            }
+        } else {
+            // Navigate cursor without reordering.
+            let count = self.tool_priority_ordered_list().len();
+            if count > 0 {
+                self.tool_priority_editor_index = self.tool_priority_editor_index.saturating_sub(1);
+            }
+        }
+    }
+
+    /// Field 3 – ↓ key: navigate cursor down OR move grabbed tool down.
+    pub fn tool_priority_editor_down(&mut self) {
+        if self.tool_priority_editor_grabbed {
+            // Move the grabbed tool to a lower-priority position.
+            let mut list = self.tool_priority_ordered_list();
+            let idx = self.tool_priority_editor_index;
+            if idx + 1 >= list.len() {
+                return;
+            }
+            list.swap(idx, idx + 1);
+            self.tool_priority_editor_index = idx + 1;
+            self.snapshot_before_config_change();
+            if let Some(coordinator) = self.coordinator_config_mut() {
+                coordinator.tool_priority = list;
+            }
+        } else {
+            // Navigate cursor without reordering.
+            let count = self.tool_priority_ordered_list().len();
+            if count > 0 {
+                self.tool_priority_editor_index =
+                    (self.tool_priority_editor_index + 1).min(count - 1);
+            }
+        }
+    }
+
+    /// Field 4 – enter the per-tool parallel count editor.
+    pub fn start_tool_parallel_editor(&mut self) {
+        self.tool_parallel_editor_index = 0;
+        self.tool_parallel_editor_active = true;
+    }
+
+    /// Field 4 – cancel per-tool parallel editor.
+    pub fn cancel_tool_parallel_editor(&mut self) {
+        self.tool_parallel_editor_active = false;
+    }
+
+    /// Field 4 – navigate between tools in the parallel editor.
+    pub fn tool_parallel_editor_select(&mut self, forward: bool) {
+        let count = self
+            .working_copy
+            .as_ref()
+            .map(|wc| wc.tools.enabled.len())
+            .unwrap_or(0);
+        if count == 0 {
+            return;
+        }
+        if forward {
+            self.tool_parallel_editor_index = (self.tool_parallel_editor_index + 1).min(count - 1);
+        } else {
+            self.tool_parallel_editor_index = self.tool_parallel_editor_index.saturating_sub(1);
+        }
+    }
+
+    /// Field 4 – adjust the parallel count for the currently selected tool by `delta`.
+    pub fn tool_parallel_editor_adjust(&mut self, delta: i32) {
+        let tool = {
+            let enabled = self
+                .working_copy
+                .as_ref()
+                .map(|wc| wc.tools.enabled.clone())
+                .unwrap_or_default();
+            enabled.into_iter().nth(self.tool_parallel_editor_index)
+        };
+        let Some(tool) = tool else { return };
+        self.snapshot_before_config_change();
+        if let Some(coordinator) = self.coordinator_config_mut() {
+            let current = coordinator
+                .max_parallel_per_tool
+                .get(&tool)
+                .copied()
+                .unwrap_or(1) as i32;
+            let next = (current + delta).max(1) as usize;
+            coordinator.max_parallel_per_tool.insert(tool, next);
+        }
+    }
+
     pub fn toggle_automation_field(&mut self) {
+        // Field 0 (Coordinator Tool): cycle through enabled tools instead of free-text.
+        if self.automation_field_index == 0 {
+            self.cycle_coordinator_tool(true);
+            return;
+        }
+        // Field 3 (Tool Priority): open the reorder editor.
+        if self.automation_field_index == 3 {
+            self.start_tool_priority_editor();
+            return;
+        }
+        // Field 4 (Max Parallel Per Tool): open the per-tool count editor.
+        if self.automation_field_index == 4 {
+            self.start_tool_parallel_editor();
+            return;
+        }
         if self.automation_field_index == 13 {
             let current = self.automation_field_display_value(13);
             let next = match current.as_str() {
@@ -2848,10 +3795,49 @@ impl AppState {
             self.set_automation_field_string(13, next.to_string());
             return;
         }
+        if self.automation_field_index == 32 {
+            let current = self.automation_field_display_value(32);
+            let next = match current.as_str() {
+                "standard" => "strict",
+                _ => "standard",
+            };
+            self.set_automation_field_string(32, next.to_string());
+            return;
+        }
+        if self.automation_field_index == 33 {
+            let current = self.automation_field_display_value(33);
+            let next = match current.as_str() {
+                "double_confirm" => "single_confirm",
+                _ => "double_confirm",
+            };
+            self.set_automation_field_string(33, next.to_string());
+            return;
+        }
         if matches!(self.automation_field_index, 17 | 22 | 25 | 28 | 29) {
             let current =
                 self.automation_field_display_value(self.automation_field_index) == "true";
             self.set_automation_field_bool(self.automation_field_index, !current);
+            return;
+        }
+        // §19: phase bool toggles (fields 34 = testing.enabled, 36 = review.enabled)
+        if matches!(self.automation_field_index, 34 | 36) {
+            let raw = self.automation_field_display_value(self.automation_field_index);
+            // Strip any "[CLI OVERRIDE ACTIVE]" suffix before parsing
+            let current = raw.split_whitespace().next().unwrap_or("false") == "true";
+            self.set_automation_phase_bool(self.automation_field_index, !current);
+            return;
+        }
+        // §19: phase mode cycling (fields 35 = testing.mode, 37 = review.mode)
+        if matches!(self.automation_field_index, 35 | 37) {
+            let raw = self.automation_field_display_value(self.automation_field_index);
+            let current = raw.split_whitespace().next().unwrap_or("disabled");
+            let next = match current {
+                "disabled" => "required",
+                "required" => "risk_based",
+                "risk_based" => "manual",
+                _ => "disabled",
+            };
+            self.set_automation_phase_mode(self.automation_field_index, next.to_string());
             return;
         }
         self.begin_automation_field_edit();
@@ -2869,6 +3855,24 @@ impl AppState {
                     Err("Value cannot be empty.".to_string())
                 } else {
                     self.set_automation_field_string(idx, input);
+                    Ok(())
+                }
+            }
+            32 => {
+                let val = input.to_lowercase();
+                if !matches!(val.as_str(), "standard" | "strict") {
+                    Err("safety_policy must be standard or strict.".to_string())
+                } else {
+                    self.set_automation_field_string(32, val);
+                    Ok(())
+                }
+            }
+            33 => {
+                let val = input.to_lowercase();
+                if !matches!(val.as_str(), "single_confirm" | "double_confirm") {
+                    Err("destructive_actions must be single_confirm or double_confirm.".to_string())
+                } else {
+                    self.set_automation_field_string(33, val);
                     Ok(())
                 }
             }
@@ -2920,6 +3924,56 @@ impl AppState {
                     Err("Value must be 'true' or 'false'.".to_string())
                 }
             }
+            // §19: phase bool/mode fields 34-37 editable as text
+            34 | 36 => {
+                let value = input.to_lowercase();
+                if value == "true" {
+                    self.set_automation_phase_bool(idx, true);
+                    Ok(())
+                } else if value == "false" {
+                    self.set_automation_phase_bool(idx, false);
+                    Ok(())
+                } else {
+                    Err("Value must be 'true' or 'false'.".to_string())
+                }
+            }
+            35 | 37 => {
+                let value = input.to_lowercase();
+                if matches!(
+                    value.as_str(),
+                    "disabled" | "required" | "risk_based" | "manual"
+                ) {
+                    self.set_automation_phase_mode(idx, value);
+                    Ok(())
+                } else {
+                    Err("Mode must be one of: disabled, required, risk_based, manual.".to_string())
+                }
+            }
+            // Preflight fields
+            38 => {
+                let value = input.to_lowercase();
+                if value == "true" {
+                    self.set_require_clean_reference_branch(true);
+                    Ok(())
+                } else if value == "false" {
+                    self.set_require_clean_reference_branch(false);
+                    Ok(())
+                } else {
+                    Err("Value must be 'true' or 'false'.".to_string())
+                }
+            }
+            39 => {
+                let value = input.to_lowercase();
+                if value == "true" {
+                    self.set_preflight_enabled(true);
+                    Ok(())
+                } else if value == "false" {
+                    self.set_preflight_enabled(false);
+                    Ok(())
+                } else {
+                    Err("Value must be 'true' or 'false'.".to_string())
+                }
+            }
             _ => Ok(()),
         };
 
@@ -2958,6 +4012,8 @@ impl AppState {
                 2 => coordinator.prd_file = Some(value),
                 13 => coordinator.stale_action = Some(value),
                 23 => coordinator.error_code_retry_list = Some(value),
+                32 => coordinator.safety_policy = Some(value),
+                33 => coordinator.destructive_actions = Some(value),
                 _ => {}
             }
         }
@@ -3019,6 +4075,68 @@ impl AppState {
                 29 => coordinator.rate_limit_throttle_parallel = Some(value),
                 _ => {}
             }
+        }
+    }
+
+    /// §19: Set a phase enabled/disabled bool (fields 34 = testing.enabled, 36 = review.enabled).
+    fn set_automation_phase_bool(&mut self, idx: usize, value: bool) {
+        self.snapshot_before_config_change();
+        if let Some(coordinator) = self.coordinator_config_mut() {
+            match idx {
+                34 => {
+                    coordinator.phases.testing.enabled = value;
+                    // Keep mode in sync: disabled when unchecked, required when checked
+                    if !value {
+                        coordinator.phases.testing.mode = "disabled".to_string();
+                    } else if coordinator.phases.testing.mode == "disabled" {
+                        coordinator.phases.testing.mode = "required".to_string();
+                    }
+                }
+                36 => {
+                    coordinator.phases.review.enabled = value;
+                    if !value {
+                        coordinator.phases.review.mode = "disabled".to_string();
+                    } else if coordinator.phases.review.mode == "disabled" {
+                        coordinator.phases.review.mode = "required".to_string();
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// §19: Set a phase mode string (fields 35 = testing.mode, 37 = review.mode).
+    fn set_automation_phase_mode(&mut self, idx: usize, value: String) {
+        self.snapshot_before_config_change();
+        if let Some(coordinator) = self.coordinator_config_mut() {
+            match idx {
+                35 => {
+                    coordinator.phases.testing.enabled = value != "disabled";
+                    coordinator.phases.testing.mode = value;
+                }
+                37 => {
+                    coordinator.phases.review.enabled = value != "disabled";
+                    coordinator.phases.review.mode = value;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn set_require_clean_reference_branch(&mut self, value: bool) {
+        self.snapshot_before_config_change();
+        if let Some(coordinator) = self.coordinator_config_mut() {
+            coordinator.require_clean_reference_branch = Some(value);
+        }
+    }
+
+    fn set_preflight_enabled(&mut self, value: bool) {
+        self.snapshot_before_config_change();
+        if let Some(coordinator) = self.coordinator_config_mut() {
+            let preflight = coordinator
+                .reference_branch_preflight
+                .get_or_insert_with(Default::default);
+            preflight.enabled = Some(value);
         }
     }
 
@@ -3572,14 +4690,26 @@ impl AppState {
     pub fn navigate_next(&mut self) {
         match self.current_screen() {
             Screen::Tools => self.next_tool(),
-            Screen::Automation => self.next_automation_field(),
-            Screen::Settings => self.next_settings_field(),
+            // Both Automation and Settings use the unified config navigation.
+            Screen::Automation | Screen::Settings => self.navigate_config_next(),
             Screen::Logs => self.next_log(),
             Screen::Skills => self.next_skill(),
             Screen::Agents => self.next_agent(),
             Screen::ToolSettings => self.next_tool_field(),
             Screen::Preview => self.next_preview_op(),
             Screen::Mcp => self.next_mcp(),
+            Screen::CoordinatorLive => self.next_live_task(),
+            Screen::Watch => {
+                let max = self
+                    .watch_snapshot
+                    .as_ref()
+                    .map(|s| s.workers.len())
+                    .unwrap_or(0);
+                if max > 0 {
+                    self.watch_selected_worker =
+                        (self.watch_selected_worker + 1).min(max.saturating_sub(1));
+                }
+            }
             _ => {}
         }
     }
@@ -3587,14 +4717,17 @@ impl AppState {
     pub fn navigate_prev(&mut self) {
         match self.current_screen() {
             Screen::Tools => self.prev_tool(),
-            Screen::Automation => self.prev_automation_field(),
-            Screen::Settings => self.prev_settings_field(),
+            Screen::Automation | Screen::Settings => self.navigate_config_prev(),
             Screen::Logs => self.prev_log(),
             Screen::Skills => self.prev_skill(),
             Screen::Agents => self.prev_agent(),
             Screen::ToolSettings => self.prev_tool_field(),
             Screen::Preview => self.prev_preview_op(),
             Screen::Mcp => self.prev_mcp(),
+            Screen::CoordinatorLive => self.prev_live_task(),
+            Screen::Watch => {
+                self.watch_selected_worker = self.watch_selected_worker.saturating_sub(1);
+            }
             _ => {}
         }
     }
@@ -3602,8 +4735,7 @@ impl AppState {
     pub fn navigate_toggle(&mut self) {
         match self.current_screen() {
             Screen::Tools => self.toggle_selected_tool(),
-            Screen::Automation => self.toggle_automation_field(),
-            Screen::Settings => self.toggle_settings_field(),
+            Screen::Automation | Screen::Settings => self.toggle_current_config_field(),
             Screen::Skills => self.toggle_skill(),
             Screen::Agents => self.toggle_agent(),
             Screen::ToolSettings => self.toggle_tool_field(),
@@ -3637,8 +4769,7 @@ impl AppState {
                     self.push_screen(Screen::ToolSettings);
                 }
             }
-            Screen::Automation => self.toggle_automation_field(),
-            Screen::Settings => self.toggle_settings_field(),
+            Screen::Automation | Screen::Settings => self.toggle_current_config_field(),
             Screen::Skills => self.toggle_skill(),
             Screen::Agents => self.toggle_agent(),
             Screen::ToolSettings => self.toggle_tool_field(),
@@ -4206,8 +5337,339 @@ impl AppState {
                     None
                 }
             }
+            // §19: phase bool/mode validation
+            34 | 36 => {
+                let v = input.to_lowercase();
+                if !matches!(v.as_str(), "true" | "false") {
+                    Some("Value must be 'true' or 'false'.".to_string())
+                } else {
+                    None
+                }
+            }
+            35 | 37 => {
+                let v = input.to_lowercase();
+                if !matches!(
+                    v.as_str(),
+                    "disabled" | "required" | "risk_based" | "manual"
+                ) {
+                    Some("Mode must be one of: disabled, required, risk_based, manual.".to_string())
+                } else {
+                    None
+                }
+            }
+            38 | 39 => {
+                let v = input.to_lowercase();
+                if !matches!(v.as_str(), "true" | "false") {
+                    Some("Value must be 'true' or 'false'.".to_string())
+                } else {
+                    None
+                }
+            }
             _ => None,
         }
+    }
+
+    pub fn filtered_active_tasks(&self) -> Vec<macc_core::coordinator::view_model::LiveTaskRow> {
+        let Some(ref snap) = self.coordinator_snapshot else {
+            return Vec::new();
+        };
+        snap.active_tasks
+            .iter()
+            .filter(|task| {
+                let msg = task.current_message.as_deref().unwrap_or("");
+                let phase = task.phase.compact_label();
+                let status = task.runtime_status.as_str();
+                matches_search(
+                    &self.search_query,
+                    &[
+                        &task.task_id,
+                        msg,
+                        &task.worker_id,
+                        &task.tool,
+                        phase,
+                        status,
+                    ],
+                )
+            })
+            .cloned()
+            .collect()
+    }
+
+    pub fn selected_live_task(&self) -> Option<macc_core::coordinator::view_model::LiveTaskRow> {
+        let tasks = self.filtered_active_tasks();
+        if tasks.is_empty() {
+            return None;
+        }
+        let index = self.coordinator_selected_task_index.min(tasks.len() - 1);
+        Some(tasks[index].clone())
+    }
+
+    pub fn next_live_task(&mut self) {
+        let tasks = self.filtered_active_tasks();
+        if !tasks.is_empty() {
+            self.coordinator_selected_task_index =
+                (self.coordinator_selected_task_index + 1) % tasks.len();
+        }
+    }
+
+    pub fn prev_live_task(&mut self) {
+        let tasks = self.filtered_active_tasks();
+        if !tasks.is_empty() {
+            if self.coordinator_selected_task_index == 0 {
+                self.coordinator_selected_task_index = tasks.len() - 1;
+            } else {
+                self.coordinator_selected_task_index -= 1;
+            }
+        }
+    }
+
+    pub fn toggle_log_pane(&mut self) {
+        self.coordinator_log_pane_visible = !self.coordinator_log_pane_visible;
+    }
+
+    pub fn get_task_diff(&self, task: &macc_core::coordinator::view_model::LiveTaskRow) -> String {
+        let paths = match &self.project_paths {
+            Some(p) => p,
+            None => return "No project loaded.".to_string(),
+        };
+        let snap = match self.load_coordinator_storage_snapshot() {
+            Ok(s) => s,
+            Err(e) => return format!("Failed to load coordinator snapshot: {}", e),
+        };
+        let reg_task = match snap.registry.tasks.iter().find(|t| t.id == task.task_id) {
+            Some(t) => t,
+            None => return format!("Task '{}' not found in registry.", task.task_id),
+        };
+
+        let worktree_path = reg_task
+            .task_runtime
+            .worktree
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                reg_task
+                    .worktree
+                    .as_ref()
+                    .and_then(|w| w.worktree_path.as_deref())
+                    .filter(|s| !s.is_empty())
+            })
+            .map(|p| paths.root.join(p));
+
+        let base_branch = reg_task
+            .worktree
+            .as_ref()
+            .and_then(|w| w.base_branch.clone())
+            .filter(|s| !s.is_empty())
+            .or_else(|| reg_task.base_branch.clone().filter(|s| !s.is_empty()))
+            .unwrap_or_else(|| "main".to_string());
+
+        let commit = reg_task
+            .worktree
+            .as_ref()
+            .and_then(|w| w.last_commit.as_ref());
+
+        if let Some(ref wt) = worktree_path {
+            if wt.exists() {
+                let diff_target = format!("{}...HEAD", base_branch);
+                let args = vec!["diff", &diff_target];
+                match macc_core::git::run_git_output_mapped(wt, &args, "git diff worktree") {
+                    Ok(output) => return String::from_utf8_lossy(&output.stdout).into_owned(),
+                    Err(e) => return format!("Failed to run git diff in worktree: {}", e),
+                }
+            }
+        }
+
+        if let Some(commit_sha) = commit {
+            let diff_target = format!("{}...{}", base_branch, commit_sha);
+            let args = vec!["diff", &diff_target];
+            match macc_core::git::run_git_output_mapped(&paths.root, &args, "git diff commit") {
+                Ok(output) => return String::from_utf8_lossy(&output.stdout).into_owned(),
+                Err(e) => {
+                    return format!("Failed to run git diff for commit {}: {}", commit_sha, e)
+                }
+            }
+        }
+        "No diff available (worktree does not exist and no commit recorded).".to_string()
+    }
+
+    pub fn get_task_explain(
+        &self,
+        task: &macc_core::coordinator::view_model::LiveTaskRow,
+    ) -> String {
+        let paths = match &self.project_paths {
+            Some(p) => p,
+            None => return "No project loaded.".to_string(),
+        };
+        let snap = match self.load_coordinator_storage_snapshot() {
+            Ok(s) => s,
+            Err(e) => return format!("Failed to load coordinator snapshot: {}", e),
+        };
+        let reg_task = match snap.registry.tasks.iter().find(|t| t.id == task.task_id) {
+            Some(t) => t,
+            None => return format!("Task '{}' not found in registry.", task.task_id),
+        };
+
+        let mut output = String::new();
+        let rt = &reg_task.task_runtime;
+        let title = reg_task.title.as_deref().unwrap_or("(no title)");
+        output.push_str(&format!("{} — {}\n\n", reg_task.id, title));
+        output.push_str(&format!("State:     {}\n", reg_task.state));
+        if let Some(status) = &rt.status {
+            output.push_str(&format!("Runtime:   {}\n", status));
+        }
+        if let Some(phase) = &rt.current_phase {
+            if !phase.is_empty() {
+                output.push_str(&format!("Phase:     {}\n", phase));
+            }
+        }
+        if let Some(tool) = &reg_task.tool {
+            output.push_str(&format!("Tool:      {}\n", tool));
+        }
+        if let Some(worker) = &rt.worker_id {
+            if !worker.is_empty() {
+                output.push_str(&format!("Worker:    {}\n", worker));
+            }
+        }
+        if let Some(worktree) = &rt.worktree {
+            if !worktree.is_empty() {
+                output.push_str(&format!("Worktree:  {}\n", worktree));
+            }
+        }
+        if let Some(branch) = &rt.branch {
+            if !branch.is_empty() {
+                output.push_str(&format!("Branch:    {}\n", branch));
+            }
+        }
+        if let Some(started) = &rt.started_at {
+            if !started.is_empty() {
+                output.push_str(&format!("Started:   {}\n", started));
+            }
+        }
+        if let Some(hb) = &rt.last_heartbeat {
+            if !hb.is_empty() {
+                output.push_str(&format!("Heartbeat: {}\n", hb));
+            }
+        }
+        if let Some(msg) = &rt.message {
+            if !msg.is_empty() {
+                output.push_str(&format!("Message:   {}\n", msg));
+            }
+        }
+        if let Some(err) = &rt.last_error {
+            if !err.is_empty() {
+                output.push_str(&format!("Error:     {}\n", err));
+            }
+        }
+
+        output.push_str("\nTimeline:\n");
+        let events_log_path = rt.events_log.as_deref().map(|p| paths.root.join(p));
+        let events_resolved_path = if let Some(ref path) = events_log_path {
+            if path.exists() {
+                Some(path.clone())
+            } else {
+                None
+            }
+        } else {
+            let global_events = paths.root.join(".macc/log/events.jsonl");
+            if global_events.exists() {
+                Some(global_events)
+            } else {
+                None
+            }
+        };
+
+        if let Some(ref path) = events_resolved_path {
+            use std::io::{BufRead, BufReader};
+            if let Ok(file) = std::fs::File::open(path) {
+                let reader = BufReader::new(file);
+                let mut found = false;
+                for line in reader.lines() {
+                    let Ok(line) = line else { continue };
+                    let Ok(val) = serde_json::from_str::<serde_json::Value>(&line) else {
+                        continue;
+                    };
+                    if events_log_path.is_none() {
+                        let event_task = val.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
+                        if !event_task.eq_ignore_ascii_case(&task.task_id) {
+                            continue;
+                        }
+                    }
+                    let ts = val
+                        .get("timestamp")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| val.get("ts").and_then(|v| v.as_str()))
+                        .unwrap_or("-");
+                    let phase = val.get("phase").and_then(|v| v.as_str()).unwrap_or("-");
+                    let sev = val
+                        .get("severity")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("info");
+                    let message = val
+                        .get("message")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| val.get("msg").and_then(|v| v.as_str()))
+                        .unwrap_or("");
+                    let time_part = if ts.len() >= 19 { &ts[11..19] } else { ts };
+                    output.push_str(&format!(
+                        "  {}  {:<6} {:<8} {}\n",
+                        time_part, sev, phase, message
+                    ));
+                    found = true;
+                }
+                if !found {
+                    output.push_str("  (no events found)\n");
+                }
+            } else {
+                output.push_str("  (failed to open events log)\n");
+            }
+        } else {
+            output.push_str("  (no events log found)\n");
+        }
+
+        output
+    }
+
+    pub fn requeue_selected_task(&mut self, task_id: String) -> Result<(), String> {
+        let paths = self
+            .project_paths
+            .as_ref()
+            .ok_or_else(|| "No project loaded.".to_string())?;
+        let storage_paths = CoordinatorStoragePaths::from_project_paths(paths);
+
+        let mut snapshot = self.load_coordinator_storage_snapshot()?;
+
+        let task = match snapshot.registry.tasks.iter_mut().find(|t| t.id == task_id) {
+            Some(t) => t,
+            None => return Err(format!("Task '{}' not found in registry.", task_id)),
+        };
+
+        task.state = "queued".to_string();
+        task.task_runtime.status = Some("idle".to_string());
+        task.task_runtime.pid = None;
+        task.task_runtime.started_at = None;
+        task.task_runtime.current_phase = None;
+        task.task_runtime.message = Some("Requeued by operator via TUI".to_string());
+        task.task_runtime.last_error = None;
+        task.task_runtime.last_error_code = None;
+
+        snapshot.registry.updated_at = Some(macc_core::coordinator::helpers::now_iso_coordinator());
+
+        let store_sqlite = SqliteStorage::new(storage_paths.clone());
+        if let Err(e) = store_sqlite.save_snapshot(&snapshot) {
+            return Err(format!("Failed to save snapshot to SQLite: {}", e));
+        }
+
+        if self.allow_legacy_json_fallback() {
+            let store_json = JsonStorage::new(storage_paths);
+            let _ = store_json.save_snapshot(&snapshot);
+        }
+
+        self.refresh_coordinator_snapshot();
+        Ok(())
+    }
+
+    pub fn stop_selected_task(&mut self, task_id: String) {
+        self.start_managed_coordinator_command(CoordinatorCommand::KillTask { task_id });
     }
 }
 

@@ -12,17 +12,28 @@ pub mod config;
 pub mod context;
 pub mod coordinator;
 pub mod doctor;
+pub mod failure;
 pub mod init;
 pub mod install;
 pub mod lifecycle_support;
+pub mod lock;
 pub mod logs;
 pub mod migrate;
 pub mod plan;
+pub mod prd;
 pub mod process;
 pub mod quickstart;
 pub mod restore;
+pub mod run;
+pub mod save;
+pub mod settings;
+pub mod skills_cmd;
+pub mod start;
+pub mod status;
 pub mod supervisor;
+pub mod task;
 pub mod tool;
+pub mod trust;
 pub mod web;
 pub mod worktree;
 
@@ -141,5 +152,46 @@ impl AppContext {
         })?;
         *guard = Some(canonical.clone());
         Ok(canonical)
+    }
+}
+
+pub fn create_save_bundle_interactive(
+    paths: &macc_core::ProjectPaths,
+    name: &str,
+    mut opts: macc_core::save::SaveOptions,
+) -> Result<macc_core::save::SaveBundleManifest> {
+    loop {
+        match macc_core::save::create_save_bundle(paths, name, &opts) {
+            Err(macc_core::MaccError::Validation(ref msg)) if msg.contains("MACC-SAVE-1003") => {
+                let term_interactive =
+                    !cfg!(test) || std::env::var("MACC_FORCE_INTERACTIVE").is_ok();
+                if !term_interactive {
+                    return Err(macc_core::MaccError::Validation(msg.clone()));
+                }
+
+                println!("Potential secrets were detected in files selected for saving.\n");
+                println!("Choose:");
+                println!("  [R] Save with redaction if possible");
+                println!("  [E] Exclude affected files");
+                println!("  [A] Abort");
+
+                use std::io::{self, Write};
+                print!("> ");
+                io::stdout().flush().ok();
+                let mut input = String::new();
+                io::stdin().read_line(&mut input).ok();
+                let choice = input.trim().to_lowercase();
+
+                if choice == "r" || choice == "redact" {
+                    opts.handle_secrets = Some(macc_core::save::SecretHandlingChoice::Redact);
+                } else if choice == "e" || choice == "exclude" {
+                    opts.handle_secrets = Some(macc_core::save::SecretHandlingChoice::Exclude);
+                } else {
+                    println!("Save aborted.");
+                    return Err(macc_core::MaccError::Validation(msg.clone()));
+                }
+            }
+            res => return res,
+        }
     }
 }

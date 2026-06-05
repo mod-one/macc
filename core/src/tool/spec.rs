@@ -53,6 +53,29 @@ pub struct ToolPerformerSessionSpec {
     pub id_strategy: Option<String>,
 }
 
+/// Describes how to write the selected model to a tool-specific config file.
+/// Used for tools that do not accept `--model` as a CLI flag.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelConfigSpec {
+    /// Config file path relative to the worktree (e.g. ".tool/config.toml").
+    pub path: String,
+    /// File format: `toml` or `json`.
+    pub format: String,
+    /// Key in the config file that holds the model name (e.g. "active_model" or "model").
+    pub key: String,
+}
+
+/// Per-tier model + effort configuration written into tool.json.
+/// Users configure these in macc.yaml; spec provides defaults.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelTierSpec {
+    /// Concrete model name for this tier (e.g. "haiku", "gpt-5.4-mini").
+    pub model: String,
+    /// Optional effort / reasoning level for this tier (e.g. "medium", "high").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ToolPerformerSpec {
     pub runner: String,
@@ -65,6 +88,20 @@ pub struct ToolPerformerSpec {
     pub prompt: Option<ToolPerformerPrompt>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session: Option<ToolPerformerSessionSpec>,
+    /// CLI flag for effort/reasoning level (e.g. "--reasoning-effort").
+    /// performer_lib.sh appends `<effort_flag> <tier.effort>` to the command args.
+    /// Use this only for tools whose CLI accepts an effort flag directly.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort_flag: Option<String>,
+    /// Config-file-based model override for tools without a `--model` CLI flag.
+    /// performer_lib.sh writes the tier model to this file before invoking the tool.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_config: Option<ModelConfigSpec>,
+    /// Config-file-based effort override for tools that do not accept an effort CLI flag
+    /// but read the reasoning/effort level from a settings file.
+    /// Takes precedence over `effort_flag` when both are set for a given tool.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort_config: Option<ModelConfigSpec>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -99,6 +136,11 @@ pub struct ToolRuntimeConfig {
     pub performer: ToolPerformerSpec,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub defaults: Option<serde_json::Value>,
+    /// Tier-to-model mapping written by write_tool_json.
+    /// Spec provides defaults; users override via `tools.config.<tool>.model_tiers` in macc.yaml.
+    /// performer_lib.sh reads this when `MACC_MODEL_TIER` is set to select the concrete model.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub model_tiers: std::collections::BTreeMap<String, ModelTierSpec>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -167,6 +209,10 @@ pub struct ToolSpec {
     pub version_check: Option<ToolVersionCheckSpec>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub defaults: Option<serde_json::Value>,
+    /// Default tier-to-model mapping from the tool spec YAML.
+    /// Merged with user overrides from macc.yaml by write_tool_json.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub model_tiers: std::collections::BTreeMap<String, ModelTierSpec>,
 }
 
 impl ToolSpec {
@@ -255,6 +301,7 @@ impl ToolSpec {
             display_name: self.display_name.clone(),
             performer: performer.clone(),
             defaults: self.defaults.clone(),
+            model_tiers: self.model_tiers.clone(),
         })
     }
 
@@ -421,12 +468,8 @@ impl ToolSpec {
                         self.id
                     )));
                 }
-                if mode == "arg" && prompt.arg.as_deref().unwrap_or("").is_empty() {
-                    return Err(MaccError::Validation(format!(
-                        "Performer prompt arg must be set for tool '{}'",
-                        self.id
-                    )));
-                }
+                // `arg` may be absent for bare-positional mode (prompt appended
+                // directly as the last argument without a flag name).
             }
             if let Some(session) = &performer.session {
                 if let Some(scope) = &session.scope {
@@ -631,6 +674,7 @@ mod tests {
             update: None,
             version_check: None,
             defaults: None,
+            model_tiers: Default::default(),
         };
 
         assert!(spec.validate().is_ok());
@@ -672,6 +716,7 @@ mod tests {
             update: None,
             version_check: None,
             defaults: None,
+            model_tiers: Default::default(),
         };
 
         assert!(spec.validate().is_err());
@@ -700,6 +745,7 @@ mod tests {
             update: None,
             version_check: None,
             defaults: None,
+            model_tiers: Default::default(),
         };
 
         assert!(spec.validate().is_err());
@@ -758,6 +804,7 @@ mod tests {
             update: None,
             version_check: None,
             defaults: None,
+            model_tiers: Default::default(),
         };
 
         let desc = spec.to_descriptor();
@@ -812,6 +859,7 @@ mod tests {
             update: None,
             version_check: None,
             defaults: None,
+            model_tiers: Default::default(),
         };
 
         let desc = spec.to_descriptor();

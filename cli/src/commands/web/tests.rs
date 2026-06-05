@@ -39,10 +39,13 @@ fn temp_root(label: &str) -> std::path::PathBuf {
 
 fn apply_test_guard() -> MutexGuard<'static, ()> {
     static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
+    // Use unwrap_or_else so that a panic in one test does not poison the mutex
+    // and cascade failures into every subsequent test that acquires this guard.
+    // Mutex<()> has no meaningful protected state, so recovery is always safe.
     GUARD
         .get_or_init(|| Mutex::new(()))
         .lock()
-        .expect("apply test guard")
+        .unwrap_or_else(|e| e.into_inner())
 }
 
 fn write_test_config(root: &std::path::Path) {
@@ -230,6 +233,8 @@ fn registry_event(task_id: &str, event_id: &str, event_type: &str) -> Coordinato
         schema_version: COORDINATOR_EVENT_SCHEMA_VERSION.to_string(),
         event_id: event_id.to_string(),
         run_id: Some("run-1".to_string()),
+        coordinator_epoch: None,
+        claim_id: None,
         seq: 1,
         ts: "2026-03-20T12:00:00Z".to_string(),
         source: "coordinator:web".to_string(),
@@ -387,44 +392,6 @@ impl WebTestEngine {
         }
     }
 
-    fn with_plan_result(plan: std::result::Result<macc_core::plan::ActionPlan, MaccError>) -> Self {
-        Self {
-            inner: TestEngine::with_fixtures(),
-            use_fixture_plan_from_overrides: false,
-            real_tool_cooldown_commands: false,
-            plan_result: std::sync::Mutex::new(Some(plan)),
-            run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
-            managed_run_result: std::sync::Mutex::new(None),
-            worktree_run_result: std::sync::Mutex::new(Some(Ok(()))),
-            worktree_run_calls: std::sync::Mutex::new(Vec::new()),
-            cleanup_result: std::sync::Mutex::new(Some(Ok(()))),
-            stop_result: std::sync::Mutex::new(Some(Ok(()))),
-            resume_result: std::sync::Mutex::new(Some(Ok(()))),
-            doctor_snapshots: std::sync::Mutex::new(None),
-            doctor_fix_result: std::sync::Mutex::new(None),
-            coordinator_events: std::sync::Mutex::new(vec![Vec::new()]),
-        }
-    }
-
-    fn with_fixture_plan_from_overrides() -> Self {
-        Self {
-            inner: TestEngine::with_fixtures(),
-            use_fixture_plan_from_overrides: true,
-            real_tool_cooldown_commands: false,
-            plan_result: std::sync::Mutex::new(None),
-            run_result: std::sync::Mutex::new(Some(Ok(CoordinatorCommandResult::default()))),
-            managed_run_result: std::sync::Mutex::new(None),
-            worktree_run_result: std::sync::Mutex::new(Some(Ok(()))),
-            worktree_run_calls: std::sync::Mutex::new(Vec::new()),
-            cleanup_result: std::sync::Mutex::new(Some(Ok(()))),
-            stop_result: std::sync::Mutex::new(Some(Ok(()))),
-            resume_result: std::sync::Mutex::new(Some(Ok(()))),
-            doctor_snapshots: std::sync::Mutex::new(None),
-            doctor_fix_result: std::sync::Mutex::new(None),
-            coordinator_events: std::sync::Mutex::new(vec![Vec::new()]),
-        }
-    }
-
     fn with_worktree_run_result(result: std::result::Result<(), MaccError>) -> Self {
         Self {
             inner: TestEngine::with_fixtures(),
@@ -571,6 +538,15 @@ impl macc_core::engine::Engine for WebTestEngine {
         {
             return execute_coordinator_workflow_command(&self.inner, paths, command, request);
         }
+        if matches!(command, CoordinatorCommand::Stop { .. }) {
+            return self
+                .stop_result
+                .lock()
+                .expect("lock")
+                .take()
+                .unwrap_or(Ok(()))
+                .map(|_| CoordinatorCommandResult::default());
+        }
         self.run_result
             .lock()
             .expect("lock")
@@ -625,6 +601,14 @@ impl macc_core::engine::Engine for WebTestEngine {
             .expect("lock")
             .take()
             .unwrap_or_else(|| Ok(()))
+    }
+
+    fn collect_diagnostic_findings(
+        &self,
+        _paths: &ProjectPaths,
+        _max_parallel: u32,
+    ) -> Vec<macc_core::doctor::DiagnosticFinding> {
+        Vec::new()
     }
 
     fn get_coordinator_events(&self, _paths: &ProjectPaths) -> Result<Vec<CoordinatorEvent>> {

@@ -8,9 +8,19 @@ gitignore:
 performer:
   runner: adapters/codex/codex.performer.sh
   command: codex
-  args: ["--model", "{model}", "--yolo", "exec", "-"]
+  # Codex accepts instructions as a bare positional argument: `codex exec "<instructions>"`.
+  # No "-" (stdin) needed — the prompt is appended directly as the last positional.
+  args: ["--model", "{model}", "--yolo", "exec"]
+  # Codex reads reasoning effort from .codex/config.toml (model_reasoning_effort),
+  # not from a CLI flag. effort_config writes the tier effort there automatically.
+  effort_config:
+    path: ".codex/config.toml"
+    format: toml
+    key: model_reasoning_effort
   prompt:
-    mode: stdin
+    mode: arg
+    # No arg field — prompt is a bare positional, not an explicit flag.
+    # performer_lib.sh appends it as the last argument when prompt_arg is absent.
   session:
     enabled: true
     scope: worktree
@@ -18,10 +28,20 @@ performer:
     extract_regex: "session[[:space:]]+id:[[:space:]]*([[:alnum:]-]+)"
     resume:
       command: codex
-      args: ["--model", "{model}", "--yolo", "exec", "resume", "{session_id}", "-"]
+      args: ["--model", "{model}", "--yolo", "exec", "resume", "{session_id}"]
   retry:
     command: codex
-    args: ["--model", "{model}", "--yolo", "exec", "resume", "{session_id}", "-"]
+    args: ["--model", "{model}", "--yolo", "exec", "resume", "{session_id}"]
+model_tiers:
+  mini:
+    model: gpt-5.4-mini
+    effort: low
+  standard:
+    model: gpt-5.4
+    effort: medium
+  heavy:
+    model: gpt-5.5
+    effort: high
 defaults:
   approval_policy: never
   sandbox_mode: workspace-write
@@ -152,6 +172,54 @@ fields:
       action: open_skills
       target_pointer: /tools/config/codex/skills
     help: Open Codex skills selector.
+  - id: tier_mini_model
+    label: Mini tier — model
+    kind:
+      type: enum
+      options: ["gpt-5.4-mini", "gpt-5.4", "gpt-5.5", "gpt-5.1-codex-mini"]
+    help: "Model used when routing tier = mini."
+    pointer: /tools/config/codex/model_tiers/mini/model
+    default: "gpt-5.4-mini"
+  - id: tier_mini_effort
+    label: Mini tier — reasoning effort
+    kind:
+      type: enum
+      options: ["low", "medium", "high", "xhigh"]
+    help: "Reasoning effort for the mini tier."
+    pointer: /tools/config/codex/model_tiers/mini/effort
+    default: "low"
+  - id: tier_standard_model
+    label: Standard tier — model
+    kind:
+      type: enum
+      options: ["gpt-5.4-mini", "gpt-5.4", "gpt-5.5", "gpt-5.3-codex"]
+    help: "Model used when routing tier = standard."
+    pointer: /tools/config/codex/model_tiers/standard/model
+    default: "gpt-5.4"
+  - id: tier_standard_effort
+    label: Standard tier — reasoning effort
+    kind:
+      type: enum
+      options: ["low", "medium", "high", "xhigh"]
+    help: "Reasoning effort for the standard tier."
+    pointer: /tools/config/codex/model_tiers/standard/effort
+    default: "medium"
+  - id: tier_heavy_model
+    label: Heavy tier — model
+    kind:
+      type: enum
+      options: ["gpt-5.4", "gpt-5.5", "gpt-5.1-codex-max"]
+    help: "Model used when routing tier = heavy (complex work)."
+    pointer: /tools/config/codex/model_tiers/heavy/model
+    default: "gpt-5.5"
+  - id: tier_heavy_effort
+    label: Heavy tier — reasoning effort
+    kind:
+      type: enum
+      options: ["medium", "high", "xhigh"]
+    help: "Reasoning effort for the heavy tier."
+    pointer: /tools/config/codex/model_tiers/heavy/effort
+    default: "high"
 doctor:
   - kind: which
     value: codex

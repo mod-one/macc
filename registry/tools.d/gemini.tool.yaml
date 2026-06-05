@@ -27,6 +27,13 @@ performer:
   retry:
     command: gemini
     args: ["--model", "{model}", "--resume", "{session_id}", "--sandbox", "false", "--approval-mode", "yolo"]
+model_tiers:
+  mini:
+    model: gemini-2.5-flash-lite
+  standard:
+    model: gemini-2.5-flash
+  heavy:
+    model: gemini-2.5-pro
 defaults:
   approval_mode: auto_edit
   sandbox: false
@@ -253,6 +260,30 @@ fields:
     help: You can opt out of usage statistics collection at any time.
     pointer: /tools/config/gemini/privacy/usageStatisticsEnabled
     default: true
+  - id: tier_mini_model
+    label: Mini tier — model
+    kind:
+      type: enum
+      options: ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.5-pro", "auto-gemini-2.5"]
+    help: "Model used when routing tier = mini."
+    pointer: /tools/config/gemini/model_tiers/mini/model
+    default: "gemini-2.5-flash-lite"
+  - id: tier_standard_model
+    label: Standard tier — model
+    kind:
+      type: enum
+      options: ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.5-pro", "auto-gemini-2.5"]
+    help: "Model used when routing tier = standard."
+    pointer: /tools/config/gemini/model_tiers/standard/model
+    default: "gemini-2.5-flash"
+  - id: tier_heavy_model
+    label: Heavy tier — model
+    kind:
+      type: enum
+      options: ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-3.1-pro-preview", "auto-gemini-3"]
+    help: "Model used when routing tier = heavy (complex / architectural work)."
+    pointer: /tools/config/gemini/model_tiers/heavy/model
+    default: "gemini-2.5-pro"
 doctor:
   - kind: which
     value: gemini

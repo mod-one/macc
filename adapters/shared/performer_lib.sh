@@ -342,7 +342,7 @@ run_and_capture() {
   local output_file="$1"
   shift
   local rc=0
-  printf '[MACC] invoke (${TOOL_LOG_PREFIX} 1): %s\n' "$*" >&2
+  [[ "${MACC_DEBUG:-0}" == "1" ]] && printf '[MACC] invoke (%s 1): %s\n' "${TOOL_LOG_PREFIX}" "$*" >&2
   "$@" 2>&1 | tee "$output_file"
   rc=${PIPESTATUS[0]}
   return "$rc"
@@ -396,6 +396,29 @@ run_resume_and_capture() {
     fi
     i=$((i + 1))
   done
+
+  # Apply tier model override to resume args.
+  # Config-file updates (model_config, effort_config) were already done by
+  # _apply_tier_model_to_args before the first call — no need to repeat them.
+  # Only re-apply the --model arg replacement to the resume-specific arg list.
+  if [[ -n "$_tier_model" ]]; then
+    local _r_prev_applied="$_tier_model_applied_via_args"
+    _tier_model_applied_via_args=false
+    _replace_model_in_args final_args
+    # Append effort CLI flag if the model was replaced and the tool uses effort_flag
+    # (not effort_config — that was already written to disk above).
+    if $_tier_model_applied_via_args && [[ -n "$_tier_effort" && -n "$_effort_flag" ]]; then
+      # Only use effort_flag when no effort_config is declared for this tool.
+      local _ecfg_chk
+      _ecfg_chk="$(jq -r '.performer.effort_config.path // empty' "$tool_json" 2>/dev/null || true)"
+      if [[ -z "$_ecfg_chk" ]]; then
+        local _r_has=false
+        for _r_a in "${final_args[@]}"; do [[ "$_r_a" == "$_effort_flag" ]] && _r_has=true && break; done
+        $_r_has || final_args+=("$_effort_flag" "$_tier_effort")
+      fi
+    fi
+    _tier_model_applied_via_args="$_r_prev_applied"
+  fi
 
   if [[ "$prompt_mode" == "arg" && -n "$prompt_arg" ]]; then
     run_and_capture "$output_file" "$session_resume_command" "${final_args[@]}" "$prompt_arg" "$prompt"
@@ -475,6 +498,127 @@ else
   done < <(jq -r '.performer.args[]?' "$tool_json")
 fi
 
+# ── Model tier routing (spec §8) ──────────────────────────────────────────────
+# When MACC_MODEL_TIER is set (injected by coordinator model_routing.rs or via
+# CLI --model-tier), override the static model in args with the tier-specific
+# model from tool.json.model_tiers, and append the effort flag when configured.
+_macc_tier="${MACC_MODEL_TIER:-}"
+_macc_routing_mode="${MACC_MODEL_ROUTING_MODE:-auto}"
+_tier_model=""
+_tier_effort=""
+_effort_flag=""
+
+if [[ "$_macc_routing_mode" == "auto" && -n "$_macc_tier" ]]; then
+  _tier_model="$(jq -r --arg t "$_macc_tier" '.model_tiers[$t].model // empty' "$tool_json" 2>/dev/null || true)"
+  _tier_effort="$(jq -r --arg t "$_macc_tier" '.model_tiers[$t].effort // empty' "$tool_json" 2>/dev/null || true)"
+  _effort_flag="$(jq -r '.performer.effort_flag // empty' "$tool_json" 2>/dev/null || true)"
+fi
+
+# Strategy A: replace the value after --model / -m in an args array.
+# Sets _tier_model_applied_via_args=true when the flag was found and replaced.
+_tier_model_applied_via_args=false
+_replace_model_in_args() {
+  # $1 = name of array variable to modify (passed by name via nameref)
+  local -n _arr_ref="$1"
+  local _new=() _found=false
+  local _a
+  local _skip=false
+  for _a in "${_arr_ref[@]}"; do
+    if $_skip; then
+      _new+=("$_tier_model"); _skip=false; _found=true
+    elif [[ "$_a" == "--model" || "$_a" == "-m" ]]; then
+      _new+=("$_a"); _skip=true
+    else
+      _new+=("$_a")
+    fi
+  done
+  _arr_ref=("${_new[@]}")
+  $_found && _tier_model_applied_via_args=true
+}
+
+# Strategy B: write the tier model directly to the tool's config file.
+# Used when the tool reads model from a settings file instead of a CLI flag.
+_apply_tier_model_via_config_file() {
+  local _cfg_path="$1" _cfg_fmt="$2" _cfg_key="$3" _model_val="$4"
+  local _dir="${_cfg_path%/*}"
+  [[ "$_dir" != "$_cfg_path" ]] && mkdir -p "$_dir" 2>/dev/null
+  case "$_cfg_fmt" in
+    toml)
+      if [[ -f "$_cfg_path" ]]; then
+        # Update existing key if present, otherwise append.
+        if grep -qE "^[[:space:]]*${_cfg_key}[[:space:]]*=" "$_cfg_path" 2>/dev/null; then
+          local _tmp; _tmp="$(mktemp)"
+          sed "s|^[[:space:]]*${_cfg_key}[[:space:]]*=.*|${_cfg_key} = \"${_model_val}\"|" \
+              "$_cfg_path" > "$_tmp" && mv "$_tmp" "$_cfg_path"
+        else
+          printf '\n%s = "%s"\n' "$_cfg_key" "$_model_val" >> "$_cfg_path"
+        fi
+      else
+        printf '%s = "%s"\n' "$_cfg_key" "$_model_val" > "$_cfg_path"
+      fi
+      ;;
+    json)
+      local _tmp; _tmp="$(mktemp)"
+      if [[ -f "$_cfg_path" ]]; then
+        jq --arg k "$_cfg_key" --arg v "$_model_val" '.[$k] = $v' \
+           "$_cfg_path" > "$_tmp" && mv "$_tmp" "$_cfg_path"
+      else
+        jq -n --arg k "$_cfg_key" --arg v "$_model_val" '{($k): $v}' > "$_cfg_path"
+      fi
+      ;;
+  esac
+}
+
+# Apply tier model: try arg-replacement first; fall back to config file.
+_apply_tier_model_to_args() {
+  [[ -z "$_tier_model" ]] && return
+
+  # Strategy A: tool has --model flag in its args array.
+  _replace_model_in_args args
+
+  if $_tier_model_applied_via_args; then
+    # Model applied via --model CLI arg. Now handle effort:
+    #   Priority 1: effort_config (write to config file, e.g. codex's config.toml).
+    #   Priority 2: effort_flag (append as CLI arg, for tools that accept it).
+    if [[ -n "$_tier_effort" ]]; then
+      local _ecfg_path _ecfg_fmt _ecfg_key
+      _ecfg_path="$(jq -r '.performer.effort_config.path // empty' "$tool_json" 2>/dev/null || true)"
+      _ecfg_fmt="$(jq -r '.performer.effort_config.format // empty' "$tool_json" 2>/dev/null || true)"
+      _ecfg_key="$(jq -r '.performer.effort_config.key // "model_reasoning_effort"' "$tool_json" 2>/dev/null || true)"
+      if [[ -n "$_ecfg_path" && -n "$_ecfg_fmt" ]]; then
+        # Write effort to config file — do NOT append a CLI flag.
+        _apply_tier_model_via_config_file "$_ecfg_path" "$_ecfg_fmt" "$_ecfg_key" "$_tier_effort"
+      elif [[ -n "$_effort_flag" ]]; then
+        # Fall back to CLI flag only when no effort_config is declared.
+        local _has=false
+        for _a in "${args[@]}"; do [[ "$_a" == "$_effort_flag" ]] && _has=true && break; done
+        $_has || args+=("$_effort_flag" "$_tier_effort")
+      fi
+    fi
+  else
+    # Strategy B: tool reads model from a config file (e.g. vibe, agy).
+    local _cfg_path _cfg_fmt _cfg_key
+    _cfg_path="$(jq -r '.performer.model_config.path // empty' "$tool_json" 2>/dev/null || true)"
+    _cfg_fmt="$(jq -r '.performer.model_config.format // empty' "$tool_json" 2>/dev/null || true)"
+    _cfg_key="$(jq -r '.performer.model_config.key // "model"' "$tool_json" 2>/dev/null || true)"
+    if [[ -n "$_cfg_path" && -n "$_cfg_fmt" ]]; then
+      _apply_tier_model_via_config_file "$_cfg_path" "$_cfg_fmt" "$_cfg_key" "$_tier_model"
+    fi
+    # For config-file-model tools, also write effort to a config file if declared.
+    if [[ -n "$_tier_effort" ]]; then
+      local _ecfg_path _ecfg_fmt _ecfg_key
+      _ecfg_path="$(jq -r '.performer.effort_config.path // empty' "$tool_json" 2>/dev/null || true)"
+      _ecfg_fmt="$(jq -r '.performer.effort_config.format // empty' "$tool_json" 2>/dev/null || true)"
+      _ecfg_key="$(jq -r '.performer.effort_config.key // "model_reasoning_effort"' "$tool_json" 2>/dev/null || true)"
+      if [[ -n "$_ecfg_path" && -n "$_ecfg_fmt" ]]; then
+        _apply_tier_model_via_config_file "$_ecfg_path" "$_ecfg_fmt" "$_ecfg_key" "$_tier_effort"
+      fi
+    fi
+  fi
+}
+
+_apply_tier_model_to_args
+
 prompt_mode="$(jq -r '.performer.prompt.mode // "stdin"' "$tool_json")"
 prompt_arg="$(jq -r '.performer.prompt.arg // empty' "$tool_json")"
 prompt_text="$(cat "$prompt_file")"
@@ -500,16 +644,21 @@ run_default_call() {
   expand_config_args "$sid" final_call_args
 
   if [[ "$prompt_mode" == "arg" ]]; then
-    if [[ -z "$prompt_arg" ]]; then
-      echo "Error: performer.prompt.arg required for arg mode" >&2
-      return 1
+    if [[ -n "$prompt_arg" ]]; then
+      # Explicit flag form, e.g. claude: -p "<prompt>"
+      run_and_capture "$output_capture" "$command" "${final_call_args[@]}" "$prompt_arg" "$prompt_text"
+    else
+      # Bare positional form — prompt appended as the last argument, no flag, no stdin.
+      # Used by tools (e.g. Codex) that accept instructions as a plain positional: codex exec "<prompt>"
+      run_and_capture "$output_capture" "$command" "${final_call_args[@]}" "$prompt_text"
     fi
-    run_and_capture "$output_capture" "$command" "${final_call_args[@]}" "$prompt_arg" "$prompt_text"
   else
     local rc=0
-    printf '[MACC] invoke (${TOOL_LOG_PREFIX} 2): %s' "$command" >&2
-    printf ' %q' "${final_call_args[@]}" >&2
-    printf '\n' >&2
+    if [[ "${MACC_DEBUG:-0}" == "1" ]]; then
+      printf '[MACC] invoke (%s 2): %s' "${TOOL_LOG_PREFIX}" "$command" >&2
+      printf ' %q' "${final_call_args[@]}" >&2
+      printf '\n' >&2
+    fi
     printf "%s" "$prompt_text" | "$command" "${final_call_args[@]}" 2>&1 | tee "$output_capture"
     rc=${PIPESTATUS[1]}
     return "$rc"
@@ -527,6 +676,57 @@ override_rc_for_success_marker() {
   else
     echo "$rc"
   fi
+}
+
+# RL-PERFORMER-010: Detect tool-reported quota/session-limit errors that the
+# tool emits as human-readable text but exits 0 (a tool-level bug/design quirk).
+#
+# When detected on a zero exit code:
+#   - Prints a structured MACC_TOOL_LIMIT line to stderr so the coordinator
+#     log and the per-adapter error normalizer can classify it as E602
+#     (QuotaExhausted / not retryable).
+#   - Returns exit code 1 so the runtime sees a failure and invokes the
+#     normalizer (normalizer_input is only populated on !success).
+#   - Optionally extracts and emits a retry-after hint from the message.
+#
+# Patterns covered:
+#   Codex:  "ERROR: You've hit your usage limit. ... try again at <DATE>"
+#   Claude: "You've hit your session limit · resets <TIME>"
+detect_tool_limit_exit() {
+  local rc="$1"
+  [[ "$rc" -ne 0 ]] && { echo "$rc"; return; }
+  [[ -f "$output_capture" ]] || { echo "$rc"; return; }
+
+  # Match the usage/session limit phrases both tools emit.
+  if ! grep -qiE \
+      "(you.ve hit your (usage|session) limit|hit your usage limit|your usage limit)" \
+      "$output_capture" 2>/dev/null; then
+    echo "$rc"
+    return
+  fi
+
+  # Try to extract an absolute "try again at <DATE>" hint (codex format).
+  # Also handle "resets <TIME>" form (claude format). Emit as a raw string for
+  # the normalizer / log — converting to epoch here would require locale-aware
+  # date parsing which is fragile across distros.
+  local retry_hint=""
+  retry_hint="$(grep -oiE \
+      "(try again at [A-Za-z]+ [0-9]+[a-z]*, [0-9]+ [0-9]+:[0-9]+ [AaPp][Mm]([^.]*)?|resets [0-9]+:[0-9]+[AaPp][Mm]([^)]*)?)" \
+      "$output_capture" 2>/dev/null | head -1 || true)"
+
+  # Emit a structured notification that appears in the performer log and is
+  # picked up as the tail text by the normalizer path.
+  {
+    echo ""
+    echo "MACC_TOOL_LIMIT: quota_exhausted tool=${tool_id}${retry_hint:+ retry_hint=\"${retry_hint}\"}"
+    echo "The tool '${tool_id}' has exhausted its usage quota and exited 0 without doing any work."
+    echo "This is treated as an error (E602) so the coordinator can handle it correctly."
+    if [[ -n "$retry_hint" ]]; then
+      echo "Retry hint from tool: ${retry_hint}"
+    fi
+  } >&2
+
+  echo 1
 }
 
 if [[ "$session_enabled" == "true" && -n "$session_resume_command" ]]; then
@@ -606,9 +806,23 @@ if [[ "$session_enabled" == "true" && -n "$session_resume_command" ]]; then
       release_session_lock
     fi
   fi
-  exit "$(override_rc_for_success_marker "$rc")"
+  # Apply success-marker override first, then quota detection.
+  #
+  # ORDER MATTERS:
+  # 1. override_rc_for_success_marker: may flip a non-zero rc back to 0 if
+  #    the tool printed a MACC_TASK_RESULT marker (e.g. task completed before
+  #    a transient error).
+  # 2. detect_tool_limit_exit: ALWAYS runs last so a quota/session-limit error
+  #    in the output overrides even a success marker.  This prevents session
+  #    contamination: resumed sessions may contain MACC_TASK_RESULT markers
+  #    from earlier interactions, which must not suppress a quota failure.
+  rc="$(override_rc_for_success_marker "$rc")"
+  rc="$(detect_tool_limit_exit "$rc")"
+  exit "$rc"
 else
   rc=0
   run_default_call || rc=$?
-  exit "$(override_rc_for_success_marker "$rc")"
+  rc="$(override_rc_for_success_marker "$rc")"
+  rc="$(detect_tool_limit_exit "$rc")"
+  exit "$rc"
 fi

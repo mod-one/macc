@@ -2,6 +2,8 @@ use crate::coordinator::legacy_helpers::{
     stop_coordinator_process_groups, NativeCoordinatorLogger,
 };
 use crate::coordinator::render::print_status_summary;
+#[cfg(unix)]
+use libc;
 use macc_core::coordinator::engine as coordinator_engine;
 use macc_core::coordinator::types::CoordinatorEnvConfig;
 use macc_core::coordinator_storage::CoordinatorStorageMode;
@@ -44,17 +46,42 @@ impl macc_core::coordinator::control_plane::CoordinatorLog for LoggerAdapter<'_>
     }
 }
 
-#[derive(Debug, Clone)]
+/// Which client the user wants to open alongside the coordinator run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CoordinatorClientMode {
+    /// Show the launch review and prompt interactively (default in a TTY).
+    Interactive,
+    /// Open the Ratatui TUI coordinator live screen.
+    Tui,
+    /// Start the local web server and print the dashboard URL.
+    Web,
+    /// Run headless, no client.
+    None,
+}
+
+#[derive(Clone)]
 pub struct CoordinatorCommandInput {
     pub command_name: String,
     pub client_id: String,
-    pub no_tui: bool,
+    /// Client to open after the coordinator starts.
+    pub client_mode: CoordinatorClientMode,
     pub supervisor: bool,
+    pub drain: bool,
     pub graceful: bool,
+    pub force: bool,
     pub remove_worktrees: bool,
     pub remove_branches: bool,
     pub env_cfg: CoordinatorEnvConfig,
     pub extra_args: Vec<String>,
+    // ── Reference branch preflight flags (spec §8.6) ──────────────────────
+    /// Exit after preflight checks without starting coordinator.
+    pub preflight_only: bool,
+    /// Override dirty-branch block for this run.
+    pub allow_dirty_reference: bool,
+    /// Create the reference branch if it is missing.
+    pub create_reference_branch: bool,
+    /// Base branch/revision used when creating the reference branch.
+    pub reference_branch_base: Option<String>,
 }
 
 struct ProjectContext {
@@ -106,7 +133,9 @@ pub fn handle(
     let command = coordinator_command_from_name(
         &input.command_name,
         &input.extra_args,
+        input.drain,
         input.graceful,
+        input.force,
         input.remove_worktrees,
         input.remove_branches,
     )?;
@@ -119,19 +148,10 @@ pub fn handle(
         gate_owner_action(&client_ctx, &coordinator_process_handle(&paths.root))?;
     }
 
-    if input.supervisor && input.command_name == "run" {
-        spawn_attached_supervisor(&context.paths.root)?;
-    }
-
-    if matches!(command, CoordinatorCommand::Run) && !input.no_tui {
-        return macc_tui::run_tui_with_launch(macc_tui::LaunchMode::CoordinatorRun).map_err(|e| {
-            MaccError::Io {
-                path: "tui".into(),
-                action: "run_tui coordinator live".into(),
-                source: std::io::Error::other(e.to_string()),
-            }
-        });
-    }
+    // Supervisor is intentionally not spawned here. When command == "run",
+    // the supervisor is started AFTER the coordinator child is spawned so it
+    // can watch the actual coordinator child PID rather than the CLI process PID.
+    // (See the launch_coordinator_with_client call below.)
 
     let _ = macc_core::ensure_embedded_automation_scripts(paths)?;
 
@@ -162,9 +182,16 @@ pub fn handle(
     // Preflight: abort before dispatching workers if git identity is not configured.
     // A missing user.email / user.name causes every performer's `git commit` to fail,
     // leaving changes uncommitted and the coordinator stuck.
+    //
+    // CoordinatorCommand::Run is included so that `macc coordinator run --no-tui`
+    // catches errors in the parent process before the child is spawned with muted
+    // stdio (control-plane-run). Without this, preflight errors in the child are
+    // silently swallowed and the parent only sees a generic non-zero exit code.
     if matches!(
         command,
-        CoordinatorCommand::RunControlPlane | CoordinatorCommand::DispatchReadyTasks
+        CoordinatorCommand::Run
+            | CoordinatorCommand::RunControlPlane
+            | CoordinatorCommand::DispatchReadyTasks
     ) {
         let missing = macc_core::git::missing_git_identity_fields(&paths.root);
         if !missing.is_empty() {
@@ -178,16 +205,40 @@ Performers cannot commit without it. Fix this first:\n\
         }
     }
 
-    if matches!(command, CoordinatorCommand::Stop { .. }) {
-        // Stop any supervisor that was launched by this coordinator first.
-        // Doing this before killing the coordinator prevents the supervisor's
-        // --attach loop from detecting the coordinator is gone and triggering
-        // an unwanted recovery/restart.
-        stop_attached_supervisor_if_present(&paths.root);
-        let coordinator_path = paths.automation_coordinator_path();
-        let stopped =
-            stop_coordinator_process_groups(&paths.root, &coordinator_path, input.graceful)?;
-        println!("Coordinator process groups signaled: {}", stopped);
+    // Reference branch preflight gate (spec §7, §11.1).
+    // Must run before any registry/worktree mutation.
+    // CoordinatorCommand::Run is included for the same reason as above.
+    if matches!(
+        command,
+        CoordinatorCommand::Run
+            | CoordinatorCommand::RunControlPlane
+            | CoordinatorCommand::DispatchReadyTasks
+    ) {
+        run_reference_branch_preflight(engine, paths, coordinator_cfg, &input)?;
+    }
+
+    // ── Client selection and launch review (motif §2) ─────────────────────────
+    //
+    // For `macc coordinator run`, after preflight passes, show a launch review
+    // and ask which client to open (TUI / Web / None). In non-interactive mode
+    // (--client flag set, or stdout is not a TTY), skip the prompt.
+    if matches!(command, CoordinatorCommand::Run) {
+        let chosen_mode = resolve_client_mode(&input, coordinator_cfg, paths);
+        return launch_coordinator_with_client(chosen_mode, &input, paths, coordinator_cfg);
+    }
+
+    if let CoordinatorCommand::Stop { drain, .. } = &command {
+        if !*drain {
+            // Stop any supervisor that was launched by this coordinator first.
+            // Doing this before killing the coordinator prevents the supervisor's
+            // --attach loop from detecting the coordinator is gone and triggering
+            // an unwanted recovery/restart.
+            stop_attached_supervisor_if_present(&paths.root);
+            let coordinator_path = paths.automation_coordinator_path();
+            let stopped =
+                stop_coordinator_process_groups(&paths.root, &coordinator_path, input.graceful)?;
+            println!("Coordinator process groups signaled: {}", stopped);
+        }
     }
 
     let logger_action = match command {
@@ -196,7 +247,6 @@ Performers cannot commit without it. Fix this first:\n\
         CoordinatorCommand::AdvanceTasks => Some("advance"),
         CoordinatorCommand::SyncRegistry => Some("sync"),
         CoordinatorCommand::SyncPrd => Some("sync-prd"),
-        CoordinatorCommand::AuditPrd { .. } => Some("audit-prd"),
         CoordinatorCommand::ReconcileRuntime => Some("reconcile"),
         CoordinatorCommand::CleanupMaintenance => Some("cleanup"),
         _ => None,
@@ -227,6 +277,32 @@ Performers cannot commit without it. Fix this first:\n\
 
     if let Some(status) = response.status {
         print_status_summary(&paths.root, &status);
+    }
+    if let Some(processes) = response.processes {
+        println!(
+            "{:<12} {:<12} {:<12} {:>8} {:>8} {:<10} {:<12} WORKTREE",
+            "TASK ID", "CLAIM ID", "TOOL", "PID", "PGID", "STATUS", "HEARTBEAT"
+        );
+        println!("{}", "-".repeat(100));
+        for p in processes {
+            println!(
+                "{:<12} {:<12} {:<12} {:>8} {:>8} {:<10} {:<12} {}",
+                p.task_id, p.claim_id, p.tool, p.pid, p.pgid, p.status, p.heartbeat, p.worktree
+            );
+        }
+    }
+    if let Some(report) = response.recovery_report {
+        println!(
+            "{:<12} {:<30} {:<20} {:<30} MUTATED",
+            "TASK ID", "SITUATION", "CLASSIFICATION", "ACTION"
+        );
+        println!("{}", "-".repeat(100));
+        for r in report {
+            println!(
+                "{:<12} {:<30} {:<20} {:<30} {}",
+                r.task_id, r.situation, r.classification, r.action, r.mutated
+            );
+        }
     }
     if let Some(runtime) = response.runtime_status {
         println!("{}", runtime);
@@ -260,27 +336,6 @@ Performers cannot commit without it. Fix this first:\n\
             "{}\t{}\t{}\t{}",
             selected.id, selected.title, selected.tool, selected.base_branch
         );
-    }
-    if let Some(audit) = response.audit_prd_report {
-        println!(
-            "Audit PRD: {} completed task(s) with context, {} todo task(s)",
-            audit.completed_with_context, audit.todo_tasks
-        );
-        if audit.prompt_generated {
-            if matches!(command, CoordinatorCommand::AuditPrd { dry_run: true, .. })
-                || matches!(command, CoordinatorCommand::AuditPrd { tool: None, .. })
-            {
-                println!("--- BEGIN AUDIT PROMPT ---");
-                if let Some(ref prompt) = audit.prompt {
-                    println!("{}", prompt);
-                }
-                println!("--- END AUDIT PROMPT ---");
-            } else {
-                println!("Audit prompt sent to tool.");
-            }
-        } else {
-            println!("No tasks to audit.");
-        }
     }
     if let Some(cooldowns) = response.tool_cooldowns {
         if cooldowns.is_empty() {
@@ -345,13 +400,18 @@ fn coordinator_process_handle(project_root: &Path) -> ProcessHandle {
     }
 }
 
-fn spawn_attached_supervisor(project_root: &Path) -> Result<()> {
+/// Spawn a supervisor daemon attached to the given coordinator child process.
+///
+/// `coordinator_pid` must be the actual coordinator child PID (not the CLI
+/// process ID). The supervisor watches this PID and restarts the coordinator
+/// if it crashes. Because the supervisor itself uses `setsid()` it also
+/// survives SSH session close independently.
+fn spawn_attached_supervisor(project_root: &Path, coordinator_pid: u32) -> Result<()> {
     let current_exe = std::env::current_exe().map_err(|e| MaccError::Io {
         path: project_root.to_string_lossy().into(),
         action: "resolve current executable for coordinator supervisor bootstrap".into(),
         source: e,
     })?;
-    let coordinator_pid = std::process::id();
     let status = ProcessCommand::new(current_exe)
         .current_dir(project_root)
         .env("MACC_INTERNAL_INVOCATION", "1")
@@ -563,9 +623,738 @@ fn format_duration_human(secs: u64) -> String {
     }
 }
 
+/// Run the reference branch preflight gate and handle the result interactively (spec §11).
+///
+/// Returns `Ok(())` to proceed, or an `Err` to cancel the coordinator run.
+fn run_reference_branch_preflight(
+    engine: &crate::services::engine_provider::SharedEngine,
+    paths: &macc_core::ProjectPaths,
+    coordinator_cfg: Option<&macc_core::config::CoordinatorConfig>,
+    input: &CoordinatorCommandInput,
+) -> Result<()> {
+    #[allow(unused_imports)]
+    use macc_core::coordinator::preflight::{self, BranchCreateSource, ReferencePreflightAction};
+
+    let repo_root = &paths.root;
+
+    // Resolve preflight config from project config + CLI overrides.
+    let raw = coordinator_cfg
+        .and_then(|c| c.reference_branch_preflight.clone())
+        .unwrap_or_default();
+    let require_clean = coordinator_cfg.and_then(|c| c.require_clean_reference_branch);
+    let mut cfg = raw.resolve(require_clean);
+
+    // --allow-dirty-reference CLI flag overrides dirty_policy.
+    if input.allow_dirty_reference {
+        cfg.dirty_policy = preflight::DirtyReferencePolicy::Allow;
+    }
+    // --create-reference-branch enables non-interactive creation.
+    if input.create_reference_branch {
+        cfg.missing_branch_policy = preflight::MissingBranchPolicy::Create;
+        cfg.allow_non_interactive_create = true;
+    }
+
+    if !cfg.enabled {
+        return Ok(());
+    }
+
+    // Resolve reference_branch from env_cfg > coordinator_cfg > default.
+    let reference_branch = input
+        .env_cfg
+        .reference_branch
+        .clone()
+        .or_else(|| coordinator_cfg.and_then(|c| c.reference_branch.clone()))
+        .unwrap_or_else(|| "main".to_string());
+
+    let report = engine
+        .inspect_reference_preflight(paths, &reference_branch, &cfg)
+        .map_err(|e| MaccError::Validation(e.to_string()))?;
+
+    // Log preflight result to coordinator log if available.
+    let log_event =
+        preflight::build_preflight_log_event(&report, "pending", input.allow_dirty_reference);
+    if cfg.log_clean_result
+        || !matches!(
+            report.status,
+            preflight::ReferencePreflightStatus::Clean
+                | preflight::ReferencePreflightStatus::NotCheckedOut
+        )
+    {
+        if let Ok(log_json) = serde_json::to_string(&log_event) {
+            let log_path = repo_root.join(".macc/log/coordinator/preflight-latest.json");
+            if let Some(parent) = log_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(&log_path, log_json);
+        }
+    }
+
+    // --preflight-only: print result and exit.
+    if input.preflight_only {
+        println!("{}", preflight::format_report_cli(&report));
+        return if matches!(report.recommended_action, ReferencePreflightAction::Proceed) {
+            Ok(())
+        } else {
+            Err(MaccError::Validation(format!(
+                "Preflight failed for reference branch \"{}\".",
+                reference_branch
+            )))
+        };
+    }
+
+    match &report.status {
+        preflight::ReferencePreflightStatus::Clean
+        | preflight::ReferencePreflightStatus::NotCheckedOut => {
+            if cfg.log_clean_result {
+                println!("Reference branch: {}\nPreflight: OK", reference_branch);
+            }
+            Ok(())
+        }
+
+        preflight::ReferencePreflightStatus::BranchMissing => {
+            // Non-interactive: fail fast unless --create-reference-branch was given.
+            if input.create_reference_branch {
+                let base = input
+                    .reference_branch_base
+                    .clone()
+                    .or_else(|| report.remote_tracking_branches.first().cloned())
+                    .unwrap_or_else(|| "HEAD".to_string());
+
+                let source = if report.remote_tracking_branches.contains(&base) {
+                    BranchCreateSource::RemoteTracking(base.clone())
+                } else {
+                    BranchCreateSource::LocalBranch(base.clone())
+                };
+
+                engine
+                    .create_reference_branch_via_engine(paths, &reference_branch, source)
+                    .map_err(|e| MaccError::Validation(format!("{}", e)))?;
+
+                println!(
+                    "Created local branch \"{}\" from \"{}\".\nPreflight: OK",
+                    reference_branch, base
+                );
+                return Ok(());
+            }
+
+            // Interactive: prompt the user.
+            println!("{}", preflight::format_report_cli(&report));
+            println!();
+            println!("Options:");
+            println!("  [1] Create from current HEAD");
+            if !report.remote_tracking_branches.is_empty() {
+                for (i, remote) in report.remote_tracking_branches.iter().enumerate() {
+                    println!("  [{}] Create from {}", i + 2, remote);
+                }
+            }
+            println!("  [c] Cancel");
+            print!("Selection [c]: ");
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+            let mut line = String::new();
+            let _ = std::io::stdin().read_line(&mut line);
+            let choice = line.trim().to_lowercase();
+
+            if choice == "1" {
+                engine
+                    .create_reference_branch_via_engine(
+                        paths,
+                        &reference_branch,
+                        BranchCreateSource::CurrentHead,
+                    )
+                    .map_err(|e| MaccError::Validation(format!("{}", e)))?;
+                println!(
+                    "Created local branch \"{}\" from HEAD.\nPreflight: OK",
+                    reference_branch
+                );
+                return Ok(());
+            }
+
+            if let Ok(idx) = choice.parse::<usize>() {
+                let remote_idx = idx.saturating_sub(2);
+                if let Some(remote) = report.remote_tracking_branches.get(remote_idx) {
+                    engine
+                        .create_reference_branch_via_engine(
+                            paths,
+                            &reference_branch,
+                            BranchCreateSource::RemoteTracking(remote.clone()),
+                        )
+                        .map_err(|e| MaccError::Validation(format!("{}", e)))?;
+                    println!(
+                        "Created local tracking branch \"{}\" from \"{}\".\nPreflight: OK",
+                        reference_branch, remote
+                    );
+                    return Ok(());
+                }
+            }
+
+            Err(MaccError::Validation(format!(
+                "Coordinator cancelled: reference branch \"{}\" does not exist.\n\
+                 Use --create-reference-branch to create it automatically.",
+                reference_branch
+            )))
+        }
+
+        preflight::ReferencePreflightStatus::Dirty => {
+            // Non-interactive (allow_dirty_reference already set cfg.dirty_policy to Allow).
+            if matches!(cfg.dirty_policy, preflight::DirtyReferencePolicy::Allow) {
+                eprintln!(
+                    "WARNING: Reference branch \"{}\" has uncommitted changes.\n\
+                     Override accepted because --allow-dirty-reference was provided.",
+                    reference_branch
+                );
+                return Ok(());
+            }
+            if matches!(cfg.dirty_policy, preflight::DirtyReferencePolicy::Warn) {
+                eprintln!("{}", preflight::format_report_cli(&report));
+                return Ok(());
+            }
+
+            // Interactive prompt.
+            println!("{}", preflight::format_report_cli(&report));
+            println!();
+            println!("Options:");
+            println!("  [1] Cancel  (recommended)");
+            println!("  [2] Continue once");
+            print!("Selection [1]: ");
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+            let mut line = String::new();
+            let _ = std::io::stdin().read_line(&mut line);
+            if line.trim() == "2" {
+                eprintln!(
+                    "WARNING: Continuing with dirty reference branch \"{}\".",
+                    reference_branch
+                );
+                Ok(())
+            } else {
+                Err(MaccError::Validation(format!(
+                    "{}: Reference branch \"{}\" has uncommitted changes.\n\
+                     Commit, stash, discard, or rerun with --allow-dirty-reference.",
+                    preflight::E702,
+                    reference_branch
+                )))
+            }
+        }
+
+        preflight::ReferencePreflightStatus::InvalidBranchName => {
+            Err(MaccError::Validation(preflight::format_report_cli(&report)))
+        }
+
+        preflight::ReferencePreflightStatus::BareRepository => {
+            Err(MaccError::Validation(preflight::format_report_cli(&report)))
+        }
+
+        preflight::ReferencePreflightStatus::GitInspectionFailed => {
+            Err(MaccError::Validation(preflight::format_report_cli(&report)))
+        }
+    }
+}
+
+// ── Client selection and launch (motif §2–5) ──────────────────────────────────
+
+/// Full 8-step flow: load config → resolve → preflight → summary → client →
+/// confirm → start engine → attach client.
+///
+/// Called only for `CoordinatorCommand::Run` with interactive or explicit client.
+fn resolve_client_mode(
+    input: &CoordinatorCommandInput,
+    coordinator_cfg: Option<&macc_core::config::CoordinatorConfig>,
+    paths: &macc_core::ProjectPaths,
+) -> CoordinatorClientMode {
+    // Explicit CLI flag wins — skip config and prompt.
+    if input.client_mode != CoordinatorClientMode::Interactive {
+        return input.client_mode.clone();
+    }
+
+    // Read client preferences from config.
+    let client_cfg = coordinator_cfg
+        .and_then(|c| c.client.as_ref())
+        .cloned()
+        .unwrap_or_default();
+
+    let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
+
+    // Resolve default mode from config (falls through to Interactive/None).
+    let config_default_mode = match client_cfg.default.as_deref() {
+        Some("tui") => Some(CoordinatorClientMode::Tui),
+        Some("web") => Some(CoordinatorClientMode::Web),
+        Some("none") => Some(CoordinatorClientMode::None),
+        Some("auto") => {
+            if is_tty {
+                Some(CoordinatorClientMode::Tui)
+            } else {
+                Some(CoordinatorClientMode::None)
+            }
+        }
+        // "prompt" or absent: fall through to interactive or headless below
+        _ => None,
+    };
+
+    // Non-interactive terminal: use config default or fall back to headless.
+    if !is_tty {
+        return config_default_mode.unwrap_or(CoordinatorClientMode::None);
+    }
+
+    // If config says non-prompt mode AND show_preflight is false AND no confirmation needed:
+    // skip the review entirely and return the configured mode.
+    let show_preflight = client_cfg.show_preflight.unwrap_or(true);
+    let require_confirmation = client_cfg.require_confirmation.unwrap_or(true);
+    if let Some(ref forced_mode) = config_default_mode {
+        if !show_preflight && !require_confirmation {
+            return forced_mode.clone();
+        }
+    }
+
+    // ── Steps 4+5+6: display full launch summary, ask client, confirm ─────────
+    let warnings = collect_launch_warnings(input, coordinator_cfg, paths);
+
+    if show_preflight {
+        print_launch_review(input, coordinator_cfg, paths, &warnings, &client_cfg);
+    }
+
+    // Step 5 — choose client (or use config default).
+    let mode = if let Some(forced) = config_default_mode {
+        // Config has a non-prompt default: skip the prompt but still confirm.
+        let label = match &forced {
+            CoordinatorClientMode::Tui => "TUI",
+            CoordinatorClientMode::Web => "Web",
+            _ => "headless",
+        };
+        println!("Client:");
+        println!("  Using configured default: {} (change with --client or automation.coordinator.client.default)", label);
+        println!();
+        forced
+    } else {
+        println!("Client:");
+        println!("  Choose how to monitor this run:");
+        println!();
+        println!("  [1] TUI client (default)");
+        println!("  [2] Web client");
+        println!("  [3] No client / headless");
+        println!();
+        let client_choice = prompt("  Selection [1]: ");
+        match client_choice.trim() {
+            "2" => CoordinatorClientMode::Web,
+            "3" => CoordinatorClientMode::None,
+            _ => CoordinatorClientMode::Tui,
+        }
+    };
+
+    // Step 6 — final confirmation (respects require_confirmation config).
+    if require_confirmation {
+        println!();
+        let mode_label = match &mode {
+            CoordinatorClientMode::Tui => "TUI",
+            CoordinatorClientMode::Web => "Web",
+            _ => "headless",
+        };
+        if !warnings.is_empty() {
+            println!("  {} warning(s) noted above.", warnings.len());
+        }
+        let confirm = prompt(&format!("  Start coordinator ({})? [Y/n]: ", mode_label));
+        if matches!(confirm.trim().to_lowercase().as_str(), "n" | "no") {
+            println!("Cancelled.");
+            std::process::exit(0);
+        }
+        println!();
+    }
+
+    mode
+}
+
+fn prompt(msg: &str) -> String {
+    use std::io::Write;
+    print!("{}", msg);
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    let _ = std::io::stdin().read_line(&mut line);
+    line
+}
+
+/// Collect safety warnings to surface in the launch review.
+fn collect_launch_warnings(
+    input: &CoordinatorCommandInput,
+    coordinator_cfg: Option<&macc_core::config::CoordinatorConfig>,
+    paths: &macc_core::ProjectPaths,
+) -> Vec<String> {
+    use macc_core::config::CoordinatorConfigResolved;
+    let resolved = CoordinatorConfigResolved::resolve(coordinator_cfg);
+    let mut warnings: Vec<String> = Vec::new();
+
+    // Web host is non-localhost.
+    let client_cfg = coordinator_cfg.and_then(|c| c.client.as_ref());
+    let web_host = client_cfg
+        .and_then(|c| c.web_host.as_deref())
+        .unwrap_or("127.0.0.1");
+    if web_host != "127.0.0.1" && web_host != "localhost" {
+        warnings.push(format!(
+            "Web client will bind to {}, not localhost.",
+            web_host
+        ));
+    }
+
+    // High max_parallel — rate-limit risk.
+    let max_parallel = input.env_cfg.max_parallel.unwrap_or(resolved.max_parallel);
+    if max_parallel > 8 {
+        warnings.push(format!(
+            "Max parallel is {}; this may increase provider rate-limit risk.",
+            max_parallel
+        ));
+    }
+
+    // Reference branch behind remote.
+    let ref_branch = input
+        .env_cfg
+        .reference_branch
+        .as_deref()
+        .unwrap_or(&resolved.reference_branch);
+    let remote_ref = format!("origin/{}", ref_branch);
+    let count_arg = format!("{}..{}", ref_branch, remote_ref);
+    let behind = macc_core::git::run_git_output_mapped(
+        &paths.root,
+        &["rev-list", "--count", &count_arg],
+        "rev-list count",
+    )
+    .ok()
+    .and_then(|o| if o.status.success() { Some(o) } else { None })
+    .and_then(|o| String::from_utf8(o.stdout).ok())
+    .and_then(|s| s.trim().parse::<u64>().ok())
+    .unwrap_or(0);
+    if behind > 0 {
+        warnings.push(format!(
+            "Reference branch \"{}\" is {} commit(s) behind {}.",
+            ref_branch, behind, remote_ref
+        ));
+    }
+
+    // Dirty working tree in reference branch worktrees.
+    // (Already caught by preflight — only warn if preflight was overridden.)
+    if input.allow_dirty_reference {
+        warnings
+            .push("Working tree has uncommitted changes (--allow-dirty-reference active).".into());
+    }
+
+    // Tool priority contains unavailable tools.
+    for tool_id in &resolved.tool_priority {
+        let available = std::process::Command::new("which")
+            .arg(tool_id)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !available {
+            warnings.push(format!(
+                "Tool \"{}\" is in tool_priority but not available in PATH.",
+                tool_id
+            ));
+        }
+    }
+
+    warnings
+}
+
+/// Print the full Coordinator Launch Review (spec §4).
+fn print_launch_review(
+    input: &CoordinatorCommandInput,
+    coordinator_cfg: Option<&macc_core::config::CoordinatorConfig>,
+    paths: &macc_core::ProjectPaths,
+    warnings: &[String],
+    client_cfg: &macc_core::config::CoordinatorClientConfig,
+) {
+    use macc_core::config::CoordinatorConfigResolved;
+    let resolved = CoordinatorConfigResolved::resolve(coordinator_cfg);
+
+    let prd = resolved.prd_file.as_deref().unwrap_or("prd.json");
+    let ref_branch = input
+        .env_cfg
+        .reference_branch
+        .as_deref()
+        .unwrap_or(&resolved.reference_branch);
+
+    println!();
+    println!("MACC Coordinator Launch Review");
+    println!();
+
+    // ── Project and task source ───────────────────────────────────────────────
+    println!("Project:");
+    println!("  Root:              {}", paths.root.display());
+    println!("  PRD:               {}", prd);
+    println!("  Reference branch:  {}", ref_branch);
+    println!();
+
+    // ── Dispatch policy ───────────────────────────────────────────────────────
+    let max_parallel = input.env_cfg.max_parallel.unwrap_or(resolved.max_parallel);
+    let max_dispatch = input.env_cfg.max_dispatch.unwrap_or(resolved.max_dispatch);
+    let tool_priority = if !resolved.tool_priority.is_empty() {
+        resolved.tool_priority.join(", ")
+    } else {
+        "(any enabled)".to_string()
+    };
+    println!("Dispatch:");
+    println!("  Max parallel:      {}", max_parallel);
+    println!("  Max dispatch:      {}", max_dispatch);
+    println!("  Tool priority:     {}", tool_priority);
+    println!();
+
+    // ── Stale and recovery policy ─────────────────────────────────────────────
+    let stale_action = input
+        .env_cfg
+        .stale_action
+        .as_deref()
+        .or_else(|| coordinator_cfg.and_then(|c| c.stale_action.as_deref()))
+        .unwrap_or("block");
+    let stale_claimed = coordinator_cfg
+        .and_then(|c| c.stale_claimed_seconds)
+        .map(|s| format!("{}s", s))
+        .unwrap_or_else(|| "default".into());
+    let stale_in_progress = coordinator_cfg
+        .and_then(|c| c.stale_in_progress_seconds)
+        .map(|s| format!("{}s", s))
+        .unwrap_or_else(|| "default".into());
+    println!("Stale / Recovery:");
+    println!("  Stale action:      {}", stale_action);
+    println!("  Stale claimed:     {}", stale_claimed);
+    println!("  Stale in-progress: {}", stale_in_progress);
+    println!();
+
+    // ── Merge and retry policy ────────────────────────────────────────────────
+    let merge_ai_fix = coordinator_cfg
+        .and_then(|c| c.merge_ai_fix)
+        .map(|v| if v { "enabled" } else { "disabled" })
+        .unwrap_or("disabled");
+    let max_review_cycles = coordinator_cfg
+        .and_then(|c| c.max_review_cycles)
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "default".into());
+    let retry_codes = coordinator_cfg
+        .and_then(|c| c.error_code_retry_list.as_deref())
+        .unwrap_or("(none)");
+    let retry_max = coordinator_cfg
+        .and_then(|c| c.error_code_retry_max)
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "default".into());
+    let rl_backoff = coordinator_cfg
+        .and_then(|c| c.rate_limit_backoff_base_seconds)
+        .map(|n| format!("{}s base", n))
+        .unwrap_or_else(|| "default".into());
+    println!("Merge / Retry:");
+    println!("  Merge AI fix:      {}", merge_ai_fix);
+    println!("  Max review cycles: {}", max_review_cycles);
+    println!("  Retry error codes: {}", retry_codes);
+    println!("  Retry max:         {}", retry_max);
+    println!("  RL backoff:        {}", rl_backoff);
+    println!();
+
+    // ── Client and observability ──────────────────────────────────────────────
+    let web_port = client_cfg.web_port.unwrap_or(3450);
+    let web_host = client_cfg.web_host.as_deref().unwrap_or("127.0.0.1");
+    let log_dir = paths.macc_dir.join("log/coordinator");
+    println!("Observability:");
+    println!("  TUI available:     yes");
+    println!("  Web port:          {}", web_port);
+    println!("  Web host:          {}", web_host);
+    println!("  Log directory:     {}", log_dir.display());
+    println!("  SSE event stream:  /api/v1/sse (when web is running)");
+    println!("  Ops audit log:     .macc/log/ops.jsonl");
+    println!();
+
+    // ── Safety warnings ───────────────────────────────────────────────────────
+    if !warnings.is_empty() {
+        println!("Warnings:");
+        for w in warnings {
+            println!("  - {}", w);
+        }
+        println!();
+    }
+}
+
+/// Start the coordinator and open the chosen client.
+fn launch_coordinator_with_client(
+    mode: CoordinatorClientMode,
+    input: &CoordinatorCommandInput,
+    paths: &macc_core::ProjectPaths,
+    coordinator_cfg: Option<&macc_core::config::CoordinatorConfig>,
+) -> Result<()> {
+    let phase_overrides = build_phase_overrides_label(input);
+
+    match mode {
+        CoordinatorClientMode::Tui => {
+            // TUI path: the TUI itself starts the coordinator daemon and
+            // connects to it. Once the TUI exits the coordinator keeps running
+            // in the background (coordinator child has setsid() — terminal-independent).
+            // If --supervisor was requested, start the supervisor AFTER the TUI
+            // has launched the coordinator so we have the real child PID.
+            let result = macc_tui::run_tui_with_launch(macc_tui::LaunchMode::CoordinatorRun {
+                phase_overrides,
+            })
+            .map_err(|e| MaccError::Io {
+                path: "tui".into(),
+                action: "run_tui coordinator live".into(),
+                source: std::io::Error::other(e.to_string()),
+            });
+            // Best-effort supervisor start after TUI (coordinator child already running).
+            if input.supervisor {
+                if let Ok(coord_pid) = coordinator_child_pid_from_registry(&paths.root) {
+                    let _ = spawn_attached_supervisor(&paths.root, coord_pid);
+                }
+            }
+            result
+        }
+
+        CoordinatorClientMode::Web => {
+            let client_cfg = coordinator_cfg
+                .and_then(|c| c.client.as_ref())
+                .cloned()
+                .unwrap_or_default();
+            let port = client_cfg.web_port.unwrap_or(3450);
+            let host = client_cfg.web_host.as_deref().unwrap_or("127.0.0.1");
+            let url = format!("http://{}:{}/ops/console", host, port);
+
+            // Start coordinator as background daemon.
+            let coord_pid = run_coordinator_daemon(paths, coordinator_cfg)?;
+
+            // Start supervisor with coordinator child PID (not CLI PID).
+            if input.supervisor {
+                let _ = spawn_attached_supervisor(&paths.root, coord_pid as u32);
+            }
+
+            // Launch web server as a background daemon so the CLI can return.
+            if let Err(e) = spawn_web_daemon(&paths.root) {
+                println!("Note: could not start web server daemon: {}", e);
+                println!("Start it manually: macc web");
+            } else {
+                // Give the server a moment to bind before printing the URL.
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+
+            if client_cfg.open_browser.unwrap_or(false) {
+                let _ = ProcessCommand::new("sh")
+                    .args([
+                        "-c",
+                        &format!(
+                            "open '{url}' 2>/dev/null || xdg-open '{url}' 2>/dev/null || true"
+                        ),
+                    ])
+                    .spawn();
+                println!("Dashboard opening in browser: {}", url);
+            } else {
+                println!("Dashboard: {}", url);
+            }
+            Ok(())
+        }
+
+        CoordinatorClientMode::None | CoordinatorClientMode::Interactive => {
+            // Start coordinator as background daemon; return immediately.
+            let coord_pid = run_coordinator_daemon(paths, coordinator_cfg)?;
+            if input.supervisor {
+                let _ = spawn_attached_supervisor(&paths.root, coord_pid as u32);
+            }
+            Ok(())
+        }
+    }
+}
+
+fn build_phase_overrides_label(input: &CoordinatorCommandInput) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    let testing_off = input.env_cfg.disable_testing == Some(true)
+        || input.env_cfg.testing_mode.as_deref() == Some("disabled");
+    let review_off = input.env_cfg.disable_review == Some(true)
+        || input.env_cfg.review_mode.as_deref() == Some("disabled");
+    if testing_off {
+        parts.push("[testing:off]".to_string());
+    } else if let Some(ref mode) = input.env_cfg.testing_mode {
+        parts.push(format!("[testing:{}]", mode));
+    }
+    if review_off {
+        parts.push("[review:off]".to_string());
+    } else if let Some(ref mode) = input.env_cfg.review_mode {
+        parts.push(format!("[review:{}]", mode));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" "))
+    }
+}
+
+/// Start the coordinator as a background daemon and return immediately.
+///
+/// The coordinator child process has `setsid()` applied (in `coordinator.rs`)
+/// so it runs in its own session, independent of any controlling terminal or
+/// SSH session. Closing the terminal / SSH that ran this command does not
+/// affect the coordinator or any of its performers/workers.
+fn run_coordinator_daemon(
+    paths: &macc_core::ProjectPaths,
+    coordinator_cfg: Option<&macc_core::config::CoordinatorConfig>,
+) -> Result<i32> {
+    use macc_core::service::coordinator::coordinator_start_managed_command_process_with_pid;
+    use macc_core::service::coordinator_workflow::coordinator_command_invocation;
+
+    let invocation = coordinator_command_invocation(
+        &macc_core::service::coordinator_workflow::CoordinatorCommand::Run,
+    )?;
+    let pid = coordinator_start_managed_command_process_with_pid(
+        paths,
+        invocation.action,
+        &invocation.args,
+        coordinator_cfg,
+    )?;
+
+    println!("Coordinator started (pid {}).", pid);
+    println!("  Monitor : macc status");
+    println!("  Live TUI: macc tui");
+    println!("  Stop    : macc coordinator stop");
+
+    Ok(pid)
+}
+
+/// Read the coordinator child PID from the managed command registry.
+fn coordinator_child_pid_from_registry(project_root: &Path) -> Result<u32> {
+    use macc_core::coordinator::managed_command_registry::get_managed_command;
+    let paths = macc_core::ProjectPaths::from_root(project_root);
+    get_managed_command(&paths, "run")?
+        .map(|r| r.pid as u32)
+        .ok_or_else(|| MaccError::Validation("coordinator is not running".into()))
+}
+
+/// Spawn the web server as a background daemon (setsid + null stdio).
+fn spawn_web_daemon(project_root: &Path) -> Result<()> {
+    let current_exe = std::env::current_exe().map_err(|e| MaccError::Io {
+        path: project_root.to_string_lossy().into(),
+        action: "resolve current exe for web daemon".into(),
+        source: e,
+    })?;
+    let mut cmd = ProcessCommand::new(current_exe);
+    cmd.arg("--cwd")
+        .arg(project_root)
+        .arg("web")
+        .env("MACC_INTERNAL_INVOCATION", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+    }
+
+    cmd.spawn().map_err(|e| MaccError::Io {
+        path: project_root.to_string_lossy().into(),
+        action: "spawn web server daemon".into(),
+        source: e,
+    })?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{handle, CoordinatorCommandInput};
+    use super::{handle, CoordinatorClientMode, CoordinatorCommandInput};
     use crate::services::engine_provider::SharedEngine;
     use macc_core::config::CanonicalConfig;
     use macc_core::coordinator::types::CoordinatorEnvConfig;
@@ -632,7 +1421,9 @@ mod tests {
         assert_eq!(
             engine.last_command(),
             Some(CoordinatorCommand::Stop {
+                drain: false,
                 graceful: false,
+                force: false,
                 remove_worktrees: false,
                 remove_branches: false,
                 reason: "manual stop".to_string(),
@@ -723,13 +1514,19 @@ mod tests {
         CoordinatorCommandInput {
             command_name: command_name.to_string(),
             client_id: client_id.to_string(),
-            no_tui: true,
+            client_mode: CoordinatorClientMode::None,
             supervisor: false,
+            drain: false,
             graceful: false,
+            force: false,
             remove_worktrees: false,
             remove_branches: false,
             env_cfg: CoordinatorEnvConfig::default(),
             extra_args: Vec::new(),
+            preflight_only: false,
+            allow_dirty_reference: false,
+            create_reference_branch: false,
+            reference_branch_base: None,
         }
     }
 

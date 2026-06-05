@@ -139,10 +139,70 @@ fn request_id_regex() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"req_[a-zA-Z0-9]{10,}").unwrap())
 }
 
-/// Regex for extracting `retry-after` hints from text.
+/// Regex for extracting `retry-after` hints from text (seconds form).
 fn retry_after_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"(?i)(?:retry.after|retry_after)\s*[:=]\s*(\d+)").unwrap())
+}
+
+/// Regex for the absolute-timestamp "try again at <Month> <Day>, <Year>
+/// <HH>:<MM> [AP]M" form that codex emits on quota exhaustion.
+fn try_again_at_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)try again at (?P<month>[A-Za-z]+) (?P<day>\d+)[a-z]*, (?P<year>\d{4}) (?P<hour>\d{1,2}):(?P<min>\d{2}) (?P<ampm>[AaPp][Mm])",
+        )
+        .unwrap()
+    })
+}
+
+/// Parse an absolute "try again at …" timestamp from the codex output into
+/// seconds from now, or return `None` when parsing fails.
+fn parse_try_again_at_seconds(text: &str) -> Option<u64> {
+    let caps = try_again_at_regex().captures(text)?;
+    let month_str = caps.name("month")?.as_str();
+    let day: u32 = caps.name("day")?.as_str().parse().ok()?;
+    let year: i32 = caps.name("year")?.as_str().parse().ok()?;
+    let hour_raw: u32 = caps.name("hour")?.as_str().parse().ok()?;
+    let min: u32 = caps.name("min")?.as_str().parse().ok()?;
+    let ampm = caps.name("ampm")?.as_str().to_ascii_uppercase();
+
+    let month = match month_str.to_ascii_lowercase().as_str() {
+        "january" | "jan" => 1,
+        "february" | "feb" => 2,
+        "march" | "mar" => 3,
+        "april" | "apr" => 4,
+        "may" => 5,
+        "june" | "jun" => 6,
+        "july" | "jul" => 7,
+        "august" | "aug" => 8,
+        "september" | "sep" | "sept" => 9,
+        "october" | "oct" => 10,
+        "november" | "nov" => 11,
+        "december" | "dec" => 12,
+        _ => return None,
+    };
+
+    let hour = match ampm.as_str() {
+        "AM" if hour_raw == 12 => 0,
+        "AM" => hour_raw,
+        "PM" if hour_raw == 12 => 12,
+        "PM" => hour_raw + 12,
+        _ => return None,
+    };
+
+    use chrono::{TimeZone as _, Utc};
+    let retry_dt = Utc
+        .with_ymd_and_hms(year, month, day, hour, min, 0)
+        .single()?;
+    let now_ts = Utc::now().timestamp();
+    let retry_ts = retry_dt.timestamp();
+    if retry_ts <= now_ts {
+        // Already past — return a short cooldown to avoid blocking forever.
+        return Some(60);
+    }
+    Some((retry_ts - now_ts) as u64)
 }
 
 impl ErrorNormalizer for CodexErrorNormalizer {
@@ -172,10 +232,14 @@ impl ErrorNormalizer for CodexErrorNormalizer {
             .find(&combined)
             .map(|m| m.as_str().to_string());
 
+        // Try the seconds-form header first (e.g. `retry-after: 60`), then
+        // fall back to the absolute-timestamp form that codex emits on quota
+        // exhaustion (e.g. "try again at May 25th, 2026 3:20 AM").
         let retry_after_seconds = retry_after_regex()
             .captures(&combined)
             .and_then(|caps| caps.get(1))
-            .and_then(|m| m.as_str().parse::<u64>().ok());
+            .and_then(|m| m.as_str().parse::<u64>().ok())
+            .or_else(|| parse_try_again_at_seconds(&combined));
 
         let error_code = canonical_to_error_code(&class).to_string();
         let retryable = is_retryable(&class);
@@ -404,10 +468,86 @@ mod tests {
     // ── Retry-after extraction ──────────────────────────────────────
 
     #[test]
-    fn extracts_retry_after() {
+    fn extracts_retry_after_seconds_form() {
         let stderr = "429 Rate limit reached. retry-after: 60";
         let err = norm(1, stderr, "").unwrap();
         assert_eq!(err.retry_after_seconds, Some(60));
+    }
+
+    // ── Absolute-timestamp "try again at …" parsing ─────────────────
+
+    #[test]
+    fn parse_try_again_at_future_timestamp() {
+        // Build a timestamp that is always in the future (year 9999).
+        let text = "try again at December 31st, 9999 11:59 PM";
+        let secs = parse_try_again_at_seconds(text);
+        // Should parse successfully and return a large positive number.
+        assert!(
+            secs.is_some(),
+            "expected a parsed value for a far-future timestamp"
+        );
+        assert!(
+            secs.unwrap() > 3600,
+            "expected many seconds for a far-future timestamp"
+        );
+    }
+
+    #[test]
+    fn parse_try_again_at_past_timestamp_returns_cooldown() {
+        // A timestamp in the past should return the 60-second cooldown floor.
+        let text = "try again at January 1st, 2000 12:00 AM";
+        let secs = parse_try_again_at_seconds(text);
+        assert_eq!(secs, Some(60));
+    }
+
+    #[test]
+    fn parse_try_again_at_midday() {
+        // 12:00 PM = noon = 12:00 UTC — test the 12-PM edge case in AM/PM logic.
+        let text = "try again at January 1st, 9999 12:00 PM";
+        let secs = parse_try_again_at_seconds(text);
+        assert!(secs.is_some());
+    }
+
+    #[test]
+    fn parse_try_again_at_midnight() {
+        // 12:00 AM = midnight = 00:00 UTC — test the 12-AM edge case.
+        let text = "try again at January 1st, 9999 12:00 AM";
+        let secs = parse_try_again_at_seconds(text);
+        assert!(secs.is_some());
+    }
+
+    #[test]
+    fn parse_try_again_at_bad_month_returns_none() {
+        let text = "try again at Octember 5th, 2026 3:00 AM";
+        assert_eq!(parse_try_again_at_seconds(text), None);
+    }
+
+    /// The exact format codex emits when a quota limit is hit at exit-0.
+    /// After `detect_tool_limit_exit()` forces exit 1, the normalizer receives
+    /// this text and must classify it as QuotaExhausted with a retry_after hint.
+    #[test]
+    fn quota_exhausted_codex_cli_format_with_retry_hint() {
+        // Simulates the combined stderr that arrives when performer_lib forces
+        // exit 1 after detecting a zero-exit quota error from codex.
+        let stderr = "ERROR: You've hit your usage limit. Upgrade to Pro \
+            (https://chatgpt.com/explore/pro), visit \
+            https://chatgpt.com/codex/settings/usage to purchase more credits \
+            or try again at May 25th, 2026 3:20 AM.\n\
+            \nMACC_TOOL_LIMIT: quota_exhausted tool=codex \
+            retry_hint=\"try again at May 25th, 2026 3:20 AM\"\n\
+            The tool 'codex' has exhausted its usage quota and exited 0 \
+            without doing any work.";
+
+        let err = norm(1, stderr, "").unwrap();
+        assert_eq!(err.canonical_class, CanonicalClass::QuotaExhausted);
+        assert!(!err.retryable);
+        assert!(err.user_action_required);
+        assert_eq!(err.error_code, "E602");
+        // retry_after_seconds must be populated from the absolute timestamp.
+        assert!(
+            err.retry_after_seconds.is_some(),
+            "retry_after_seconds should be extracted from the 'try again at' hint"
+        );
     }
 
     // ── Unknown / no error ──────────────────────────────────────────

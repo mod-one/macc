@@ -43,6 +43,8 @@ fn check_adapter_contract(adapter: Arc<dyn ToolAdapter>) {
         mcp_templates: Vec::new(),
         automation: Default::default(),
         settings: Default::default(),
+        context: None,
+        skills_run_policy: None,
     };
 
     let ctx = PlanningContext {
@@ -141,6 +143,8 @@ fn test_adapter_with_skills_and_agents() {
             mcp_templates: Vec::new(),
             automation: Default::default(),
             settings: Default::default(),
+            context: None,
+            skills_run_policy: None,
         };
 
         let ctx = PlanningContext {
@@ -191,8 +195,37 @@ fn contract_embedded_toolspecs_match_registered_adapters() {
         .map(|spec| spec.id)
         .collect();
 
+    let mut expected_spec_ids = BTreeSet::new();
+    for spec_id in spec_ids {
+        match spec_id.as_str() {
+            "claude" => {
+                if cfg!(feature = "claude") {
+                    expected_spec_ids.insert(spec_id);
+                }
+            }
+            "codex" => {
+                if cfg!(feature = "codex") {
+                    expected_spec_ids.insert(spec_id);
+                }
+            }
+            "gemini" => {
+                if cfg!(feature = "gemini") {
+                    expected_spec_ids.insert(spec_id);
+                }
+            }
+            "vibe" => {
+                if cfg!(feature = "vibe") {
+                    expected_spec_ids.insert(spec_id);
+                }
+            }
+            other => {
+                expected_spec_ids.insert(other.to_string());
+            }
+        }
+    }
+
     assert_eq!(
-        spec_ids, adapter_ids,
+        expected_spec_ids, adapter_ids,
         "Embedded ToolSpec performer IDs must match registered adapter IDs."
     );
 }

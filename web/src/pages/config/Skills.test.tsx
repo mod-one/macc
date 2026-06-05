@@ -31,6 +31,7 @@ function buildConfig(overrides: Partial<ApiConfigResponse> = {}): ApiConfigRespo
     selectedAgents: [],
     selectedMcp: [],
     quiet: false,
+    debug: false,
     offline: false,
     webPort: 3450,
     webAssets: null,

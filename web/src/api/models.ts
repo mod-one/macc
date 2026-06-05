@@ -217,6 +217,7 @@ export interface ApiConfigResponse {
   selectedAgents: string[];
   selectedMcp: string[];
   quiet: boolean;
+  debug: boolean;
   offline: boolean;
   webPort: number | null;
   webAssets: ApiWebAssetsMode | null;
@@ -260,6 +261,9 @@ export interface ApiConfigResponse {
   rateLimitFallbackEnabled: boolean | null;
   rateLimitThrottleParallel: boolean | null;
   forceKillGraceSeconds: number | null;
+  safetyPolicy?: string | null;
+  destructiveActions?: string | null;
+  maxReviewCycles?: number | null;
   requirementsDetected: boolean;
   managedEnvironmentWarnings: string[];
 }
@@ -275,6 +279,7 @@ export interface ApiConfigUpdateRequest {
   selectedAgents?: string[];
   selectedMcp?: string[];
   quiet?: boolean;
+  debug?: boolean;
   offline?: boolean;
   webPort?: number | null;
   webAssets?: ApiWebAssetsMode | null;
@@ -318,6 +323,9 @@ export interface ApiConfigUpdateRequest {
   rateLimitFallbackEnabled?: boolean | null;
   rateLimitThrottleParallel?: boolean | null;
   forceKillGraceSeconds?: number | null;
+  safetyPolicy?: string | null;
+  destructiveActions?: string | null;
+  maxReviewCycles?: number | null;
 }
 
 export interface ApiToolInstallDescriptor {
@@ -611,10 +619,30 @@ export interface ApiDoctorIssue {
   message: string | null;
 }
 
+/** Structured diagnostic finding from extended checks (spec §14.2). */
+export interface ApiDiagnosticFinding {
+  /** Stable MACC code, e.g. `MACC-GIT-IDENTITY-MISSING`. */
+  id: string;
+  title: string;
+  /** `"ok"` | `"info"` | `"warning"` | `"error"` */
+  severity: string;
+  /** `"git"` | `"coordinator"` | `"tools"` | `"tasks"` | `"worktrees"` | `"project"` */
+  category: string;
+  /** Why this matters — shown in the issue card "Why it matters" section. */
+  message: string;
+  /** Exact command(s) to run. Shown in the "Fix" section of the issue card. */
+  recommendedAction?: string;
+  fixAvailable: boolean;
+}
+
 export interface ApiDoctorReport {
   healthScore: number;
   issuesBySeverity: Record<string, number>;
   issues: ApiDoctorIssue[];
+  /** Extended diagnostic findings with stable codes and recommended actions. */
+  findings?: ApiDiagnosticFinding[];
+  /** True when no blocking (error-severity) findings exist. */
+  ready?: boolean;
 }
 
 export interface ApiBackup {
@@ -648,4 +676,156 @@ export interface ApiActionResult {
   status?: string;
   message?: string;
   [key: string]: JsonValue | undefined;
+}
+
+export interface ApiTrustSummary {
+  state: 'trusted' | 'caution' | 'risky' | 'blocked';
+  local_only: boolean;
+  terminal_enabled: boolean;
+  user_level_writes: number;
+  backups_ready: boolean;
+  catalog_pinned: boolean;
+  secrets_redacted: boolean;
+  server_exposure: string;
+  allowed_roots: string[];
+  audit_log: string;
+}
+
+// ── Shared runtime snapshot (spec §6.3) ──────────────────────────────────────
+
+export interface ApiQueueSummary {
+  todo: number;
+  ready: number;
+  claimed: number;
+  in_progress: number;
+  testing: number;
+  reviewing: number;
+  changes_requested: number;
+  blocked: number;
+  merged: number;
+  failed: number;
+  total: number;
+}
+
+export interface ApiWorkerRuntime {
+  id: string;
+  worktree_path: string;
+  tool: string;
+  task_id: string | null;
+  branch: string | null;
+  phase: string | null;
+  runtime_status: string;
+  last_heartbeat: string | null;
+  retry_count: number;
+  delayed_until: string | null;
+}
+
+export interface ApiToolThrottleStatus {
+  tool: string;
+  reason: string;
+  error_code: string;
+  retryable: boolean;
+  delayed_until: string | null;
+  backoff_seconds: number;
+  effective_parallelism_delta: number;
+}
+
+export interface ApiRuntimeEvent {
+  ts: string | null;
+  event_type: string;
+  task_id: string | null;
+  phase: string | null;
+  status: string | null;
+  message: string | null;
+}
+
+export interface ApiRuntimeSnapshot {
+  generated_at: string;
+  project: { name: string; root: string; config_version: string | null };
+  coordinator: { running: boolean; paused: boolean; pause_reason: string | null };
+  queue: ApiQueueSummary;
+  workers: ApiWorkerRuntime[];
+  throttled_tools: ApiToolThrottleStatus[];
+  recent_events: ApiRuntimeEvent[];
+  git: { current_branch: string | null; clean: boolean; worktrees_count: number };
+  diagnostics: { issues_count: number; warnings_count: number; critical_count: number };
+  active_runs: Array<{ id: string; skill_id: string; status: string; started_at: string }>;
+}
+
+export interface ApiSkillItem {
+  id: string;
+  title: string;
+  kind: string;
+  risk: string;
+  description: string;
+}
+
+// ── Catalog skills lifecycle (spec §15) ───────────────────────────────────────
+
+/** A skill available from configured catalogs. */
+export interface ApiCatalogSkillEntry {
+  id: string;
+  name: string;
+  description: string;
+  tags: string[];
+  tools: string[];
+  recommended_ref: string | null;
+  risk: string | null;
+  requires_mcp: boolean;
+  writes_user_level_config: boolean;
+  category: string | null;
+  targets: Record<string, string[]>;
+  source: {
+    kind: string;
+    url: string;
+    ref: string;
+    checksum: string | null;
+  };
+}
+
+/** Status of an installed catalog skill. */
+export interface ApiCatalogSkillStatus {
+  id: string;
+  tool: string;
+  kind: string; // SkillStatusKind
+  source_url: string | null;
+  requested_ref: string | null;
+  resolved_ref: string | null;
+  pinned: boolean;
+  warnings: string[];
+  installed_files: string[];
+}
+
+/** Single entry in the skills lockfile. */
+export interface ApiSkillLockEntry {
+  id: string;
+  tool: string;
+  source: {
+    kind: string;
+    url: string | null;
+    requested_ref: string | null;
+    resolved_ref: string | null;
+    checksum: string | null;
+    subpath: string;
+    pinned: boolean;
+  };
+  package: {
+    manifest_path: string | null;
+    manifest_digest: string | null;
+    id: string;
+    version: string | null;
+  };
+  cache: { cache_key: string };
+  installed: {
+    at: string;
+    targets: Array<{ src: string; dest: string; digest: string | null; owner: string }>;
+  };
+}
+
+/** Drift / verification finding. */
+export interface ApiVerifyFinding {
+  skill_id: string;
+  tool: string;
+  kind: string;
+  message: string;
 }

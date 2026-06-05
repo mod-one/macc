@@ -14,7 +14,8 @@ use crate::coordinator::runtime::{
 };
 use crate::coordinator::state_runtime::{
     cleanup_dead_runtime_tasks, clear_coordinator_pause_file, coordinator_pause_file_path,
-    resume_paused_task_merge, set_task_paused_for_merge, write_coordinator_pause_file,
+    execute_startup_recovery_sweep, resume_paused_task_merge, set_task_paused_for_merge,
+    write_coordinator_pause_file,
 };
 use crate::coordinator::{
     CompletionAuthority, PerformerCompletionKind, RuntimeStatus, WorkflowState,
@@ -91,6 +92,8 @@ pub struct DispatchClaimUpdate {
     pub pid: Option<i64>,
     pub phase: String,
     pub now: String,
+    pub run_id: String,
+    pub coordinator_epoch: i64,
 }
 
 /// Raw output captured from a performer process for error normalization.
@@ -246,24 +249,41 @@ pub fn plan_advance(
     state: WorkflowState,
     max_review_cycles: Option<usize>,
     review_cycles: usize,
+    phases: &crate::config::PhasesConfig,
 ) -> AdvancePlan {
     match state {
         WorkflowState::InProgress => {
-            if max_review_cycles == Some(0) {
-                // No review at all — go straight to merge.
-                return AdvancePlan::Merge;
+            if phases.testing.enabled {
+                AdvancePlan::RunPhase(PhaseTransition {
+                    mode: "test",
+                    next_state: WorkflowState::Testing,
+                    runtime_phase: "test",
+                })
+            } else if phases.review.enabled && max_review_cycles != Some(0) {
+                AdvancePlan::RunPhase(PhaseTransition {
+                    mode: "review",
+                    next_state: WorkflowState::Reviewing,
+                    runtime_phase: "review",
+                })
+            } else {
+                AdvancePlan::Merge
             }
-            AdvancePlan::RunPhase(PhaseTransition {
-                mode: "review",
-                next_state: WorkflowState::PrOpen,
-                runtime_phase: "review",
-            })
         }
-        // Review approved → merge.
+        WorkflowState::Testing => {
+            if phases.review.enabled && max_review_cycles != Some(0) {
+                AdvancePlan::RunPhase(PhaseTransition {
+                    mode: "review",
+                    next_state: WorkflowState::Reviewing,
+                    runtime_phase: "review",
+                })
+            } else {
+                AdvancePlan::Merge
+            }
+        }
+        WorkflowState::Reviewing => AdvancePlan::Merge,
         WorkflowState::PrOpen => AdvancePlan::Merge,
         WorkflowState::ChangesRequested => {
-            // If we've exhausted the review cycle budget, skip the fix→review
-            // loop and go straight to merge with whatever we have.
+            // If we've exhausted the review cycle budget, skip fix and go to merge.
             if let Some(max) = max_review_cycles {
                 if review_cycles >= max {
                     return AdvancePlan::Merge;
@@ -271,7 +291,13 @@ pub fn plan_advance(
             }
             AdvancePlan::RunPhase(PhaseTransition {
                 mode: "fix",
-                next_state: WorkflowState::PrOpen,
+                next_state: if phases.testing.enabled {
+                    WorkflowState::Testing
+                } else if phases.review.enabled {
+                    WorkflowState::Reviewing
+                } else {
+                    WorkflowState::PrOpen // fallback
+                },
                 runtime_phase: "fix",
             })
         }
@@ -280,27 +306,63 @@ pub fn plan_advance(
     }
 }
 
-fn transition_workflow_state(from: WorkflowState, event: WorkflowEvent) -> Result<WorkflowState> {
+fn transition_workflow_state(
+    from: WorkflowState,
+    event: WorkflowEvent,
+    next_state: Option<WorkflowState>,
+) -> Result<WorkflowState> {
     let to = match (from, event) {
-        (WorkflowState::InProgress, WorkflowEvent::PhaseSucceeded("review")) => {
-            WorkflowState::PrOpen
+        // --- Success transitions ---
+        (WorkflowState::InProgress, WorkflowEvent::PhaseSucceeded("test")) => {
+            WorkflowState::Testing
         }
+        (WorkflowState::InProgress, WorkflowEvent::PhaseSucceeded("review")) => {
+            next_state.unwrap_or(WorkflowState::PrOpen)
+        }
+        (WorkflowState::Testing, WorkflowEvent::PhaseSucceeded("test")) => {
+            next_state.unwrap_or(WorkflowState::Reviewing)
+        }
+        (WorkflowState::Testing, WorkflowEvent::PhaseSucceeded("review")) => {
+            WorkflowState::Reviewing
+        }
+        (WorkflowState::Reviewing, WorkflowEvent::PhaseSucceeded("review")) => {
+            WorkflowState::Merged
+        }
+        (WorkflowState::ChangesRequested, WorkflowEvent::PhaseSucceeded("fix")) => {
+            next_state.unwrap_or(WorkflowState::PrOpen)
+        }
+
+        // --- Review verdict transitions ---
         (WorkflowState::InProgress, WorkflowEvent::ReviewChangesRequested) => {
             WorkflowState::ChangesRequested
         }
-        (WorkflowState::ChangesRequested, WorkflowEvent::PhaseSucceeded("fix")) => {
-            WorkflowState::PrOpen
+        (WorkflowState::Reviewing, WorkflowEvent::ReviewChangesRequested) => {
+            WorkflowState::ChangesRequested
         }
-        (WorkflowState::InProgress, WorkflowEvent::PhaseFailed("review"))
-        | (WorkflowState::ChangesRequested, WorkflowEvent::PhaseFailed("fix"))
-        | (WorkflowState::InProgress, WorkflowEvent::MergeFailed)
-        | (WorkflowState::PrOpen, WorkflowEvent::MergeFailed)
-        | (WorkflowState::ChangesRequested, WorkflowEvent::MergeFailed)
-        | (WorkflowState::Queued, WorkflowEvent::MergeFailed) => WorkflowState::Blocked,
+
+        // --- Failure transitions ---
+        (WorkflowState::InProgress, WorkflowEvent::PhaseFailed("dev")) => WorkflowState::Blocked,
+        (WorkflowState::InProgress, WorkflowEvent::PhaseFailed("review")) => WorkflowState::Blocked,
+        (WorkflowState::Testing, WorkflowEvent::PhaseFailed("test")) => WorkflowState::InProgress,
+        (WorkflowState::Reviewing, WorkflowEvent::PhaseFailed("review")) => WorkflowState::Blocked,
+        (WorkflowState::ChangesRequested, WorkflowEvent::PhaseFailed("fix")) => {
+            WorkflowState::Blocked
+        }
+
+        // --- Merge transitions ---
         (WorkflowState::InProgress, WorkflowEvent::MergeSucceeded)
+        | (WorkflowState::Testing, WorkflowEvent::MergeSucceeded)
+        | (WorkflowState::Reviewing, WorkflowEvent::MergeSucceeded)
         | (WorkflowState::PrOpen, WorkflowEvent::MergeSucceeded)
         | (WorkflowState::ChangesRequested, WorkflowEvent::MergeSucceeded)
         | (WorkflowState::Queued, WorkflowEvent::MergeSucceeded) => WorkflowState::Merged,
+
+        (WorkflowState::InProgress, WorkflowEvent::MergeFailed)
+        | (WorkflowState::Testing, WorkflowEvent::MergeFailed)
+        | (WorkflowState::Reviewing, WorkflowEvent::MergeFailed)
+        | (WorkflowState::PrOpen, WorkflowEvent::MergeFailed)
+        | (WorkflowState::ChangesRequested, WorkflowEvent::MergeFailed)
+        | (WorkflowState::Queued, WorkflowEvent::MergeFailed) => WorkflowState::Blocked,
         _ => {
             return Err(MaccError::Coordinator {
                 code: "invalid_transition",
@@ -365,6 +427,7 @@ pub fn build_advance_actions(
     active_merge_jobs: &HashSet<String>,
     now: &str,
     max_review_cycles: Option<usize>,
+    phases: &crate::config::PhasesConfig,
 ) -> Result<Vec<AdvanceTaskAction>> {
     let typed = TaskRegistry::from_value(registry)?;
     let mut actions = Vec::new();
@@ -378,7 +441,7 @@ pub fn build_advance_actions(
         let review_cycles = task.task_runtime.review_cycles.unwrap_or(0);
         let workflow_state = task.workflow_state();
         match workflow_state
-            .map(|s| plan_advance(s, max_review_cycles, review_cycles))
+            .map(|s| plan_advance(s, max_review_cycles, review_cycles, phases))
             .unwrap_or(AdvancePlan::Noop)
         {
             AdvancePlan::RunPhase(transition) => {
@@ -594,18 +657,27 @@ fn apply_dispatch_claim_typed(task: &mut Task, update: &DispatchClaimUpdate) {
     worktree.last_commit = Some(update.last_commit.clone());
     worktree.session_id = Some(update.session_id.clone());
     let runtime = task.ensure_runtime();
-    runtime.set_status(RuntimeStatus::Running);
+    runtime.set_status(RuntimeStatus::Dispatched);
     runtime.current_phase = Some(update.phase.clone());
     runtime.started_at = Some(update.now.clone());
+    runtime.run_id = Some(update.run_id.clone());
+    runtime.coordinator_epoch = Some(update.coordinator_epoch);
+    runtime.claim_id = Some(update.session_id.clone());
     if let Some(active_session_id) = update.active_session_id.as_ref() {
         runtime.active_session_id = Some(active_session_id.clone());
     }
+    let log_prefix = format!(".macc/log/performer/{}/{}", update.task_id, update.run_id);
+    runtime.events_log = Some(format!("{}.events.jsonl", log_prefix));
+    runtime.stdout_log = Some(format!("{}.stdout.log", log_prefix));
+    runtime.stderr_log = Some(format!("{}.stderr.log", log_prefix));
     runtime.pid = update.pid;
     task.touch_state_changed(&update.now);
 }
 
 fn apply_dispatch_pid_typed(task: &mut Task, pid: Option<i64>) {
-    task.ensure_runtime().pid = pid;
+    let runtime = task.ensure_runtime();
+    runtime.pid = pid;
+    runtime.set_status(RuntimeStatus::Running);
 }
 
 pub fn apply_phase_success(task: &mut Value, transition: PhaseTransition, now: &str) -> Result<()> {
@@ -679,7 +751,11 @@ pub(crate) fn apply_phase_success_typed(
     now: &str,
 ) -> Result<()> {
     let from = task_workflow_state_typed(task)?;
-    let to = transition_workflow_state(from, WorkflowEvent::PhaseSucceeded(transition.mode))?;
+    let to = transition_workflow_state(
+        from,
+        WorkflowEvent::PhaseSucceeded(transition.mode),
+        Some(transition.next_state),
+    )?;
     if to != transition.next_state {
         return Err(MaccError::Validation(format!(
             "Coordinator FSM mismatch for mode='{}': expected next={} got {}",
@@ -705,12 +781,16 @@ pub(crate) fn apply_review_phase_success_typed(
 ) -> Result<WorkflowState> {
     let from = task_workflow_state_typed(task)?;
     let to = match verdict {
-        ReviewVerdict::Ok => {
-            transition_workflow_state(from, WorkflowEvent::PhaseSucceeded("review"))?
-        }
-        ReviewVerdict::ChangesRequested => {
-            transition_workflow_state(from, WorkflowEvent::ReviewChangesRequested)?
-        }
+        ReviewVerdict::Ok => transition_workflow_state(
+            from,
+            WorkflowEvent::PhaseSucceeded("review"),
+            Some(WorkflowState::Merged),
+        )?,
+        ReviewVerdict::ChangesRequested => transition_workflow_state(
+            from,
+            WorkflowEvent::ReviewChangesRequested,
+            Some(WorkflowState::ChangesRequested),
+        )?,
     };
     task.set_workflow_state(to);
     let runtime = task.ensure_runtime();
@@ -732,7 +812,7 @@ pub(crate) fn apply_phase_failure_typed(
     now: &str,
 ) -> Result<()> {
     let from = task_workflow_state_typed(task)?;
-    let to = transition_workflow_state(from, WorkflowEvent::PhaseFailed(phase_mode))?;
+    let to = transition_workflow_state(from, WorkflowEvent::PhaseFailed(phase_mode), None)?;
     task.set_workflow_state(to);
     let runtime = task.ensure_runtime();
     runtime.set_status(RuntimeStatus::Failed);
@@ -745,7 +825,11 @@ pub(crate) fn apply_phase_failure_typed(
 
 pub(crate) fn apply_merge_success_typed(task: &mut Task, now: &str) -> Result<()> {
     let from = task_workflow_state_typed(task)?;
-    let to = transition_workflow_state(from, WorkflowEvent::MergeSucceeded)?;
+    let to = transition_workflow_state(
+        from,
+        WorkflowEvent::MergeSucceeded,
+        Some(WorkflowState::Merged),
+    )?;
     task.set_workflow_state(to);
     let runtime = task.ensure_runtime();
     runtime.set_status(RuntimeStatus::Idle);
@@ -756,7 +840,11 @@ pub(crate) fn apply_merge_success_typed(task: &mut Task, now: &str) -> Result<()
 
 pub(crate) fn apply_merge_failure_typed(task: &mut Task, reason: &str, now: &str) -> Result<()> {
     let from = task_workflow_state_typed(task)?;
-    let to = transition_workflow_state(from, WorkflowEvent::MergeFailed)?;
+    let to = transition_workflow_state(
+        from,
+        WorkflowEvent::MergeFailed,
+        Some(WorkflowState::Blocked),
+    )?;
     task.set_workflow_state(to);
     let runtime = task.ensure_runtime();
     runtime.set_status(RuntimeStatus::Paused);
@@ -1177,6 +1265,8 @@ where
         runtime.pid = None;
         runtime.set_status(RuntimeStatus::Stale);
         runtime.last_error = Some(format!("runtime pid {} is not running; auto-reset", pid));
+        runtime.last_error_code =
+            Some(crate::coordinator::error_normalizer::E414_PERFORMER_PROCESS_DEAD.to_string());
         let new_state = if old_state == WorkflowState::Claimed.as_str() && phase == "dev" {
             task.set_workflow_state(WorkflowState::Todo);
             task.assignee = None;
@@ -1335,8 +1425,12 @@ async fn run_control_plane_cycle<B: ControlPlaneBackend + ?Sized>(
     }
 
     let counts = backend.on_cycle_end(cycle, &advance, dispatched).await?;
-    if let Some(reason) = backend.should_terminate_run(&counts) {
-        return Err(MaccError::Validation(reason));
+    if let Some(_reason) = backend.should_terminate_run(&counts) {
+        // This is a planned stop (e.g. dispatch limit reached), not a failure.
+        // The dispatch_limit_reached event was already emitted by the dispatcher.
+        // Returning Complete causes an exit code 0 so the TUI shows a green
+        // "finished" message instead of a red error overlay.
+        return Ok(ControlPlaneDecision::Complete);
     }
     let last_fail = backend.last_dispatch_failure();
     controller.on_cycle_counts(counts, last_fail.as_deref())
@@ -1356,11 +1450,191 @@ struct NativeControlPlaneBackend<'a> {
     ghost_heartbeat_grace_seconds: i64,
     last_logged_counts: Option<CoordinatorCounts>,
     last_cycle_progressed: bool,
+    /// Timestamp of the last coordinator-alive heartbeat event emitted to SQLite.
+    /// Used to throttle periodic heartbeats to once every 30 seconds so that
+    /// viewer TUIs always see recent activity even while performers are running.
+    last_sqlite_heartbeat_at: Option<std::time::Instant>,
 }
 
 #[async_trait]
 impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
     async fn on_cycle_start(&mut self, _cycle: usize) -> Result<()> {
+        let storage_paths = crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(
+            &crate::ProjectPaths::from_root(self.repo_root),
+        );
+        let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
+
+        let _ = sqlite.get_active_coordinator_run().map(|run_opt| {
+            if let Some(mut r) = run_opt {
+                r.last_tick_at = Some(chrono::Utc::now().to_rfc3339());
+                let _ = sqlite.upsert_coordinator_run(&r);
+            }
+        });
+
+        if let Ok(Some(ctrl)) = sqlite.get_coordinator_control() {
+            if ctrl.mode == "force_stopping" {
+                if let Some(log) = self.logger {
+                    let _ = log
+                        .note("- Force stop requested. Terminating all performers...".to_string());
+                }
+
+                let mut pids_to_kill = std::collections::HashSet::new();
+                if let Ok(db_pids) = sqlite.get_running_task_pids() {
+                    for (task_id, pid) in db_pids {
+                        pids_to_kill.insert(pid);
+                        let _ = crate::coordinator::helpers::append_coordinator_event_with_severity(
+                            self.repo_root,
+                            "task_blocked",
+                            &task_id,
+                            "dev",
+                            "aborted_by_operator",
+                            "Task aborted by operator force-stop",
+                            "warning",
+                        );
+                    }
+                }
+                for job in self.run_state.active_jobs.values() {
+                    if let Some(pid) = job.pid {
+                        pids_to_kill.insert(pid);
+                    }
+                }
+
+                let grace_secs = ctrl.force_grace_seconds.unwrap_or(10);
+                for pid in &pids_to_kill {
+                    if let Some(log) = self.logger {
+                        let _ =
+                            log.note(format!("- Sending TERM to performer process group {}", pid));
+                    }
+                    #[cfg(unix)]
+                    if *pid > 0 {
+                        unsafe {
+                            let _ = libc::killpg(*pid as libc::pid_t, libc::SIGTERM);
+                        }
+                    }
+                }
+                if !pids_to_kill.is_empty() {
+                    tokio::time::sleep(std::time::Duration::from_secs(grace_secs)).await;
+                    for pid in &pids_to_kill {
+                        if let Some(log) = self.logger {
+                            let _ = log
+                                .note(format!("- Sending KILL to performer process group {}", pid));
+                        }
+                        #[cfg(unix)]
+                        if *pid > 0 {
+                            unsafe {
+                                let _ = libc::killpg(*pid as libc::pid_t, libc::SIGKILL);
+                            }
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    for pid in &pids_to_kill {
+                        if crate::coordinator::helpers::is_pid_running(*pid) {
+                            if let Some(log) = self.logger {
+                                let _ = log.note(format!(
+                                    "- Warning: performer process group {} survived SIGKILL [E416]",
+                                    pid
+                                ));
+                            }
+                        }
+                    }
+                }
+
+                if ctrl.cleanup_after_force.unwrap_or(false) {
+                    if let Some(log) = self.logger {
+                        let _ = log.note(
+                            "- Cleaning worktrees as requested by force cleanup...".to_string(),
+                        );
+                    }
+                    let _ = crate::service::worktree::remove_all_worktrees(self.repo_root, true);
+                    let _ = crate::prune_worktrees(self.repo_root);
+                }
+
+                let mut stopped_ctrl = ctrl.clone();
+                stopped_ctrl.mode = "stopped".to_string();
+                let _ = sqlite.set_coordinator_control(&stopped_ctrl);
+
+                return Err(MaccError::Validation(
+                    "force stopped by operator".to_string(),
+                ));
+            } else if ctrl.mode == "draining" {
+                let mut active_draining_tasks_left = false;
+                if let Some(snapshot_raw) = &ctrl.drain_snapshot_json {
+                    if let Ok(task_ids) = serde_json::from_str::<Vec<String>>(snapshot_raw) {
+                        let registry = crate::coordinator::state::coordinator_state_registry_load(
+                            self.repo_root,
+                            &std::collections::BTreeMap::new(),
+                        )?;
+                        if let Some(tasks_arr) = registry.get("tasks").and_then(Value::as_array) {
+                            for task_val in tasks_arr {
+                                if let Some(tid) = task_val.get("id").and_then(Value::as_str) {
+                                    if task_ids.contains(&tid.to_string()) {
+                                        if let Some(state_str) =
+                                            task_val.get("state").and_then(Value::as_str)
+                                        {
+                                            if state_str == WorkflowState::Claimed.as_str()
+                                                || state_str == WorkflowState::InProgress.as_str()
+                                                || state_str
+                                                    == WorkflowState::ChangesRequested.as_str()
+                                                || state_str == WorkflowState::Queued.as_str()
+                                            {
+                                                active_draining_tasks_left = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if !active_draining_tasks_left {
+                    if let Some(log) = self.logger {
+                        let _ = log.note(
+                            "- All active drain tasks completed. Draining complete.".to_string(),
+                        );
+                    }
+                    let mut stopped_ctrl = ctrl.clone();
+                    stopped_ctrl.mode = "stopped".to_string();
+                    let _ = sqlite.set_coordinator_control(&stopped_ctrl);
+
+                    return Err(MaccError::Validation("draining complete".to_string()));
+                }
+            } else if ctrl.mode == "graceful_stopping"
+                && self.run_state.active_jobs.is_empty()
+                && self.run_state.active_merge_jobs.is_empty()
+            {
+                if let Some(log) = self.logger {
+                    let _ = log.note("- Graceful stopping completed. Exiting.".to_string());
+                }
+                let mut stopped_ctrl = ctrl.clone();
+                stopped_ctrl.mode = "stopped".to_string();
+                let _ = sqlite.set_coordinator_control(&stopped_ctrl);
+
+                return Err(MaccError::Validation("graceful stop complete".to_string()));
+            }
+        }
+
+        // Emit a periodic coordinator-alive heartbeat so viewer TUIs always
+        // see recent activity even while performers are long-running.
+        // Throttled to once every 30 seconds.
+        const HEARTBEAT_INTERVAL_SECS: u64 = 30;
+        let should_emit_heartbeat = self
+            .last_sqlite_heartbeat_at
+            .map(|last| last.elapsed().as_secs() >= HEARTBEAT_INTERVAL_SECS)
+            .unwrap_or(true);
+        if should_emit_heartbeat {
+            let _ = crate::coordinator::helpers::append_coordinator_event_with_severity(
+                self.repo_root,
+                "coordinator_heartbeat",
+                "",
+                "run",
+                "ok",
+                "coordinator is running",
+                "info",
+            );
+            self.last_sqlite_heartbeat_at = Some(std::time::Instant::now());
+        }
+
         crate::coordinator::control_plane::sync_registry_from_prd_native(
             self.repo_root,
             &self.prd_file,
@@ -1632,6 +1906,77 @@ pub async fn run_native_control_plane(
         generated
     };
 
+    let storage_paths = crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(
+        &crate::ProjectPaths::from_root(repo_root),
+    );
+    let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths.clone());
+
+    // Register coordinator run and seed control mode
+    let last_run = sqlite.get_active_coordinator_run().unwrap_or(None);
+    let max_epoch = {
+        if let Ok(conn) = rusqlite::Connection::open(&sqlite.paths.sqlite_path) {
+            let _ = sqlite.init_schema(&conn);
+            conn.query_row(
+                "SELECT COALESCE(MAX(epoch), 0) FROM coordinator_runs",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(0)
+        } else {
+            0
+        }
+    };
+    let next_epoch = max_epoch + 1;
+    std::env::set_var("COORDINATOR_EPOCH", next_epoch.to_string());
+    if let Some(mut prev) = last_run {
+        if (prev.status == "running" || prev.status == "draining")
+            && crate::coordinator::helpers::is_pid_running(prev.pid)
+            && prev.pid != std::process::id() as i64
+        {
+            return Err(MaccError::Coordinator {
+                code: crate::coordinator::error_normalizer::E410_COORDINATOR_LEASE_CONFLICT,
+                message: format!(
+                    "Lease conflict: coordinator is already running on host {} under PID {}",
+                    prev.hostname, prev.pid
+                ),
+            });
+        }
+        prev.status = "crashed".to_string();
+        prev.stopped_at = Some(chrono::Utc::now().to_rfc3339());
+        prev.stop_reason = Some("coordinator process crashed or exited uncleanly".to_string());
+        let _ = sqlite.upsert_coordinator_run(&prev);
+    }
+    let hostname = std::env::var("HOSTNAME").unwrap_or_else(|_| {
+        std::env::var("COMPUTERNAME").unwrap_or_else(|_| "localhost".to_string())
+    });
+    let current_run = crate::coordinator_storage::CoordinatorRun {
+        run_id: run_id.clone(),
+        pid: std::process::id() as i64,
+        hostname,
+        started_at: chrono::Utc::now().to_rfc3339(),
+        last_tick_at: Some(chrono::Utc::now().to_rfc3339()),
+        stopped_at: None,
+        status: "running".to_string(),
+        epoch: next_epoch,
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        stop_reason: None,
+    };
+    let _ = sqlite.upsert_coordinator_run(&current_run);
+
+    let _ = sqlite.set_coordinator_control(&crate::coordinator_storage::CoordinatorControl {
+        mode: "running".to_string(),
+        requested_at: Some(chrono::Utc::now().to_rfc3339()),
+        requested_by: Some("system".to_string()),
+        drain_snapshot_json: None,
+        force_grace_seconds: Some(10),
+        cleanup_after_force: Some(false),
+        reason: None,
+    });
+
+    // Clear any stale pause file left by a previous crash so clients don't
+    // show a spurious "paused" banner while this run is actively running.
+    let _ = clear_coordinator_pause_file(repo_root);
+
     let _ = crate::coordinator::helpers::append_coordinator_event_with_severity(
         repo_root,
         "command_start",
@@ -1798,6 +2143,63 @@ pub async fn run_native_control_plane(
         }
     }
 
+    // ── Part E: replay unread events from SQLite on startup ─────────────
+    if let Err(e) =
+        crate::coordinator::control_plane::consume_runtime_events(repo_root, &mut run_state, logger)
+    {
+        if let Some(log) = logger {
+            let _ = log.note(format!("- Warning: startup event replay failed: {}", e));
+        }
+    } else {
+        let _ = crate::coordinator::control_plane::apply_runtime_event_bus_updates(
+            repo_root,
+            env_cfg,
+            coordinator,
+            &mut run_state,
+            logger,
+        );
+    }
+
+    // ── Part F: §11.1 Steps 7-10 — startup recovery sweep ───────────────
+    // Inspects worktree state (step 7), Git branch/merge state (step 8),
+    // runs deterministic PRD reconciliation (step 9), and persists
+    // recovery classifications to SQLite (step 10).
+    // Must complete before any new dispatch (step 11).
+    {
+        let reference_branch: &str = env_cfg
+            .reference_branch
+            .as_deref()
+            .unwrap_or(&cfg.reference_branch);
+        // We cannot cheaply coerce &dyn CoordinatorLog into &dyn Fn(String)
+        // across lifetimes, so we collect the entries and log the summary
+        // ourselves using the coordinator logger.
+        match execute_startup_recovery_sweep(repo_root, reference_branch, false, None) {
+            Ok(entries) => {
+                let classified = entries.len();
+                let mutated = entries.iter().filter(|e| e.mutated).count();
+                if let Some(log) = logger {
+                    for entry in &entries {
+                        let _ = log.note(format!(
+                            "- Recovery sweep task={} classification={} action=\"{}\"",
+                            entry.task_id, entry.classification, entry.action
+                        ));
+                    }
+                    if classified > 0 {
+                        let _ = log.note(format!(
+                            "- Startup recovery sweep: {} task(s) classified, {} state(s) corrected",
+                            classified, mutated
+                        ));
+                    }
+                }
+            }
+            Err(e) => {
+                if let Some(log) = logger {
+                    let _ = log.note(format!("- Warning: startup recovery sweep failed: {}", e));
+                }
+            }
+        }
+    }
+
     let mut backend = NativeControlPlaneBackend {
         repo_root,
         canonical,
@@ -1812,6 +2214,7 @@ pub async fn run_native_control_plane(
         ghost_heartbeat_grace_seconds,
         last_logged_counts: None,
         last_cycle_progressed: false,
+        last_sqlite_heartbeat_at: None,
     };
 
     let timeout_seconds = env_cfg.timeout_seconds.unwrap_or(cfg.timeout_seconds);
@@ -1864,12 +2267,32 @@ pub async fn run_native_control_plane(
         }
     };
 
+    let mut is_clean_exit = false;
+    let mut final_status = "success".to_string();
+    if let Err(MaccError::Validation(ref msg)) = run_result {
+        if msg == "draining complete"
+            || msg == "graceful stop complete"
+            || msg == "force stopped by operator"
+        {
+            is_clean_exit = true;
+            final_status = if msg == "draining complete" || msg == "graceful stop complete" {
+                "stopped".to_string()
+            } else {
+                "force_stopping".to_string()
+            };
+        }
+    }
+
+    let run_result = if is_clean_exit { Ok(()) } else { run_result };
+
     let result_label = if run_result.is_err() {
         "failed"
     } else {
         let is_shutdown = *shutdown_rx.borrow();
         if is_shutdown {
             "stopped"
+        } else if is_clean_exit {
+            &final_status
         } else if crate::coordinator::state_runtime::read_coordinator_pause_file(repo_root)
             .ok()
             .flatten()
@@ -1888,6 +2311,25 @@ pub async fn run_native_control_plane(
             result_label
         ));
     }
+
+    let _ = sqlite.get_active_coordinator_run().map(|run_opt| {
+        if let Some(mut r) = run_opt {
+            r.status = if is_clean_exit {
+                final_status.clone()
+            } else if run_result.is_err() {
+                "crashed".to_string()
+            } else {
+                "stopped".to_string()
+            };
+            r.stopped_at = Some(chrono::Utc::now().to_rfc3339());
+            if !is_clean_exit && run_result.is_err() {
+                r.stop_reason = Some(format!("{:?}", run_result));
+            } else if is_clean_exit {
+                r.stop_reason = Some(final_status.clone());
+            }
+            let _ = sqlite.upsert_coordinator_run(&r);
+        }
+    });
 
     if run_result.is_err() {
         if let Err(err) = &run_result {
@@ -1909,15 +2351,7 @@ pub async fn run_native_control_plane(
         return run_result;
     }
 
-    let _ = crate::coordinator::helpers::append_coordinator_event_with_severity(
-        repo_root,
-        "command_end",
-        "-",
-        "run",
-        "done",
-        "Coordinator run complete",
-        "info",
-    );
+    let _ = crate::coordinator::helpers::append_coordinator_run_complete_event(repo_root);
     Ok(())
 }
 
@@ -2040,6 +2474,9 @@ mod tests {
         fs::create_dir_all(&repo).expect("create temp repo");
 
         run_git(&repo, &["init"]);
+        // Set local git identity so merge commits succeed on CI (no global identity configured).
+        run_git(&repo, &["config", "user.name", "MACC Test"]);
+        run_git(&repo, &["config", "user.email", "macc-test@example.com"]);
         run_git(&repo, &["checkout", "-b", base_branch]);
         fs::write(repo.join("fixture.txt"), "base\n").expect("write base fixture");
         run_git(&repo, &["add", "fixture.txt"]);
@@ -2131,73 +2568,189 @@ mod tests {
     }
 
     #[test]
+    fn plan_advance_testing_phase() {
+        let phases_enabled = crate::config::PhasesConfig {
+            testing: crate::config::PhaseConfig {
+                enabled: true,
+                ..Default::default()
+            },
+            review: crate::config::PhaseConfig {
+                enabled: true,
+                ..Default::default()
+            },
+        };
+        let phases_disabled = crate::config::PhasesConfig {
+            testing: crate::config::PhaseConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            review: crate::config::PhaseConfig {
+                enabled: true,
+                ..Default::default()
+            },
+        };
+
+        // When testing is enabled:
+        // InProgress should transition to RunPhase("test") / WorkflowState::Testing
+        assert!(matches!(
+            plan_advance(WorkflowState::InProgress, None, 0, &phases_enabled),
+            AdvancePlan::RunPhase(PhaseTransition {
+                mode: "test",
+                next_state: WorkflowState::Testing,
+                ..
+            })
+        ));
+
+        // Testing should transition to RunPhase("review") / WorkflowState::Reviewing if review enabled
+        assert!(matches!(
+            plan_advance(WorkflowState::Testing, None, 0, &phases_enabled),
+            AdvancePlan::RunPhase(PhaseTransition {
+                mode: "review",
+                next_state: WorkflowState::Reviewing,
+                ..
+            })
+        ));
+
+        // ChangesRequested should transition to RunPhase("fix") with next_state: WorkflowState::Testing
+        assert!(matches!(
+            plan_advance(WorkflowState::ChangesRequested, None, 0, &phases_enabled),
+            AdvancePlan::RunPhase(PhaseTransition {
+                mode: "fix",
+                next_state: WorkflowState::Testing,
+                ..
+            })
+        ));
+
+        // When testing is disabled:
+        // InProgress should transition to RunPhase("review") / WorkflowState::Reviewing if review enabled
+        assert!(matches!(
+            plan_advance(WorkflowState::InProgress, None, 0, &phases_disabled),
+            AdvancePlan::RunPhase(PhaseTransition {
+                mode: "review",
+                next_state: WorkflowState::Reviewing,
+                ..
+            })
+        ));
+
+        // ChangesRequested should transition to RunPhase("fix") with next_state: WorkflowState::Reviewing
+        assert!(matches!(
+            plan_advance(WorkflowState::ChangesRequested, None, 0, &phases_disabled),
+            AdvancePlan::RunPhase(PhaseTransition {
+                mode: "fix",
+                next_state: WorkflowState::Reviewing,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn plan_advance_maps_states() {
+        let phases = crate::config::PhasesConfig {
+            testing: crate::config::PhaseConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            review: crate::config::PhaseConfig {
+                enabled: true,
+                ..Default::default()
+            },
+        };
         // Default (unlimited review cycles)
         assert!(matches!(
-            plan_advance(WorkflowState::InProgress, None, 0),
+            plan_advance(WorkflowState::InProgress, None, 0, &phases),
             AdvancePlan::RunPhase(PhaseTransition { mode: "review", .. })
         ));
         assert!(matches!(
-            plan_advance(WorkflowState::PrOpen, None, 0),
+            plan_advance(WorkflowState::PrOpen, None, 0, &phases),
             AdvancePlan::Merge
         ));
         assert!(matches!(
-            plan_advance(WorkflowState::ChangesRequested, None, 0),
+            plan_advance(WorkflowState::ChangesRequested, None, 0, &phases),
             AdvancePlan::RunPhase(PhaseTransition { mode: "fix", .. })
         ));
         assert!(matches!(
-            plan_advance(WorkflowState::Queued, None, 0),
+            plan_advance(WorkflowState::Queued, None, 0, &phases),
             AdvancePlan::Merge
         ));
         assert!(matches!(
-            plan_advance(WorkflowState::Todo, None, 0),
+            plan_advance(WorkflowState::Todo, None, 0, &phases),
             AdvancePlan::Noop
         ));
     }
 
     #[test]
     fn plan_advance_max_review_cycles_zero_skips_review() {
+        let phases = crate::config::PhasesConfig {
+            testing: crate::config::PhaseConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            review: crate::config::PhaseConfig {
+                enabled: true,
+                ..Default::default()
+            },
+        };
         // max_review_cycles=0 → skip review entirely
         assert!(matches!(
-            plan_advance(WorkflowState::InProgress, Some(0), 0),
+            plan_advance(WorkflowState::InProgress, Some(0), 0, &phases),
             AdvancePlan::Merge
         ));
         // ChangesRequested with 0 cycles used but max=0 → merge directly
         assert!(matches!(
-            plan_advance(WorkflowState::ChangesRequested, Some(0), 0),
+            plan_advance(WorkflowState::ChangesRequested, Some(0), 0, &phases),
             AdvancePlan::Merge
         ));
     }
 
     #[test]
     fn plan_advance_max_review_cycles_one_allows_single_fix() {
+        let phases = crate::config::PhasesConfig {
+            testing: crate::config::PhaseConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            review: crate::config::PhaseConfig {
+                enabled: true,
+                ..Default::default()
+            },
+        };
         // max=1, 0 cycles done → allow fix
         assert!(matches!(
-            plan_advance(WorkflowState::ChangesRequested, Some(1), 0),
+            plan_advance(WorkflowState::ChangesRequested, Some(1), 0, &phases),
             AdvancePlan::RunPhase(PhaseTransition { mode: "fix", .. })
         ));
         // max=1, 1 cycle done → exhausted, merge directly
         assert!(matches!(
-            plan_advance(WorkflowState::ChangesRequested, Some(1), 1),
+            plan_advance(WorkflowState::ChangesRequested, Some(1), 1, &phases),
             AdvancePlan::Merge
         ));
     }
 
     #[test]
     fn plan_advance_max_review_cycles_n_caps_loops() {
+        let phases = crate::config::PhasesConfig {
+            testing: crate::config::PhaseConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            review: crate::config::PhaseConfig {
+                enabled: true,
+                ..Default::default()
+            },
+        };
         // max=3, 2 done → allow another
         assert!(matches!(
-            plan_advance(WorkflowState::ChangesRequested, Some(3), 2),
+            plan_advance(WorkflowState::ChangesRequested, Some(3), 2, &phases),
             AdvancePlan::RunPhase(PhaseTransition { mode: "fix", .. })
         ));
         // max=3, 3 done → exhausted, merge
         assert!(matches!(
-            plan_advance(WorkflowState::ChangesRequested, Some(3), 3),
+            plan_advance(WorkflowState::ChangesRequested, Some(3), 3, &phases),
             AdvancePlan::Merge
         ));
         // max=3, 5 done → way past, merge
         assert!(matches!(
-            plan_advance(WorkflowState::ChangesRequested, Some(3), 5),
+            plan_advance(WorkflowState::ChangesRequested, Some(3), 5, &phases),
             AdvancePlan::Merge
         ));
     }
@@ -2223,14 +2776,20 @@ mod tests {
             last_commit: "abc".to_string(),
             session_id: "s-1".to_string(),
             active_session_id: Some("tool-session-1".to_string()),
-            pid: Some(123),
+            pid: None,
             phase: "dev".to_string(),
             now: "2026-02-20T00:00:00Z".to_string(),
+            run_id: "run-1".to_string(),
+            coordinator_epoch: 1,
         };
         apply_dispatch_claim(&mut task, &update);
         assert_eq!(task["state"], "claimed");
-        assert_eq!(task["task_runtime"]["status"], "running");
+        assert_eq!(task["task_runtime"]["status"], "dispatched");
         assert_eq!(task["task_runtime"]["active_session_id"], "tool-session-1");
+        assert_eq!(task["task_runtime"]["pid"], serde_json::Value::Null);
+
+        apply_dispatch_pid(&mut task, Some(123));
+        assert_eq!(task["task_runtime"]["status"], "running");
         assert_eq!(task["task_runtime"]["pid"], 123);
     }
 
@@ -2761,8 +3320,14 @@ mod tests {
         .expect("apply completion");
         assert_eq!(completion.status_label, "already_satisfied");
         assert_eq!(registry["tasks"][0]["state"], "merged");
-        let actions =
-            build_advance_actions(&registry, &HashSet::new(), "", None).expect("advance actions");
+        let actions = build_advance_actions(
+            &registry,
+            &HashSet::new(),
+            "",
+            None,
+            &crate::config::PhasesConfig::default(),
+        )
+        .expect("advance actions");
         assert!(!actions.iter().any(|action| {
             matches!(
                 action,
@@ -2827,8 +3392,14 @@ mod tests {
         .expect("apply completion");
         assert_eq!(completion.status_label, "success_without_changes");
         assert_eq!(registry["tasks"][0]["state"], "merged");
-        let actions =
-            build_advance_actions(&registry, &HashSet::new(), "", None).expect("advance actions");
+        let actions = build_advance_actions(
+            &registry,
+            &HashSet::new(),
+            "",
+            None,
+            &crate::config::PhasesConfig::default(),
+        )
+        .expect("advance actions");
         assert!(!actions.iter().any(|action| {
             matches!(
                 action,

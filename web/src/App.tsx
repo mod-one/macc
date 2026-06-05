@@ -25,6 +25,9 @@ const WorktreeTerminal = lazy(() => import('./pages/ops/WorktreeTerminal'));
 const WorkerDetail = lazy(() => import('./pages/ops/WorkerDetail'));
 const Backups = lazy(() => import('./pages/ops/Backups'));
 const Git = lazy(() => import('./pages/ops/Git'));
+const Trust = lazy(() => import('./pages/ops/Trust'));
+const SkillRunner = lazy(() => import('./pages/ops/SkillRunner'));
+const SkillsCatalog = lazy(() => import('./pages/ops/SkillsCatalog'));
 const Help = lazy(() => import('./pages/Help'));
 const About = lazy(() => import('./pages/About'));
 
@@ -68,6 +71,9 @@ const App: React.FC = () => {
             <Route path="logs" element={<Logs />} />
             <Route path="backups" element={<Backups />} />
             <Route path="git" element={<Git />} />
+            <Route path="trust" element={<Trust />} />
+            <Route path="skill-runner" element={<SkillRunner />} />
+            <Route path="skills-catalog" element={<SkillsCatalog />} />
           </Route>
 
           {/* Utility / Info */}

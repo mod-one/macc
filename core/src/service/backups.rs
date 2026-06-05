@@ -16,7 +16,11 @@ pub fn list(paths: &ProjectPaths, user: bool, ui: &dyn BackupsUi) -> Result<()> 
     for set in sets {
         let id = set.file_name().and_then(|v| v.to_str()).unwrap_or_default();
         let files = crate::domain::backups::count_files_recursive(&set)?;
-        ui.info(&format!("  - {} ({} file(s))", id, files));
+        let user_flag = if user { " --user" } else { "" };
+        ui.info(&format!(
+            "  - {} ({} file(s)) | Restore via: macc restore --backup {}{}",
+            id, files, id, user_flag
+        ));
     }
     Ok(())
 }
@@ -72,6 +76,24 @@ pub fn restore(
             ui.info(&format!("  - {}", rel.display()));
         }
         return Ok(());
+    }
+
+    if !yes {
+        let mut dummy_plan = crate::plan::ActionPlan::new();
+        for file in &files {
+            if let Ok(rel) = file.strip_prefix(&set) {
+                dummy_plan.add_action(crate::plan::Action::WriteFile {
+                    path: target_root.join(rel).to_string_lossy().into_owned(),
+                    content: vec![],
+                    scope: if user {
+                        crate::plan::Scope::User
+                    } else {
+                        crate::plan::Scope::Project
+                    },
+                });
+            }
+        }
+        crate::ops_motif::print_trust_review_card(paths, &dummy_plan, user);
     }
 
     if !yes && !ui.confirm("Proceed with restore [y/N]? ")? {

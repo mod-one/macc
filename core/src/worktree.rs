@@ -34,6 +34,7 @@ pub struct WorktreeCreateResult {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct WorktreeMetadata {
     pub id: String,
+    pub slug: String,
     pub tool: String,
     pub scope: Option<String>,
     pub feature: Option<String>,
@@ -67,12 +68,11 @@ pub fn create_worktrees(
     })?;
 
     let mut results = Vec::new();
-    let suffix = generate_suffix();
     for idx in 1..=spec.count {
         let id = if spec.count == 1 {
-            format!("{}-{}", spec.slug, suffix)
+            spec.slug.clone()
         } else {
-            format!("{}-{}-{:02}", spec.slug, suffix, idx)
+            format!("{}-{:02}", spec.slug, idx)
         };
         let branch = format!("ai/{}/{}", spec.tool, id);
         let path = base_dir.join(&id);
@@ -83,6 +83,7 @@ pub fn create_worktrees(
             &path,
             WorktreeMetadata {
                 id: id.clone(),
+                slug: spec.slug.clone(),
                 tool: spec.tool.clone(),
                 scope: spec.scope.clone(),
                 feature: spec.feature.clone(),
@@ -209,6 +210,8 @@ pub fn write_tool_json(repo_root: &Path, worktree_path: &Path, tool_id: &str) ->
     let canonical = load_tool_runtime_config(repo_root, worktree_path)?;
     let placeholders = resolve_runtime_placeholders(&spec, &canonical);
     apply_runtime_placeholders(&mut runtime, &placeholders);
+    // Merge user model_tiers overrides from macc.yaml on top of spec defaults.
+    apply_user_model_tiers(&mut runtime, &canonical, &spec.id);
 
     let worktree_paths = ProjectPaths::from_root(worktree_path);
     let _ = crate::ensure_embedded_automation_scripts(&worktree_paths)?;
@@ -350,6 +353,29 @@ fn replace_placeholders(value: &str, placeholders: &BTreeMap<String, String>) ->
         rendered = rendered.replace(&format!("{{{}}}", key), replacement);
     }
     rendered
+}
+
+/// Merge user-specified model_tiers overrides from macc.yaml into the runtime config.
+/// User config (`tools.config.<tool>.model_tiers`) takes precedence over spec defaults.
+fn apply_user_model_tiers(
+    runtime: &mut crate::tool::ToolRuntimeConfig,
+    canonical: &CanonicalConfig,
+    tool_id: &str,
+) {
+    let user_tiers = canonical
+        .tools
+        .config
+        .get(tool_id)
+        .and_then(|cfg| cfg.get("model_tiers"))
+        .and_then(|v| v.as_object());
+
+    let Some(user_tiers) = user_tiers else { return };
+
+    for (tier_name, tier_val) in user_tiers {
+        if let Ok(tier) = serde_json::from_value::<crate::tool::ModelTierSpec>(tier_val.clone()) {
+            runtime.model_tiers.insert(tier_name.clone(), tier);
+        }
+    }
 }
 
 pub fn ensure_performer(worktree_path: &Path) -> Result<PathBuf> {
@@ -568,15 +594,6 @@ fn write_scope_file(path: &Path, scope: &str) -> Result<()> {
     Ok(())
 }
 
-fn generate_suffix() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    format!("{:x}", nanos)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -622,6 +639,7 @@ mod tests {
             update: None,
             version_check: None,
             defaults: Some(json!({"model": "fallback-model"})),
+            model_tiers: Default::default(),
         };
         let canonical = CanonicalConfig {
             version: None,
@@ -639,6 +657,9 @@ mod tests {
             settings: crate::config::SettingsConfig::default(),
             process_ownership: None,
             mcp_templates: CanonicalConfig::default().mcp_templates,
+            skills: None,
+            context: None,
+            prd_generation: None,
         };
 
         assert_eq!(
@@ -684,8 +705,12 @@ mod tests {
                     discover: None,
                     id_strategy: None,
                 }),
+                effort_flag: None,
+                model_config: None,
+                effort_config: None,
             },
             defaults: None,
+            model_tiers: Default::default(),
         };
         let placeholders = BTreeMap::from([("model".to_string(), "gpt-5.2-codex".to_string())]);
 

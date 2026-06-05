@@ -38,11 +38,6 @@ pub enum CoordinatorCommand {
     SyncRegistry,
     /// Reconcile task states from commit history on the reference branch.
     SyncPrd,
-    /// AI-powered audit: enrich prd.json notes from commit history.
-    AuditPrd {
-        tool: Option<String>,
-        dry_run: bool,
-    },
     GetStatus,
     ReconcileRuntime,
     CleanupMaintenance,
@@ -144,10 +139,22 @@ pub enum CoordinatorCommand {
         tool: String,
     },
     Stop {
+        drain: bool,
         graceful: bool,
+        force: bool,
         remove_worktrees: bool,
         remove_branches: bool,
         reason: String,
+    },
+    Recover {
+        dry_run: bool,
+    },
+    Ps,
+    KillTask {
+        task_id: String,
+    },
+    AdoptTask {
+        task_id: String,
     },
 }
 
@@ -164,6 +171,27 @@ pub struct CoordinatorCommandRequest<'a> {
     pub logger: Option<&'a dyn CoordinatorLog>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PsProcessEntry {
+    pub task_id: String,
+    pub claim_id: String,
+    pub tool: String,
+    pub pid: i64,
+    pub pgid: i64,
+    pub status: String,
+    pub heartbeat: String,
+    pub worktree: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RecoveryReportEntry {
+    pub task_id: String,
+    pub situation: String,
+    pub classification: String,
+    pub action: String,
+    pub mutated: bool,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct CoordinatorCommandResult {
     pub status: Option<CoordinatorStatus>,
@@ -173,8 +201,9 @@ pub struct CoordinatorCommandResult {
     pub exported_events_path: Option<PathBuf>,
     pub removed_worktrees: Option<usize>,
     pub selected_task: Option<SelectedTask>,
-    pub audit_prd_report: Option<crate::coordinator::prd_auditor::AuditPrdReport>,
     pub tool_cooldowns: Option<Vec<ToolCooldownEntry>>,
+    pub processes: Option<Vec<PsProcessEntry>>,
+    pub recovery_report: Option<Vec<RecoveryReportEntry>>,
 }
 
 #[derive(Debug, Clone)]
@@ -228,7 +257,6 @@ pub fn coordinator_command_display_name(command: &CoordinatorCommand) -> &'stati
         CoordinatorCommand::AdvanceTasks => "advance",
         CoordinatorCommand::SyncRegistry => "sync",
         CoordinatorCommand::SyncPrd => "sync-prd",
-        CoordinatorCommand::AuditPrd { .. } => "audit-prd",
         CoordinatorCommand::GetStatus => "status",
         CoordinatorCommand::ReconcileRuntime => "reconcile",
         CoordinatorCommand::CleanupMaintenance => "cleanup",
@@ -259,6 +287,10 @@ pub fn coordinator_command_display_name(command: &CoordinatorCommand) -> &'stati
         CoordinatorCommand::ToolCooldownSet { .. } => "tool-cooldown-set",
         CoordinatorCommand::ToolCooldownClear { .. } => "tool-cooldown-clear",
         CoordinatorCommand::Stop { .. } => "stop",
+        CoordinatorCommand::Recover { .. } => "recover",
+        CoordinatorCommand::Ps => "ps",
+        CoordinatorCommand::KillTask { .. } => "kill",
+        CoordinatorCommand::AdoptTask { .. } => "adopt",
     }
 }
 
@@ -442,8 +474,11 @@ pub fn coordinator_command_invocation(
         | CoordinatorCommand::RunCycle
         | CoordinatorCommand::GetStatus
         | CoordinatorCommand::ResumePausedRun
-        | CoordinatorCommand::AuditPrd { .. }
-        | CoordinatorCommand::Stop { .. } => {
+        | CoordinatorCommand::Stop { .. }
+        | CoordinatorCommand::Recover { .. }
+        | CoordinatorCommand::Ps
+        | CoordinatorCommand::KillTask { .. }
+        | CoordinatorCommand::AdoptTask { .. } => {
             return Err(MaccError::Validation(format!(
                 "Coordinator command '{}' is not available as a managed process invocation",
                 coordinator_command_display_name(command)
@@ -456,7 +491,9 @@ pub fn coordinator_command_invocation(
 pub fn coordinator_command_from_name(
     action: &str,
     extra_args: &[String],
+    drain: bool,
     graceful: bool,
+    force: bool,
     remove_worktrees: bool,
     remove_branches: bool,
 ) -> Result<CoordinatorCommand> {
@@ -468,7 +505,6 @@ pub fn coordinator_command_from_name(
         "resume" => Ok(CoordinatorCommand::ResumePausedRun),
         "sync" => Ok(CoordinatorCommand::SyncRegistry),
         "sync-prd" => Ok(CoordinatorCommand::SyncPrd),
-        "audit-prd" => Ok(parse_audit_prd_command(extra_args)?),
         "status" => Ok(CoordinatorCommand::GetStatus),
         "reconcile" => Ok(CoordinatorCommand::ReconcileRuntime),
         "cleanup" => Ok(CoordinatorCommand::CleanupMaintenance),
@@ -527,8 +563,23 @@ pub fn coordinator_command_from_name(
         "tool-cooldown-list" | "tool-cooldown" => Ok(CoordinatorCommand::ToolCooldownList),
         "tool-cooldown-set" => Ok(parse_tool_cooldown_set_command(extra_args)?),
         "tool-cooldown-clear" => Ok(parse_tool_cooldown_clear_command(extra_args)?),
+        "recover" => {
+            let dry_run = parse_recover_args(extra_args)?;
+            Ok(CoordinatorCommand::Recover { dry_run })
+        }
+        "ps" => Ok(CoordinatorCommand::Ps),
+        "kill" => {
+            let task_id = parse_task_id_arg(extra_args, "kill")?;
+            Ok(CoordinatorCommand::KillTask { task_id })
+        }
+        "adopt" => {
+            let task_id = parse_task_id_arg(extra_args, "adopt")?;
+            Ok(CoordinatorCommand::AdoptTask { task_id })
+        }
         "stop" => Ok(CoordinatorCommand::Stop {
+            drain,
             graceful,
+            force,
             remove_worktrees,
             remove_branches,
             reason: "manual stop".to_string(),
@@ -661,16 +712,6 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
                 request.env_cfg,
                 request.logger,
             )?;
-        }
-        CoordinatorCommand::AuditPrd { tool, dry_run } => {
-            result.audit_prd_report = Some(coordinator_audit_prd(
-                paths,
-                request.coordinator_cfg,
-                request.env_cfg,
-                request.logger,
-                tool.as_deref(),
-                dry_run,
-            )?);
         }
         CoordinatorCommand::GetStatus => {
             result.status = Some(get_coordinator_status(paths)?);
@@ -986,36 +1027,382 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
             result.tool_cooldowns = Some(tool_cooldown_list(paths)?);
         }
         CoordinatorCommand::Stop {
+            drain,
             graceful,
+            force,
             remove_worktrees,
             remove_branches,
             reason,
         } => {
-            coordinator_stop(paths, &reason)?;
-            coordinator_reconcile(
-                paths,
-                request.env_cfg,
-                request.coordinator_cfg,
-                request.logger,
-            )?;
-            coordinator_cleanup(paths, request.logger)?;
-            coordinator_unlock(
-                engine,
-                paths,
-                request.coordinator_cfg,
-                request.env_cfg,
-                &[
-                    "--all".to_string(),
-                    "--unlock-state".to_string(),
-                    "blocked".to_string(),
-                ],
-            )?;
-            result.removed_worktrees = Some(handle_stop_cleanup(
-                paths,
-                graceful,
-                remove_worktrees,
-                remove_branches,
-            )?);
+            let storage_paths =
+                crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(paths);
+            let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
+
+            if drain {
+                let mut active_task_ids = Vec::new();
+                if let Ok(snapshot) = sqlite.load_snapshot() {
+                    for task in snapshot.registry.tasks {
+                        if task.state == "claimed"
+                            || task.state == "in_progress"
+                            || task.state == "changes_requested"
+                            || task.state == "queued"
+                        {
+                            active_task_ids.push(task.id);
+                        }
+                    }
+                }
+                let snapshot_json =
+                    serde_json::to_string(&active_task_ids).unwrap_or_else(|_| "[]".to_string());
+                sqlite.set_coordinator_control(
+                    &crate::coordinator_storage::CoordinatorControl {
+                        mode: "draining".to_string(),
+                        requested_at: Some(chrono::Utc::now().to_rfc3339()),
+                        requested_by: Some("cli".to_string()),
+                        drain_snapshot_json: Some(snapshot_json),
+                        force_grace_seconds: Some(10),
+                        cleanup_after_force: Some(false),
+                        reason: Some(reason.clone()),
+                    },
+                )?;
+                if let Some(log) = request.logger {
+                    let _ = log.note("Coordinator transitioned to draining mode.".to_string());
+                }
+            } else if force {
+                sqlite.set_coordinator_control(
+                    &crate::coordinator_storage::CoordinatorControl {
+                        mode: "force_stopping".to_string(),
+                        requested_at: Some(chrono::Utc::now().to_rfc3339()),
+                        requested_by: Some("cli".to_string()),
+                        drain_snapshot_json: None,
+                        force_grace_seconds: Some(10),
+                        cleanup_after_force: Some(remove_worktrees),
+                        reason: Some(reason.clone()),
+                    },
+                )?;
+
+                let mut term_count = 0;
+                let mut kill_count = 0;
+                let mut aborted_count = 0;
+
+                if let Ok(db_pids) = sqlite.get_running_task_pids() {
+                    for (task_id, pid) in db_pids {
+                        if let Some(log) = request.logger {
+                            let _ = log.note(format!(
+                                "Force-terminating performer process group {} for task {}...",
+                                pid, task_id
+                            ));
+                        }
+                        #[cfg(unix)]
+                        if pid > 0 {
+                            unsafe {
+                                let _ = libc::killpg(pid as libc::pid_t, libc::SIGTERM);
+                            }
+                        }
+                        term_count += 1;
+
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+
+                        let is_running = crate::coordinator::helpers::is_pid_running(pid);
+                        if is_running {
+                            #[cfg(unix)]
+                            if pid > 0 {
+                                unsafe {
+                                    let _ = libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+                                }
+                            }
+                            kill_count += 1;
+                        }
+
+                        let _ = crate::coordinator::helpers::append_coordinator_event_with_severity(
+                            &paths.root,
+                            "task_blocked",
+                            &task_id,
+                            "dev",
+                            "aborted_by_operator",
+                            "Task aborted by operator force-stop",
+                            "warning",
+                        );
+                        aborted_count += 1;
+                    }
+                }
+
+                let _ = crate::service::coordinator::coordinator_stop_managed_command_process(
+                    paths, false,
+                );
+
+                if remove_worktrees {
+                    if let Some(log) = request.logger {
+                        let _ = log.note("Cleaning up worktrees...".to_string());
+                    }
+                    let _ = crate::service::worktree::remove_all_worktrees(
+                        &paths.root,
+                        remove_branches,
+                    );
+                    let _ = crate::prune_worktrees(&paths.root);
+                }
+
+                let term_exited = term_count - kill_count;
+                let worktree_msg = if remove_worktrees {
+                    "Worktrees were cleaned up."
+                } else {
+                    "Worktrees were preserved for inspection."
+                };
+
+                let output_lines = [
+                    "Force stop requested.".to_string(),
+                    "Dispatch disabled.".to_string(),
+                    format!("Sent SIGTERM to {} process groups.", term_count),
+                    format!("{} exited within 10s.", term_exited),
+                    format!(
+                        "Sent SIGKILL to {} remaining process group{}.",
+                        kill_count,
+                        if kill_count == 1 { "" } else { "s" }
+                    ),
+                    format!(
+                        "Marked {} task runtimes as aborted_by_operator.",
+                        aborted_count
+                    ),
+                    worktree_msg.to_string(),
+                    "Next: run `macc coordinator recover --dry-run`.".to_string(),
+                ];
+                result.runtime_status = Some(output_lines.join("\n"));
+            } else {
+                sqlite.set_coordinator_control(
+                    &crate::coordinator_storage::CoordinatorControl {
+                        mode: "graceful_stopping".to_string(),
+                        requested_at: Some(chrono::Utc::now().to_rfc3339()),
+                        requested_by: Some("cli".to_string()),
+                        drain_snapshot_json: None,
+                        force_grace_seconds: Some(10),
+                        cleanup_after_force: Some(false),
+                        reason: Some(reason.clone()),
+                    },
+                )?;
+
+                let _ = crate::service::coordinator::coordinator_stop_managed_command_process(
+                    paths, graceful,
+                );
+
+                if remove_worktrees {
+                    let _ = crate::service::worktree::remove_all_worktrees(
+                        &paths.root,
+                        remove_branches,
+                    );
+                    let _ = crate::prune_worktrees(&paths.root);
+                }
+            }
+        }
+        CoordinatorCommand::Ps => {
+            let storage_paths =
+                crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(paths);
+            let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
+            let snapshot = sqlite.load_snapshot()?;
+            let mut processes = Vec::new();
+
+            let db_pids: Vec<i64> = snapshot
+                .registry
+                .tasks
+                .iter()
+                .filter_map(|t| t.runtime_pid())
+                .collect();
+            let orphaned_pids = find_orphaned_pids_local(&paths.root, &db_pids)?;
+
+            for task in &snapshot.registry.tasks {
+                let pid_opt = task.runtime_pid();
+                let is_active = task.is_active();
+                if pid_opt.is_some() || is_active {
+                    let pid = pid_opt.unwrap_or(0);
+                    let pgid = pid;
+                    let is_alive = if pid > 0 {
+                        crate::coordinator::helpers::is_pid_running(pid)
+                    } else {
+                        false
+                    };
+
+                    let mut heartbeat_str = "none".to_string();
+                    let mut is_stale = false;
+                    if let Some(ref lh) = task.task_runtime.last_heartbeat {
+                        if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(lh) {
+                            let elapsed = chrono::Utc::now().timestamp()
+                                - parsed.with_timezone(&chrono::Utc).timestamp();
+                            heartbeat_str = format!("{}s ago", elapsed);
+                            if elapsed > 180 {
+                                is_stale = true;
+                            }
+                        }
+                    }
+
+                    let status = if is_alive {
+                        if is_stale {
+                            "stale".to_string()
+                        } else {
+                            "alive".to_string()
+                        }
+                    } else if pid > 0 {
+                        "dead".to_string()
+                    } else {
+                        "none".to_string()
+                    };
+
+                    processes.push(PsProcessEntry {
+                        task_id: task.id.clone(),
+                        claim_id: task
+                            .task_runtime
+                            .active_session_id
+                            .clone()
+                            .unwrap_or_else(|| "-".to_string()),
+                        tool: task.tool.clone().unwrap_or_else(|| "-".to_string()),
+                        pid,
+                        pgid,
+                        status,
+                        heartbeat: heartbeat_str,
+                        worktree: task.worktree_path().unwrap_or("-").to_string(),
+                    });
+                }
+            }
+
+            for pid in orphaned_pids {
+                processes.push(PsProcessEntry {
+                    task_id: "-".to_string(),
+                    claim_id: "-".to_string(),
+                    tool: "-".to_string(),
+                    pid,
+                    pgid: pid,
+                    status: "orphaned".to_string(),
+                    heartbeat: "none".to_string(),
+                    worktree: "-".to_string(),
+                });
+            }
+
+            result.processes = Some(processes);
+        }
+        CoordinatorCommand::Recover { dry_run } => {
+            let storage_paths =
+                crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(paths);
+            let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
+
+            // ── Meta: epoch bump and coordinator run record ───────────────
+            let last_run = sqlite.get_active_coordinator_run().unwrap_or(None);
+            let current_epoch = last_run.map(|r| r.epoch).unwrap_or(0);
+            let next_epoch = current_epoch + 1;
+
+            if !dry_run {
+                let run_id = crate::service::project::ensure_coordinator_run_id();
+                let hostname =
+                    std::env::var("HOSTNAME").unwrap_or_else(|_| "localhost".to_string());
+                let current_run = crate::coordinator_storage::CoordinatorRun {
+                    run_id: run_id.clone(),
+                    pid: std::process::id() as i64,
+                    hostname,
+                    started_at: chrono::Utc::now().to_rfc3339(),
+                    last_tick_at: Some(chrono::Utc::now().to_rfc3339()),
+                    stopped_at: None,
+                    status: "running".to_string(),
+                    epoch: next_epoch,
+                    version: env!("CARGO_PKG_VERSION").to_string(),
+                    stop_reason: None,
+                };
+                sqlite.upsert_coordinator_run(&current_run)?;
+            }
+
+            // ── §11.2 canonical classification via execute_startup_recovery_sweep ──
+            let reference_branch = request
+                .env_cfg
+                .reference_branch
+                .as_deref()
+                .or_else(|| {
+                    request
+                        .coordinator_cfg
+                        .and_then(|c| c.reference_branch.as_deref())
+                })
+                .unwrap_or("main");
+
+            let sweep_entries = crate::coordinator::state_runtime::execute_startup_recovery_sweep(
+                &paths.root,
+                reference_branch,
+                dry_run,
+                None,
+            )
+            .map_err(|e| {
+                if matches!(&e, MaccError::Coordinator { code, .. } if *code == crate::coordinator::error_normalizer::E412_RECOVERY_CLASSIFICATION_FAILED) {
+                    e
+                } else {
+                    MaccError::Coordinator {
+                        code: crate::coordinator::error_normalizer::E412_RECOVERY_CLASSIFICATION_FAILED,
+                        message: format!("Startup recovery could not safely classify runtime state: {}", e),
+                    }
+                }
+            })?;
+
+            // Map StartupRecoveryEntry → RecoveryReportEntry (identical fields)
+            let reports: Vec<RecoveryReportEntry> = sweep_entries
+                .into_iter()
+                .map(|e| RecoveryReportEntry {
+                    task_id: e.task_id,
+                    situation: e.situation,
+                    classification: e.classification,
+                    action: e.action,
+                    mutated: e.mutated,
+                })
+                .collect();
+
+            result.recovery_report = Some(reports);
+        }
+        CoordinatorCommand::KillTask { task_id } => {
+            let storage_paths =
+                crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(paths);
+            let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
+            let mut snapshot = sqlite.load_snapshot()?;
+            if let Some(task) = snapshot.registry.find_task_mut(&task_id) {
+                if let Some(pid) = task.runtime_pid() {
+                    if let Some(logger) = request.logger {
+                        let _ = logger.note(format!(
+                            "Killing process group {} for task {}...",
+                            pid, task_id
+                        ));
+                    }
+                    coordinator_runtime::terminate_process_group_gracefully(pid, 10);
+                }
+                task.state = "blocked".to_string();
+                task.task_runtime.status = Some("idle".to_string());
+                task.clear_assignment();
+                sqlite.save_snapshot(&snapshot)?;
+                if let Some(logger) = request.logger {
+                    let _ = logger.note(format!(
+                        "Task {} process terminated and state reset to blocked.",
+                        task_id
+                    ));
+                }
+            } else {
+                return Err(MaccError::Validation(format!(
+                    "Task {} not found in registry",
+                    task_id
+                )));
+            }
+        }
+        CoordinatorCommand::AdoptTask { task_id } => {
+            let storage_paths =
+                crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(paths);
+            let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
+            let mut snapshot = sqlite.load_snapshot()?;
+            if let Some(task) = snapshot.registry.find_task_mut(&task_id) {
+                task.state = "in_progress".to_string();
+                task.task_runtime.status = Some("running".to_string());
+                task.task_runtime.last_heartbeat =
+                    Some(crate::coordinator::helpers::now_iso_coordinator());
+                sqlite.save_snapshot(&snapshot)?;
+                if let Some(logger) = request.logger {
+                    let _ = logger.note(format!(
+                        "Task {} successfully adopted by coordinator.",
+                        task_id
+                    ));
+                }
+            } else {
+                return Err(MaccError::Validation(format!(
+                    "Task {} not found in registry",
+                    task_id
+                )));
+            }
         }
     }
     Ok(result)
@@ -1053,20 +1440,6 @@ pub fn coordinator_run(
             }
         }
     }
-}
-
-fn handle_stop_cleanup(
-    paths: &ProjectPaths,
-    _graceful: bool,
-    remove_worktrees: bool,
-    remove_branches: bool,
-) -> Result<usize> {
-    if !remove_worktrees {
-        return Ok(0);
-    }
-    let removed = crate::service::worktree::remove_all_worktrees(&paths.root, remove_branches)?;
-    crate::prune_worktrees(&paths.root)?;
-    Ok(removed)
 }
 
 pub fn coordinator_stop(paths: &ProjectPaths, reason: &str) -> Result<()> {
@@ -1601,206 +1974,6 @@ pub fn coordinator_sync_unmerged_branches(
     Ok(results)
 }
 
-/// Build a human-readable sync-prd summary for inclusion in the audit prompt.
-fn build_sync_summary_for_prompt(
-    report: &crate::coordinator::commit_reconciler::ReconcileReport,
-) -> String {
-    if report.reconciled.is_empty() {
-        return format!(
-            "{} commit(s) scanned — no task states changed.",
-            report.commits_scanned
-        );
-    }
-    let mut s = format!(
-        "{} commit(s) scanned — {} task(s) transitioned to `merged`:\n",
-        report.commits_scanned,
-        report.reconciled.len()
-    );
-    for entry in &report.reconciled {
-        s.push_str(&format!(
-            "- `{}` ({} → merged) via commit `{}`\n",
-            entry.task_id,
-            entry.previous_state,
-            &entry.matched_commit_sha[..7.min(entry.matched_commit_sha.len())]
-        ));
-    }
-    s
-}
-
-/// AI-powered PRD audit: gathers commit context for completed tasks and
-/// builds a prompt for an LLM to update `prd.json`.
-///
-/// When `tool` is provided, the prompt is sent to the tool via its performer
-/// spec. When `dry_run` is true (or no tool given), only the prompt is
-/// returned without invoking any tool.
-pub fn coordinator_audit_prd(
-    paths: &ProjectPaths,
-    coordinator_cfg: Option<&CoordinatorConfig>,
-    env_cfg: &CoordinatorEnvConfig,
-    logger: Option<&dyn CoordinatorLog>,
-    tool: Option<&str>,
-    dry_run: bool,
-) -> Result<crate::coordinator::prd_auditor::AuditPrdReport> {
-    use crate::coordinator::prd_auditor;
-
-    if let Some(log) = logger {
-        let _ = log.note("- Audit PRD: running sync-prd before audit".to_string());
-    }
-
-    let reference_branch = env_cfg
-        .reference_branch
-        .as_deref()
-        .or_else(|| coordinator_cfg.and_then(|c| c.reference_branch.as_deref()))
-        .unwrap_or("main");
-
-    // Run sync-prd first and capture the reconcile result for the prompt
-    let sync_report = coordinator_sync_prd(paths, coordinator_cfg, env_cfg, logger)?;
-    let sync_summary = build_sync_summary_for_prompt(&sync_report);
-
-    if let Some(log) = logger {
-        let _ = log.note("- Audit PRD: gathering commit context for completed tasks".to_string());
-    }
-
-    // Load the PRD file
-    let prd_path_buf = env_cfg
-        .prd
-        .as_ref()
-        .map(std::path::PathBuf::from)
-        .or_else(|| coordinator_cfg.and_then(|c| c.prd_file.as_ref().map(std::path::PathBuf::from)))
-        .unwrap_or_else(|| paths.root.join("prd.json"));
-
-    if !prd_path_buf.exists() {
-        return Err(MaccError::Validation(format!(
-            "PRD file not found: {}. Specify via --prd or automation.coordinator.prd in config.",
-            prd_path_buf.display()
-        )));
-    }
-
-    // Compute a repo-relative path string for the agent prompt
-    let prd_path_rel = prd_path_buf
-        .strip_prefix(&paths.root)
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| prd_path_buf.to_string_lossy().into_owned());
-
-    let prd_json = std::fs::read_to_string(&prd_path_buf).map_err(|e| MaccError::Io {
-        path: prd_path_buf.display().to_string(),
-        action: "read PRD file for audit".into(),
-        source: e,
-    })?;
-
-    // Load task registry (after sync so states are up to date)
-    let storage_mode = coordinator_engine::resolve_storage_mode(env_cfg, coordinator_cfg)?;
-    let store_paths = CoordinatorStoragePaths::from_project_paths(paths);
-    let snapshot = match storage_mode {
-        CoordinatorStorageMode::Json => JsonStorage::new(store_paths.clone()).load_snapshot()?,
-        _ => SqliteStorage::new(store_paths.clone()).load_snapshot()?,
-    };
-
-    // Build the audit report with prompt
-    let report = prd_auditor::prepare_audit(
-        &paths.root,
-        &prd_json,
-        &prd_path_rel,
-        &snapshot.registry,
-        reference_branch,
-        true, // include diff stats
-        Some(sync_summary),
-    )?;
-
-    if !report.prompt_generated {
-        if let Some(log) = logger {
-            let _ = log.note(
-                "- Audit PRD: no completed tasks with commits or todo tasks found, nothing to audit"
-                    .to_string(),
-            );
-        }
-        return Ok(report);
-    }
-
-    if let Some(log) = logger {
-        let _ = log.note(format!(
-            "- Audit PRD: {} completed task(s) with context, {} todo task(s)",
-            report.completed_with_context, report.todo_tasks
-        ));
-    }
-
-    // If dry_run or no tool, just return the prompt
-    if dry_run || tool.is_none() {
-        if let Some(log) = logger {
-            let mode = if dry_run {
-                "dry-run"
-            } else {
-                "no tool specified"
-            };
-            let _ = log.note(format!(
-                "- Audit PRD: prompt generated ({}) — use --tool <id> to invoke an AI tool",
-                mode
-            ));
-        }
-        return Ok(report);
-    }
-
-    // Invoke the tool
-    let tool_id = tool.unwrap();
-    invoke_audit_tool(
-        paths,
-        tool_id,
-        report.prompt.as_deref().unwrap_or(""),
-        logger,
-    )?;
-
-    if let Some(log) = logger {
-        let _ = log.note(format!(
-            "- Audit PRD: tool '{}' invoked successfully",
-            tool_id
-        ));
-    }
-
-    Ok(report)
-}
-
-/// Invoke an AI tool with the audit prompt via its performer spec.
-fn invoke_audit_tool(
-    paths: &ProjectPaths,
-    tool_id: &str,
-    prompt: &str,
-    logger: Option<&dyn CoordinatorLog>,
-) -> Result<()> {
-    use crate::tool::ToolSpecLoader;
-
-    let loader = ToolSpecLoader::new(ToolSpecLoader::default_search_paths(&paths.root));
-    let (specs, _) = loader.load_all_with_embedded();
-
-    let spec = specs.iter().find(|s| s.id == tool_id).ok_or_else(|| {
-        MaccError::Validation(format!(
-            "Tool '{}' not found. Available tools: {}",
-            tool_id,
-            specs
-                .iter()
-                .map(|s| s.id.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ))
-    })?;
-
-    let performer = spec.performer.as_ref().ok_or_else(|| {
-        MaccError::Validation(format!(
-            "Tool '{}' has no performer configuration; cannot invoke for audit.",
-            tool_id
-        ))
-    })?;
-
-    if let Some(log) = logger {
-        let _ = log.note(format!(
-            "- Audit PRD: invoking tool '{}' (command: {})",
-            tool_id, performer.command
-        ));
-    }
-
-    // Delegate to the shared context tool invocation
-    crate::service::context::invoke_tool_with_prompt(paths, performer, prompt, logger)
-}
-
 pub fn coordinator_unlock<E: crate::engine::Engine + ?Sized>(
     engine: &E,
     paths: &ProjectPaths,
@@ -1972,26 +2145,6 @@ pub fn coordinator_retry_phase<E: crate::engine::Engine + ?Sized>(
     Ok(())
 }
 
-fn parse_audit_prd_command(args: &[String]) -> Result<CoordinatorCommand> {
-    let mut tool: Option<String> = None;
-    let mut dry_run = false;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--tool" => {
-                i += 1;
-                tool = args.get(i).cloned();
-            }
-            "--dry-run" => {
-                dry_run = true;
-            }
-            _ => {}
-        }
-        i += 1;
-    }
-    Ok(CoordinatorCommand::AuditPrd { tool, dry_run })
-}
-
 fn parse_retry_phase_args(args: &[String]) -> Result<(String, String, bool)> {
     let mut task_id = None;
     let mut phase = None;
@@ -2086,6 +2239,8 @@ fn retry_dev_phase<E: crate::engine::Engine + ?Sized>(
     let current_exe = std::env::current_exe().map_err(|e| {
         MaccError::Validation(format!("Failed to resolve current executable path: {}", e))
     })?;
+    let claim_id = task.task_runtime.claim_id.clone().unwrap_or_default();
+    let epoch = task.task_runtime.coordinator_epoch.unwrap_or(0);
     let pid = coordinator_runtime::spawn_performer_job(
         &current_exe,
         &paths.root,
@@ -2096,6 +2251,9 @@ fn retry_dev_phase<E: crate::engine::Engine + ?Sized>(
         &mut state.join_set,
         env_cfg.stale_in_progress_seconds.unwrap_or(0),
         state.performer_ipc_addr.as_deref(),
+        &claim_id,
+        epoch,
+        &[], // run-cycle path: routing env not computed here
     )?;
     state.active_jobs.insert(
         task_id.to_string(),
@@ -2699,6 +2857,8 @@ mod tests {
             false,
             false,
             false,
+            false,
+            false,
         )
         .expect("retry-phase should parse");
         assert_eq!(
@@ -2716,6 +2876,8 @@ mod tests {
         let command = coordinator_command_from_name(
             "storage-sync",
             &["--direction".to_string(), "verify".to_string()],
+            false,
+            false,
             false,
             false,
             false,
@@ -2762,6 +2924,8 @@ mod tests {
             false,
             false,
             false,
+            false,
+            false,
         )
         .expect("state-set-runtime should parse");
         assert_eq!(
@@ -2780,8 +2944,9 @@ mod tests {
 
     #[test]
     fn state_counts_action_maps_to_typed_command() {
-        let command = coordinator_command_from_name("state-counts", &[], false, false, false)
-            .expect("state-counts should parse");
+        let command =
+            coordinator_command_from_name("state-counts", &[], false, false, false, false, false)
+                .expect("state-counts should parse");
         assert_eq!(command, CoordinatorCommand::StateCounts);
     }
 
@@ -2795,6 +2960,8 @@ mod tests {
                 "--to".to_string(),
                 "claimed".to_string(),
             ],
+            false,
+            false,
             false,
             false,
             false,
@@ -2822,6 +2989,8 @@ mod tests {
             false,
             false,
             false,
+            false,
+            false,
         )
         .expect("runtime-status-from-event should parse");
         assert_eq!(
@@ -2846,6 +3015,8 @@ mod tests {
             false,
             false,
             false,
+            false,
+            false,
         )
         .expect("select-ready-task should parse");
         match command {
@@ -2856,4 +3027,72 @@ mod tests {
             other => panic!("unexpected command: {:?}", other),
         }
     }
+}
+
+fn parse_task_id_arg(args: &[String], cmd: &str) -> Result<String> {
+    let mut task_id = None;
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--task" {
+            if i + 1 >= args.len() {
+                return Err(MaccError::Validation(format!(
+                    "{} --task requires a value",
+                    cmd
+                )));
+            }
+            task_id = Some(args[i + 1].clone());
+            i += 2;
+        } else {
+            return Err(MaccError::Validation(format!(
+                "Unknown {} arg: {}",
+                cmd, args[i]
+            )));
+        }
+    }
+    task_id.ok_or_else(|| MaccError::Validation(format!("{} requires --task <task_id>", cmd)))
+}
+
+fn parse_recover_args(args: &[String]) -> Result<bool> {
+    let mut dry_run = false;
+    for arg in args {
+        if arg == "--dry-run" {
+            dry_run = true;
+        } else {
+            return Err(MaccError::Validation(format!(
+                "Unknown recover arg: {}",
+                arg
+            )));
+        }
+    }
+    Ok(dry_run)
+}
+
+fn find_orphaned_pids_local(repo_root: &std::path::Path, db_pids: &[i64]) -> Result<Vec<i64>> {
+    let mut candidate_pids = std::collections::HashSet::new();
+    if let Ok(pids) = crate::coordinator::helpers::pgrep_pids("performer") {
+        for pid in pids {
+            candidate_pids.insert(pid);
+        }
+    }
+    if let Ok(pids) = crate::coordinator::helpers::pgrep_pids("macc") {
+        for pid in pids {
+            candidate_pids.insert(pid);
+        }
+    }
+
+    let mut orphaned = Vec::new();
+    let current_pid = std::process::id() as i32;
+
+    for pid in candidate_pids {
+        if pid == current_pid {
+            continue;
+        }
+        if db_pids.contains(&(pid as i64)) {
+            continue;
+        }
+        if crate::coordinator::helpers::pid_in_repo(pid, repo_root) {
+            orphaned.push(pid as i64);
+        }
+    }
+    Ok(orphaned)
 }

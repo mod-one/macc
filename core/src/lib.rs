@@ -2,6 +2,7 @@ pub mod automation;
 pub mod catalog;
 pub mod commit_message;
 pub mod config;
+pub mod context;
 pub mod coordinator;
 pub mod coordinator_storage;
 pub mod doctor;
@@ -10,14 +11,21 @@ pub mod engine;
 pub mod git;
 pub use config::migrate;
 pub mod mcp_json;
+pub mod onboarding;
+pub mod ops_motif;
 pub mod packages;
 pub mod plan;
+pub mod prd_generation;
 pub mod process_ownership;
 pub mod profile;
 pub mod resolve;
+pub mod runtime;
+pub mod save;
 pub mod security;
 pub mod service;
 pub mod skills;
+pub mod skills_catalog;
+pub mod skills_runner;
 mod structured_merge;
 pub mod supervisor;
 pub mod tool;
@@ -181,6 +189,93 @@ pub struct ClearReport {
     pub skipped: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ManagedPathKind {
+    SourceOfTruth,
+    PortableState,
+    RuntimeState,
+    DiagnosticLog,
+    Generated,
+    Cache,
+    Worktree,
+    Secret,
+    Unknown,
+}
+
+pub fn classify_path<P: AsRef<Path>>(path: P, paths: &ProjectPaths) -> ManagedPathKind {
+    let path = path.as_ref();
+    let abs_path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        paths.root.join(path)
+    };
+
+    let clean_path = abs_path.canonicalize().unwrap_or(abs_path);
+
+    if clean_path == paths.config_path {
+        return ManagedPathKind::SourceOfTruth;
+    }
+
+    if let Ok(rel) = clean_path.strip_prefix(&paths.root) {
+        let components: Vec<String> = rel
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
+            .collect();
+
+        if !components.is_empty() && components[0] == ".macc" {
+            if components.len() > 1 {
+                let sub = &components[1];
+                if sub == "cache" || sub == "download" {
+                    return ManagedPathKind::Cache;
+                }
+                if sub == "worktree" || sub == "worktrees" {
+                    return ManagedPathKind::Worktree;
+                }
+                if sub == "log" || sub == "logs" {
+                    return ManagedPathKind::DiagnosticLog;
+                }
+                if sub == "state" {
+                    return ManagedPathKind::PortableState;
+                }
+                if sub == "catalog" {
+                    return ManagedPathKind::PortableState;
+                }
+                if sub == "backups" {
+                    return ManagedPathKind::RuntimeState;
+                }
+                if sub == "tmp" {
+                    return ManagedPathKind::RuntimeState;
+                }
+                if sub == "skills" {
+                    return ManagedPathKind::Generated;
+                }
+                if sub == "automation" {
+                    return ManagedPathKind::Generated;
+                }
+            } else {
+                return ManagedPathKind::PortableState;
+            }
+        }
+
+        for comp in &components {
+            if comp == "cache" || comp == "download" {
+                return ManagedPathKind::Cache;
+            }
+            if comp == "worktree" || comp == "worktrees" || comp == ".worktrees" {
+                return ManagedPathKind::Worktree;
+            }
+            if comp == "node_modules" || comp == "vendor" {
+                return ManagedPathKind::Cache;
+            }
+            if comp == ".tmp" || comp == "tmp" {
+                return ManagedPathKind::RuntimeState;
+            }
+        }
+    }
+
+    ManagedPathKind::Unknown
+}
+
 #[derive(Debug, Clone)]
 pub struct ProjectPaths {
     pub root: PathBuf,
@@ -273,6 +368,16 @@ impl ProjectPaths {
 
     pub fn managed_paths_state_path(&self) -> PathBuf {
         self.macc_dir.join("state").join("managed_paths.json")
+    }
+
+    /// Path to the skills lockfile (spec §5.2).
+    pub fn skills_lock_path(&self) -> PathBuf {
+        self.macc_dir.join("skills.lock.json")
+    }
+
+    /// Root for the skills package cache (spec §8).
+    pub fn skills_cache_dir(&self) -> PathBuf {
+        self.macc_dir.join("cache")
     }
 }
 
@@ -469,6 +574,9 @@ pub fn init(paths: &ProjectPaths, force: bool) -> Result<()> {
             settings: config::SettingsConfig::default(),
             process_ownership: None,
             mcp_templates: config::builtin_mcp_templates(),
+            skills: None,
+            context: None,
+            prd_generation: None,
         };
         let yaml = default_config.to_yaml().map_err(|e| {
             MaccError::Validation(format!("Failed to serialize default config: {}", e))
@@ -595,12 +703,28 @@ pub fn build_plan(
         materialized_units,
     };
 
+    let mut context_sections = Vec::new();
+
     for tool_id in &resolved.tools.enabled {
         if let Some(adapter) = registry.get(tool_id) {
             let tool_plan = adapter.plan(&ctx)?;
             for action in tool_plan.actions {
                 total_plan.add_action(action);
             }
+            if let Ok(sections) = adapter.context_file_sections(&ctx) {
+                context_sections.extend(sections);
+            }
+        }
+    }
+
+    if !context_sections.is_empty() {
+        if let Some(orchestrator) = crate::tool::registry::AGENTS_MD_ORCHESTRATOR.get() {
+            let content = orchestrator(resolved, &context_sections);
+            total_plan.add_action(plan::Action::WriteFile {
+                path: "AGENTS.md".to_string(),
+                content: content.into_bytes(),
+                scope: plan::Scope::Project,
+            });
         }
     }
 
@@ -1296,6 +1420,37 @@ pub fn clear(paths: &ProjectPaths) -> Result<ClearReport> {
     }
 
     cleanup_empty_parents(paths, &removed_paths);
+
+    Ok(report)
+}
+
+pub fn clear_dry_run(paths: &ProjectPaths) -> Result<ClearReport> {
+    let mut managed = load_managed_paths(paths)?;
+
+    if let Some(rel) = relative_to_root(paths, &paths.managed_paths_state_path()) {
+        managed.insert(rel);
+    }
+    if let Some(parent) = paths.managed_paths_state_path().parent() {
+        if let Some(rel) = relative_to_root(paths, parent) {
+            managed.insert(rel);
+        }
+    }
+
+    let mut entries: Vec<String> = managed.into_iter().collect();
+    entries.sort_by(|a, b| {
+        let da = a.split('/').count();
+        let db = b.split('/').count();
+        db.cmp(&da).then_with(|| b.cmp(a))
+    });
+
+    let mut report = ClearReport::default();
+    for rel in entries {
+        let full = paths.root.join(&rel);
+        if !full.exists() {
+            continue;
+        }
+        report.removed += 1;
+    }
 
     Ok(report)
 }
@@ -2349,6 +2504,78 @@ mod tests {
         assert!(!nested.exists());
         assert!(!temp_dir.join("a/b").exists());
         assert!(!temp_dir.join("a").exists());
+
+        fs::remove_dir_all(&temp_dir).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn test_classify_path_kinds() -> Result<()> {
+        let temp_dir = std::env::temp_dir().join(format!("macc_classify_test_{}", uuid_v4_like()));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let paths = ProjectPaths::from_root(&temp_dir);
+
+        // 1. Config file (SourceOfTruth)
+        assert_eq!(
+            classify_path(&paths.config_path, &paths),
+            ManagedPathKind::SourceOfTruth
+        );
+
+        // 2. Cache dir (Cache)
+        assert_eq!(
+            classify_path(temp_dir.join(".macc/cache"), &paths),
+            ManagedPathKind::Cache
+        );
+        assert_eq!(
+            classify_path(temp_dir.join(".macc/cache/some_file"), &paths),
+            ManagedPathKind::Cache
+        );
+        assert_eq!(
+            classify_path(temp_dir.join("some/nested/node_modules/pkg"), &paths),
+            ManagedPathKind::Cache
+        );
+
+        // 3. Worktree dir (Worktree)
+        assert_eq!(
+            classify_path(temp_dir.join(".macc/worktrees"), &paths),
+            ManagedPathKind::Worktree
+        );
+        assert_eq!(
+            classify_path(temp_dir.join("some/nested/.worktrees"), &paths),
+            ManagedPathKind::Worktree
+        );
+
+        // 4. Log dir (DiagnosticLog)
+        assert_eq!(
+            classify_path(temp_dir.join(".macc/log"), &paths),
+            ManagedPathKind::DiagnosticLog
+        );
+
+        // 5. PortableState (state/catalog)
+        assert_eq!(
+            classify_path(temp_dir.join(".macc/state"), &paths),
+            ManagedPathKind::PortableState
+        );
+        assert_eq!(
+            classify_path(temp_dir.join(".macc/catalog"), &paths),
+            ManagedPathKind::PortableState
+        );
+
+        // 6. RuntimeState (backups/tmp)
+        assert_eq!(
+            classify_path(temp_dir.join(".macc/tmp"), &paths),
+            ManagedPathKind::RuntimeState
+        );
+        assert_eq!(
+            classify_path(temp_dir.join("my_temp_dir/tmp"), &paths),
+            ManagedPathKind::RuntimeState
+        );
+
+        // 7. Unknown
+        assert_eq!(
+            classify_path(temp_dir.join("random_user_file.txt"), &paths),
+            ManagedPathKind::Unknown
+        );
 
         fs::remove_dir_all(&temp_dir).ok();
         Ok(())

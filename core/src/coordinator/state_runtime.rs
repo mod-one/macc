@@ -132,12 +132,19 @@ fn is_pid_running(pid: i64) -> bool {
     if pid <= 0 {
         return false;
     }
-    std::process::Command::new("kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    #[cfg(unix)]
+    {
+        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
 }
 
 pub fn cleanup_dead_runtime_tasks_in_registry(
@@ -345,6 +352,383 @@ pub fn reconcile_registry_native(repo_root: &Path, heartbeat_grace_seconds: i64)
     )
 }
 
+/// One entry produced by the startup recovery sweep for a single task.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct StartupRecoveryEntry {
+    pub task_id: String,
+    /// Human-readable description of the situation observed.
+    pub situation: String,
+    /// §11.2 classification label.
+    pub classification: String,
+    /// Default action taken (or recommended if dry_run).
+    pub action: String,
+    /// Whether the registry was mutated for this task.
+    pub mutated: bool,
+}
+
+/// §11.1 Steps 7-10: Startup Recovery Sweep — canonical §11.2 classification
+///
+/// Inspects worktree state (step 7), Git branch and merge state (step 8),
+/// runs deterministic PRD reconciliation from commit history (step 9), and
+/// persists recovery decisions back to SQLite storage (step 10).
+///
+/// When `dry_run` is `true` the classification is performed and every entry is
+/// returned, but no task is mutated and nothing is written to storage.
+/// This is the mode used by `macc coordinator recover --dry-run`.
+///
+/// Must be called after dead-process cleanup and event replay, but before
+/// any new task dispatch.
+///
+/// Returns the list of classification entries produced, one per active task.
+pub fn execute_startup_recovery_sweep(
+    repo_root: &Path,
+    reference_branch: &str,
+    dry_run: bool,
+    logger: Option<&dyn Fn(String)>,
+) -> Result<Vec<StartupRecoveryEntry>> {
+    let project_paths = crate::ProjectPaths::from_root(repo_root);
+    let storage_paths =
+        crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&project_paths);
+    let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
+
+    let mut snapshot = sqlite
+        .load_snapshot()
+        .unwrap_or_else(|_| crate::coordinator_storage::CoordinatorSnapshot::empty());
+
+    // ── Step 9 — deterministic PRD reconciliation from commit history ──────
+    let commits =
+        crate::coordinator::commit_reconciler::read_commit_range(repo_root, None, reference_branch)
+            .unwrap_or_default();
+    let reconcile_report =
+        crate::coordinator::commit_reconciler::reconcile(&snapshot.registry, &commits);
+
+    let mut entries = Vec::new();
+    let mut changed = false;
+
+    enum MutationAction {
+        Merge,
+        Stale,
+        Blocked,
+        PhaseDone,
+        Requeue,
+    }
+
+    let mut proposed_mutations = Vec::new();
+
+    for task in &snapshot.registry.tasks {
+        if !task.is_active() && task.state != "blocked" {
+            continue;
+        }
+
+        #[allow(unused_assignments)]
+        let mut situation = "Process not spawned".to_string();
+        #[allow(unused_assignments)]
+        let mut classification = "dispatched_without_process".to_string();
+        #[allow(unused_assignments)]
+        let mut action = "Requeue safely".to_string();
+        #[allow(unused_assignments)]
+        let mut proposed_action = Some(MutationAction::Requeue);
+
+        // ── Step 9 check: commit already on base branch? ──────────────────
+        let matched_commit = reconcile_report
+            .reconciled
+            .iter()
+            .find(|r| r.task_id == task.id);
+
+        if let Some(m) = matched_commit {
+            situation = format!(
+                "Commit {} matches task on base branch",
+                &m.matched_commit_sha[..7.min(m.matched_commit_sha.len())]
+            );
+            classification = "merged".to_string();
+            action = "Close runtime claim".to_string();
+            proposed_action = Some(MutationAction::Merge);
+        } else if let Some(pid) = task.runtime_pid() {
+            let is_alive = crate::coordinator::helpers::is_pid_running(pid);
+            let mut is_stale = false;
+            let mut elapsed_sec = 0i64;
+
+            if let Some(ref lh) = task.task_runtime.last_heartbeat {
+                if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(lh) {
+                    elapsed_sec = chrono::Utc::now().timestamp()
+                        - parsed.with_timezone(&chrono::Utc).timestamp();
+                    if elapsed_sec > 180 {
+                        is_stale = true;
+                    }
+                }
+            }
+
+            if is_alive {
+                // ── Step 6 (verified alive): adopted or heartbeat_stale ────
+                if is_stale {
+                    situation = format!("Performer alive but heartbeat stale for {}s", elapsed_sec);
+                    classification = "heartbeat_stale".to_string();
+                    action = "Wait grace period, then block/requeue".to_string();
+                    proposed_action = Some(MutationAction::Stale);
+                } else {
+                    situation = "Performer alive and heartbeat fresh".to_string();
+                    classification = "adopted".to_string();
+                    action = "Continue monitoring".to_string();
+                    proposed_action = None;
+                }
+            } else {
+                // ── Steps 7-8: worktree and Git branch/merge inspection ────
+                let wt_path_opt = task.worktree_path();
+
+                let has_commits = if let Some(wt) = wt_path_opt {
+                    let wt_path = repo_root.join(wt);
+                    branch_has_commits_ahead(
+                        repo_root,
+                        task.branch().unwrap_or(""),
+                        reference_branch,
+                    ) || crate::git::has_commits_ahead(&wt_path, reference_branch)
+                } else {
+                    false
+                };
+
+                // Step 8: inspect Git merge state
+                let is_merge = if let Some(wt) = wt_path_opt {
+                    is_merge_in_progress(&repo_root.join(wt))
+                } else {
+                    false
+                };
+
+                // Step 7: inspect worktree cleanliness
+                let is_dirty = if let Some(wt) = wt_path_opt {
+                    crate::git::is_dirty(&repo_root.join(wt)).unwrap_or(false)
+                } else {
+                    false
+                };
+
+                if is_merge {
+                    situation = "Git merge in progress".to_string();
+                    classification = "blocked_merge_recovery".to_string();
+                    action = "Manual intervention required".to_string();
+                    proposed_action = Some(MutationAction::Blocked);
+                } else if has_commits {
+                    situation = "Performer dead but commit exists".to_string();
+                    classification = "phase_done".to_string();
+                    action = "Continue FSM advancement".to_string();
+                    proposed_action = Some(MutationAction::PhaseDone);
+                } else if is_dirty {
+                    situation = "Worktree dirty, no phase result".to_string();
+                    classification = "blocked_dirty_worktree".to_string();
+                    action = "Require operator review".to_string();
+                    proposed_action = Some(MutationAction::Blocked);
+                } else {
+                    situation = "Performer dead, no changes".to_string();
+                    classification = "process_dead".to_string();
+                    action = "Requeue task".to_string();
+                    proposed_action = Some(MutationAction::Requeue);
+                }
+            }
+        } else {
+            // No PID: claim without process
+            situation = "Claim exists but no process spawned".to_string();
+            classification = "dispatched_without_process".to_string();
+            action = "Requeue safely".to_string();
+            proposed_action = Some(MutationAction::Requeue);
+        }
+
+        let mutated = proposed_action.is_some();
+
+        if let Some(log) = logger {
+            log(format!(
+                "- Recovery sweep task={} classification={} action=\"{}\"",
+                task.id, classification, action
+            ));
+        }
+
+        entries.push(StartupRecoveryEntry {
+            task_id: task.id.clone(),
+            situation,
+            classification: classification.clone(),
+            action,
+            mutated: mutated && !dry_run,
+        });
+
+        if let Some(act) = proposed_action {
+            proposed_mutations.push((task.id.clone(), act, classification.clone()));
+        }
+    }
+
+    // 2. Application Phase (Only runs if !dry_run, applying all mutations to snapshot)
+    if !dry_run && !proposed_mutations.is_empty() {
+        changed = true;
+        for (task_id, act, classification) in proposed_mutations {
+            if let Some(task) = snapshot.registry.find_task_mut(&task_id) {
+                let err_code = match classification.as_str() {
+                    "heartbeat_stale" => Some("E413".to_string()),
+                    "process_dead" => Some("E414".to_string()),
+                    "blocked_dirty_worktree" => Some("E417".to_string()),
+                    _ => None,
+                };
+                if let Some(code) = err_code {
+                    let runtime = task.ensure_runtime();
+                    runtime.last_error_code = Some(code.clone());
+                    runtime.last_error = Some(match classification.as_str() {
+                        "heartbeat_stale" => "Performer heartbeat stale".to_string(),
+                        "process_dead" => "Performer process dead".to_string(),
+                        "blocked_dirty_worktree" => "Dirty worktree blocks recovery".to_string(),
+                        _ => "Recovery classification".to_string(),
+                    });
+                }
+                match act {
+                    MutationAction::Merge => {
+                        task.state = "merged".to_string();
+                        task.task_runtime.status = Some("idle".to_string());
+                        task.clear_assignment();
+                    }
+                    MutationAction::Stale => {
+                        task.task_runtime.status = Some("stale".to_string());
+                    }
+                    MutationAction::Blocked => {
+                        task.state = "blocked".to_string();
+                    }
+                    MutationAction::PhaseDone => {
+                        task.task_runtime.status = Some("phase_done".to_string());
+                    }
+                    MutationAction::Requeue => {
+                        task.state = "todo".to_string();
+                        task.task_runtime.status = Some("idle".to_string());
+                        task.clear_assignment();
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Step 9b: orphaned processes (no active claim) ─────────────────────
+    let db_pids: Vec<i64> = snapshot
+        .registry
+        .tasks
+        .iter()
+        .filter_map(|t| t.runtime_pid())
+        .collect();
+    let orphaned_pids = find_orphaned_pids_local(repo_root, &db_pids).unwrap_or_default();
+    for pid in orphaned_pids {
+        if let Some(log) = logger {
+            log(format!(
+                "- Recovery sweep pid={} classification=orphaned action=\"Surface and optionally force terminate\" [E415]",
+                pid
+            ));
+        }
+        entries.push(StartupRecoveryEntry {
+            task_id: "-".to_string(),
+            situation: "Process exists but no active task claim".to_string(),
+            classification: "orphaned".to_string(),
+            action: "Surface and optionally force terminate".to_string(),
+            mutated: false,
+        });
+    }
+
+    // ── Step 10: persist recovery decisions (skipped when dry_run=true) ─────
+    if changed && !dry_run {
+        let now = now_iso_coordinator();
+        snapshot.registry.recompute_resource_locks(&now);
+        snapshot.registry.set_updated_at(now);
+        if let Err(e) = sqlite.save_snapshot(&snapshot) {
+            return Err(MaccError::Coordinator {
+                code: crate::coordinator::error_normalizer::E412_RECOVERY_CLASSIFICATION_FAILED,
+                message: format!("Failed to persist recovery decisions: {}", e),
+            });
+        } else if let Some(log) = logger {
+            let mutated = entries.iter().filter(|e| e.mutated).count();
+            log(format!(
+                "- Recovery sweep complete: {} task(s) classified, {} mutated",
+                entries.len(),
+                mutated
+            ));
+        }
+    } else if let Some(log) = logger {
+        let label = if dry_run { "(dry-run)" } else { "0 mutated" };
+        log(format!(
+            "- Recovery sweep complete: {} task(s) classified, {}",
+            entries.len(),
+            label
+        ));
+    }
+
+    Ok(entries)
+}
+
+/// Returns true if `branch` has commits that are not yet on `reference_branch`.
+fn branch_has_commits_ahead(repo_root: &Path, branch: &str, reference_branch: &str) -> bool {
+    if branch.is_empty() || reference_branch.is_empty() {
+        return false;
+    }
+    if let Ok(out) = crate::git::run_git_output_mapped(
+        repo_root,
+        &[
+            "rev-list",
+            "--count",
+            &format!("{}..{}", reference_branch, branch),
+        ],
+        "check branch commits ahead",
+    ) {
+        if out.status.success() {
+            let count_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            return count_str.parse::<usize>().unwrap_or(0) > 0;
+        }
+    }
+    false
+}
+
+/// Returns true if a merge is in progress in the given repo or worktree directory.
+fn is_merge_in_progress(repo_or_worktree: &Path) -> bool {
+    if let Ok(out) = crate::git::run_git_output_mapped(
+        repo_or_worktree,
+        &["rev-parse", "--git-path", "MERGE_HEAD"],
+        "check MERGE_HEAD path",
+    ) {
+        if out.status.success() {
+            let path_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !path_str.is_empty() {
+                let path = std::path::Path::new(&path_str);
+                let target_path = if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    repo_or_worktree.join(path)
+                };
+                return target_path.exists();
+            }
+        }
+    }
+    false
+}
+
+/// Finds PIDs of performer/macc processes that are running in `repo_root`
+/// but are not recorded in `db_pids`.
+fn find_orphaned_pids_local(repo_root: &Path, db_pids: &[i64]) -> Result<Vec<i64>> {
+    let mut candidate_pids = std::collections::HashSet::new();
+    if let Ok(pids) = crate::coordinator::helpers::pgrep_pids("performer") {
+        for pid in pids {
+            candidate_pids.insert(pid);
+        }
+    }
+    if let Ok(pids) = crate::coordinator::helpers::pgrep_pids("macc") {
+        for pid in pids {
+            candidate_pids.insert(pid);
+        }
+    }
+
+    let mut orphaned = Vec::new();
+    let current_pid = std::process::id() as i32;
+
+    for pid in candidate_pids {
+        if pid == current_pid {
+            continue;
+        }
+        if db_pids.contains(&(pid as i64)) {
+            continue;
+        }
+        if crate::coordinator::helpers::pid_in_repo(pid, repo_root) {
+            orphaned.push(pid as i64);
+        }
+    }
+    Ok(orphaned)
+}
+
 pub fn cleanup_registry_native(repo_root: &Path) -> Result<()> {
     let registry_value =
         crate::coordinator::state::coordinator_state_registry_load(repo_root, &BTreeMap::new())?;
@@ -389,4 +773,148 @@ pub fn cleanup_registry_native(repo_root: &Path) -> Result<()> {
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn make_test_git_repo() -> std::path::PathBuf {
+        use std::time::SystemTime;
+        let nanos = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let repo = std::env::temp_dir().join(format!(
+            "macc-state-runtime-tests-{}-{}",
+            std::process::id(),
+            nanos
+        ));
+        fs::create_dir_all(&repo).expect("create temp repo");
+        std::process::Command::new("git")
+            .args(&["init"])
+            .current_dir(&repo)
+            .output()
+            .expect("git init");
+        std::process::Command::new("git")
+            .args(&["checkout", "-b", "main"])
+            .current_dir(&repo)
+            .output()
+            .ok();
+        std::process::Command::new("git")
+            .args(&["config", "user.email", "test@example.com"])
+            .current_dir(&repo)
+            .output()
+            .ok();
+        std::process::Command::new("git")
+            .args(&["config", "user.name", "Test"])
+            .current_dir(&repo)
+            .output()
+            .ok();
+        fs::write(repo.join("readme.txt"), "init\n").expect("write readme");
+        std::process::Command::new("git")
+            .args(&["add", "readme.txt"])
+            .current_dir(&repo)
+            .output()
+            .expect("git add");
+        std::process::Command::new("git")
+            .args(&["commit", "-m", "initial commit"])
+            .current_dir(&repo)
+            .output()
+            .expect("git commit");
+        repo
+    }
+
+    #[test]
+    fn test_recovery_sweep_classifies_no_pid_as_dispatched_without_process() {
+        let repo = make_test_git_repo();
+        let project_paths = crate::ProjectPaths::from_root(&repo);
+        let storage_paths =
+            crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&project_paths);
+        let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
+
+        // Build a snapshot with one "in_progress" task that has no PID
+        let mut snapshot = crate::coordinator_storage::CoordinatorSnapshot::empty();
+        let task_json = serde_json::json!({
+            "id": "task-no-pid",
+            "title": "Task without spawned process",
+            "state": "in_progress",
+            "dependencies": [],
+            "exclusive_resources": [],
+            "task_runtime": {}
+        });
+        let task: crate::coordinator::model::Task =
+            serde_json::from_value(task_json).expect("parse task");
+        snapshot.registry.tasks.push(task);
+        sqlite.save_snapshot(&snapshot).expect("save snapshot");
+
+        // Run the recovery sweep
+        let entries = execute_startup_recovery_sweep(&repo, "main", false, None)
+            .expect("recovery sweep should succeed");
+
+        assert_eq!(entries.len(), 1, "expected exactly one task classified");
+        let entry = &entries[0];
+        assert_eq!(entry.task_id, "task-no-pid");
+        assert_eq!(
+            entry.classification, "dispatched_without_process",
+            "no-PID task should be classified as dispatched_without_process"
+        );
+        assert!(entry.mutated, "task should be mutated (requeued to todo)");
+
+        // Verify the mutation was persisted to SQLite
+        let reloaded = sqlite.load_snapshot().expect("reload snapshot");
+        let reloaded_task = reloaded
+            .registry
+            .tasks
+            .iter()
+            .find(|t| t.id == "task-no-pid")
+            .expect("task should still exist");
+        assert_eq!(
+            reloaded_task.state, "todo",
+            "task should have been requeued to todo"
+        );
+    }
+
+    #[test]
+    fn test_recovery_sweep_adopts_alive_fresh_task() {
+        let repo = make_test_git_repo();
+        let project_paths = crate::ProjectPaths::from_root(&repo);
+        let storage_paths =
+            crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&project_paths);
+        let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
+
+        // Use the current process PID to simulate an "alive" performer
+        let current_pid = std::process::id() as i64;
+        let now_ts = chrono::Utc::now().to_rfc3339();
+
+        let mut snapshot = crate::coordinator_storage::CoordinatorSnapshot::empty();
+        let task_json = serde_json::json!({
+            "id": "task-alive",
+            "title": "Task with alive process",
+            "state": "in_progress",
+            "dependencies": [],
+            "exclusive_resources": [],
+            "task_runtime": {
+                "pid": current_pid,
+                "last_heartbeat": now_ts
+            }
+        });
+        let task: crate::coordinator::model::Task =
+            serde_json::from_value(task_json).expect("parse task");
+        snapshot.registry.tasks.push(task);
+        sqlite.save_snapshot(&snapshot).expect("save snapshot");
+
+        let entries = execute_startup_recovery_sweep(&repo, "main", false, None)
+            .expect("recovery sweep should succeed");
+
+        assert_eq!(entries.len(), 1);
+        let entry = &entries[0];
+        assert_eq!(entry.task_id, "task-alive");
+        assert_eq!(
+            entry.classification, "adopted",
+            "alive task with fresh heartbeat should be adopted"
+        );
+        assert!(!entry.mutated, "adopted task should not be mutated");
+    }
 }

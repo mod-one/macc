@@ -38,6 +38,18 @@ fn default_health_status_path() -> PathBuf {
     PathBuf::from(".macc/state/supervisor-health.json")
 }
 
+fn default_max_restart_attempts() -> u32 {
+    3
+}
+
+fn default_registry_path() -> PathBuf {
+    PathBuf::from(".macc/automation/task/task_registry.json")
+}
+
+fn default_ai_tool() -> String {
+    "".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WatchdogConfig {
     #[serde(default = "default_watchdog_interval_seconds")]
@@ -54,6 +66,12 @@ pub struct WatchdogConfig {
     pub pid_file_path: PathBuf,
     #[serde(default = "default_health_status_path")]
     pub health_status_path: PathBuf,
+    #[serde(default = "default_max_restart_attempts")]
+    pub max_restart_attempts: u32,
+    #[serde(default = "default_registry_path")]
+    pub registry_path: PathBuf,
+    #[serde(default = "default_ai_tool")]
+    pub ai_tool: String,
 }
 
 impl Default for WatchdogConfig {
@@ -66,6 +84,9 @@ impl Default for WatchdogConfig {
             events_log_path: default_events_log_path(),
             pid_file_path: default_pid_file_path(),
             health_status_path: default_health_status_path(),
+            max_restart_attempts: default_max_restart_attempts(),
+            registry_path: default_registry_path(),
+            ai_tool: default_ai_tool(),
         }
     }
 }
@@ -353,6 +374,9 @@ pub struct SupervisorWatchdog<P> {
     state: WatchdogState,
     fsm_state: SupervisorFsmState,
     crash_check_count: u32,
+    recovery: ModeCRecovery,
+    mode_b_supervisor:
+        crate::supervisor::mode_b::ModeBSupervisor<crate::supervisor::mode_b::CliToolDispatcher>,
 }
 
 impl<P> SupervisorWatchdog<P>
@@ -361,6 +385,21 @@ where
 {
     pub fn new(config: WatchdogConfig, process_manager: P) -> Self {
         let tailer = EventStreamTailer::new(config.events_log_path.clone());
+        let recovery = ModeCRecovery::new(ModeCConfig {
+            events_log_path: config.events_log_path.clone(),
+            max_restart_attempts: config.max_restart_attempts,
+            ..ModeCConfig::default()
+        });
+        let mode_b_config = crate::supervisor::mode_b::ModeBConfig::default();
+        let dispatcher = crate::supervisor::mode_b::CliToolDispatcher::new(config.ai_tool.clone());
+        let repo_root = config
+            .pid_file_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        let mode_b_supervisor =
+            crate::supervisor::mode_b::ModeBSupervisor::new(repo_root, mode_b_config, dispatcher);
+
         Self {
             config,
             process_manager,
@@ -368,6 +407,8 @@ where
             state: WatchdogState::default(),
             fsm_state: SupervisorFsmState::Starting,
             crash_check_count: 0,
+            recovery,
+            mode_b_supervisor,
         }
     }
 
@@ -446,6 +487,13 @@ where
     async fn run_cycle(&mut self) -> Result<SupervisorHealthStatus, WatchdogError> {
         let status = self.check_once().await?;
         self.advance_fsm(&status.health).await?;
+
+        if status.health.is_running() {
+            if let Err(err) = self.run_mode_b_if_needed().await {
+                tracing::warn!("supervisor watchdog Mode B analysis failed: {}", err);
+            }
+        }
+
         Ok(status)
     }
 
@@ -454,9 +502,16 @@ where
             HealthCheckResult::Healthy => {
                 self.fsm_state = SupervisorFsmState::Healthy;
                 self.crash_check_count = 0;
+                self.recovery = ModeCRecovery::new(ModeCConfig {
+                    events_log_path: self.config.events_log_path.clone(),
+                    max_restart_attempts: self.config.max_restart_attempts,
+                    ..ModeCConfig::default()
+                });
             }
             HealthCheckResult::Crashed { exit_code } => {
-                if self.fsm_state == SupervisorFsmState::Healthy {
+                if self.fsm_state == SupervisorFsmState::Healthy
+                    || self.fsm_state == SupervisorFsmState::Starting
+                {
                     self.crash_check_count = self.crash_check_count.saturating_add(1);
                     let debounce = self.config.crash_debounce_checks.max(1);
                     if self.crash_check_count < debounce {
@@ -496,15 +551,125 @@ where
             .unwrap_or(false))
     }
 
-    async fn trigger_mode_c_recovery(&self, exit_code: Option<i32>) -> Result<(), WatchdogError> {
-        let mut recovery = ModeCRecovery::new(ModeCConfig {
-            events_log_path: self.config.events_log_path.clone(),
-            ..ModeCConfig::default()
-        });
-        recovery
+    async fn trigger_mode_c_recovery(
+        &mut self,
+        exit_code: Option<i32>,
+    ) -> Result<(), WatchdogError> {
+        self.recovery
             .run_recovery(&self.process_manager, exit_code)
             .await?;
         Ok(())
+    }
+
+    pub async fn run_mode_b_if_needed(&mut self) -> Result<(), WatchdogError> {
+        if self.config.ai_tool.is_empty() {
+            return Ok(());
+        }
+        let registry_path = &self.config.registry_path;
+        if !registry_path.exists() {
+            return Ok(());
+        }
+
+        let raw = fs::read_to_string(registry_path)?;
+        let registry: crate::coordinator::model::TaskRegistry = serde_json::from_str(&raw)?;
+
+        let now = Utc::now();
+        let repo_root = self
+            .config
+            .pid_file_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+
+        for task in &registry.tasks {
+            let is_failed = task.state == "failed";
+            let is_stuck = if task.state == "claimed" || task.state == "in_progress" {
+                let pid = task.task_runtime.pid.map(|p| p as u32);
+                let dead_process = !performer_is_running(pid);
+
+                let too_long = if let Some(ref changed_at) = task.state_changed_at {
+                    if let Ok(dt) = DateTime::parse_from_rfc3339(changed_at) {
+                        let age = now
+                            .signed_duration_since(dt.with_timezone(&Utc))
+                            .num_seconds();
+                        age >= self.config.stall_threshold_seconds as i64
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+                dead_process || too_long
+            } else {
+                false
+            };
+
+            if is_failed || is_stuck {
+                let worktree_path = if let Some(path_str) = task
+                    .worktree
+                    .as_ref()
+                    .and_then(|w| w.worktree_path.as_ref())
+                {
+                    PathBuf::from(path_str)
+                } else {
+                    repo_root.join(".macc").join("worktrees").join(&task.id)
+                };
+
+                let base_branch = task
+                    .worktree
+                    .as_ref()
+                    .and_then(|w| w.base_branch.as_ref())
+                    .map(|s| s.as_str())
+                    .unwrap_or("master");
+
+                let last_error_code = task.task_runtime.last_error_code.as_deref();
+                let last_error_message = task.task_runtime.last_error.as_deref();
+
+                if let Err(err) = self
+                    .mode_b_supervisor
+                    .analyse(
+                        &task.id,
+                        &worktree_path,
+                        base_branch,
+                        last_error_code,
+                        last_error_message,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        "supervisor watchdog Mode B failed for task {}: {}",
+                        task.id,
+                        err
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn performer_is_running(pid: Option<u32>) -> bool {
+    let Some(pid) = pid else {
+        return false;
+    };
+
+    #[cfg(unix)]
+    {
+        let status = std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        matches!(status, Ok(s) if s.success())
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
     }
 }
 
@@ -707,6 +872,7 @@ mod tests {
             events_log_path: events_path,
             pid_file_path: root.join("coordinator.pid"),
             health_status_path: health_path.clone(),
+            ..WatchdogConfig::default()
         };
 
         let mut watchdog = SupervisorWatchdog::new(
@@ -738,6 +904,7 @@ mod tests {
             events_log_path: events_path,
             pid_file_path: root.join("coordinator.pid"),
             health_status_path: root.join("supervisor-health.json"),
+            ..WatchdogConfig::default()
         };
 
         let mut watchdog = SupervisorWatchdog::new(
@@ -770,6 +937,7 @@ mod tests {
             events_log_path: root.join("events.jsonl"),
             pid_file_path: root.join("coordinator.pid"),
             health_status_path: root.join("supervisor-health.json"),
+            ..WatchdogConfig::default()
         };
 
         let mut watchdog = SupervisorWatchdog::new(

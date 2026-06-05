@@ -4,11 +4,13 @@ mod assets;
 mod audit;
 #[allow(clippy::result_large_err)]
 mod backups;
+mod catalog_skills;
 mod config;
 mod coordinator;
 #[allow(clippy::result_large_err)]
 mod doctor;
 mod errors;
+mod failures;
 #[allow(clippy::result_large_err)]
 mod git;
 #[allow(clippy::result_large_err)]
@@ -18,9 +20,14 @@ mod ownership;
 mod plan;
 #[allow(clippy::result_large_err)]
 mod prd;
+mod prd_generation;
 #[allow(clippy::result_large_err)]
 mod registry;
+mod search;
+mod skill_runs;
+mod snapshot;
 mod sse;
+mod task_endpoints;
 #[allow(clippy::result_large_err)]
 mod terminal;
 #[cfg(test)]
@@ -36,7 +43,10 @@ use axum::middleware::from_fn_with_state;
 use axum::routing::{delete, get, post, put};
 use axum::Json;
 use axum::Router;
+#[cfg(unix)]
+use libc;
 use macc_core::config::WebAssetsMode;
+use macc_core::coordinator_storage::CoordinatorStorage;
 use macc_core::process_ownership::{ClientKind, ProcessHandle, ProcessKind};
 use macc_core::service::process_ownership::RegisteredProcessGuard;
 use macc_core::{MaccError, ProjectPaths, Result};
@@ -51,6 +61,8 @@ pub struct WebCommand {
     host: String,
     port: Option<u16>,
     assets_mode: Option<WebAssetsMode>,
+    /// When true, re-exec as a background daemon (setsid + null stdio) and return.
+    daemon: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -77,12 +89,14 @@ impl WebCommand {
         host: String,
         port: Option<u16>,
         assets_mode: Option<WebAssetsMode>,
+        daemon: bool,
     ) -> Self {
         Self {
             app,
             host,
             port,
             assets_mode,
+            daemon,
         }
     }
 
@@ -104,10 +118,62 @@ impl WebCommand {
             }),
         })
     }
+
+    /// Re-exec the web server as a daemon: setsid + null stdio so it survives
+    /// terminal / SSH session close. `MACC_WEB_DAEMON_CHILD=1` prevents recursion.
+    fn run_as_daemon(&self) -> Result<()> {
+        let current_exe = std::env::current_exe().map_err(|e| MaccError::Io {
+            path: "web daemon".into(),
+            action: "resolve current executable".into(),
+            source: e,
+        })?;
+        let paths = self.app.project_paths()?;
+        let config = self.server_config()?;
+
+        let mut cmd = std::process::Command::new(&current_exe);
+        cmd.arg("--cwd")
+            .arg(&paths.root)
+            .arg("web")
+            .arg("--host")
+            .arg(config.host.to_string())
+            .arg("--port")
+            .arg(config.port.to_string())
+            .env("MACC_WEB_DAEMON_CHILD", "1")
+            .env("MACC_INTERNAL_INVOCATION", "1")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            unsafe {
+                cmd.pre_exec(|| {
+                    libc::setsid();
+                    Ok(())
+                });
+            }
+        }
+
+        cmd.spawn().map_err(|e| MaccError::Io {
+            path: current_exe.to_string_lossy().into(),
+            action: "spawn web server daemon".into(),
+            source: e,
+        })?;
+
+        println!("Web server started in background (port {}).", config.port);
+        Ok(())
+    }
 }
 
 impl Command for WebCommand {
     fn run(&self) -> Result<()> {
+        // Daemon mode: re-exec with null stdio + setsid so the server survives
+        // terminal / SSH session close. The env var prevents infinite recursion.
+        if self.daemon && std::env::var("MACC_WEB_DAEMON_CHILD").is_err() {
+            return self.run_as_daemon();
+        }
+
         let config = self.server_config()?;
         let paths = self.app.project_paths()?;
 
@@ -165,6 +231,7 @@ fn build_web_router(state: WebState) -> Router {
     let audit_state = state.clone();
     Router::new()
         .route("/api/v1/health", get(health_handler))
+        .route("/api/v1/trust", get(trust_handler))
         .route("/api/v1/doctor", get(doctor::get_doctor_handler))
         .route("/api/v1/doctor/fix", post(doctor::run_doctor_fix_handler))
         .route(
@@ -238,6 +305,14 @@ fn build_web_router(state: WebState) -> Router {
             post(coordinator::coordinator_stop_handler),
         )
         .route(
+            "/api/v1/coordinator/processes",
+            get(coordinator::coordinator_processes_handler),
+        )
+        .route(
+            "/api/v1/coordinator/recover",
+            post(coordinator::coordinator_recover_handler),
+        )
+        .route(
             "/api/v1/coordinator/resume",
             post(coordinator::coordinator_resume_handler),
         )
@@ -246,8 +321,12 @@ fn build_web_router(state: WebState) -> Router {
             post(coordinator::coordinator_sync_handler),
         )
         .route(
-            "/api/v1/coordinator/audit-prd",
-            post(coordinator::coordinator_audit_prd_handler),
+            "/api/v1/coordinator/preflight",
+            post(coordinator::coordinator_preflight_handler),
+        )
+        .route(
+            "/api/v1/coordinator/preflight/create-reference-branch",
+            post(coordinator::coordinator_preflight_create_branch_handler),
         )
         .route(
             "/api/v1/coordinator/tool-cooldown",
@@ -266,8 +345,55 @@ fn build_web_router(state: WebState) -> Router {
             "/api/v1/registry/tasks/:id/:action",
             post(registry::task_action_handler),
         )
+        .route(
+            "/api/v1/registry/tasks/:id",
+            get(task_endpoints::get_registry_task_handler),
+        )
+        .route(
+            "/api/v1/registry/tasks/:id/events",
+            get(task_endpoints::get_registry_task_events_handler),
+        )
+        .route(
+            "/api/v1/registry/tasks/:id/logs",
+            get(task_endpoints::get_registry_task_logs_handler),
+        )
+        .route(
+            "/api/v1/registry/tasks/:id/diff",
+            get(task_endpoints::get_registry_task_diff_handler),
+        )
+        .route(
+            "/api/v1/registry/tasks/:id/explain",
+            get(task_endpoints::get_registry_task_explain_handler),
+        )
+        .route(
+            "/api/v1/tasks/:id/stream",
+            get(task_endpoints::task_stream_handler),
+        )
+        .route(
+            "/api/v1/registry/tasks/:id/retry",
+            post(task_endpoints::task_retry_handler),
+        )
+        .route(
+            "/api/v1/registry/tasks/:id/stop",
+            post(task_endpoints::task_stop_handler),
+        )
+        .route(
+            "/api/v1/registry/tasks/:id/run-testing",
+            post(task_endpoints::task_run_testing_handler),
+        )
+        .route(
+            "/api/v1/registry/tasks/:id/run-review",
+            post(task_endpoints::task_run_review_handler),
+        )
         .route("/api/v1/prd", get(prd::get_prd_handler))
         .route("/api/v1/prd", put(prd::update_prd_handler))
+        // ── PRD generation (spec §8, §27) ────────────────────────────────────
+        .route("/api/v1/prd/generate", post(prd_generation::prd_generate_handler))
+        .route("/api/v1/prd/audit", post(prd_generation::prd_audit_handler))
+        .route("/api/v1/prd/promote", post(prd_generation::prd_promote_handler))
+        .route("/api/v1/prd/validate", post(prd_generation::prd_validate_handler))
+        .route("/api/v1/prd/generation-runs", get(prd_generation::prd_generation_runs_handler))
+        .route("/api/v1/prd/generation-runs/:run_id", get(prd_generation::prd_generation_run_detail_handler))
         .route("/api/v1/processes", get(ownership::list_processes_handler))
         .route(
             "/api/v1/processes/:kind/ownership",
@@ -296,6 +422,39 @@ fn build_web_router(state: WebState) -> Router {
         .route(
             "/api/v1/processes/:kind/heartbeat",
             post(ownership::heartbeat_handler),
+        )
+        // ── UX observability endpoints (spec §4.21, §8) ─────────────────
+        .route("/api/v1/snapshot", get(snapshot::get_snapshot_handler))
+        .route("/api/v1/search", get(search::search_handler))
+        // ── Catalog skills lifecycle (spec §16) ──────────────────────────
+        .route("/api/v1/catalog/skills/available", get(catalog_skills::available_handler))
+        .route("/api/v1/catalog/skills/status", get(catalog_skills::status_handler))
+        .route("/api/v1/catalog/skills/installed", get(catalog_skills::installed_handler))
+        .route("/api/v1/catalog/skills/verify", post(catalog_skills::verify_handler))
+        .route("/api/v1/catalog/skills/lockfile", get(catalog_skills::lockfile_handler))
+        .route("/api/v1/skills", get(skill_runs::list_skills_handler))
+        .route("/api/v1/skills/:id", get(skill_runs::get_skill_handler))
+        .route(
+            "/api/v1/skills/:id/dry-run",
+            post(skill_runs::dry_run_skill_handler),
+        )
+        .route(
+            "/api/v1/skills/:id/run",
+            post(skill_runs::run_skill_handler),
+        )
+        .route("/api/v1/runs", get(skill_runs::list_runs_handler))
+        .route("/api/v1/runs/:id", get(skill_runs::get_run_handler))
+        .route(
+            "/api/v1/runs/:id/logs",
+            get(skill_runs::get_run_logs_handler),
+        )
+        .route(
+            "/api/v1/failures/recent",
+            get(failures::recent_failures_handler),
+        )
+        .route(
+            "/api/v1/workers/:id/snapshot",
+            get(snapshot::get_worker_snapshot_handler),
         )
         .fallback(get(assets::spa_handler))
         .layer(from_fn_with_state(audit_state, audit::audit_middleware))
@@ -350,10 +509,198 @@ fn heartbeat_web_viewers_once(state: &WebState) {
 async fn health_handler(
     axum::extract::State(state): axum::extract::State<WebState>,
 ) -> Json<serde_json::Value> {
+    let paths = state.paths.clone();
+    let status_res = tokio::task::spawn_blocking(move || {
+        let storage_paths =
+            macc_core::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&paths);
+        let sqlite = macc_core::coordinator_storage::SqliteStorage::new(storage_paths);
+
+        let db_ok = sqlite.load_snapshot().is_ok();
+        let last_run = sqlite.get_active_coordinator_run().unwrap_or(None);
+        let active = last_run
+            .as_ref()
+            .map(|r| r.status == "running")
+            .unwrap_or(false);
+        let mode = last_run
+            .as_ref()
+            .map(|r| r.status.clone())
+            .unwrap_or_else(|| "stopped".to_string());
+        let run_id = last_run
+            .as_ref()
+            .map(|r| r.run_id.clone())
+            .unwrap_or_default();
+        let last_tick_at = last_run
+            .as_ref()
+            .and_then(|r| r.last_tick_at.clone())
+            .unwrap_or_default();
+        let started_at = last_run
+            .as_ref()
+            .map(|r| r.started_at.clone())
+            .unwrap_or_default();
+
+        let snapshot = sqlite.load_snapshot().ok();
+        let (active_tasks, stale_tasks, blocked_tasks) = if let Some(ref snap) = snapshot {
+            let mut active_count = 0;
+            let mut stale_count = 0;
+            let mut blocked_count = 0;
+            for t in &snap.registry.tasks {
+                if t.is_active() {
+                    active_count += 1;
+                    if let Some(lh) = t.task_runtime.last_heartbeat.as_deref() {
+                        if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(lh) {
+                            let elapsed = chrono::Utc::now().timestamp()
+                                - parsed.with_timezone(&chrono::Utc).timestamp();
+                            if elapsed > 180 {
+                                stale_count += 1;
+                            }
+                        }
+                    }
+                } else if t.state == "blocked" {
+                    blocked_count += 1;
+                }
+            }
+            (active_count, stale_count, blocked_count)
+        } else {
+            (0, 0, 0)
+        };
+
+        let db_pids: Vec<i64> = if let Some(ref snap) = snapshot {
+            snap.registry
+                .tasks
+                .iter()
+                .filter_map(|t| t.runtime_pid())
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let orphaned_processes = if db_ok {
+            let mut candidate_pids = std::collections::HashSet::new();
+            if let Ok(pids) = macc_core::coordinator::helpers::pgrep_pids("performer") {
+                for pid in pids {
+                    candidate_pids.insert(pid);
+                }
+            }
+            if let Ok(pids) = macc_core::coordinator::helpers::pgrep_pids("macc") {
+                for pid in pids {
+                    candidate_pids.insert(pid);
+                }
+            }
+            let mut count = 0;
+            let current_pid = std::process::id() as i32;
+            for pid in candidate_pids {
+                if pid == current_pid {
+                    continue;
+                }
+                if db_pids.contains(&(pid as i64)) {
+                    continue;
+                }
+                if macc_core::coordinator::helpers::pid_in_repo(pid, &paths.root) {
+                    count += 1;
+                }
+            }
+            count
+        } else {
+            0
+        };
+
+        let mut status = "ok";
+        if stale_tasks > 0 || orphaned_processes > 0 {
+            status = "degraded";
+        }
+        if !db_ok {
+            status = "unhealthy";
+        }
+
+        (
+            status,
+            db_ok,
+            active,
+            mode,
+            run_id,
+            last_tick_at,
+            active_tasks,
+            stale_tasks,
+            blocked_tasks,
+            orphaned_processes,
+            started_at,
+        )
+    })
+    .await;
+
+    let (
+        status,
+        db_ok,
+        active,
+        mode,
+        run_id,
+        last_tick_at,
+        active_tasks,
+        stale_tasks,
+        blocked_tasks,
+        orphaned_processes,
+        started_at,
+    ) = match status_res {
+        Ok(val) => val,
+        Err(_) => (
+            "unhealthy",
+            false,
+            false,
+            "stopped".to_string(),
+            "".to_string(),
+            "".to_string(),
+            0,
+            0,
+            0,
+            0,
+            "".to_string(),
+        ),
+    };
+
+    let uptime_seconds = if !started_at.is_empty() {
+        if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(&started_at) {
+            let elapsed =
+                chrono::Utc::now().timestamp() - parsed.with_timezone(&chrono::Utc).timestamp();
+            if elapsed > 0 {
+                elapsed as u64
+            } else {
+                0
+            }
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+
     Json(serde_json::json!({
-        "status": "ok",
-        "project_root": state.paths.root.to_string_lossy()
+        "status": status,
+        "version": env!("CARGO_PKG_VERSION"),
+        "uptime_seconds": uptime_seconds,
+        "db_ok": db_ok,
+        "coordinator": {
+            "active": active,
+            "mode": mode,
+            "run_id": run_id,
+            "last_tick_at": last_tick_at,
+            "last_heartbeat_at": last_tick_at,
+            "active_tasks": active_tasks,
+            "stale_tasks": stale_tasks,
+            "blocked_tasks": blocked_tasks,
+            "orphaned_processes": orphaned_processes
+        }
     }))
+}
+
+async fn trust_handler(
+    axum::extract::State(state): axum::extract::State<WebState>,
+) -> std::result::Result<Json<macc_core::ops_motif::TrustSummary>, errors::ApiError> {
+    let config = state
+        .engine
+        .load_canonical_config(&state.paths)
+        .map_err(errors::ApiError::from)?;
+    let trust = macc_core::ops_motif::calculate_trust_summary(&state.paths, &config);
+    Ok(Json(trust))
 }
 
 #[cfg(debug_assertions)]

@@ -119,6 +119,9 @@ pub struct HeaderContext<'a> {
     pub coordinator_command: Option<&'a str>,
     pub status: Option<(UiStatusLevel, String)>,
     pub width: u16,
+    pub trust_strip: Option<String>,
+    /// §18: Active runtime phase overrides, rendered as a warning banner line.
+    pub override_strip: Option<String>,
 }
 
 pub fn header_lines(ctx: &HeaderContext<'_>, t: &Theme) -> Vec<Line<'static>> {
@@ -174,6 +177,21 @@ pub fn header_lines(ctx: &HeaderContext<'_>, t: &Theme) -> Vec<Line<'static>> {
             ),
         ]),
     ];
+
+    if let Some(strip) = &ctx.trust_strip {
+        lines.push(Line::from(vec![
+            Span::styled("trust  ", Style::default().fg(t.muted)),
+            Span::raw(": "),
+            Span::raw(strip.clone()),
+        ]));
+    }
+
+    if let Some(overrides) = &ctx.override_strip {
+        lines.push(Line::from(vec![Span::styled(
+            format!("overrides: {}", overrides),
+            Style::default().fg(t.warn).add_modifier(Modifier::BOLD),
+        )]));
+    }
 
     if let Some((lvl, msg)) = &ctx.status {
         lines.push(Line::from(vec![

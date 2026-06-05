@@ -111,6 +111,8 @@ mod tests {
             mcp_templates: Vec::new(),
             automation: macc_core::config::AutomationConfig::default(),
             settings: macc_core::config::SettingsConfig::default(),
+            context: None,
+            skills_run_policy: None,
         }
     }
 

@@ -101,11 +101,47 @@ pub struct TaskReview {
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct TaskRuntime {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coordinator_epoch: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_group_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heartbeat_seq: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_expires_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locked_resources_json: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_phase: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdout_log: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr_log: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub events_log: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_event_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry_updated_at: Option<String>,
     #[serde(default)]
     pub last_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -206,9 +242,13 @@ pub struct ResourceLock {
     #[serde(default)]
     pub task_id: String,
     #[serde(default)]
+    pub claim_id: String,
+    #[serde(default)]
     pub worktree_path: String,
     #[serde(default)]
     pub locked_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -332,6 +372,14 @@ impl TaskRegistry {
                 .as_ref()
                 .and_then(|w| w.worktree_path.clone())
                 .unwrap_or_default();
+            let claim_id = task
+                .task_runtime
+                .claim_id
+                .clone()
+                .filter(|s| !s.is_empty())
+                .or(task.task_runtime.active_session_id.clone())
+                .unwrap_or_else(|| format!("unclaimed-{}", task.id));
+            let expires_at = task.task_runtime.lease_expires_at.clone();
             for resource in &task.exclusive_resources {
                 if resource.is_empty() {
                     continue;
@@ -340,8 +388,10 @@ impl TaskRegistry {
                     resource.clone(),
                     ResourceLock {
                         task_id: task.id.clone(),
+                        claim_id: claim_id.clone(),
                         worktree_path: worktree_path.clone(),
                         locked_at: now_iso.to_string(),
+                        expires_at: expires_at.clone(),
                         extra: BTreeMap::new(),
                     },
                 );
@@ -459,6 +509,8 @@ impl TaskRegistry {
                 WorkflowState::Merged => merged += 1,
                 WorkflowState::Claimed
                 | WorkflowState::InProgress
+                | WorkflowState::Testing
+                | WorkflowState::Reviewing
                 | WorkflowState::PrOpen
                 | WorkflowState::ChangesRequested
                 | WorkflowState::Queued => active += 1,

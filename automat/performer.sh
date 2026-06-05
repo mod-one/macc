@@ -23,9 +23,18 @@ performer_log_dir=""
 task_log_file=""
 EVENT_FILE="${COORD_EVENTS_FILE:-}"
 EVENT_IPC_ADDR="${MACC_COORDINATOR_IPC_ADDR:-}"
+# Path to the coordinator's well-known IPC address file.  Used for
+# coordinator-restart reconnection: when IPC fails, performer re-reads
+# this file and retries with the new address.
+EVENT_IPC_ADDR_FILE="${MACC_COORDINATOR_IPC_ADDR_FILE:-}"
 EVENT_SOURCE="${MACC_EVENT_SOURCE:-}"
 EVENT_TASK_ID="${MACC_EVENT_TASK_ID:-}"
 EVENT_RUN_ID="${COORDINATOR_RUN_ID:-$(date +%s%N)-$$}"
+EVENT_COORDINATOR_EPOCH="${COORDINATOR_EPOCH:-0}"
+if [[ ! "$EVENT_COORDINATOR_EPOCH" =~ ^[0-9]+$ ]]; then
+  EVENT_COORDINATOR_EPOCH=0
+fi
+EVENT_CLAIM_ID="${MACC_CLAIM_ID:-}"
 EVENT_SEQ=0
 EVENT_SEQ_FILE=""
 LAST_IPC_ERROR=""
@@ -195,6 +204,17 @@ log_task_line() {
   fi
 }
 
+# log_debug_line: write to task log only when MACC_DEBUG=1 is set.
+# Use this for verbose entries that add noise in normal operation:
+#   - full prompt dump (### Prompt)
+#   - runner invocation line (- Runner:)
+#   - attempt headers (## Attempt N/M)
+log_debug_line() {
+  if [[ "${MACC_DEBUG:-0}" == "1" ]]; then
+    log_task_line "$@"
+  fi
+}
+
 next_event_seq() {
   if [[ -z "${EVENT_SEQ_FILE:-}" ]]; then
     EVENT_SEQ=$((EVENT_SEQ + 1))
@@ -262,6 +282,8 @@ emit_performer_event() {
     --arg schema_version "1" \
     --arg event_id "${EVENT_TASK_ID}-${seq}-$(date +%s%N)" \
     --arg run_id "$EVENT_RUN_ID" \
+    --argjson coordinator_epoch "$EVENT_COORDINATOR_EPOCH" \
+    --arg claim_id "$EVENT_CLAIM_ID" \
     --argjson seq "$seq" \
     --arg ts "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
     --arg source "$EVENT_SOURCE" \
@@ -274,6 +296,8 @@ emit_performer_event() {
       schema_version:$schema_version,
       event_id:$event_id,
       run_id:$run_id,
+      coordinator_epoch:$coordinator_epoch,
+      claim_id:($claim_id|select(length>0)),
       seq:$seq,
       ts:$ts,
       source:$source,
@@ -377,6 +401,23 @@ PY
     return $py_rc
   fi
   LAST_IPC_ERROR="tcp ipc failed: addr=${addr_display} event_id_extracted=true preview=\"${preview}\""
+  # IPC failed with the baked-in address. If the coordinator was restarted
+  # (e.g., after SSH disconnect), the address file may have a new address.
+  # Read it and retry once so performers survive coordinator restarts.
+  if [[ -n "$EVENT_IPC_ADDR_FILE" && -f "$EVENT_IPC_ADDR_FILE" ]]; then
+    local new_addr
+    new_addr="$(< "$EVENT_IPC_ADDR_FILE" tr -d '[:space:]')"
+    if [[ -n "$new_addr" && "$new_addr" != "$EVENT_IPC_ADDR" ]]; then
+      local old_addr="$EVENT_IPC_ADDR"
+      EVENT_IPC_ADDR="$new_addr"
+      if send_event_via_ipc "$event_line"; then
+        # Successfully reconnected to restarted coordinator.
+        return 0
+      fi
+      # Retry with new addr also failed — restore original for error context.
+      EVENT_IPC_ADDR="$old_addr"
+    fi
+  fi
   return $rc
 }
 
@@ -588,11 +629,9 @@ build_prompt() {
   local task_id="$2"
   local task_title="$3"
   cat <<PROMPT
-You are an autonomous coding agent working inside a MACC worktree.
 
 Context:
 - Worktree: ${worktree}
-- Task file: ${prd}
 - Task ID: ${task_id}
 - Task Title: ${task_title}
 
@@ -601,21 +640,25 @@ ${task_json}
 
 Instructions:
 1) Implement ONLY the task above.
-2) Do NOT edit ${prd}; the runner will update it.
+2) Do NOT edit or read ${prd}; the runner will update it.
 3) Do NOT commit; the runner will commit if all tasks are done.
 4) Keep output concise; avoid dumping large files.
-5) If the task acceptance criteria are already satisfied before any code change, this is a valid success. Verify it explicitly and do not make unnecessary edits.
-6) At the end, print exactly one terminal result marker on its own line:
+5) Use concise professional fragments by default.
+6) Avoid explaining code.
+7) Avoid repeated task restatements
+8) Avoid broad educational explanations
+9) If the task acceptance criteria are already satisfied before any code change, this is a valid success. Verify it explicitly and do not make unnecessary edits.
+10) At the end, print exactly one terminal result marker on its own line:
    - MACC_TASK_RESULT: success_with_changes
    - MACC_TASK_RESULT: success_without_changes
    - MACC_TASK_RESULT: already_satisfied
    - MACC_TASK_RESULT: error_with_changes   (if you started work but cannot finish)
    - MACC_TASK_RESULT: error_without_changes (if you could not start or make any progress)
-7) Use already_satisfied only when you verified the task is already done and can cite the evidence briefly.
-8) Use error_with_changes or error_without_changes when you cannot complete the task (sandbox failures, environment issues, missing dependencies, permission errors, etc.). Include a brief explanation of why on the line before the marker.
-9) If you finish successfully but forget the marker, the runner will infer the result from repository state; still print the marker explicitly.
+11) Use already_satisfied only when you verified the task is already done and can cite the evidence briefly.
+12) Use error_with_changes or error_without_changes when you cannot complete the task (sandbox failures, environment issues, missing dependencies, permission errors, etc.). Include a brief explanation of why on the line before the marker.
+13) If you finish successfully but forget the marker, the runner will infer the result from repository state; still print the marker explicitly.
 
-Now implement the task.
+Now implement the task !
 PROMPT
 }
 
@@ -702,12 +745,11 @@ run_tool() {
   fi
   output_capture="$(mktemp)"
 
-  log_task_line "## Attempt ${attempt}/${max_attempts}"
-  log_task_line ""
-  log_task_line "- Runner: \`${script}\`"
-  log_task_line "- Started: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-  log_task_line ""
-  log_task_line '```text'
+  log_debug_line "## Attempt ${attempt}/${max_attempts}"
+  log_debug_line ""
+  log_debug_line "- Runner: \`${script}\`"
+  log_debug_line "- Started: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  log_debug_line ""
   set +e
   emit_performer_event "progress" "$CURRENT_PHASE" "running" "$(jq -nc --arg attempt "$attempt" --arg max "$max_attempts" '{attempt:($attempt|tonumber?), max_attempts:($max|tonumber?)}')"
   spinner_start "Running ${tool} (attempt ${attempt}/${max_attempts})"
@@ -773,7 +815,6 @@ run_tool() {
     fi
     must_emit_performer_event "phase_result" "$CURRENT_PHASE" "failed" "$(jq -nc --arg attempt "$attempt" --arg status "$status" --arg code "$LAST_ERROR_CODE" --arg origin "$LAST_ERROR_ORIGIN" --arg message "$LAST_ERROR_MESSAGE" '{attempt:($attempt|tonumber?), exit_status:($status|tonumber?), error_code:($code|select(length>0)), origin:($origin|select(length>0)), message:($message|select(length>0))}')"
   fi
-  log_task_line '```'
   log_task_line ""
   log_task_line "- Exit status: ${status}"
   log_task_line ""
@@ -928,12 +969,14 @@ for ((i=1; i<=PERFORMER_MAX_ITERATIONS; i++)); do
 
   prompt_file="$(mktemp)"
   build_prompt "$next_task_json" "$next_id" "$next_title" >"$prompt_file"
-  log_task_line "### Prompt"
-  log_task_line ""
-  log_task_line '```text'
-  cat "$prompt_file" >>"$task_log_file"
-  log_task_line '```'
-  log_task_line ""
+  if [[ "${MACC_DEBUG:-0}" == "1" ]]; then
+    log_task_line "### Prompt"
+    log_task_line '---'
+    log_task_line ""
+    cat "$prompt_file" >>"$task_log_file"
+    log_task_line '---'
+    log_task_line ""
+  fi
 
   tool_success=false
   for ((attempt=1; attempt<=PERFORMER_TOOL_MAX_ATTEMPTS; attempt++)); do

@@ -349,6 +349,14 @@ pub fn import_url(
                 tags: tags.map_or_else(Vec::new, |t| parse_tags(&t)),
                 source,
                 selector,
+                tools: vec![],
+                recommended_ref: None,
+                risk: None,
+                requires_mcp: false,
+                writes_user_level_config: false,
+                targets: Default::default(),
+                category: None,
+                compatibility: None,
             });
             catalog.save_atomically(paths, &paths.skills_catalog_path())?;
             ui.info(&format!(

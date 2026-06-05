@@ -88,7 +88,7 @@ impl ProfileManager {
         Self { profiles_dir: dir }
     }
 
-    fn profile_path(&self, name: &str) -> PathBuf {
+    pub fn profile_path(&self, name: &str) -> PathBuf {
         self.profiles_dir.join(format!("{}.yaml", name))
     }
 
@@ -364,6 +364,9 @@ fn extract_sections(source: &CanonicalConfig, sections: &[ProfileSection]) -> Ca
         } else {
             def.mcp_templates
         },
+        skills: source.skills.clone(),
+        context: source.context.clone(),
+        prd_generation: source.prd_generation.clone(),
     }
 }
 
@@ -463,6 +466,9 @@ mod tests {
             },
             process_ownership: None,
             mcp_templates: Vec::new(),
+            skills: None,
+            context: None,
+            prd_generation: None,
         }
     }
 

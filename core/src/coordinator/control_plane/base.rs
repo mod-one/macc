@@ -1,7 +1,7 @@
 use crate::config::CoordinatorConfigResolved;
 use crate::coordinator::helpers::{
-    append_coordinator_event, append_coordinator_event_with_severity, now_iso_coordinator,
-    recompute_resource_locks_from_tasks, set_registry_updated_at,
+    append_coordinator_event, append_coordinator_event_with_severity, append_phase_skipped_event,
+    now_iso_coordinator, recompute_resource_locks_from_tasks, set_registry_updated_at,
 };
 use crate::coordinator::ipc::ensure_performer_ipc_listener;
 use crate::coordinator::model::{PrdInput, Task, TaskRegistry};
@@ -737,6 +737,62 @@ pub fn sync_registry_from_prd_native(
     Ok(())
 }
 
+fn check_and_emit_skipped_phases(
+    repo_root: &Path,
+    task: &mut Task,
+    phases: &crate::config::PhasesConfig,
+) -> Result<bool> {
+    let mut changed = false;
+    let task_id = task.id.clone();
+    let runtime = task.ensure_runtime();
+
+    if !phases.testing.enabled {
+        let already_emitted = runtime
+            .extra
+            .get("test_skipped_emitted")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !already_emitted {
+            let _ = append_phase_skipped_event(
+                repo_root,
+                &task_id,
+                "test",
+                "disabled_by_config",
+                "testing skipped by config",
+            );
+            runtime.extra.insert(
+                "test_skipped_emitted".to_string(),
+                serde_json::Value::Bool(true),
+            );
+            changed = true;
+        }
+    }
+
+    if !phases.review.enabled {
+        let already_emitted = runtime
+            .extra
+            .get("review_skipped_emitted")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !already_emitted {
+            let _ = append_phase_skipped_event(
+                repo_root,
+                &task_id,
+                "review",
+                "disabled_by_config",
+                "review skipped by config",
+            );
+            runtime.extra.insert(
+                "review_skipped_emitted".to_string(),
+                serde_json::Value::Bool(true),
+            );
+            changed = true;
+        }
+    }
+
+    Ok(changed)
+}
+
 pub async fn advance_tasks_native(
     repo_root: &Path,
     env_cfg: &CoordinatorEnvConfig,
@@ -746,11 +802,49 @@ pub async fn advance_tasks_native(
     state: &mut CoordinatorRunState,
     logger: Option<&dyn CoordinatorLog>,
 ) -> Result<coordinator_engine::AdvanceResult> {
-    let cfg = CoordinatorConfigResolved::resolve(coordinator);
+    let mut cfg = CoordinatorConfigResolved::resolve(coordinator);
+    if let Some(disable) = env_cfg.disable_testing {
+        if disable {
+            cfg.phases.testing.enabled = false;
+            cfg.phases.testing.mode = "disabled".to_string();
+        }
+    }
+    if let Some(disable) = env_cfg.disable_review {
+        if disable {
+            cfg.phases.review.enabled = false;
+            cfg.phases.review.mode = "disabled".to_string();
+        }
+    }
+    if let Some(ref mode) = env_cfg.testing_mode {
+        cfg.phases.testing.mode = mode.clone();
+        cfg.phases.testing.enabled = mode != "disabled";
+    }
+    if let Some(ref mode) = env_cfg.review_mode {
+        cfg.phases.review.mode = mode.clone();
+        cfg.phases.review.enabled = mode != "disabled";
+    }
     let mut registry =
         crate::coordinator::state::coordinator_state_registry_load(repo_root, &BTreeMap::new())?;
+
+    // --- Emit skipped phase events if phases are disabled ---
+    let mut registry_typed = TaskRegistry::from_value(&registry)?;
+    let mut skipped_phases_changed = false;
+    for task in &mut registry_typed.tasks {
+        use crate::coordinator::WorkflowState;
+        let ws = task.workflow_state().unwrap_or(WorkflowState::Todo);
+        if ws != WorkflowState::Todo
+            && ws != WorkflowState::Claimed
+            && check_and_emit_skipped_phases(repo_root, task, &cfg.phases)?
+        {
+            skipped_phases_changed = true;
+        }
+    }
+    if skipped_phases_changed {
+        registry = registry_typed.to_value()?;
+    }
+
     let registry_snapshot = TaskRegistry::from_value(&registry)?;
-    let mut progressed = false;
+    let mut progressed = skipped_phases_changed;
     let blocked_merge: Option<(String, String)> = None;
     let now = now_iso_coordinator();
     let merge_timeout = resolve_merge_timeout_seconds(env_cfg, coordinator);
@@ -769,6 +863,7 @@ pub async fn advance_tasks_native(
         &active_merge_ids,
         &now,
         max_review_cycles,
+        &cfg.phases,
     )?;
     if !actions.is_empty() {
         if let Some(log) = logger {
@@ -1342,6 +1437,19 @@ pub async fn monitor_active_jobs_native(
                             e
                         ))
                     })?;
+                    let typed_registry = TaskRegistry::from_value(&registry).ok();
+                    let (claim_id, epoch) = if let Some(ref typed) = typed_registry {
+                        if let Some(task) = typed.find_task(&task_id) {
+                            (
+                                task.task_runtime.claim_id.clone().unwrap_or_default(),
+                                task.task_runtime.coordinator_epoch.unwrap_or(0),
+                            )
+                        } else {
+                            (String::new(), 0)
+                        }
+                    } else {
+                        (String::new(), 0)
+                    };
                     let retry_pid = coordinator_runtime::spawn_performer_job(
                         &current_exe,
                         repo_root,
@@ -1352,6 +1460,9 @@ pub async fn monitor_active_jobs_native(
                         &mut state.join_set,
                         phase_timeout_seconds,
                         state.performer_ipc_addr.as_deref(),
+                        &claim_id,
+                        epoch,
+                        &[], // retry preserves previous performer env
                     )?;
                     state.active_jobs.insert(
                         task_id,
@@ -1389,7 +1500,7 @@ pub async fn monitor_active_jobs_native(
     Ok(())
 }
 
-fn apply_runtime_event_bus_updates(
+pub fn apply_runtime_event_bus_updates(
     repo_root: &Path,
     env_cfg: &CoordinatorEnvConfig,
     coordinator: Option<&crate::config::CoordinatorConfig>,
@@ -1412,7 +1523,7 @@ fn apply_runtime_event_bus_updates(
             Ok(event) => {
                 if let Some(log) = logger {
                     let event_type = match &event.kind {
-                        CoordinatorRuntimeEventKind::Heartbeat => "heartbeat",
+                        CoordinatorRuntimeEventKind::Heartbeat { .. } => "heartbeat",
                         CoordinatorRuntimeEventKind::TaskDispatched { .. } => "task_dispatched",
                         CoordinatorRuntimeEventKind::TaskCompleted { .. } => "task_completed",
                         CoordinatorRuntimeEventKind::Progress { .. } => "progress",
@@ -1454,7 +1565,7 @@ fn apply_runtime_event_bus_updates(
                 let update = runtime_updates.entry(event.task_id.clone()).or_default();
                 update.last_heartbeat = Some(event.ts.clone());
                 match event.kind {
-                    CoordinatorRuntimeEventKind::Heartbeat => {}
+                    CoordinatorRuntimeEventKind::Heartbeat { .. } => {}
                     CoordinatorRuntimeEventKind::TaskDispatched { .. }
                     | CoordinatorRuntimeEventKind::TaskCompleted { .. } => {}
                     CoordinatorRuntimeEventKind::Progress {
@@ -1688,11 +1799,99 @@ pub fn consume_heartbeat_events(
 }
 
 pub fn consume_runtime_events(
-    _repo_root: &Path,
-    _state: &mut CoordinatorRunState,
-    _logger: Option<&dyn CoordinatorLog>,
+    repo_root: &Path,
+    state: &mut CoordinatorRunState,
+    logger: Option<&dyn CoordinatorLog>,
 ) -> Result<usize> {
-    Ok(0)
+    let project_paths = crate::ProjectPaths::from_root(repo_root);
+    let storage_paths =
+        crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&project_paths);
+    let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
+    let conn = sqlite.open()?;
+    sqlite.init_schema(&conn)?;
+
+    let sql_err = |e: rusqlite::Error| MaccError::Storage {
+        backend: "sqlite",
+        message: e.to_string(),
+    };
+
+    let last_event_id: Option<String> = match conn.query_row(
+        "SELECT last_event_id FROM event_cursor WHERE stream = 'coordinator'",
+        [],
+        |row| row.get::<_, String>(0),
+    ) {
+        Ok(id) => Some(id),
+        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(e) => return Err(sql_err(e)),
+    };
+
+    let mut last_seq: Option<i64> = None;
+    if let Some(ref id) = last_event_id {
+        last_seq = match conn.query_row("SELECT seq FROM events WHERE event_id = ?1", [id], |row| {
+            row.get::<_, i64>(0)
+        }) {
+            Ok(seq) => Some(seq),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => return Err(sql_err(e)),
+        };
+    }
+
+    let mut stmt = if let (Some(_seq), Some(_id)) = (last_seq, &last_event_id) {
+        conn.prepare("SELECT raw_json, event_id FROM events WHERE seq > ?1 OR (seq = ?1 AND event_id > ?2) ORDER BY seq ASC, event_id ASC")
+            .map_err(sql_err)?
+    } else {
+        conn.prepare("SELECT raw_json, event_id FROM events ORDER BY seq ASC, event_id ASC")
+            .map_err(sql_err)?
+    };
+
+    let mut mapped_rows = Vec::new();
+    if let (Some(seq), Some(id)) = (last_seq, &last_event_id) {
+        let mut rows = stmt.query(rusqlite::params![seq, id]).map_err(sql_err)?;
+        while let Some(row) = rows.next().map_err(sql_err)? {
+            let raw: String = row.get(0).map_err(sql_err)?;
+            let event_id: String = row.get(1).map_err(sql_err)?;
+            mapped_rows.push((raw, event_id));
+        }
+    } else {
+        let mut rows = stmt.query([]).map_err(sql_err)?;
+        while let Some(row) = rows.next().map_err(sql_err)? {
+            let raw: String = row.get(0).map_err(sql_err)?;
+            let event_id: String = row.get(1).map_err(sql_err)?;
+            mapped_rows.push((raw, event_id));
+        }
+    }
+
+    let mut count = 0;
+    let mut latest_event_id = None;
+    for (raw, id) in mapped_rows {
+        if let Ok(v) = serde_json::from_str::<crate::coordinator::CoordinatorEventRecord>(&raw) {
+            if let Some(runtime_event) = coordinator_runtime::raw_event_to_runtime_event(&v) {
+                let _ = state.runtime_event_bus_tx.send(runtime_event);
+                count += 1;
+            }
+        }
+        latest_event_id = Some(id);
+    }
+
+    if let Some(ref id) = latest_event_id {
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO event_cursor (stream, last_event_id, last_read_at)
+             VALUES ('coordinator', ?1, ?2)
+             ON CONFLICT(stream) DO UPDATE SET last_event_id = ?1, last_read_at = ?2",
+            [id, &now],
+        )
+        .map_err(sql_err)?;
+
+        if let Some(log) = logger {
+            let _ = log.note(format!(
+                "- Recovery: replayed {} events; updated event_cursor to {}",
+                count, id
+            ));
+        }
+    }
+
+    Ok(count)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2077,6 +2276,22 @@ pub async fn dispatch_ready_tasks_native(
     state: &mut CoordinatorRunState,
     logger: Option<&dyn CoordinatorLog>,
 ) -> Result<usize> {
+    let storage_paths = crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(
+        &crate::ProjectPaths::from_root(repo_root),
+    );
+    let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
+    if let Ok(Some(ctrl)) = sqlite.get_coordinator_control() {
+        if ctrl.mode != "running" {
+            if let Some(log) = logger {
+                let _ = log.note(format!(
+                    "- Dispatch skipped: coordinator control mode is {}",
+                    ctrl.mode
+                ));
+            }
+            return Ok(0);
+        }
+    }
+
     let cfg = CoordinatorConfigResolved::resolve(coordinator);
     ensure_performer_ipc_listener(repo_root, state, logger).await?;
     state
@@ -2123,7 +2338,7 @@ mod tests {
         SanitizeOptions,
     };
     use crate::coordinator::control_plane::sanitize::RollbackWorktreeOptions;
-    use crate::coordinator::model::TaskRegistry;
+    use crate::coordinator::model::{Task, TaskRegistry};
     use crate::coordinator::runtime::CoordinatorRunState;
     use rusqlite::Connection;
     use serde_json::json;
@@ -2700,5 +2915,160 @@ mod tests {
         };
         let candidate = select_dispatch_candidate(&registry, &cfg).expect("candidate selected");
         assert_eq!(candidate.task.id, "T-HIGH");
+    }
+
+    #[test]
+    fn test_consume_runtime_events_replays_properly() {
+        let repo = make_test_repo();
+        let project_paths = crate::ProjectPaths::from_root(&repo);
+        let storage_paths =
+            crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&project_paths);
+        let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
+        let conn = sqlite.open().unwrap();
+        sqlite.init_schema(&conn).unwrap();
+
+        let e1 = crate::coordinator::CoordinatorEventRecord {
+            schema_version: "1".to_string(),
+            event_id: "evt-1".to_string(),
+            run_id: Some("run-1".to_string()),
+            coordinator_epoch: Some(1),
+            claim_id: Some("claim-1".to_string()),
+            seq: 10,
+            ts: "2026-03-20T12:00:00Z".to_string(),
+            source: "performer".to_string(),
+            task_id: Some("T1".to_string()),
+            event_type: "heartbeat".to_string(),
+            phase: Some("dev".to_string()),
+            status: "ok".to_string(),
+            ..Default::default()
+        };
+        let e2 = crate::coordinator::CoordinatorEventRecord {
+            schema_version: "1".to_string(),
+            event_id: "evt-2".to_string(),
+            run_id: Some("run-1".to_string()),
+            coordinator_epoch: Some(1),
+            claim_id: Some("claim-1".to_string()),
+            seq: 20,
+            ts: "2026-03-20T12:05:00Z".to_string(),
+            source: "performer".to_string(),
+            task_id: Some("T1".to_string()),
+            event_type: "heartbeat".to_string(),
+            phase: Some("dev".to_string()),
+            status: "ok".to_string(),
+            ..Default::default()
+        };
+
+        sqlite.append_event_record(&e1).unwrap();
+        sqlite.append_event_record(&e2).unwrap();
+
+        let mut run_state = CoordinatorRunState::new();
+
+        let replayed = super::consume_runtime_events(&repo, &mut run_state, None).unwrap();
+        assert_eq!(replayed, 2);
+
+        let last_event_id: String = conn
+            .query_row(
+                "SELECT last_event_id FROM event_cursor WHERE stream = 'coordinator'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(last_event_id, "evt-2");
+
+        let replayed_again = super::consume_runtime_events(&repo, &mut run_state, None).unwrap();
+        assert_eq!(replayed_again, 0);
+
+        let e3 = crate::coordinator::CoordinatorEventRecord {
+            schema_version: "1".to_string(),
+            event_id: "evt-3".to_string(),
+            run_id: Some("run-1".to_string()),
+            coordinator_epoch: Some(1),
+            claim_id: Some("claim-1".to_string()),
+            seq: 30,
+            ts: "2026-03-20T12:10:00Z".to_string(),
+            source: "performer".to_string(),
+            task_id: Some("T1".to_string()),
+            event_type: "heartbeat".to_string(),
+            phase: Some("dev".to_string()),
+            status: "ok".to_string(),
+            ..Default::default()
+        };
+        sqlite.append_event_record(&e3).unwrap();
+
+        let replayed_third = super::consume_runtime_events(&repo, &mut run_state, None).unwrap();
+        assert_eq!(replayed_third, 1);
+
+        let last_event_id: String = conn
+            .query_row(
+                "SELECT last_event_id FROM event_cursor WHERE stream = 'coordinator'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(last_event_id, "evt-3");
+
+        let _ = fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn test_check_and_emit_skipped_phases() {
+        let repo = make_test_repo();
+        let project_paths = crate::ProjectPaths::from_root(&repo);
+        let storage_paths =
+            crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&project_paths);
+        let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths.clone());
+        let conn = sqlite.open().unwrap();
+        sqlite.init_schema(&conn).unwrap();
+
+        // 1. Create a task that has finished dev phase (InProgress workflow state)
+        let mut task = Task {
+            id: "T-SKIP-1".to_string(),
+            state: "in_progress".to_string(),
+            ..Default::default()
+        };
+
+        // 2. Set phase config to have testing disabled and review enabled
+        let phases = crate::config::PhasesConfig {
+            testing: crate::config::PhaseConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            review: crate::config::PhaseConfig {
+                enabled: true,
+                ..Default::default()
+            },
+        };
+
+        // 3. Call check_and_emit_skipped_phases
+        let changed = super::check_and_emit_skipped_phases(&repo, &mut task, &phases).unwrap();
+        assert!(changed);
+
+        // 4. Assert that "test_skipped_emitted" is now true in runtime extra
+        let runtime = task.ensure_runtime();
+        assert_eq!(
+            runtime.extra.get("test_skipped_emitted").unwrap().as_bool(),
+            Some(true)
+        );
+
+        // 5. Calling it again should return changed = false (idempotence)
+        let changed_again =
+            super::check_and_emit_skipped_phases(&repo, &mut task, &phases).unwrap();
+        assert!(!changed_again);
+
+        // 6. Verify the event actually got appended to SQLite storage
+        let mut stmt = conn.prepare("SELECT event_type, phase, status, payload_json FROM events WHERE task_id = 'T-SKIP-1'").unwrap();
+        let mut rows = stmt.query([]).unwrap();
+        let row = rows.next().unwrap().unwrap();
+        let event_type: String = row.get(0).unwrap();
+        let phase: Option<String> = row.get(1).unwrap();
+        let status: String = row.get(2).unwrap();
+        let payload_json: String = row.get(3).unwrap();
+
+        assert_eq!(event_type, "phase_skipped");
+        assert_eq!(phase, Some("test".to_string()));
+        assert_eq!(status, "skipped");
+        assert!(payload_json.contains("testing skipped by config"));
+
+        let _ = fs::remove_dir_all(repo);
     }
 }

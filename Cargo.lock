@@ -1250,8 +1250,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "macc-adapter-agy"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+ "macc-adapter-shared",
+ "macc-core",
+ "regex",
+ "serde",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
 name = "macc-adapter-claude"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "inventory",
@@ -1264,8 +1277,9 @@ dependencies = [
 
 [[package]]
 name = "macc-adapter-codex"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
+ "chrono",
  "inventory",
  "macc-adapter-shared",
  "macc-core",
@@ -1276,7 +1290,7 @@ dependencies = [
 
 [[package]]
 name = "macc-adapter-gemini"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "inventory",
  "macc-adapter-shared",
@@ -1289,7 +1303,7 @@ dependencies = [
 
 [[package]]
 name = "macc-adapter-shared"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
  "macc-core",
@@ -1303,8 +1317,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "macc-adapter-vibe"
+version = "0.2.0"
+dependencies = [
+ "inventory",
+ "macc-adapter-shared",
+ "macc-core",
+ "regex",
+ "serde",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
 name = "macc-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1313,6 +1340,8 @@ dependencies = [
  "clap",
  "futures-util",
  "http-body-util",
+ "libc",
+ "macc-adapter-agy",
  "macc-adapter-claude",
  "macc-adapter-codex",
  "macc-adapter-gemini",
@@ -1326,6 +1355,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "tempfile",
  "tokio",
  "tokio-stream",
  "tower 0.4.13",
@@ -1337,11 +1367,12 @@ dependencies = [
 
 [[package]]
 name = "macc-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "chrono",
  "inventory",
+ "libc",
  "regex",
  "rusqlite",
  "serde",
@@ -1359,19 +1390,22 @@ dependencies = [
 
 [[package]]
 name = "macc-registry"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chrono",
+ "macc-adapter-agy",
  "macc-adapter-claude",
  "macc-adapter-codex",
  "macc-adapter-gemini",
+ "macc-adapter-shared",
+ "macc-adapter-vibe",
  "macc-core",
  "serde_json",
 ]
 
 [[package]]
 name = "macc-tui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",

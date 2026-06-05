@@ -13,6 +13,12 @@ pub struct ResolvedConfig {
     pub mcp_templates: Vec<crate::config::McpTemplateDefinition>,
     pub automation: crate::config::AutomationConfig,
     pub settings: crate::config::SettingsConfig,
+    /// Spec §3.12: skill run policy resolved from `skills.run_policy` in macc.yaml.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skills_run_policy: Option<crate::config::SkillRunPolicyConfig>,
+    /// Spec §5.5: token budget and summarization config resolved from `context` in macc.yaml.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<crate::config::ContextConfig>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
@@ -199,6 +205,8 @@ pub fn resolve(canonical: &CanonicalConfig, overrides: &CliOverrides) -> Resolve
         mcp_templates: canonical.mcp_templates.clone(),
         automation: canonical.automation.clone(),
         settings,
+        skills_run_policy: canonical.skills.as_ref().and_then(|s| s.run_policy.clone()),
+        context: canonical.context.clone(),
     }
 }
 
@@ -216,13 +224,20 @@ pub fn resolve_fetch_units(
     skill_ids.dedup();
 
     for id in &skill_ids {
-        let entry = skills_catalog
-            .entries
-            .iter()
-            .find(|e| &e.id == id)
-            .ok_or_else(|| {
-                MaccError::Validation(format!("Skill ID not found in catalog: {}", id))
-            })?;
+        let entry = match skills_catalog.entries.iter().find(|e| &e.id == id) {
+            Some(e) => e,
+            None if crate::is_required_skill(id) => {
+                // Required (built-in) skills are provided by MACC itself and are
+                // not fetched from a remote catalog. Skip silently.
+                continue;
+            }
+            None => {
+                return Err(MaccError::Validation(format!(
+                    "Skill ID not found in catalog: {}",
+                    id
+                )));
+            }
+        };
         raw_selections.push((
             entry.source.clone(),
             Selection {
@@ -349,6 +364,9 @@ mod tests {
             settings: SettingsConfig::default(),
             process_ownership: None,
             mcp_templates: Vec::new(),
+            skills: None,
+            context: None,
+            prd_generation: None,
         };
 
         let resolved = resolve(&canonical, &CliOverrides::default());
@@ -386,6 +404,9 @@ mod tests {
             settings: SettingsConfig::default(),
             process_ownership: None,
             mcp_templates: Vec::new(),
+            skills: None,
+            context: None,
+            prd_generation: None,
         };
 
         let resolved = resolve(&canonical, &CliOverrides::default());
@@ -409,6 +430,9 @@ mod tests {
             settings: SettingsConfig::default(),
             process_ownership: None,
             mcp_templates: Vec::new(),
+            skills: None,
+            context: None,
+            prd_generation: None,
         };
 
         let overrides = CliOverrides {
@@ -475,6 +499,9 @@ mod tests {
             settings: SettingsConfig::default(),
             process_ownership: None,
             mcp_templates: Vec::new(),
+            skills: None,
+            context: None,
+            prd_generation: None,
         };
 
         let canonical2 = CanonicalConfig {
@@ -489,6 +516,9 @@ mod tests {
             settings: SettingsConfig::default(),
             process_ownership: None,
             mcp_templates: Vec::new(),
+            skills: None,
+            context: None,
+            prd_generation: None,
         };
 
         let resolved1 = resolve(&canonical1, &CliOverrides::default());
@@ -528,6 +558,14 @@ mod tests {
                 subpath: "skills/s1".into(),
             },
             source: source1.clone(),
+            tools: vec![],
+            recommended_ref: None,
+            risk: None,
+            requires_mcp: false,
+            writes_user_level_config: false,
+            targets: Default::default(),
+            category: None,
+            compatibility: None,
         });
         skills_catalog.entries.push(SkillEntry {
             id: "skill2".into(),
@@ -538,6 +576,14 @@ mod tests {
                 subpath: "skills/s2".into(),
             },
             source: source1, // Same source
+            tools: vec![],
+            recommended_ref: None,
+            risk: None,
+            requires_mcp: false,
+            writes_user_level_config: false,
+            targets: Default::default(),
+            category: None,
+            compatibility: None,
         });
         for required_id in crate::required_skills() {
             skills_catalog.entries.push(SkillEntry {
@@ -555,6 +601,14 @@ mod tests {
                     checksum: None,
                     subpaths: vec![],
                 },
+                tools: vec![],
+                recommended_ref: None,
+                risk: None,
+                requires_mcp: false,
+                writes_user_level_config: false,
+                targets: Default::default(),
+                category: None,
+                compatibility: None,
             });
         }
 
@@ -580,6 +634,8 @@ mod tests {
             mcp_templates: Vec::new(),
             automation: crate::config::AutomationConfig::default(),
             settings: SettingsConfig::default(),
+            context: None,
+            skills_run_policy: None,
         };
 
         let fetch_units = resolve_fetch_units(&paths, &resolved)?;
@@ -640,6 +696,14 @@ mod tests {
                 checksum: None,
                 subpaths: vec![],
             },
+            tools: vec![],
+            recommended_ref: None,
+            risk: None,
+            requires_mcp: false,
+            writes_user_level_config: false,
+            targets: Default::default(),
+            category: None,
+            compatibility: None,
         });
         for required_id in crate::required_skills() {
             skills_catalog.entries.push(SkillEntry {
@@ -657,6 +721,14 @@ mod tests {
                     checksum: None,
                     subpaths: vec![],
                 },
+                tools: vec![],
+                recommended_ref: None,
+                risk: None,
+                requires_mcp: false,
+                writes_user_level_config: false,
+                targets: Default::default(),
+                category: None,
+                compatibility: None,
             });
         }
 
@@ -703,6 +775,8 @@ mod tests {
             mcp_templates: Vec::new(),
             automation: crate::config::AutomationConfig::default(),
             settings: SettingsConfig::default(),
+            context: None,
+            skills_run_policy: None,
         };
 
         let fetch_units = resolve_fetch_units(&paths, &resolved)?;
@@ -761,6 +835,8 @@ mod tests {
             mcp_templates: Vec::new(),
             automation: crate::config::AutomationConfig::default(),
             settings: SettingsConfig::default(),
+            context: None,
+            skills_run_policy: None,
         };
 
         let result = resolve_fetch_units(&paths, &resolved);

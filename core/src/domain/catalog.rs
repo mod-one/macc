@@ -97,6 +97,14 @@ pub fn build_skill_entry(input: CatalogEntryInput) -> Result<SkillEntry> {
             checksum: input.checksum,
             subpaths: vec![],
         },
+        tools: vec![],
+        recommended_ref: None,
+        risk: None,
+        requires_mcp: false,
+        writes_user_level_config: false,
+        targets: Default::default(),
+        category: None,
+        compatibility: None,
     })
 }
 

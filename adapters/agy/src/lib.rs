@@ -1,0 +1,20 @@
+mod adapter;
+mod doctor;
+mod emit;
+pub mod error_normalizer;
+mod map;
+
+pub use adapter::AgyAdapter;
+
+inventory::submit! {
+    macc_core::tool::AdapterRegistration {
+        factory: || std::sync::Arc::new(AgyAdapter)
+    }
+}
+
+inventory::submit! {
+    macc_core::coordinator::error_normalizer::NormalizerRegistration {
+        tool_id: "agy",
+        factory: || Box::new(crate::error_normalizer::AgyErrorNormalizer),
+    }
+}

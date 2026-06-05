@@ -13,6 +13,7 @@ pub enum Screen {
     Apply,
     Settings,
     About,
+    Watch,
 }
 
 impl Screen {
@@ -31,6 +32,7 @@ impl Screen {
             Screen::Apply => "Apply Changes",
             Screen::Settings => "Global Settings",
             Screen::About => "About",
+            Screen::Watch => "Observer",
         }
     }
 
@@ -53,17 +55,22 @@ impl Screen {
         ];
 
         let screen_bindings = match self {
+            Screen::Home => vec![
+                ("d", "Run doctor check"),
+                ("a", "Open Apply screen"),
+                ("r", "Start coordinator + go to Live"),
+                ("v", "Go to Coordinator Live"),
+            ],
             Screen::Tools => vec![
-                ("Up/Down", "Navigate Tools"),
+                ("↑↓", "Navigate Tools"),
                 ("Space", "Toggle Tool"),
                 ("Enter", "Configure Tool"),
                 ("d", "Refresh Tool Checks"),
                 ("f", "Generate Tool Context"),
             ],
-            Screen::Automation => vec![
-                ("Up/Down", "Navigate Settings"),
-                ("Space/Enter", "Edit / Cycle"),
-            ],
+            Screen::Automation => {
+                vec![("↑↓", "Navigate Settings"), ("Space/Enter", "Edit / Cycle")]
+            }
             Screen::CoordinatorLive => vec![
                 ("r", "Run Full Cycle"),
                 ("y", "Sync Registry"),
@@ -79,35 +86,35 @@ impl Screen {
                 ("k/Esc (on error)", "Stop after pause"),
             ],
             Screen::ToolSettings => vec![
-                ("Up/Down", "Navigate Fields"),
+                ("↑↓", "Navigate Fields"),
                 ("Space/Enter", "Cycle Value / Edit Text/Number/Array"),
             ],
             Screen::Skills => vec![
-                ("Up/Down", "Navigate Skills"),
+                ("↑↓", "Navigate Skills"),
                 ("Space/Enter", "Toggle Skill"),
                 ("a", "Select All"),
                 ("n", "Select None"),
             ],
             Screen::Agents => vec![
-                ("Up/Down", "Navigate Agents"),
+                ("↑↓", "Navigate Agents"),
                 ("Space/Enter", "Toggle Agent"),
                 ("a", "Select All"),
                 ("n", "Select None"),
             ],
             Screen::Mcp => vec![
-                ("Up/Down", "Navigate MCP Templates"),
+                ("↑↓", "Navigate MCP Templates"),
                 ("Space/Enter", "Toggle Template"),
                 ("a", "Select All"),
                 ("n", "Select None"),
             ],
             Screen::Logs => vec![
-                ("Up/Down", "Select Log File"),
+                ("↑↓", "Select Log File"),
                 ("PgUp/PgDn", "Scroll Log Content"),
                 ("r", "Refresh Log List"),
                 ("/", "Filter logs"),
             ],
             Screen::Preview => vec![
-                ("Up/Down", "Navigate Operations"),
+                ("↑↓", "Navigate Operations"),
                 ("PgUp/PgDn", "Scroll Diff"),
                 ("r", "Refresh Plan"),
                 ("x", "Go to Apply Screen"),
@@ -117,9 +124,16 @@ impl Screen {
                 ("Backspace", "Delete last char of 'YES'"),
                 ("YES", "Type to consent to user-scope ops"),
             ],
-            Screen::Settings => vec![
-                ("Up/Down", "Navigate Settings"),
-                ("Space/Enter", "Edit / Cycle"),
+            Screen::Settings => vec![("↑↓", "Navigate Settings"), ("Space/Enter", "Edit / Cycle")],
+            Screen::Watch => vec![
+                ("↑↓", "Scroll workers"),
+                ("f", "Follow / unfollow log"),
+                ("/", "Search"),
+                ("e", "Errors only"),
+                ("w", "Warnings only"),
+                ("a", "All logs"),
+                ("r", "Refresh"),
+                ("l", "Reload snapshot"),
             ],
             _ => vec![],
         };

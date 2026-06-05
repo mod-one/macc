@@ -92,17 +92,19 @@ fn render_preview_cards(
         materialized_units: &materialized_units,
     };
     let registry = ToolRegistry::from_inventory();
-    let preferred_ids = preview_tool_ids();
     let mut cards = Vec::new();
 
-    for tool_id in preferred_ids {
+    for tool_id in registry.list_ids() {
         let Some(adapter) = registry.get(&tool_id) else {
             continue;
         };
-        let plan = adapter.plan(&planning_ctx)?;
-        let Some((target, fallback)) = preview_target_and_fallback(&tool_id) else {
+        let Some(target) = adapter.context_file_target() else {
             continue;
         };
+        let fallback = adapter
+            .context_file_fallback()
+            .unwrap_or_else(|| format!("{target} preview unavailable.\n"));
+        let plan = adapter.plan(&planning_ctx)?;
         cards.push(ApiStandardsPreviewCard {
             id: tool_id.clone(),
             title: format!("{} - {} (rendered)", tool_title(&tool_id), target),
@@ -123,44 +125,6 @@ fn find_rendered_file(plan: &ActionPlan, target: &str, fallback: &str) -> String
     }
 
     fallback.to_string()
-}
-
-fn preview_tool_ids() -> Vec<String> {
-    vec![
-        ["co", "dex"].concat(),
-        ["clau", "de"].concat(),
-        ["gem", "ini"].concat(),
-    ]
-}
-
-fn preview_target_and_fallback(tool_id: &str) -> Option<(String, String)> {
-    let first_tool_id = ["co", "dex"].concat();
-    if tool_id == first_tool_id {
-        return Some((
-            "AGENTS.md".to_string(),
-            [
-                "AGENTS.md is not generated when ",
-                "co",
-                "dex",
-                ".rules_enabled is false.\n",
-            ]
-            .concat(),
-        ));
-    }
-
-    let second_tool_id = ["clau", "de"].concat();
-    if tool_id == second_tool_id {
-        let target = ["CLAU", "DE.md"].concat();
-        return Some((target.clone(), format!("{target} preview unavailable.\n")));
-    }
-
-    let third_tool_id = ["gem", "ini"].concat();
-    if tool_id == third_tool_id {
-        let target = ["GEM", "INI.md"].concat();
-        return Some((target.clone(), format!("{target} preview unavailable.\n")));
-    }
-
-    None
 }
 
 fn tool_title(tool_id: &str) -> String {
@@ -193,6 +157,7 @@ impl From<CanonicalConfig> for ApiConfigResponse {
             selected_agents: selections.agents,
             selected_mcp: selections.mcp,
             quiet: config.settings.quiet,
+            debug: config.settings.debug,
             offline: config.settings.offline,
             web_port: config.settings.web_port,
             web_assets: config.settings.web_assets,
@@ -296,6 +261,12 @@ impl From<CanonicalConfig> for ApiConfigResponse {
                 .as_ref()
                 .and_then(|cfg| cfg.force_kill_grace_seconds),
             max_review_cycles: coordinator.as_ref().and_then(|cfg| cfg.max_review_cycles),
+            safety_policy: coordinator
+                .as_ref()
+                .and_then(|cfg| cfg.safety_policy.clone()),
+            destructive_actions: coordinator
+                .as_ref()
+                .and_then(|cfg| cfg.destructive_actions.clone()),
             requirements_detected: false,
             managed_environment_warnings: Vec::new(),
         }
@@ -350,6 +321,9 @@ fn apply_selection_update(config: &mut CanonicalConfig, request: &ApiConfigUpdat
 fn apply_settings_update(config: &mut CanonicalConfig, request: &ApiConfigUpdateRequest) {
     if let Some(quiet) = request.quiet {
         config.settings.quiet = quiet;
+    }
+    if let Some(debug) = request.debug {
+        config.settings.debug = debug;
     }
     if let Some(offline) = request.offline {
         config.settings.offline = offline;
@@ -509,6 +483,12 @@ fn apply_coordinator_update(config: &mut CanonicalConfig, request: &ApiConfigUpd
     if let Some(value) = request.max_review_cycles {
         coordinator.max_review_cycles = Some(value);
     }
+    if let Some(value) = &request.safety_policy {
+        coordinator.safety_policy = Some(value.clone());
+    }
+    if let Some(value) = &request.destructive_actions {
+        coordinator.destructive_actions = Some(value.clone());
+    }
 }
 
 fn has_coordinator_updates(request: &ApiConfigUpdateRequest) -> bool {
@@ -549,6 +529,8 @@ fn has_coordinator_updates(request: &ApiConfigUpdateRequest) -> bool {
         || request.rate_limit_throttle_parallel.is_some()
         || request.force_kill_grace_seconds.is_some()
         || request.max_review_cycles.is_some()
+        || request.safety_policy.is_some()
+        || request.destructive_actions.is_some()
 }
 
 fn default_ralph_config() -> RalphConfig {

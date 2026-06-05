@@ -1,12 +1,13 @@
 use super::errors::ApiError;
 use super::WebState;
+use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::Json;
 use macc_core::coordinator::task_selector::SelectedTask;
 use macc_core::coordinator::types::CoordinatorEnvConfig;
 use macc_core::service::coordinator_workflow::{
     CoordinatorCommand, CoordinatorCommandRequest, CoordinatorCommandResult, CoordinatorStatus,
-    ThrottledToolStatus,
+    PsProcessEntry, RecoveryReportEntry, ThrottledToolStatus,
 };
 use macc_core::service::diagnostic::{FailureKind, FailureReport};
 use serde::{Deserialize, Serialize};
@@ -82,6 +83,10 @@ pub(super) struct ApiCoordinatorCommandResult {
     pub selected_task: Option<ApiSelectedTask>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_cooldowns: Option<Vec<ApiToolCooldownEntry>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub processes: Option<Vec<ApiPsProcessEntry>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_report: Option<Vec<ApiRecoveryReportEntry>>,
 }
 
 impl From<CoordinatorCommandResult> for ApiCoordinatorCommandResult {
@@ -102,6 +107,12 @@ impl From<CoordinatorCommandResult> for ApiCoordinatorCommandResult {
                     .map(ApiToolCooldownEntry::from)
                     .collect()
             }),
+            processes: result
+                .processes
+                .map(|list| list.into_iter().map(ApiPsProcessEntry::from).collect()),
+            recovery_report: result
+                .recovery_report
+                .map(|list| list.into_iter().map(ApiRecoveryReportEntry::from).collect()),
         }
     }
 }
@@ -219,16 +230,81 @@ pub(super) async fn coordinator_run_handler(
 pub(super) async fn coordinator_stop_handler(
     State(state): State<WebState>,
     headers: axum::http::HeaderMap,
+    req: Option<Json<ApiStopRequest>>,
 ) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
     crate::commands::web::mutation_gate::require_project_owner(&state, &headers)?;
     let paths = state.paths.clone();
     let engine = state.engine.clone();
-    tokio::task::spawn_blocking(move || engine.coordinator_stop(&paths.root, "web api stop"))
-        .await
-        .map_err(|e| ApiError::validation(e.to_string()))??;
-    Ok(Json(ApiCoordinatorCommandResult::from(
-        CoordinatorCommandResult::default(),
-    )))
+
+    let req = req.map(|Json(r)| r).unwrap_or_default();
+    let mode = req.mode.as_deref().unwrap_or("graceful");
+    let drain = mode == "drain";
+    let graceful = mode == "graceful" || mode == "drain";
+    let force = mode == "force" || mode == "force_cleanup";
+    let remove_worktrees = req.cleanup_worktrees.unwrap_or(false) || mode == "force_cleanup";
+    let reason = req
+        .reason
+        .clone()
+        .unwrap_or_else(|| "web api stop".to_string());
+
+    if force {
+        let expected_confirm = if remove_worktrees {
+            "FORCE CLEANUP"
+        } else {
+            "FORCE"
+        };
+        if req.confirm.as_deref() != Some(expected_confirm) {
+            let msg = if remove_worktrees {
+                "Confirmation required. Type FORCE CLEANUP to terminate active tools and clean MACC-managed worktrees."
+            } else {
+                "Confirmation required. This will terminate all active MACC-launched tool processes. Worktrees will be preserved for inspection."
+            };
+            return Err(ApiError::confirmation_required(msg, None));
+        }
+    }
+
+    let start_time = std::time::Instant::now();
+    let result = tokio::task::spawn_blocking(move || {
+        let env_cfg = CoordinatorEnvConfig::default();
+        engine.coordinator_execute_command(
+            &paths,
+            CoordinatorCommand::Stop {
+                drain,
+                graceful,
+                force,
+                remove_worktrees,
+                remove_branches: remove_worktrees,
+                reason,
+            },
+            CoordinatorCommandRequest {
+                canonical: None,
+                coordinator_cfg: None,
+                env_cfg: &env_cfg,
+                logger: None,
+            },
+        )
+    })
+    .await;
+
+    let duration_ms = start_time.elapsed().as_millis() as u64;
+    let status_str = match &result {
+        Ok(Ok(_)) => "ok",
+        _ => "error",
+    };
+
+    let record = crate::commands::web::audit::StopAuditRecord {
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        client: "web",
+        action: "coordinator.stop",
+        mode: mode.to_string(),
+        cleanup_worktrees: remove_worktrees,
+        status: status_str.to_string(),
+        duration_ms,
+    };
+    let _ = crate::commands::web::audit::append_stop_record(&state, &record).await;
+
+    let execute_res = result.map_err(|e| ApiError::validation(e.to_string()))??;
+    Ok(Json(ApiCoordinatorCommandResult::from(execute_res)))
 }
 
 pub(super) async fn coordinator_cleanup_handler(
@@ -367,34 +443,6 @@ pub(super) async fn coordinator_sync_handler(
     Ok(Json(ApiCoordinatorCommandResult::from(result)))
 }
 
-pub(super) async fn coordinator_audit_prd_handler(
-    State(state): State<WebState>,
-    headers: axum::http::HeaderMap,
-) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
-    crate::commands::web::mutation_gate::require_project_owner(&state, &headers)?;
-    let paths = state.paths.clone();
-    let engine = state.engine.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        let env_cfg = CoordinatorEnvConfig::default();
-        engine.coordinator_execute_command(
-            &paths,
-            CoordinatorCommand::AuditPrd {
-                tool: None,
-                dry_run: false,
-            },
-            CoordinatorCommandRequest {
-                canonical: None,
-                coordinator_cfg: None,
-                env_cfg: &env_cfg,
-                logger: None,
-            },
-        )
-    })
-    .await
-    .map_err(|e| ApiError::validation(e.to_string()))??;
-    Ok(Json(ApiCoordinatorCommandResult::from(result)))
-}
-
 pub(super) async fn get_tool_cooldowns_handler(
     State(state): State<WebState>,
 ) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
@@ -465,4 +513,322 @@ pub(super) async fn clear_tool_cooldown_handler(
         )
         .map_err(ApiError::from)?;
     Ok(Json(ApiCoordinatorCommandResult::from(result)))
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub(super) struct ApiStopRequest {
+    pub mode: Option<String>,
+    pub cleanup_worktrees: Option<bool>,
+    pub reason: Option<String>,
+    pub confirm: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub(super) struct ApiRecoverRequest {
+    pub dry_run: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct ApiPsProcessEntry {
+    pub task_id: String,
+    pub claim_id: String,
+    pub tool: String,
+    pub pid: i64,
+    pub pgid: i64,
+    pub status: String,
+    pub heartbeat: String,
+    pub worktree: String,
+}
+
+impl From<PsProcessEntry> for ApiPsProcessEntry {
+    fn from(p: PsProcessEntry) -> Self {
+        Self {
+            task_id: p.task_id,
+            claim_id: p.claim_id,
+            tool: p.tool,
+            pid: p.pid,
+            pgid: p.pgid,
+            status: p.status,
+            heartbeat: p.heartbeat,
+            worktree: p.worktree,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct ApiRecoveryReportEntry {
+    pub task_id: String,
+    pub situation: String,
+    pub classification: String,
+    pub action: String,
+    pub mutated: bool,
+}
+
+impl From<RecoveryReportEntry> for ApiRecoveryReportEntry {
+    fn from(r: RecoveryReportEntry) -> Self {
+        Self {
+            task_id: r.task_id,
+            situation: r.situation,
+            classification: r.classification,
+            action: r.action,
+            mutated: r.mutated,
+        }
+    }
+}
+
+pub(super) async fn coordinator_processes_handler(
+    State(state): State<WebState>,
+) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
+    let paths = state.paths.clone();
+    let engine = state.engine.clone();
+
+    let result = tokio::task::spawn_blocking(move || {
+        let env_cfg = CoordinatorEnvConfig::default();
+        engine.coordinator_execute_command(
+            &paths,
+            CoordinatorCommand::Ps,
+            CoordinatorCommandRequest {
+                canonical: None,
+                coordinator_cfg: None,
+                env_cfg: &env_cfg,
+                logger: None,
+            },
+        )
+    })
+    .await
+    .map_err(|e| ApiError::validation(e.to_string()))??;
+
+    Ok(Json(ApiCoordinatorCommandResult::from(result)))
+}
+
+pub(super) async fn coordinator_recover_handler(
+    State(state): State<WebState>,
+    headers: axum::http::HeaderMap,
+    req: Option<Json<ApiRecoverRequest>>,
+) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
+    crate::commands::web::mutation_gate::require_project_owner(&state, &headers)?;
+    let paths = state.paths.clone();
+    let engine = state.engine.clone();
+    let req = req.map(|Json(r)| r).unwrap_or_default();
+    let dry_run = req.dry_run.unwrap_or(false);
+
+    let result = tokio::task::spawn_blocking(move || {
+        let env_cfg = CoordinatorEnvConfig::default();
+        engine.coordinator_execute_command(
+            &paths,
+            CoordinatorCommand::Recover { dry_run },
+            CoordinatorCommandRequest {
+                canonical: None,
+                coordinator_cfg: None,
+                env_cfg: &env_cfg,
+                logger: None,
+            },
+        )
+    })
+    .await
+    .map_err(|e| ApiError::validation(e.to_string()))??;
+
+    Ok(Json(ApiCoordinatorCommandResult::from(result)))
+}
+
+// ── Reference branch preflight endpoints (spec §14) ──────────────────────────
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ApiPreflightRequest {
+    reference_branch: Option<String>,
+    include_untracked: Option<bool>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ApiPreflightWorktreeEntry {
+    path: String,
+    branch: String,
+    dirty_entries: Vec<ApiPreflightStatusEntry>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ApiPreflightStatusEntry {
+    index_status: String,
+    worktree_status: String,
+    path: String,
+    original_path: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ApiPreflightResponse {
+    reference_branch: String,
+    branch_exists: bool,
+    remote_tracking_branches: Vec<String>,
+    status: String,
+    checked_out_worktrees: Vec<ApiPreflightWorktreeEntry>,
+    recommended_action: String,
+}
+
+/// `POST /api/v1/coordinator/preflight`
+pub(super) async fn coordinator_preflight_handler(
+    State(state): State<WebState>,
+    body: Bytes,
+) -> std::result::Result<Json<ApiPreflightResponse>, ApiError> {
+    use macc_core::coordinator::preflight;
+
+    let req: ApiPreflightRequest = if body.is_empty() {
+        ApiPreflightRequest {
+            reference_branch: None,
+            include_untracked: None,
+        }
+    } else {
+        serde_json::from_slice(&body)
+            .map_err(|e| ApiError::validation(format!("Invalid preflight request: {}", e)))?
+    };
+
+    let config_path = state.paths.macc_dir.join("macc.yaml");
+    let canonical = macc_core::load_canonical_config(&config_path).ok();
+    let coordinator = canonical
+        .as_ref()
+        .and_then(|c| c.automation.coordinator.as_ref());
+
+    let reference_branch = req
+        .reference_branch
+        .or_else(|| coordinator.and_then(|c| c.reference_branch.clone()))
+        .unwrap_or_else(|| "main".to_string());
+
+    let raw = coordinator
+        .and_then(|c| c.reference_branch_preflight.clone())
+        .unwrap_or_default();
+    let require_clean = coordinator.and_then(|c| c.require_clean_reference_branch);
+    let mut cfg = raw.resolve(require_clean);
+    if let Some(u) = req.include_untracked {
+        cfg.include_untracked = u;
+    }
+
+    let report = tokio::task::spawn_blocking({
+        let engine = state.engine.clone();
+        let paths = state.paths.clone();
+        let branch = reference_branch.clone();
+        move || engine.inspect_reference_preflight(&paths, &branch, &cfg)
+    })
+    .await
+    .map_err(|e| ApiError::validation(format!("Preflight task error: {}", e)))?
+    .map_err(|e| ApiError::validation(e.to_string()))?;
+
+    let status_str = match report.status {
+        preflight::ReferencePreflightStatus::Clean => "clean",
+        preflight::ReferencePreflightStatus::NotCheckedOut => "not_checked_out",
+        preflight::ReferencePreflightStatus::BranchMissing => "branch_missing",
+        preflight::ReferencePreflightStatus::Dirty => "dirty",
+        preflight::ReferencePreflightStatus::InvalidBranchName => "invalid_branch_name",
+        preflight::ReferencePreflightStatus::BareRepository => "bare_repository",
+        preflight::ReferencePreflightStatus::GitInspectionFailed => "git_inspection_failed",
+    };
+    let action_str = match report.recommended_action {
+        preflight::ReferencePreflightAction::Proceed => "proceed",
+        preflight::ReferencePreflightAction::PromptCreateBranch => "prompt_create_branch",
+        preflight::ReferencePreflightAction::PromptCleanOrOverride => "prompt_clean_or_override",
+        preflight::ReferencePreflightAction::Fail => "fail",
+    };
+
+    Ok(Json(ApiPreflightResponse {
+        reference_branch: report.reference_branch,
+        branch_exists: report.branch_exists,
+        remote_tracking_branches: report.remote_tracking_branches,
+        status: status_str.to_string(),
+        checked_out_worktrees: report
+            .checked_out_worktrees
+            .into_iter()
+            .map(|w| ApiPreflightWorktreeEntry {
+                path: w.path.to_string_lossy().to_string(),
+                branch: w.branch,
+                dirty_entries: w
+                    .dirty_entries
+                    .into_iter()
+                    .map(|e| ApiPreflightStatusEntry {
+                        index_status: e.index_status.to_string(),
+                        worktree_status: e.worktree_status.to_string(),
+                        path: e.path,
+                        original_path: e.original_path,
+                    })
+                    .collect(),
+            })
+            .collect(),
+        recommended_action: action_str.to_string(),
+    }))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ApiCreateBranchRequest {
+    branch: String,
+    source: ApiCreateBranchSource,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ApiCreateBranchSource {
+    #[serde(rename = "type")]
+    source_type: String,
+    value: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ApiCreateBranchResponse {
+    branch: String,
+    created: bool,
+    source: String,
+}
+
+/// `POST /api/v1/coordinator/preflight/create-reference-branch`
+pub(super) async fn coordinator_preflight_create_branch_handler(
+    State(state): State<WebState>,
+    headers: axum::http::HeaderMap,
+    body: Bytes,
+) -> std::result::Result<Json<ApiCreateBranchResponse>, ApiError> {
+    use macc_core::coordinator::preflight::BranchCreateSource;
+
+    crate::commands::web::mutation_gate::require_project_owner(&state, &headers)?;
+
+    let req: ApiCreateBranchRequest = serde_json::from_slice(&body)
+        .map_err(|e| ApiError::validation(format!("Invalid request: {}", e)))?;
+
+    let source = match req.source.source_type.as_str() {
+        "current_head" => BranchCreateSource::CurrentHead,
+        "remote_tracking" => {
+            BranchCreateSource::RemoteTracking(req.source.value.clone().unwrap_or_default())
+        }
+        "local_branch" => {
+            BranchCreateSource::LocalBranch(req.source.value.clone().unwrap_or_default())
+        }
+        other => {
+            return Err(ApiError::validation(format!(
+                "Unknown branch source type \"{}\".",
+                other
+            )));
+        }
+    };
+
+    let source_label = match &source {
+        BranchCreateSource::CurrentHead => "HEAD".to_string(),
+        BranchCreateSource::RemoteTracking(r) | BranchCreateSource::LocalBranch(r) => r.clone(),
+        BranchCreateSource::Revision(r) => r.clone(),
+    };
+
+    let branch = req.branch.clone();
+    let engine = state.engine.clone();
+    let paths = state.paths.clone();
+    tokio::task::spawn_blocking(move || {
+        engine.create_reference_branch_via_engine(&paths, &branch, source)
+    })
+    .await
+    .map_err(|e| ApiError::validation(format!("Branch creation task error: {}", e)))?
+    .map_err(|e| ApiError::validation(e.to_string()))?;
+
+    Ok(Json(ApiCreateBranchResponse {
+        branch: req.branch,
+        created: true,
+        source: source_label,
+    }))
 }

@@ -22,6 +22,12 @@ pub struct CanonicalConfig {
     pub process_ownership: Option<ProcessOwnershipConfig>,
     #[serde(default = "default_mcp_templates")]
     pub mcp_templates: Vec<McpTemplateDefinition>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skills: Option<SkillsConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<ContextConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prd_generation: Option<PrdGenerationConfig>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
@@ -29,6 +35,11 @@ pub struct CanonicalConfig {
 pub struct SettingsConfig {
     #[serde(default)]
     pub quiet: bool,
+    /// Enable debug mode: verbose performer logs (prompt dump, runner line,
+    /// [MACC] invoke lines). Equivalent to setting `MACC_DEBUG=1` in the
+    /// environment. Also activated by `macc --verbose`.
+    #[serde(default)]
+    pub debug: bool,
     #[serde(default)]
     pub offline: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -94,6 +105,8 @@ pub struct AutomationConfig {
     pub coordinator: Option<CoordinatorConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supervisor: Option<crate::supervisor::SupervisorConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_routing: Option<ModelRoutingConfig>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
@@ -110,12 +123,158 @@ pub struct RalphConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+#[serde(default)]
+pub struct PhaseConfig {
+    /// Whether this phase is enabled.
+    pub enabled: bool,
+    /// Mode: disabled | required | risk_based | manual.
+    pub mode: String,
+    /// Task categories that always require this phase (e.g. ["feature", "bugfix"]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_for: Vec<String>,
+    /// Task categories that always skip this phase (e.g. ["docs", "chore"]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skip_for: Vec<String>,
+    /// Maximum attempts for this phase before escalating to failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_attempts: Option<usize>,
+    /// (Testing phase only) Allow tester to write or improve tests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_write_tests: Option<bool>,
+    /// (Testing phase only) Allow tester to modify source files.
+    /// Default: false — tester is read-only except for tests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub can_modify_source: Option<bool>,
+}
+
+impl Default for PhaseConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mode: "disabled".to_string(),
+            required_for: Vec::new(),
+            skip_for: Vec::new(),
+            max_attempts: None,
+            can_write_tests: None,
+            can_modify_source: None,
+        }
+    }
+}
+
+/// Phase pipeline configuration block (under automation.coordinator.phases).
+/// Spec §16: Controls the testing and review phases independently.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
+#[serde(default)]
+pub struct PhasesConfig {
+    /// Optional dedicated Tester role configuration (spec §13–16).
+    pub testing: PhaseConfig,
+    /// Optional dedicated Reviewer role configuration.
+    pub review: PhaseConfig,
+}
+
+/// Serializable representation of the reference branch preflight policy (spec §9.2).
+/// Deserialized from `automation.coordinator.reference_branch_preflight` in macc.yaml.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
+#[serde(default)]
+pub struct ReferenceBranchPreflightConfigRaw {
+    /// Enable/disable the gate entirely. Default: true.
+    pub enabled: Option<bool>,
+    /// `prompt` | `fail` | `create`. Default: prompt.
+    pub missing_branch_policy: Option<String>,
+    /// `block` | `warn` | `allow`. Default: block.
+    pub dirty_policy: Option<String>,
+    /// Include untracked files in dirty check. Default: true.
+    pub include_untracked: Option<bool>,
+    /// Source for creating a missing branch. Default: remote_tracking_or_current_head.
+    pub create_from: Option<String>,
+    /// Allow non-interactive branch creation from config alone. Default: false.
+    pub allow_non_interactive_create: Option<bool>,
+    /// Log the preflight result even when clean. Default: true.
+    pub log_clean_result: Option<bool>,
+}
+
+impl ReferenceBranchPreflightConfigRaw {
+    /// Resolve to a strongly-typed [`ReferenceBranchPreflightConfig`] using defaults for
+    /// missing fields, taking `require_clean_reference_branch` into account.
+    pub fn resolve(
+        &self,
+        require_clean_override: Option<bool>,
+    ) -> crate::coordinator::preflight::ReferenceBranchPreflightConfig {
+        use crate::coordinator::preflight::{
+            BranchCreateSourcePolicy, DirtyReferencePolicy, MissingBranchPolicy,
+            ReferenceBranchPreflightConfig,
+        };
+
+        let dirty_policy = match self.dirty_policy.as_deref() {
+            Some("warn") => DirtyReferencePolicy::Warn,
+            Some("allow") => DirtyReferencePolicy::Allow,
+            // If MVP `require_clean_reference_branch: false` is set, downgrade to warn.
+            _ if require_clean_override == Some(false) => DirtyReferencePolicy::Warn,
+            _ => DirtyReferencePolicy::Block,
+        };
+
+        ReferenceBranchPreflightConfig {
+            enabled: self.enabled.unwrap_or(true),
+            missing_branch_policy: match self.missing_branch_policy.as_deref() {
+                Some("fail") => MissingBranchPolicy::Fail,
+                Some("create") => MissingBranchPolicy::Create,
+                _ => MissingBranchPolicy::Prompt,
+            },
+            dirty_policy,
+            include_untracked: self.include_untracked.unwrap_or(true),
+            create_from: match self.create_from.as_deref() {
+                Some("current_head") => BranchCreateSourcePolicy::CurrentHead,
+                Some("remote_tracking") => BranchCreateSourcePolicy::RemoteTracking,
+                _ => BranchCreateSourcePolicy::RemoteTrackingOrCurrentHead,
+            },
+            allow_non_interactive_create: self.allow_non_interactive_create.unwrap_or(false),
+            log_clean_result: self.log_clean_result.unwrap_or(true),
+        }
+    }
+}
+
+/// Client preference for `macc coordinator run` (motif §6).
+/// Persisted under `automation.coordinator.client` in macc.yaml.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
+#[serde(default)]
+pub struct CoordinatorClientConfig {
+    /// Default client mode: `prompt` | `tui` | `web` | `none` | `auto`.
+    /// `prompt` (default): ask interactively in a TTY, fall back to `none`.
+    /// `auto`: pick `tui` when a TTY is available, otherwise `none`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+    /// Open the system browser when client mode is `web`. Default: false
+    /// (print URL instead of opening automatically).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub open_browser: Option<bool>,
+    /// Host to bind the web server to. Default: `127.0.0.1`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub web_host: Option<String>,
+    /// Port for the web server. Default: `3450`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub web_port: Option<u16>,
+    /// Show the preflight validation summary before launching. Default: true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show_preflight: Option<bool>,
+    /// Require an explicit `Y` confirmation before starting the coordinator.
+    /// Default: true in interactive mode, false when `default` is not `prompt`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub require_confirmation: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct CoordinatorConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub coordinator_tool: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reference_branch: Option<String>,
+    /// MVP: block coordinator run when reference branch worktree is dirty (spec §9.1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub require_clean_reference_branch: Option<bool>,
+    /// Full preflight policy block (spec §9.2). Overrides `require_clean_reference_branch`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reference_branch_preflight: Option<ReferenceBranchPreflightConfigRaw>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prd_file: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -197,6 +356,12 @@ pub struct CoordinatorConfig {
     /// N = up to N review→fix→review loops.  Default: None (unlimited).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_review_cycles: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub safety_policy: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destructive_actions: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
 
     // ── Reliability feature toggles ──────────────────────────────────────────
     /// Attempt to salvage partial work before retrying a failed task.
@@ -254,6 +419,25 @@ pub struct CoordinatorConfig {
     /// "deny" (default), "auto_accept", or "admin_takeover".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub takeover_default_response: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_ledger_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_replay_max_events: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expose_processes_endpoint: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub health_include_runtime_summary: Option<bool>,
+    /// Phase pipeline configuration (testing and review phases).
+    /// Spec §16: enables testing/review as independent configurable phases.
+    #[serde(default, skip_serializing_if = "is_default_phases")]
+    pub phases: PhasesConfig,
+    /// Client preference for `macc coordinator run` (motif §6).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client: Option<CoordinatorClientConfig>,
+}
+
+fn is_default_phases(p: &PhasesConfig) -> bool {
+    p == &PhasesConfig::default()
 }
 
 fn default_true() -> bool {
@@ -334,6 +518,9 @@ impl Default for CoordinatorConfig {
         Self {
             coordinator_tool: None,
             reference_branch: None,
+            require_clean_reference_branch: None,
+            reference_branch_preflight: None,
+            client: None,
             prd_file: None,
             task_registry_file: None,
             tool_priority: Vec::new(),
@@ -381,6 +568,25 @@ impl Default for CoordinatorConfig {
             max_salvage_attempts_per_task: 1,
             takeover_timeout_seconds: None,
             takeover_default_response: None,
+            safety_policy: None,
+            destructive_actions: None,
+            preset: None,
+            runtime_ledger_enabled: None,
+            event_replay_max_events: None,
+            expose_processes_endpoint: None,
+            health_include_runtime_summary: None,
+            phases: PhasesConfig {
+                testing: PhaseConfig {
+                    enabled: false,
+                    mode: "disabled".to_string(),
+                    ..Default::default()
+                },
+                review: PhaseConfig {
+                    enabled: true,
+                    mode: "required".to_string(),
+                    ..Default::default()
+                },
+            },
         }
     }
 }
@@ -414,6 +620,12 @@ pub struct CoordinatorConfigResolved {
     /// Git branch to rebase/merge finished task branches onto.
     /// Default: `"master"` — matches git's historical default.
     pub reference_branch: String,
+
+    /// Resolved preflight policy — always present with sensible defaults.
+    pub reference_branch_preflight: crate::coordinator::preflight::ReferenceBranchPreflightConfig,
+
+    /// Client preference resolved with defaults — always present.
+    pub client: CoordinatorClientConfig,
 
     /// Ordered list of tools to prefer when dispatching new tasks.
     /// Default: empty — all enabled tools are eligible equally.
@@ -620,6 +832,19 @@ pub struct CoordinatorConfigResolved {
     /// Maximum salvage attempts per task before giving up and hard-failing.
     /// Default: `1`.
     pub max_salvage_attempts_per_task: u32,
+
+    /// Permitted tool write scopes and validations.
+    /// Default: `"standard"`.
+    pub safety_policy: String,
+
+    /// Risk policy for destructive actions.
+    /// Default: `"double_confirm"`.
+    pub destructive_actions: String,
+    pub runtime_ledger_enabled: bool,
+    pub event_replay_max_events: usize,
+    pub expose_processes_endpoint: bool,
+    pub health_include_runtime_summary: bool,
+    pub phases: PhasesConfig,
 }
 
 impl CoordinatorConfigResolved {
@@ -639,6 +864,14 @@ impl CoordinatorConfigResolved {
             reference_branch: config
                 .and_then(|c| c.reference_branch.clone())
                 .unwrap_or_else(|| "master".to_string()),
+            reference_branch_preflight: {
+                let raw = config
+                    .and_then(|c| c.reference_branch_preflight.clone())
+                    .unwrap_or_default();
+                let require_clean = config.and_then(|c| c.require_clean_reference_branch);
+                raw.resolve(require_clean)
+            },
+            client: config.and_then(|c| c.client.clone()).unwrap_or_default(),
             tool_priority: config.map(|c| c.tool_priority.clone()).unwrap_or_default(),
             max_parallel_per_tool: config
                 .map(|c| c.max_parallel_per_tool.clone())
@@ -737,6 +970,25 @@ impl CoordinatorConfigResolved {
             max_salvage_attempts_per_task: config
                 .map(|c| c.max_salvage_attempts_per_task)
                 .unwrap_or(1),
+            safety_policy: config
+                .and_then(|c| c.safety_policy.clone())
+                .unwrap_or_else(|| "standard".to_string()),
+            destructive_actions: config
+                .and_then(|c| c.destructive_actions.clone())
+                .unwrap_or_else(|| "double_confirm".to_string()),
+            runtime_ledger_enabled: config
+                .and_then(|c| c.runtime_ledger_enabled)
+                .unwrap_or(true),
+            event_replay_max_events: config
+                .and_then(|c| c.event_replay_max_events)
+                .unwrap_or(10000),
+            expose_processes_endpoint: config
+                .and_then(|c| c.expose_processes_endpoint)
+                .unwrap_or(true),
+            health_include_runtime_summary: config
+                .and_then(|c| c.health_include_runtime_summary)
+                .unwrap_or(true),
+            phases: config.map(|c| c.phases.clone()).unwrap_or_default(),
         }
     }
 }
@@ -807,6 +1059,9 @@ impl Default for CanonicalConfig {
             settings: SettingsConfig::default(),
             process_ownership: None,
             mcp_templates: default_mcp_templates(),
+            skills: None,
+            context: None,
+            prd_generation: None,
         }
     }
 }
@@ -874,6 +1129,237 @@ fn default_mcp_templates() -> Vec<McpTemplateDefinition> {
 
 pub fn builtin_mcp_templates() -> Vec<McpTemplateDefinition> {
     default_mcp_templates()
+}
+
+// ── Skills runner config (spec §3.12) ──────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
+pub struct SkillsConfig {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub selected: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_policy: Option<SkillRunPolicyConfig>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub skill_defaults: std::collections::BTreeMap<String, SkillDefaultConfig>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
+pub struct SkillRunPolicyConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_tool: Option<String>,
+    #[serde(default = "default_true")]
+    pub allow_local_commands: bool,
+    #[serde(default = "default_true")]
+    pub require_confirmation_for_writes: bool,
+    #[serde(default = "default_true")]
+    pub summarize_tool_output: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_budget: Option<usize>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
+pub struct SkillDefaultConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub write_policy: Option<String>,
+}
+
+// ── Context / token budget config (spec §5.5) ─────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
+pub struct ContextConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_budget: Option<TokenBudgetConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summarization: Option<SummarizationConfig>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct TokenBudgetConfig {
+    #[serde(default = "default_token_budget_default")]
+    pub default: usize,
+    #[serde(default = "default_token_budget_tool_output")]
+    pub tool_output: usize,
+    #[serde(default = "default_token_budget_diff")]
+    pub diff: usize,
+    #[serde(default = "default_token_budget_logs")]
+    pub logs: usize,
+}
+
+impl Default for TokenBudgetConfig {
+    fn default() -> Self {
+        Self {
+            default: default_token_budget_default(),
+            tool_output: default_token_budget_tool_output(),
+            diff: default_token_budget_diff(),
+            logs: default_token_budget_logs(),
+        }
+    }
+}
+
+fn default_token_budget_default() -> usize {
+    12000
+}
+fn default_token_budget_tool_output() -> usize {
+    4000
+}
+fn default_token_budget_diff() -> usize {
+    6000
+}
+fn default_token_budget_logs() -> usize {
+    3000
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
+pub struct SummarizationConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub default_bundles: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub per_tool: std::collections::BTreeMap<String, ToolSummarizationConfig>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub per_skill: std::collections::BTreeMap<String, SkillSummarizationConfig>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
+pub struct ToolSummarizationConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_budget: Option<usize>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
+pub struct SkillSummarizationConfig {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bundles: Vec<String>,
+}
+
+// ── PRD generation configuration (spec §18) ──────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
+pub struct PrdGenerationConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_tool: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_target_dir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_selection: Option<PrdModelSelectionConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outputs: Option<PrdOutputsConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub promotion: Option<PrdPromotionConfig>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
+pub struct PrdModelSelectionConfig {
+    #[serde(default)]
+    pub mode: PrdModelRoutingMode,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PrdModelRoutingMode {
+    #[default]
+    Auto,
+    Manual,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct PrdOutputsConfig {
+    #[serde(default = "default_true")]
+    pub prd_json: bool,
+    #[serde(default = "default_true")]
+    pub summary: bool,
+    #[serde(default = "default_true")]
+    pub validation_notes: bool,
+}
+
+impl Default for PrdOutputsConfig {
+    fn default() -> Self {
+        Self {
+            prd_json: true,
+            summary: true,
+            validation_notes: true,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct PrdPromotionConfig {
+    #[serde(default = "default_true")]
+    pub require_confirmation_when_overwriting: bool,
+    #[serde(default = "default_prd_output_path")]
+    pub default_output_path: String,
+}
+
+impl Default for PrdPromotionConfig {
+    fn default() -> Self {
+        Self {
+            require_confirmation_when_overwriting: true,
+            default_output_path: default_prd_output_path(),
+        }
+    }
+}
+
+fn default_prd_output_path() -> String {
+    "prd.json".to_string()
+}
+
+// ── Model routing configuration (spec §6) ────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
+pub struct ModelRoutingConfig {
+    #[serde(default)]
+    pub mode: ModelRoutingMode,
+    #[serde(default = "default_true")]
+    pub client_override_allowed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manual: Option<ModelRoutingManualConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto: Option<ModelRoutingAutoConfig>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelRoutingMode {
+    #[default]
+    Auto,
+    Manual,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
+pub struct ModelRoutingManualConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_tool: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_reasoning_depth: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone, Default)]
+pub struct ModelRoutingAutoConfig {
+    #[serde(default = "default_efficiency_first")]
+    pub policy: String,
+    #[serde(default = "default_true")]
+    pub allow_escalation: bool,
+    #[serde(default = "default_true")]
+    pub allow_tool_fallback: bool,
+    #[serde(default = "default_true")]
+    pub allow_model_fallback: bool,
+    #[serde(default = "default_true")]
+    pub prefer_mini_under_budget_pressure: bool,
+}
+
+fn default_efficiency_first() -> String {
+    "efficiency_first".to_string()
 }
 
 #[cfg(test)]
@@ -1273,6 +1759,9 @@ settings:
             settings: SettingsConfig::default(),
             process_ownership: None,
             mcp_templates: Vec::new(),
+            skills: None,
+            context: None,
+            prd_generation: None,
         };
 
         let yaml1 = config.to_yaml().expect("Should serialize");
@@ -1486,6 +1975,10 @@ unknown_field: true
         assert!(r.sync_unmerged_branches);
         assert_eq!(r.salvage_merge_timeout_seconds, 120);
         assert_eq!(r.max_salvage_attempts_per_task, 1);
+        assert!(r.runtime_ledger_enabled);
+        assert_eq!(r.event_replay_max_events, 10000);
+        assert!(r.expose_processes_endpoint);
+        assert!(r.health_include_runtime_summary);
     }
 
     #[test]
@@ -1532,6 +2025,10 @@ unknown_field: true
         cfg.sync_unmerged_branches = false;
         cfg.salvage_merge_timeout_seconds = 60;
         cfg.max_salvage_attempts_per_task = 3;
+        cfg.runtime_ledger_enabled = Some(false);
+        cfg.event_replay_max_events = Some(5000);
+        cfg.expose_processes_endpoint = Some(false);
+        cfg.health_include_runtime_summary = Some(false);
 
         let r = CoordinatorConfigResolved::resolve(Some(&cfg));
 
@@ -1576,6 +2073,10 @@ unknown_field: true
         assert!(!r.sync_unmerged_branches);
         assert_eq!(r.salvage_merge_timeout_seconds, 60);
         assert_eq!(r.max_salvage_attempts_per_task, 3);
+        assert!(!r.runtime_ledger_enabled);
+        assert_eq!(r.event_replay_max_events, 5000);
+        assert!(!r.expose_processes_endpoint);
+        assert!(!r.health_include_runtime_summary);
     }
 
     #[test]

@@ -182,6 +182,10 @@ Controls coordinator runtime defaults for `.macc/automation/coordinator.sh`.
 - `salvage_merge_timeout_seconds` (u64, default `120`): timeout in seconds for the salvage-merge operation.
 - `max_salvage_attempts_per_task` (u32, default `1`): maximum number of salvage attempts allowed per task before giving up.
 - `session_cache_ttl_seconds` (u64, default `300`): warm-session TTL used by dispatch preference logic; recent activity inside this window gets higher reuse priority.
+- `runtime_ledger_enabled` (bool, default `true`): toggle to enable durable ledger transitions.
+- `event_replay_max_events` (usize, default `10000`): max events for replaying event history.
+- `expose_processes_endpoint` (bool, default `true`): exposes running performer PIDs.
+- `health_include_runtime_summary` (bool, default `true`): injects runtime summary inside `/api/v1/health`.
 
 These values are used by `macc coordinator` as defaults and can be overridden via CLI flags or environment variables.
 

@@ -14,8 +14,14 @@ export interface IssueCardProps {
   severityTone?: StatusTone;
   code: string;
   title: string;
-  currentState: string;
-  expectedState: string;
+  /** Legacy: current observed state (used when whyItMatters is not provided). */
+  currentState?: string;
+  /** Legacy: expected healthy state (used when fix is not provided). */
+  expectedState?: string;
+  /** Spec §13.3: "Why it matters" explanation. When present, replaces currentState slot. */
+  whyItMatters?: string;
+  /** Spec §13.3: Fix command(s). When present, replaces expectedState slot. */
+  fix?: string;
   summary?: string;
   actions?: IssueCardAction[];
   className?: string;
@@ -28,10 +34,14 @@ export function IssueCard({
   title,
   currentState,
   expectedState,
+  whyItMatters,
+  fix,
   summary,
   actions = [],
   className,
 }: IssueCardProps) {
+  const useNewFormat = whyItMatters !== undefined || fix !== undefined;
+
   return (
     <article className={cn(surfaceClassName, 'space-y-4 p-5', className)}>
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -59,21 +69,50 @@ export function IssueCard({
           </div>
         )}
       </div>
+
       {summary && <p className="text-sm text-[var(--text-secondary)]">{summary}</p>}
-      <dl className="grid gap-4 md:grid-cols-2">
-        <div className="rounded-lg border border-white/8 bg-black/20 p-4">
-          <dt className="text-xs font-semibold uppercase tracking-wide text-[var(--text-muted)]">
-            Current state
-          </dt>
-          <dd className="mt-2 text-sm text-[var(--text-primary)]">{currentState}</dd>
-        </div>
-        <div className="rounded-lg border border-white/8 bg-black/20 p-4">
-          <dt className="text-xs font-semibold uppercase tracking-wide text-[var(--text-muted)]">
-            Expected state
-          </dt>
-          <dd className="mt-2 text-sm text-[var(--text-primary)]">{expectedState}</dd>
-        </div>
-      </dl>
+
+      {useNewFormat ? (
+        <dl className="grid gap-4 md:grid-cols-2">
+          {whyItMatters && (
+            <div className="rounded-lg border border-white/8 bg-black/20 p-4">
+              <dt className="text-xs font-semibold uppercase tracking-wide text-[var(--text-muted)]">
+                Why it matters
+              </dt>
+              <dd className="mt-2 text-sm text-[var(--text-primary)]">{whyItMatters}</dd>
+            </div>
+          )}
+          {fix && (
+            <div className="rounded-lg border border-white/8 bg-black/20 p-4">
+              <dt className="text-xs font-semibold uppercase tracking-wide text-[var(--text-muted)]">
+                Fix
+              </dt>
+              <dd className="mt-2 whitespace-pre-wrap font-mono text-xs text-[var(--text-primary)]">
+                {fix}
+              </dd>
+            </div>
+          )}
+        </dl>
+      ) : (
+        <dl className="grid gap-4 md:grid-cols-2">
+          {currentState !== undefined && (
+            <div className="rounded-lg border border-white/8 bg-black/20 p-4">
+              <dt className="text-xs font-semibold uppercase tracking-wide text-[var(--text-muted)]">
+                Current state
+              </dt>
+              <dd className="mt-2 text-sm text-[var(--text-primary)]">{currentState}</dd>
+            </div>
+          )}
+          {expectedState !== undefined && (
+            <div className="rounded-lg border border-white/8 bg-black/20 p-4">
+              <dt className="text-xs font-semibold uppercase tracking-wide text-[var(--text-muted)]">
+                Expected state
+              </dt>
+              <dd className="mt-2 text-sm text-[var(--text-primary)]">{expectedState}</dd>
+            </div>
+          )}
+        </dl>
+      )}
     </article>
   );
 }

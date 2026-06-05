@@ -99,7 +99,7 @@ pub(super) fn coordinator_event_stream(
     }
 }
 
-fn web_client_id(query: &EventsQuery, headers: &HeaderMap) -> Option<String> {
+pub(super) fn web_client_id(query: &EventsQuery, headers: &HeaderMap) -> Option<String> {
     query.client_id.clone().or_else(|| {
         headers
             .get(WEB_CLIENT_HEADER)
@@ -110,7 +110,7 @@ fn web_client_id(query: &EventsQuery, headers: &HeaderMap) -> Option<String> {
     })
 }
 
-fn register_web_viewers(
+pub(super) fn register_web_viewers(
     state: &WebState,
     client_id: Option<String>,
 ) -> Result<Vec<macc_core::service::process_ownership::ProcessViewerGuard>, Box<ApiError>> {
@@ -146,7 +146,7 @@ fn register_web_viewers(
     Ok(viewer_guards)
 }
 
-fn pending_events_after(
+pub(super) fn pending_events_after(
     events: &[CoordinatorEvent],
     source_seq_cursor: i64,
 ) -> VecDeque<CoordinatorEvent> {
@@ -157,7 +157,10 @@ fn pending_events_after(
         .collect()
 }
 
-fn resolve_source_seq_cursor(events: &[CoordinatorEvent], last_event_id: Option<&str>) -> i64 {
+pub(super) fn resolve_source_seq_cursor(
+    events: &[CoordinatorEvent],
+    last_event_id: Option<&str>,
+) -> i64 {
     last_event_id
         .and_then(|id| {
             events
@@ -190,7 +193,7 @@ fn parse_source_seq_from_sse_id(event_id: &str) -> Option<i64> {
     None
 }
 
-fn build_coordinator_sse_event(event: &CoordinatorEvent) -> Event {
+pub(super) fn build_coordinator_sse_event(event: &CoordinatorEvent) -> Event {
     Event::default()
         .id(coordinator_event_sse_id(event))
         .event("coordinator_event")
@@ -198,7 +201,7 @@ fn build_coordinator_sse_event(event: &CoordinatorEvent) -> Event {
         .expect("serialize coordinator event payload")
 }
 
-fn build_heartbeat_sse_event(source_seq_cursor: i64) -> Event {
+pub(super) fn build_heartbeat_sse_event(source_seq_cursor: i64) -> Event {
     let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let heartbeat_id = format!("hb-{}-{}", source_seq_cursor, unix_timestamp_millis());
     let payload = serde_json::json!({

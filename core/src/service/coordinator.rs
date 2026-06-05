@@ -3,6 +3,8 @@ use crate::coordinator::managed_command_registry::{
     list_managed_commands, remove_managed_command, upsert_managed_command,
 };
 use crate::{ensure_embedded_automation_scripts, MaccError, ProjectPaths, Result};
+#[cfg(unix)]
+use libc;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -50,6 +52,9 @@ pub enum CoordinatorManagedCommandState {
     Succeeded {
         command: String,
         elapsed_secs: u64,
+        /// Human-readable reason when the coordinator stopped intentionally
+        /// before all tasks completed (e.g. dispatch limit reached).
+        finish_reason: Option<String>,
     },
     Failed {
         command: String,
@@ -95,6 +100,17 @@ pub fn coordinator_start_managed_command_process(
     args: &[String],
     cfg: Option<&CoordinatorConfig>,
 ) -> Result<()> {
+    coordinator_start_managed_command_process_with_pid(paths, command, args, cfg).map(|_| ())
+}
+
+/// Like `coordinator_start_managed_command_process` but also returns the
+/// coordinator child process ID so callers can pass it to the supervisor.
+pub fn coordinator_start_managed_command_process_with_pid(
+    paths: &ProjectPaths,
+    command: &str,
+    args: &[String],
+    cfg: Option<&CoordinatorConfig>,
+) -> Result<i32> {
     let key = handle_key(paths, command);
     if let Some(existing) = active_managed_command(paths)? {
         return Err(MaccError::Validation(format!(
@@ -109,7 +125,7 @@ pub fn coordinator_start_managed_command_process(
         .lock()
         .map_err(|_| MaccError::Validation("coordinator local handle table lock poisoned".into()))?
         .insert(key, handle);
-    Ok(())
+    Ok(pid)
 }
 
 pub fn coordinator_poll_managed_command_process(
@@ -194,9 +210,11 @@ pub fn coordinator_poll_managed_command_state(
             elapsed_secs,
         } => {
             if success {
+                let finish_reason = read_dispatch_limit_reason(paths);
                 return Ok(CoordinatorManagedCommandState::Succeeded {
                     command,
                     elapsed_secs,
+                    finish_reason,
                 });
             }
             let failure = crate::service::diagnostic::analyze_last_failure(paths)?;
@@ -303,8 +321,31 @@ fn coordinator_start_command_process_with_pid(
     };
 
     cmd.env("MACC_INTERNAL_INVOCATION", "1")
+        .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+
+    // Detach from the controlling terminal so the coordinator survives SSH
+    // session close.  setsid(2) creates a new session with no controlling
+    // terminal; the child becomes the session leader and is no longer in the
+    // parent's process group, so SIGHUP on terminal close never reaches it.
+    // This applies to all coordinator commands (control-plane-run, dispatch,
+    // sync, …) — performers and merge workers inherit the same independence
+    // because they are spawned by this child.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: setsid(2) is async-signal-safe. The restriction is that the
+        // calling process must not be a process-group leader; a freshly forked
+        // child always satisfies this.
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+    }
+
     let child = cmd.spawn().map_err(|e| MaccError::Io {
         path: root.to_string_lossy().into(),
         action: format!("spawn coordinator command '{}'", command),
@@ -515,4 +556,45 @@ fn pid_is_alive(pid: i32) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+/// Check whether the most recent coordinator run ended because the dispatch
+/// limit was reached. Returns a user-friendly message if so, or `None` for
+/// a normal full-completion.
+fn read_dispatch_limit_reason(paths: &ProjectPaths) -> Option<String> {
+    use crate::coordinator_storage::{
+        CoordinatorSnapshot, CoordinatorStorage, CoordinatorStoragePaths, JsonStorage,
+        SqliteStorage,
+    };
+    let storage_paths = CoordinatorStoragePaths::from_project_paths(paths);
+    let sqlite = SqliteStorage::new(storage_paths.clone());
+    let snapshot: CoordinatorSnapshot = if sqlite.has_snapshot_data().unwrap_or(false) {
+        sqlite.load_snapshot().ok()?
+    } else {
+        JsonStorage::new(storage_paths).load_snapshot().ok()?
+    };
+    // Scan the last 20 events newest-first for the dispatch_limit_reached marker.
+    for event in snapshot.events.iter().rev().take(20) {
+        if event.event_type == "dispatch_limit_reached" {
+            let detail = event.message().unwrap_or("").to_string();
+            let dispatched = detail.split_whitespace().find_map(|s| {
+                s.strip_prefix("run_total=")
+                    .and_then(|v| v.parse::<usize>().ok())
+            });
+            let max = detail.split_whitespace().find_map(|s| {
+                s.strip_prefix("max_dispatch=")
+                    .and_then(|v| v.parse::<usize>().ok())
+            });
+            return Some(match (dispatched, max) {
+                (Some(d), Some(m)) => format!(
+                    "Stopped: dispatch limit reached ({}/{} tasks dispatched). \
+                     Restart the coordinator to continue.",
+                    d, m
+                ),
+                _ => "Stopped: dispatch limit reached. Restart the coordinator to continue."
+                    .to_string(),
+            });
+        }
+    }
+    None
 }

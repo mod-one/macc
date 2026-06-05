@@ -17,7 +17,7 @@ use crate::{
 };
 use std::collections::BTreeMap;
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
 type MonitorMergeJobsFuture<'a> =
@@ -286,9 +286,10 @@ pub trait Engine {
         &self,
         paths: &ProjectPaths,
         force: bool,
+        dry_run: bool,
         ui: &dyn crate::service::interaction::InteractionHandler,
     ) -> Result<crate::service::clear::ClearExecutionReport> {
-        crate::service::clear::clear_project(paths, force, ui)
+        crate::service::clear::clear_project(paths, force, dry_run, ui)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -878,13 +879,26 @@ pub trait Engine {
         counts.blocked = blocked;
         counts.merged = merged;
 
-        if let Some(pause) =
-            coordinator::state_runtime::read_coordinator_pause_file(&project_paths.root)?
-        {
-            counts.paused = true;
-            counts.pause_reason = Some(pause.reason);
-            counts.pause_task_id = Some(pause.task_id);
-            counts.pause_phase = Some(pause.phase);
+        // Only surface the pause file when the coordinator is not actively
+        // running. If a coordinator is alive the pause file is a stale artifact
+        // from a previous crash/error that was never cleaned up, and showing it
+        // would mislead the operator.
+        let coordinator_alive = sqlite
+            .get_active_coordinator_run()
+            .ok()
+            .flatten()
+            .map(|run| crate::doctor::is_pid_alive_pub(run.pid as u32))
+            .unwrap_or(false);
+
+        if !coordinator_alive {
+            if let Some(pause) =
+                coordinator::state_runtime::read_coordinator_pause_file(&project_paths.root)?
+            {
+                counts.paused = true;
+                counts.pause_reason = Some(pause.reason);
+                counts.pause_task_id = Some(pause.task_id);
+                counts.pause_phase = Some(pause.phase);
+            }
         }
 
         Ok(counts)
@@ -907,6 +921,441 @@ pub trait Engine {
             out.push(CoordinatorEvent::from_record(record));
         }
         Ok(out)
+    }
+
+    fn runtime_snapshot(&self, paths: &ProjectPaths) -> Result<crate::runtime::RuntimeSnapshot> {
+        crate::runtime::RuntimeSnapshotBuilder::build(paths)
+    }
+
+    fn list_skills(&self, paths: &ProjectPaths) -> Vec<crate::skills_runner::SkillDefinition> {
+        crate::skills_runner::SkillResolver::list(&paths.macc_dir)
+    }
+
+    fn resolve_skill(
+        &self,
+        paths: &ProjectPaths,
+        id: &str,
+    ) -> Option<crate::skills_runner::SkillDefinition> {
+        crate::skills_runner::SkillResolver::resolve(id, &paths.macc_dir)
+    }
+
+    fn dry_run_skill(
+        &self,
+        paths: &ProjectPaths,
+        skill: &crate::skills_runner::SkillDefinition,
+        tool: Option<String>,
+    ) -> crate::skills_runner::SkillDryRunPreview {
+        let log_path = paths
+            .macc_dir
+            .join("log")
+            .join("run")
+            .join(format!("<ts>-{}.jsonl", skill.id));
+        crate::skills_runner::SkillDryRunPreview {
+            skill_id: skill.id.clone(),
+            title: skill.title.clone(),
+            kind: skill.kind.as_str().to_string(),
+            tool,
+            risk: skill.risk.as_str().to_string(),
+            commands: skill.steps.iter().filter_map(|s| s.run.clone()).collect(),
+            writes: Vec::new(),
+            context_estimate: None,
+            logs_path: log_path.display().to_string(),
+        }
+    }
+
+    fn run_skill(
+        &self,
+        paths: &ProjectPaths,
+        skill: &crate::skills_runner::SkillDefinition,
+        request: &crate::skills_runner::SkillRunRequest,
+    ) -> Result<crate::skills_runner::SkillRunResult> {
+        let log_dir = paths.macc_dir.join("log").join("run");
+        let mut result = crate::skills_runner::SkillRunner::run(skill, request, &log_dir)?;
+
+        // Spec §5.3: apply the summarization hook pipeline to the raw stdout.
+        // Load ContextConfig from canonical config; skip silently if unavailable.
+        if !result.stdout.is_empty() && !request.watch {
+            let ctx_cfg = crate::load_canonical_config(&paths.config_path)
+                .ok()
+                .and_then(|c| c.context);
+
+            if let Some(ctx) = ctx_cfg {
+                if let Some(summarization) = &ctx.summarization {
+                    if summarization.enabled {
+                        // Determine which bundles to apply: skill-specific override first,
+                        // then global defaults (spec §5.5).
+                        let bundles: Vec<String> = summarization
+                            .per_skill
+                            .get(&skill.id)
+                            .map(|s| s.bundles.clone())
+                            .filter(|b| !b.is_empty())
+                            .unwrap_or_else(|| summarization.default_bundles.clone());
+
+                        if !bundles.is_empty() {
+                            let raw_size = result.stdout.len();
+                            let mut text = result.stdout.clone();
+
+                            for bundle in &bundles {
+                                text = match bundle.as_str() {
+                                    "test-output-failures-only" => {
+                                        crate::context::test_output_failures_only(&text)
+                                    }
+                                    "lint-errors-only" => crate::context::lint_errors_only(&text),
+                                    "stacktrace-collapse" => {
+                                        crate::context::stacktrace_collapse(&text)
+                                    }
+                                    "log-grep-error-first" => {
+                                        crate::context::log_grep_error_first(&text)
+                                    }
+                                    _ => text,
+                                };
+                            }
+
+                            // Apply token budget after all summarizer passes.
+                            let budget = ctx
+                                .token_budget
+                                .as_ref()
+                                .map(|tb| tb.tool_output)
+                                .unwrap_or(4000);
+                            let (budgeted, truncated) =
+                                crate::context::enforce_budget(&text, budget);
+
+                            let summary_size = budgeted.len();
+                            result.summary = Some(crate::skills_runner::SummaryMetadata {
+                                raw_size_chars: raw_size,
+                                summary_size_chars: summary_size,
+                                bundles_applied: bundles,
+                                was_truncated: truncated,
+                            });
+                            result.stdout = budgeted;
+                        } else if let Some(tb) = &ctx.token_budget {
+                            // No bundles configured — still enforce budget.
+                            let raw_size = result.stdout.len();
+                            let (budgeted, truncated) =
+                                crate::context::enforce_budget(&result.stdout, tb.tool_output);
+                            if truncated {
+                                result.summary = Some(crate::skills_runner::SummaryMetadata {
+                                    raw_size_chars: raw_size,
+                                    summary_size_chars: budgeted.len(),
+                                    bundles_applied: Vec::new(),
+                                    was_truncated: true,
+                                });
+                                result.stdout = budgeted;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Spec §3.5 — 8-step tool selection algorithm.
+    /// Returns the resolved tool ID, or `None` if no tool is needed (local-only skill)
+    /// or no tool is available (caller should produce a helpful error).
+    fn resolve_skill_tool(
+        &self,
+        paths: &ProjectPaths,
+        skill: &crate::skills_runner::SkillDefinition,
+        tool_flag: Option<&str>,
+    ) -> Option<String> {
+        use crate::skills_runner::SkillKind;
+
+        // Step 1: explicit --tool flag.
+        if let Some(t) = tool_flag {
+            return Some(t.to_string());
+        }
+
+        // Local-only skills do not need a tool adapter.
+        if matches!(skill.kind, SkillKind::LocalCommand) {
+            return None;
+        }
+
+        // Step 2: .macc/worktree.json inside a MACC worktree.
+        if let Ok(Some(meta)) = crate::read_worktree_metadata(&paths.root) {
+            if !meta.tool.is_empty() {
+                return Some(meta.tool);
+            }
+        }
+
+        // Step 3: .macc/tool.json (written by `macc worktree apply`).
+        let tool_json = paths.macc_dir.join("tool.json");
+        if tool_json.exists() {
+            if let Ok(content) = std::fs::read_to_string(&tool_json) {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(t) = v.get("tool_id").and_then(|x| x.as_str()) {
+                        return Some(t.to_string());
+                    }
+                }
+            }
+        }
+
+        if let Ok(config) = crate::load_canonical_config(&paths.config_path) {
+            // Step 4: skills.run_policy.default_tool.
+            if let Some(t) = config
+                .skills
+                .as_ref()
+                .and_then(|s| s.run_policy.as_ref())
+                .and_then(|p| p.default_tool.as_deref())
+            {
+                return Some(t.to_string());
+            }
+
+            // Step 5: automation.coordinator.tool_priority first entry.
+            if let Some(t) = config
+                .automation
+                .coordinator
+                .as_ref()
+                .and_then(|c| c.tool_priority.first())
+            {
+                return Some(t.clone());
+            }
+
+            // Steps 6 & 7: first enabled tool in macc.yaml.
+            if let Some(t) = config.tools.enabled.first() {
+                return Some(t.clone());
+            }
+        }
+
+        // Step 8: no tool found — caller handles the error.
+        None
+    }
+
+    /// Spec §3.11 — find the worktree `cwd` for a given task ID.
+    /// Returns the worktree path if the task has an active worktree, `None` otherwise.
+    fn find_task_worktree(
+        &self,
+        paths: &ProjectPaths,
+        task_id: &str,
+    ) -> Option<std::path::PathBuf> {
+        // Prefer the live RuntimeSnapshot (has runtime worktree field from task_runtime).
+        if let Ok(snapshot) = self.runtime_snapshot(paths) {
+            for task in &snapshot.tasks {
+                if task.task_id == task_id {
+                    if let Some(wt) = &task.worktree {
+                        let p = std::path::PathBuf::from(wt);
+                        if p.exists() {
+                            return Some(p);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    // ── Skills & Catalog lifecycle (spec §7) ─────────────────────────────────
+
+    /// Return catalog skills visible to the project.
+    fn catalog_skills_available(
+        &self,
+        paths: &ProjectPaths,
+        filter_tool: Option<&str>,
+    ) -> Vec<crate::catalog::SkillEntry> {
+        use crate::catalog::load_skills_catalog_with_local;
+        load_skills_catalog_with_local(paths)
+            .map(|cat| {
+                cat.entries
+                    .into_iter()
+                    .filter(|e| {
+                        filter_tool
+                            .is_none_or(|t| e.tools.is_empty() || e.tools.iter().any(|et| et == t))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Load the skills lockfile for this project.
+    fn skills_lockfile(
+        &self,
+        paths: &ProjectPaths,
+    ) -> crate::Result<crate::skills_catalog::SkillsLockFile> {
+        crate::skills_catalog::SkillsLockFile::load(&paths.skills_lock_path())
+    }
+
+    /// Compute the installed status of all locked skills.
+    fn skills_status(
+        &self,
+        paths: &ProjectPaths,
+        filter_tool: Option<&str>,
+    ) -> crate::Result<Vec<crate::skills_catalog::SkillStatus>> {
+        let lockfile = self.skills_lockfile(paths)?;
+        Ok(crate::skills_catalog::compute_skills_status(
+            &lockfile,
+            &paths.root,
+            filter_tool,
+        ))
+    }
+
+    /// Verify lockfile/cache/filesystem integrity.
+    fn skills_verify(
+        &self,
+        paths: &ProjectPaths,
+    ) -> crate::Result<Vec<crate::skills_catalog::VerifyFinding>> {
+        let lockfile = self.skills_lockfile(paths)?;
+        Ok(crate::skills_catalog::verify_skills(
+            &lockfile,
+            &paths.root,
+            &paths.skills_cache_dir(),
+        ))
+    }
+
+    // ── Diagnostics and onboarding (spec §5, §9, §14) ────────────────────────
+
+    /// Run all extended doctor checks and return structured diagnostic findings.
+    fn collect_diagnostic_findings(
+        &self,
+        paths: &ProjectPaths,
+        max_parallel: u32,
+    ) -> Vec<crate::doctor::DiagnosticFinding> {
+        crate::doctor::collect_all_findings(paths, max_parallel)
+    }
+
+    /// Apply a git identity fix locally in the project (local repo config).
+    fn fix_git_identity_config(&self, paths: &ProjectPaths, name: &str, email: &str) -> Result<()> {
+        crate::doctor::fix_git_identity(&paths.root, name, email)
+            .map_err(crate::MaccError::Validation)
+    }
+
+    /// Compute the 8-step readiness ladder for this project.
+    fn readiness_ladder(&self, paths: &ProjectPaths) -> crate::onboarding::ReadinessLadder {
+        let canonical = self.load_canonical_config(paths).ok();
+        let coordinator_running = check_coordinator_running_via_storage(paths);
+        crate::onboarding::compute_readiness_from_state(
+            paths,
+            canonical.as_ref(),
+            coordinator_running,
+        )
+    }
+
+    /// Run the reference branch preflight inspection (spec §7).
+    /// Encapsulates the call to `coordinator::preflight` so clients never import
+    /// core business-logic modules directly.
+    fn inspect_reference_preflight(
+        &self,
+        paths: &ProjectPaths,
+        reference_branch: &str,
+        config: &crate::coordinator::preflight::ReferenceBranchPreflightConfig,
+    ) -> std::result::Result<
+        crate::coordinator::preflight::ReferenceBranchPreflightReport,
+        crate::coordinator::preflight::PreflightError,
+    > {
+        crate::coordinator::preflight::inspect_reference_branch_preflight(
+            &paths.root,
+            reference_branch,
+            config,
+        )
+    }
+
+    /// Create the reference branch from the given source.
+    fn create_reference_branch_via_engine(
+        &self,
+        paths: &ProjectPaths,
+        reference_branch: &str,
+        source: crate::coordinator::preflight::BranchCreateSource,
+    ) -> std::result::Result<(), crate::coordinator::preflight::PreflightError> {
+        crate::coordinator::preflight::create_reference_branch(
+            &paths.root,
+            reference_branch,
+            source,
+        )
+    }
+
+    // ── PRD generation (spec §8) ──────────────────────────────────────────────
+
+    /// Invoke a tool with a prompt via its performer spec.
+    ///
+    /// This is the single authoritative point for tool invocation in the PRD
+    /// generation / audit flow. CLI, TUI, and Web must go through this method;
+    /// they must never call `service::context::invoke_tool_with_prompt` directly.
+    fn prd_invoke_tool(&self, paths: &ProjectPaths, tool_id: &str, prompt: &str) -> Result<()> {
+        use crate::tool::ToolSpecLoader;
+        use crate::MaccError;
+
+        let loader = ToolSpecLoader::new(ToolSpecLoader::default_search_paths(&paths.root));
+        let (specs, _) = loader.load_all_with_embedded();
+
+        let spec = specs.iter().find(|s| s.id == tool_id).ok_or_else(|| {
+            MaccError::Validation(format!(
+                "PRD-GEN-TOOL-UNAVAILABLE: tool '{}' not found. Available: {}",
+                tool_id,
+                specs
+                    .iter()
+                    .map(|s| s.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        })?;
+
+        let performer = spec.performer.as_ref().ok_or_else(|| {
+            MaccError::Validation(format!(
+                "PRD-GEN-TOOL-UNAVAILABLE: tool '{}' has no performer configuration.",
+                tool_id
+            ))
+        })?;
+
+        crate::service::context::invoke_tool_with_prompt(paths, performer, prompt, None)
+    }
+
+    /// Build the audit prompt and, when a tool is configured and `dry_run` is
+    /// false, forward the prompt to the tool via [`prd_invoke_tool`].
+    fn prd_audit(
+        &self,
+        paths: &ProjectPaths,
+        request: &crate::prd_generation::PrdAuditRequest,
+    ) -> Result<crate::prd_generation::PrdAuditResult> {
+        let mut result = crate::prd_generation::audit::run_prd_audit(&paths.root, request)?;
+
+        // run_prd_audit is prompt-only; dispatch is handled here in the facade.
+        if result.prompt_generated && !request.dry_run {
+            if let (Some(ref tool_id), Some(ref prompt)) = (&request.tool, &result.prompt) {
+                self.prd_invoke_tool(paths, tool_id, prompt)?;
+                result.dispatched = true;
+            }
+        }
+
+        Ok(result)
+    }
+
+    fn prd_validate(
+        &self,
+        file_path: &Path,
+        target_dir: Option<&Path>,
+    ) -> crate::prd_generation::ValidationResult {
+        crate::prd_generation::validate_prd_file(file_path, target_dir)
+    }
+
+    fn prd_promote(
+        &self,
+        options: &crate::prd_generation::PromoteOptions,
+    ) -> Result<crate::prd_generation::PromoteResult> {
+        crate::prd_generation::promotion::promote_prd(options)
+    }
+
+    fn prd_list_runs(&self, paths: &ProjectPaths) -> Vec<(String, PathBuf)> {
+        let base = paths
+            .root
+            .join(crate::prd_generation::PRD_GENERATION_DEFAULT_TARGET_DIR);
+        crate::prd_generation::promotion::list_generation_runs(&base)
+    }
+
+    fn prd_build_generate_prompt(
+        &self,
+        brief_content: &str,
+        target_dir: &Path,
+        existing_prd: Option<&str>,
+        instructions: Option<&str>,
+        model_selection: Option<&crate::prd_generation::ModelSelection>,
+    ) -> String {
+        crate::prd_generation::prompt_builder::build_generate_prompt(
+            brief_content,
+            target_dir,
+            existing_prd,
+            instructions,
+            model_selection,
+        )
     }
 
     fn coordinator_storage_import_json_to_sqlite(&self, paths: &ProjectPaths) -> Result<()> {
@@ -1347,6 +1796,19 @@ impl CoordinatorEvent {
     }
 }
 
+/// Check whether a coordinator is running by reading `coordinator.sqlite` via
+/// `SqliteStorage`. Used by the `Engine::readiness_ladder` default method so
+/// the `Engine` facade is the only entry-point for clients.
+fn check_coordinator_running_via_storage(paths: &ProjectPaths) -> bool {
+    use crate::coordinator_storage::{CoordinatorStoragePaths, SqliteStorage};
+    let storage_paths = CoordinatorStoragePaths::from_project_paths(paths);
+    let storage = SqliteStorage::new(storage_paths);
+    match storage.get_active_coordinator_run() {
+        Ok(Some(run)) => crate::doctor::is_pid_alive_pub(run.pid as u32),
+        _ => false,
+    }
+}
+
 /// The standard production engine.
 pub struct MaccEngine {
     registry: ToolRegistry,
@@ -1534,6 +1996,7 @@ impl TestEngine {
             update: None,
             version_check: None,
             defaults: None,
+            model_tiers: Default::default(),
         };
 
         let spec_two = ToolSpec {
@@ -1581,6 +2044,7 @@ impl TestEngine {
             update: None,
             version_check: None,
             defaults: None,
+            model_tiers: Default::default(),
         };
 
         let mut registry = ToolRegistry::new();
@@ -1657,6 +2121,15 @@ impl Engine for TestEngine {
             check.status = crate::doctor::ToolStatus::Installed;
         }
         checks
+    }
+
+    /// Return no extended findings in tests so health score stays at 100.
+    fn collect_diagnostic_findings(
+        &self,
+        _paths: &ProjectPaths,
+        _max_parallel: u32,
+    ) -> Vec<crate::doctor::DiagnosticFinding> {
+        Vec::new()
     }
 
     /// Produces a deterministic ActionPlan.
@@ -1826,7 +2299,7 @@ fields: []
 
     #[test]
     fn engine_trait_method_count_guard() {
-        const EXPECTED_METHOD_COUNT: usize = 122;
+        const EXPECTED_METHOD_COUNT: usize = 144;
         let source = include_str!("engine.rs");
         let trait_start = source
             .find("pub trait Engine {")
