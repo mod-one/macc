@@ -692,7 +692,7 @@ fn free_space_bytes(path: &Path) -> u64 {
         };
         let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
         if unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) } == 0 {
-            return stat.f_bavail * stat.f_frsize;
+            return (stat.f_bavail as u64) * (stat.f_frsize as u64);
         }
         u64::MAX
     }
