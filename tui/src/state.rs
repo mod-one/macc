@@ -448,12 +448,7 @@ impl AppState {
     }
 
     pub fn refresh_skills(&mut self) {
-        let mut skills_map: BTreeMap<String, Skill> = self
-            .engine
-            .builtin_skills()
-            .into_iter()
-            .map(|skill| (skill.id.clone(), skill))
-            .collect();
+        let mut skills_map: BTreeMap<String, Skill> = BTreeMap::new();
 
         if let Some(paths) = &self.project_paths {
             match macc_core::catalog::load_skills_catalog_with_local(paths) {
@@ -465,6 +460,7 @@ impl AppState {
                                 id: entry.id,
                                 name: entry.name,
                                 description: entry.description,
+                                mandatory: entry.mandatory,
                             },
                         );
                     }
@@ -4357,9 +4353,7 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
             return Vec::new();
         };
         let mut selected = self.read_string_list_at(path);
-        for required in macc_core::required_skills() {
-            selected.push((*required).to_string());
-        }
+        selected.extend(self.mandatory_skill_ids());
         selected.sort();
         selected.dedup();
         selected
@@ -4499,12 +4493,10 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
     fn set_string_list_at(&mut self, pointer: &str, values: Vec<String>) {
         let mut normalized = values;
         if self.skill_target_path.as_deref() == Some(pointer) {
-            for required in macc_core::required_skills() {
-                normalized.push((*required).to_string());
-            }
-            normalized.sort();
-            normalized.dedup();
+            normalized.extend(self.mandatory_skill_ids());
         }
+        normalized.sort();
+        normalized.dedup();
         let array = normalized.into_iter().map(Value::String).collect();
         let _ = self.set_value_at(pointer, Value::Array(array));
     }
@@ -4599,11 +4591,12 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
             .or_else(|| self.filtered_skill_indices().first().copied())
             .unwrap_or(self.skill_selection_index);
         self.ensure_working_copy();
-        let skill_id = self.skills[selected_index].id.to_string();
-        if macc_core::is_required_skill(&skill_id) {
+        let skill = self.skills[selected_index].clone();
+        let skill_id = skill.id;
+        if skill.mandatory {
             self.set_status(
                 UiStatusLevel::Warning,
-                format!("cannot disable required skill '{}'", skill_id),
+                format!("cannot disable mandatory skill '{}'", skill_id),
                 Some(Duration::from_secs(4)),
             );
             return;
@@ -4629,14 +4622,10 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
             return;
         };
         self.ensure_working_copy();
-        let required = macc_core::required_skills()
-            .iter()
-            .map(|id| (*id).to_string())
-            .collect();
-        self.set_string_list_at(&path, required);
+        self.set_string_list_at(&path, self.mandatory_skill_ids());
         self.set_status(
             UiStatusLevel::Info,
-            "required skills remain enabled",
+            "mandatory skills remain enabled",
             Some(Duration::from_secs(4)),
         );
     }
@@ -4807,8 +4796,7 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
         }
 
         self.apply_tool_defaults();
-        self.ensure_required_skills_selected();
-
+        self.ensure_mandatory_skills_selected();
         let yaml = match self
             .working_copy
             .as_ref()
@@ -4894,16 +4882,26 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
         self.apply_tool_normalizations();
     }
 
-    fn ensure_required_skills_selected(&mut self) {
+    fn mandatory_skill_ids(&self) -> Vec<String> {
+        self.skills
+            .iter()
+            .filter(|skill| skill.mandatory)
+            .map(|skill| skill.id.clone())
+            .collect()
+    }
+
+    fn ensure_mandatory_skills_selected(&mut self) {
+        let mandatory = self.mandatory_skill_ids();
+        if mandatory.is_empty() {
+            return;
+        }
         let Some(ref mut wc) = self.working_copy else {
             return;
         };
         let selections = wc
             .selections
             .get_or_insert_with(macc_core::config::SelectionsConfig::default);
-        for required in macc_core::required_skills() {
-            selections.skills.push((*required).to_string());
-        }
+        selections.skills.extend(mandatory);
         selections.skills.sort();
         selections.skills.dedup();
     }
@@ -5904,10 +5902,6 @@ mod tests {
             Ok(macc_core::ApplyReport::default())
         }
 
-        fn builtin_skills(&self) -> Vec<Skill> {
-            Vec::new()
-        }
-
         fn builtin_agents(&self) -> Vec<Agent> {
             Vec::new()
         }
@@ -6398,16 +6392,62 @@ mod tests {
 
     #[test]
     fn test_skills_selection() {
+        use macc_core::catalog::{Selector, SkillEntry, SkillsCatalog, Source, SourceKind};
+
         let ids = fixture_ids();
         let tool_one = ids[0].clone();
         let engine = fixture_engine(&ids);
         let mut state = AppState::with_engine(engine);
+        let temp_dir = tempdir().unwrap();
+        let paths = ProjectPaths::from_root(temp_dir.path());
+        fs::create_dir_all(&paths.catalog_dir).unwrap();
+        let mut catalog = SkillsCatalog::default();
+        for (id, name) in [
+            ("mock-skill-one", "Mock Skill One"),
+            ("mock-skill-two", "Mock Skill Two"),
+        ] {
+            catalog.entries.push(SkillEntry {
+                id: id.to_string(),
+                name: name.to_string(),
+                description: format!("{name} from catalog."),
+                tags: vec![],
+                selector: Selector {
+                    subpath: format!("skills/{id}"),
+                },
+                source: Source {
+                    kind: SourceKind::Git,
+                    url: "https://example.com/catalog.git".to_string(),
+                    reference: "main".to_string(),
+                    checksum: None,
+                    subpaths: vec![],
+                },
+                tools: vec![],
+                recommended_ref: None,
+                risk: None,
+                requires_mcp: false,
+                writes_user_level_config: false,
+                mandatory: id == "mock-skill-one",
+                targets: Default::default(),
+                category: None,
+                compatibility: None,
+            });
+        }
+        catalog
+            .save_atomically(&paths, &paths.skills_catalog_path())
+            .unwrap();
+        state.project_paths = Some(paths);
+        state.refresh_skills();
         state.working_copy = Some(CanonicalConfig::default());
         state.skill_target_path = Some(format!("/tools/config/{}/skills", tool_one));
         state.goto_screen(Screen::Skills);
+        state.search_query = "mock-skill".to_string();
+        state.skill_selection_index = state.filtered_skill_indices()[0];
 
         // Initial state
-        assert_eq!(state.skill_selection_index, 0);
+        assert_eq!(
+            state.skills[state.skill_selection_index].id,
+            "mock-skill-one"
+        );
 
         let empty_vec: Vec<String> = Vec::new();
         let current_skills = state
@@ -6422,31 +6462,32 @@ mod tests {
             .unwrap_or(empty_vec);
         assert!(current_skills.is_empty());
 
-        // Toggle first skill (mock-skill-one)
-        state.toggle_skill();
+        assert!(state
+            .selected_skills()
+            .contains(&"mock-skill-one".to_string()));
 
-        let current_skills: Vec<String> = serde_json::from_value(
-            state
-                .working_copy
-                .as_ref()
-                .unwrap()
-                .tools
-                .config
-                .get(&tool_one)
-                .unwrap()
-                .get("skills")
-                .unwrap()
-                .clone(),
-        )
-        .unwrap();
-        assert!(current_skills.contains(&"mock-skill-one".to_string()));
-        for required in macc_core::required_skills() {
-            assert!(current_skills.contains(&required.to_string()));
-        }
+        // Toggle first skill (mock-skill-one); mandatory skills are read-only.
+        state.toggle_skill();
+        assert!(state
+            .working_copy
+            .as_ref()
+            .unwrap()
+            .tools
+            .config
+            .get(&tool_one)
+            .and_then(|v| v.get("skills"))
+            .is_none());
+
+        assert!(state
+            .selected_skills()
+            .contains(&"mock-skill-one".to_string()));
 
         // Move to next skill
         state.next_skill();
-        assert_eq!(state.skill_selection_index, 1);
+        assert_eq!(
+            state.skills[state.skill_selection_index].id,
+            "mock-skill-two"
+        );
 
         // Toggle second skill (mock-skill-two)
         state.toggle_skill();
@@ -6466,9 +6507,6 @@ mod tests {
         .unwrap();
         assert!(current_skills.contains(&"mock-skill-one".to_string()));
         assert!(current_skills.contains(&"mock-skill-two".to_string()));
-        for required in macc_core::required_skills() {
-            assert!(current_skills.contains(&required.to_string()));
-        }
 
         // Select none
         state.select_no_skills();
@@ -6486,9 +6524,15 @@ mod tests {
                 .clone(),
         )
         .unwrap();
-        for required in macc_core::required_skills() {
-            assert!(current_skills.contains(&required.to_string()));
-        }
+        assert_eq!(
+            current_skills,
+            vec![
+                "macc-performer".to_string(),
+                "macc-prd-planner".to_string(),
+                "macc-reviewer".to_string(),
+                "mock-skill-one".to_string(),
+            ]
+        );
 
         // Select all
         state.select_all_skills();
@@ -6509,9 +6553,6 @@ mod tests {
         assert!(current_skills.len() >= 2);
         assert!(current_skills.contains(&"mock-skill-one".to_string()));
         assert!(current_skills.contains(&"mock-skill-two".to_string()));
-        for required in macc_core::required_skills() {
-            assert!(current_skills.contains(&required.to_string()));
-        }
     }
 
     #[test]

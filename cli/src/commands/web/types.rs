@@ -36,6 +36,9 @@ pub(crate) struct ApiConfigResponse {
     /// Selected skill IDs enabled for the project.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub selected_skills: Vec<String>,
+    /// Catalog skill IDs that clients must keep selected.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mandatory_skills: Vec<String>,
     /// Selected agent IDs enabled for the project.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub selected_agents: Vec<String>,

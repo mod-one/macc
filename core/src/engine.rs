@@ -6,7 +6,7 @@ use crate::service::process_ownership::{
     ProcessOwnershipGuard, ProcessViewerGuard, RegisteredProcessGuard,
 };
 use crate::{
-    catalog::{self, Agent, Skill},
+    catalog::{self, Agent},
     config::CanonicalConfig,
     coordinator,
     doctor::{self, ToolCheck},
@@ -31,7 +31,6 @@ type MonitorMergeJobsFuture<'a> =
 /// - `plan`
 /// - `plan_operations`
 /// - `apply`
-/// - `builtin_skills`
 /// - `builtin_agents`
 ///
 /// Default methods:
@@ -73,7 +72,6 @@ pub trait Engine {
         crate::save_canonical_config(paths, config)
     }
 
-    fn builtin_skills(&self) -> Vec<Skill>;
     fn builtin_agents(&self) -> Vec<Agent>;
 
     fn list_worktrees(&self, root: &Path) -> Result<Vec<WorktreeEntry>> {
@@ -1887,10 +1885,6 @@ impl Engine for MaccEngine {
         crate::apply_plan(paths, plan, allow_user_scope)
     }
 
-    fn builtin_skills(&self) -> Vec<Skill> {
-        catalog::builtin_skills()
-    }
-
     fn builtin_agents(&self) -> Vec<Agent> {
         catalog::builtin_agents()
     }
@@ -2159,21 +2153,6 @@ impl Engine for TestEngine {
         crate::apply_plan(paths, plan, allow_user_scope)
     }
 
-    fn builtin_skills(&self) -> Vec<Skill> {
-        vec![
-            Skill {
-                id: "mock-skill-one".into(),
-                name: "Mock Skill One".into(),
-                description: "First mock skill for testing.".into(),
-            },
-            Skill {
-                id: "mock-skill-two".into(),
-                name: "Mock Skill Two".into(),
-                description: "Second mock skill for testing.".into(),
-            },
-        ]
-    }
-
     fn builtin_agents(&self) -> Vec<Agent> {
         vec![
             Agent {
@@ -2299,7 +2278,7 @@ fields: []
 
     #[test]
     fn engine_trait_method_count_guard() {
-        const EXPECTED_METHOD_COUNT: usize = 144;
+        const EXPECTED_METHOD_COUNT: usize = 143;
         let source = include_str!("engine.rs");
         let trait_start = source
             .find("pub trait Engine {")

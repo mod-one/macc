@@ -160,7 +160,7 @@ const Layout: React.FC = () => {
   const requestTakeover = async () => {
     try {
       await requestProjectTakeover({ clientId: webClientId });
-      setOwnershipMessage('Takeover requested — waiting for the owner to respond.');
+      setOwnershipMessage('Takeover requested waiting for the owner to respond.');
       setTimeout(() => setOwnershipMessage(null), 6000);
     } catch { /* silent */ }
   };

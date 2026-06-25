@@ -354,6 +354,7 @@ pub fn import_url(
                 risk: None,
                 requires_mcp: false,
                 writes_user_level_config: false,
+                mandatory: false,
                 targets: Default::default(),
                 category: None,
                 compatibility: None,

@@ -29,6 +29,7 @@ function buildConfig(overrides: Partial<ApiConfigResponse> = {}): ApiConfigRespo
     standardsPath: null,
     standardsInline: {},
     selectedSkills: [],
+    mandatorySkills: [],
     selectedAgents: [],
     selectedMcp: [],
     quiet: false,

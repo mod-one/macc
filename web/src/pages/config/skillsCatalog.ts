@@ -15,6 +15,7 @@ export interface CatalogItem {
   kind: CatalogKind;
   toolCompatibility: string[];
   verified: boolean;
+  mandatory?: boolean;
   sourceKind: SourceKind;
   sourceUrl?: string;
   security: CatalogSecurity;
@@ -46,6 +47,7 @@ export const SEED_CATALOG: CatalogItem[] = [
     kind: 'skill',
     toolCompatibility: ['codex', 'claude'],
     verified: true,
+    mandatory: true,
     sourceKind: 'builtin',
     security: { env: false, network: false, fs: true },
     configuration: { mode: 'worktree' },
@@ -58,6 +60,7 @@ export const SEED_CATALOG: CatalogItem[] = [
     kind: 'skill',
     toolCompatibility: ['codex', 'gemini'],
     verified: true,
+    mandatory: true,
     sourceKind: 'builtin',
     security: { env: false, network: false, fs: true },
     configuration: { mode: 'review' },
@@ -170,6 +173,7 @@ export function readStoredCatalog(): CatalogItem[] {
             ? value.toolCompatibility.filter((entry): entry is string => typeof entry === 'string')
             : [],
           verified: Boolean(value.verified),
+          mandatory: Boolean(value.mandatory),
           sourceKind:
             value.sourceKind === 'builtin' || value.sourceKind === 'registry' ? value.sourceKind : 'remote',
           sourceUrl: typeof value.sourceUrl === 'string' ? value.sourceUrl : undefined,

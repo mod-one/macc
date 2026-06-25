@@ -3687,6 +3687,10 @@ async fn config_get_endpoint_returns_canonical_config() {
     assert_eq!(payload["webPort"], 4567);
     assert_eq!(payload["quiet"], false);
     assert_eq!(payload["offline"], false);
+    assert_eq!(
+        payload["mandatorySkills"],
+        serde_json::json!(["macc-performer", "macc-prd-planner", "macc-reviewer"])
+    );
 }
 
 #[tokio::test]
@@ -3725,7 +3729,10 @@ async fn config_put_endpoint_updates_config_file() {
     let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
     assert_eq!(payload["webPort"], 4567);
     assert_eq!(payload["quiet"], true);
-    assert_eq!(payload["selectedSkills"], serde_json::json!(["macc-performer"]));
+    let expected_skills =
+        serde_json::json!(["macc-performer", "macc-prd-planner", "macc-reviewer"]);
+    assert_eq!(payload["selectedSkills"], expected_skills);
+    assert_eq!(payload["mandatorySkills"], expected_skills);
 
     let paths = ProjectPaths::from_root(&root);
     let updated = macc_core::load_canonical_config(&paths.config_path).expect("load config");
@@ -3737,7 +3744,11 @@ async fn config_put_endpoint_updates_config_file() {
             .as_ref()
             .expect("selections")
             .skills,
-        vec!["macc-performer".to_string()]
+        vec![
+            "macc-performer".to_string(),
+            "macc-prd-planner".to_string(),
+            "macc-reviewer".to_string(),
+        ]
     );
 }
 

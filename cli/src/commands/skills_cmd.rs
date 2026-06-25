@@ -270,10 +270,13 @@ impl Command for SkillsCmdCommand {
 
                 println!("Available skills\n");
                 println!(
-                    "{:<24} {:<18} {:<10} {:<14} Risk",
-                    "ID", "Tools", "Source", "Ref"
+                    "{:<24} {:<18} {:<10} {:<14} {:<10} Risk",
+                    "ID", "Tools", "Source", "Ref", "Policy"
                 );
-                println!("{:-<24} {:-<18} {:-<10} {:-<14} ---", "", "", "", "");
+                println!(
+                    "{:-<24} {:-<18} {:-<10} {:-<14} {:-<10} ---",
+                    "", "", "", "", ""
+                );
                 for e in &filtered {
                     let tools_str = if e.tools.is_empty() {
                         "(any)".to_string()
@@ -283,12 +286,14 @@ impl Command for SkillsCmdCommand {
                     let src_short = e.source.url.split('/').next_back().unwrap_or("local");
                     let ref_str = e.recommended_ref.as_deref().unwrap_or("-");
                     let risk = e.risk.as_deref().unwrap_or("-");
+                    let policy = if e.mandatory { "mandatory" } else { "-" };
                     println!(
-                        "{:<24} {:<18} {:<10} {:<14} {}",
+                        "{:<24} {:<18} {:<10} {:<14} {:<10} {}",
                         e.id,
                         &tools_str[..tools_str.len().min(17)],
                         src_short,
                         ref_str,
+                        policy,
                         risk
                     );
                 }
@@ -659,6 +664,18 @@ impl Command for SkillsCmdCommand {
                 tool,
                 all_tools,
             } => {
+                let catalog_entries = self.app.engine.catalog_skills_available(&paths, None);
+                if catalog_entries
+                    .iter()
+                    .any(|entry| entry.id == id.as_str() && entry.mandatory)
+                {
+                    eprintln!("Skill '{}' is mandatory and cannot be uninstalled.", id);
+                    return Err(macc_core::MaccError::Catalog {
+                        operation: "uninstall".to_string(),
+                        message: format!("Skill '{}' is mandatory", id),
+                    });
+                }
+
                 let mut lockfile = self.app.engine.skills_lockfile(&paths)?;
 
                 let tools_to_remove: Vec<String> = if *all_tools {

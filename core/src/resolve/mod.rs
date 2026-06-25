@@ -155,9 +155,6 @@ pub fn resolve(canonical: &CanonicalConfig, overrides: &CliOverrides) -> Resolve
         .as_ref()
         .map(|s| s.skills.clone())
         .unwrap_or_default();
-    for required in crate::required_skills() {
-        skills.push((*required).to_string());
-    }
     skills.sort();
     skills.dedup();
 
@@ -220,17 +217,19 @@ pub fn resolve_fetch_units(
     let mut raw_selections = Vec::new();
 
     let mut skill_ids = collect_skill_ids(resolved);
+    skill_ids.extend(
+        skills_catalog
+            .entries
+            .iter()
+            .filter(|entry| entry.mandatory)
+            .map(|entry| entry.id.clone()),
+    );
     skill_ids.sort();
     skill_ids.dedup();
 
     for id in &skill_ids {
         let entry = match skills_catalog.entries.iter().find(|e| &e.id == id) {
             Some(e) => e,
-            None if crate::is_required_skill(id) => {
-                // Required (built-in) skills are provided by MACC itself and are
-                // not fetched from a remote catalog. Skip silently.
-                continue;
-            }
             None => {
                 return Err(MaccError::Validation(format!(
                     "Skill ID not found in catalog: {}",
@@ -297,7 +296,6 @@ pub fn resolve_fetch_units(
 
 fn collect_skill_ids(resolved: &ResolvedConfig) -> Vec<String> {
     let mut ids: Vec<String> = resolved.selections.skills.clone();
-    ids.extend(crate::required_skills().iter().map(|id| (*id).to_string()));
 
     for value in resolved.tools.config.values() {
         ids.extend(read_string_list(value, "skills"));
@@ -307,6 +305,22 @@ fn collect_skill_ids(resolved: &ResolvedConfig) -> Vec<String> {
     }
 
     ids
+}
+
+pub fn with_mandatory_skills(
+    paths: &ProjectPaths,
+    resolved: &ResolvedConfig,
+) -> Result<ResolvedConfig> {
+    let mandatory = crate::catalog::mandatory_skill_ids(paths)?;
+    if mandatory.is_empty() {
+        return Ok(resolved.clone());
+    }
+
+    let mut next = resolved.clone();
+    next.selections.skills.extend(mandatory);
+    next.selections.skills.sort();
+    next.selections.skills.dedup();
+    Ok(next)
 }
 
 fn read_string_list(value: &serde_json::Value, key: &str) -> Vec<String> {
@@ -373,11 +387,7 @@ mod tests {
 
         assert_eq!(resolved.version, "v1");
         assert_eq!(resolved.tools.enabled, vec![tool_one, tool_two]);
-        assert!(resolved.selections.skills.contains(&"a".to_string()));
-        assert!(resolved.selections.skills.contains(&"z".to_string()));
-        for required in crate::required_skills() {
-            assert!(resolved.selections.skills.contains(&required.to_string()));
-        }
+        assert_eq!(resolved.selections.skills, vec!["a", "z"]);
         assert_eq!(resolved.selections.agents, vec!["b", "y"]);
 
         // Check stable ordering of inline standards (BTreeMap)
@@ -390,7 +400,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_reinjects_required_skills() {
+    fn test_resolve_does_not_inject_skills() {
         let canonical = CanonicalConfig {
             version: None,
             tools: ToolsConfig::default(),
@@ -410,9 +420,7 @@ mod tests {
         };
 
         let resolved = resolve(&canonical, &CliOverrides::default());
-        for required in crate::required_skills() {
-            assert!(resolved.selections.skills.contains(&required.to_string()));
-        }
+        assert!(resolved.selections.skills.is_empty());
     }
 
     #[test]
@@ -563,6 +571,7 @@ mod tests {
             risk: None,
             requires_mcp: false,
             writes_user_level_config: false,
+            mandatory: false,
             targets: Default::default(),
             category: None,
             compatibility: None,
@@ -581,37 +590,11 @@ mod tests {
             risk: None,
             requires_mcp: false,
             writes_user_level_config: false,
+            mandatory: false,
             targets: Default::default(),
             category: None,
             compatibility: None,
         });
-        for required_id in crate::required_skills() {
-            skills_catalog.entries.push(SkillEntry {
-                id: (*required_id).into(),
-                name: format!("Required {required_id}"),
-                description: "".into(),
-                tags: vec![],
-                selector: Selector {
-                    subpath: format!("skills/{required_id}"),
-                },
-                source: Source {
-                    kind: SourceKind::Git,
-                    url: "https://github.com/repo1.git".into(),
-                    reference: "main".into(),
-                    checksum: None,
-                    subpaths: vec![],
-                },
-                tools: vec![],
-                recommended_ref: None,
-                risk: None,
-                requires_mcp: false,
-                writes_user_level_config: false,
-                targets: Default::default(),
-                category: None,
-                compatibility: None,
-            });
-        }
-
         skills_catalog
             .save_atomically(&paths, &paths.skills_catalog_path())
             .unwrap();
@@ -640,16 +623,15 @@ mod tests {
 
         let fetch_units = resolve_fetch_units(&paths, &resolved)?;
 
-        assert_eq!(fetch_units.len(), 1);
-        let unit = &fetch_units[0];
+        let unit = fetch_units
+            .iter()
+            .find(|unit| unit.source.url == "https://github.com/repo1.git")
+            .unwrap();
         assert_eq!(unit.source.url, "https://github.com/repo1.git");
-        assert_eq!(
-            unit.source.subpaths.len(),
-            2 + crate::required_skills().len()
-        );
+        assert_eq!(unit.source.subpaths.len(), 2);
         assert!(unit.source.subpaths.contains(&"skills/s1".into()));
         assert!(unit.source.subpaths.contains(&"skills/s2".into()));
-        assert_eq!(unit.selections.len(), 2 + crate::required_skills().len());
+        assert_eq!(unit.selections.len(), 2);
         assert!(unit
             .selections
             .iter()
@@ -658,12 +640,6 @@ mod tests {
             .selections
             .iter()
             .any(|selection| selection.id == "skill2"));
-        for required_id in crate::required_skills() {
-            assert!(unit
-                .selections
-                .iter()
-                .any(|selection| selection.id == *required_id));
-        }
 
         fs::remove_dir_all(&temp_dir).ok();
         Ok(())
@@ -701,37 +677,11 @@ mod tests {
             risk: None,
             requires_mcp: false,
             writes_user_level_config: false,
+            mandatory: false,
             targets: Default::default(),
             category: None,
             compatibility: None,
         });
-        for required_id in crate::required_skills() {
-            skills_catalog.entries.push(SkillEntry {
-                id: (*required_id).into(),
-                name: format!("Required {required_id}"),
-                description: "".into(),
-                tags: vec![],
-                selector: Selector {
-                    subpath: format!("required/{required_id}"),
-                },
-                source: Source {
-                    kind: SourceKind::Git,
-                    url: "repo1".into(),
-                    reference: "main".into(),
-                    checksum: None,
-                    subpaths: vec![],
-                },
-                tools: vec![],
-                recommended_ref: None,
-                risk: None,
-                requires_mcp: false,
-                writes_user_level_config: false,
-                targets: Default::default(),
-                category: None,
-                compatibility: None,
-            });
-        }
-
         let mut mcp_catalog = McpCatalog::default();
         mcp_catalog.entries.push(McpEntry {
             id: "mcp1".into(),
@@ -781,26 +731,19 @@ mod tests {
 
         let fetch_units = resolve_fetch_units(&paths, &resolved)?;
 
-        assert_eq!(fetch_units.len(), 2);
-        // Sorted by cache key
         let git_unit = fetch_units
             .iter()
-            .find(|u| u.source.kind == SourceKind::Git)
+            .find(|u| u.source.kind == SourceKind::Git && u.source.url == "repo1")
             .unwrap();
         let http_unit = fetch_units
             .iter()
-            .find(|u| u.source.kind == SourceKind::Http)
+            .find(|u| u.source.kind == SourceKind::Http && u.source.url == "url1")
             .unwrap();
 
         assert_eq!(git_unit.source.url, "repo1");
         assert!(git_unit.selections.iter().any(|selection| {
             selection.id == "skill1" && selection.kind == SelectionKind::Skill
         }));
-        for required_id in crate::required_skills() {
-            assert!(git_unit.selections.iter().any(|selection| {
-                selection.id == *required_id && selection.kind == SelectionKind::Skill
-            }));
-        }
 
         assert_eq!(http_unit.source.url, "url1");
         assert_eq!(http_unit.selections[0].id, "mcp1");
@@ -847,6 +790,85 @@ mod tests {
             .contains("Skill ID not found"));
 
         std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn test_resolve_fetch_units_includes_catalog_mandatory_skills() -> Result<()> {
+        use crate::catalog::{Selector, SkillEntry, Source, SourceKind};
+        use std::fs;
+
+        let temp_dir =
+            std::env::temp_dir().join(format!("macc_resolve_mandatory_test_{}", uuid_v4_like()));
+        fs::create_dir_all(&temp_dir).unwrap();
+        let paths = ProjectPaths::from_root(&temp_dir);
+        fs::create_dir_all(&paths.catalog_dir).unwrap();
+
+        let mut skills_catalog = crate::catalog::SkillsCatalog::default();
+        skills_catalog.entries.push(SkillEntry {
+            id: "mandatory-skill".into(),
+            name: "Mandatory Skill".into(),
+            description: "".into(),
+            tags: vec![],
+            selector: Selector {
+                subpath: "skills/mandatory".into(),
+            },
+            source: Source {
+                kind: SourceKind::Git,
+                url: "repo-mandatory".into(),
+                reference: "main".into(),
+                checksum: None,
+                subpaths: vec![],
+            },
+            tools: vec![],
+            recommended_ref: None,
+            risk: None,
+            requires_mcp: false,
+            writes_user_level_config: false,
+            mandatory: true,
+            targets: Default::default(),
+            category: None,
+            compatibility: None,
+        });
+        skills_catalog
+            .save_atomically(&paths, &paths.skills_catalog_path())
+            .unwrap();
+
+        let resolved = ResolvedConfig {
+            version: "v1".into(),
+            tools: ResolvedToolsConfig {
+                enabled: vec![],
+                ..Default::default()
+            },
+            standards: ResolvedStandardsConfig {
+                path: None,
+                inline: BTreeMap::new(),
+            },
+            selections: ResolvedSelectionsConfig {
+                skills: vec![],
+                agents: vec![],
+                mcp: vec![],
+            },
+            mcp_templates: Vec::new(),
+            automation: crate::config::AutomationConfig::default(),
+            settings: SettingsConfig::default(),
+            context: None,
+            skills_run_policy: None,
+        };
+
+        let effective = with_mandatory_skills(&paths, &resolved)?;
+        assert!(effective
+            .selections
+            .skills
+            .contains(&"mandatory-skill".to_string()));
+
+        let fetch_units = resolve_fetch_units(&paths, &resolved)?;
+        assert!(fetch_units.iter().any(|unit| unit
+            .selections
+            .iter()
+            .any(|selection| selection.id == "mandatory-skill")));
+
+        fs::remove_dir_all(&temp_dir).ok();
+        Ok(())
     }
 
     fn uuid_v4_like() -> String {

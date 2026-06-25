@@ -28,6 +28,7 @@ function buildConfig(overrides: Partial<ApiConfigResponse> = {}): ApiConfigRespo
     standardsPath: null,
     standardsInline: {},
     selectedSkills: [],
+    mandatorySkills: [],
     selectedAgents: [],
     selectedMcp: [],
     quiet: false,
@@ -98,13 +99,13 @@ describe('Skills page', () => {
     await screen.findByText('Skills & Catalog');
     expect(screen.getByText('MACC Performer')).toBeInTheDocument();
 
-    fireEvent.change(screen.getByPlaceholderText('Search by name, id, tool or URL'), {
+    fireEvent.change(screen.getByPlaceholderText('Search name, id, tool'), {
       target: { value: 'filesystem' },
     });
     expect(screen.getByText('Filesystem MCP')).toBeInTheDocument();
     expect(screen.queryByText('MACC Performer')).not.toBeInTheDocument();
 
-    fireEvent.change(screen.getByLabelText('Kind'), { target: { value: 'mcp' } });
+    fireEvent.change(screen.getByLabelText('Filter by kind'), { target: { value: 'mcp' } });
     expect(screen.getByText('Filesystem MCP')).toBeInTheDocument();
   });
 
@@ -139,7 +140,7 @@ describe('Skills page', () => {
   });
 
   it('removes an installed item with confirmation', async () => {
-    const initial = buildConfig({ selectedSkills: ['macc-performer'] });
+    const initial = buildConfig({ selectedSkills: ['custom-package'] });
     const saved = buildConfig({ selectedSkills: [] });
     getConfigMock.mockResolvedValue(initial);
     updateConfigMock.mockResolvedValue(saved);
@@ -150,7 +151,7 @@ describe('Skills page', () => {
     fireEvent.click(screen.getAllByRole('button', { name: 'Remove' })[0]);
 
     const phraseInput = screen.getByLabelText(/Type/i);
-    fireEvent.change(phraseInput, { target: { value: 'macc-performer' } });
+    fireEvent.change(phraseInput, { target: { value: 'custom-package' } });
     fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
 
     await waitFor(() => {
@@ -159,6 +160,24 @@ describe('Skills page', () => {
 
     const payload = updateConfigMock.mock.calls[0][0] as Record<string, unknown>;
     expect(payload.selectedSkills).toEqual([]);
+  });
+
+  it('disables removal for mandatory installed skills', async () => {
+    getConfigMock.mockResolvedValue(
+      buildConfig({
+        selectedSkills: ['macc-performer'],
+        mandatorySkills: ['macc-performer'],
+      }),
+    );
+
+    render(<Skills />);
+    await screen.findByText('Skills & Catalog');
+
+    expect(screen.getAllByText('Mandatory').length).toBeGreaterThan(0);
+    const removeButton = screen.getAllByRole('button', { name: 'Remove' })[0];
+    expect(removeButton).toBeDisabled();
+    fireEvent.click(removeButton);
+    expect(updateConfigMock).not.toHaveBeenCalled();
   });
 
   it('renders when selected catalog arrays are missing from the config payload', async () => {

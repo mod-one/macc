@@ -1,7 +1,7 @@
 use crate::catalog::{
     McpCatalog, McpEntry, Selector, SkillEntry, SkillsCatalog, Source, SourceKind,
 };
-use crate::{is_required_skill, MaccError, ProjectPaths, Result};
+use crate::{MaccError, ProjectPaths, Result};
 
 #[derive(Debug, Clone)]
 pub struct CatalogEntryInput {
@@ -102,6 +102,7 @@ pub fn build_skill_entry(input: CatalogEntryInput) -> Result<SkillEntry> {
         risk: None,
         requires_mcp: false,
         writes_user_level_config: false,
+        mandatory: false,
         targets: Default::default(),
         category: None,
         compatibility: None,
@@ -138,10 +139,14 @@ pub fn upsert_skill(
 }
 
 pub fn remove_skill(paths: &ProjectPaths, catalog: &mut SkillsCatalog, id: &str) -> Result<bool> {
-    if is_required_skill(id) {
+    if catalog
+        .entries
+        .iter()
+        .any(|entry| entry.id == id && entry.mandatory)
+    {
         return Err(MaccError::Catalog {
-            operation: "lookup_skill".to_string(),
-            message: format!("cannot disable required skill '{}'", id),
+            operation: "remove_skill".to_string(),
+            message: format!("Skill '{}' is mandatory and cannot be removed.", id),
         });
     }
     let removed = catalog.delete_skill_entry(id);

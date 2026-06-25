@@ -1490,10 +1490,6 @@ mod tests {
             self.inner.apply(paths, plan, allow_user_scope)
         }
 
-        fn builtin_skills(&self) -> Vec<macc_core::catalog::Skill> {
-            self.inner.builtin_skills()
-        }
-
         fn builtin_agents(&self) -> Vec<macc_core::catalog::Agent> {
             self.inner.builtin_agents()
         }

@@ -98,6 +98,9 @@ pub struct SkillEntry {
     /// Whether this skill writes user-level config outside the project.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub writes_user_level_config: bool,
+    /// Whether clients must keep this skill selected.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mandatory: bool,
     /// Preview of install target directories per tool.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub targets: std::collections::BTreeMap<String, Vec<String>>,
@@ -283,6 +286,19 @@ pub fn load_effective_skills_catalog(paths: &ProjectPaths) -> MaccResult<SkillsC
     ))
 }
 
+pub fn mandatory_skill_ids(paths: &ProjectPaths) -> MaccResult<Vec<String>> {
+    let catalog = load_skills_catalog_with_local(paths)?;
+    let mut ids: Vec<String> = catalog
+        .entries
+        .into_iter()
+        .filter(|entry| entry.mandatory)
+        .map(|entry| entry.id)
+        .collect();
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
+}
+
 pub fn load_effective_mcp_catalog(paths: &ProjectPaths) -> MaccResult<McpCatalog> {
     let embedded = embedded_mcp_catalog()?;
     let user = McpCatalog::load(&paths.mcp_catalog_path())?;
@@ -329,6 +345,7 @@ fn discover_local_skill_entries(paths: &ProjectPaths) -> Vec<SkillEntry> {
             risk: None,
             requires_mcp: false,
             writes_user_level_config: false,
+            mandatory: false,
             targets: Default::default(),
             category: None,
             compatibility: None,
@@ -427,6 +444,7 @@ pub struct Skill {
     pub id: String,
     pub name: String,
     pub description: String,
+    pub mandatory: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -434,28 +452,6 @@ pub struct Agent {
     pub id: String,
     pub name: String,
     pub description: String,
-}
-
-pub fn builtin_skills() -> Vec<Skill> {
-    vec![
-        Skill {
-            id: "create-plan".into(),
-            name: "Create Plan".into(),
-            description: "Produces a structured implementation plan from a request.".into(),
-        },
-        Skill {
-            id: "implement".into(),
-            name: "Implement".into(),
-            description:
-                "Guides an agent through implementing a feature with tests and validation.".into(),
-        },
-        Skill {
-            id: "security-check".into(),
-            name: "Security Check".into(),
-            description: "Performs basic security checks for common issues and unsafe operations."
-                .into(),
-        },
-    ]
 }
 
 pub fn builtin_agents() -> Vec<Agent> {
@@ -668,6 +664,7 @@ mod tests {
             risk: None,
             requires_mcp: false,
             writes_user_level_config: false,
+            mandatory: false,
             targets: Default::default(),
             category: None,
             compatibility: None,
@@ -750,6 +747,7 @@ mod tests {
             risk: None,
             requires_mcp: false,
             writes_user_level_config: false,
+            mandatory: false,
             targets: Default::default(),
             category: None,
             compatibility: None,
@@ -910,6 +908,7 @@ mod tests {
             risk: None,
             requires_mcp: false,
             writes_user_level_config: false,
+            mandatory: false,
             targets: Default::default(),
             category: None,
             compatibility: None,
@@ -939,6 +938,7 @@ mod tests {
             risk: None,
             requires_mcp: false,
             writes_user_level_config: false,
+            mandatory: false,
             targets: Default::default(),
             category: None,
             compatibility: None,

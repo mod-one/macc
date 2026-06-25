@@ -34,6 +34,7 @@ Each entry in the `entries` array contains:
 | `source.url` | `string` | URL to the Git repository or HTTP ZIP archive. |
 | `source.ref` | `string` | Git branch, tag, or commit SHA (only for `git`). |
 | `source.checksum` | `string?` | Optional SHA256 checksum (recommended for `http`). |
+| `mandatory` | `boolean?` | When `true`, clients keep the skill selected and refuse user removal from skill menus. |
 
 ---
 
