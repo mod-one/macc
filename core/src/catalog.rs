@@ -306,6 +306,43 @@ pub fn load_effective_mcp_catalog(paths: &ProjectPaths) -> MaccResult<McpCatalog
     Ok(merge_mcp_layers(merge_mcp_layers(embedded, user), project))
 }
 
+/// Syncs project-level catalog entries from `repo_paths` into `worktree_paths` so that
+/// user-added skills and MCP servers registered in the project root are visible during
+/// worktree apply. Entries already present in the worktree catalog are kept as-is;
+/// only missing entries are added.
+pub fn sync_project_catalog_to_worktree(
+    repo_paths: &ProjectPaths,
+    worktree_paths: &ProjectPaths,
+) -> MaccResult<()> {
+    let repo_skills = SkillsCatalog::load(&repo_paths.project_skills_catalog_path())?;
+    if !repo_skills.entries.is_empty() {
+        let mut worktree_skills =
+            SkillsCatalog::load(&worktree_paths.project_skills_catalog_path())?;
+        for entry in repo_skills.entries {
+            if !worktree_skills.entries.iter().any(|e| e.id == entry.id) {
+                worktree_skills.entries.push(entry);
+            }
+        }
+        worktree_skills
+            .save_atomically(worktree_paths, &worktree_paths.project_skills_catalog_path())?;
+    }
+
+    let repo_mcp = McpCatalog::load(&repo_paths.project_mcp_catalog_path())?;
+    if !repo_mcp.entries.is_empty() {
+        let mut worktree_mcp =
+            McpCatalog::load(&worktree_paths.project_mcp_catalog_path())?;
+        for entry in repo_mcp.entries {
+            if !worktree_mcp.entries.iter().any(|e| e.id == entry.id) {
+                worktree_mcp.entries.push(entry);
+            }
+        }
+        worktree_mcp
+            .save_atomically(worktree_paths, &worktree_paths.project_mcp_catalog_path())?;
+    }
+
+    Ok(())
+}
+
 fn discover_local_skill_entries(paths: &ProjectPaths) -> Vec<SkillEntry> {
     let mut entries = Vec::new();
     let skills_root = paths.macc_dir.join("skills");
