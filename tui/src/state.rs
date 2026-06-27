@@ -718,35 +718,56 @@ impl AppState {
         }
     }
 
-fn resolve_task_model(
-    task: &macc_core::coordinator::model::Task,
-    canonical: &CanonicalConfig,
-) -> String {
-    let tool_id = task
-        .tool
-        .as_deref()
-        .or_else(|| task.coordinator_tool.as_deref())
-        .unwrap_or("");
-    if tool_id.is_empty() {
-        return "-".to_string();
-    }
+    fn resolve_task_model(
+        task: &macc_core::coordinator::model::Task,
+        canonical: &CanonicalConfig,
+    ) -> String {
+        let tool_id = task
+            .tool
+            .as_deref()
+            .or_else(|| task.coordinator_tool.as_deref())
+            .unwrap_or("");
+        if tool_id.is_empty() {
+            return "-".to_string();
+        }
 
-    // 1. Resolve model tier via routing engine
-    let routing_cfg = canonical.automation.model_routing.as_ref();
-    let phase = task
-        .task_runtime
-        .current_phase
-        .as_deref()
-        .unwrap_or("implementation");
-    let decision = macc_core::coordinator::model_routing::decide(task, phase, routing_cfg);
-    let tier_str = decision.tier.as_str();
+        // 1. Resolve model tier via routing engine
+        let routing_cfg = canonical.automation.model_routing.as_ref();
+        let phase = task
+            .task_runtime
+            .current_phase
+            .as_deref()
+            .unwrap_or("implementation");
+        let decision = macc_core::coordinator::model_routing::decide(task, phase, routing_cfg);
+        let tier_str = decision.tier.as_str();
 
-    // 2. Lookup in tools.config.<tool_id>
-    if let Some(tool_cfg) = canonical.tools.config.get(tool_id) {
-        // Try model_tiers[tier].model
-        if let Some(model_tiers) = tool_cfg.get("model_tiers").and_then(|t| t.as_object()) {
-            if let Some(tier_spec) = model_tiers.get(tier_str) {
-                if let Some(model) = tier_spec.get("model").and_then(|m| m.as_str()) {
+        // 2. Lookup in tools.config.<tool_id>
+        if let Some(tool_cfg) = canonical.tools.config.get(tool_id) {
+            // Try model_tiers[tier].model
+            if let Some(model_tiers) = tool_cfg.get("model_tiers").and_then(|t| t.as_object()) {
+                if let Some(tier_spec) = model_tiers.get(tier_str) {
+                    if let Some(model) = tier_spec.get("model").and_then(|m| m.as_str()) {
+                        if !model.is_empty() {
+                            return model.to_string();
+                        }
+                    }
+                }
+            }
+
+            // Try model
+            if let Some(model) = tool_cfg.get("model").and_then(|m| m.as_str()) {
+                if !model.is_empty() {
+                    return model.to_string();
+                }
+            }
+
+            // Try settings.model_name or settings.model
+            if let Some(settings) = tool_cfg.get("settings").and_then(|s| s.as_object()) {
+                if let Some(model) = settings
+                    .get("model_name")
+                    .or_else(|| settings.get("model"))
+                    .and_then(|m| m.as_str())
+                {
                     if !model.is_empty() {
                         return model.to_string();
                     }
@@ -754,37 +775,16 @@ fn resolve_task_model(
             }
         }
 
-        // Try model
-        if let Some(model) = tool_cfg.get("model").and_then(|m| m.as_str()) {
-            if !model.is_empty() {
-                return model.to_string();
-            }
-        }
-
-        // Try settings.model_name or settings.model
-        if let Some(settings) = tool_cfg.get("settings").and_then(|s| s.as_object()) {
-            if let Some(model) = settings
-                .get("model_name")
-                .or_else(|| settings.get("model"))
-                .and_then(|m| m.as_str())
-            {
-                if !model.is_empty() {
-                    return model.to_string();
-                }
-            }
-        }
+        // 3. Fallback to default tool models
+        let fallback = match tool_id {
+            "claude" => "sonnet",         // macc:allow-tool-name
+            "agy" => "auto-gemini-3",     // macc:allow-tool-name
+            "gemini" => "gemini-1.5-pro", // macc:allow-tool-name
+            "codex" => "gpt-4o",          // macc:allow-tool-name
+            _ => tier_str,
+        };
+        fallback.to_string()
     }
-
-    // 3. Fallback to default tool models
-    let fallback = match tool_id {
-        "claude" => "sonnet", // macc:allow-tool-name
-        "agy" => "auto-gemini-3", // macc:allow-tool-name
-        "gemini" => "gemini-1.5-pro", // macc:allow-tool-name
-        "codex" => "gpt-4o", // macc:allow-tool-name
-        _ => tier_str,
-    };
-    fallback.to_string()
-}
 
     fn read_registry_snapshot(
         &self,
