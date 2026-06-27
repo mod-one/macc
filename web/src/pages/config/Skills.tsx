@@ -43,6 +43,7 @@ function normalizeConfigResponse(config: ApiConfigResponse): ApiConfigResponse {
     ...config,
     enabledTools: ensureStringArray(config.enabledTools),
     selectedSkills: ensureStringArray(config.selectedSkills),
+    mandatorySkills: ensureStringArray(config.mandatorySkills),
     selectedAgents: ensureStringArray(config.selectedAgents),
     selectedMcp: ensureStringArray(config.selectedMcp),
     toolPriority: ensureStringArray(config.toolPriority),
@@ -132,6 +133,7 @@ const Skills: React.FC = () => {
         kind,
         toolCompatibility: [],
         verified: false,
+        mandatory: kind === 'skill' && config.mandatorySkills.includes(id),
         sourceKind: 'remote',
         security: { env: kind === 'agent', network: false, fs: true },
         configuration: {},
@@ -239,6 +241,7 @@ const Skills: React.FC = () => {
         kind: draft.kind,
         toolCompatibility: normalizeToolList(draft.toolCompatibilityText),
         verified: draft.verified,
+        mandatory: false,
         sourceKind: draft.sourceKind,
         sourceUrl: draft.sourceUrl.trim() || undefined,
         security: { ...draft.security },
@@ -277,6 +280,11 @@ const Skills: React.FC = () => {
 
   const removeInstalledItem = React.useCallback(async () => {
     if (!config || !removeCandidate) return;
+    if (removeCandidate.kind === 'skill' && config.mandatorySkills.includes(removeCandidate.id)) {
+      setError(`Skill '${removeCandidate.id}' is mandatory and cannot be removed.`);
+      setRemoveCandidate(null);
+      return;
+    }
     setIsSaving(true);
     setError(null);
     const nextSkills = config.selectedSkills.filter(
@@ -303,6 +311,7 @@ const Skills: React.FC = () => {
   }
 
   const installedCount = filteredItems.filter((item) => installedKeys.has(itemKey(item.kind, item.id))).length;
+  const mandatorySkillIds = new Set(config?.mandatorySkills ?? []);
   const activeFilters = searchTerm || kindFilter !== 'all' || toolFilter !== 'all' || installedFilter !== 'all';
 
   const clearFilters = () => {
@@ -465,6 +474,7 @@ const Skills: React.FC = () => {
           {filteredItems.map((item, index) => {
             const key = itemKey(item.kind, item.id);
             const installed = installedKeys.has(key);
+            const mandatory = item.kind === 'skill' && (item.mandatory || mandatorySkillIds.has(item.id));
 
             return (
               <li
@@ -538,6 +548,17 @@ const Skills: React.FC = () => {
                       Installed
                     </span>
                   )}
+                  {mandatory && (
+                    <span
+                      className="rounded px-1.5 py-0.5 text-[10px] font-medium"
+                      style={{
+                        backgroundColor: 'oklch(0.75 0.17 80 / 0.14)',
+                        color: 'var(--warning)',
+                      }}
+                    >
+                      Mandatory
+                    </span>
+                  )}
 
                   <Button
                     className="h-7 border-[var(--border)] bg-[var(--bg-secondary)] px-2.5 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
@@ -550,11 +571,14 @@ const Skills: React.FC = () => {
                   {installed ? (
                     <Button
                       className="h-7 px-2.5 text-xs"
-                      onClick={() => setRemoveCandidate({ kind: item.kind, id: item.id })}
+                      disabled={mandatory}
+                      onClick={() => {
+                        if (!mandatory) setRemoveCandidate({ kind: item.kind, id: item.id });
+                      }}
                       style={{
                         borderColor: 'oklch(0.62 0.22 25 / 0.35)',
-                        backgroundColor: 'oklch(0.62 0.22 25 / 0.1)',
-                        color: 'var(--error)',
+                        backgroundColor: mandatory ? 'var(--bg-secondary)' : 'oklch(0.62 0.22 25 / 0.1)',
+                        color: mandatory ? 'var(--text-muted)' : 'var(--error)',
                       }}
                       type="button"
                     >

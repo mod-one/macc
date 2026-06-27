@@ -37,6 +37,7 @@ function buildConfig(overrides: Partial<ApiConfigResponse> = {}): ApiConfigRespo
       package_manager: 'pnpm',
     },
     selectedSkills: [],
+    mandatorySkills: [],
     selectedAgents: [],
     selectedMcp: [],
     quiet: false,

@@ -98,6 +98,9 @@ pub struct SkillEntry {
     /// Whether this skill writes user-level config outside the project.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub writes_user_level_config: bool,
+    /// Whether clients must keep this skill selected.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mandatory: bool,
     /// Preview of install target directories per tool.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub targets: std::collections::BTreeMap<String, Vec<String>>,
@@ -283,11 +286,61 @@ pub fn load_effective_skills_catalog(paths: &ProjectPaths) -> MaccResult<SkillsC
     ))
 }
 
+pub fn mandatory_skill_ids(paths: &ProjectPaths) -> MaccResult<Vec<String>> {
+    let catalog = load_skills_catalog_with_local(paths)?;
+    let mut ids: Vec<String> = catalog
+        .entries
+        .into_iter()
+        .filter(|entry| entry.mandatory)
+        .map(|entry| entry.id)
+        .collect();
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
+}
+
 pub fn load_effective_mcp_catalog(paths: &ProjectPaths) -> MaccResult<McpCatalog> {
     let embedded = embedded_mcp_catalog()?;
     let user = McpCatalog::load(&paths.mcp_catalog_path())?;
     let project = McpCatalog::load(&paths.project_mcp_catalog_path())?;
     Ok(merge_mcp_layers(merge_mcp_layers(embedded, user), project))
+}
+
+/// Syncs project-level catalog entries from `repo_paths` into `worktree_paths` so that
+/// user-added skills and MCP servers registered in the project root are visible during
+/// worktree apply. Entries already present in the worktree catalog are kept as-is;
+/// only missing entries are added.
+pub fn sync_project_catalog_to_worktree(
+    repo_paths: &ProjectPaths,
+    worktree_paths: &ProjectPaths,
+) -> MaccResult<()> {
+    let repo_skills = SkillsCatalog::load(&repo_paths.project_skills_catalog_path())?;
+    if !repo_skills.entries.is_empty() {
+        let mut worktree_skills =
+            SkillsCatalog::load(&worktree_paths.project_skills_catalog_path())?;
+        for entry in repo_skills.entries {
+            if !worktree_skills.entries.iter().any(|e| e.id == entry.id) {
+                worktree_skills.entries.push(entry);
+            }
+        }
+        worktree_skills.save_atomically(
+            worktree_paths,
+            &worktree_paths.project_skills_catalog_path(),
+        )?;
+    }
+
+    let repo_mcp = McpCatalog::load(&repo_paths.project_mcp_catalog_path())?;
+    if !repo_mcp.entries.is_empty() {
+        let mut worktree_mcp = McpCatalog::load(&worktree_paths.project_mcp_catalog_path())?;
+        for entry in repo_mcp.entries {
+            if !worktree_mcp.entries.iter().any(|e| e.id == entry.id) {
+                worktree_mcp.entries.push(entry);
+            }
+        }
+        worktree_mcp.save_atomically(worktree_paths, &worktree_paths.project_mcp_catalog_path())?;
+    }
+
+    Ok(())
 }
 
 fn discover_local_skill_entries(paths: &ProjectPaths) -> Vec<SkillEntry> {
@@ -329,6 +382,7 @@ fn discover_local_skill_entries(paths: &ProjectPaths) -> Vec<SkillEntry> {
             risk: None,
             requires_mcp: false,
             writes_user_level_config: false,
+            mandatory: false,
             targets: Default::default(),
             category: None,
             compatibility: None,
@@ -427,6 +481,7 @@ pub struct Skill {
     pub id: String,
     pub name: String,
     pub description: String,
+    pub mandatory: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -434,28 +489,6 @@ pub struct Agent {
     pub id: String,
     pub name: String,
     pub description: String,
-}
-
-pub fn builtin_skills() -> Vec<Skill> {
-    vec![
-        Skill {
-            id: "create-plan".into(),
-            name: "Create Plan".into(),
-            description: "Produces a structured implementation plan from a request.".into(),
-        },
-        Skill {
-            id: "implement".into(),
-            name: "Implement".into(),
-            description:
-                "Guides an agent through implementing a feature with tests and validation.".into(),
-        },
-        Skill {
-            id: "security-check".into(),
-            name: "Security Check".into(),
-            description: "Performs basic security checks for common issues and unsafe operations."
-                .into(),
-        },
-    ]
 }
 
 pub fn builtin_agents() -> Vec<Agent> {
@@ -668,6 +701,7 @@ mod tests {
             risk: None,
             requires_mcp: false,
             writes_user_level_config: false,
+            mandatory: false,
             targets: Default::default(),
             category: None,
             compatibility: None,
@@ -750,6 +784,7 @@ mod tests {
             risk: None,
             requires_mcp: false,
             writes_user_level_config: false,
+            mandatory: false,
             targets: Default::default(),
             category: None,
             compatibility: None,
@@ -910,6 +945,7 @@ mod tests {
             risk: None,
             requires_mcp: false,
             writes_user_level_config: false,
+            mandatory: false,
             targets: Default::default(),
             category: None,
             compatibility: None,
@@ -939,6 +975,7 @@ mod tests {
             risk: None,
             requires_mcp: false,
             writes_user_level_config: false,
+            mandatory: false,
             targets: Default::default(),
             category: None,
             compatibility: None,

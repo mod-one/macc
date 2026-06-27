@@ -42,6 +42,26 @@ pub(super) fn ensure_tool_json_for_tool(
     Ok(())
 }
 
+/// Returns `false` when the tool's `tool.json` explicitly sets
+/// `performer.session.enabled` to `false`. Defaults to `true` when the field
+/// is absent or unreadable so existing tools are unaffected.
+fn tool_session_enabled(tool_json_path: &Path) -> bool {
+    let raw = match std::fs::read_to_string(tool_json_path) {
+        Ok(r) => r,
+        Err(_) => return true,
+    };
+    let value: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return true,
+    };
+    value
+        .get("performer")
+        .and_then(|p| p.get("session"))
+        .and_then(|s| s.get("enabled"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true)
+}
+
 pub(super) fn read_session_id_from_state(
     repo_root: &Path,
     tool_id: &str,
@@ -325,20 +345,26 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
         );
         // Read existing session ID from tool-sessions.json so we can inject it
         // into the tool runner command, just like the performer.sh wrapper does.
-        let mut session_id = read_session_id_from_state(self.repo_root, &phase_tool, &worktree);
-        // Fallback: if no session in state file, use the preserved session from
-        // the prior run (saved in task_runtime on error_with_changes / error_without_changes)
-        // so retries resume with cached context rather than cold-starting.
-        if session_id.is_none() {
-            let rt = &task.task_runtime;
-            if rt.last_session_tool.as_deref() == Some(phase_tool.as_str()) {
-                if let Some(ref sid) = rt.last_session_id {
-                    if !sid.is_empty() {
-                        session_id = Some(sid.clone());
+        // Skip entirely when the tool has session.enabled = false.
+        let mut session_id = if tool_session_enabled(&tool_json) {
+            let mut sid = read_session_id_from_state(self.repo_root, &phase_tool, &worktree);
+            // Fallback: if no session in state file, use the preserved session from
+            // the prior run (saved in task_runtime on error_with_changes / error_without_changes)
+            // so retries resume with cached context rather than cold-starting.
+            if sid.is_none() {
+                let rt = &task.task_runtime;
+                if rt.last_session_tool.as_deref() == Some(phase_tool.as_str()) {
+                    if let Some(ref s) = rt.last_session_id {
+                        if !s.is_empty() {
+                            sid = Some(s.clone());
+                        }
                     }
                 }
             }
-        }
+            sid
+        } else {
+            None
+        };
         let mut last_reason = String::new();
         for attempt in 1..=attempts {
             append_performer_log(

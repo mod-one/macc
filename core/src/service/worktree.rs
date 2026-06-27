@@ -82,6 +82,10 @@ pub fn apply_worktree(
     allow_user_scope: bool,
 ) -> Result<()> {
     let paths = crate::ProjectPaths::from_root(worktree_root);
+    if worktree_root != repo_root {
+        let repo_paths = crate::ProjectPaths::from_root(repo_root);
+        crate::catalog::sync_project_catalog_to_worktree(&repo_paths, &paths)?;
+    }
     let canonical = load_canonical_config(&paths.config_path)?;
     let metadata = crate::read_worktree_metadata(worktree_root)?
         .ok_or_else(|| MaccError::Validation("Missing .macc/worktree.json".into()))?;

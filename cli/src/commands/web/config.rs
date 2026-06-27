@@ -19,7 +19,7 @@ pub(super) async fn get_config_handler(
         .engine
         .load_canonical_config(&state.paths)
         .map_err(ApiError::from)?;
-    Ok(Json(ApiConfigResponse::from(canonical)))
+    config_response_with_mandatory(&state.paths, canonical).map(Json)
 }
 
 pub(super) async fn get_tool_descriptors_handler(
@@ -50,12 +50,14 @@ pub(super) async fn update_config_handler(
         .engine
         .load_canonical_config(&state.paths)
         .map_err(ApiError::from)?;
-    apply_update(&mut canonical, &request);
+    let mandatory_skills =
+        macc_core::catalog::mandatory_skill_ids(&state.paths).map_err(ApiError::from)?;
+    apply_update(&mut canonical, &request, &mandatory_skills);
     state
         .engine
         .save_canonical_config(&state.paths, &canonical)
         .map_err(ApiError::from)?;
-    Ok(Json(ApiConfigResponse::from(canonical)))
+    Ok(Json(response_from_canonical(canonical, mandatory_skills)))
 }
 
 pub(super) async fn standards_preview_handler(
@@ -154,6 +156,7 @@ impl From<CanonicalConfig> for ApiConfigResponse {
             standards_path: config.standards.path,
             standards_inline: config.standards.inline,
             selected_skills: selections.skills,
+            mandatory_skills: Vec::new(),
             selected_agents: selections.agents,
             selected_mcp: selections.mcp,
             quiet: config.settings.quiet,
@@ -273,7 +276,32 @@ impl From<CanonicalConfig> for ApiConfigResponse {
     }
 }
 
-fn apply_update(config: &mut CanonicalConfig, request: &ApiConfigUpdateRequest) {
+fn config_response_with_mandatory(
+    paths: &ProjectPaths,
+    canonical: CanonicalConfig,
+) -> std::result::Result<ApiConfigResponse, ApiError> {
+    let mandatory_skills =
+        macc_core::catalog::mandatory_skill_ids(paths).map_err(ApiError::from)?;
+    Ok(response_from_canonical(canonical, mandatory_skills))
+}
+
+fn response_from_canonical(
+    canonical: CanonicalConfig,
+    mandatory_skills: Vec<String>,
+) -> ApiConfigResponse {
+    let mut response = ApiConfigResponse::from(canonical);
+    response.selected_skills.extend(mandatory_skills.clone());
+    response.selected_skills.sort();
+    response.selected_skills.dedup();
+    response.mandatory_skills = mandatory_skills;
+    response
+}
+
+fn apply_update(
+    config: &mut CanonicalConfig,
+    request: &ApiConfigUpdateRequest,
+    mandatory_skills: &[String],
+) {
     if let Some(version) = &request.version {
         config.version = Some(version.clone());
     }
@@ -292,13 +320,17 @@ fn apply_update(config: &mut CanonicalConfig, request: &ApiConfigUpdateRequest) 
     if let Some(standards_inline) = &request.standards_inline {
         config.standards.inline = standards_inline.clone();
     }
-    apply_selection_update(config, request);
+    apply_selection_update(config, request, mandatory_skills);
     apply_settings_update(config, request);
     apply_ralph_update(config, request);
     apply_coordinator_update(config, request);
 }
 
-fn apply_selection_update(config: &mut CanonicalConfig, request: &ApiConfigUpdateRequest) {
+fn apply_selection_update(
+    config: &mut CanonicalConfig,
+    request: &ApiConfigUpdateRequest,
+    mandatory_skills: &[String],
+) {
     if request.selected_skills.is_none()
         && request.selected_agents.is_none()
         && request.selected_mcp.is_none()
@@ -309,6 +341,9 @@ fn apply_selection_update(config: &mut CanonicalConfig, request: &ApiConfigUpdat
     let selections = config.selections.get_or_insert_with(Default::default);
     if let Some(selected_skills) = &request.selected_skills {
         selections.skills = selected_skills.clone();
+        selections.skills.extend(mandatory_skills.iter().cloned());
+        selections.skills.sort();
+        selections.skills.dedup();
     }
     if let Some(selected_agents) = &request.selected_agents {
         selections.agents = selected_agents.clone();

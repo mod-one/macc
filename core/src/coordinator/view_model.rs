@@ -138,6 +138,7 @@ pub struct LiveTaskRow {
     pub runtime_status: RuntimeStatus,
     pub phase: TaskPhase,
     pub tool: String,
+    pub model: String,
     #[serde(with = "serde_duration_secs")]
     pub age: Duration,
     #[serde(with = "serde_opt_duration_secs")]
@@ -152,7 +153,7 @@ pub struct LiveTaskRow {
 }
 
 impl LiveTaskRow {
-    pub fn from_task(task: &Task, now: DateTime<Utc>) -> Self {
+    pub fn from_task(task: &Task, now: DateTime<Utc>, model: String) -> Self {
         let last_error = task.task_runtime.last_error.as_deref().unwrap_or("");
         let runtime_status_str = task.task_runtime.status.as_deref().unwrap_or("");
         let last_error_code_str = task.task_runtime.last_error_code.as_deref().unwrap_or("");
@@ -183,7 +184,7 @@ impl LiveTaskRow {
             .map(TaskPhase::from)
             .unwrap_or(TaskPhase::Other(String::new()));
 
-        let worker_id = task.task_runtime.worker_id.clone().unwrap_or_default();
+        let mut worker_id = task.task_runtime.worker_id.clone().unwrap_or_default();
         let task_id = task.id.clone();
         let tool = task.tool.clone().unwrap_or_else(|| "-".to_string());
 
@@ -219,6 +220,17 @@ impl LiveTaskRow {
             .clone()
             .filter(|e| !e.is_empty());
 
+        // Worker fallback: resolve from worktree directory name if worker_id is empty
+        if worker_id.is_empty() {
+            if let Some(ref path) = worktree {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if name.starts_with("worker-") {
+                        worker_id = name.to_string();
+                    }
+                }
+            }
+        }
+
         Self {
             health,
             worker_id,
@@ -227,6 +239,7 @@ impl LiveTaskRow {
             runtime_status,
             phase,
             tool,
+            model,
             age,
             heartbeat_age,
             last_event_age,
@@ -393,8 +406,9 @@ mod tests {
             ..Default::default()
         };
 
-        let row = LiveTaskRow::from_task(&task, now);
+        let row = LiveTaskRow::from_task(&task, now, "sonnet".to_string());
         assert_eq!(row.task_id, "task-123");
+        assert_eq!(row.model, "sonnet");
         assert_eq!(row.health, TaskHealth::Healthy);
         assert_eq!(row.runtime_status, RuntimeStatus::Running);
         assert_eq!(row.phase, TaskPhase::Implementing);

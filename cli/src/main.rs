@@ -363,6 +363,12 @@ enum Commands {
         /// Coordinator command (run, control-plane-run, dispatch, advance, resume, sync, sync-prd, status, reconcile, unlock, cleanup, retry-phase, cutover-gate, stop, sessions, validate-transition, validate-runtime-transition, runtime-status-from-event, storage-import, storage-export, events-export, storage-verify, storage-sync, select-ready-task, state-apply-transition, state-set-runtime, state-task-field, state-task-exists, state-counts, state-locks, state-set-merge-pending, state-set-merge-processed, state-increment-retries, state-upsert-slo-warning, state-slo-metric)
         #[arg(default_value = "run")]
         command_name: String,
+        /// Start the coordinator after a relative delay, for example 30m or 2h
+        #[arg(long = "in", value_name = "DURATION", conflicts_with = "at")]
+        run_in: Option<String>,
+        /// Start the coordinator at an absolute date-time
+        #[arg(long, value_name = "DATETIME", conflicts_with = "run_in")]
+        at: Option<String>,
         /// Execute coordinator mutations as this client identity
         #[arg(long)]
         as_client: Option<String>,
@@ -1354,6 +1360,12 @@ fn main() {
 
     if let Err(e) = run_with_engine_provider(cli, provider) {
         error!(error = %e, "Command failed");
+        if let MaccError::Validation(ref msg) = e {
+            if msg.starts_with("error:") {
+                eprintln!("{}", msg);
+                exit(get_exit_code(&e));
+            }
+        }
         eprintln!("Error: {}", e);
         exit(get_exit_code(&e));
     }
@@ -2033,6 +2045,8 @@ fn run_with_engine_provider(
 
         Some(Commands::Coordinator {
             command_name,
+            run_in,
+            at,
             as_client,
             client,
             no_client,
@@ -2140,10 +2154,17 @@ fn run_with_engine_provider(
             if let Some(ref p) = preset {
                 macc_core::ops_motif::apply_preset_to_env_cfg(&mut env_cfg, p)?;
             }
+            if (run_in.is_some() || at.is_some()) && command_name != "run" {
+                return Err(MaccError::Validation(
+                    "error: scheduling flags '--in' and '--at' are only allowed with the 'run' action".to_string(),
+                ));
+            }
             commands::coordinator::CoordinatorCommand::new(
                 app.clone(),
                 coordinator::command::CoordinatorCommandInput {
                     command_name: command_name.clone(),
+                    run_in: run_in.clone(),
+                    at: at.clone(),
                     client_id: as_client
                         .clone()
                         .unwrap_or_else(|| format!("cli-{}", std::process::id())),
@@ -2785,6 +2806,77 @@ mod tests {
             }
             _ => panic!("unexpected command"),
         }
+    }
+
+    #[test]
+    fn test_parse_coordinator_delayed_run_args() {
+        // Valid relative run
+        let cli = Cli::try_parse_from(["macc", "coordinator", "run", "--in", "30m"])
+            .expect("parse coordinator run --in 30m");
+        match cli.command {
+            Some(Commands::Coordinator {
+                command_name,
+                run_in,
+                at,
+                ..
+            }) => {
+                assert_eq!(command_name, "run");
+                assert_eq!(run_in, Some("30m".to_string()));
+                assert_eq!(at, None);
+            }
+            _ => panic!("unexpected command"),
+        }
+
+        // Valid absolute run
+        let cli = Cli::try_parse_from(["macc", "coordinator", "run", "--at", "2026-06-28T02:00"])
+            .expect("parse coordinator run --at 2026-06-28T02:00");
+        match cli.command {
+            Some(Commands::Coordinator {
+                command_name,
+                run_in,
+                at,
+                ..
+            }) => {
+                assert_eq!(command_name, "run");
+                assert_eq!(run_in, None);
+                assert_eq!(at, Some("2026-06-28T02:00".to_string()));
+            }
+            _ => panic!("unexpected command"),
+        }
+
+        // Conflicting args: --in and --at (should fail)
+        let parse_err = Cli::try_parse_from([
+            "macc",
+            "coordinator",
+            "run",
+            "--in",
+            "30m",
+            "--at",
+            "2026-06-28T02:00",
+        ]);
+        assert!(parse_err.is_err());
+    }
+
+    #[test]
+    fn test_coordinator_delayed_run_validation_only_run_allowed() {
+        let engine = TestEngine::with_fixtures();
+        let provider = services::engine_provider::EngineProvider::new(engine);
+
+        // Invalid: coordinator status --in 30m
+        let cli = Cli::try_parse_from(["macc", "coordinator", "status", "--in", "30m"]).unwrap();
+        let err = run_with_engine_provider(cli, provider.clone()).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("only allowed with the 'run' action"));
+
+        // Invalid: coordinator cleanup --at 2026-06-28T02:00
+        let cli =
+            Cli::try_parse_from(["macc", "coordinator", "cleanup", "--at", "2026-06-28T02:00"])
+                .unwrap();
+        let err = run_with_engine_provider(cli, provider).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("only allowed with the 'run' action"));
     }
 
     #[test]
@@ -3655,6 +3747,8 @@ fi
                 web_port: None,
                 command: Some(Commands::Coordinator {
                     command_name: "stop".to_string(),
+                    run_in: None,
+                    at: None,
                     as_client: None,
                     client: None,
                     no_client: true,

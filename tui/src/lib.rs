@@ -730,13 +730,12 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 .map(|index| {
                     let skill = &state.skills[*index];
                     let is_enabled = selected_skills.contains(&skill.id.to_string());
-                    let is_required = macc_core::is_required_skill(&skill.id);
                     let enabled_marker = if is_enabled { "[x]" } else { "[ ]" };
-                    let required_badge = if is_required { " [required]" } else { "" };
+                    let mandatory_badge = if skill.mandatory { " [mandatory]" } else { "" };
                     ListItem::new(Line::from(vec![
                         Span::raw(enabled_marker),
                         Span::raw(" "),
-                        Span::raw(format!("{}{}", skill.name, required_badge)),
+                        Span::raw(format!("{}{}", skill.name, mandatory_badge)),
                     ]))
                 })
                 .collect();
@@ -769,8 +768,8 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 let mut desc_text = format!("ID: {}\n\n", current_skill.id);
                 desc_text.push_str("Description:\n");
                 desc_text.push_str(&current_skill.description);
-                if macc_core::is_required_skill(&current_skill.id) {
-                    desc_text.push_str("\n\nRequired skill: always enabled (read-only toggle).");
+                if current_skill.mandatory {
+                    desc_text.push_str("\n\nMandatory skill: always enabled from catalog policy.");
                 }
                 desc_text.push_str("\n\n---\nShortcuts:\n'a' - Select All\n'n' - Select None");
 
@@ -1825,6 +1824,11 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 } else {
                     &task.tool
                 };
+                let model = if task.model.is_empty() {
+                    "-"
+                } else {
+                    &task.model
+                };
 
                 let cells = vec![
                     Cell::from(health_symbol).style(health_style),
@@ -1832,6 +1836,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                     Cell::from(task.task_id.clone()),
                     Cell::from(status_text),
                     Cell::from(tool.to_string()),
+                    Cell::from(model.to_string()),
                     Cell::from(age_label),
                     Cell::from(hb_label),
                 ];
@@ -1844,6 +1849,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 Cell::from("Task ID").style(Style::default().fg(theme.accent)),
                 Cell::from("Status").style(Style::default().fg(theme.accent)),
                 Cell::from("Tool").style(Style::default().fg(theme.accent)),
+                Cell::from("Model").style(Style::default().fg(theme.accent)),
                 Cell::from("Age").style(Style::default().fg(theme.accent)),
                 Cell::from("HB").style(Style::default().fg(theme.accent)),
             ]);
@@ -1854,6 +1860,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 Constraint::Length(25),
                 Constraint::Length(12),
                 Constraint::Length(10),
+                Constraint::Length(15),
                 Constraint::Length(8),
                 Constraint::Length(8),
             ];

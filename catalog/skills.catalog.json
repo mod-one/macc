@@ -15,13 +15,14 @@
       "selector": {
         "subpath": "skills/macc-reviewer"
       },
-      "source": {
-        "kind": "git",
-        "url": "https://github.com/mod-one/skills.git",
-        "ref": "main",
-        "checksum": null
-      }
+    "source": {
+      "kind": "git",
+      "url": "https://github.com/mod-one/skills.git",
+      "ref": "main",
+      "checksum": null
     },
+    "mandatory": true
+  },
     {
       "id": "macc-performer",
       "name": "macc performer",
@@ -34,13 +35,14 @@
       "selector": {
         "subpath": "skills/macc-performer"
       },
-      "source": {
-        "kind": "git",
-        "url": "https://github.com/mod-one/skills.git",
-        "ref": "main",
-        "checksum": null
-      }
+    "source": {
+      "kind": "git",
+      "url": "https://github.com/mod-one/skills.git",
+      "ref": "main",
+      "checksum": null
     },
+    "mandatory": true
+  },
     {
       "id": "macc-prd-planner",
       "name": "macc prd planner",
@@ -53,13 +55,14 @@
       "selector": {
         "subpath": "skills/macc-prd-planner"
       },
-      "source": {
-        "kind": "git",
-        "url": "https://github.com/mod-one/skills.git",
-        "ref": "main",
-        "checksum": null
-      }
+    "source": {
+      "kind": "git",
+      "url": "https://github.com/mod-one/skills.git",
+      "ref": "main",
+      "checksum": null
     },
+    "mandatory": true
+  },
     {
       "id": "dfigma-implement-designc",
       "name": "figma implement design",

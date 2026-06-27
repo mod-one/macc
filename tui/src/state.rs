@@ -448,12 +448,7 @@ impl AppState {
     }
 
     pub fn refresh_skills(&mut self) {
-        let mut skills_map: BTreeMap<String, Skill> = self
-            .engine
-            .builtin_skills()
-            .into_iter()
-            .map(|skill| (skill.id.clone(), skill))
-            .collect();
+        let mut skills_map: BTreeMap<String, Skill> = BTreeMap::new();
 
         if let Some(paths) = &self.project_paths {
             match macc_core::catalog::load_skills_catalog_with_local(paths) {
@@ -465,6 +460,7 @@ impl AppState {
                                 id: entry.id,
                                 name: entry.name,
                                 description: entry.description,
+                                mandatory: entry.mandatory,
                             },
                         );
                     }
@@ -722,6 +718,74 @@ impl AppState {
         }
     }
 
+fn resolve_task_model(
+    task: &macc_core::coordinator::model::Task,
+    canonical: &CanonicalConfig,
+) -> String {
+    let tool_id = task
+        .tool
+        .as_deref()
+        .or_else(|| task.coordinator_tool.as_deref())
+        .unwrap_or("");
+    if tool_id.is_empty() {
+        return "-".to_string();
+    }
+
+    // 1. Resolve model tier via routing engine
+    let routing_cfg = canonical.automation.model_routing.as_ref();
+    let phase = task
+        .task_runtime
+        .current_phase
+        .as_deref()
+        .unwrap_or("implementation");
+    let decision = macc_core::coordinator::model_routing::decide(task, phase, routing_cfg);
+    let tier_str = decision.tier.as_str();
+
+    // 2. Lookup in tools.config.<tool_id>
+    if let Some(tool_cfg) = canonical.tools.config.get(tool_id) {
+        // Try model_tiers[tier].model
+        if let Some(model_tiers) = tool_cfg.get("model_tiers").and_then(|t| t.as_object()) {
+            if let Some(tier_spec) = model_tiers.get(tier_str) {
+                if let Some(model) = tier_spec.get("model").and_then(|m| m.as_str()) {
+                    if !model.is_empty() {
+                        return model.to_string();
+                    }
+                }
+            }
+        }
+
+        // Try model
+        if let Some(model) = tool_cfg.get("model").and_then(|m| m.as_str()) {
+            if !model.is_empty() {
+                return model.to_string();
+            }
+        }
+
+        // Try settings.model_name or settings.model
+        if let Some(settings) = tool_cfg.get("settings").and_then(|s| s.as_object()) {
+            if let Some(model) = settings
+                .get("model_name")
+                .or_else(|| settings.get("model"))
+                .and_then(|m| m.as_str())
+            {
+                if !model.is_empty() {
+                    return model.to_string();
+                }
+            }
+        }
+    }
+
+    // 3. Fallback to default tool models
+    let fallback = match tool_id {
+        "claude" => "sonnet", // macc:allow-tool-name
+        "agy" => "auto-gemini-3", // macc:allow-tool-name
+        "gemini" => "gemini-1.5-pro", // macc:allow-tool-name
+        "codex" => "gpt-4o", // macc:allow-tool-name
+        _ => tier_str,
+    };
+    fallback.to_string()
+}
+
     fn read_registry_snapshot(
         &self,
         root: &macc_core::coordinator::model::TaskRegistry,
@@ -807,11 +871,17 @@ impl AppState {
                 | "changes_requested" | "queued"
                     if is_live_active =>
                 {
+                    let model = if let Some(ref canonical) = self.working_copy {
+                        Self::resolve_task_model(task, canonical)
+                    } else {
+                        "-".to_string()
+                    };
                     snapshot.active += 1;
                     snapshot.active_tasks.push(
                         macc_core::coordinator::view_model::LiveTaskRow::from_task(
                             task,
                             Utc::now(),
+                            model,
                         ),
                     );
                 }
@@ -1964,7 +2034,6 @@ impl AppState {
         } else {
             "project:none".to_string()
         });
-        badges.push(format!("tool:{}", self.active_tool_label()));
         badges.push(format!("warnings:{}", self.errors.len()));
         if self.is_coordinator_running() {
             let action = self.coordinator_running_command.as_deref().unwrap_or("run");
@@ -4357,9 +4426,7 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
             return Vec::new();
         };
         let mut selected = self.read_string_list_at(path);
-        for required in macc_core::required_skills() {
-            selected.push((*required).to_string());
-        }
+        selected.extend(self.mandatory_skill_ids());
         selected.sort();
         selected.dedup();
         selected
@@ -4499,12 +4566,10 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
     fn set_string_list_at(&mut self, pointer: &str, values: Vec<String>) {
         let mut normalized = values;
         if self.skill_target_path.as_deref() == Some(pointer) {
-            for required in macc_core::required_skills() {
-                normalized.push((*required).to_string());
-            }
-            normalized.sort();
-            normalized.dedup();
+            normalized.extend(self.mandatory_skill_ids());
         }
+        normalized.sort();
+        normalized.dedup();
         let array = normalized.into_iter().map(Value::String).collect();
         let _ = self.set_value_at(pointer, Value::Array(array));
     }
@@ -4599,11 +4664,12 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
             .or_else(|| self.filtered_skill_indices().first().copied())
             .unwrap_or(self.skill_selection_index);
         self.ensure_working_copy();
-        let skill_id = self.skills[selected_index].id.to_string();
-        if macc_core::is_required_skill(&skill_id) {
+        let skill = self.skills[selected_index].clone();
+        let skill_id = skill.id;
+        if skill.mandatory {
             self.set_status(
                 UiStatusLevel::Warning,
-                format!("cannot disable required skill '{}'", skill_id),
+                format!("cannot disable mandatory skill '{}'", skill_id),
                 Some(Duration::from_secs(4)),
             );
             return;
@@ -4629,14 +4695,10 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
             return;
         };
         self.ensure_working_copy();
-        let required = macc_core::required_skills()
-            .iter()
-            .map(|id| (*id).to_string())
-            .collect();
-        self.set_string_list_at(&path, required);
+        self.set_string_list_at(&path, self.mandatory_skill_ids());
         self.set_status(
             UiStatusLevel::Info,
-            "required skills remain enabled",
+            "mandatory skills remain enabled",
             Some(Duration::from_secs(4)),
         );
     }
@@ -4807,8 +4869,7 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
         }
 
         self.apply_tool_defaults();
-        self.ensure_required_skills_selected();
-
+        self.ensure_mandatory_skills_selected();
         let yaml = match self
             .working_copy
             .as_ref()
@@ -4894,16 +4955,26 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
         self.apply_tool_normalizations();
     }
 
-    fn ensure_required_skills_selected(&mut self) {
+    fn mandatory_skill_ids(&self) -> Vec<String> {
+        self.skills
+            .iter()
+            .filter(|skill| skill.mandatory)
+            .map(|skill| skill.id.clone())
+            .collect()
+    }
+
+    fn ensure_mandatory_skills_selected(&mut self) {
+        let mandatory = self.mandatory_skill_ids();
+        if mandatory.is_empty() {
+            return;
+        }
         let Some(ref mut wc) = self.working_copy else {
             return;
         };
         let selections = wc
             .selections
             .get_or_insert_with(macc_core::config::SelectionsConfig::default);
-        for required in macc_core::required_skills() {
-            selections.skills.push((*required).to_string());
-        }
+        selections.skills.extend(mandatory);
         selections.skills.sort();
         selections.skills.dedup();
     }
@@ -5904,10 +5975,6 @@ mod tests {
             Ok(macc_core::ApplyReport::default())
         }
 
-        fn builtin_skills(&self) -> Vec<Skill> {
-            Vec::new()
-        }
-
         fn builtin_agents(&self) -> Vec<Agent> {
             Vec::new()
         }
@@ -6398,16 +6465,62 @@ mod tests {
 
     #[test]
     fn test_skills_selection() {
+        use macc_core::catalog::{Selector, SkillEntry, SkillsCatalog, Source, SourceKind};
+
         let ids = fixture_ids();
         let tool_one = ids[0].clone();
         let engine = fixture_engine(&ids);
         let mut state = AppState::with_engine(engine);
+        let temp_dir = tempdir().unwrap();
+        let paths = ProjectPaths::from_root(temp_dir.path());
+        fs::create_dir_all(&paths.catalog_dir).unwrap();
+        let mut catalog = SkillsCatalog::default();
+        for (id, name) in [
+            ("mock-skill-one", "Mock Skill One"),
+            ("mock-skill-two", "Mock Skill Two"),
+        ] {
+            catalog.entries.push(SkillEntry {
+                id: id.to_string(),
+                name: name.to_string(),
+                description: format!("{name} from catalog."),
+                tags: vec![],
+                selector: Selector {
+                    subpath: format!("skills/{id}"),
+                },
+                source: Source {
+                    kind: SourceKind::Git,
+                    url: "https://example.com/catalog.git".to_string(),
+                    reference: "main".to_string(),
+                    checksum: None,
+                    subpaths: vec![],
+                },
+                tools: vec![],
+                recommended_ref: None,
+                risk: None,
+                requires_mcp: false,
+                writes_user_level_config: false,
+                mandatory: id == "mock-skill-one",
+                targets: Default::default(),
+                category: None,
+                compatibility: None,
+            });
+        }
+        catalog
+            .save_atomically(&paths, &paths.skills_catalog_path())
+            .unwrap();
+        state.project_paths = Some(paths);
+        state.refresh_skills();
         state.working_copy = Some(CanonicalConfig::default());
         state.skill_target_path = Some(format!("/tools/config/{}/skills", tool_one));
         state.goto_screen(Screen::Skills);
+        state.search_query = "mock-skill".to_string();
+        state.skill_selection_index = state.filtered_skill_indices()[0];
 
         // Initial state
-        assert_eq!(state.skill_selection_index, 0);
+        assert_eq!(
+            state.skills[state.skill_selection_index].id,
+            "mock-skill-one"
+        );
 
         let empty_vec: Vec<String> = Vec::new();
         let current_skills = state
@@ -6422,31 +6535,32 @@ mod tests {
             .unwrap_or(empty_vec);
         assert!(current_skills.is_empty());
 
-        // Toggle first skill (mock-skill-one)
-        state.toggle_skill();
+        assert!(state
+            .selected_skills()
+            .contains(&"mock-skill-one".to_string()));
 
-        let current_skills: Vec<String> = serde_json::from_value(
-            state
-                .working_copy
-                .as_ref()
-                .unwrap()
-                .tools
-                .config
-                .get(&tool_one)
-                .unwrap()
-                .get("skills")
-                .unwrap()
-                .clone(),
-        )
-        .unwrap();
-        assert!(current_skills.contains(&"mock-skill-one".to_string()));
-        for required in macc_core::required_skills() {
-            assert!(current_skills.contains(&required.to_string()));
-        }
+        // Toggle first skill (mock-skill-one); mandatory skills are read-only.
+        state.toggle_skill();
+        assert!(state
+            .working_copy
+            .as_ref()
+            .unwrap()
+            .tools
+            .config
+            .get(&tool_one)
+            .and_then(|v| v.get("skills"))
+            .is_none());
+
+        assert!(state
+            .selected_skills()
+            .contains(&"mock-skill-one".to_string()));
 
         // Move to next skill
         state.next_skill();
-        assert_eq!(state.skill_selection_index, 1);
+        assert_eq!(
+            state.skills[state.skill_selection_index].id,
+            "mock-skill-two"
+        );
 
         // Toggle second skill (mock-skill-two)
         state.toggle_skill();
@@ -6466,9 +6580,6 @@ mod tests {
         .unwrap();
         assert!(current_skills.contains(&"mock-skill-one".to_string()));
         assert!(current_skills.contains(&"mock-skill-two".to_string()));
-        for required in macc_core::required_skills() {
-            assert!(current_skills.contains(&required.to_string()));
-        }
 
         // Select none
         state.select_no_skills();
@@ -6486,9 +6597,15 @@ mod tests {
                 .clone(),
         )
         .unwrap();
-        for required in macc_core::required_skills() {
-            assert!(current_skills.contains(&required.to_string()));
-        }
+        assert_eq!(
+            current_skills,
+            vec![
+                "macc-performer".to_string(),
+                "macc-prd-planner".to_string(),
+                "macc-reviewer".to_string(),
+                "mock-skill-one".to_string(),
+            ]
+        );
 
         // Select all
         state.select_all_skills();
@@ -6509,9 +6626,6 @@ mod tests {
         assert!(current_skills.len() >= 2);
         assert!(current_skills.contains(&"mock-skill-one".to_string()));
         assert!(current_skills.contains(&"mock-skill-two".to_string()));
-        for required in macc_core::required_skills() {
-            assert!(current_skills.contains(&required.to_string()));
-        }
     }
 
     #[test]
@@ -6872,5 +6986,71 @@ mod tests {
         assert!(msg.contains("Cause:"));
         assert!(msg.contains("Suggested fix:"));
         assert!(msg.contains("registry"));
+    }
+
+    #[test]
+    fn test_resolve_task_model_and_worker_fallback() {
+        use macc_core::coordinator::model::{Task, TaskRuntime, TaskWorktree};
+        use macc_core::coordinator::view_model::LiveTaskRow;
+
+        // Setup test CanonicalConfig
+        let mut config = CanonicalConfig::default();
+        config.tools.config.insert(
+            "claude".to_string(),
+            serde_json::json!({
+                "model": "sonnet-default",
+                "model_tiers": {
+                    "mini": {
+                        "model": "haiku-override"
+                    },
+                    "heavy": {
+                        "model": "opus-override"
+                    }
+                }
+            }),
+        );
+
+        // Task with no routing hints -> uses phase defaults (standard tier for implementation)
+        let mut task = Task {
+            id: "task-1".to_string(),
+            tool: Some("claude".to_string()),
+            task_runtime: TaskRuntime {
+                current_phase: Some("implementation".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        // Standard tier claude should fallback to "sonnet-default" because standard is not in model_tiers
+        let resolved = AppState::resolve_task_model(&task, &config);
+        assert_eq!(resolved, "sonnet-default");
+
+        // Set routing hint to heavy
+        task.extra.insert(
+            "routing_hints".to_string(),
+            serde_json::json!({
+                "risk_level": "high" // high risk maps to heavy tier
+            }),
+        );
+        let resolved_heavy = AppState::resolve_task_model(&task, &config);
+        assert_eq!(resolved_heavy, "opus-override");
+
+        // Verify fallback to default tool models when tool is unknown/missing config
+        task.tool = Some("unknown-tool".to_string());
+        let resolved_fallback = AppState::resolve_task_model(&task, &config);
+        // "unknown-tool" with heavy tier should resolve to tier name "heavy"
+        assert_eq!(resolved_fallback, "heavy");
+
+        // Now verify worker fallback logic in LiveTaskRow::from_task
+        task.task_runtime.worker_id = None;
+        task.worktree = Some(TaskWorktree {
+            worktree_path: Some("/path/to/.macc/worktree/worker-05".to_string()),
+            ..Default::default()
+        });
+
+        let now = chrono::Utc::now();
+        let row = LiveTaskRow::from_task(&task, now, "some-model".to_string());
+        assert_eq!(row.worker_id, "worker-05");
+        assert_eq!(row.model, "some-model");
     }
 }

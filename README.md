@@ -330,6 +330,8 @@ macc coordinator run                # launch review, then choose TUI / Web / hea
 macc coordinator run --client tui   # skip prompt, open TUI coordinator view
 macc coordinator run --client web   # skip prompt, run headless + print dashboard URL
 macc coordinator run --client none  # skip prompt, run headless (alias: --no-client)
+macc coordinator run --in 30m          # start after 30m relative delay
+macc coordinator run --at "2026-06-28T02:00"  # start at absolute target date-time
 macc coordinator status
 macc coordinator sync-prd           # reconcile tasks from PRD
 macc coordinator reconcile

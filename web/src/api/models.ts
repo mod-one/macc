@@ -214,6 +214,7 @@ export interface ApiConfigResponse {
   standardsPath: string | null;
   standardsInline: Record<string, string>;
   selectedSkills: string[];
+  mandatorySkills: string[];
   selectedAgents: string[];
   selectedMcp: string[];
   quiet: boolean;
@@ -773,6 +774,7 @@ export interface ApiCatalogSkillEntry {
   risk: string | null;
   requires_mcp: boolean;
   writes_user_level_config: boolean;
+  mandatory: boolean;
   category: string | null;
   targets: Record<string, string[]>;
   source: {

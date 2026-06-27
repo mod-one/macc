@@ -18,7 +18,7 @@ performer:
     mode: arg
     arg: "-p"
   session:
-    enabled: true
+    enabled: false
     scope: worktree
     init_prompt: "Hello"
     extract_regex: "([0-9a-fA-F]{8}-[0-9a-fA-F-]{27})"

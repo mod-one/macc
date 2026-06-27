@@ -23,7 +23,6 @@ pub mod runtime;
 pub mod save;
 pub mod security;
 pub mod service;
-pub mod skills;
 pub mod skills_catalog;
 pub mod skills_runner;
 mod structured_merge;
@@ -39,7 +38,6 @@ pub use config::load_canonical_config;
 pub use engine::{Engine, MaccEngine, TestEngine};
 pub use resolve::{resolve, CliOverrides, ResolvedConfig};
 pub use security::Finding;
-pub use skills::{is_required_skill, required_skills, REQUIRED_SKILLS};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use structured_merge::StructuredToolMergePolicy;
@@ -672,6 +670,8 @@ pub fn build_plan(
     materialized_units: &[resolve::MaterializedFetchUnit],
     registry: &ToolRegistry,
 ) -> Result<plan::ActionPlan> {
+    let effective_resolved = resolve::with_mandatory_skills(paths, resolved)?;
+    let resolved = &effective_resolved;
     let mut total_plan = plan::ActionPlan::new();
 
     // Add baseline ignore entries

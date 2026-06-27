@@ -7,6 +7,9 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+- Added delayed one-shot coordinator execution with `macc coordinator run --in <duration>` and `macc coordinator run --at <datetime>`.
+
 ### Added — PRD Generation and Model Routing (spec §8)
 - **`core/src/prd_generation/`** — new module implementing the shared PRD generation and audit infrastructure:
   - `request.rs`: `PrdGenerateRequest`, `ModelSelection`, `ModelRoutingMode` (auto/manual).

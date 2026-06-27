@@ -3687,6 +3687,78 @@ async fn config_get_endpoint_returns_canonical_config() {
     assert_eq!(payload["webPort"], 4567);
     assert_eq!(payload["quiet"], false);
     assert_eq!(payload["offline"], false);
+    assert_eq!(
+        payload["mandatorySkills"],
+        serde_json::json!(["macc-performer", "macc-prd-planner", "macc-reviewer"])
+    );
+}
+
+#[tokio::test]
+async fn catalog_skills_available_includes_local_project_catalog_entries() {
+    let root = temp_root("catalog-skills-local");
+    fs::create_dir_all(&root).expect("create root");
+    let paths = ProjectPaths::from_root(&root);
+    fs::create_dir_all(&paths.catalog_dir).expect("create catalog dir");
+    fs::write(
+        paths.skills_catalog_path(),
+        serde_json::json!({
+            "schema_version": "1.0",
+            "type": "skills",
+            "updated_at": "2026-06-26T00:00:00Z",
+            "entries": [
+                {
+                    "id": "local-client-skill",
+                    "name": "Local Client Skill",
+                    "description": "Skill added by a client to the local project catalog.",
+                    "tags": ["local"],
+                    "selector": { "subpath": "skills/local-client-skill" },
+                    "source": {
+                        "kind": "git",
+                        "url": "https://example.com/local-client-skill.git",
+                        "ref": "main",
+                        "checksum": null
+                    },
+                    "mandatory": true
+                }
+            ]
+        })
+        .to_string(),
+    )
+    .expect("write local skills catalog");
+
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/catalog/skills/available")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    let local_skill = payload["skills"]
+        .as_array()
+        .expect("skills array")
+        .iter()
+        .find(|entry| entry["id"] == "local-client-skill")
+        .expect("local skill returned");
+    assert_eq!(local_skill["name"], "Local Client Skill");
+    assert_eq!(local_skill["mandatory"], true);
 }
 
 #[tokio::test]
@@ -3725,7 +3797,10 @@ async fn config_put_endpoint_updates_config_file() {
     let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
     assert_eq!(payload["webPort"], 4567);
     assert_eq!(payload["quiet"], true);
-    assert_eq!(payload["selectedSkills"], serde_json::json!(["macc-performer"]));
+    let expected_skills =
+        serde_json::json!(["macc-performer", "macc-prd-planner", "macc-reviewer"]);
+    assert_eq!(payload["selectedSkills"], expected_skills);
+    assert_eq!(payload["mandatorySkills"], expected_skills);
 
     let paths = ProjectPaths::from_root(&root);
     let updated = macc_core::load_canonical_config(&paths.config_path).expect("load config");
@@ -3737,7 +3812,11 @@ async fn config_put_endpoint_updates_config_file() {
             .as_ref()
             .expect("selections")
             .skills,
-        vec!["macc-performer".to_string()]
+        vec![
+            "macc-performer".to_string(),
+            "macc-prd-planner".to_string(),
+            "macc-reviewer".to_string(),
+        ]
     );
 }
 
