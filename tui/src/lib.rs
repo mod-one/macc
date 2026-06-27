@@ -1824,6 +1824,11 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 } else {
                     &task.tool
                 };
+                let model = if task.model.is_empty() {
+                    "-"
+                } else {
+                    &task.model
+                };
 
                 let cells = vec![
                     Cell::from(health_symbol).style(health_style),
@@ -1831,6 +1836,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                     Cell::from(task.task_id.clone()),
                     Cell::from(status_text),
                     Cell::from(tool.to_string()),
+                    Cell::from(model.to_string()),
                     Cell::from(age_label),
                     Cell::from(hb_label),
                 ];
@@ -1843,6 +1849,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 Cell::from("Task ID").style(Style::default().fg(theme.accent)),
                 Cell::from("Status").style(Style::default().fg(theme.accent)),
                 Cell::from("Tool").style(Style::default().fg(theme.accent)),
+                Cell::from("Model").style(Style::default().fg(theme.accent)),
                 Cell::from("Age").style(Style::default().fg(theme.accent)),
                 Cell::from("HB").style(Style::default().fg(theme.accent)),
             ]);
@@ -1853,6 +1860,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 Constraint::Length(25),
                 Constraint::Length(12),
                 Constraint::Length(10),
+                Constraint::Length(15),
                 Constraint::Length(8),
                 Constraint::Length(8),
             ];
