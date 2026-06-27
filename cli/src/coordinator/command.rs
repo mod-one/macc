@@ -181,8 +181,7 @@ Performers cannot commit without it. Fix this first:\n\
         run_reference_branch_preflight(engine, paths, coordinator_cfg, &input)?;
 
         // Launch review: summary, client choice, and confirmation — before any wait.
-        let chosen_mode =
-            resolve_client_mode(&input, coordinator_cfg, paths, schedule.as_ref());
+        let chosen_mode = resolve_client_mode(&input, coordinator_cfg, paths, schedule.as_ref());
 
         // Countdown wait (if a delayed start was requested).
         if let Some(ref sched) = schedule {
@@ -994,7 +993,14 @@ fn resolve_client_mode(
     let warnings = collect_launch_warnings(input, coordinator_cfg, paths);
 
     if show_preflight {
-        print_launch_review(input, coordinator_cfg, paths, &warnings, &client_cfg, schedule);
+        print_launch_review(
+            input,
+            coordinator_cfg,
+            paths,
+            &warnings,
+            &client_cfg,
+            schedule,
+        );
     }
 
     // Step 5 — choose client (or use config default).
@@ -1163,8 +1169,14 @@ fn print_launch_review(
     // ── Scheduled start (shown first when a delay is active) ─────────────────
     if let Some(sched) = schedule {
         println!("Scheduled start:");
-        println!("  Starts at:         {}", sched.scheduled_at.format("%Y-%m-%d %H:%M:%S %Z"));
-        println!("  Delay:             {}", humantime::format_duration(sched.delay));
+        println!(
+            "  Starts at:         {}",
+            sched.scheduled_at.format("%Y-%m-%d %H:%M:%S %Z")
+        );
+        println!(
+            "  Delay:             {}",
+            humantime::format_duration(sched.delay)
+        );
         println!();
     }
 

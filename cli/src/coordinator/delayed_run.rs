@@ -5,9 +5,11 @@ use std::time::Duration;
 pub struct ResolvedDelayedStart {
     pub scheduled_at: DateTime<Local>,
     pub delay: Duration,
+    #[allow(dead_code)]
     pub source: DelayedStartSource,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DelayedStartSource {
     Relative,
@@ -156,12 +158,14 @@ pub fn resolve_delayed_start(
     }
 }
 
+#[allow(dead_code)]
 pub async fn wait_until_start(
     schedule: &ResolvedDelayedStart,
 ) -> Result<DelayedRunOutcome, DelayedRunError> {
     wait_with_cancellation(schedule.delay, tokio::signal::ctrl_c()).await
 }
 
+#[allow(dead_code)]
 pub fn block_on_wait(
     schedule: &ResolvedDelayedStart,
 ) -> Result<DelayedRunOutcome, DelayedRunError> {
@@ -221,6 +225,7 @@ pub fn block_on_wait_with_countdown(
     })
 }
 
+#[allow(dead_code)]
 pub async fn wait_with_cancellation<C>(
     delay: Duration,
     cancellation: C,
