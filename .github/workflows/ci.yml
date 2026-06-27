@@ -2,8 +2,15 @@ name: CI
 
 on:
   pull_request:
+    branches:
+      - main
+      - develop
+      - 'release/*'
   push:
-    branches: [main]
+    branches:
+      - main
+      - develop
+      - 'release/*'
   workflow_dispatch:
     inputs:
       run_automation_tests:
