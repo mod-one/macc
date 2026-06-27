@@ -155,32 +155,88 @@ pub fn handle(
         None
     };
 
-    if let Some(schedule) = schedule {
-        if !canonical.settings.quiet {
-            println!("Coordinator run scheduled.");
-            println!("Project: {}", paths.root.display());
-            println!("Starts at: {}", schedule.scheduled_at.to_rfc3339());
-            println!("Delay: {}", humantime::format_duration(schedule.delay));
-            println!("Press Ctrl+C to cancel.");
+    // ── CoordinatorCommand::Run: full self-contained launch flow ──────────────
+    //
+    // Order: preflight → launch review + client choice + confirm → countdown
+    // wait (if scheduled) → owner gate → setup → launch.
+    //
+    // The review and choice happen before any wait so the user sees the summary
+    // and confirms (or cancels) immediately after typing the command.
+    if matches!(command, CoordinatorCommand::Run) {
+        // Preflight: git identity must be set before workers can commit.
+        {
+            let missing = macc_core::git::missing_git_identity_fields(&paths.root);
+            if !missing.is_empty() {
+                let fields = missing.join(", ");
+                return Err(MaccError::Validation(format!(
+                    "Git identity is not configured ({fields}). \
+Performers cannot commit without it. Fix this first:\n\
+  git config --global user.email \"you@example.com\"\n\
+  git config --global user.name \"Your Name\""
+                )));
+            }
         }
 
-        match crate::coordinator::delayed_run::block_on_wait(&schedule)
-            .map_err(|e| macc_core::MaccError::Validation(e.to_string()))?
-        {
-            crate::coordinator::delayed_run::DelayedRunOutcome::Cancelled => {
-                if !canonical.settings.quiet {
-                    println!("Scheduled coordinator run cancelled.");
+        // Preflight: reference branch must be clean before any mutation.
+        run_reference_branch_preflight(engine, paths, coordinator_cfg, &input)?;
+
+        // Launch review: summary, client choice, and confirmation — before any wait.
+        let chosen_mode =
+            resolve_client_mode(&input, coordinator_cfg, paths, schedule.as_ref());
+
+        // Countdown wait (if a delayed start was requested).
+        if let Some(ref sched) = schedule {
+            match crate::coordinator::delayed_run::block_on_wait_with_countdown(sched)
+                .map_err(|e| macc_core::MaccError::Validation(e.to_string()))?
+            {
+                crate::coordinator::delayed_run::DelayedRunOutcome::Cancelled => {
+                    if !canonical.settings.quiet {
+                        println!("Scheduled coordinator run cancelled.");
+                    }
+                    return Ok(());
                 }
-                return Ok(());
-            }
-            crate::coordinator::delayed_run::DelayedRunOutcome::Ready => {
-                if !canonical.settings.quiet {
-                    println!("Scheduled start time reached.");
-                    println!("Validating project and coordinator state...");
-                    println!("Starting coordinator run.");
+                crate::coordinator::delayed_run::DelayedRunOutcome::Ready => {
+                    if !canonical.settings.quiet {
+                        println!("Starting coordinator run.");
+                    }
                 }
             }
         }
+
+        // Owner gate: checked after the user has confirmed, before launch.
+        let client_ctx = ClientContext {
+            client_id: input.client_id.clone(),
+            project_root: paths.root.clone(),
+        };
+        gate_owner_action(&client_ctx, &coordinator_process_handle(&paths.root))?;
+
+        // Setup: scripts, storage mode env, run-id.
+        // Supervisor is intentionally not spawned here — it is started inside
+        // launch_coordinator_with_client after the coordinator child is known.
+        let _ = macc_core::ensure_embedded_automation_scripts(paths)?;
+        if let Ok(effective_storage_mode) =
+            coordinator_engine::resolve_storage_mode(&input.env_cfg, coordinator_cfg)
+        {
+            let mode_raw = match effective_storage_mode {
+                CoordinatorStorageMode::Json => "json",
+                CoordinatorStorageMode::DualWrite => "dual-write",
+                CoordinatorStorageMode::Sqlite => "sqlite",
+            };
+            std::env::set_var("COORDINATOR_STORAGE_MODE", mode_raw);
+        }
+        if let Some(debounce_ms) = input
+            .env_cfg
+            .mirror_json_debounce_ms
+            .or_else(|| coordinator_cfg.and_then(|c| c.mirror_json_debounce_ms))
+        {
+            std::env::set_var(
+                "COORDINATOR_JSON_EXPORT_DEBOUNCE_MS",
+                debounce_ms.to_string(),
+            );
+        }
+        let _ = engine.project_ensure_coordinator_run_id();
+
+        return launch_coordinator_with_client(chosen_mode, &input, paths, coordinator_cfg);
     }
 
     let client_ctx = ClientContext {
@@ -227,15 +283,10 @@ pub fn handle(
     // A missing user.email / user.name causes every performer's `git commit` to fail,
     // leaving changes uncommitted and the coordinator stuck.
     //
-    // CoordinatorCommand::Run is included so that `macc coordinator run --no-tui`
-    // catches errors in the parent process before the child is spawned with muted
-    // stdio (control-plane-run). Without this, preflight errors in the child are
-    // silently swallowed and the parent only sees a generic non-zero exit code.
+    // CoordinatorCommand::Run is handled in the early-return block above.
     if matches!(
         command,
-        CoordinatorCommand::Run
-            | CoordinatorCommand::RunControlPlane
-            | CoordinatorCommand::DispatchReadyTasks
+        CoordinatorCommand::RunControlPlane | CoordinatorCommand::DispatchReadyTasks
     ) {
         let missing = macc_core::git::missing_git_identity_fields(&paths.root);
         if !missing.is_empty() {
@@ -251,24 +302,12 @@ Performers cannot commit without it. Fix this first:\n\
 
     // Reference branch preflight gate (spec §7, §11.1).
     // Must run before any registry/worktree mutation.
-    // CoordinatorCommand::Run is included for the same reason as above.
+    // CoordinatorCommand::Run is handled in the early-return block above.
     if matches!(
         command,
-        CoordinatorCommand::Run
-            | CoordinatorCommand::RunControlPlane
-            | CoordinatorCommand::DispatchReadyTasks
+        CoordinatorCommand::RunControlPlane | CoordinatorCommand::DispatchReadyTasks
     ) {
         run_reference_branch_preflight(engine, paths, coordinator_cfg, &input)?;
-    }
-
-    // ── Client selection and launch review (motif §2) ─────────────────────────
-    //
-    // For `macc coordinator run`, after preflight passes, show a launch review
-    // and ask which client to open (TUI / Web / None). In non-interactive mode
-    // (--client flag set, or stdout is not a TTY), skip the prompt.
-    if matches!(command, CoordinatorCommand::Run) {
-        let chosen_mode = resolve_client_mode(&input, coordinator_cfg, paths);
-        return launch_coordinator_with_client(chosen_mode, &input, paths, coordinator_cfg);
     }
 
     if let CoordinatorCommand::Stop { drain, .. } = &command {
@@ -905,6 +944,7 @@ fn resolve_client_mode(
     input: &CoordinatorCommandInput,
     coordinator_cfg: Option<&macc_core::config::CoordinatorConfig>,
     paths: &macc_core::ProjectPaths,
+    schedule: Option<&crate::coordinator::delayed_run::ResolvedDelayedStart>,
 ) -> CoordinatorClientMode {
     // Explicit CLI flag wins — skip config and prompt.
     if input.client_mode != CoordinatorClientMode::Interactive {
@@ -954,7 +994,7 @@ fn resolve_client_mode(
     let warnings = collect_launch_warnings(input, coordinator_cfg, paths);
 
     if show_preflight {
-        print_launch_review(input, coordinator_cfg, paths, &warnings, &client_cfg);
+        print_launch_review(input, coordinator_cfg, paths, &warnings, &client_cfg, schedule);
     }
 
     // Step 5 — choose client (or use config default).
@@ -1104,6 +1144,7 @@ fn print_launch_review(
     paths: &macc_core::ProjectPaths,
     warnings: &[String],
     client_cfg: &macc_core::config::CoordinatorClientConfig,
+    schedule: Option<&crate::coordinator::delayed_run::ResolvedDelayedStart>,
 ) {
     use macc_core::config::CoordinatorConfigResolved;
     let resolved = CoordinatorConfigResolved::resolve(coordinator_cfg);
@@ -1118,6 +1159,14 @@ fn print_launch_review(
     println!();
     println!("MACC Coordinator Launch Review");
     println!();
+
+    // ── Scheduled start (shown first when a delay is active) ─────────────────
+    if let Some(sched) = schedule {
+        println!("Scheduled start:");
+        println!("  Starts at:         {}", sched.scheduled_at.format("%Y-%m-%d %H:%M:%S %Z"));
+        println!("  Delay:             {}", humantime::format_duration(sched.delay));
+        println!();
+    }
 
     // ── Project and task source ───────────────────────────────────────────────
     println!("Project:");
