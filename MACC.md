@@ -376,6 +376,8 @@ Default command is `run`. The coordinator starts, runs until the queue is exhaus
 | `--preflight-only` | Run preflight checks and exit |
 | `--allow-dirty-reference` | Start even if reference branch is dirty |
 | `--merge-ai-fix` | Enable AI-assisted merge conflict resolution |
+| `--in <duration>` | Start the coordinator after a relative delay (e.g., 30m, 2h) |
+| `--at <datetime>` | Start the coordinator at an absolute target date-time |
 
 #### Task workflow states
 
@@ -385,6 +387,24 @@ todo → queued → claimed → in_progress → testing → reviewing → pr_ope
 ```
 
 States `claimed`, `in_progress`, `testing`, `reviewing`, `pr_open`, `changes_requested`, and `queued` are counted as "active" for parallelism.
+
+#### Delayed one-shot coordinator run
+
+`macc coordinator run` supports an optional process-bound delayed start:
+
+```bash
+macc coordinator run --in 30m
+macc coordinator run --at "2026-06-28T02:00"
+```
+
+- `--in` accepts a human-readable relative duration.
+- `--at` accepts RFC 3339 or local `YYYY-MM-DDTHH:MM[:SS]` date-time.
+- A local date-time without an offset uses the machine's local timezone.
+- The flags are mutually exclusive.
+- Past timestamps and zero durations are rejected.
+- The process must remain alive until execution.
+- `Ctrl+C` cancels the pending run.
+- No scheduler state is persisted.
 
 ### 5.9 Supervisor
 

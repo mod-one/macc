@@ -73,6 +73,8 @@ pub struct CoordinatorCommandInput {
     pub remove_branches: bool,
     pub env_cfg: CoordinatorEnvConfig,
     pub extra_args: Vec<String>,
+    pub run_in: Option<String>,
+    pub at: Option<String>,
     // ── Reference branch preflight flags (spec §8.6) ──────────────────────
     /// Exit after preflight checks without starting coordinator.
     pub preflight_only: bool,
@@ -139,6 +141,47 @@ pub fn handle(
         input.remove_worktrees,
         input.remove_branches,
     )?;
+
+    // Resolve delayed start if this is a 'run' command
+    let schedule = if matches!(command, CoordinatorCommand::Run) {
+        let now = chrono::Local::now();
+        crate::coordinator::delayed_run::resolve_delayed_start(
+            input.run_in.as_deref(),
+            input.at.as_deref(),
+            now,
+        ).map_err(|e| macc_core::MaccError::Validation(e.to_string()))?
+    } else {
+        None
+    };
+
+    if let Some(schedule) = schedule {
+        if !canonical.settings.quiet {
+            println!("Coordinator run scheduled.");
+            println!("Project: {}", paths.root.display());
+            println!("Starts at: {}", schedule.scheduled_at.to_rfc3339());
+            println!("Delay: {}", humantime::format_duration(schedule.delay));
+            println!("Press Ctrl+C to cancel.");
+        }
+
+        match crate::coordinator::delayed_run::block_on_wait(&schedule)
+            .map_err(|e| macc_core::MaccError::Validation(e.to_string()))?
+        {
+            crate::coordinator::delayed_run::DelayedRunOutcome::Cancelled => {
+                if !canonical.settings.quiet {
+                    println!("Scheduled coordinator run cancelled.");
+                }
+                return Ok(());
+            }
+            crate::coordinator::delayed_run::DelayedRunOutcome::Ready => {
+                if !canonical.settings.quiet {
+                    println!("Scheduled start time reached.");
+                    println!("Validating project and coordinator state...");
+                    println!("Starting coordinator run.");
+                }
+            }
+        }
+    }
+
     let client_ctx = ClientContext {
         client_id: input.client_id.clone(),
         project_root: paths.root.clone(),
@@ -1519,6 +1562,8 @@ mod tests {
             remove_branches: false,
             env_cfg: CoordinatorEnvConfig::default(),
             extra_args: Vec::new(),
+            run_in: None,
+            at: None,
             preflight_only: false,
             allow_dirty_reference: false,
             create_reference_branch: false,
