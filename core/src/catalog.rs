@@ -323,21 +323,21 @@ pub fn sync_project_catalog_to_worktree(
                 worktree_skills.entries.push(entry);
             }
         }
-        worktree_skills
-            .save_atomically(worktree_paths, &worktree_paths.project_skills_catalog_path())?;
+        worktree_skills.save_atomically(
+            worktree_paths,
+            &worktree_paths.project_skills_catalog_path(),
+        )?;
     }
 
     let repo_mcp = McpCatalog::load(&repo_paths.project_mcp_catalog_path())?;
     if !repo_mcp.entries.is_empty() {
-        let mut worktree_mcp =
-            McpCatalog::load(&worktree_paths.project_mcp_catalog_path())?;
+        let mut worktree_mcp = McpCatalog::load(&worktree_paths.project_mcp_catalog_path())?;
         for entry in repo_mcp.entries {
             if !worktree_mcp.entries.iter().any(|e| e.id == entry.id) {
                 worktree_mcp.entries.push(entry);
             }
         }
-        worktree_mcp
-            .save_atomically(worktree_paths, &worktree_paths.project_mcp_catalog_path())?;
+        worktree_mcp.save_atomically(worktree_paths, &worktree_paths.project_mcp_catalog_path())?;
     }
 
     Ok(())

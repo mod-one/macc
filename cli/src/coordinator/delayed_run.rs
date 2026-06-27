@@ -56,12 +56,11 @@ pub fn parse_relative_delay(input: &str) -> Result<Duration, DelayedRunError> {
         });
     }
 
-    let parsed = humantime::parse_duration(input_trimmed).map_err(|e| {
-        DelayedRunError::InvalidDuration {
+    let parsed =
+        humantime::parse_duration(input_trimmed).map_err(|e| DelayedRunError::InvalidDuration {
             input: input.to_string(),
             reason: e.to_string(),
-        }
-    })?;
+        })?;
 
     if parsed == Duration::ZERO {
         return Err(DelayedRunError::ZeroDuration);
@@ -120,8 +119,11 @@ fn resolve_relative_delay(
     duration: Duration,
     now: DateTime<Local>,
 ) -> Result<DateTime<Local>, DelayedRunError> {
-    let chrono_dur = chrono::Duration::from_std(duration).map_err(|_| DelayedRunError::DateTimeOverflow)?;
-    let target = now.checked_add_signed(chrono_dur).ok_or(DelayedRunError::DateTimeOverflow)?;
+    let chrono_dur =
+        chrono::Duration::from_std(duration).map_err(|_| DelayedRunError::DateTimeOverflow)?;
+    let target = now
+        .checked_add_signed(chrono_dur)
+        .ok_or(DelayedRunError::DateTimeOverflow)?;
     Ok(target)
 }
 
@@ -141,7 +143,9 @@ pub fn resolve_delayed_start(
     } else if let Some(at_str) = at {
         let scheduled_at = parse_absolute_time(at_str, now)?;
         let duration_to_target = scheduled_at.signed_duration_since(now);
-        let delay = duration_to_target.to_std().map_err(|_| DelayedRunError::DateTimeOverflow)?;
+        let delay = duration_to_target
+            .to_std()
+            .map_err(|_| DelayedRunError::DateTimeOverflow)?;
         Ok(Some(ResolvedDelayedStart {
             scheduled_at,
             delay,
@@ -191,18 +195,45 @@ mod tests {
 
     #[test]
     fn test_parse_relative_delay() {
-        assert_eq!(parse_relative_delay("30s").unwrap(), Duration::from_secs(30));
-        assert_eq!(parse_relative_delay("30m").unwrap(), Duration::from_secs(1800));
-        assert_eq!(parse_relative_delay("2h").unwrap(), Duration::from_secs(7200));
+        assert_eq!(
+            parse_relative_delay("30s").unwrap(),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            parse_relative_delay("30m").unwrap(),
+            Duration::from_secs(1800)
+        );
+        assert_eq!(
+            parse_relative_delay("2h").unwrap(),
+            Duration::from_secs(7200)
+        );
         // Compound duration (spec §16.1)
-        assert_eq!(parse_relative_delay("1h 30m").unwrap(), Duration::from_secs(5400));
-        assert_eq!(parse_relative_delay("1d").unwrap(), Duration::from_secs(86400));
+        assert_eq!(
+            parse_relative_delay("1h 30m").unwrap(),
+            Duration::from_secs(5400)
+        );
+        assert_eq!(
+            parse_relative_delay("1d").unwrap(),
+            Duration::from_secs(86400)
+        );
 
-        assert!(matches!(parse_relative_delay("0s"), Err(DelayedRunError::ZeroDuration)));
-        assert!(matches!(parse_relative_delay("abc"), Err(DelayedRunError::InvalidDuration { .. })));
-        assert!(matches!(parse_relative_delay(""), Err(DelayedRunError::InvalidDuration { .. })));
+        assert!(matches!(
+            parse_relative_delay("0s"),
+            Err(DelayedRunError::ZeroDuration)
+        ));
+        assert!(matches!(
+            parse_relative_delay("abc"),
+            Err(DelayedRunError::InvalidDuration { .. })
+        ));
+        assert!(matches!(
+            parse_relative_delay(""),
+            Err(DelayedRunError::InvalidDuration { .. })
+        ));
         // Negative input (spec §16.1)
-        assert!(matches!(parse_relative_delay("-5m"), Err(DelayedRunError::InvalidDuration { .. })));
+        assert!(matches!(
+            parse_relative_delay("-5m"),
+            Err(DelayedRunError::InvalidDuration { .. })
+        ));
     }
 
     #[test]
@@ -212,23 +243,38 @@ mod tests {
         // Future absolute time
         let future_rfc = "2026-06-26T13:00:00Z";
         let parsed = parse_absolute_time(future_rfc, now).unwrap();
-        assert_eq!(parsed.with_timezone(&chrono::Utc).to_rfc3339(), "2026-06-26T13:00:00+00:00");
+        assert_eq!(
+            parsed.with_timezone(&chrono::Utc).to_rfc3339(),
+            "2026-06-26T13:00:00+00:00"
+        );
 
         let future_local_sec = "2026-06-26T14:30:15";
         let parsed_sec = parse_absolute_time(future_local_sec, now).unwrap();
-        assert_eq!(parsed_sec.format("%Y-%m-%dT%H:%M:%S").to_string(), "2026-06-26T14:30:15");
+        assert_eq!(
+            parsed_sec.format("%Y-%m-%dT%H:%M:%S").to_string(),
+            "2026-06-26T14:30:15"
+        );
 
         let future_local = "2026-06-26T14:30";
         let parsed_local = parse_absolute_time(future_local, now).unwrap();
-        assert_eq!(parsed_local.format("%Y-%m-%dT%H:%M").to_string(), "2026-06-26T14:30");
+        assert_eq!(
+            parsed_local.format("%Y-%m-%dT%H:%M").to_string(),
+            "2026-06-26T14:30"
+        );
 
         // Past time
         let past = "2026-06-26T11:00:00Z";
-        assert!(matches!(parse_absolute_time(past, now), Err(DelayedRunError::PastDateTime { .. })));
+        assert!(matches!(
+            parse_absolute_time(past, now),
+            Err(DelayedRunError::PastDateTime { .. })
+        ));
 
         // Invalid format
         let invalid = "2026/06/26 12:00";
-        assert!(matches!(parse_absolute_time(invalid, now), Err(DelayedRunError::InvalidDateTime { .. })));
+        assert!(matches!(
+            parse_absolute_time(invalid, now),
+            Err(DelayedRunError::InvalidDateTime { .. })
+        ));
     }
 
     #[test]
@@ -240,13 +286,17 @@ mod tests {
         assert!(resolved.is_none());
 
         // Relative
-        let resolved = resolve_delayed_start(Some("30m"), None, now).unwrap().unwrap();
+        let resolved = resolve_delayed_start(Some("30m"), None, now)
+            .unwrap()
+            .unwrap();
         assert_eq!(resolved.delay, Duration::from_secs(1800));
         assert_eq!(resolved.source, DelayedStartSource::Relative);
         assert_eq!(resolved.scheduled_at, now + chrono::Duration::seconds(1800));
 
         // Absolute
-        let resolved = resolve_delayed_start(None, Some("2026-06-26T14:00:00"), now).unwrap().unwrap();
+        let resolved = resolve_delayed_start(None, Some("2026-06-26T14:00:00"), now)
+            .unwrap()
+            .unwrap();
         assert_eq!(resolved.delay, Duration::from_secs(7200));
         assert_eq!(resolved.source, DelayedStartSource::Absolute);
 
@@ -266,7 +316,9 @@ mod tests {
 
         // We use a future that doesn't resolve for the cancellation to simulate no Ctrl+C
         let cancellation = futures_util::future::pending();
-        let outcome = wait_with_cancellation(schedule.delay, cancellation).await.unwrap();
+        let outcome = wait_with_cancellation(schedule.delay, cancellation)
+            .await
+            .unwrap();
         assert_eq!(outcome, DelayedRunOutcome::Ready);
     }
 
@@ -280,7 +332,9 @@ mod tests {
 
         // Instantly cancelled
         let cancellation = futures_util::future::ready(Ok(()));
-        let outcome = wait_with_cancellation(schedule.delay, cancellation).await.unwrap();
+        let outcome = wait_with_cancellation(schedule.delay, cancellation)
+            .await
+            .unwrap();
         assert_eq!(outcome, DelayedRunOutcome::Cancelled);
     }
 
@@ -288,9 +342,10 @@ mod tests {
     async fn test_waiting_signal_error() {
         let delay = Duration::from_secs(10);
         // Simulate a signal listener failure (spec §16.4)
-        let cancellation = futures_util::future::ready(
-            Err(std::io::Error::new(std::io::ErrorKind::Other, "signal setup failed")),
-        );
+        let cancellation = futures_util::future::ready(Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "signal setup failed",
+        )));
         let result = wait_with_cancellation(delay, cancellation).await;
         assert!(matches!(result, Err(DelayedRunError::Signal(_))));
     }

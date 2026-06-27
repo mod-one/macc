@@ -149,7 +149,8 @@ pub fn handle(
             input.run_in.as_deref(),
             input.at.as_deref(),
             now,
-        ).map_err(|e| macc_core::MaccError::Validation(e.to_string()))?
+        )
+        .map_err(|e| macc_core::MaccError::Validation(e.to_string()))?
     } else {
         None
     };

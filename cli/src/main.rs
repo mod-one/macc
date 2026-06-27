@@ -2845,7 +2845,15 @@ mod tests {
         }
 
         // Conflicting args: --in and --at (should fail)
-        let parse_err = Cli::try_parse_from(["macc", "coordinator", "run", "--in", "30m", "--at", "2026-06-28T02:00"]);
+        let parse_err = Cli::try_parse_from([
+            "macc",
+            "coordinator",
+            "run",
+            "--in",
+            "30m",
+            "--at",
+            "2026-06-28T02:00",
+        ]);
         assert!(parse_err.is_err());
     }
 
@@ -2857,12 +2865,18 @@ mod tests {
         // Invalid: coordinator status --in 30m
         let cli = Cli::try_parse_from(["macc", "coordinator", "status", "--in", "30m"]).unwrap();
         let err = run_with_engine_provider(cli, provider.clone()).unwrap_err();
-        assert!(err.to_string().contains("only allowed with the 'run' action"));
+        assert!(err
+            .to_string()
+            .contains("only allowed with the 'run' action"));
 
         // Invalid: coordinator cleanup --at 2026-06-28T02:00
-        let cli = Cli::try_parse_from(["macc", "coordinator", "cleanup", "--at", "2026-06-28T02:00"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["macc", "coordinator", "cleanup", "--at", "2026-06-28T02:00"])
+                .unwrap();
         let err = run_with_engine_provider(cli, provider).unwrap_err();
-        assert!(err.to_string().contains("only allowed with the 'run' action"));
+        assert!(err
+            .to_string()
+            .contains("only allowed with the 'run' action"));
     }
 
     #[test]
