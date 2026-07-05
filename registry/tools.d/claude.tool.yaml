@@ -62,7 +62,7 @@ fields:
     label: Model
     kind:
       type: enum
-      options: ["sonnet", "sonnet[1m]", "opus", "haiku"]
+      options: ["fable", "opus", "sonnet", "sonnet[1m]", "haiku"]
     help: Claude model alias (e.g., sonnet, opus).
     pointer: /tools/config/claude/model
     default: "sonnet"
@@ -114,7 +114,7 @@ fields:
     label: Mini tier — model
     kind:
       type: enum
-      options: ["haiku", "sonnet", "sonnet[1m]", "opus"]
+      options: ["fable", "opus", "sonnet", "sonnet[1m]", "haiku"]
     help: "Model used when routing tier = mini (light, fast tasks)."
     pointer: /tools/config/claude/model_tiers/mini/model
     default: "haiku"
@@ -130,7 +130,7 @@ fields:
     label: Standard tier — model
     kind:
       type: enum
-      options: ["haiku", "sonnet", "sonnet[1m]", "opus"]
+      options: ["fable", "opus", "sonnet", "sonnet[1m]", "haiku"]
     help: "Model used when routing tier = standard (everyday tasks)."
     pointer: /tools/config/claude/model_tiers/standard/model
     default: "sonnet"
@@ -146,7 +146,7 @@ fields:
     label: Heavy tier — model
     kind:
       type: enum
-      options: ["sonnet", "sonnet[1m]", "opus"]
+      options: ["fable", "opus", "sonnet", "sonnet[1m]", "haiku"]
     help: "Model used when routing tier = heavy (complex / architectural work)."
     pointer: /tools/config/claude/model_tiers/heavy/model
     default: "opus"
@@ -154,7 +154,7 @@ fields:
     label: Heavy tier — effort
     kind:
       type: enum
-      options: ["Medium", "High", "Max"]
+      options: ["Low", "Medium", "High", "Max"]
     help: "Effort level for the heavy tier (not applicable to Haiku)."
     pointer: /tools/config/claude/model_tiers/heavy/effort
     default: "High"
