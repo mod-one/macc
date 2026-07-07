@@ -146,6 +146,16 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
         return;
     }
 
+    if state.has_coordinator_finished_prompt() {
+        match key {
+            KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('k') => {
+                state.dismiss_coordinator_finished()
+            }
+            _ => {}
+        }
+        return;
+    }
+
     if state.has_coordinator_pause_prompt() {
         match key {
             KeyCode::Char('r') | KeyCode::Enter => state.retry_after_coordinator_pause(),
@@ -2266,6 +2276,9 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
     if state.has_coordinator_pause_prompt() {
         render_coordinator_pause_overlay(f, state);
     }
+    if state.has_coordinator_finished_prompt() {
+        render_coordinator_finished_overlay(f, state);
+    }
     if let Some(req) = state
         .coordinator_ownership
         .pending_incoming_request
@@ -2801,6 +2814,29 @@ fn render_coordinator_pause_overlay(f: &mut Frame, state: &AppState) {
                 .title(title)
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Red)),
+        )
+        .wrap(Wrap { trim: true });
+    f.render_widget(popup, area);
+}
+
+fn render_coordinator_finished_overlay(f: &mut Frame, state: &AppState) {
+    let area = ui::centered_rect(70, 35, f.size());
+    f.render_widget(Clear, area);
+    let theme = ui::theme();
+    let message = state
+        .coordinator_finished_message
+        .as_deref()
+        .unwrap_or("Coordinator run finished.");
+    let text = format!(
+        "Coordinator run complete (no errors).\n\n{}\n\nPress Enter, q, or Esc to exit.\n",
+        message
+    );
+    let popup = Paragraph::new(text)
+        .block(
+            Block::default()
+                .title("Coordinator Finished")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.good)),
         )
         .wrap(Wrap { trim: true });
     f.render_widget(popup, area);

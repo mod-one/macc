@@ -175,10 +175,22 @@ const Layout: React.FC = () => {
       .catch(() => { /* silent */ });
   };
 
+  // When the coordinator is neither running nor paused, distinguish *how* the
+  // last run ended: a normal stop (all tasks done / dispatch limit) vs a
+  // degraded stop (crashed). The reason is surfaced as a tooltip.
+  const lastRunStatus = status?.last_run_status;
+  const stopReason = status?.last_run_stop_reason ?? undefined;
+  const idleState =
+    lastRunStatus === 'crashed'
+      ? { label: 'Stopped (error)', tone: 'failed' as const, title: stopReason }
+      : lastRunStatus === 'stopped' || lastRunStatus === 'force_stopping'
+        ? { label: 'Stopped', tone: 'todo' as const, title: stopReason }
+        : { label: 'Idle', tone: 'todo' as const, title: undefined };
+
   const coordState =
-    status?.paused         ? { label: 'Paused',  tone: 'paused' as const } :
-    (status?.active ?? 0) > 0 ? { label: 'Running', tone: 'active' as const } :
-                              { label: 'Idle',    tone: 'todo'   as const };
+    status?.paused         ? { label: 'Paused',  tone: 'paused' as const, title: status?.pause_reason ?? undefined } :
+    (status?.active ?? 0) > 0 ? { label: 'Running', tone: 'active' as const, title: undefined } :
+                              idleState;
 
   const activeWorkers  = status?.active ?? 0;
   const throttledCount = status?.throttled_tools?.length ?? 0;
@@ -586,10 +598,12 @@ const Layout: React.FC = () => {
           {/* Left: coordinator pulse */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <span
+              title={coordState.title}
               style={{
                 color:
                   coordState.tone === 'active' ? 'var(--success)' :
                   coordState.tone === 'paused' ? 'var(--warning)' :
+                  coordState.tone === 'failed' ? 'var(--error)' :
                   'var(--text-muted)',
               }}
             >

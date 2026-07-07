@@ -847,6 +847,34 @@ impl SqliteStorage {
         }
     }
 
+    /// Returns the most recent coordinator run regardless of status. Unlike
+    /// `get_active_coordinator_run` (which filters to running/draining), this
+    /// surfaces the last finished run so clients can report why it stopped.
+    pub fn get_latest_coordinator_run(&self) -> Result<Option<CoordinatorRun>> {
+        let conn = self.open()?;
+        self.init_schema(&conn)?;
+        let mut stmt = conn
+            .prepare("SELECT run_id, pid, hostname, started_at, last_tick_at, stopped_at, status, epoch, version, stop_reason FROM coordinator_runs ORDER BY started_at DESC LIMIT 1")
+            .map_err(sql_err)?;
+        let mut rows = stmt.query([]).map_err(sql_err)?;
+        if let Some(row) = rows.next().map_err(sql_err)? {
+            Ok(Some(CoordinatorRun {
+                run_id: row.get(0).map_err(sql_err)?,
+                pid: row.get(1).map_err(sql_err)?,
+                hostname: row.get(2).map_err(sql_err)?,
+                started_at: row.get(3).map_err(sql_err)?,
+                last_tick_at: row.get(4).map_err(sql_err)?,
+                stopped_at: row.get(5).map_err(sql_err)?,
+                status: row.get(6).map_err(sql_err)?,
+                epoch: row.get(7).map_err(sql_err)?,
+                version: row.get(8).map_err(sql_err)?,
+                stop_reason: row.get(9).map_err(sql_err)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
     pub fn get_cursor(&self, name: &str) -> Result<Option<(u64, String)>> {
         let conn = self.open()?;
         self.init_schema(&conn)?;

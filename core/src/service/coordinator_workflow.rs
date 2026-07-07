@@ -231,6 +231,13 @@ pub struct CoordinatorStatus {
     pub throttled_tools: Vec<ThrottledToolStatus>,
     /// RL-WEB-008: effective max_parallel after concurrency reductions from rate-limiting.
     pub effective_max_parallel: Option<usize>,
+    /// Status of the most recent coordinator run ("stopped", "crashed",
+    /// "force_stopping", "running", ...). Lets clients distinguish a normal stop
+    /// from a degraded/error stop when the coordinator is no longer running.
+    pub last_run_status: Option<String>,
+    /// Human-readable reason the most recent run stopped (e.g. "all tasks
+    /// completed", "dispatch limit reached", or an error detail).
+    pub last_run_stop_reason: Option<String>,
 }
 
 /// RL-WEB-008: per-tool throttle status for API exposure.
@@ -1521,6 +1528,13 @@ pub fn get_coordinator_status(paths: &ProjectPaths) -> Result<CoordinatorStatus>
         }
     }
     status.throttled_tools = throttle_map.into_values().collect();
+
+    // Surface the most recent run's status and stop reason so clients can show
+    // *why* a run ended (normal completion vs error) once it is no longer live.
+    if let Ok(Some(run)) = sqlite.get_latest_coordinator_run() {
+        status.last_run_status = Some(run.status);
+        status.last_run_stop_reason = run.stop_reason;
+    }
 
     // RL-WEB-008: parse effective_max_parallel from the most recent concurrency_adjusted event.
     status.effective_max_parallel = snapshot

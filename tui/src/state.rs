@@ -212,6 +212,10 @@ pub struct AppState {
     pub coordinator_pause_command: Option<String>,
     pub coordinator_pause_task_id: Option<String>,
     pub coordinator_pause_phase: Option<String>,
+    /// Set when a `macc coordinator run` finishes normally (exit 0) under
+    /// auto-quit. Holds the completion message so a dismissible overlay can show
+    /// the reason for stopping instead of the TUI exiting immediately.
+    pub coordinator_finished_message: Option<String>,
     pub coordinator_spinner_tick: u64,
     pub coordinator_events: Vec<String>,
     pub coordinator_events_last_refresh: Option<Instant>,
@@ -344,6 +348,7 @@ impl AppState {
             coordinator_running_command: None,
             coordinator_last_result: None,
             coordinator_pause_error: None,
+            coordinator_finished_message: None,
             coordinator_pause_command: None,
             coordinator_pause_task_id: None,
             coordinator_pause_phase: None,
@@ -2096,6 +2101,20 @@ impl AppState {
         self.coordinator_pause_error.is_some()
     }
 
+    /// True when a normal-completion overlay is showing for an auto-quit run.
+    pub fn has_coordinator_finished_prompt(&self) -> bool {
+        self.coordinator_finished_message.is_some()
+    }
+
+    /// Dismiss the normal-completion overlay and exit the auto-quit run TUI,
+    /// releasing coordinator ownership on the way out (mirrors the previous
+    /// instant-quit behaviour, but only after the user has seen the reason).
+    pub fn dismiss_coordinator_finished(&mut self) {
+        self.coordinator_finished_message = None;
+        self.release_ownership_on_exit();
+        self.should_quit = true;
+    }
+
     pub fn handle_takeover_request_received(&mut self, request: TakeoverRequest) {
         if self.ownership_state.dismissed_request_id.as_deref() == Some(request.request_id.as_str())
         {
@@ -2301,8 +2320,17 @@ impl AppState {
                     self.refresh_coordinator_snapshot();
                     self.refresh_coordinator_events();
                     if self.coordinator_run_auto_quit {
-                        self.release_ownership_on_exit();
-                        self.should_quit = true;
+                        // A `macc coordinator run` finished normally (exit 0).
+                        // Instead of quitting immediately — which hides the reason
+                        // for stopping — show a dismissible completion overlay so
+                        // the user can read the finish reason, then exit on a key.
+                        // The error path (Failed) already keeps the TUI open via
+                        // coordinator_pause_error; this is the success counterpart.
+                        if post_success_action.is_none() {
+                            self.coordinator_finished_message = finished_message
+                                .as_ref()
+                                .map(|(_, msg)| msg.clone());
+                        }
                     }
                 }
                 Ok(CoordinatorManagedCommandState::Failed {

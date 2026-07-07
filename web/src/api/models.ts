@@ -129,6 +129,10 @@ export interface ApiCoordinatorStatus {
   failure_report: ApiFailureReport | null;
   throttled_tools?: ApiThrottledToolStatus[];
   effective_max_parallel?: number;
+  /** Status of the most recent run: "stopped", "crashed", "force_stopping", "running", ... */
+  last_run_status?: string;
+  /** Human-readable reason the most recent run stopped. */
+  last_run_stop_reason?: string;
 }
 
 export interface ApiSelectedTask {

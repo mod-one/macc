@@ -2314,6 +2314,27 @@ pub async fn run_native_control_plane(
         ));
     }
 
+    // Reason for a normal (non-error, non-operator) stop. The control-plane loop
+    // returns Ok(()) both when all tasks complete and when the dispatch limit is
+    // reached; that distinction is only recorded as a `dispatch_limit_reached`
+    // event, so recover it here to persist a meaningful stop_reason for clients
+    // (TUI Watch, Web) that read the run record rather than the live process.
+    let normal_stop_reason = |sqlite: &crate::coordinator_storage::SqliteStorage| -> String {
+        use crate::coordinator_storage::CoordinatorStorage;
+        if let Ok(snapshot) = sqlite.load_snapshot() {
+            let dispatch_limited = snapshot
+                .events
+                .iter()
+                .rev()
+                .take(20)
+                .any(|e| e.event_type == "dispatch_limit_reached");
+            if dispatch_limited {
+                return "dispatch limit reached".to_string();
+            }
+        }
+        "all tasks completed".to_string()
+    };
+
     let _ = sqlite.get_active_coordinator_run().map(|run_opt| {
         if let Some(mut r) = run_opt {
             r.status = if is_clean_exit {
@@ -2328,6 +2349,10 @@ pub async fn run_native_control_plane(
                 r.stop_reason = Some(format!("{:?}", run_result));
             } else if is_clean_exit {
                 r.stop_reason = Some(final_status.clone());
+            } else {
+                // Normal completion (exit 0): persist the human-readable reason so
+                // it is not lost the way it previously was.
+                r.stop_reason = Some(normal_stop_reason(&sqlite));
             }
             let _ = sqlite.upsert_coordinator_run(&r);
         }

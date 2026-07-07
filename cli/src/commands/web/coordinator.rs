@@ -29,6 +29,10 @@ pub(super) struct ApiCoordinatorStatus {
     pub throttled_tools: Vec<ApiThrottledToolStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effective_max_parallel: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_run_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_run_stop_reason: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -68,6 +72,8 @@ impl From<CoordinatorStatus> for ApiCoordinatorStatus {
                 .map(ApiThrottledToolStatus::from)
                 .collect(),
             effective_max_parallel: status.effective_max_parallel,
+            last_run_status: status.last_run_status,
+            last_run_stop_reason: status.last_run_stop_reason,
         }
     }
 }
