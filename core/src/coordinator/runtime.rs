@@ -92,6 +92,7 @@ pub struct CoordinatorJobEvent {
     pub error_code: Option<String>,
     pub error_origin: Option<String>,
     pub error_message: Option<String>,
+    pub result_explanation: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1364,6 +1365,9 @@ pub fn spawn_performer_job(
             error_code,
             error_origin,
             error_message,
+            result_explanation: completion_details
+                .as_ref()
+                .and_then(|details| details.result_explanation.clone()),
         });
     });
     Ok(pid)
@@ -1380,6 +1384,7 @@ struct ErrorDetails {
 struct CompletionDetails {
     result_kind: Option<PerformerCompletionKind>,
     message: Option<String>,
+    result_explanation: Option<String>,
 }
 
 const COORDINATOR_COMPAT_PHASE_RESULT_LOG_FALLBACK: &str =
@@ -1463,6 +1468,7 @@ fn read_last_completion_details_once(
         return Some(CompletionDetails {
             result_kind: event.payload_result_kind(),
             message: event.message().map(|value| value.to_string()),
+            result_explanation: event.payload_result_exp(),
         });
     }
     if attempt < 2 {
@@ -1483,8 +1489,19 @@ fn read_completion_details_from_worktree_log(
     let raw = std::fs::read_to_string(log_path).ok()?;
     let mut result_kind = None;
     let mut message = None;
+    let mut result_explanation = None;
     for line in raw.lines().rev() {
         let trimmed = line.trim();
+        if result_explanation.is_none() {
+            if let Some(exp) = trimmed.strip_prefix("- Explanation:") {
+                result_explanation = Some(exp.trim().to_string());
+                continue;
+            }
+            if let Some(exp) = trimmed.strip_prefix("MACC_TASK_RESULT_EXP:") {
+                result_explanation = Some(exp.trim().to_string());
+                continue;
+            }
+        }
         if result_kind.is_none() {
             if let Some(raw_kind) = trimmed.strip_prefix("- Result kind:") {
                 result_kind = raw_kind.trim().parse::<PerformerCompletionKind>().ok();
@@ -1495,16 +1512,14 @@ fn read_completion_details_from_worktree_log(
                 continue;
             }
         }
-        if message.is_none() && !trimmed.is_empty() && !trimmed.starts_with('-') {
+        if message.is_none() && !trimmed.is_empty() && !trimmed.starts_with('-') && !trimmed.starts_with("MACC_TASK_RESULT") {
             message = Some(trimmed.to_string());
-        }
-        if result_kind.is_some() && message.is_some() {
-            break;
         }
     }
     result_kind.map(|kind| CompletionDetails {
         result_kind: Some(kind),
         message,
+        result_explanation,
     })
 }
 

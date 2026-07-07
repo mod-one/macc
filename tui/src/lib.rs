@@ -1942,6 +1942,12 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                         Span::styled(err, Style::default().fg(theme.bad)),
                     ]));
                 }
+                if let Some(ref exp) = t.result_explanation {
+                    detail_lines.push(Line::from(vec![
+                        Span::styled("Explanation:", Style::default().fg(theme.muted)),
+                        Span::styled(format!(" {}", exp), Style::default().fg(theme.bad)),
+                    ]));
+                }
             } else {
                 detail_lines.push(Line::from("No task selected. Use ↑/↓ to navigate."));
             }

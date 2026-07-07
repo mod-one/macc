@@ -777,6 +777,19 @@ impl CoordinatorEventRecord {
             })
     }
 
+    /// Extract the tool-reported error explanation (`result_exp`) from the
+    /// event payload.  This corresponds to `MACC_TASK_RESULT_EXP:` markers
+    /// emitted by the performer.
+    pub fn payload_result_exp(&self) -> Option<String> {
+        let norm = self.normalized_payload();
+        norm.get("result_exp")
+            .and_then(Value::as_str)
+            .or_else(|| self.payload.get("result_exp").and_then(Value::as_str))
+            .or_else(|| self.extra.get("result_exp").and_then(Value::as_str))
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string)
+    }
+
     pub fn is_terminal_success(&self) -> bool {
         self.event_type == "commit_created"
             || (self.event_type == "phase_result"

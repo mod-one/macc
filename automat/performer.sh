@@ -655,7 +655,7 @@ Instructions:
    - MACC_TASK_RESULT: error_with_changes   (if you started work but cannot finish)
    - MACC_TASK_RESULT: error_without_changes (if you could not start or make any progress)
 11) Use already_satisfied only when you verified the task is already done and can cite the evidence briefly.
-12) Use error_with_changes or error_without_changes when you cannot complete the task (sandbox failures, environment issues, missing dependencies, permission errors, etc.). Include a brief explanation of why on the line before the marker.
+12) Use error_with_changes or error_without_changes when you cannot complete the task (sandbox failures, environment issues, missing dependencies, permission errors, etc.). Include a brief explanation of why on the line before the marker. The explanation must start with "MACC_TASK_RESULT_EXP:".
 13) If you finish successfully but forget the marker, the runner will infer the result from repository state; still print the marker explicitly.
 
 Now implement the task !
@@ -675,6 +675,13 @@ extract_task_result_marker() {
     error_without_changes|error|failed) printf '%s' "error_without_changes" ;;
     *) printf '%s' "" ;;
   esac
+}
+
+extract_task_result_exp() {
+  local output_file="$1"
+  local raw=""
+  raw="$(grep -E 'MACC_TASK_RESULT_EXP:' "$output_file" | tail -n 1 | sed -E 's/^.*MACC_TASK_RESULT_EXP:[[:space:]]*//')"
+  printf '%s' "$raw" | tr -d '\r' | xargs
 }
 
 has_committable_changes() {
@@ -797,23 +804,52 @@ run_tool() {
     if [[ "$result_kind" == "success_with_changes" ]]; then
       changed="true"
     fi
-    must_emit_performer_event "phase_result" "$CURRENT_PHASE" "done" "$(jq -nc --arg attempt "$attempt" --arg result_kind "$result_kind" --argjson changed "$changed" '{
-      attempt:($attempt|tonumber?),
-      result_kind:($result_kind|select(length>0)),
-      changed:$changed,
-      message:(if $result_kind == "already_satisfied" then "Task already satisfied; verified with no code changes required."
-               elif $result_kind == "success_without_changes" then "Task completed successfully with no repository changes."
-               else "Task completed successfully with repository changes."
-               end)
-    }')"
+    local result_exp=""
+    result_exp="$(extract_task_result_exp "$output_capture")"
+    must_emit_performer_event "phase_result" "$CURRENT_PHASE" "done" "$(jq -nc \
+      --arg attempt "$attempt" \
+      --arg result_kind "$result_kind" \
+      --argjson changed "$changed" \
+      --arg result_exp "$result_exp" \
+      '{
+        attempt:($attempt|tonumber?),
+        result_kind:($result_kind|select(length>0)),
+        changed:$changed,
+        result_exp:($result_exp|select(length>0)),
+        message:(if $result_kind == "already_satisfied" then "Task already satisfied; verified with no code changes required."
+                 elif $result_kind == "success_without_changes" then "Task completed successfully with no repository changes."
+                 elif $result_kind == "error_with_changes" then "Tool execution failed with repository changes."
+                 elif $result_kind == "error_without_changes" then "Tool execution failed with no repository changes."
+                 else "Task completed successfully with repository changes."
+                 end)
+      }')"
     log_task_line "- Result kind: ${result_kind}"
+    if [[ -n "$result_exp" ]]; then
+      log_task_line "- Explanation: ${result_exp}"
+    fi
   else
     # RL-PERFORMER-009: classify rate-limit signals before falling back to E101.
     detect_rate_limit "$output_capture"
     if [[ -z "$LAST_ERROR_CODE" || "$LAST_ERROR_CODE" == "E101" ]]; then
       set_last_error "E101" "runner" "runner exited non-zero"
     fi
-    must_emit_performer_event "phase_result" "$CURRENT_PHASE" "failed" "$(jq -nc --arg attempt "$attempt" --arg status "$status" --arg code "$LAST_ERROR_CODE" --arg origin "$LAST_ERROR_ORIGIN" --arg message "$LAST_ERROR_MESSAGE" '{attempt:($attempt|tonumber?), exit_status:($status|tonumber?), error_code:($code|select(length>0)), origin:($origin|select(length>0)), message:($message|select(length>0))}')"
+    local result_exp=""
+    result_exp="$(extract_task_result_exp "$output_capture")"
+    must_emit_performer_event "phase_result" "$CURRENT_PHASE" "failed" "$(jq -nc \
+      --arg attempt "$attempt" \
+      --arg status "$status" \
+      --arg code "$LAST_ERROR_CODE" \
+      --arg origin "$LAST_ERROR_ORIGIN" \
+      --arg message "$LAST_ERROR_MESSAGE" \
+      --arg result_exp "$result_exp" \
+      '{
+        attempt:($attempt|tonumber?),
+        exit_status:($status|tonumber?),
+        error_code:($code|select(length>0)),
+        origin:($origin|select(length>0)),
+        message:($message|select(length>0)),
+        result_exp:($result_exp|select(length>0))
+      }')"
   fi
   log_task_line ""
   log_task_line "- Exit status: ${status}"

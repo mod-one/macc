@@ -5631,6 +5631,11 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
                 output.push_str(&format!("Error:     {}\n", err));
             }
         }
+        if let Some(exp) = &rt.result_explanation {
+            if !exp.is_empty() {
+                output.push_str(&format!("Explanation: {}\n", exp));
+            }
+        }
 
         output.push_str("\nTimeline:\n");
         let events_log_path = rt.events_log.as_deref().map(|p| paths.root.join(p));
@@ -5722,6 +5727,7 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
         task.task_runtime.message = Some("Requeued by operator via TUI".to_string());
         task.task_runtime.last_error = None;
         task.task_runtime.last_error_code = None;
+        task.task_runtime.result_explanation = None;
 
         snapshot.registry.updated_at = Some(macc_core::coordinator::helpers::now_iso_coordinator());
 

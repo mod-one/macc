@@ -447,6 +447,12 @@ const Registry: React.FC = () => {
                 <div className="text-sm text-rose-200/80 font-mono break-words bg-black/20 p-2 rounded-lg leading-relaxed">
                   {selectedTask.lastError}
                 </div>
+                {selectedTask.resultExplanation && (
+                  <div className="text-xs text-rose-300/90 leading-relaxed font-sans mt-2 border-t border-rose-500/10 pt-2">
+                    <span className="font-semibold block mb-0.5">Explanation:</span>
+                    {selectedTask.resultExplanation}
+                  </div>
+                )}
               </div>
             )}
 

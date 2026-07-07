@@ -570,6 +570,7 @@ export interface ApiRegistryTask {
   currentPhase: string | null;
   lastError: string | null;
   lastErrorCode: string | null;
+  resultExplanation: string | null;
   description: string | null;
   objective: string | null;
   result: string | null;

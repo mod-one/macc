@@ -209,6 +209,10 @@ pub struct TaskRuntime {
     /// cleared after a failure, so retry salvage can attempt recovery merge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_branch: Option<String>,
+    /// Tool-reported error explanation extracted from `MACC_TASK_RESULT_EXP:` markers
+    /// in performer output. Displayed in TUI/WEB coordinator live view.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_explanation: Option<String>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -697,6 +701,7 @@ impl TaskRuntime {
         self.last_error_code = None;
         self.last_error_origin = None;
         self.last_error_message = None;
+        self.result_explanation = None;
     }
 
     pub fn ensure_metrics(&mut self) -> &mut TaskRuntimeMetrics {

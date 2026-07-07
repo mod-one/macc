@@ -317,7 +317,7 @@ mod tests {
         );
 
         // Past time
-        let past = "2026-06-26T11:00:00Z";
+        let past = "2026-06-25T11:00:00Z";
         assert!(matches!(
             parse_absolute_time(past, now),
             Err(DelayedRunError::PastDateTime { .. })
