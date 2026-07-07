@@ -292,21 +292,21 @@ emit_performer_event() {
     --arg phase "$phase" \
     --arg status "$status" \
     --argjson payload "$payload_json" \
-    '{
+    '({
       schema_version:$schema_version,
       event_id:$event_id,
       run_id:$run_id,
       coordinator_epoch:$coordinator_epoch,
-      claim_id:($claim_id|select(length>0)),
       seq:$seq,
       ts:$ts,
       source:$source,
       task_id:$task_id,
       type:$type,
-      phase:($phase|select(length>0)),
       status:$status,
       payload:$payload
-    }' 2>"$jq_err_file")"; then
+    }
+    + (if $claim_id != "" then {claim_id:$claim_id} else {} end)
+    + (if $phase    != "" then {phase:$phase}       else {} end))' 2>"$jq_err_file")"; then
     jq_err="$(tr '\n' ' ' <"$jq_err_file" | sed 's/[[:space:]]\\+/ /g')"
     rm -f "$jq_err_file"
     LAST_IPC_ERROR="event json build failed: addr=$(ipc_addr_display) type=${event_type} status=${status} phase=${phase:-<empty>} jq_stderr=${jq_err:-<empty>}"
@@ -480,12 +480,12 @@ build_error_payload() {
     --arg origin "$LAST_ERROR_ORIGIN" \
     --arg msg "$LAST_ERROR_MESSAGE" \
     --arg exit "$exit_code" \
-    '{
-      exit_code:($exit|tonumber?),
-      error_code:($code|select(length>0)),
-      origin:($origin|select(length>0)),
-      message:($msg|select(length>0))
-    }'
+    '({
+      exit_code:($exit|tonumber?)
+    }
+    + (if $code   != "" then {error_code:$code} else {} end)
+    + (if $origin != "" then {origin:$origin}   else {} end)
+    + (if $msg    != "" then {message:$msg}     else {} end))'
 }
 
 heartbeat_start() {
@@ -806,23 +806,29 @@ run_tool() {
     fi
     local result_exp=""
     result_exp="$(extract_task_result_exp "$output_capture")"
+    # Build the payload additively: optional string fields are merged in only
+    # when non-empty. Do NOT use `field:($x|select(length>0))` inside the object
+    # literal — jq's `select` yields `empty` for an empty string, and a field
+    # whose value is `empty` collapses the ENTIRE object to no output. That is
+    # what silently produced a `{}` payload (missing result_kind) and caused the
+    # coordinator to reject successful terminal events.
     must_emit_performer_event "phase_result" "$CURRENT_PHASE" "done" "$(jq -nc \
       --arg attempt "$attempt" \
       --arg result_kind "$result_kind" \
       --argjson changed "$changed" \
       --arg result_exp "$result_exp" \
-      '{
+      '({
         attempt:($attempt|tonumber?),
-        result_kind:($result_kind|select(length>0)),
         changed:$changed,
-        result_exp:($result_exp|select(length>0)),
         message:(if $result_kind == "already_satisfied" then "Task already satisfied; verified with no code changes required."
                  elif $result_kind == "success_without_changes" then "Task completed successfully with no repository changes."
                  elif $result_kind == "error_with_changes" then "Tool execution failed with repository changes."
                  elif $result_kind == "error_without_changes" then "Tool execution failed with no repository changes."
                  else "Task completed successfully with repository changes."
                  end)
-      }')"
+      }
+      + (if $result_kind != "" then {result_kind:$result_kind} else {} end)
+      + (if $result_exp  != "" then {result_exp:$result_exp}  else {} end))')"
     log_task_line "- Result kind: ${result_kind}"
     if [[ -n "$result_exp" ]]; then
       log_task_line "- Explanation: ${result_exp}"
@@ -835,6 +841,9 @@ run_tool() {
     fi
     local result_exp=""
     result_exp="$(extract_task_result_exp "$output_capture")"
+    # Same additive-merge pattern as the success path above: never let an empty
+    # optional field collapse the whole object (which would drop error_code and
+    # cause the failure to be misclassified).
     must_emit_performer_event "phase_result" "$CURRENT_PHASE" "failed" "$(jq -nc \
       --arg attempt "$attempt" \
       --arg status "$status" \
@@ -842,14 +851,14 @@ run_tool() {
       --arg origin "$LAST_ERROR_ORIGIN" \
       --arg message "$LAST_ERROR_MESSAGE" \
       --arg result_exp "$result_exp" \
-      '{
+      '({
         attempt:($attempt|tonumber?),
-        exit_status:($status|tonumber?),
-        error_code:($code|select(length>0)),
-        origin:($origin|select(length>0)),
-        message:($message|select(length>0)),
-        result_exp:($result_exp|select(length>0))
-      }')"
+        exit_status:($status|tonumber?)
+      }
+      + (if $code       != "" then {error_code:$code}       else {} end)
+      + (if $origin     != "" then {origin:$origin}         else {} end)
+      + (if $message    != "" then {message:$message}       else {} end)
+      + (if $result_exp != "" then {result_exp:$result_exp} else {} end))')"
   fi
   log_task_line ""
   log_task_line "- Exit status: ${status}"
@@ -1029,7 +1038,7 @@ for ((i=1; i<=PERFORMER_MAX_ITERATIONS; i++)); do
     if [[ -z "$LAST_ERROR_CODE" ]]; then
       set_last_error "E101" "runner" "tool execution failed"
     fi
-    must_emit_performer_event "failed" "$CURRENT_PHASE" "failed" "$(jq -nc --arg task "$next_id" --arg code "$LAST_ERROR_CODE" --arg origin "$LAST_ERROR_ORIGIN" --arg message "$LAST_ERROR_MESSAGE" '{task_id:$task, reason:"tool execution failed", error_code:($code|select(length>0)), origin:($origin|select(length>0)), message:($message|select(length>0))}')"
+    must_emit_performer_event "failed" "$CURRENT_PHASE" "failed" "$(jq -nc --arg task "$next_id" --arg code "$LAST_ERROR_CODE" --arg origin "$LAST_ERROR_ORIGIN" --arg message "$LAST_ERROR_MESSAGE" '({task_id:$task, reason:"tool execution failed"} + (if $code != "" then {error_code:$code} else {} end) + (if $origin != "" then {origin:$origin} else {} end) + (if $message != "" then {message:$message} else {} end))')"
     TERMINAL_EVENT_EMITTED="true"
     echo "Error: tool execution failed for task ${next_id}" >&2
     exit 1
