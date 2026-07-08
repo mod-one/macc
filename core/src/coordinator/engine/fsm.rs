@@ -216,9 +216,19 @@ pub struct CoordinatorRunController {
 #[async_trait]
 pub trait ControlPlaneBackend {
     async fn on_cycle_start(&mut self, cycle: usize) -> Result<()>;
-    async fn monitor_active_jobs(&mut self) -> Result<()>;
+    /// Returns `Some((task_id, reason))` when a completed job's failure meets
+    /// the coordinator integrity-pause condition (see
+    /// `crate::coordinator::model::requires_integrity_pause`) and must halt
+    /// the run for operator review rather than proceed to retry/dispatch.
+    async fn monitor_active_jobs(&mut self) -> Result<Option<(String, String)>>;
     async fn monitor_merge_jobs(&mut self) -> Result<Option<(String, String)>>;
     async fn on_blocked_merge(&mut self, task_id: &str, reason: &str) -> Result<()>;
+    /// Pause the run for operator review after an integrity condition is
+    /// detected (see `monitor_active_jobs`). Mirrors `on_blocked_merge`'s
+    /// wait-for-resume loop, but does not requeue the task on resume -- the
+    /// task remains in its failed/needs-review state until the operator
+    /// takes an explicit recovery action.
+    async fn on_integrity_pause(&mut self, task_id: &str, reason: &str) -> Result<()>;
     async fn advance_tasks(&mut self) -> Result<AdvanceResult>;
     async fn dispatch_ready_tasks(&mut self) -> Result<usize>;
     async fn on_cycle_end(
@@ -1404,14 +1414,18 @@ async fn run_control_plane_cycle<B: ControlPlaneBackend + ?Sized>(
 ) -> std::result::Result<ControlPlaneDecision, MaccError> {
     backend.on_cycle_start(cycle).await?;
 
-    backend.monitor_active_jobs().await?;
+    if let Some((task_id, reason)) = backend.monitor_active_jobs().await? {
+        backend.on_integrity_pause(&task_id, &reason).await?;
+    }
     if let Some((task_id, reason)) = backend.monitor_merge_jobs().await? {
         backend.on_blocked_merge(&task_id, &reason).await?;
     }
 
     let advance = backend.advance_tasks().await?;
 
-    backend.monitor_active_jobs().await?;
+    if let Some((task_id, reason)) = backend.monitor_active_jobs().await? {
+        backend.on_integrity_pause(&task_id, &reason).await?;
+    }
     if let Some((task_id, reason)) = backend
         .monitor_merge_jobs()
         .await?
@@ -1688,7 +1702,7 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
         Ok(())
     }
 
-    async fn monitor_active_jobs(&mut self) -> Result<()> {
+    async fn monitor_active_jobs(&mut self) -> Result<Option<(String, String)>> {
         crate::coordinator::control_plane::monitor_active_jobs_native(
             self.repo_root,
             self.env_cfg,
@@ -1757,6 +1771,32 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
         resume_paused_task_merge(self.repo_root, task_id)?;
+        let _ = clear_coordinator_pause_file(self.repo_root)?;
+        Ok(())
+    }
+
+    async fn on_integrity_pause(&mut self, task_id: &str, reason: &str) -> Result<()> {
+        write_coordinator_pause_file(self.repo_root, task_id, "dev", reason)?;
+        if let Some(log) = self.logger {
+            let _ = log.note(format!(
+                "- Run paused task={} phase=dev reason=integrity_guard detail={}",
+                task_id, reason
+            ));
+        }
+        loop {
+            if !coordinator_pause_file_path(self.repo_root).exists() {
+                if let Some(log) = self.logger {
+                    let _ = log.note("- Resume signal received; continuing run loop".to_string());
+                }
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        // Unlike on_blocked_merge, deliberately do NOT requeue the task here.
+        // The task remains in its failed/needs-review state -- the operator
+        // must take an explicit recovery action (retry, accept, or abandon)
+        // rather than have the coordinator silently resume dispatching work
+        // against a worktree with unresolved integrity risk.
         let _ = clear_coordinator_pause_file(self.repo_root)?;
         Ok(())
     }

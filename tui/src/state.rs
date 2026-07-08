@@ -985,6 +985,10 @@ impl AppState {
                 // coordinator is running, so viewer TUIs see activity even when
                 // no task lifecycle events are occurring).
                 | "coordinator_heartbeat"
+                // Coordinator-side integrity/protocol diagnostics (e.g. a
+                // rejected performer IPC terminal event) -- must be visible in
+                // the live event feed, not only in the performer's log file.
+                | "coordinator_diagnostic"
         )
     }
 

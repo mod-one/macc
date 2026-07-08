@@ -525,6 +525,25 @@ impl TaskRegistry {
     }
 }
 
+/// True when a completed task's failure must pause the coordinator run rather
+/// than be treated as a routine failure.
+///
+/// `E901` means the performer exited without persisting a valid terminal
+/// `phase_result` event -- a protocol/contract failure between the performer
+/// and coordinator (serialization bug, IPC rejection, version mismatch),
+/// never a normal task failure. If the task's worktree still holds commits
+/// that are not yet merged into the base branch, silently continuing
+/// (auto-retry, salvage, or later worktree reuse) risks losing or obscuring
+/// that work. See docs/prd/8_3_MACC_Coordinator_Integrity_Recommendations.md
+/// §4.3 for the full rationale.
+pub fn requires_integrity_pause(
+    error_code: Option<&str>,
+    has_commits_ahead_of_base: bool,
+    branch_merged_into_base: bool,
+) -> bool {
+    error_code == Some("E901") && has_commits_ahead_of_base && !branch_merged_into_base
+}
+
 impl Task {
     pub fn workflow_state(&self) -> Option<WorkflowState> {
         WorkflowState::from_str(self.state.as_str()).ok()
@@ -843,6 +862,41 @@ mod tests {
         let r = make_registry_with_task("in_progress", "/wt/worker-02");
         // worker-01 has no task references — orphaned, safe to reuse.
         assert!(r.can_reuse_worktree_slot("/wt/worker-01"));
+    }
+
+    #[test]
+    fn requires_integrity_pause_e901_with_unmerged_commits() {
+        // The exact incident scenario: performer exited 0, no terminal event
+        // was persisted (E901), and the branch has unmerged commits ahead of
+        // base. This must pause the coordinator rather than let the task be
+        // silently classified as a routine failure.
+        assert!(requires_integrity_pause(Some("E901"), true, false));
+    }
+
+    #[test]
+    fn requires_integrity_pause_false_when_no_commits() {
+        // A failed_clean task (no commits produced) is always safe to reuse
+        // automatically, even with E901.
+        assert!(!requires_integrity_pause(Some("E901"), false, false));
+    }
+
+    #[test]
+    fn requires_integrity_pause_false_when_branch_already_merged() {
+        // If the branch is already merged into base, there is nothing at risk.
+        assert!(!requires_integrity_pause(Some("E901"), true, true));
+    }
+
+    #[test]
+    fn requires_integrity_pause_false_for_other_error_codes() {
+        // A routine failure (e.g. E101 runner error) with commits ahead is not
+        // an integrity condition on its own -- only E901 (missing terminal
+        // event) qualifies.
+        assert!(!requires_integrity_pause(Some("E101"), true, false));
+    }
+
+    #[test]
+    fn requires_integrity_pause_false_when_no_error_code() {
+        assert!(!requires_integrity_pause(None, true, false));
     }
 }
 

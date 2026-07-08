@@ -812,7 +812,16 @@ run_tool() {
     # whose value is `empty` collapses the ENTIRE object to no output. That is
     # what silently produced a `{}` payload (missing result_kind) and caused the
     # coordinator to reject successful terminal events.
-    must_emit_performer_event "phase_result" "$CURRENT_PHASE" "done" "$(jq -nc \
+    # Fatal on rejection: `run_tool` is invoked as the condition of an `if`
+    # statement by its caller (`if run_tool ...; then`), which means `set -e`
+    # is suspended for this entire function body -- a non-zero return from
+    # must_emit_performer_event here would NOT abort the script on its own,
+    # and `run_tool` would still `return "$status"` (the tool's own exit code,
+    # unrelated to whether the terminal event was accepted). This previously
+    # let the performer mark the task passed and exit 0 even though the
+    # coordinator had rejected the only record of that success. An explicit
+    # `exit 1` is required to terminate the script regardless of call context.
+    if ! must_emit_performer_event "phase_result" "$CURRENT_PHASE" "done" "$(jq -nc \
       --arg attempt "$attempt" \
       --arg result_kind "$result_kind" \
       --argjson changed "$changed" \
@@ -828,7 +837,11 @@ run_tool() {
                  end)
       }
       + (if $result_kind != "" then {result_kind:$result_kind} else {} end)
-      + (if $result_exp  != "" then {result_exp:$result_exp}  else {} end))')"
+      + (if $result_exp  != "" then {result_exp:$result_exp}  else {} end))')"; then
+      echo "Error: failed to persist terminal phase_result event (status=done); refusing to mark task passed" >&2
+      log_task_line "- Exit status: ${status}"
+      exit 1
+    fi
     log_task_line "- Result kind: ${result_kind}"
     if [[ -n "$result_exp" ]]; then
       log_task_line "- Explanation: ${result_exp}"
@@ -844,6 +857,13 @@ run_tool() {
     # Same additive-merge pattern as the success path above: never let an empty
     # optional field collapse the whole object (which would drop error_code and
     # cause the failure to be misclassified).
+    #
+    # Not made fatal-on-rejection like the "done" path: this is a per-attempt
+    # progress signal, not the mandatory terminal record. run_tool() always
+    # returns the runner's own non-zero $status regardless of whether this
+    # event persists, so the retry loop and the final unconditional exit 1
+    # (after max attempts) already guarantee a correct non-zero exit without
+    # aborting mid-retry over a possibly-transient IPC hiccup.
     must_emit_performer_event "phase_result" "$CURRENT_PHASE" "failed" "$(jq -nc \
       --arg attempt "$attempt" \
       --arg status "$status" \
@@ -990,12 +1010,20 @@ for ((i=1; i<=PERFORMER_MAX_ITERATIONS; i++)); do
   next_task_json="$(get_next_task_json)"
   if [[ -z "$next_task_json" ]]; then
     commit_changes "$last_id" "$last_title"
-    must_emit_performer_event "phase_result" "$CURRENT_PHASE" "done" "$(jq -nc '{
+    # Fatal on rejection (see the "done" path in run_tool() for the full
+    # rationale): do not set TERMINAL_EVENT_EMITTED or exit 0 unless the
+    # coordinator actually accepted this terminal event. Leaving
+    # TERMINAL_EVENT_EMITTED unset on failure lets the on_exit trap's
+    # synthetic "failed" event fire as a fallback signal.
+    if ! must_emit_performer_event "phase_result" "$CURRENT_PHASE" "done" "$(jq -nc '{
       attempt: 0,
       result_kind: "already_satisfied",
       changed: false,
       message: "Task already satisfied; no pending work remained in the worktree PRD."
-    }')"
+    }')"; then
+      echo "Error: failed to persist terminal phase_result event (status=already_satisfied)" >&2
+      exit 1
+    fi
     TERMINAL_EVENT_EMITTED="true"
     exit 0
   fi

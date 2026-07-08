@@ -237,6 +237,27 @@ fn process_ipc_event(
     };
     let event_id = event.event_id.clone();
     if let Err(err) = event.validate_performer_runtime_event() {
+        // Make the rejection visible in the coordinator event feed (TUI/Web)
+        // instead of leaving it only in the performer's own log file -- this
+        // is often the first and only signal that the performer/coordinator
+        // terminal-event contract is broken (see
+        // docs/prd/8_3_MACC_Coordinator_Integrity_Recommendations.md §5.2).
+        let message = format!(
+            "Rejected performer IPC event: type={} phase={} status={} reason={}",
+            event.event_type,
+            event.phase.as_deref().unwrap_or("-"),
+            event.status,
+            err
+        );
+        let _ = crate::coordinator::helpers::append_coordinator_event_with_severity(
+            &project_paths.root,
+            "coordinator_diagnostic",
+            event.task_id.as_deref().unwrap_or("-"),
+            event.phase.as_deref().unwrap_or("-"),
+            "rejected",
+            &message,
+            "blocking",
+        );
         return PerformerIpcAck {
             ok: false,
             event_id,
