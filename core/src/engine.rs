@@ -1422,7 +1422,13 @@ pub trait Engine {
         phase_timeout_seconds: usize,
         logger: Option<&'a dyn crate::coordinator::control_plane::CoordinatorLog>,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
-        Box::pin(
+        // This method drives a single-shot "wait for active jobs to drain"
+        // loop (used by `dispatch`/`advance` commands), not the main
+        // coordinator run loop -- the coordinator integrity pause (see
+        // `crate::coordinator::model::requires_integrity_pause`) only applies
+        // to `macc coordinator run` via `ControlPlaneBackend::monitor_active_jobs`,
+        // so its Option is intentionally discarded here.
+        Box::pin(async move {
             crate::coordinator::control_plane::monitor_active_jobs_native(
                 repo_root,
                 env_cfg,
@@ -1431,8 +1437,10 @@ pub trait Engine {
                 max_attempts,
                 phase_timeout_seconds,
                 logger,
-            ),
-        )
+            )
+            .await
+            .map(|_| ())
+        })
     }
 
     fn coordinator_monitor_merge_jobs_native<'a>(

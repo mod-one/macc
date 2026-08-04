@@ -48,6 +48,7 @@ fn make_failure_input(stderr: &str, stdout: &str) -> JobCompletionInput {
         error_code: None,
         error_origin: None,
         error_message: None,
+        result_explanation: None,
         auto_retry_error_codes: Vec::new(),
         auto_retry_max: 0,
         backoff_base_seconds: 30,

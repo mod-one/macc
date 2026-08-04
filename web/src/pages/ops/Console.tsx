@@ -389,7 +389,7 @@ const TaskRow: React.FC<{ task: ApiRegistryTask; isFeatured?: boolean }> = ({ ta
         </p>
         {err && (
           <p style={{ fontSize: '10px', color: 'var(--error)', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {err}
+            {err}{task.resultExplanation ? ` - ${task.resultExplanation}` : ''}
           </p>
         )}
       </div>

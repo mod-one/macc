@@ -224,6 +224,7 @@ pub(super) fn task_to_api(task: &Task, events: &[ApiRegistryEvent]) -> ApiRegist
         current_phase: task.task_runtime.current_phase.clone(),
         last_error: task.task_runtime.last_error.clone(),
         last_error_code: task.task_runtime.last_error_code.clone(),
+        result_explanation: task.task_runtime.result_explanation.clone(),
         description: task
             .extra
             .get("description")

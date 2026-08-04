@@ -5,9 +5,11 @@ use std::time::Duration;
 pub struct ResolvedDelayedStart {
     pub scheduled_at: DateTime<Local>,
     pub delay: Duration,
+    #[allow(dead_code)]
     pub source: DelayedStartSource,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DelayedStartSource {
     Relative,
@@ -156,12 +158,14 @@ pub fn resolve_delayed_start(
     }
 }
 
+#[allow(dead_code)]
 pub async fn wait_until_start(
     schedule: &ResolvedDelayedStart,
 ) -> Result<DelayedRunOutcome, DelayedRunError> {
     wait_with_cancellation(schedule.delay, tokio::signal::ctrl_c()).await
 }
 
+#[allow(dead_code)]
 pub fn block_on_wait(
     schedule: &ResolvedDelayedStart,
 ) -> Result<DelayedRunOutcome, DelayedRunError> {
@@ -172,6 +176,56 @@ pub fn block_on_wait(
     rt.block_on(wait_until_start(schedule))
 }
 
+/// Like `block_on_wait` but prints a live countdown line that updates in place.
+///
+/// Prints:   `  Starts in: HH:MM:SS  (Ctrl+C to cancel)`
+/// and updates it every second using a carriage return.
+pub fn block_on_wait_with_countdown(
+    schedule: &ResolvedDelayedStart,
+) -> Result<DelayedRunOutcome, DelayedRunError> {
+    use std::io::Write;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(DelayedRunError::Signal)?;
+    rt.block_on(async {
+        let deadline = std::time::Instant::now() + schedule.delay;
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+        // First tick fires immediately.
+        let ctrl_c = tokio::signal::ctrl_c();
+        tokio::pin!(ctrl_c);
+        loop {
+            tokio::select! {
+                biased;
+                result = &mut ctrl_c => {
+                    // Clear the countdown line before printing the cancellation message.
+                    print!("\r\x1b[K");
+                    let _ = std::io::stdout().flush();
+                    result.map_err(DelayedRunError::Signal)?;
+                    return Ok(DelayedRunOutcome::Cancelled);
+                }
+                _ = interval.tick() => {
+                    let now = std::time::Instant::now();
+                    let remaining = deadline.saturating_duration_since(now);
+                    let secs = remaining.as_secs();
+                    let h = secs / 3600;
+                    let m = (secs % 3600) / 60;
+                    let s = secs % 60;
+                    print!("\r  Starts in: {:02}:{:02}:{:02}  (Ctrl+C to cancel)", h, m, s);
+                    let _ = std::io::stdout().flush();
+                    if remaining.is_zero() {
+                        // Clear the line so the caller's output starts cleanly.
+                        print!("\r\x1b[K");
+                        let _ = std::io::stdout().flush();
+                        return Ok(DelayedRunOutcome::Ready);
+                    }
+                }
+            }
+        }
+    })
+}
+
+#[allow(dead_code)]
 pub async fn wait_with_cancellation<C>(
     delay: Duration,
     cancellation: C,
@@ -263,7 +317,7 @@ mod tests {
         );
 
         // Past time
-        let past = "2026-06-26T11:00:00Z";
+        let past = "2026-06-25T11:00:00Z";
         assert!(matches!(
             parse_absolute_time(past, now),
             Err(DelayedRunError::PastDateTime { .. })

@@ -150,6 +150,7 @@ pub struct LiveTaskRow {
     pub branch: Option<String>,
     pub last_error_code: Option<String>,
     pub last_error: Option<String>,
+    pub result_explanation: Option<String>,
 }
 
 impl LiveTaskRow {
@@ -219,6 +220,11 @@ impl LiveTaskRow {
             .last_error
             .clone()
             .filter(|e| !e.is_empty());
+        let result_explanation = task
+            .task_runtime
+            .result_explanation
+            .clone()
+            .filter(|e| !e.is_empty());
 
         // Worker fallback: resolve from worktree directory name if worker_id is empty
         if worker_id.is_empty() {
@@ -248,6 +254,7 @@ impl LiveTaskRow {
             branch,
             last_error_code,
             last_error,
+            result_explanation,
         }
     }
 

@@ -167,9 +167,24 @@ mod tests {
 
     #[test]
     fn embedded_performer_script_does_not_use_malformed_event_jq_filter() {
+        // The collapse-prone `field:(value|select(length>0))` pattern must not
+        // appear in actual jq code (it may appear in comments explaining why
+        // it's banned): when `value` is empty, jq's `select` yields `empty`,
+        // and a field whose value is `empty` collapses the ENTIRE object to
+        // no output. That is exactly the bug that silently dropped
+        // `result_kind` from successful terminal phase_result payloads (see
+        // docs/prd/8_3_MACC_Coordinator_Integrity_Recommendations.md §4.1).
+        // The fix wraps payload object literals in parens so optional fields
+        // can be merged in additively (`({...} + (if $x != "" then {...} else
+        // {} end))`), which legitimately starts with `'({` -- that pattern is
+        // correct and must not be flagged.
+        let has_malformed_pattern = EMBEDDED_PERFORMER_SH
+            .lines()
+            .filter(|line| !line.trim_start().starts_with('#'))
+            .any(|line| line.contains("select(length>0)") || line.contains("select(length > 0)"));
         assert!(
-            !EMBEDDED_PERFORMER_SH.contains("'({"),
-            "embedded performer event jq filter starts with an unmatched parenthesis"
+            !has_malformed_pattern,
+            "embedded performer script uses the collapse-prone `select(length>0)` jq pattern outside a comment"
         );
     }
 }

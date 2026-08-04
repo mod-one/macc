@@ -22,6 +22,7 @@ function task(
     currentPhase: null,
     lastError: null,
     lastErrorCode: null,
+    resultExplanation: null,
     description: `${id} description`,
     objective: `${id} objective`,
     result: null,

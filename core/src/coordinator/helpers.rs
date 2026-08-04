@@ -443,7 +443,11 @@ fn prepare_reused_worktree_base(
     Ok((true, false))
 }
 
-fn is_branch_merged_into_base(worktree_path: &Path, branch: &str, base_branch: &str) -> bool {
+pub(crate) fn is_branch_merged_into_base(
+    worktree_path: &Path,
+    branch: &str,
+    base_branch: &str,
+) -> bool {
     if branch.is_empty() || branch == base_branch {
         return true;
     }

@@ -767,6 +767,8 @@ pub(crate) struct ApiRegistryTask {
     pub last_error: Option<String>,
     /// Latest normalized task error code.
     pub last_error_code: Option<String>,
+    /// Explanation of the task completion result/error.
+    pub result_explanation: Option<String>,
     /// Human-readable task description.
     pub description: Option<String>,
     /// Task objective summary.

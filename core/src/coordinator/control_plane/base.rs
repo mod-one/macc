@@ -1131,7 +1131,7 @@ pub async fn monitor_active_jobs_native(
     max_attempts: usize,
     phase_timeout_seconds: usize,
     logger: Option<&dyn CoordinatorLog>,
-) -> Result<()> {
+) -> Result<Option<(String, String)>> {
     let cfg = CoordinatorConfigResolved::resolve(coordinator);
     ensure_performer_ipc_listener(repo_root, state, logger).await?;
     consume_runtime_events(repo_root, state, logger)?;
@@ -1194,6 +1194,7 @@ pub async fn monitor_active_jobs_native(
                         error_code: evt.error_code.clone(),
                         error_origin: evt.error_origin.clone(),
                         error_message: evt.error_message.clone(),
+                        result_explanation: evt.result_explanation.clone(),
                         auto_retry_error_codes: retry_codes.clone(),
                         auto_retry_max: retry_max,
                         backoff_base_seconds: resolve_rate_limit_backoff_base_seconds(
@@ -1241,6 +1242,59 @@ pub async fn monitor_active_jobs_native(
                     &BTreeMap::new(),
                     &registry,
                 )?;
+
+                // Coordinator Integrity Guard (see
+                // docs/prd/8_3_MACC_Coordinator_Integrity_Recommendations.md §4.3):
+                // E901 means the performer exited without persisting a valid
+                // terminal phase_result event -- a protocol/contract failure,
+                // not a routine task failure. If the worktree still holds
+                // commits that are not merged into base, continuing on to
+                // auto-retry/salvage/dispatch below risks silently losing or
+                // obscuring that work. Pause immediately instead, before any
+                // retry or worktree-reuse logic can run.
+                if evt.error_code.as_deref() == Some("E901") {
+                    let has_commits =
+                        crate::git::has_commits_ahead(&job.worktree_path, &job.base_branch);
+                    if has_commits {
+                        let branch = TaskRegistry::from_value(&registry)
+                            .ok()
+                            .and_then(|typed| typed.find_task(&evt.task_id).cloned())
+                            .and_then(|task| task.task_runtime.branch)
+                            .unwrap_or_default();
+                        let merged = crate::coordinator::helpers::is_branch_merged_into_base(
+                            &job.worktree_path,
+                            &branch,
+                            &job.base_branch,
+                        );
+                        if crate::coordinator::model::requires_integrity_pause(
+                            evt.error_code.as_deref(),
+                            has_commits,
+                            merged,
+                        ) {
+                            let reason = format!(
+                                "Task {} produced commits but terminal result was not persisted (E901); work was protected and requires operator review.",
+                                evt.task_id
+                            );
+                            let _ = append_coordinator_event_with_severity(
+                                repo_root,
+                                "coordinator_diagnostic",
+                                &evt.task_id,
+                                "dev",
+                                "needs_operator_review",
+                                &reason,
+                                "blocking",
+                            );
+                            if let Some(log) = logger {
+                                let _ = log.note(format!(
+                                    "- Integrity guard: task={} error_code=E901 has_commits_ahead=true branch_merged=false -> pausing run",
+                                    evt.task_id
+                                ));
+                            }
+                            return Ok(Some((evt.task_id.clone(), reason)));
+                        }
+                    }
+                }
+
                 let completion_event_message = format!(
                     "task {} completed status={} attempt={} detail={}",
                     evt.task_id, completion.status_label, job.attempt, evt.status_text
@@ -1497,7 +1551,7 @@ pub async fn monitor_active_jobs_native(
     while let Some(joined) = state.join_set.try_join_next() {
         let _ = joined;
     }
-    Ok(())
+    Ok(None)
 }
 
 pub fn apply_runtime_event_bus_updates(

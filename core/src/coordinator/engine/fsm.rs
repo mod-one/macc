@@ -122,6 +122,7 @@ pub struct JobCompletionInput {
     pub error_code: Option<String>,
     pub error_origin: Option<String>,
     pub error_message: Option<String>,
+    pub result_explanation: Option<String>,
     pub auto_retry_error_codes: Vec<String>,
     pub auto_retry_max: usize,
     /// Base backoff delay in seconds for E601 rate-limit retries.
@@ -215,9 +216,19 @@ pub struct CoordinatorRunController {
 #[async_trait]
 pub trait ControlPlaneBackend {
     async fn on_cycle_start(&mut self, cycle: usize) -> Result<()>;
-    async fn monitor_active_jobs(&mut self) -> Result<()>;
+    /// Returns `Some((task_id, reason))` when a completed job's failure meets
+    /// the coordinator integrity-pause condition (see
+    /// `crate::coordinator::model::requires_integrity_pause`) and must halt
+    /// the run for operator review rather than proceed to retry/dispatch.
+    async fn monitor_active_jobs(&mut self) -> Result<Option<(String, String)>>;
     async fn monitor_merge_jobs(&mut self) -> Result<Option<(String, String)>>;
     async fn on_blocked_merge(&mut self, task_id: &str, reason: &str) -> Result<()>;
+    /// Pause the run for operator review after an integrity condition is
+    /// detected (see `monitor_active_jobs`). Mirrors `on_blocked_merge`'s
+    /// wait-for-resume loop, but does not requeue the task on resume -- the
+    /// task remains in its failed/needs-review state until the operator
+    /// takes an explicit recovery action.
+    async fn on_integrity_pause(&mut self, task_id: &str, reason: &str) -> Result<()>;
     async fn advance_tasks(&mut self) -> Result<AdvanceResult>;
     async fn dispatch_ready_tasks(&mut self) -> Result<usize>;
     async fn on_cycle_end(
@@ -1203,6 +1214,7 @@ fn apply_job_completion_typed(
         is_healthy_worktree,
         now,
     );
+    task.task_runtime.result_explanation = input.result_explanation.clone();
     apply_state_transitions(task, &strategy, now)
 }
 
@@ -1402,14 +1414,18 @@ async fn run_control_plane_cycle<B: ControlPlaneBackend + ?Sized>(
 ) -> std::result::Result<ControlPlaneDecision, MaccError> {
     backend.on_cycle_start(cycle).await?;
 
-    backend.monitor_active_jobs().await?;
+    if let Some((task_id, reason)) = backend.monitor_active_jobs().await? {
+        backend.on_integrity_pause(&task_id, &reason).await?;
+    }
     if let Some((task_id, reason)) = backend.monitor_merge_jobs().await? {
         backend.on_blocked_merge(&task_id, &reason).await?;
     }
 
     let advance = backend.advance_tasks().await?;
 
-    backend.monitor_active_jobs().await?;
+    if let Some((task_id, reason)) = backend.monitor_active_jobs().await? {
+        backend.on_integrity_pause(&task_id, &reason).await?;
+    }
     if let Some((task_id, reason)) = backend
         .monitor_merge_jobs()
         .await?
@@ -1686,7 +1702,7 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
         Ok(())
     }
 
-    async fn monitor_active_jobs(&mut self) -> Result<()> {
+    async fn monitor_active_jobs(&mut self) -> Result<Option<(String, String)>> {
         crate::coordinator::control_plane::monitor_active_jobs_native(
             self.repo_root,
             self.env_cfg,
@@ -1755,6 +1771,32 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
         resume_paused_task_merge(self.repo_root, task_id)?;
+        let _ = clear_coordinator_pause_file(self.repo_root)?;
+        Ok(())
+    }
+
+    async fn on_integrity_pause(&mut self, task_id: &str, reason: &str) -> Result<()> {
+        write_coordinator_pause_file(self.repo_root, task_id, "dev", reason)?;
+        if let Some(log) = self.logger {
+            let _ = log.note(format!(
+                "- Run paused task={} phase=dev reason=integrity_guard detail={}",
+                task_id, reason
+            ));
+        }
+        loop {
+            if !coordinator_pause_file_path(self.repo_root).exists() {
+                if let Some(log) = self.logger {
+                    let _ = log.note("- Resume signal received; continuing run loop".to_string());
+                }
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        // Unlike on_blocked_merge, deliberately do NOT requeue the task here.
+        // The task remains in its failed/needs-review state -- the operator
+        // must take an explicit recovery action (retry, accept, or abandon)
+        // rather than have the coordinator silently resume dispatching work
+        // against a worktree with unresolved integrity risk.
         let _ = clear_coordinator_pause_file(self.repo_root)?;
         Ok(())
     }
@@ -2312,6 +2354,27 @@ pub async fn run_native_control_plane(
         ));
     }
 
+    // Reason for a normal (non-error, non-operator) stop. The control-plane loop
+    // returns Ok(()) both when all tasks complete and when the dispatch limit is
+    // reached; that distinction is only recorded as a `dispatch_limit_reached`
+    // event, so recover it here to persist a meaningful stop_reason for clients
+    // (TUI Watch, Web) that read the run record rather than the live process.
+    let normal_stop_reason = |sqlite: &crate::coordinator_storage::SqliteStorage| -> String {
+        use crate::coordinator_storage::CoordinatorStorage;
+        if let Ok(snapshot) = sqlite.load_snapshot() {
+            let dispatch_limited = snapshot
+                .events
+                .iter()
+                .rev()
+                .take(20)
+                .any(|e| e.event_type == "dispatch_limit_reached");
+            if dispatch_limited {
+                return "dispatch limit reached".to_string();
+            }
+        }
+        "all tasks completed".to_string()
+    };
+
     let _ = sqlite.get_active_coordinator_run().map(|run_opt| {
         if let Some(mut r) = run_opt {
             r.status = if is_clean_exit {
@@ -2326,6 +2389,10 @@ pub async fn run_native_control_plane(
                 r.stop_reason = Some(format!("{:?}", run_result));
             } else if is_clean_exit {
                 r.stop_reason = Some(final_status.clone());
+            } else {
+                // Normal completion (exit 0): persist the human-readable reason so
+                // it is not lost the way it previously was.
+                r.stop_reason = Some(normal_stop_reason(&sqlite));
             }
             let _ = sqlite.upsert_coordinator_run(&r);
         }
@@ -2407,6 +2474,7 @@ mod tests {
             error_code: None,
             error_origin: None,
             error_message: None,
+            result_explanation: None,
             auto_retry_error_codes: Vec::new(),
             auto_retry_max: 0,
             backoff_base_seconds: 30,
@@ -2811,6 +2879,7 @@ mod tests {
                 error_code: None,
                 error_origin: None,
                 error_message: None,
+                result_explanation: None,
                 auto_retry_error_codes: Vec::new(),
                 auto_retry_max: 0,
                 backoff_base_seconds: 30,
@@ -2844,6 +2913,7 @@ mod tests {
                 error_code: None,
                 error_origin: None,
                 error_message: None,
+                result_explanation: None,
                 auto_retry_error_codes: Vec::new(),
                 auto_retry_max: 0,
                 backoff_base_seconds: 30,
@@ -2883,6 +2953,7 @@ mod tests {
                 error_code: None,
                 error_origin: None,
                 error_message: None,
+                result_explanation: None,
                 auto_retry_error_codes: Vec::new(),
                 auto_retry_max: 0,
                 backoff_base_seconds: 30,
@@ -2927,6 +2998,7 @@ mod tests {
                 error_code: Some("E101".to_string()),
                 error_origin: Some("runner".to_string()),
                 error_message: Some("non-zero exit".to_string()),
+                result_explanation: None,
                 auto_retry_error_codes: Vec::new(),
                 auto_retry_max: 0,
                 backoff_base_seconds: 30,
@@ -2970,6 +3042,7 @@ mod tests {
                 error_code: Some("E201".to_string()),
                 error_origin: Some("runner".to_string()),
                 error_message: Some("auth error".to_string()),
+                result_explanation: None,
                 auto_retry_error_codes: Vec::new(),
                 auto_retry_max: 0,
                 backoff_base_seconds: 30,
@@ -3308,6 +3381,7 @@ mod tests {
                 error_code: None,
                 error_origin: None,
                 error_message: None,
+                result_explanation: None,
                 auto_retry_error_codes: Vec::new(),
                 auto_retry_max: 0,
                 backoff_base_seconds: 30,
@@ -3380,6 +3454,7 @@ mod tests {
                 error_code: None,
                 error_origin: None,
                 error_message: None,
+                result_explanation: None,
                 auto_retry_error_codes: Vec::new(),
                 auto_retry_max: 0,
                 backoff_base_seconds: 30,
@@ -3515,6 +3590,7 @@ mod tests {
             error_code: None,
             error_origin: None,
             error_message: None,
+            result_explanation: None,
             auto_retry_error_codes: Vec::new(),
             auto_retry_max: 0,
             backoff_base_seconds: 30,
@@ -3559,6 +3635,7 @@ mod tests {
                 error_code: Some("E201".to_string()),
                 error_origin: Some("runner".to_string()),
                 error_message: Some("auth error".to_string()),
+                result_explanation: None,
                 auto_retry_error_codes: Vec::new(),
                 auto_retry_max: 0,
                 backoff_base_seconds: 30,
@@ -3588,6 +3665,7 @@ mod tests {
             error_code: None,
             error_origin: None,
             error_message: None,
+            result_explanation: None,
             auto_retry_error_codes: Vec::new(),
             auto_retry_max: 0,
             backoff_base_seconds: 30,
@@ -3772,6 +3850,7 @@ mod tests {
                 error_code: None,
                 error_origin: None,
                 error_message: None,
+                result_explanation: None,
                 auto_retry_error_codes: Vec::new(),
                 auto_retry_max: 0,
                 backoff_base_seconds: 30,
@@ -3923,6 +4002,7 @@ mod tests {
                 error_code: None,
                 error_origin: None,
                 error_message: None,
+                result_explanation: None,
                 auto_retry_error_codes: Vec::new(),
                 auto_retry_max: 0,
                 backoff_base_seconds: 30,
