@@ -2331,9 +2331,8 @@ impl AppState {
                         // The error path (Failed) already keeps the TUI open via
                         // coordinator_pause_error; this is the success counterpart.
                         if post_success_action.is_none() {
-                            self.coordinator_finished_message = finished_message
-                                .as_ref()
-                                .map(|(_, msg)| msg.clone());
+                            self.coordinator_finished_message =
+                                finished_message.as_ref().map(|(_, msg)| msg.clone());
                         }
                     }
                 }

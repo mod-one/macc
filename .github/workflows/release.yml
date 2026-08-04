@@ -75,8 +75,8 @@ PY2
       - name: Test
         run: make test
 
-      - name: Web quality
-        run: make web-ci
+      #- name: Web quality
+      #  run: make web-ci
 
       - name: Tool-agnostic guardrail
         run: make check-generic

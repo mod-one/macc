@@ -1512,7 +1512,11 @@ fn read_completion_details_from_worktree_log(
                 continue;
             }
         }
-        if message.is_none() && !trimmed.is_empty() && !trimmed.starts_with('-') && !trimmed.starts_with("MACC_TASK_RESULT") {
+        if message.is_none()
+            && !trimmed.is_empty()
+            && !trimmed.starts_with('-')
+            && !trimmed.starts_with("MACC_TASK_RESULT")
+        {
             message = Some(trimmed.to_string());
         }
     }
