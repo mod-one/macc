@@ -189,6 +189,161 @@ fn conflicting_merge_leaves_the_operator_checkout_clean() {
     );
 }
 
+/// The end-of-run symptom, exercised along the real chain:
+/// merge → `apply_merge_result_in_registry` → `counts()` → loop decision.
+///
+/// With the old `precheck_clean` gate, any uncommitted file in the repo root
+/// made the merge fail without ever being attempted. `apply_merge_failure_typed`
+/// then set the task to `Blocked`, so the next cycle saw `todo=0, active=0,
+/// blocked=1` and ended the run with "finished with blocked tasks" — no active
+/// or pending tasks left, and the branch never merged.
+#[test]
+fn final_task_merges_before_the_run_completes_even_with_a_dirty_tree() {
+    use macc_core::coordinator::engine::{
+        apply_merge_result_in_registry, ControlPlaneDecision, ControlPlaneLoopConfig,
+        CoordinatorCounts, CoordinatorRunController,
+    };
+    use macc_core::coordinator::model::{Task, TaskRegistry};
+    use macc_core::coordinator::WorkflowState;
+
+    let dir = make_repo();
+    let repo = dir.path();
+    add_task_branch(repo, "task/t1", "work.txt", "work\n");
+    // The operator left an untracked file behind — `git status --porcelain`
+    // reports `??`, which the old gate treated as "dirty" and refused on.
+    std::fs::write(repo.join("notes.md"), "scratch\n").expect("write");
+
+    // The last remaining task is merge-ready.
+    let mut task = Task {
+        id: "T1".to_string(),
+        ..Default::default()
+    };
+    task.set_workflow_state(WorkflowState::Reviewing);
+    let mut registry = TaskRegistry {
+        tasks: vec![task],
+        ..Default::default()
+    }
+    .to_value()
+    .expect("registry to value");
+
+    // While the merge is in flight the task must still count as active, or the
+    // loop would complete and abandon it.
+    let (_, todo, active, _, _) = TaskRegistry::from_value(&registry).expect("typed").counts();
+    assert_eq!(
+        (todo, active),
+        (0, 1),
+        "a merge-ready task must count as active so the run cannot finish under it"
+    );
+
+    let result = merge(repo, "T1", "task/t1");
+    assert!(result.is_ok(), "merge should succeed: {result:?}");
+
+    apply_merge_result_in_registry(
+        &mut registry,
+        "T1",
+        result.is_ok(),
+        "",
+        "2026-01-01T00:00:00Z",
+    )
+    .expect("apply merge result");
+
+    let typed = TaskRegistry::from_value(&registry).expect("typed");
+    assert_eq!(
+        typed.tasks[0].workflow_state(),
+        Some(WorkflowState::Merged),
+        "the task must end merged, not blocked"
+    );
+
+    let (total, todo, active, blocked, merged) = typed.counts();
+    let mut controller = CoordinatorRunController::new(ControlPlaneLoopConfig {
+        timeout: None,
+        max_no_progress_cycles: 5,
+    });
+    let decision = controller
+        .on_cycle_counts(
+            CoordinatorCounts {
+                total,
+                todo,
+                active,
+                blocked,
+                merged,
+            },
+            None,
+        )
+        .expect("run should complete cleanly, not error with blocked tasks");
+    assert_eq!(decision, ControlPlaneDecision::Complete);
+
+    // And the work really is on the base branch.
+    assert!(
+        !git_stdout(repo, &["log", "--oneline", "main", "--", "work.txt"]).is_empty(),
+        "merged work must be reachable from the base branch"
+    );
+}
+
+/// Documents *why* a failed merge on the last task was so visible: it ends the
+/// whole run. This is the mechanism behind "the merge never happened once the
+/// run finished" — the old `precheck_clean` gate turned any dirty working tree
+/// into this outcome. The chain itself is correct and still in place; only its
+/// trigger was wrong.
+#[test]
+fn a_failed_merge_on_the_last_task_ends_the_run_with_blocked_tasks() {
+    use macc_core::coordinator::engine::{
+        apply_merge_result_in_registry, ControlPlaneLoopConfig, CoordinatorCounts,
+        CoordinatorRunController,
+    };
+    use macc_core::coordinator::model::{Task, TaskRegistry};
+    use macc_core::coordinator::WorkflowState;
+
+    let mut task = Task {
+        id: "T1".to_string(),
+        ..Default::default()
+    };
+    task.set_workflow_state(WorkflowState::Reviewing);
+    let mut registry = TaskRegistry {
+        tasks: vec![task],
+        ..Default::default()
+    }
+    .to_value()
+    .expect("registry to value");
+
+    apply_merge_result_in_registry(
+        &mut registry,
+        "T1",
+        false,
+        "failure:local_merge step=merge",
+        "2026-01-01T00:00:00Z",
+    )
+    .expect("apply merge result");
+
+    let typed = TaskRegistry::from_value(&registry).expect("typed");
+    assert_eq!(
+        typed.tasks[0].workflow_state(),
+        Some(WorkflowState::Blocked),
+        "a failed merge blocks the task"
+    );
+
+    let (total, todo, active, blocked, merged) = typed.counts();
+    assert_eq!((todo, active, blocked), (0, 0, 1));
+
+    let mut controller = CoordinatorRunController::new(ControlPlaneLoopConfig {
+        timeout: None,
+        max_no_progress_cycles: 5,
+    });
+    let err = controller
+        .on_cycle_counts(
+            CoordinatorCounts {
+                total,
+                todo,
+                active,
+                blocked,
+                merged,
+            },
+            None,
+        )
+        .expect_err("the run must end, not spin");
+    assert!(err.to_string().contains("blocked tasks"), "got: {err}");
+}
+
 #[test]
 fn integration_worktree_is_invisible_to_the_operators_status() {
     let dir = make_repo();
