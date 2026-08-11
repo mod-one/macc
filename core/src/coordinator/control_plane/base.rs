@@ -2581,6 +2581,58 @@ mod tests {
     }
 
     #[test]
+    fn merge_gate_check_salvages_work_while_the_operator_has_uncommitted_changes() {
+        // The gate used to check branches out in the repo root, so any dirty
+        // working tree turned every salvageable task into a conflict.
+        let repo = make_test_repo();
+        run_git(&repo, &["checkout", "-b", "task/task-dirty-001"]);
+        fs::write(repo.join("task.txt"), "task work\n").expect("write task file");
+        run_git(&repo, &["add", "task.txt"]);
+        run_git(&repo, &["commit", "-m", "task commit"]);
+        run_git(&repo, &["checkout", "main"]);
+        // Operator leaves WIP on an unrelated file.
+        fs::write(repo.join("base.txt"), "operator wip\n").expect("write wip");
+
+        assert_eq!(
+            merge_gate_check("TASK-DIRTY-001", "main", &repo),
+            MergeGateResult::Merged
+        );
+        assert_eq!(
+            fs::read_to_string(repo.join("base.txt")).expect("read"),
+            "operator wip\n",
+            "operator WIP must be preserved by the merge gate"
+        );
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn merge_gate_check_does_not_move_the_operators_branch() {
+        let repo = make_test_repo();
+        run_git(&repo, &["checkout", "-b", "task/task-branch-001"]);
+        fs::write(repo.join("task.txt"), "task work\n").expect("write task file");
+        run_git(&repo, &["add", "task.txt"]);
+        run_git(&repo, &["commit", "-m", "task commit"]);
+        run_git(&repo, &["checkout", "main"]);
+        run_git(&repo, &["checkout", "-b", "operator/wip"]);
+
+        assert_eq!(
+            merge_gate_check("TASK-BRANCH-001", "main", &repo),
+            MergeGateResult::Merged
+        );
+        let head = Command::new("git")
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .current_dir(&repo)
+            .output()
+            .expect("git rev-parse");
+        assert_eq!(
+            String::from_utf8_lossy(&head.stdout).trim(),
+            "operator/wip",
+            "merge gate must not move the operator's HEAD"
+        );
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
     fn merge_gate_check_returns_conflict_on_conflicting_retry_branch() {
         let repo = make_test_repo();
         run_git(&repo, &["checkout", "-b", "task/task-conflict-001"]);

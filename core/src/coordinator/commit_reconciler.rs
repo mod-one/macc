@@ -8,6 +8,7 @@
 //! This module is pure business logic — no CLI, no UI.
 
 use crate::commit_message;
+use crate::coordinator::integration::{IntegrationWorktree, PublishOutcome};
 use crate::coordinator::model::TaskRegistry;
 use crate::coordinator::WorkflowState;
 use crate::git;
@@ -325,16 +326,12 @@ fn is_unmerged_branch_sync_state(state: &str) -> bool {
         || normalized.contains("error")
 }
 
-fn merge_branch_into_base(repo_root: &Path, branch: &str) -> Result<std::process::Output> {
+fn merge_branch_into_base(merge_dir: &Path, branch: &str) -> Result<std::process::Output> {
     git::run_git_output_mapped(
-        repo_root,
+        merge_dir,
         &["merge", "--no-ff", "--no-edit", branch],
         "merge branch during sync reconciliation",
     )
-}
-
-fn abort_merge(repo_root: &Path) {
-    let _ = git::run_git_output_mapped(repo_root, &["merge", "--abort"], "abort conflicted merge");
 }
 
 pub fn sync_unmerged_branches(
@@ -351,16 +348,11 @@ pub fn sync_unmerged_branches(
     branches.sort();
     branches.dedup();
 
-    let original_branch = git::current_branch_name(repo_root).unwrap_or_default();
-    if original_branch != base_branch {
-        let ok = git::checkout(repo_root, base_branch, false)?;
-        if !ok {
-            return Err(MaccError::Validation(format!(
-                "failed to checkout base branch '{}' before sync_unmerged_branches",
-                base_branch
-            )));
-        }
-    }
+    // Integrate in the coordinator's private worktree rather than checking the
+    // base branch out here: `macc coordinator sync` must not move the
+    // operator's HEAD or merge into their working tree.
+    let integration = IntegrationWorktree::acquire(repo_root, base_branch)?;
+    let merge_dir = integration.path().to_path_buf();
 
     let mut out = Vec::new();
     for branch in &branches {
@@ -397,8 +389,13 @@ pub fn sync_unmerged_branches(
             continue;
         }
 
-        let merge_output = merge_branch_into_base(repo_root, branch)?;
-        if merge_output.status.success() {
+        let merge_output = merge_branch_into_base(&merge_dir, branch)?;
+        let published = merge_output.status.success()
+            && matches!(
+                integration.publish(),
+                Ok(PublishOutcome::Published { .. }) | Ok(PublishOutcome::UpToDate)
+            );
+        if published {
             let report = ReconcileReport {
                 reconciled: eligible_task_ids
                     .iter()
@@ -433,24 +430,28 @@ pub fn sync_unmerged_branches(
                 detail: None,
             });
         } else {
-            abort_merge(repo_root);
+            let detail = if merge_output.status.success() {
+                // The merge itself worked but could not reach the base branch.
+                "merge succeeded but could not be published to the base branch \
+                 (it may be checked out with conflicting uncommitted changes)"
+                    .to_string()
+            } else {
+                String::from_utf8_lossy(&merge_output.stderr)
+                    .trim()
+                    .to_string()
+            };
             out.push(SyncBranchResult {
                 branch: branch.clone(),
                 discovered_task_ids,
                 merged_task_ids: Vec::new(),
                 status: SyncBranchStatus::MergeFailed,
-                detail: Some(
-                    String::from_utf8_lossy(&merge_output.stderr)
-                        .trim()
-                        .to_string(),
-                ),
+                detail: Some(detail),
             });
         }
+        // Reset between candidates so a failed merge cannot leak into the next.
+        integration.reset()?;
     }
 
-    if !original_branch.is_empty() && original_branch != base_branch {
-        let _ = git::checkout(repo_root, &original_branch, false);
-    }
     Ok(out)
 }
 
@@ -507,6 +508,15 @@ mod tests {
             args,
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    fn git_stdout(repo: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("run git command");
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 
     fn create_commit(repo: &Path, file: &str, content: &str, message: &str) {
@@ -710,6 +720,40 @@ mod tests {
         assert_eq!(results[0].status, SyncBranchStatus::Merged);
         assert_eq!(results[0].merged_task_ids, vec!["L4-SYNC-001".to_string()]);
         assert_eq!(registry.tasks[0].state, "merged");
+    }
+
+    #[test]
+    fn sync_unmerged_branches_leaves_the_operator_checkout_alone() {
+        // `sync` used to check out the base branch in the repo root and merge
+        // there, moving the operator's HEAD and requiring a clean tree.
+        let repo = make_test_repo();
+        run_git(&repo, &["checkout", "-b", "macc/worker-03"]);
+        create_commit(
+            &repo,
+            "feature.txt",
+            "feature\n",
+            "feat: L4-SYNC-003\n\n[macc:task L4-SYNC-003]",
+        );
+        run_git(&repo, &["checkout", "main"]);
+        run_git(&repo, &["checkout", "-b", "operator/wip"]);
+        std::fs::write(repo.join("scratch.txt"), "uncommitted\n").expect("write wip");
+
+        let mut registry = make_registry(vec![make_task("L4-SYNC-003", "todo")]);
+        let results = sync_unmerged_branches(&mut registry, &repo, "main").expect("sync branches");
+
+        assert_eq!(results[0].status, SyncBranchStatus::Merged);
+        assert_eq!(
+            git_stdout(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]),
+            "operator/wip",
+            "sync must not move the operator's HEAD"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("scratch.txt")).expect("read"),
+            "uncommitted\n",
+            "sync must not disturb uncommitted work"
+        );
+        // The base branch advanced even though it was never checked out.
+        assert!(!git_stdout(&repo, &["log", "--oneline", "main", "--", "feature.txt"]).is_empty());
     }
 
     #[test]

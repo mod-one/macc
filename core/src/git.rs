@@ -1,5 +1,5 @@
 use crate::{MaccError, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Output};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -995,6 +995,163 @@ pub fn create_tracking_branch(repo_root: &Path, branch: &str, remote_ref: &str) 
         });
     }
     Ok(())
+}
+
+/// Resolve `git rev-parse --git-common-dir` to an absolute path.
+///
+/// The *common* dir is shared by every worktree of a repository (unlike
+/// `--git-dir`, which points at the per-worktree directory). Anything stored
+/// under it is invisible to `git status` in every checkout, which makes it the
+/// right home for coordinator scratch state that must never dirty a working
+/// tree.
+pub fn git_common_dir(repo_or_worktree: &Path) -> Result<PathBuf> {
+    let output = run_git_output(
+        repo_or_worktree,
+        &["rev-parse", "--git-common-dir"],
+        "resolve git common dir",
+    )?;
+    if !output.status.success() {
+        return Err(MaccError::Git {
+            operation: "git_common_dir".to_string(),
+            message: format!(
+                "Failed to resolve git common dir in {}: {}",
+                repo_or_worktree.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        });
+    }
+    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if raw.is_empty() {
+        return Err(MaccError::Git {
+            operation: "git_common_dir".to_string(),
+            message: format!(
+                "git returned an empty common dir for {}",
+                repo_or_worktree.display()
+            ),
+        });
+    }
+    let path = PathBuf::from(&raw);
+    Ok(if path.is_absolute() {
+        path
+    } else {
+        repo_or_worktree.join(path)
+    })
+}
+
+/// Add a worktree at `path` with a detached HEAD pointing at `start_point`.
+///
+/// Detaching matters: git refuses to check out the same branch in two
+/// worktrees, so a detached worktree can be created at the tip of the base
+/// branch even while the operator has that branch checked out.
+pub fn worktree_add_detached(repo_root: &Path, path: &Path, start_point: &str) -> Result<()> {
+    let output = run_git_output(
+        repo_root,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            path.to_string_lossy().as_ref(),
+            start_point,
+        ],
+        "run git worktree add --detach",
+    )?;
+    if !output.status.success() {
+        return Err(MaccError::Git {
+            operation: "worktree_add_detached".to_string(),
+            message: format!(
+                "git worktree add --detach {} {} failed: {}",
+                path.display(),
+                start_point,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Force the worktree at `path` onto a detached HEAD at `revision`, discarding
+/// any working-tree or index state left behind by an earlier operation.
+pub fn checkout_detach_force(worktree: &Path, revision: &str) -> Result<()> {
+    let output = run_git_output(
+        worktree,
+        &["checkout", "--force", "--detach", revision],
+        "detach worktree head",
+    )?;
+    if !output.status.success() {
+        return Err(MaccError::Git {
+            operation: "checkout_detach_force".to_string(),
+            message: format!(
+                "git checkout --force --detach {} failed in {}: {}",
+                revision,
+                worktree.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Abort an in-progress merge, ignoring the "no merge to abort" case.
+pub fn merge_abort(repo_or_worktree: &Path) -> Result<()> {
+    let _ = run_git_output(repo_or_worktree, &["merge", "--abort"], "abort merge")?;
+    Ok(())
+}
+
+/// Remove untracked files and directories (but not ignored ones).
+pub fn clean_untracked(worktree: &Path) -> Result<()> {
+    let _ = run_git_output(worktree, &["clean", "-fd"], "clean untracked files")?;
+    Ok(())
+}
+
+/// Compare-and-swap a branch ref: set `refs/heads/<branch>` to `new_sha` only
+/// if it currently equals `expected_sha`.
+///
+/// Returns `false` when git rejects the update because the ref moved under us,
+/// which is the signal that another actor advanced the branch concurrently.
+pub fn update_branch_ref_checked(
+    repo_root: &Path,
+    branch: &str,
+    new_sha: &str,
+    expected_sha: &str,
+) -> Result<bool> {
+    let ref_name = format!("refs/heads/{}", branch);
+    let output = run_git_output(
+        repo_root,
+        &["update-ref", &ref_name, new_sha, expected_sha],
+        "compare-and-swap branch ref",
+    )?;
+    Ok(output.status.success())
+}
+
+/// List commits reachable from `to_ref` but not from `from_ref`.
+///
+/// Unlike [`commits_ahead_of_base`] this names both endpoints explicitly, so it
+/// answers "is this branch ahead of base?" without checking anything out.
+pub fn commits_between(
+    repo_or_worktree: &Path,
+    from_ref: &str,
+    to_ref: &str,
+) -> Result<Vec<CommitInfo>> {
+    let range = format!("{from_ref}..{to_ref}");
+    let output = run_git_output(
+        repo_or_worktree,
+        &["log", "--format=%H%x1f%s%x1f%aI", &range],
+        "read commits between refs",
+    )?;
+    if !output.status.success() {
+        return Err(MaccError::Git {
+            operation: "log".to_string(),
+            message: format!(
+                "Failed to read commits in range {} in {}: {}",
+                range,
+                repo_or_worktree.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        });
+    }
+    Ok(parse_commit_info_records(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
 }
 
 /// Return `true` when the repository is a bare repository.

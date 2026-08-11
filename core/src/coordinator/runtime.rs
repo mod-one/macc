@@ -1,4 +1,5 @@
 use crate::coordinator::engine::{MergeTaskContext, ReviewVerdict};
+use crate::coordinator::integration::{IntegrationWorktree, PublishOutcome};
 use crate::coordinator::model::Task;
 use crate::coordinator::rate_limit::ToolThrottleRegistry;
 use crate::coordinator::{CoordinatorEventRecord, PerformerCompletionKind};
@@ -1747,9 +1748,16 @@ enum HookRunResult {
     Completed { output: String, timed_out: bool },
 }
 
+/// Run the AI merge-fix hook.
+///
+/// `repo_root` is used for read-only history queries and for resolving the
+/// hook's own tooling; `merge_dir` is the integration worktree that actually
+/// holds the conflicted merge, and is where the hook (and the AI performer it
+/// launches) must do its work.
 #[allow(clippy::too_many_arguments)]
 fn run_merge_hook_with_timeout(
     repo_root: &Path,
+    merge_dir: &Path,
     hook: &Path,
     task_id: &str,
     branch: &str,
@@ -1863,9 +1871,11 @@ fn run_merge_hook_with_timeout(
     };
 
     let mut child = Command::new(hook)
-        .current_dir(repo_root)
+        .current_dir(merge_dir)
         .arg("--repo")
         .arg(repo_root)
+        .arg("--merge-dir")
+        .arg(merge_dir)
         .arg("--task-id")
         .arg(task_id)
         .arg("--branch")
@@ -1945,6 +1955,41 @@ fn run_merge_hook_with_timeout(
     })
 }
 
+/// Publish a completed integration and translate the outcome into the
+/// `failure:local_merge` vocabulary the coordinator already reports on.
+fn finish_integration(
+    integration: &IntegrationWorktree,
+    branch: &str,
+    base: &str,
+    suggestion: &str,
+) -> Result<std::result::Result<(), String>> {
+    match integration.publish() {
+        Ok(PublishOutcome::Published { .. }) | Ok(PublishOutcome::UpToDate) => Ok(Ok(())),
+        Ok(outcome) => {
+            let detail = outcome
+                .failure_detail()
+                .unwrap_or_else(|| "step=publish".to_string());
+            // A blocked publish is the one failure an operator can act on
+            // directly, so say what to do instead of the generic merge hint.
+            let advice = match &outcome {
+                PublishOutcome::BlockedByCheckout { worktree, .. } => format!(
+                    "commit or stash your changes in {} (the merge is ready and will be applied on the next attempt)",
+                    worktree.display()
+                ),
+                _ => suggestion.to_string(),
+            };
+            Ok(Err(format!(
+                "failure:local_merge {} branch={} base={} suggestion=\"{}\"",
+                detail, branch, base, advice
+            )))
+        }
+        Err(err) => Ok(Err(format!(
+            "failure:local_merge step=publish branch={} base={} error=\"{}\" suggestion=\"{}\"",
+            branch, base, err, suggestion
+        ))),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn merge_task_with_policy_native<FE>(
     repo_root: &Path,
@@ -1980,22 +2025,27 @@ where
         )));
     }
 
-    if !git::status_porcelain(repo_root)?.trim().is_empty() {
-        return Ok(Err(format!(
-            "failure:local_merge step=precheck_clean branch={} base={} suggestion=\"{}\"",
-            branch, base, suggestion
-        )));
-    }
+    // Integration happens in a private worktree, never in the operator's
+    // checkout. See `coordinator::integration` for why.
+    let integration = match IntegrationWorktree::acquire(repo_root, base) {
+        Ok(worktree) => worktree,
+        Err(err) => {
+            return Ok(Err(format!(
+                "failure:local_merge step=integration_worktree branch={} base={} error=\"{}\" suggestion=\"{}\"",
+                branch, base, err, suggestion
+            )));
+        }
+    };
+    let merge_dir = integration.path().to_path_buf();
 
-    let _ = git::checkout(repo_root, base, false);
     let merge_msg = crate::commit_message::merge_commit(task_id).format();
     let merge = git::run_git_output_mapped(
-        repo_root,
+        &merge_dir,
         &["merge", "--no-ff", "-m", &merge_msg, branch],
         "run local merge",
     )?;
     if merge.status.success() {
-        return Ok(Ok(()));
+        return finish_integration(&integration, branch, base, &suggestion);
     }
 
     let merge_output = format!(
@@ -2004,7 +2054,7 @@ where
         String::from_utf8_lossy(&merge.stderr)
     );
     let conflicts = git::run_git_output_mapped(
-        repo_root,
+        &merge_dir,
         &["diff", "--name-only", "--diff-filter=U"],
         "list merge conflict files",
     )
@@ -2030,6 +2080,7 @@ where
         );
         let hook_result = run_merge_hook_with_timeout(
             repo_root,
+            &merge_dir,
             &hook,
             task_id,
             branch,
@@ -2070,24 +2121,21 @@ where
             }
         }
         let unresolved = git::run_git_output_mapped(
-            repo_root,
+            &merge_dir,
             &["diff", "--name-only", "--diff-filter=U"],
             "list unresolved merge conflict files",
         )
         .ok()
         .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
         .unwrap_or(true);
-        let in_merge = git::rev_parse_verify(repo_root, "MERGE_HEAD").unwrap_or(false);
-        if !unresolved && !in_merge {
-            return Ok(Ok(()));
+        if !unresolved && !integration.merge_in_progress() {
+            return finish_integration(&integration, branch, base, &suggestion);
         }
     }
 
-    let in_merge = git::rev_parse_verify(repo_root, "MERGE_HEAD").unwrap_or(false);
-    if in_merge {
-        let _ =
-            git::run_git_output_mapped(repo_root, &["merge", "--abort"], "abort conflicted merge");
-    }
+    // Leave the integration worktree clean for the next merge. The operator's
+    // checkout was never touched, so there is nothing to restore there.
+    let _ = integration.reset();
 
     let report_file = log_dir.join(format!(
         "merge-fail-{}-{}.md",
@@ -2095,11 +2143,12 @@ where
         chrono::Utc::now().format("%Y%m%dT%H%M%SZ")
     ));
     let report = format!(
-        "# Local merge failure report\n\n- Task: {}\n- Branch: {}\n- Base: {}\n- UTC: {}\n\n## Conflicts\n\n{}\n\n## Suggested manual command\n\n`cd \"{}\" && {}`\n\n## Merge stdout/stderr\n\n```text\n{}\n```\n\n## Merge-fix hook output\n\n```text\n{}\n```\n",
+        "# Local merge failure report\n\n- Task: {}\n- Branch: {}\n- Base: {}\n- UTC: {}\n- Integration worktree: {}\n\nThe merge was attempted in the integration worktree above; your own checkout\nwas not modified.\n\n## Conflicts\n\n{}\n\n## Suggested manual command\n\n`cd \"{}\" && {}`\n\n## Merge stdout/stderr\n\n```text\n{}\n```\n\n## Merge-fix hook output\n\n```text\n{}\n```\n",
         task_id,
         branch,
         base,
         chrono::Utc::now().to_rfc3339(),
+        merge_dir.display(),
         if conflicts.is_empty() { "none" } else { &conflicts },
         repo_root.display(),
         suggestion,

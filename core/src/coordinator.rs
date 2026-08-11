@@ -9,6 +9,7 @@ pub mod control_plane;
 pub mod engine;
 pub mod error_normalizer;
 pub mod helpers;
+pub mod integration;
 pub mod ipc;
 pub mod logs;
 pub mod managed_command_registry;

@@ -5,6 +5,7 @@ usage() {
   cat <<'EOF'
 Usage:
   ai-merge-fix.sh --repo <path> --task-id <id> --branch <branch> --base-branch <branch>
+    [--merge-dir <path>]
     [--failure-step <step>] [--failure-reason <text>] [--conflicts <csv>]
     [--report-file <path>]
     --tool <tool_id> --worktree-path <path>
@@ -18,6 +19,10 @@ EOF
 }
 
 REPO_DIR=""
+# Worktree holding the conflicted merge. The coordinator integrates in a private
+# worktree so the operator's checkout is never touched, and passes it here.
+# Defaults to REPO_DIR for backward compatibility with older callers.
+MERGE_DIR=""
 TASK_ID=""
 BRANCH=""
 BASE_BRANCH=""
@@ -42,6 +47,7 @@ CONFLICT_DIFF=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --repo) REPO_DIR="$2"; shift 2 ;;
+    --merge-dir) MERGE_DIR="$2"; shift 2 ;;
     --task-id) TASK_ID="$2"; shift 2 ;;
     --branch) BRANCH="$2"; shift 2 ;;
     --base-branch) BASE_BRANCH="$2"; shift 2 ;;
@@ -74,6 +80,12 @@ fi
 command -v jq >/dev/null 2>&1 || { echo "Error: jq is required" >&2; exit 1; }
 
 REPO_DIR="$(cd "$REPO_DIR" && pwd -P)"
+MERGE_DIR="${MERGE_DIR:-$REPO_DIR}"
+if [[ ! -d "$MERGE_DIR" ]]; then
+  echo "Error: merge dir does not exist: $MERGE_DIR" >&2
+  exit 1
+fi
+MERGE_DIR="$(cd "$MERGE_DIR" && pwd -P)"
 
 # ---------------------------------------------------------------------------
 # Resolve tool and runner
@@ -124,10 +136,9 @@ fi
 FAILURE_OUTPUT="${MACC_MERGE_FAILURE_OUTPUT:-}"
 SUGGESTION="${MACC_MERGE_SUGGESTION:-git checkout ${BASE_BRANCH} && git merge ${BRANCH}}"
 
-current_branch="$(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-status_short="$(git -C "$REPO_DIR" status --short 2>&1 || true)"
+status_short="$(git -C "$MERGE_DIR" status --short 2>&1 || true)"
 in_merge_state="no"
-if git -C "$REPO_DIR" rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
+if git -C "$MERGE_DIR" rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
   in_merge_state="yes"
 fi
 report_snippet=""
@@ -155,15 +166,19 @@ The feature branch implements the following task:
 ## Merge context
 
 - Repository: ${REPO_DIR}
+- Working directory (integration worktree): ${MERGE_DIR}
 - Base branch (merge target): ${BASE_BRANCH}
 - Feature branch (to merge): ${BRANCH}
 - Merge-base commit: ${MERGE_BASE_SHA:-unknown}
 - Failure step: ${FAILURE_STEP}
 - Failure reason: ${FAILURE_REASON}
 - Conflict files: ${FAILURE_CONFLICTS:-none}
-- Currently checked-out branch: ${current_branch:-unknown}
 - Merge in progress (MERGE_HEAD): ${in_merge_state}
-- Suggested command: ${SUGGESTION}
+
+You are working inside a dedicated integration worktree with a DETACHED HEAD at
+the tip of '${BASE_BRANCH}'. This is not the operator's checkout. Do not run
+\`git checkout\`, \`git switch\`, or \`git branch\` — the coordinator publishes
+your resulting commit to '${BASE_BRANCH}' itself once the merge is complete.
 
 ## Development progress on the base branch since fork
 
@@ -223,8 +238,8 @@ ${report_snippet}
 1) Work ONLY on the merge of branch '${BRANCH}' into '${BASE_BRANCH}'.
 2) Do NOT edit unrelated files. Do NOT run formatter/linter outside files
    touched by the merge.
-3) If the merge is not already in progress, start it:
-   git checkout ${BASE_BRANCH}
+3) If the merge is not already in progress (see MERGE_HEAD above), start it
+   from where you are — the HEAD is already at the '${BASE_BRANCH}' tip:
    git merge --no-ff ${BRANCH}
 4) For each conflicting file, use the per-file diffs above to understand
    what EACH side intended. Keep both sides' changes — the base branch
@@ -245,7 +260,7 @@ set +e
   --prompt-file "$prompt_file" \
   --tool-json "$tool_json" \
   --repo "$REPO_DIR" \
-  --worktree "$REPO_DIR" \
+  --worktree "$MERGE_DIR" \
   --task-id "$TASK_ID" \
   --attempt 1 \
   --max-attempts 1
