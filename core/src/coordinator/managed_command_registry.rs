@@ -1,3 +1,4 @@
+use crate::fs_lock::AdvisoryLock;
 use crate::{MaccError, ProjectPaths, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -5,12 +6,12 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::thread;
 use std::time::Duration;
 
 const STORE_RELATIVE_PATH: &str = ".macc/state/managed_commands.json";
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(10);
-const LOCK_MAX_ATTEMPTS: usize = 200;
+/// The guarded section is a small JSON read-modify-write plus a PID sweep.
+const LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ManagedCommandRecord {
@@ -152,7 +153,7 @@ impl ManagedCommandStore {
     where
         F: FnOnce(&mut Self) -> Result<T>,
     {
-        let _guard = StoreLockGuard::acquire(repo_root)?;
+        let _guard = acquire_store_lock(repo_root)?;
         let mut store = Self::load_raw(repo_root)?;
         let evicted = store.evict_dead_pids();
         let output = action(&mut store)?;
@@ -279,54 +280,18 @@ fn lock_path(repo_root: &Path) -> PathBuf {
     repo_root.join(".macc/state/managed_commands.json.lock")
 }
 
-struct StoreLockGuard {
-    path: PathBuf,
-}
-
-impl StoreLockGuard {
-    fn acquire(repo_root: &Path) -> Result<Self> {
-        let path = lock_path(repo_root);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| MaccError::Io {
-                path: parent.to_string_lossy().into(),
-                action: "create managed command lock parent directory".into(),
-                source: e,
-            })?;
-        }
-
-        for _ in 0..LOCK_MAX_ATTEMPTS {
-            match fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-            {
-                Ok(_) => return Ok(Self { path }),
-                Err(e) if e.kind() == ErrorKind::AlreadyExists => thread::sleep(LOCK_RETRY_DELAY),
-                Err(e) => {
-                    return Err(MaccError::Io {
-                        path: path.to_string_lossy().into(),
-                        action: "acquire managed command store lock".into(),
-                        source: e,
-                    });
-                }
-            }
-        }
-
-        Err(MaccError::Io {
-            path: path.to_string_lossy().into(),
-            action: "acquire managed command store lock timeout".into(),
-            source: std::io::Error::new(
-                ErrorKind::TimedOut,
-                "timed out waiting for managed command store lock",
-            ),
-        })
-    }
-}
-
-impl Drop for StoreLockGuard {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
+/// Serialises the read-modify-write cycle in `load_and_reconcile` across
+/// processes.
+///
+/// Backed by [`AdvisoryLock`], so a `macc` process killed while holding it
+/// cannot wedge the registry permanently — see `crate::fs_lock`.
+fn acquire_store_lock(repo_root: &Path) -> Result<AdvisoryLock> {
+    AdvisoryLock::acquire_with_retry(
+        &lock_path(repo_root),
+        LOCK_TIMEOUT,
+        LOCK_RETRY_DELAY,
+        "managed command store",
+    )
 }
 
 fn pid_is_alive(pid: i32) -> bool {
@@ -354,6 +319,24 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use std::thread;
     use tempfile::TempDir;
+
+    /// Same regression as the ownership store: a lock file left behind by a
+    /// killed process must not permanently block the registry.
+    #[test]
+    fn a_leftover_lock_file_does_not_wedge_the_registry() {
+        let repo_root = temp_repo_root("stale-lock");
+        let lock = super::lock_path(repo_root.path());
+        std::fs::create_dir_all(lock.parent().expect("parent")).expect("create state dir");
+        std::fs::write(&lock, b"").expect("write leftover lock file");
+
+        let started = std::time::Instant::now();
+        ManagedCommandStore::load(repo_root.path())
+            .expect("a leftover lock file must never block the managed command store");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "acquisition should be immediate, not stall on the retry budget"
+        );
+    }
 
     #[test]
     fn upsert_deduplicates_by_project_root_and_kind() {

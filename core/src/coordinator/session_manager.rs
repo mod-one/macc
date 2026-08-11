@@ -1,3 +1,4 @@
+use crate::fs_lock::AdvisoryLock;
 use crate::{MaccError, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -30,30 +31,31 @@ fn persist_sessions_file(path: &Path, value: &Value) -> Result<()> {
     Ok(())
 }
 
-fn acquire_lock(lock_dir: &PathBuf) -> Result<()> {
-    for _ in 0..80 {
-        match fs::create_dir(lock_dir) {
-            Ok(()) => return Ok(()),
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            Err(err) => {
-                return Err(MaccError::Io {
-                    path: lock_dir.to_string_lossy().into(),
-                    action: "acquire tool session lock".into(),
-                    source: err,
-                });
-            }
-        }
-    }
-    Err(MaccError::Validation(format!(
-        "Timed out acquiring tool session lock '{}'",
-        lock_dir.display()
-    )))
-}
+/// How long to wait for another process to release the tool-sessions lock.
+const SESSION_LOCK_TIMEOUT: Duration = Duration::from_secs(8);
+/// Delay between acquisition attempts.
+const SESSION_LOCK_RETRY_DELAY: Duration = Duration::from_millis(100);
 
-fn release_lock(lock_dir: &PathBuf) {
-    let _ = fs::remove_dir(lock_dir);
+/// Guard concurrent access to `tool-sessions.json`.
+///
+/// Returns an RAII guard, so the lock is released on every exit path — earlier
+/// revisions released it by hand and could leak it on an early return.
+///
+/// Older builds locked by `mkdir`-ing a *directory* at this same path and
+/// removing it afterwards, which deadlocked permanently if the holder was
+/// killed. Any leftover directory here can only be such a remnant (the old
+/// scheme never left one behind while running), so it is removed before
+/// locking — otherwise opening the path as a file would fail forever.
+fn acquire_session_lock(lock_path: &Path) -> Result<AdvisoryLock> {
+    if lock_path.is_dir() {
+        let _ = fs::remove_dir_all(lock_path);
+    }
+    AdvisoryLock::acquire_with_retry(
+        lock_path,
+        SESSION_LOCK_TIMEOUT,
+        SESSION_LOCK_RETRY_DELAY,
+        "tool session store",
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -123,17 +125,15 @@ pub fn save_sessions(repo_root: &Path, name: Option<&str>) -> Result<SavedSessio
         ));
     }
 
-    let lock_dir = sessions_path.with_extension("json.lock");
-    acquire_lock(&lock_dir)?;
-    let raw = fs::read_to_string(&sessions_path).map_err(|e| {
-        release_lock(&lock_dir);
-        MaccError::Io {
+    let lock_path = sessions_path.with_extension("json.lock");
+    let raw = {
+        let _guard = acquire_session_lock(&lock_path)?;
+        fs::read_to_string(&sessions_path).map_err(|e| MaccError::Io {
             path: sessions_path.to_string_lossy().into(),
             action: "read tool sessions for save".into(),
             source: e,
-        }
-    })?;
-    release_lock(&lock_dir);
+        })?
+    };
 
     let root: Value = serde_json::from_str(&raw).map_err(|e| {
         MaccError::Validation(format!(
@@ -258,8 +258,8 @@ pub fn restore_sessions(repo_root: &Path, name: &str, dry_run: bool) -> Result<S
     }
 
     let sessions_path = repo_root.join(TOOL_SESSIONS_REL_PATH);
-    let lock_dir = sessions_path.with_extension("json.lock");
-    acquire_lock(&lock_dir)?;
+    let lock_path = sessions_path.with_extension("json.lock");
+    let _guard = acquire_session_lock(&lock_path)?;
 
     let result = (|| {
         // Load or initialize current sessions file
@@ -364,7 +364,6 @@ pub fn restore_sessions(repo_root: &Path, name: &str, dry_run: bool) -> Result<S
         Ok(meta)
     })();
 
-    release_lock(&lock_dir);
     result
 }
 
@@ -436,8 +435,8 @@ pub fn reset_stale_active_sessions(repo_root: &Path, lease_ttl_seconds: u64) -> 
     if !sessions_path.exists() {
         return Ok(0);
     }
-    let lock_dir = sessions_path.with_extension("json.lock");
-    acquire_lock(&lock_dir)?;
+    let lock_path = sessions_path.with_extension("json.lock");
+    let _guard = acquire_session_lock(&lock_path)?;
     let result = (|| {
         let raw = fs::read_to_string(&sessions_path).map_err(|e| MaccError::Io {
             path: sessions_path.to_string_lossy().into(),
@@ -504,7 +503,6 @@ pub fn reset_stale_active_sessions(repo_root: &Path, lease_ttl_seconds: u64) -> 
         }
         Ok(reset_count)
     })();
-    release_lock(&lock_dir);
     result
 }
 
@@ -529,6 +527,51 @@ pub fn delete_saved_session(repo_root: &Path, name: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A killed holder used to leave the mkdir-based lock directory behind,
+    /// deadlocking every later session operation after an 8-second stall.
+    /// Upgrading must reclaim that directory rather than fail on it forever.
+    #[test]
+    fn a_leftover_lock_directory_from_the_old_scheme_is_reclaimed() {
+        let root = temp_dir("session-stale-lock");
+        let sessions_path = root.join(TOOL_SESSIONS_REL_PATH);
+        std::fs::create_dir_all(sessions_path.parent().expect("parent")).expect("create dirs");
+        let lock_path = sessions_path.with_extension("json.lock");
+        std::fs::create_dir(&lock_path).expect("create leftover lock directory");
+
+        let started = std::time::Instant::now();
+        let guard = acquire_session_lock(&lock_path)
+            .expect("a leftover lock directory must not block acquisition");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "acquisition should be immediate, not stall on the retry budget"
+        );
+        assert!(
+            lock_path.is_file(),
+            "the lock should now be a regular file, not a directory"
+        );
+        drop(guard);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn session_lock_is_released_on_every_exit_path() {
+        let root = temp_dir("session-lock-raii");
+        let sessions_path = root.join(TOOL_SESSIONS_REL_PATH);
+        std::fs::create_dir_all(sessions_path.parent().expect("parent")).expect("create dirs");
+        let lock_path = sessions_path.with_extension("json.lock");
+
+        // An early return inside a guarded section must still free the lock.
+        let failed: Result<()> = (|| {
+            let _guard = acquire_session_lock(&lock_path)?;
+            Err(MaccError::Validation("simulated early return".into()))
+        })();
+        assert!(failed.is_err());
+
+        acquire_session_lock(&lock_path)
+            .expect("the lock must be free after a guarded section returns early");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     fn temp_dir(prefix: &str) -> PathBuf {
         let id = format!(

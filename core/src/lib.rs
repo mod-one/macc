@@ -8,6 +8,7 @@ pub mod coordinator_storage;
 pub mod doctor;
 pub mod domain;
 pub mod engine;
+pub mod fs_lock;
 pub mod git;
 pub use config::migrate;
 pub mod mcp_json;

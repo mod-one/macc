@@ -254,11 +254,17 @@ impl CoordinatorPidGuard {
             .join(".macc")
             .join("state")
             .join("coordinator.pid");
-        let tmp_path = path.with_extension("pid.tmp");
         let pid = std::process::id().to_string();
+        // Per-process temp name, created with truncate rather than `create_new`:
+        // a coordinator killed between create and rename used to leave a
+        // leftover temp file that made every later start fail with "File
+        // exists". Scoping the name to our pid also keeps concurrent starts from
+        // colliding on a shared temp path.
+        let tmp_path = path.with_extension(format!("pid.{}.tmp", pid));
 
         let mut file = OpenOptions::new()
-            .create_new(true)
+            .create(true)
+            .truncate(true)
             .write(true)
             .open(&tmp_path)
             .map_err(|source| MaccError::Io {
@@ -794,12 +800,38 @@ mod tests {
         let root = temp_root("pid-guard-missing-dir");
         fs::create_dir_all(&root).expect("create root dir");
         let pid_path = root.join(".macc").join("state").join("coordinator.pid");
-        let tmp_path = pid_path.with_extension("pid.tmp");
+        let tmp_path = pid_path.with_extension(format!("pid.{}.tmp", std::process::id()));
 
         let result = CoordinatorPidGuard::new(&root);
         assert!(result.is_err());
         assert!(!pid_path.exists());
         assert!(!tmp_path.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// A coordinator killed between creating the temp pid file and renaming it
+    /// used to leave a `coordinator.pid.tmp` behind, and `create_new` then made
+    /// every subsequent start fail with "File exists".
+    #[test]
+    fn coordinator_pid_guard_starts_despite_a_leftover_temp_file() {
+        let root = temp_root("pid-guard-stale-tmp");
+        let state = root.join(".macc").join("state");
+        fs::create_dir_all(&state).expect("create state dir");
+        let pid_path = state.join("coordinator.pid");
+
+        // Leftovers from a killed run: both the legacy shared temp name and the
+        // per-process one this build would pick.
+        fs::write(pid_path.with_extension("pid.tmp"), b"stale").expect("write legacy temp");
+        fs::write(
+            pid_path.with_extension(format!("pid.{}.tmp", std::process::id())),
+            b"stale",
+        )
+        .expect("write per-process temp");
+
+        let guard = CoordinatorPidGuard::new(&root)
+            .expect("a leftover temp pid file must not block coordinator startup");
+        assert!(pid_path.exists());
+        drop(guard);
         let _ = fs::remove_dir_all(root);
     }
 }

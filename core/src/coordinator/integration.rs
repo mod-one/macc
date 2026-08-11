@@ -41,14 +41,14 @@
 //!
 //! # Exclusion
 //!
-//! An advisory lock (`flock` on unix) serialises integration against other
-//! `macc` processes. Unlike a lockfile guarded by `create_new`, an `flock` is
-//! released by the kernel when the holder dies, so a killed coordinator cannot
-//! wedge merges permanently.
+//! A [`crate::fs_lock::AdvisoryLock`] serialises integration against other
+//! `macc` processes. It is kernel-backed, so it is released automatically when
+//! the holder dies and a killed coordinator cannot wedge merges permanently.
 
+use crate::fs_lock::AdvisoryLock;
 use crate::{git, MaccError, Result};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Directory (under the git common dir) holding all integration scratch state.
 const INTEGRATION_DIR: &str = "macc";
@@ -80,93 +80,6 @@ pub enum PublishOutcome {
     BaseMoved { expected_sha: String },
 }
 
-/// An exclusive advisory lock over the integration worktree.
-struct IntegrationLock {
-    #[cfg(unix)]
-    file: std::fs::File,
-    #[cfg(not(unix))]
-    _path: PathBuf,
-}
-
-impl IntegrationLock {
-    #[cfg(unix)]
-    fn acquire(path: &Path) -> Result<Self> {
-        use std::os::unix::io::AsRawFd;
-
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(path)
-            .map_err(|e| MaccError::Io {
-                path: path.to_string_lossy().into(),
-                action: "open integration lock file".into(),
-                source: e,
-            })?;
-
-        let started = Instant::now();
-        loop {
-            // SAFETY: `file` owns a valid fd for the duration of the call.
-            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-            if rc == 0 {
-                return Ok(Self { file });
-            }
-            let err = std::io::Error::last_os_error();
-            let would_block = matches!(
-                err.raw_os_error(),
-                Some(code) if code == libc::EWOULDBLOCK || code == libc::EINTR
-            );
-            if !would_block {
-                return Err(MaccError::Io {
-                    path: path.to_string_lossy().into(),
-                    action: "lock integration worktree".into(),
-                    source: err,
-                });
-            }
-            if started.elapsed() >= LOCK_TIMEOUT {
-                return Err(MaccError::Git {
-                    operation: "integration_lock".into(),
-                    message: format!(
-                        "timed out after {}s waiting for another macc process to finish integrating (lock: {})",
-                        LOCK_TIMEOUT.as_secs(),
-                        path.display()
-                    ),
-                });
-            }
-            std::thread::sleep(LOCK_RETRY_DELAY);
-        }
-    }
-
-    /// Non-unix platforms have no portable advisory lock here. Integration is
-    /// still serialised within a process by the coordinator's single merge
-    /// worker; cross-process exclusion is best-effort.
-    #[cfg(not(unix))]
-    fn acquire(path: &Path) -> Result<Self> {
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(path);
-        Ok(Self {
-            _path: path.to_path_buf(),
-        })
-    }
-}
-
-#[cfg(unix)]
-impl Drop for IntegrationLock {
-    fn drop(&mut self) {
-        use std::os::unix::io::AsRawFd;
-        // SAFETY: `file` is still open here; the fd is closed after this runs.
-        unsafe {
-            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
-        }
-    }
-}
-
 /// A private worktree, detached at the base branch tip, in which the
 /// coordinator performs merges without touching any operator checkout.
 pub struct IntegrationWorktree {
@@ -174,7 +87,7 @@ pub struct IntegrationWorktree {
     path: PathBuf,
     base: String,
     base_sha: String,
-    _lock: IntegrationLock,
+    _lock: AdvisoryLock,
 }
 
 impl IntegrationWorktree {
@@ -193,7 +106,12 @@ impl IntegrationWorktree {
             source: e,
         })?;
 
-        let lock = IntegrationLock::acquire(&integration_dir.join(LOCK_NAME))?;
+        let lock = AdvisoryLock::acquire_with_retry(
+            &integration_dir.join(LOCK_NAME),
+            LOCK_TIMEOUT,
+            LOCK_RETRY_DELAY,
+            "integration worktree",
+        )?;
         let path = integration_dir.join(WORKTREE_NAME);
 
         let base_sha = git::resolve_ref(repo_root, base).ok_or_else(|| MaccError::Git {
