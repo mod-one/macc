@@ -636,10 +636,15 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(5), // Compact title + project/status + ops guardrails
+            Constraint::Length(1), // One actionable next step
             Constraint::Min(0),    // Body
             Constraint::Length(4), // Footer / Navigation help
         ])
         .split(f.size());
+    let header_area = chunks[0];
+    let next_step_area = chunks[1];
+    let body_area = chunks[2];
+    let footer_area = chunks[3];
 
     let current_screen = state.current_screen();
 
@@ -714,12 +719,20 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
         coordinator_paused: state.is_coordinator_paused(),
         coordinator_command: state.coordinator_running_command.as_deref(),
         status: state.status_line(),
-        width: chunks[0].width,
+        width: header_area.width,
         trust_strip,
         override_strip: state.coordinator_phase_overrides.clone(),
     };
     let title = Paragraph::new(header_lines(&header_ctx, &theme)).block(panel("MACC"));
-    f.render_widget(title, chunks[0]);
+    f.render_widget(title, header_area);
+
+    let next_step = Paragraph::new(next_step_text(
+        state,
+        next_step_area.width.saturating_sub(2) as usize,
+    ))
+    .style(Style::default().fg(theme.accent_dim))
+    .block(Block::default().borders(Borders::LEFT | Borders::RIGHT));
+    f.render_widget(next_step, next_step_area);
 
     // Body
     match current_screen {
@@ -727,7 +740,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             let body_chunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(chunks[1]);
+                .split(body_area);
             let selected_skills = state.selected_skills();
 
             let mut list_state = ListState::default();
@@ -798,7 +811,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             let body_chunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(chunks[1]);
+                .split(body_area);
             let selected_ids = state
                 .working_copy
                 .as_ref()
@@ -887,7 +900,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             let body_chunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
-                .split(chunks[1]);
+                .split(body_area);
 
             let mut list_state = ListState::default();
             let visible = state.filtered_log_indices();
@@ -935,7 +948,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             let body_chunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(chunks[1]);
+                .split(body_area);
 
             let selected_agents = state.selected_agents();
 
@@ -1010,7 +1023,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             let preview_chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints(&preview_constraints)
-                .split(chunks[1]);
+                .split(body_area);
 
             let mut chunk_index = 0;
             if let Some(error) = &state.preview_error {
@@ -1220,7 +1233,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                     Constraint::Percentage(15),
                     Constraint::Percentage(25),
                 ])
-                .split(chunks[1]);
+                .split(body_area);
 
             let summary_rect = apply_chunks[0];
             let operations_rect = apply_chunks[1];
@@ -1367,7 +1380,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             let body_chunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-                .split(chunks[1]);
+                .split(body_area);
 
             let mut overview = String::new();
             if !state.errors.is_empty() {
@@ -1467,7 +1480,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             )
             .block(panel("Settings — Moved"))
             .wrap(Wrap { trim: false });
-            f.render_widget(notice, chunks[1]);
+            f.render_widget(notice, body_area);
         }
         Screen::Automation => {
             // ── Unified tabbed configuration screen ───────────────────────────
@@ -1475,7 +1488,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             let outer_chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Length(1), Constraint::Min(0)])
-                .split(chunks[1]);
+                .split(body_area);
 
             // ── Tab bar ───────────────────────────────────────────────────────
             let tab_spans: Vec<Span> = AppState::CONFIG_TAB_NAMES
@@ -1743,7 +1756,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                     Constraint::Length(1), // summary header status line
                     Constraint::Min(0),    // vertical stacked panes
                 ])
-                .split(chunks[1]);
+                .split(body_area);
             render_coordinator_ownership_banner(f, live_chunks[0], state);
 
             let status_line = if state.is_coordinator_paused() {
@@ -2085,7 +2098,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             let body_chunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
-                .split(chunks[1]);
+                .split(body_area);
 
             let enabled_tools = state
                 .working_copy
@@ -2211,7 +2224,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             let body_chunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-                .split(chunks[1]);
+                .split(body_area);
 
             if let Some(desc) = state.current_tool_descriptor() {
                 let mut list_state = ListState::default();
@@ -2271,7 +2284,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 f.render_widget(detail_para, body_chunks[1]);
             } else {
                 let body = wrapped_paragraph("No tool selected. Return to Tools.", "Tool Settings");
-                f.render_widget(body, chunks[1]);
+                f.render_widget(body, body_area);
             }
         }
         Screen::About => {
@@ -2279,10 +2292,10 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 "About MACC\n\nThis is the v0.2 prototype.\n\nUse Backspace or Esc to go back.",
                 "About",
             );
-            f.render_widget(body, chunks[1]);
+            f.render_widget(body, body_area);
         }
         Screen::Watch => {
-            render_watch_screen(f, state, chunks[1]);
+            render_watch_screen(f, state, body_area);
         }
     }
 
@@ -2300,20 +2313,20 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             Span::styled("Path: ", Style::default().fg(theme.muted)),
             Span::raw(ui::truncate_middle(
                 &state.display_breadcrumbs(),
-                chunks[2].width.saturating_sub(8) as usize,
+                footer_area.width.saturating_sub(8) as usize,
             )),
         ]),
         Line::from(vec![
             Span::styled("State: ", Style::default().fg(theme.muted)),
             Span::raw(ui::truncate_middle(
                 &format!("{} | {}", badges, search),
-                chunks[2].width.saturating_sub(9) as usize,
+                footer_area.width.saturating_sub(9) as usize,
             )),
         ]),
-        footer_hints_line(state, &theme, chunks[2].width.saturating_sub(20) as usize),
+        footer_hints_line(state, &theme, footer_area.width.saturating_sub(20) as usize),
     ])
     .block(panel("Navigation"));
-    f.render_widget(footer, chunks[2]);
+    f.render_widget(footer, footer_area);
 
     if state.has_coordinator_pause_prompt() {
         render_coordinator_pause_overlay(f, state);
@@ -2428,6 +2441,46 @@ fn build_readiness_text(
         out.push_str("  [?] All Keybindings\n");
     }
     out
+}
+
+fn next_step_text(state: &AppState, max_chars: usize) -> String {
+    let Some(paths) = &state.project_paths else {
+        return ui::truncate_middle(
+            "Next step: Initialize this project. Run `macc init`.",
+            max_chars,
+        );
+    };
+
+    let ladder = state.engine.readiness_ladder(paths);
+    let text = next_step_text_for_ladder(&ladder, state.is_coordinator_running());
+
+    ui::truncate_middle(text, max_chars)
+}
+
+fn next_step_text_for_ladder(
+    ladder: &macc_core::onboarding::ReadinessLadder,
+    coordinator_running: bool,
+) -> &'static str {
+    let first_pending = ladder
+        .steps
+        .iter()
+        .find(|step| matches!(step.status, macc_core::onboarding::ReadinessStatus::Pending));
+
+    match first_pending.map(|step| step.number) {
+        Some(1) => "Next step: Project not initialized. Run `macc init`.",
+        Some(2) => "Next step: Tool missing. Press t to select a performer tool.",
+        Some(3) => "Next step: Config not applied. Press a to apply configuration.",
+        Some(4) => {
+            "Next step: PRD/task missing. Run `macc prd generate --from <brief.md> --promote`."
+        }
+        Some(5) => "Next step: Git identity missing. Configure git user.name and user.email.",
+        Some(6) => "Next step: Ready to run. Press r to start coordinator.",
+        Some(_) => "Next step: Run Doctor. Press d from Home to inspect the blocking setup step.",
+        None if coordinator_running => {
+            "Next step: Coordinator is running. Press v to watch live tasks."
+        }
+        None => "Next step: Ready to run. Press r to start coordinator.",
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3074,6 +3127,45 @@ mod tests {
 
         assert!(text.contains("current search"));
         assert!(!text.contains("create or promote a PRD"));
+    }
+
+    #[test]
+    fn next_step_band_prioritizes_missing_prd() {
+        let ladder = ReadinessLadder {
+            steps: vec![
+                step(1, "Project initialized", ReadinessStatus::Done),
+                step(2, "Tool adapter selected", ReadinessStatus::Done),
+                step(3, "Config applied", ReadinessStatus::Done),
+                step(4, "PRD/task available", ReadinessStatus::Pending),
+                step(6, "Coordinator running", ReadinessStatus::Pending),
+            ],
+            blocking_count: 2,
+        };
+
+        assert_eq!(
+            next_step_text_for_ladder(&ladder, false),
+            "Next step: PRD/task missing. Run `macc prd generate --from <brief.md> --promote`."
+        );
+    }
+
+    #[test]
+    fn next_step_band_recommends_run_when_setup_is_ready() {
+        let ladder = ReadinessLadder {
+            steps: vec![
+                step(1, "Project initialized", ReadinessStatus::Done),
+                step(2, "Tool adapter selected", ReadinessStatus::Done),
+                step(3, "Config applied", ReadinessStatus::Done),
+                step(4, "PRD/task available", ReadinessStatus::Done),
+                step(5, "Git identity configured", ReadinessStatus::Done),
+                step(6, "Coordinator running", ReadinessStatus::Pending),
+            ],
+            blocking_count: 1,
+        };
+
+        assert_eq!(
+            next_step_text_for_ladder(&ladder, false),
+            "Next step: Ready to run. Press r to start coordinator."
+        );
     }
 }
 
