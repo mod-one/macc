@@ -27,7 +27,7 @@ use macc_core::plan::{PlannedOpKind, Scope};
 use macc_core::tool::{FieldDefault, FieldKind};
 use screen::Screen;
 use state::{AppState, UiStatusLevel};
-use ui::{compact_help_line, header_lines, panel, theme, wrapped_paragraph, HeaderContext};
+use ui::{header_lines, panel, theme, wrapped_paragraph, HeaderContext};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LaunchMode {
@@ -776,7 +776,6 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 if current_skill.mandatory {
                     desc_text.push_str("\n\nMandatory skill: always enabled from catalog policy.");
                 }
-                desc_text.push_str("\n\n---\nShortcuts:\n'a' - Select All\n'n' - Select None");
 
                 let desc_para = Paragraph::new(desc_text).block(panel("Details"));
                 f.render_widget(desc_para, body_chunks[1]);
@@ -863,7 +862,9 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 } else {
                     detail.push_str(&current.tags.join(", "));
                 }
-                detail.push_str("\n\nNotes:\n- MCP packages are merged into .mcp.json on apply.\n- Secrets are never stored by MACC.\n\nShortcuts:\n'a' - Select All\n'n' - Select None");
+                detail.push_str(
+                    "\n\nNotes:\n- MCP packages are merged into .mcp.json on apply.\n- Secrets are never stored by MACC.",
+                );
 
                 let desc_para = Paragraph::new(detail).block(panel("Details"));
                 f.render_widget(desc_para, body_chunks[1]);
@@ -980,7 +981,6 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 let mut desc_text = format!("ID: {}\n\n", current_agent.id);
                 desc_text.push_str("Purpose:\n");
                 desc_text.push_str(&current_agent.description);
-                desc_text.push_str("\n\n---\nShortcuts:\n'a' - Select All\n'n' - Select None");
 
                 let desc_para = Paragraph::new(desc_text).block(panel("Details"));
                 f.render_widget(desc_para, body_chunks[1]);
@@ -1713,9 +1713,6 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                             text.push_str(&format!("\n\nValidation: {}", validation));
                         }
                     }
-                    text.push_str(
-                        "\n\nShortcuts:\nSpace/Enter  edit or cycle\nEsc          cancel edit\ns            save to .macc/macc.yaml\nTab          next tab\n1-6          jump to tab",
-                    );
                     text
                 } else {
                     "No field selected.".to_string()
@@ -1891,7 +1888,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 ];
                 let tasks_table = Table::new(rows, widths)
                     .header(headers)
-                    .block(panel("LIVE TASKS (↑↓ navigate, Enter details, d diff, r retry, s stop task, k stop coordinator)"))
+                    .block(panel("LIVE TASKS"))
                     .highlight_style(Style::default().bg(theme.highlight_bg))
                     .highlight_symbol("› ");
 
@@ -2185,7 +2182,6 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                     detail.push_str("\nError:\n");
                     detail.push_str(&msg);
                 }
-                detail.push_str("\n\nShortcuts:\nSpace - Toggle\nEnter - Configure\n'i' - Install missing tool\n'd' - Refresh checks\n'f' - Generate context file");
                 if state.is_tool_install_confirmation_open() {
                     detail.push_str(
                         "\n\nInstall confirmation pending: press 'y' to install, 'n' to cancel.",
@@ -2253,7 +2249,6 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 } else {
                     detail.push_str("No field selected.");
                 }
-                detail.push_str("\n\nShortcuts:\nSpace/Enter - Edit\nEsc - Cancel edit");
 
                 if let Some(validation) = state.current_tool_field_validation() {
                     detail.push_str("\n\nValidation:\n");
@@ -2841,16 +2836,11 @@ fn render_coordinator_ownership_banner(f: &mut Frame, area: Rect, state: &AppSta
 
 fn footer_hints_line(state: &AppState, theme: &ui::Theme, max_chars: usize) -> Line<'static> {
     if state.current_screen() != Screen::CoordinatorLive {
-        return Line::from(vec![
-            Span::styled("Hints: ", Style::default().fg(theme.muted)),
-            Span::raw(compact_help_line(
-                state.current_screen().help_keybindings(),
-                max_chars,
-            )),
-            Span::raw("  "),
-            Span::styled("Press ?", Style::default().fg(theme.accent)),
-            Span::raw(" for help"),
-        ]);
+        let bindings = screen_action_bindings(state.current_screen())
+            .into_iter()
+            .map(|(key, desc)| (key, desc, false))
+            .collect();
+        return action_bar_line(bindings, theme, max_chars);
     }
 
     let is_viewer = !state.coordinator_ownership.is_owner;
@@ -2870,6 +2860,92 @@ fn footer_hints_line(state: &AppState, theme: &ui::Theme, max_chars: usize) -> L
         ("a/r", "Accept / Reject", !has_pending),
     ];
 
+    action_bar_line(bindings, theme, max_chars)
+}
+
+fn screen_action_bindings(screen: Screen) -> Vec<(&'static str, &'static str)> {
+    match screen {
+        Screen::Home => vec![
+            ("d", "Doctor"),
+            ("a", "Apply"),
+            ("r", "Start coordinator"),
+            ("v", "Live"),
+        ],
+        Screen::Tools => vec![
+            ("↑↓", "Move"),
+            ("Space", "Toggle"),
+            ("Enter", "Configure"),
+            ("i", "Install"),
+            ("d", "Refresh"),
+            ("f", "Context"),
+        ],
+        Screen::Automation | Screen::Settings => vec![
+            ("Tab/1-6", "Tabs"),
+            ("↑↓", "Move"),
+            ("Space/Enter", "Edit"),
+            ("s", "Save"),
+        ],
+        Screen::ToolSettings => vec![
+            ("↑↓", "Move"),
+            ("Space/Enter", "Edit"),
+            ("Esc", "Cancel edit"),
+            ("s", "Save"),
+        ],
+        Screen::Skills => vec![
+            ("↑↓", "Move"),
+            ("Space/Enter", "Toggle"),
+            ("a", "All"),
+            ("n", "None"),
+            ("/", "Search"),
+        ],
+        Screen::Mcp => vec![
+            ("↑↓", "Move"),
+            ("Space/Enter", "Toggle"),
+            ("a", "All"),
+            ("n", "None"),
+            ("/", "Search"),
+        ],
+        Screen::Agents => vec![
+            ("↑↓", "Move"),
+            ("Space/Enter", "Toggle"),
+            ("a", "All"),
+            ("n", "None"),
+            ("/", "Search"),
+        ],
+        Screen::Logs => vec![
+            ("↑↓", "Files"),
+            ("PgUp/PgDn", "Scroll"),
+            ("r", "Refresh"),
+            ("/", "Search"),
+        ],
+        Screen::Preview => vec![
+            ("↑↓", "Ops"),
+            ("PgUp/PgDn", "Diff"),
+            ("r", "Refresh"),
+            ("x", "Apply"),
+        ],
+        Screen::Apply => vec![
+            ("YES", "Consent"),
+            ("Enter", "Apply"),
+            ("Backspace", "Delete"),
+            ("Esc", "Back"),
+        ],
+        Screen::Watch => vec![
+            ("↑↓", "Workers"),
+            ("f", "Logs"),
+            ("e/w/a", "Filter"),
+            ("r/l", "Refresh"),
+        ],
+        Screen::About => vec![("Esc/q", "Back")],
+        Screen::CoordinatorLive => Vec::new(),
+    }
+}
+
+fn action_bar_line(
+    bindings: Vec<(&'static str, &'static str, bool)>,
+    theme: &ui::Theme,
+    max_chars: usize,
+) -> Line<'static> {
     let mut spans = Vec::new();
     let mut used = 0usize;
     for (idx, (key, desc, disabled)) in bindings.into_iter().enumerate() {
@@ -2900,7 +2976,7 @@ fn footer_hints_line(state: &AppState, theme: &ui::Theme, max_chars: usize) -> L
     spans.push(Span::styled("Press ?", Style::default().fg(theme.accent)));
     spans.push(Span::raw(" for help"));
 
-    let mut with_label = vec![Span::styled("Hints: ", Style::default().fg(theme.muted))];
+    let mut with_label = vec![Span::styled("Actions: ", Style::default().fg(theme.muted))];
     with_label.extend(spans);
     Line::from(with_label)
 }
