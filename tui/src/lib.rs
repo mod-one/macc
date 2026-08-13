@@ -666,26 +666,39 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
     let trust_strip =
         if let (Some(paths), Some(config)) = (&state.project_paths, state.working_copy.as_ref()) {
             let trust = macc_core::ops_motif::calculate_trust_summary(paths, config);
-            let local_only = if trust.local_only { "yes" } else { "no" };
-            let terminal = if trust.terminal_enabled { "on" } else { "off" };
-            let backups = if trust.backups_ready {
-                "ready"
+            let locality = if trust.local_only {
+                "local only"
             } else {
-                "missing"
+                "remote allowed"
+            };
+            let backups = if trust.backups_ready {
+                "backups ready"
+            } else {
+                "backups missing"
             };
             let catalog = if trust.catalog_pinned {
-                "pinned"
+                "catalog trusted"
             } else {
-                "unpinned"
+                "catalog unpinned"
             };
             let secrets = if trust.secrets_redacted {
-                "redacted"
+                "secrets hidden"
             } else {
-                "visible"
+                "secrets visible"
+            };
+            let terminal_policy = if trust.terminal_enabled {
+                "terminal allowed"
+            } else {
+                "terminal blocked"
+            };
+            let writes_policy = if trust.user_level_writes == 0 {
+                "no user-file writes".to_string()
+            } else {
+                format!("{} user-file write(s)", trust.user_level_writes)
             };
             Some(format!(
-                "local:{} terminal:{} writes:{} backups:{} catalog:{} secrets:{}",
-                local_only, terminal, trust.user_level_writes, backups, catalog, secrets
+                "{} | {} | {} | {} | {} | {}",
+                locality, terminal_policy, writes_policy, backups, catalog, secrets
             ))
         } else {
             None

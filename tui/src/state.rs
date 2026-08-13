@@ -2062,18 +2062,18 @@ impl AppState {
     pub fn status_badges(&self) -> Vec<String> {
         let mut badges = Vec::new();
         badges.push(if self.project_paths.is_some() {
-            "project:ok".to_string()
+            "Project ready".to_string()
         } else {
-            "project:none".to_string()
+            "No project loaded".to_string()
         });
-        badges.push(format!("warnings:{}", self.errors.len()));
+        badges.push(format!("Issues {}", self.errors.len()));
         if self.is_coordinator_running() {
             let action = self.coordinator_running_command.as_deref().unwrap_or("run");
-            badges.push(format!("coord:{}", action));
+            badges.push(format!("Coordinator running ({})", action));
         } else if self.coordinator_paused {
-            badges.push("coord:paused".to_string());
+            badges.push("Coordinator paused".to_string());
         } else {
-            badges.push("coord:off".to_string());
+            badges.push("Coordinator stopped".to_string());
         }
         let offline = self
             .working_copy
@@ -2081,9 +2081,9 @@ impl AppState {
             .map(|c| c.settings.offline)
             .unwrap_or(false);
         badges.push(if offline {
-            "offline:on".to_string()
+            "Offline mode".to_string()
         } else {
-            "offline:off".to_string()
+            "Online allowed".to_string()
         });
         let cache_ok = self
             .project_paths
@@ -2091,12 +2091,12 @@ impl AppState {
             .map(|p| self.engine.path_exists(&p.cache_dir))
             .unwrap_or(false);
         badges.push(if cache_ok {
-            "cache:ok".to_string()
+            "Cache ready".to_string()
         } else {
-            "cache:missing".to_string()
+            "Cache not prepared".to_string()
         });
         if !self.search_query.is_empty() {
-            badges.push(format!("search:'{}'", self.search_query));
+            badges.push(format!("Filtered by '{}'", self.search_query));
         }
         badges
     }
