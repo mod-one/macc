@@ -308,14 +308,29 @@ fn list_local_branches(repo_root: &Path) -> Result<Vec<String>> {
         .collect())
 }
 
-fn branch_matches_known_patterns(branch: &str, task_ids: &[String]) -> bool {
-    if branch.starts_with("macc/worker-") {
+/// True when a branch follows one of the naming conventions MACC itself
+/// creates.
+///
+/// These are used only to decide whether a *trailer-less* branch is worth
+/// reporting; which tasks a branch actually carries is decided by its
+/// `[macc:task <ID>]` commit trailers, never by its name.
+///
+/// The conventions, and where they come from:
+/// * `ai/<tool>/<slot>`  -- `crate::create_worktrees`, the pool worktrees the
+///   coordinator dispatches into. This is the one real runs produce, and it was
+///   missing here: sync could not see the branches MACC had just made.
+/// * `task/<task-id>`    -- the merge-gate salvage convention.
+/// * `macc/worker-*`     -- legacy pool naming, kept for older projects.
+fn branch_is_macc_managed(branch: &str) -> bool {
+    if branch.starts_with("macc/worker-") || branch.starts_with("task/") {
         return true;
     }
-    let branch_upper = branch.to_ascii_uppercase();
-    task_ids
-        .iter()
-        .any(|task_id| branch_upper.contains(&task_id.to_ascii_uppercase()))
+    // ai/<tool>/<slot>: three segments, non-empty tool and slot.
+    let mut parts = branch.split('/');
+    matches!(
+        (parts.next(), parts.next(), parts.next(), parts.next()),
+        (Some("ai"), Some(tool), Some(slot), None) if !tool.is_empty() && !slot.is_empty()
+    )
 }
 
 fn is_unmerged_branch_sync_state(state: &str) -> bool {
@@ -339,11 +354,18 @@ pub fn sync_unmerged_branches(
     repo_root: &Path,
     base_branch: &str,
 ) -> Result<Vec<SyncBranchResult>> {
-    let known_task_ids: Vec<String> = registry.tasks.iter().map(|task| task.id.clone()).collect();
+    // Every local branch is a candidate. The `[macc:task <ID>]` trailers on its
+    // commits decide whether it carries task work -- a branch-name filter here
+    // would (and did) hide branches MACC itself created, because the pattern
+    // list never matched the `ai/<tool>/<slot>` names `create_worktrees`
+    // produces. Names are used further down only to decide whether a
+    // trailer-less branch is worth reporting.
+    //
+    // Cost is one `git log <base>..<branch>` per local branch, which is fine
+    // for an explicit `macc coordinator sync`.
     let mut branches: Vec<String> = list_local_branches(repo_root)?
         .into_iter()
         .filter(|branch| branch != base_branch)
-        .filter(|branch| branch_matches_known_patterns(branch, &known_task_ids))
         .collect();
     branches.sort();
     branches.dedup();
@@ -360,13 +382,19 @@ pub fn sync_unmerged_branches(
         let task_commits = extract_task_ids_from_commits(&commits);
         let discovered_task_ids: Vec<String> = task_commits.keys().cloned().collect();
         if discovered_task_ids.is_empty() {
-            out.push(SyncBranchResult {
-                branch: branch.clone(),
-                discovered_task_ids,
-                merged_task_ids: Vec::new(),
-                status: SyncBranchStatus::SkippedNoTaskTags,
-                detail: Some("no [macc:task TASK-ID] tags found in branch commits".to_string()),
-            });
+            // Report only branches MACC created: a MACC-managed branch with no
+            // trailers is a real signal (something committed without tagging).
+            // An unrelated branch is simply not ours, and reporting every one
+            // would bury the useful rows in noise.
+            if branch_is_macc_managed(branch) {
+                out.push(SyncBranchResult {
+                    branch: branch.clone(),
+                    discovered_task_ids,
+                    merged_task_ids: Vec::new(),
+                    status: SyncBranchStatus::SkippedNoTaskTags,
+                    detail: Some("no [macc:task TASK-ID] tags found in branch commits".to_string()),
+                });
+            }
             continue;
         }
 
@@ -720,6 +748,128 @@ mod tests {
         assert_eq!(results[0].status, SyncBranchStatus::Merged);
         assert_eq!(results[0].merged_task_ids, vec!["L4-SYNC-001".to_string()]);
         assert_eq!(registry.tasks[0].state, "merged");
+    }
+
+    /// The regression that stranded real work: `create_worktrees` names pool
+    /// branches `ai/<tool>/<slot>`, but the old filter only knew `macc/worker-*`
+    /// and "task id appears in the branch name". Neither matched, so `sync`
+    /// silently ignored every branch the coordinator had just created.
+    #[test]
+    fn sync_recognises_the_ai_tool_slot_branches_macc_creates() {
+        let repo = make_test_repo();
+        run_git(
+            &repo,
+            &["checkout", "-b", "ai/codex/worker-01-20260813055116"],
+        );
+        create_commit(
+            &repo,
+            "feature.txt",
+            "feature\n",
+            "feat: L4H-ADDPERSON-001 - add relationships\n\n[macc:task L4H-ADDPERSON-001]",
+        );
+        run_git(&repo, &["checkout", "main"]);
+
+        let mut registry = make_registry(vec![make_task("L4H-ADDPERSON-001", "todo")]);
+        let results = sync_unmerged_branches(&mut registry, &repo, "main").expect("sync branches");
+
+        let merged: Vec<_> = results
+            .iter()
+            .filter(|r| r.status == SyncBranchStatus::Merged)
+            .collect();
+        assert_eq!(merged.len(), 1, "got: {results:?}");
+        assert_eq!(merged[0].branch, "ai/codex/worker-01-20260813055116");
+        assert_eq!(registry.tasks[0].state, "merged");
+    }
+
+    /// The trailer decides, not the name. A branch whose name mentions no task
+    /// and follows no MACC convention is still picked up when its commits carry
+    /// `[macc:task <ID>]`.
+    #[test]
+    fn sync_follows_the_trailer_on_an_arbitrarily_named_branch() {
+        let repo = make_test_repo();
+        run_git(&repo, &["checkout", "-b", "some/renamed-branch"]);
+        create_commit(
+            &repo,
+            "feature.txt",
+            "feature\n",
+            "feat: work\n\n[macc:task L4-SYNC-900]",
+        );
+        run_git(&repo, &["checkout", "main"]);
+
+        let mut registry = make_registry(vec![make_task("L4-SYNC-900", "todo")]);
+        let results = sync_unmerged_branches(&mut registry, &repo, "main").expect("sync branches");
+
+        let merged: Vec<_> = results
+            .iter()
+            .filter(|r| r.status == SyncBranchStatus::Merged)
+            .collect();
+        assert_eq!(
+            merged.len(),
+            1,
+            "the trailer must win over the name: {results:?}"
+        );
+        assert_eq!(registry.tasks[0].state, "merged");
+    }
+
+    /// Unrelated branches must stay out of the report entirely, or the useful
+    /// rows drown in noise now that every local branch is scanned.
+    #[test]
+    fn sync_stays_quiet_about_unrelated_branches() {
+        let repo = make_test_repo();
+        run_git(&repo, &["checkout", "-b", "front/event"]);
+        create_commit(&repo, "unrelated.txt", "x\n", "chore: unrelated work");
+        run_git(&repo, &["checkout", "main"]);
+
+        let mut registry = make_registry(vec![make_task("L4-SYNC-901", "todo")]);
+        let results = sync_unmerged_branches(&mut registry, &repo, "main").expect("sync branches");
+        assert!(
+            results.is_empty(),
+            "a branch with no MACC trailers and no MACC name must not be reported: {results:?}"
+        );
+    }
+
+    /// A MACC-created branch whose commits lack trailers *is* worth reporting --
+    /// it means something committed without tagging.
+    #[test]
+    fn sync_reports_a_macc_branch_missing_trailers() {
+        let repo = make_test_repo();
+        run_git(&repo, &["checkout", "-b", "ai/claude/worker-02"]);
+        create_commit(&repo, "untagged.txt", "x\n", "chore: forgot the trailer");
+        run_git(&repo, &["checkout", "main"]);
+
+        let mut registry = make_registry(vec![make_task("L4-SYNC-902", "todo")]);
+        let results = sync_unmerged_branches(&mut registry, &repo, "main").expect("sync branches");
+        assert_eq!(results.len(), 1, "got: {results:?}");
+        assert_eq!(results[0].status, SyncBranchStatus::SkippedNoTaskTags);
+        assert_eq!(results[0].branch, "ai/claude/worker-02");
+    }
+
+    #[test]
+    fn macc_managed_branch_naming_conventions() {
+        for branch in [
+            "ai/codex/worker-01-20260813055116",
+            "ai/claude/worker-02",
+            "task/l4h-addperson-001",
+            "macc/worker-01",
+        ] {
+            assert!(
+                super::branch_is_macc_managed(branch),
+                "{branch} is a MACC convention"
+            );
+        }
+        for branch in [
+            "main",
+            "front/event",
+            "fix/lot4",
+            "ai",
+            "ai/codex",
+            "ai//slot",
+        ] {
+            assert!(
+                !super::branch_is_macc_managed(branch),
+                "{branch} is not a MACC convention"
+            );
+        }
     }
 
     #[test]
