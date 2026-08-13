@@ -790,6 +790,23 @@ export interface ApiCatalogSkillEntry {
   };
 }
 
+/** An MCP server available from configured catalogs. */
+export interface ApiCatalogMcpEntry {
+  id: string;
+  name: string;
+  description: string;
+  tags: string[];
+  selector: {
+    subpath: string;
+  };
+  source: {
+    kind: string;
+    url: string;
+    ref: string;
+    checksum: string | null;
+  };
+}
+
 /** Status of an installed catalog skill. */
 export interface ApiCatalogSkillStatus {
   id: string;

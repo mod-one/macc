@@ -3695,7 +3695,12 @@ async fn config_get_endpoint_returns_canonical_config() {
     assert_eq!(payload["offline"], false);
     assert_eq!(
         payload["mandatorySkills"],
-        serde_json::json!(["macc-performer", "macc-prd-planner", "macc-reviewer"])
+        serde_json::json!([
+            "macc-auditor",
+            "macc-performer",
+            "macc-prd-planner",
+            "macc-reviewer"
+        ])
     );
 }
 
@@ -3768,6 +3773,73 @@ async fn catalog_skills_available_includes_local_project_catalog_entries() {
 }
 
 #[tokio::test]
+async fn catalog_mcp_available_includes_local_project_catalog_entries() {
+    let root = temp_root("catalog-mcp-local");
+    fs::create_dir_all(&root).expect("create root");
+    let paths = ProjectPaths::from_root(&root);
+    fs::create_dir_all(&paths.catalog_dir).expect("create catalog dir");
+    fs::write(
+        paths.mcp_catalog_path(),
+        serde_json::json!({
+            "schema_version": "1.0",
+            "type": "mcp",
+            "updated_at": "2026-08-13T00:00:00Z",
+            "entries": [
+                {
+                    "id": "local-client-mcp",
+                    "name": "Local Client MCP",
+                    "description": "MCP added by a client to the local project catalog.",
+                    "tags": ["local", "mcp"],
+                    "selector": { "subpath": "servers/local-client-mcp" },
+                    "source": {
+                        "kind": "git",
+                        "url": "https://example.com/local-client-mcp.git",
+                        "ref": "main",
+                        "checksum": null
+                    }
+                }
+            ]
+        })
+        .to_string(),
+    )
+    .expect("write local mcp catalog");
+
+    let state = test_web_state(
+        &root,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/catalog/mcp/available")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    let local_mcp = payload["mcp"]
+        .as_array()
+        .expect("mcp array")
+        .iter()
+        .find(|entry| entry["id"] == "local-client-mcp")
+        .expect("local mcp returned");
+    assert_eq!(local_mcp["name"], "Local Client MCP");
+    assert_eq!(local_mcp["source"]["kind"], "git");
+}
+
+#[tokio::test]
 async fn config_put_endpoint_updates_config_file() {
     let root = temp_root("config-put");
     fs::create_dir_all(&root).expect("create root");
@@ -3803,8 +3875,12 @@ async fn config_put_endpoint_updates_config_file() {
     let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
     assert_eq!(payload["webPort"], 4567);
     assert_eq!(payload["quiet"], true);
-    let expected_skills =
-        serde_json::json!(["macc-performer", "macc-prd-planner", "macc-reviewer"]);
+    let expected_skills = serde_json::json!([
+        "macc-auditor",
+        "macc-performer",
+        "macc-prd-planner",
+        "macc-reviewer"
+    ]);
     assert_eq!(payload["selectedSkills"], expected_skills);
     assert_eq!(payload["mandatorySkills"], expected_skills);
 
@@ -3819,6 +3895,7 @@ async fn config_put_endpoint_updates_config_file() {
             .expect("selections")
             .skills,
         vec![
+            "macc-auditor".to_string(),
             "macc-performer".to_string(),
             "macc-prd-planner".to_string(),
             "macc-reviewer".to_string(),

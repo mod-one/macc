@@ -428,6 +428,7 @@ fn build_web_router(state: WebState) -> Router {
         .route("/api/v1/search", get(search::search_handler))
         // ── Catalog skills lifecycle (spec §16) ──────────────────────────
         .route("/api/v1/catalog/skills/available", get(catalog_skills::available_handler))
+        .route("/api/v1/catalog/mcp/available", get(catalog_skills::mcp_available_handler))
         .route("/api/v1/catalog/skills/status", get(catalog_skills::status_handler))
         .route("/api/v1/catalog/skills/installed", get(catalog_skills::installed_handler))
         .route("/api/v1/catalog/skills/verify", post(catalog_skills::verify_handler))

@@ -6637,6 +6637,7 @@ mod tests {
         assert_eq!(
             current_skills,
             vec![
+                "macc-auditor".to_string(),
                 "macc-performer".to_string(),
                 "macc-prd-planner".to_string(),
                 "macc-reviewer".to_string(),
