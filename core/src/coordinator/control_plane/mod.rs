@@ -10,4 +10,5 @@ pub use base::{
     monitor_active_jobs_native, monitor_merge_jobs_native, sync_registry_from_prd_native,
     CoordinatorLog,
 };
+pub use dispatch::diagnose_stall_native;
 pub use phase_runner::{run_phase_for_task_native, run_review_phase_for_task_native};

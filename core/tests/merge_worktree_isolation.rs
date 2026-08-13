@@ -344,6 +344,97 @@ fn a_failed_merge_on_the_last_task_ends_the_run_with_blocked_tasks() {
     assert!(err.to_string().contains("blocked tasks"), "got: {err}");
 }
 
+/// The stall abort must name what is stuck, not just count it. Reporting
+/// "todo=3, active=0, blocked=0" and pointing at `unlock --all` sent operators
+/// after the wrong cause; the tasks and their reasons are what make it
+/// actionable.
+#[test]
+fn no_progress_abort_reports_the_stuck_tasks() {
+    use macc_core::coordinator::engine::{
+        ControlPlaneLoopConfig, CoordinatorCounts, CoordinatorRunController,
+    };
+
+    let mut controller = CoordinatorRunController::new(ControlPlaneLoopConfig {
+        timeout: None,
+        max_no_progress_cycles: 1,
+    });
+    let counts = CoordinatorCounts {
+        total: 3,
+        todo: 3,
+        active: 0,
+        blocked: 0,
+        merged: 0,
+    };
+    let diagnosis = || {
+        vec![
+            "L4H-ADDPERSON-001 (worktree attached, not resumable: retry budget spent (2/1)); \
+             branch ai/codex/worker-01 holds 1 unmerged commit(s)"
+                .to_string(),
+            "L4H-OVERVIEW-REFACTOR-001 (waiting on dependencies: L4H-OVERVIEW-SOURCES-001)"
+                .to_string(),
+        ]
+    };
+
+    // First call establishes the baseline counts; the second trips the limit.
+    controller
+        .on_cycle_counts_with(counts, None, diagnosis)
+        .expect("first cycle continues");
+    let err = controller
+        .on_cycle_counts_with(counts, None, diagnosis)
+        .expect_err("stall must abort");
+
+    let msg = err.to_string();
+    assert!(msg.contains("made no progress"), "got: {msg}");
+    assert!(
+        msg.contains("2 task(s) could not be dispatched"),
+        "the abort must say how many are stuck: {msg}"
+    );
+    assert!(
+        msg.contains("L4H-ADDPERSON-001") && msg.contains("retry budget spent"),
+        "the abort must name the stuck task and why: {msg}"
+    );
+    assert!(
+        msg.contains("holds 1 unmerged commit"),
+        "the abort must surface unmerged work at risk: {msg}"
+    );
+    assert!(
+        msg.contains("L4H-OVERVIEW-REFACTOR-001"),
+        "every stuck task must be listed: {msg}"
+    );
+}
+
+/// With nothing diagnosable the message must stay clean -- no empty section.
+#[test]
+fn no_progress_abort_without_a_diagnosis_stays_terse() {
+    use macc_core::coordinator::engine::{
+        ControlPlaneLoopConfig, CoordinatorCounts, CoordinatorRunController,
+    };
+
+    let mut controller = CoordinatorRunController::new(ControlPlaneLoopConfig {
+        timeout: None,
+        max_no_progress_cycles: 1,
+    });
+    let counts = CoordinatorCounts {
+        total: 1,
+        todo: 1,
+        active: 0,
+        blocked: 0,
+        merged: 0,
+    };
+    controller
+        .on_cycle_counts(counts, None)
+        .expect("first cycle continues");
+    let msg = controller
+        .on_cycle_counts(counts, None)
+        .expect_err("stall must abort")
+        .to_string();
+    assert!(msg.contains("made no progress"));
+    assert!(
+        !msg.contains("could not be dispatched"),
+        "no diagnosis means no empty section: {msg}"
+    );
+}
+
 #[test]
 fn integration_worktree_is_invisible_to_the_operators_status() {
     let dir = make_repo();

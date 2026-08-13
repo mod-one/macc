@@ -248,6 +248,167 @@ fn resume_worktree_for(task: &Task, max_retries: usize) -> Option<ResumeWorktree
     })
 }
 
+/// Why one `todo` task could not be dispatched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnschedulableTask {
+    pub id: String,
+    /// Human-readable cause, mirroring the filter that rejected the task.
+    pub reason: String,
+    /// Branch still attached to the task, when it holds one. The caller can
+    /// enrich the reason with how much unmerged work is sitting on it.
+    pub branch: Option<String>,
+}
+
+/// Explain why no `todo` task was dispatchable.
+///
+/// This mirrors [`select_next_ready_task_typed`]'s filters one-for-one and lives
+/// beside them deliberately: a stall diagnosis that drifts from the real
+/// selection rules is worse than none, because it sends the operator after the
+/// wrong cause.
+///
+/// Used to turn the coordinator's "made no progress for N cycles" abort — which
+/// reports only counts — into a message that names each stuck task and its
+/// cause.
+pub fn diagnose_unschedulable_tasks(
+    registry: &TaskRegistry,
+    config: &TaskSelectorConfig,
+) -> Vec<UnschedulableTask> {
+    let mut out = Vec::new();
+
+    // A global block reason applies to the whole dispatch pass, not one task.
+    if let Some(reason) = dispatch_block_reason_typed(registry, config) {
+        out.push(UnschedulableTask {
+            id: "-".to_string(),
+            reason: format!("dispatch blocked: {:?}", reason),
+            branch: None,
+        });
+        return out;
+    }
+
+    let active_tasks: Vec<&Task> = registry
+        .tasks
+        .iter()
+        .filter(|task| task.is_active())
+        .collect();
+    if config.max_parallel > 0 && active_tasks.len() >= config.max_parallel {
+        out.push(UnschedulableTask {
+            id: "-".to_string(),
+            reason: format!(
+                "parallelism cap reached ({} active >= max_parallel {})",
+                active_tasks.len(),
+                config.max_parallel
+            ),
+            branch: None,
+        });
+        return out;
+    }
+
+    let merged_ids: HashSet<String> = registry
+        .tasks
+        .iter()
+        .filter(|task| task.is_merged())
+        .map(|task| task.id.clone())
+        .collect();
+    let mut active_by_tool: HashMap<String, usize> = HashMap::new();
+    for task in active_tasks {
+        if let Some(tool) = task.task_tool() {
+            *active_by_tool.entry(tool.to_string()).or_insert(0) += 1;
+        }
+    }
+
+    for task in &registry.tasks {
+        if task.workflow_state() != Some(crate::coordinator::WorkflowState::Todo) {
+            continue;
+        }
+        let branch = task.branch().map(ToString::to_string);
+        let push = |out: &mut Vec<UnschedulableTask>, reason: String| {
+            out.push(UnschedulableTask {
+                id: task.id.clone(),
+                reason,
+                branch: branch.clone(),
+            });
+        };
+
+        if task.has_worktree_attached()
+            && resume_worktree_for(task, config.max_same_worktree_retries).is_none()
+        {
+            let retries = task.task_runtime.retries_count();
+            let detail = if task.runtime_status() != crate::coordinator::RuntimeStatus::Failed {
+                format!("runtime={}", task.runtime_status().as_str())
+            } else if config.max_same_worktree_retries == 0 {
+                "same-worktree resume disabled".to_string()
+            } else if retries > config.max_same_worktree_retries {
+                format!(
+                    "retry budget spent ({}/{})",
+                    retries, config.max_same_worktree_retries
+                )
+            } else {
+                "no branch to resume".to_string()
+            };
+            push(
+                &mut out,
+                format!("worktree attached, not resumable: {}", detail),
+            );
+            continue;
+        }
+        if task.id.is_empty() {
+            push(&mut out, "task has an empty id".to_string());
+            continue;
+        }
+        let unmet: Vec<String> = task
+            .dependency_ids()
+            .iter()
+            .filter(|dep| !merged_ids.contains(*dep) && !config.external_merged_ids.contains(*dep))
+            .cloned()
+            .collect();
+        if !unmet.is_empty() {
+            push(
+                &mut out,
+                format!("waiting on dependencies: {}", unmet.join(", ")),
+            );
+            continue;
+        }
+        let held: Vec<String> = task
+            .exclusive_resources
+            .iter()
+            .filter(|resource| !resource.is_empty())
+            .filter(|resource| {
+                registry
+                    .resource_locks
+                    .get(*resource)
+                    .is_some_and(|lock| !lock.task_id.is_empty() && lock.task_id != task.id)
+            })
+            .cloned()
+            .collect();
+        if !held.is_empty() {
+            push(
+                &mut out,
+                format!("exclusive resources held: {}", held.join(", ")),
+            );
+            continue;
+        }
+        if is_task_delayed(task, &config.now) {
+            let until = task
+                .task_runtime
+                .delayed_until
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string());
+            push(&mut out, format!("delayed until {}", until));
+            continue;
+        }
+        if pick_tool(task, config, &active_by_tool).is_none() {
+            push(
+                &mut out,
+                "no eligible tool (all candidates throttled, disabled, or at their parallel cap)"
+                    .to_string(),
+            );
+            continue;
+        }
+    }
+
+    out
+}
+
 fn dependencies_ready(
     task: &Task,
     merged_ids: &HashSet<String>,
@@ -1003,6 +1164,135 @@ mod tests {
           "resource_locks": {}
         });
         assert!(select_next_ready_task(&registry, &parked_cfg(2)).is_none());
+    }
+
+    // ── Stall diagnosis ────────────────────────────────────────────────────
+    //
+    // When the coordinator aborts for lack of progress it used to report only
+    // counts ("todo=3, active=0, blocked=0"), leaving the operator to guess.
+    // These pin that each selector filter has a matching, specific explanation.
+
+    fn reasons(registry: serde_json::Value, cfg: &TaskSelectorConfig) -> Vec<String> {
+        let typed = TaskRegistry::from_value(&registry).expect("typed registry");
+        diagnose_unschedulable_tasks(&typed, cfg)
+            .into_iter()
+            .map(|s| format!("{}|{}|{}", s.id, s.reason, s.branch.unwrap_or_default()))
+            .collect()
+    }
+
+    #[test]
+    fn diagnosis_names_a_task_stuck_holding_a_worktree() {
+        // The exact shape that deadlocked a real run: parked with committed
+        // work, retry budget spent, invisible in the counts.
+        let out = reasons(parked_registry(3), &parked_cfg(1));
+        assert_eq!(out.len(), 1, "got: {out:?}");
+        assert!(out[0].starts_with("T-PARKED|worktree attached, not resumable"));
+        assert!(
+            out[0].contains("retry budget spent (3/1)"),
+            "got: {}",
+            out[0]
+        );
+        assert!(
+            out[0].ends_with("|ai/codex/worker-01-2026"),
+            "the branch must be reported so the unmerged work can be found: {}",
+            out[0]
+        );
+    }
+
+    #[test]
+    fn diagnosis_names_unmet_dependencies() {
+        let registry = json!({
+          "tasks": [
+            {"id":"A","state":"todo","priority":"1","dependencies":["DEP-1","DEP-2"],"exclusive_resources":[]},
+            {"id":"DEP-1","state":"merged","priority":"1","dependencies":[],"exclusive_resources":[]}
+          ],
+          "resource_locks": {}
+        });
+        let out = reasons(registry, &parked_cfg(1));
+        assert_eq!(out.len(), 1, "got: {out:?}");
+        assert!(
+            out[0].contains("waiting on dependencies: DEP-2"),
+            "got: {}",
+            out[0]
+        );
+        assert!(
+            !out[0].contains("DEP-1"),
+            "satisfied deps must not be listed"
+        );
+    }
+
+    #[test]
+    fn diagnosis_names_held_exclusive_resources() {
+        let registry = json!({
+          "tasks": [
+            {"id":"A","state":"todo","priority":"1","dependencies":[],"exclusive_resources":["shared-api"]}
+          ],
+          "resource_locks": { "shared-api": { "task_id": "OTHER" } }
+        });
+        let out = reasons(registry, &parked_cfg(1));
+        assert!(
+            out[0].contains("exclusive resources held: shared-api"),
+            "got: {}",
+            out[0]
+        );
+    }
+
+    #[test]
+    fn diagnosis_names_the_parallelism_cap() {
+        let registry = json!({
+          "tasks": [
+            {"id":"RUNNING","state":"in_progress","priority":"1","tool":"codex","dependencies":[],"exclusive_resources":[]},
+            {"id":"WAITING","state":"todo","priority":"1","dependencies":[],"exclusive_resources":[]}
+          ],
+          "resource_locks": {}
+        });
+        let cfg = TaskSelectorConfig {
+            max_parallel: 1,
+            ..parked_cfg(1)
+        };
+        let out = reasons(registry, &cfg);
+        assert!(
+            out[0].contains("parallelism cap reached"),
+            "got: {}",
+            out[0]
+        );
+    }
+
+    #[test]
+    fn diagnosis_names_a_missing_tool() {
+        let registry = json!({
+          "tasks": [
+            {"id":"A","state":"todo","priority":"1","dependencies":[],"exclusive_resources":[]}
+          ],
+          "resource_locks": {}
+        });
+        let cfg = TaskSelectorConfig {
+            enabled_tools: vec![],
+            tool_priority: vec![],
+            default_tool: String::new(),
+            ..parked_cfg(1)
+        };
+        let out = reasons(registry, &cfg);
+        assert!(out[0].contains("no eligible tool"), "got: {}", out[0]);
+    }
+
+    #[test]
+    fn a_dispatchable_task_produces_no_diagnosis() {
+        // The diagnosis must stay silent when nothing is actually wrong,
+        // otherwise it becomes noise in every stall report.
+        let registry = json!({
+          "tasks": [
+            {"id":"READY","state":"todo","priority":"1","dependencies":[],"exclusive_resources":[]}
+          ],
+          "resource_locks": {}
+        });
+        assert!(reasons(registry, &parked_cfg(1)).is_empty());
+    }
+
+    #[test]
+    fn a_resumable_parked_task_is_not_reported_as_stuck() {
+        // It still has budget, so it is dispatchable and must not be blamed.
+        assert!(reasons(parked_registry(1), &parked_cfg(2)).is_empty());
     }
 
     #[test]

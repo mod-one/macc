@@ -159,6 +159,57 @@ fn build_task_selector_config(
     }
 }
 
+/// Explain why no `todo` task could be dispatched, for the "no progress" abort.
+///
+/// Builds the *same* selector config dispatch uses, so the reasons reported are
+/// the reasons that actually applied. Where a task still holds a branch, the
+/// count of unmerged commits on it is appended -- that is the number an operator
+/// needs to decide between recovering the work and discarding it.
+pub fn diagnose_stall_native(
+    repo_root: &Path,
+    canonical: &crate::config::CanonicalConfig,
+    coordinator: Option<&crate::config::CoordinatorConfig>,
+    env_cfg: &CoordinatorEnvConfig,
+    state: &CoordinatorRunState,
+) -> Vec<String> {
+    let cfg = CoordinatorConfigResolved::resolve(coordinator);
+    let Ok(registry_value) =
+        crate::coordinator::state::coordinator_state_registry_load(repo_root, &BTreeMap::new())
+    else {
+        return Vec::new();
+    };
+    let Ok(registry) = crate::coordinator::model::TaskRegistry::from_value(&registry_value) else {
+        return Vec::new();
+    };
+    let selector_cfg = build_task_selector_config(
+        repo_root,
+        &registry_value,
+        canonical,
+        env_cfg,
+        &cfg,
+        coordinator,
+        state,
+    );
+    let base_branch = selector_cfg.default_base_branch.clone();
+
+    crate::coordinator::task_selector::diagnose_unschedulable_tasks(&registry, &selector_cfg)
+        .into_iter()
+        .map(|stuck| {
+            let mut line = format!("{} ({})", stuck.id, stuck.reason);
+            if let Some(branch) = stuck.branch {
+                let commits = crate::git::commits_between(repo_root, &base_branch, &branch)
+                    .map(|c| c.len())
+                    .unwrap_or(0);
+                line.push_str(&format!(
+                    "; branch {} holds {} unmerged commit(s)",
+                    branch, commits
+                ));
+            }
+            line
+        })
+        .collect()
+}
+
 pub(super) fn select_dispatch_candidate(
     registry: &serde_json::Value,
     config: &crate::coordinator::task_selector::TaskSelectorConfig,

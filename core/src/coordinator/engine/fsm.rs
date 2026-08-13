@@ -244,6 +244,13 @@ pub trait ControlPlaneBackend {
     fn last_dispatch_failure(&self) -> Option<String> {
         None
     }
+    /// Explain, one line per task, why nothing could be dispatched.
+    ///
+    /// Only called when a run is about to abort for lack of progress, so it may
+    /// read the registry and git without slowing the normal path.
+    fn diagnose_stall(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Plan the next advance action for a task.
@@ -1333,6 +1340,25 @@ impl CoordinatorRunController {
         counts: CoordinatorCounts,
         last_dispatch_failure: Option<&str>,
     ) -> Result<ControlPlaneDecision> {
+        self.on_cycle_counts_with(counts, last_dispatch_failure, Vec::new)
+    }
+
+    /// As [`Self::on_cycle_counts`], but able to explain a stall.
+    ///
+    /// `diagnose` is only invoked when the run is actually about to abort for
+    /// lack of progress, so the (registry-reading) diagnosis costs nothing on
+    /// the normal path. Reporting bare counts leaves the operator to guess why
+    /// nothing moved; naming the stuck tasks and their causes is the difference
+    /// between an actionable failure and a mystery.
+    pub fn on_cycle_counts_with<F>(
+        &mut self,
+        counts: CoordinatorCounts,
+        last_dispatch_failure: Option<&str>,
+        diagnose: F,
+    ) -> Result<ControlPlaneDecision>
+    where
+        F: FnOnce() -> Vec<String>,
+    {
         if counts.todo == 0 && counts.active == 0 {
             if counts.blocked > 0 {
                 return Err(MaccError::Validation(format!(
@@ -1357,9 +1383,23 @@ impl CoordinatorRunController {
                 Some(msg) => format!(" Last dispatch failure: {}", msg),
                 None => String::new(),
             };
+            let stalled = diagnose();
+            let diagnosis = if stalled.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "\n\n{} task(s) could not be dispatched:\n{}\n",
+                    stalled.len(),
+                    stalled
+                        .iter()
+                        .map(|line| format!("  - {}", line))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                )
+            };
             return Err(MaccError::Validation(format!(
-                "Coordinator made no progress for {} cycles (todo={}, active={}, blocked={}).{} Run `macc coordinator status`, then `macc coordinator unlock --all`, and inspect logs with `macc logs tail --component coordinator`.",
-                self.no_progress_cycles, counts.todo, counts.active, counts.blocked, hint
+                "Coordinator made no progress for {} cycles (todo={}, active={}, blocked={}).{}{}\nRun `macc coordinator status`, then `macc coordinator unlock --all`, and inspect logs with `macc logs tail --component coordinator`.",
+                self.no_progress_cycles, counts.todo, counts.active, counts.blocked, hint, diagnosis
             )));
         }
 
@@ -1464,7 +1504,7 @@ async fn run_control_plane_cycle<B: ControlPlaneBackend + ?Sized>(
         return Ok(ControlPlaneDecision::Complete);
     }
     let last_fail = backend.last_dispatch_failure();
-    controller.on_cycle_counts(counts, last_fail.as_deref())
+    controller.on_cycle_counts_with(counts, last_fail.as_deref(), || backend.diagnose_stall())
 }
 
 struct NativeControlPlaneBackend<'a> {
@@ -1895,6 +1935,16 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
 
     fn last_dispatch_failure(&self) -> Option<String> {
         self.run_state.last_dispatch_failure.clone()
+    }
+
+    fn diagnose_stall(&self) -> Vec<String> {
+        crate::coordinator::control_plane::diagnose_stall_native(
+            self.repo_root,
+            self.canonical,
+            self.coordinator,
+            self.env_cfg,
+            &self.run_state,
+        )
     }
 }
 
