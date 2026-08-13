@@ -1789,100 +1789,119 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
 
             // Pane 1: LIVE TASKS Table
             let filtered_tasks = state.filtered_active_tasks();
-            let mut rows = Vec::new();
-            for task in &filtered_tasks {
-                let health_symbol = task.health.symbol();
+            let snapshot_total = state
+                .coordinator_snapshot
+                .as_ref()
+                .map(|s| s.total)
+                .unwrap_or(0);
+            let coordinator_live_empty = !state.is_coordinator_running()
+                && !state.is_coordinator_paused()
+                && snapshot_total == 0
+                && filtered_tasks.is_empty();
+            if filtered_tasks.is_empty() {
+                let empty_lines = coordinator_live_empty_lines(
+                    coordinator_live_empty,
+                    !state.search_query.is_empty(),
+                    snapshot_total,
+                );
+                let empty_para = Paragraph::new(empty_lines)
+                    .block(panel("LIVE TASKS"))
+                    .wrap(Wrap { trim: true });
+                f.render_widget(empty_para, body_chunks[0]);
+            } else {
+                let mut rows = Vec::new();
+                for task in &filtered_tasks {
+                    let health_symbol = task.health.symbol();
 
-                let health_style = match task.health {
-                    macc_core::coordinator::view_model::TaskHealth::Warning => {
-                        Style::default().fg(theme.bad)
-                    }
-                    macc_core::coordinator::view_model::TaskHealth::Stale => {
-                        Style::default().fg(theme.warn)
-                    }
-                    macc_core::coordinator::view_model::TaskHealth::Healthy => {
-                        Style::default().fg(theme.good)
-                    }
-                    _ => Style::default().fg(theme.muted),
-                };
+                    let health_style = match task.health {
+                        macc_core::coordinator::view_model::TaskHealth::Warning => {
+                            Style::default().fg(theme.bad)
+                        }
+                        macc_core::coordinator::view_model::TaskHealth::Stale => {
+                            Style::default().fg(theme.warn)
+                        }
+                        macc_core::coordinator::view_model::TaskHealth::Healthy => {
+                            Style::default().fg(theme.good)
+                        }
+                        _ => Style::default().fg(theme.muted),
+                    };
 
-                let status_label = task.status_label();
+                    let status_label = task.status_label();
 
-                let phase_label = task.phase.compact_label();
+                    let phase_label = task.phase.compact_label();
 
-                let status_text = if phase_label.is_empty() {
-                    status_label
-                } else {
-                    format!("{} {}", status_label, phase_label)
-                };
+                    let status_text = if phase_label.is_empty() {
+                        status_label
+                    } else {
+                        format!("{} {}", status_label, phase_label)
+                    };
 
-                let age_label = task.age_label();
-                let hb_label = task.heartbeat_age_label();
+                    let age_label = task.age_label();
+                    let hb_label = task.heartbeat_age_label();
 
-                let worker = if task.worker_id.is_empty() {
-                    "-"
-                } else {
-                    &task.worker_id
-                };
-                let tool = if task.tool.is_empty() {
-                    "-"
-                } else {
-                    &task.tool
-                };
-                let model = if task.model.is_empty() {
-                    "-"
-                } else {
-                    &task.model
-                };
+                    let worker = if task.worker_id.is_empty() {
+                        "-"
+                    } else {
+                        &task.worker_id
+                    };
+                    let tool = if task.tool.is_empty() {
+                        "-"
+                    } else {
+                        &task.tool
+                    };
+                    let model = if task.model.is_empty() {
+                        "-"
+                    } else {
+                        &task.model
+                    };
 
-                let cells = vec![
-                    Cell::from(health_symbol).style(health_style),
-                    Cell::from(worker.to_string()),
-                    Cell::from(task.task_id.clone()),
-                    Cell::from(status_text),
-                    Cell::from(tool.to_string()),
-                    Cell::from(model.to_string()),
-                    Cell::from(age_label),
-                    Cell::from(hb_label),
+                    let cells = vec![
+                        Cell::from(health_symbol).style(health_style),
+                        Cell::from(worker.to_string()),
+                        Cell::from(task.task_id.clone()),
+                        Cell::from(status_text),
+                        Cell::from(tool.to_string()),
+                        Cell::from(model.to_string()),
+                        Cell::from(age_label),
+                        Cell::from(hb_label),
+                    ];
+                    rows.push(Row::new(cells));
+                }
+
+                let headers = Row::new(vec![
+                    Cell::from("Health").style(Style::default().fg(theme.accent)),
+                    Cell::from("Worker").style(Style::default().fg(theme.accent)),
+                    Cell::from("Task ID").style(Style::default().fg(theme.accent)),
+                    Cell::from("Status").style(Style::default().fg(theme.accent)),
+                    Cell::from("Tool").style(Style::default().fg(theme.accent)),
+                    Cell::from("Model").style(Style::default().fg(theme.accent)),
+                    Cell::from("Age").style(Style::default().fg(theme.accent)),
+                    Cell::from("HB").style(Style::default().fg(theme.accent)),
+                ]);
+
+                let widths = [
+                    Constraint::Length(8),
+                    Constraint::Length(12),
+                    Constraint::Length(25),
+                    Constraint::Length(12),
+                    Constraint::Length(10),
+                    Constraint::Length(15),
+                    Constraint::Length(8),
+                    Constraint::Length(8),
                 ];
-                rows.push(Row::new(cells));
-            }
+                let tasks_table = Table::new(rows, widths)
+                    .header(headers)
+                    .block(panel("LIVE TASKS (↑↓ navigate, Enter details, d diff, r retry, s stop task, k stop coordinator)"))
+                    .highlight_style(Style::default().bg(theme.highlight_bg))
+                    .highlight_symbol("› ");
 
-            let headers = Row::new(vec![
-                Cell::from("Health").style(Style::default().fg(theme.accent)),
-                Cell::from("Worker").style(Style::default().fg(theme.accent)),
-                Cell::from("Task ID").style(Style::default().fg(theme.accent)),
-                Cell::from("Status").style(Style::default().fg(theme.accent)),
-                Cell::from("Tool").style(Style::default().fg(theme.accent)),
-                Cell::from("Model").style(Style::default().fg(theme.accent)),
-                Cell::from("Age").style(Style::default().fg(theme.accent)),
-                Cell::from("HB").style(Style::default().fg(theme.accent)),
-            ]);
-
-            let widths = [
-                Constraint::Length(8),
-                Constraint::Length(12),
-                Constraint::Length(25),
-                Constraint::Length(12),
-                Constraint::Length(10),
-                Constraint::Length(15),
-                Constraint::Length(8),
-                Constraint::Length(8),
-            ];
-            let tasks_table = Table::new(rows, widths)
-                .header(headers)
-                .block(panel("LIVE TASKS (↑↓ navigate, Enter details, d diff, r retry, s stop task, k stop coordinator)"))
-                .highlight_style(Style::default().bg(theme.highlight_bg))
-                .highlight_symbol("› ");
-
-            let mut table_state = TableState::default();
-            if !filtered_tasks.is_empty() {
+                let mut table_state = TableState::default();
                 let clamped_idx = state
                     .coordinator_selected_task_index
                     .min(filtered_tasks.len() - 1);
                 table_state.select(Some(clamped_idx));
+                f.render_stateful_widget(tasks_table, body_chunks[0], &mut table_state);
             }
-            f.render_stateful_widget(tasks_table, body_chunks[0], &mut table_state);
 
             // Pane 2: SELECTED TASK DETAIL
             let selected_task = state.selected_live_task();
@@ -1954,7 +1973,17 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                     ]));
                 }
             } else {
-                detail_lines.push(Line::from("No task selected. Use ↑/↓ to navigate."));
+                if coordinator_live_empty {
+                    detail_lines.extend(coordinator_live_empty_lines(true, false, snapshot_total));
+                } else if !state.search_query.is_empty() {
+                    detail_lines.push(Line::from(
+                        "No task matches the current search. Clear search with Esc or adjust it.",
+                    ));
+                } else {
+                    detail_lines.push(Line::from(
+                        "No task selected. When tasks appear, use ↑/↓ to navigate.",
+                    ));
+                }
             }
             let detail_para = Paragraph::new(detail_lines)
                 .block(panel("SELECTED TASK DETAIL"))
@@ -2001,9 +2030,19 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                         }
                     }
                 } else {
-                    logs_lines.push(Line::from(
-                        "No task selected. Showing recent coordinator events:",
-                    ));
+                    if coordinator_live_empty {
+                        logs_lines.push(Line::from("No coordinator run is active."));
+                        logs_lines.push(Line::from(
+                            "Next: create/promote a PRD task, then start the coordinator.",
+                        ));
+                        logs_lines.push(Line::from(
+                            "Recent coordinator events will appear here once a run starts.",
+                        ));
+                    } else {
+                        logs_lines.push(Line::from(
+                            "No task selected. Showing recent coordinator events:",
+                        ));
+                    }
                     for line in state.coordinator_events.iter().rev().take(15).rev() {
                         logs_lines.push(Line::from(line.clone()));
                     }
@@ -2439,6 +2478,45 @@ fn readiness_recommendation(
             other_actions: &["[a] Apply config", "[v] Coordinator live view"],
         },
     }
+}
+
+fn coordinator_live_empty_lines(
+    no_run_and_no_tasks: bool,
+    search_active: bool,
+    total_tasks: usize,
+) -> Vec<Line<'static>> {
+    if no_run_and_no_tasks {
+        return vec![
+            Line::from("No coordinator run is active."),
+            Line::from("No PRD tasks are currently known to MACC."),
+            Line::from(""),
+            Line::from(
+                "Next: create or promote a PRD with ready tasks, then start the coordinator.",
+            ),
+            Line::from("CLI: macc prd generate --from <brief.md> --promote"),
+            Line::from("Then: press [r] from Home or run `macc coordinator run`."),
+        ];
+    }
+
+    if search_active {
+        return vec![
+            Line::from("No visible tasks match the current search."),
+            Line::from("Next: clear or adjust search to see existing coordinator tasks."),
+        ];
+    }
+
+    if total_tasks > 0 {
+        return vec![
+            Line::from("No live task is currently active."),
+            Line::from("Next: start or resume the coordinator to dispatch ready work."),
+            Line::from("Shortcut: [r] run/requeue, [u] resume, [c] reconcile."),
+        ];
+    }
+
+    vec![
+        Line::from("No live task is currently active."),
+        Line::from("Next: run Doctor from Home to find the blocking setup step."),
+    ]
 }
 
 fn render_watch_screen(f: &mut Frame, state: &AppState, area: Rect) {
@@ -2880,6 +2958,33 @@ mod tests {
 
         assert_eq!(recommendation.action, "[r] Start coordinator");
         assert!(recommendation.reason.contains("tasks are ready"));
+    }
+
+    #[test]
+    fn coordinator_live_empty_state_explains_next_prd_action() {
+        let lines = coordinator_live_empty_lines(true, false, 0);
+        let text = lines
+            .iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("No coordinator run is active"));
+        assert!(text.contains("create or promote a PRD"));
+        assert!(text.contains("macc prd generate --from <brief.md> --promote"));
+    }
+
+    #[test]
+    fn coordinator_live_empty_state_respects_search_filter() {
+        let lines = coordinator_live_empty_lines(false, true, 3);
+        let text = lines
+            .iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("current search"));
+        assert!(!text.contains("create or promote a PRD"));
     }
 }
 
