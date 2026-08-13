@@ -781,11 +781,32 @@ resolve_task_result_exp() {
   local exp=""
   exp="$(extract_task_result_exp "$output_file")"
   if [[ -z "$exp" && "$result_kind" == error_* ]]; then
+    # A terminal error with no explanation is not accepted as-is: the tool's
+    # own account is the only record of why it stopped, and the continuation
+    # prompt for the next attempt is built from it. Substitute an explicit
+    # statement of the omission so the failure is never unexplained, and make
+    # the contract breach visible in the log and on stderr.
     exp="(no explanation provided: the tool reported ${result_kind} without the required MACC_TASK_RESULT_EXP line)"
     echo "Warning: ${result_kind} reported without MACC_TASK_RESULT_EXP" >&2
     log_task_line "- Warning: ${result_kind} reported without MACC_TASK_RESULT_EXP"
   fi
   printf '%s' "$exp"
+}
+
+# Reject a terminal result whose contract is incomplete.
+#
+# `error_*` markers must carry MACC_TASK_RESULT_EXP. The check is deliberately
+# non-fatal: refusing to emit the terminal event at all would leave the
+# coordinator with no record of the task's outcome, which is strictly worse
+# than an error with a stated-missing explanation (see the fatal-on-rejection
+# note on the "done" path below). Returns 1 so callers can log the breach.
+validate_terminal_result_contract() {
+  local output_file="$1"
+  local result_kind="$2"
+  [[ "$result_kind" == error_* ]] || return 0
+  local raw
+  raw="$(extract_task_result_exp "$output_file")"
+  [[ -n "$raw" ]]
 }
 
 has_committable_changes() {
@@ -910,6 +931,11 @@ run_tool() {
     fi
     local result_exp=""
     result_exp="$(resolve_task_result_exp "$output_capture" "$result_kind")"
+    if ! validate_terminal_result_contract "$output_capture" "$result_kind"; then
+      emit_performer_event "contract_violation" "$CURRENT_PHASE" "warning" "$(jq -nc \
+        --arg kind "$result_kind" \
+        '{violation:"missing_result_explanation", result_kind:$kind}')" || true
+    fi
     # Build the payload additively: optional string fields are merged in only
     # when non-empty. Do NOT use `field:($x|select(length>0))` inside the object
     # literal — jq's `select` yields `empty` for an empty string, and a field

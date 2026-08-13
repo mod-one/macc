@@ -3812,6 +3812,76 @@ mod tests {
         let _ = fs::remove_dir_all(&repo);
     }
 
+    /// The tool's own account of why it stopped must reach the *typed* error
+    /// fields. `result_explanation` lives in the runtime's serialized payload,
+    /// which later writes overwrite, so failures were routinely recorded with
+    /// nothing but the generic "Tool execution failed…" line.
+    #[test]
+    fn tool_explanation_is_surfaced_in_last_error_message() {
+        let repo = make_repo_with_commit_ahead("main");
+        let wt = repo.to_string_lossy().to_string();
+        let mut task_val = json!({
+            "id": "EXP-1",
+            "state": "claimed",
+            "tool": "codex",
+            "worktree": { "worktree_path": wt, "branch": "ai/codex/worker-01" },
+            "task_runtime": { "status": "running", "retries": 0 }
+        });
+        let mut input = make_error_completion_input(PerformerCompletionKind::ErrorWithChanges);
+        input.result_explanation =
+            Some("pnpm test and pnpm build fail for unrelated pre-existing reasons".to_string());
+
+        let out = apply_job_completion(
+            &mut task_val,
+            &input,
+            &NormalizerRegistry::empty(),
+            "2026-04-12T00:00:00Z",
+        );
+
+        let message = task_val["task_runtime"]["last_error_message"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            message.contains("unrelated pre-existing reasons"),
+            "the explanation must reach last_error_message: {message}"
+        );
+        assert_eq!(task_val["task_runtime"]["last_error_code"], "E104");
+        assert_eq!(task_val["task_runtime"]["last_error_origin"], "tool");
+        assert!(
+            out.detail.contains("unrelated pre-existing reasons"),
+            "the emitted detail must carry it too: {}",
+            out.detail
+        );
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    /// A tool that omits the explanation must not produce a failure with no
+    /// recorded reason — the omission itself is recorded.
+    #[test]
+    fn a_missing_explanation_is_recorded_as_missing() {
+        let mut task_val = json!({
+            "id": "EXP-2",
+            "state": "claimed",
+            "tool": "codex",
+            "worktree": { "worktree_path": "/tmp/wt-exp2" },
+            "task_runtime": { "status": "running" }
+        });
+        apply_job_completion(
+            &mut task_val,
+            &make_error_completion_input(PerformerCompletionKind::ErrorWithoutChanges),
+            &NormalizerRegistry::empty(),
+            "2026-04-12T00:00:00Z",
+        );
+        let message = task_val["task_runtime"]["last_error_message"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            message.contains("no explanation provided"),
+            "an unexplained failure must say so: {message}"
+        );
+        assert_eq!(task_val["task_runtime"]["last_error_code"], "E105");
+    }
+
     /// Once the same-worktree budget is spent the task must be `blocked`, not
     /// `todo`. A `todo` task holding a worktree past its budget is not
     /// selectable, so it would sit unschedulable while looking healthy and the

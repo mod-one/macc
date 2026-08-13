@@ -25,6 +25,7 @@ extract_fns() {
   sed -n \
     -e '/^extract_task_result_exp()/,/^}/p' \
     -e '/^resolve_task_result_exp()/,/^}/p' \
+    -e '/^validate_terminal_result_contract()/,/^}/p' \
     -e '/^previous_result_explanation()/,/^}/p' \
     -e '/^build_prior_work_summary()/,/^}/p' \
     -e '/^build_continuation_section()/,/^}/p' \
@@ -122,6 +123,28 @@ if [[ "$section" == *"treat the task as unstarted"* ]]; then
   pass "no commits on the branch is stated explicitly"
 else
   fail "no commits on the branch is stated explicitly" "got: $section"
+fi
+
+# ── 3b. terminal error contract validation ──────────────────────────────────
+printf 'MACC_TASK_RESULT: error_with_changes\n' >"$out_file"
+if run_harness "$tmp_root" 0 "" "validate_terminal_result_contract '$out_file' 'error_with_changes'" 2>/dev/null; then
+  fail "unexplained error result is rejected" "validator accepted a missing explanation"
+else
+  pass "unexplained error result is rejected"
+fi
+
+printf 'MACC_TASK_RESULT_EXP: why\nMACC_TASK_RESULT: error_with_changes\n' >"$out_file"
+if run_harness "$tmp_root" 0 "" "validate_terminal_result_contract '$out_file' 'error_with_changes'" 2>/dev/null; then
+  pass "an explained error result is accepted"
+else
+  fail "an explained error result is accepted" "validator rejected a valid result"
+fi
+
+printf 'MACC_TASK_RESULT: success_with_changes\n' >"$out_file"
+if run_harness "$tmp_root" 0 "" "validate_terminal_result_contract '$out_file' 'success_with_changes'" 2>/dev/null; then
+  pass "success results are not subject to the explanation contract"
+else
+  fail "success results are not subject to the explanation contract" "validator rejected a success"
 fi
 
 # ── 4. session lock is flock-based and self-healing ─────────────────────────
