@@ -632,82 +632,51 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
     if full_clear {
         f.render_widget(Clear, f.size());
     }
+    let current_screen = state.current_screen();
+    let frame_width = f.size().width;
+    let next_step_full = next_step_text(state, frame_width.saturating_sub(10) as usize);
+    let next_step_label = next_step_full
+        .strip_prefix("Next step: ")
+        .unwrap_or(next_step_full.as_str())
+        .to_string();
+    let trust_strip =
+        if let (Some(paths), Some(config)) = (&state.project_paths, state.working_copy.as_ref()) {
+            trust_warning_strip(paths, config)
+        } else {
+            None
+        };
+    let header_height = 5
+        + u16::from(trust_strip.is_some())
+        + u16::from(state.coordinator_phase_overrides.is_some());
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(5), // Compact title + project/status + ops guardrails
-            Constraint::Length(1), // One actionable next step
-            Constraint::Min(0),    // Body
-            Constraint::Length(4), // Footer / Navigation help
+            Constraint::Length(header_height), // Compact 3-line header, plus warnings if needed
+            Constraint::Min(0),                // Body
+            Constraint::Length(4),             // Footer / Navigation help
         ])
         .split(f.size());
     let header_area = chunks[0];
-    let next_step_area = chunks[1];
-    let body_area = chunks[2];
-    let footer_area = chunks[3];
-
-    let current_screen = state.current_screen();
+    let body_area = chunks[1];
+    let footer_area = chunks[2];
 
     // Header
     let project_label = state
         .project_paths
         .as_ref()
-        .map(|p| p.root.display().to_string())
+        .map(|p| {
+            p.root
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("project")
+                .to_string()
+        })
         .unwrap_or_else(|| "(no project)".to_string());
-    let (config_label, config_color) = if state.working_copy.is_some() {
-        ("loaded", theme.good)
+    let config_status = if state.working_copy.is_some() {
+        "ok"
     } else {
-        ("missing", theme.warn)
+        "missing"
     };
-    let config_status = format!(
-        "{} ({})",
-        config_label,
-        if config_color == theme.good {
-            "ok"
-        } else {
-            "warn"
-        }
-    );
-    let trust_strip =
-        if let (Some(paths), Some(config)) = (&state.project_paths, state.working_copy.as_ref()) {
-            let trust = macc_core::ops_motif::calculate_trust_summary(paths, config);
-            let locality = if trust.local_only {
-                "local only"
-            } else {
-                "remote allowed"
-            };
-            let backups = if trust.backups_ready {
-                "backups ready"
-            } else {
-                "backups missing"
-            };
-            let catalog = if trust.catalog_pinned {
-                "catalog trusted"
-            } else {
-                "catalog unpinned"
-            };
-            let secrets = if trust.secrets_redacted {
-                "secrets hidden"
-            } else {
-                "secrets visible"
-            };
-            let terminal_policy = if trust.terminal_enabled {
-                "terminal allowed"
-            } else {
-                "terminal blocked"
-            };
-            let writes_policy = if trust.user_level_writes == 0 {
-                "no user-file writes".to_string()
-            } else {
-                format!("{} user-file write(s)", trust.user_level_writes)
-            };
-            Some(format!(
-                "{} | {} | {} | {} | {} | {}",
-                locality, terminal_policy, writes_policy, backups, catalog, secrets
-            ))
-        } else {
-            None
-        };
     let header_ctx = HeaderContext {
         app_name: "[M][A][C][C]",
         screen_title: current_screen.title(),
@@ -718,6 +687,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
         coordinator_active: state.is_coordinator_running(),
         coordinator_paused: state.is_coordinator_paused(),
         coordinator_command: state.coordinator_running_command.as_deref(),
+        next_step: &next_step_label,
         status: state.status_line(),
         width: header_area.width,
         trust_strip,
@@ -725,14 +695,6 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
     };
     let title = Paragraph::new(header_lines(&header_ctx, &theme)).block(panel("MACC"));
     f.render_widget(title, header_area);
-
-    let next_step = Paragraph::new(next_step_text(
-        state,
-        next_step_area.width.saturating_sub(2) as usize,
-    ))
-    .style(Style::default().fg(theme.accent_dim))
-    .block(Block::default().borders(Borders::LEFT | Borders::RIGHT));
-    f.render_widget(next_step, next_step_area);
 
     // Body
     match current_screen {
@@ -2503,6 +2465,36 @@ fn next_step_text_for_ladder(
     }
 }
 
+fn trust_warning_strip(
+    paths: &macc_core::ProjectPaths,
+    config: &macc_core::config::CanonicalConfig,
+) -> Option<String> {
+    let trust = macc_core::ops_motif::calculate_trust_summary(paths, config);
+    let mut warnings = Vec::new();
+
+    if trust.terminal_enabled {
+        warnings.push("terminal allowed".to_string());
+    }
+    if trust.user_level_writes > 0 {
+        warnings.push(format!("{} user-file write(s)", trust.user_level_writes));
+    }
+    if !trust.backups_ready {
+        warnings.push("backups missing".to_string());
+    }
+    if !trust.catalog_pinned {
+        warnings.push("catalog unpinned".to_string());
+    }
+    if !trust.secrets_redacted {
+        warnings.push("secrets visible".to_string());
+    }
+
+    if warnings.is_empty() {
+        None
+    } else {
+        Some(warnings.join(" | "))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ReadinessRecommendation {
     action: &'static str,
@@ -3241,6 +3233,59 @@ mod tests {
             next_step_text_for_ladder(&ladder, false),
             "Next step: Ready to run. Press r to start coordinator."
         );
+    }
+
+    #[test]
+    fn compact_header_uses_three_lines_without_trust_warning() {
+        let theme = theme();
+        let ctx = HeaderContext {
+            app_name: "[M][A][C][C]",
+            screen_title: "Home",
+            mode: "browse",
+            project: "macc",
+            config_label: "ok",
+            errors: 0,
+            coordinator_active: false,
+            coordinator_paused: false,
+            coordinator_command: None,
+            next_step: "Ready to run. Press r to start coordinator.",
+            status: None,
+            width: 120,
+            trust_strip: None,
+            override_strip: None,
+        };
+
+        let lines = header_lines(&ctx, &theme);
+
+        assert_eq!(lines.len(), 3);
+        assert!(lines[1].to_string().contains("Next: Ready to run"));
+        assert!(lines[2].to_string().contains("Status: idle"));
+    }
+
+    #[test]
+    fn compact_header_adds_trust_line_only_for_warning() {
+        let theme = theme();
+        let ctx = HeaderContext {
+            app_name: "[M][A][C][C]",
+            screen_title: "Home",
+            mode: "browse",
+            project: "macc",
+            config_label: "ok",
+            errors: 0,
+            coordinator_active: false,
+            coordinator_paused: false,
+            coordinator_command: None,
+            next_step: "Ready to run. Press r to start coordinator.",
+            status: None,
+            width: 120,
+            trust_strip: Some("terminal allowed".to_string()),
+            override_strip: None,
+        };
+
+        let lines = header_lines(&ctx, &theme);
+
+        assert_eq!(lines.len(), 4);
+        assert!(lines[3].to_string().contains("Trust: terminal allowed"));
     }
 }
 

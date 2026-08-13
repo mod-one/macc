@@ -117,6 +117,7 @@ pub struct HeaderContext<'a> {
     pub coordinator_active: bool,
     pub coordinator_paused: bool,
     pub coordinator_command: Option<&'a str>,
+    pub next_step: &'a str,
     pub status: Option<(UiStatusLevel, String)>,
     pub width: u16,
     pub trust_strip: Option<String>,
@@ -126,7 +127,14 @@ pub struct HeaderContext<'a> {
 
 pub fn header_lines(ctx: &HeaderContext<'_>, t: &Theme) -> Vec<Line<'static>> {
     let max = ctx.width.saturating_sub(6) as usize;
-    let project_short = truncate_middle(ctx.project, max.saturating_sub(42));
+    let project_short = truncate_middle(ctx.project, max.saturating_sub(48));
+    let coord_label = if ctx.coordinator_paused {
+        "paused".to_string()
+    } else if ctx.coordinator_active {
+        ctx.coordinator_command.unwrap_or("run").to_string()
+    } else {
+        "off".to_string()
+    };
     let mut top_line = vec![
         Span::styled(
             ctx.app_name.to_string(),
@@ -141,15 +149,26 @@ pub fn header_lines(ctx: &HeaderContext<'_>, t: &Theme) -> Vec<Line<'static>> {
         Span::styled("mode", Style::default().fg(t.muted)),
         Span::raw(": "),
         Span::styled(ctx.mode.to_string(), Style::default().fg(t.accent)),
+        Span::raw("   "),
+        Span::styled("project", Style::default().fg(t.muted)),
+        Span::raw(":"),
+        Span::raw(project_short),
+        Span::raw("   "),
+        Span::styled("config", Style::default().fg(t.muted)),
+        Span::raw(":"),
+        Span::raw(ctx.config_label.to_string()),
+        Span::raw("   "),
+        Span::styled("coord", Style::default().fg(t.muted)),
+        Span::raw(":"),
+        Span::styled(
+            coord_label,
+            Style::default().fg(if ctx.coordinator_active || ctx.coordinator_paused {
+                t.warn
+            } else {
+                t.muted
+            }),
+        ),
     ];
-    if ctx.coordinator_active {
-        let command_name = ctx.coordinator_command.unwrap_or("run");
-        top_line.push(Span::raw("  "));
-        top_line.push(Span::styled(
-            format!("[coord:{}]", command_name),
-            Style::default().fg(t.warn).add_modifier(Modifier::BOLD),
-        ));
-    }
     if ctx.coordinator_paused {
         top_line.push(Span::raw("  "));
         top_line.push(Span::styled(
@@ -172,33 +191,30 @@ pub fn header_lines(ctx: &HeaderContext<'_>, t: &Theme) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::from(top_line),
         Line::from(vec![
-            Span::styled("project", Style::default().fg(t.muted)),
+            Span::styled("Next", Style::default().fg(t.accent)),
             Span::raw(": "),
-            Span::raw(project_short),
-            Span::raw("  "),
-            Span::styled("config", Style::default().fg(t.muted)),
+            Span::raw(truncate_middle(ctx.next_step, max.saturating_sub(6))),
+        ]),
+        Line::from(vec![
+            Span::styled("Status", Style::default().fg(t.muted)),
             Span::raw(": "),
-            Span::raw(ctx.config_label.to_string()),
-            Span::raw("  "),
-            Span::styled("errors", Style::default().fg(t.muted)),
-            Span::raw(": "),
+            Span::styled(
+                truncate_middle(status_text, max.saturating_sub(24)),
+                status_style,
+            ),
+            Span::raw("   "),
+            Span::styled("issues", Style::default().fg(t.muted)),
+            Span::raw(":"),
             Span::styled(
                 ctx.errors.to_string(),
                 Style::default().fg(if ctx.errors == 0 { t.good } else { t.bad }),
-            ),
-            Span::raw("  "),
-            Span::styled("status", Style::default().fg(t.muted)),
-            Span::raw(": "),
-            Span::styled(
-                truncate_middle(status_text, max.saturating_sub(48)),
-                status_style,
             ),
         ]),
     ];
 
     let mut ops_parts = Vec::new();
     if let Some(strip) = &ctx.trust_strip {
-        ops_parts.push(format!("ops: {}", strip));
+        ops_parts.push(format!("Trust: {}", strip));
     }
 
     if let Some(overrides) = &ctx.override_strip {
