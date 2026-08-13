@@ -177,6 +177,14 @@ Performers cannot commit without it. Fix this first:\n\
             }
         }
 
+        // Preflight: surface settings the runtime silently ignores. These are
+        // not fatal, but a phase that is configured `required` and never runs
+        // is worse than one that is rejected -- the operator has no way to
+        // notice from behaviour alone.
+        for warning in macc_core::config::coordinator_config_warnings(coordinator_cfg) {
+            eprintln!("Warning: {}", warning);
+        }
+
         // Preflight: reference branch must be clean before any mutation.
         run_reference_branch_preflight(engine, paths, coordinator_cfg, &input)?;
 

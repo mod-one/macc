@@ -496,6 +496,76 @@ pub struct McpEnvPlaceholder {
     pub description: Option<String>,
 }
 
+/// A configuration setting that is accepted but does not do what it appears to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigWarning {
+    /// Dotted path of the setting at fault, e.g.
+    /// `automation.coordinator.max_review_cycles`.
+    pub setting: String,
+    /// What actually happens, and how to make the config say it.
+    pub message: String,
+}
+
+impl std::fmt::Display for ConfigWarning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.setting, self.message)
+    }
+}
+
+/// Report coordinator settings whose stated intent the runtime silently ignores.
+///
+/// These are not errors -- the config loads and the coordinator runs -- which is
+/// exactly the problem: the operator believes a phase is active when it never
+/// executes. Surfacing them at preflight turns a silent no-op into a visible
+/// choice.
+pub fn coordinator_config_warnings(config: Option<&CoordinatorConfig>) -> Vec<ConfigWarning> {
+    let Some(config) = config else {
+        return Vec::new();
+    };
+    let mut warnings = Vec::new();
+
+    // `plan_advance` gates the review phase on
+    // `phases.review.enabled && max_review_cycles != Some(0)`, so an explicit
+    // zero disables review outright -- including `mode: required`.
+    if config.max_review_cycles == Some(0) && config.phases.review.enabled {
+        let mode = config.phases.review.mode.trim();
+        let mode_note = if mode.is_empty() || mode == "disabled" {
+            String::new()
+        } else {
+            format!(" (review.mode is `{}`)", mode)
+        };
+        warnings.push(ConfigWarning {
+            setting: "automation.coordinator.max_review_cycles".to_string(),
+            message: format!(
+                "is 0 while phases.review.enabled is true{}, so the review phase never runs. \
+                 Raise max_review_cycles to allow review cycles, or set phases.review.enabled: false \
+                 to say so explicitly.",
+                mode_note
+            ),
+        });
+    }
+
+    // Same shape for testing: the phase is enabled but pinned off.
+    if config.phases.testing.enabled && config.phases.testing.mode.trim() == "disabled" {
+        warnings.push(ConfigWarning {
+            setting: "automation.coordinator.phases.testing".to_string(),
+            message: "has enabled: true with mode: disabled, so the testing phase never runs. \
+                 Pick one: set mode to required/risk_based/manual, or set enabled: false."
+                .to_string(),
+        });
+    }
+    if config.phases.review.enabled && config.phases.review.mode.trim() == "disabled" {
+        warnings.push(ConfigWarning {
+            setting: "automation.coordinator.phases.review".to_string(),
+            message: "has enabled: true with mode: disabled, so the review phase never runs. \
+                 Pick one: set mode to required/risk_based/manual, or set enabled: false."
+                .to_string(),
+        });
+    }
+
+    warnings
+}
+
 pub fn load_canonical_config<P: AsRef<Path>>(path: P) -> crate::Result<CanonicalConfig> {
     let path = path.as_ref();
     let content = std::fs::read_to_string(path).map_err(|e| crate::MaccError::Io {
@@ -2104,5 +2174,122 @@ unknown_field: true
         cfg.phase_runner_max_attempts = Some(0);
         let r = CoordinatorConfigResolved::resolve(Some(&cfg));
         assert_eq!(r.phase_runner_max_attempts, 1);
+    }
+
+    // ── Settings that are accepted but silently do nothing ─────────────────
+
+    /// The real-world config that ran a whole coordinator session with review
+    /// configured `required` and never executed once:
+    ///
+    /// ```yaml
+    /// max_review_cycles: 0
+    /// phases:
+    ///   review: { enabled: true, mode: required }
+    /// ```
+    #[test]
+    fn zero_review_cycles_with_review_enabled_is_reported() {
+        let yaml = r#"tools:
+  enabled: []
+automation:
+  coordinator:
+    max_review_cycles: 0
+    phases:
+      testing:
+        enabled: false
+        mode: disabled
+      review:
+        enabled: true
+        mode: required
+"#;
+        let canonical = CanonicalConfig::from_yaml(yaml).expect("parse config");
+        let warnings = coordinator_config_warnings(canonical.automation.coordinator.as_ref());
+
+        assert_eq!(warnings.len(), 1, "got: {warnings:?}");
+        assert_eq!(
+            warnings[0].setting,
+            "automation.coordinator.max_review_cycles"
+        );
+        assert!(
+            warnings[0].message.contains("never runs"),
+            "must state the consequence: {}",
+            warnings[0].message
+        );
+        assert!(
+            warnings[0].message.contains("review.mode is `required`"),
+            "must quote the mode the operator wrote: {}",
+            warnings[0].message
+        );
+        assert!(
+            warnings[0].message.contains("enabled: false"),
+            "must offer the explicit alternative: {}",
+            warnings[0].message
+        );
+    }
+
+    #[test]
+    fn zero_review_cycles_without_review_enabled_is_silent() {
+        let yaml = r#"tools:
+  enabled: []
+automation:
+  coordinator:
+    max_review_cycles: 0
+    phases:
+      review:
+        enabled: false
+        mode: disabled
+"#;
+        let canonical = CanonicalConfig::from_yaml(yaml).expect("parse config");
+        assert!(
+            coordinator_config_warnings(canonical.automation.coordinator.as_ref()).is_empty(),
+            "0 cycles with review off is a coherent way to disable review"
+        );
+    }
+
+    #[test]
+    fn a_positive_review_budget_is_silent() {
+        let yaml = r#"tools:
+  enabled: []
+automation:
+  coordinator:
+    max_review_cycles: 2
+    phases:
+      review:
+        enabled: true
+        mode: required
+"#;
+        let canonical = CanonicalConfig::from_yaml(yaml).expect("parse config");
+        assert!(coordinator_config_warnings(canonical.automation.coordinator.as_ref()).is_empty());
+    }
+
+    #[test]
+    fn phase_enabled_with_mode_disabled_is_reported() {
+        let yaml = r#"tools:
+  enabled: []
+automation:
+  coordinator:
+    phases:
+      testing:
+        enabled: true
+        mode: disabled
+      review:
+        enabled: true
+        mode: disabled
+"#;
+        let canonical = CanonicalConfig::from_yaml(yaml).expect("parse config");
+        let warnings = coordinator_config_warnings(canonical.automation.coordinator.as_ref());
+        let settings: Vec<&str> = warnings.iter().map(|w| w.setting.as_str()).collect();
+        assert!(
+            settings.contains(&"automation.coordinator.phases.testing"),
+            "got: {settings:?}"
+        );
+        assert!(
+            settings.contains(&"automation.coordinator.phases.review"),
+            "got: {settings:?}"
+        );
+    }
+
+    #[test]
+    fn absent_coordinator_config_produces_no_warnings() {
+        assert!(coordinator_config_warnings(None).is_empty());
     }
 }
