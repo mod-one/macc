@@ -2016,12 +2016,10 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                     }
                 } else {
                     if coordinator_live_empty {
-                        logs_lines.push(Line::from("No coordinator run is active."));
-                        logs_lines.push(Line::from(
-                            "Next: create/promote a PRD task, then start the coordinator.",
-                        ));
-                        logs_lines.push(Line::from(
-                            "Recent coordinator events will appear here once a run starts.",
+                        logs_lines.extend(coordinator_live_empty_lines(
+                            true,
+                            false,
+                            snapshot_total,
                         ));
                     } else {
                         logs_lines.push(Line::from(
@@ -2581,14 +2579,10 @@ fn coordinator_live_empty_lines(
 ) -> Vec<Line<'static>> {
     if no_run_and_no_tasks {
         return vec![
-            Line::from("No coordinator run is active."),
-            Line::from("No PRD tasks are currently known to MACC."),
-            Line::from(""),
-            Line::from(
-                "Next: create or promote a PRD with ready tasks, then start the coordinator.",
-            ),
-            Line::from("CLI: macc prd generate --from <brief.md> --promote"),
-            Line::from("Then: press [r] from Home or run `macc coordinator run`."),
+            Line::from("No tasks available"),
+            Line::from("Reason: no PRD/task registry entries are ready"),
+            Line::from("Next: create/promote a PRD task, then press r to run"),
+            Line::from("Useful: d Doctor | h Home | p Preview"),
         ];
     }
 
@@ -3164,9 +3158,10 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(text.contains("No coordinator run is active"));
-        assert!(text.contains("create or promote a PRD"));
-        assert!(text.contains("macc prd generate --from <brief.md> --promote"));
+        assert!(text.contains("No tasks available"));
+        assert!(text.contains("Reason: no PRD/task registry entries are ready"));
+        assert!(text.contains("Next: create/promote a PRD task, then press r to run"));
+        assert!(text.contains("Useful: d Doctor | h Home | p Preview"));
     }
 
     #[test]
