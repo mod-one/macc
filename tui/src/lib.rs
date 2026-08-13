@@ -2412,13 +2412,33 @@ fn build_readiness_text(
     for step in &ladder.steps {
         let symbol = step.symbol();
         let detail = step.detail.as_deref().unwrap_or("");
+        let fix = if matches!(step.status, macc_core::onboarding::ReadinessStatus::Pending) {
+            readiness_step_fix(step.number)
+        } else {
+            None
+        };
         if detail.is_empty() {
-            out.push_str(&format!("{}. {}  {}\n", step.number, step.label, symbol));
+            out.push_str(&format!(
+                "{}. {}  {}{}\n",
+                step.number,
+                step.label,
+                symbol,
+                fix.map(|fix| format!("  Fix: {}", fix.summary))
+                    .unwrap_or_default()
+            ));
         } else {
             out.push_str(&format!(
-                "{}. {}  {}  {}\n",
-                step.number, step.label, symbol, detail
+                "{}. {}  {}  {}{}\n",
+                step.number,
+                step.label,
+                symbol,
+                detail,
+                fix.map(|fix| format!("  Fix: {}", fix.summary))
+                    .unwrap_or_default()
             ));
+        }
+        if let Some(fix) = fix {
+            out.push_str(&format!("   Action: {}\n", fix.action));
         }
     }
     out.push('\n');
@@ -2488,6 +2508,42 @@ struct ReadinessRecommendation {
     action: &'static str,
     reason: &'static str,
     other_actions: &'static [&'static str],
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ReadinessStepFix {
+    summary: &'static str,
+    action: &'static str,
+}
+
+fn readiness_step_fix(number: u8) -> Option<ReadinessStepFix> {
+    match number {
+        1 => Some(ReadinessStepFix {
+            summary: "initialize this project",
+            action: "CLI: macc init",
+        }),
+        2 => Some(ReadinessStepFix {
+            summary: "select a performer tool",
+            action: "Press t to open Tools Configuration",
+        }),
+        3 => Some(ReadinessStepFix {
+            summary: "apply the selected configuration",
+            action: "Press a to open Apply",
+        }),
+        4 => Some(ReadinessStepFix {
+            summary: "create/promote a PRD task",
+            action: "Press p to preview PRD/task state, or CLI: macc prd generate --from brief.md",
+        }),
+        5 => Some(ReadinessStepFix {
+            summary: "configure git identity",
+            action: "CLI: git config user.name <name> && git config user.email <email>",
+        }),
+        6 => Some(ReadinessStepFix {
+            summary: "start the coordinator",
+            action: "Press r to start coordinator",
+        }),
+        _ => None,
+    }
 }
 
 fn readiness_recommendation(
@@ -3080,6 +3136,25 @@ mod tests {
         assert!(text.contains("Recommended next step:"));
         assert!(text.contains("Create or import a PRD at .macc/prd.json"));
         assert!(text.contains("Starting it now will not create tasks"));
+    }
+
+    #[test]
+    fn readiness_checklist_shows_actionable_fix_for_missing_prd() {
+        let ladder = ReadinessLadder {
+            steps: vec![
+                step(1, "Project initialized", ReadinessStatus::Done),
+                step(4, "PRD/task available", ReadinessStatus::Pending),
+            ],
+            blocking_count: 1,
+        };
+
+        let text = build_readiness_text(&ladder, None);
+
+        assert!(text.contains("4. PRD/task available  ❌  Fix: create/promote a PRD task"));
+        assert!(text.contains(
+            "Action: Press p to preview PRD/task state, or CLI: macc prd generate --from brief.md"
+        ));
+        assert!(!text.contains("1. Project initialized  ✅  Fix:"));
     }
 
     #[test]
