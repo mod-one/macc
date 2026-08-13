@@ -2462,6 +2462,7 @@ async fn coordinator_run_endpoint_returns_envelope() {
             tool: "mock".to_string(),
             base_branch: "main".to_string(),
             is_fallback: false,
+            resume_worktree: None,
         }),
         tool_cooldowns: None,
         ..CoordinatorCommandResult::default()
@@ -2616,6 +2617,7 @@ async fn coordinator_dispatch_endpoint_returns_envelope() {
             tool: "mock".to_string(),
             base_branch: "main".to_string(),
             is_fallback: false,
+            resume_worktree: None,
         }),
         tool_cooldowns: None,
         ..CoordinatorCommandResult::default()

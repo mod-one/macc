@@ -32,6 +32,13 @@ pub(super) fn apply_state_transitions(
                     task.worktree = None;
                 }
                 let runtime = task.ensure_runtime();
+                if *same_worktree {
+                    // The task keeps its worktree so the retry can resume on top
+                    // of the commits already made. Count the attempt here so the
+                    // selector can bound how many times it is re-dispatched --
+                    // without this the task would be eligible forever.
+                    runtime.increment_retries();
+                }
                 runtime.completion_kind = Some(completion_kind.as_str().to_string());
                 runtime.set_status(RuntimeStatus::Failed);
                 runtime.current_phase = None;

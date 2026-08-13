@@ -584,6 +584,24 @@ impl Task {
         })
     }
 
+    /// True when the task was parked by the same-worktree retry path and is
+    /// waiting to be re-dispatched into the worktree it already holds.
+    ///
+    /// A tool that reports `error_with_changes` after committing work is
+    /// requeued to `todo` with its worktree deliberately *kept* (see
+    /// `engine::transitions::apply_state_transitions`), so the retry can resume
+    /// on top of those commits. The dispatcher otherwise skips every `todo`
+    /// task that has a worktree attached, which would make such a task
+    /// permanently unschedulable — it is neither active nor blocked, so no
+    /// recovery path reclaims it either. This predicate is what lets the
+    /// selector tell "parked for retry" apart from "already assigned".
+    pub fn is_awaiting_same_worktree_retry(&self) -> bool {
+        self.workflow_state() == Some(WorkflowState::Todo)
+            && self.runtime_status() == RuntimeStatus::Failed
+            && self.branch().is_some()
+            && self.worktree_path().is_some()
+    }
+
     pub fn task_tool(&self) -> Option<&str> {
         self.tool.as_deref().filter(|tool| !tool.is_empty())
     }

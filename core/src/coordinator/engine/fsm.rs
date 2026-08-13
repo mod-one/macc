@@ -3713,6 +3713,62 @@ mod tests {
         let _ = fs::remove_dir_all(&repo);
     }
 
+    /// Parking a task for same-worktree retry must advance the attempt counter.
+    /// The selector uses it to bound how many times the task is re-dispatched;
+    /// without it a task that keeps failing would be eligible forever.
+    #[test]
+    fn error_with_changes_counts_the_attempt_when_keeping_the_worktree() {
+        let repo = make_repo_with_commit_ahead("main");
+        let wt = repo.to_string_lossy().to_string();
+        let mut task_val = json!({
+            "id": "RETRY-COUNT-1",
+            "state": "claimed",
+            "tool": "codex",
+            "worktree": { "worktree_path": wt, "branch": "ai/codex/worker-01", "base_branch": "main" },
+            "task_runtime": { "status": "running", "pid": 42, "retries": 0 }
+        });
+        apply_job_completion(
+            &mut task_val,
+            &make_error_completion_input(PerformerCompletionKind::ErrorWithChanges),
+            &NormalizerRegistry::empty(),
+            "2026-04-12T00:00:00Z",
+        );
+        assert_eq!(task_val["state"], "todo");
+        assert_eq!(task_val["task_runtime"]["status"], "failed");
+        assert_eq!(
+            task_val["task_runtime"]["retries"], 1,
+            "same-worktree park must count as an attempt"
+        );
+
+        // And the parked task is exactly what the selector recognises.
+        let task: crate::coordinator::model::Task =
+            serde_json::from_value(task_val).expect("typed task");
+        assert!(task.is_awaiting_same_worktree_retry());
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    /// Without commits the worktree is dropped, so there is nothing to resume
+    /// and no attempt is charged against the same-worktree budget.
+    #[test]
+    fn error_without_changes_does_not_count_a_same_worktree_attempt() {
+        let mut task_val = json!({
+            "id": "RETRY-COUNT-2",
+            "state": "claimed",
+            "tool": "codex",
+            "worktree": { "worktree_path": "/tmp/wt-none" },
+            "task_runtime": { "status": "running", "retries": 0 }
+        });
+        apply_job_completion(
+            &mut task_val,
+            &make_error_completion_input(PerformerCompletionKind::ErrorWithoutChanges),
+            &NormalizerRegistry::empty(),
+            "2026-04-12T00:00:00Z",
+        );
+        assert_eq!(task_val["state"], "todo");
+        assert!(task_val["worktree"].is_null(), "worktree must be released");
+        assert_eq!(task_val["task_runtime"]["retries"], 0);
+    }
+
     #[test]
     fn error_with_changes_prefers_active_session_chain_over_claim_session() {
         let mut task_val = json!({

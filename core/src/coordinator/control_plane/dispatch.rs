@@ -147,6 +147,10 @@ fn build_task_selector_config(
         throttle_registry: state.throttle_registry.clone(),
         rate_limit_fallback_enabled: resolve_rate_limit_fallback_enabled(env_cfg, coordinator),
         external_merged_ids,
+        // Reuse the phase attempt budget: a task parked with committed work gets
+        // the same number of tries as any other phase before it stops being
+        // re-dispatched.
+        max_same_worktree_retries: cfg.phase_runner_max_attempts.max(1),
     }
 }
 
@@ -161,6 +165,56 @@ pub(super) fn select_dispatch_candidate(
     })
 }
 
+/// Re-acquire the worktree a parked task already holds, preserving its commits.
+///
+/// Returns `Ok(None)` when the worktree no longer exists or no longer holds the
+/// expected branch, so the caller can fall back to normal acquisition instead of
+/// failing the dispatch.
+fn resume_attached_worktree(
+    repo_root: &Path,
+    task_id: &str,
+    tool: &str,
+    resume: &crate::coordinator::task_selector::ResumeWorktree,
+    logger: Option<&dyn CoordinatorLog>,
+) -> Result<Option<AcquiredWorktree>> {
+    let path = PathBuf::from(&resume.path);
+    if !path.join(".git").exists() {
+        return Ok(None);
+    }
+    if !ensure_expected_worktree_branch(&path, &resume.branch).unwrap_or(false) {
+        return Ok(None);
+    }
+    let last_commit = crate::git::head_commit(&path).unwrap_or_default();
+    let active_session_id = read_session_id_from_state(repo_root, tool, &path);
+
+    let msg = format!(
+        "resume_same_worktree task={} path={} branch={} head={}",
+        task_id,
+        path.display(),
+        resume.branch,
+        last_commit
+    );
+    let _ = append_coordinator_event_with_severity(
+        repo_root,
+        "worktree_resumed",
+        task_id,
+        "dev",
+        "info",
+        &msg,
+        "info",
+    );
+    if let Some(log) = logger {
+        let _ = log.note(format!("- Lifecycle task={} stage=resume {}", task_id, msg));
+    }
+
+    Ok(Some(AcquiredWorktree {
+        path,
+        branch: resume.branch.clone(),
+        last_commit,
+        active_session_id,
+    }))
+}
+
 pub(super) async fn acquire_worktree_for_dispatch(
     repo_root: &Path,
     registry: &serde_json::Value,
@@ -171,6 +225,28 @@ pub(super) async fn acquire_worktree_for_dispatch(
 ) -> Result<AcquiredWorktree> {
     let task = &candidate.task;
     let session_cache_ttl_seconds = cfg.session_cache_ttl_seconds;
+
+    // Same-worktree retry: resume in the worktree the task already holds,
+    // deliberately *without* sanitizing it. The commits the tool made before
+    // reporting `error_with_changes` live on that branch, and resetting to base
+    // would strand them.
+    if let Some(resume) = &task.resume_worktree {
+        match resume_attached_worktree(repo_root, &task.id, &task.tool, resume, logger)? {
+            Some(acquired) => return Ok(acquired),
+            None => {
+                // The worktree or branch is gone (pruned, deleted, or renamed).
+                // Fall through to normal acquisition so the task still runs
+                // rather than becoming unschedulable again.
+                if let Some(log) = logger {
+                    let _ = log.note(format!(
+                        "- Resume unavailable task={} path={} branch={} reason=worktree_or_branch_missing; acquiring a fresh slot",
+                        task.id, resume.path, resume.branch
+                    ));
+                }
+            }
+        }
+    }
+
     let (reusable, _reuse_prepare_error) = find_reusable_worktree_native(
         repo_root,
         registry,

@@ -2696,6 +2696,10 @@ fn parse_select_ready_task_command(args: &[String]) -> Result<CoordinatorCommand
             throttle_registry: Default::default(),
             rate_limit_fallback_enabled: false,
             external_merged_ids: std::collections::HashSet::new(),
+            max_same_worktree_retries: map
+                .get("max-same-worktree-retries")
+                .and_then(|raw| raw.parse::<usize>().ok())
+                .unwrap_or(1),
         },
     })
 }

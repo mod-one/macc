@@ -3018,6 +3018,7 @@ mod tests {
             throttle_registry: BTreeMap::new(),
             rate_limit_fallback_enabled: false,
             external_merged_ids: std::collections::HashSet::new(),
+            max_same_worktree_retries: 1,
         };
         let candidate = select_dispatch_candidate(&registry, &cfg).expect("candidate selected");
         assert_eq!(candidate.task.id, "T-HIGH");

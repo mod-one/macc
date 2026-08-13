@@ -28,6 +28,11 @@ pub struct TaskSelectorConfig {
     /// satisfy cross-lot dependency edges that would otherwise look "unmet"
     /// because the dependency target isn't part of this registry's `tasks`.
     pub external_merged_ids: HashSet<String>,
+    /// How many times a task parked by the same-worktree retry path may be
+    /// re-dispatched into its existing worktree. Beyond this the task is left
+    /// for `apply_stale_heartbeat_policy` / operator action rather than being
+    /// retried forever. `0` disables same-worktree resume entirely.
+    pub max_same_worktree_retries: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +44,19 @@ pub struct SelectedTask {
     /// `true` when the selected tool differs from the primary (highest-priority)
     /// tool due to throttle filtering (RL-ROUTE-005 fallback routing).
     pub is_fallback: bool,
+    /// Set when the task is being re-dispatched into the worktree it already
+    /// holds, after a tool reported `error_with_changes` on top of committed
+    /// work. The dispatcher must resume in this worktree rather than acquiring
+    /// (and resetting) a pool slot, or the commits would be stranded.
+    pub resume_worktree: Option<ResumeWorktree>,
+}
+
+/// The worktree a parked task must resume in. See
+/// [`crate::coordinator::model::Task::is_awaiting_same_worktree_retry`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeWorktree {
+    pub path: String,
+    pub branch: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,9 +178,18 @@ pub fn select_next_ready_task_typed(
         if task.workflow_state() != Some(crate::coordinator::WorkflowState::Todo) {
             continue;
         }
-        if task.has_worktree_attached() {
-            continue;
-        }
+        // A `todo` task normally must not carry a worktree -- that would mean it
+        // is still assigned somewhere. The one exception is a task parked for a
+        // same-worktree retry, which keeps its worktree on purpose so the retry
+        // can resume on top of commits the tool already made.
+        let resume_worktree = if task.has_worktree_attached() {
+            match resume_worktree_for(task, config.max_same_worktree_retries) {
+                Some(resume) => Some(resume),
+                None => continue,
+            }
+        } else {
+            None
+        };
         if task.id.is_empty() {
             continue;
         }
@@ -190,6 +217,7 @@ pub fn select_next_ready_task_typed(
                 tool,
                 base_branch: task.base_branch(&config.default_base_branch),
                 is_fallback,
+                resume_worktree,
             },
         ));
     }
@@ -199,6 +227,25 @@ pub fn select_next_ready_task_typed(
         .into_iter()
         .next()
         .map(|(_, _, _, selected)| selected)
+}
+
+/// Return the worktree a parked task should resume in, or `None` when the task
+/// is not a same-worktree retry candidate or has exhausted its attempts.
+///
+/// The attempt counter is advanced when the task is parked (see
+/// `engine::transitions`), so a task that keeps failing stops being selected
+/// instead of cycling forever against the same broken state.
+fn resume_worktree_for(task: &Task, max_retries: usize) -> Option<ResumeWorktree> {
+    if max_retries == 0 || !task.is_awaiting_same_worktree_retry() {
+        return None;
+    }
+    if task.task_runtime.retries_count() > max_retries {
+        return None;
+    }
+    Some(ResumeWorktree {
+        path: task.worktree_path()?.to_string(),
+        branch: task.branch()?.to_string(),
+    })
 }
 
 fn dependencies_ready(
@@ -852,5 +899,122 @@ mod tests {
         let selected = select_next_ready_task(&registry, &cfg).expect("primary selected");
         assert_eq!(selected.tool, "primary");
         assert!(!selected.is_fallback);
+    }
+
+    // ── Same-worktree retry ────────────────────────────────────────────────
+    //
+    // A tool that commits work and then reports `error_with_changes` is
+    // requeued to `todo` with its worktree deliberately kept. Before this was
+    // handled, the selector's blanket "skip todo tasks with a worktree" rule
+    // made those tasks permanently unschedulable: not active, not blocked, so
+    // no recovery sweep reclaimed them either, and the run died with a
+    // "made no progress" error while committed work sat stranded on a branch.
+
+    fn parked_registry(retries: i64) -> serde_json::Value {
+        json!({
+          "tasks": [
+            {
+              "id":"T-PARKED","title":"parked","state":"todo","priority":"1",
+              "dependencies":[],"exclusive_resources":[],
+              "worktree":{
+                "worktree_path":"/repo/.macc/worktree/worker-01",
+                "branch":"ai/codex/worker-01-2026",
+                "base_branch":"main",
+                "last_commit":"abc123"
+              },
+              "task_runtime":{"status":"failed","retries":retries}
+            }
+          ],
+          "resource_locks": {}
+        })
+    }
+
+    fn parked_cfg(max_same_worktree_retries: usize) -> TaskSelectorConfig {
+        TaskSelectorConfig {
+            default_tool: "codex".into(),
+            default_base_branch: "main".into(),
+            max_parallel: 3,
+            tool_priority: vec!["codex".into()],
+            enabled_tools: vec!["codex".into()],
+            max_same_worktree_retries,
+            ..TaskSelectorConfig::default()
+        }
+    }
+
+    #[test]
+    fn parked_task_is_selected_and_resumes_its_own_worktree() {
+        let selected = select_next_ready_task(&parked_registry(1), &parked_cfg(2))
+            .expect("a task parked for same-worktree retry must be dispatchable");
+        assert_eq!(selected.id, "T-PARKED");
+        let resume = selected
+            .resume_worktree
+            .expect("dispatch must be told to resume the attached worktree");
+        assert_eq!(resume.path, "/repo/.macc/worktree/worker-01");
+        assert_eq!(resume.branch, "ai/codex/worker-01-2026");
+    }
+
+    #[test]
+    fn parked_task_stops_being_selected_once_attempts_are_exhausted() {
+        // retries (2) exceeds the budget (1) -> no longer eligible, so a task
+        // that keeps failing cannot spin the dispatcher forever.
+        assert!(select_next_ready_task(&parked_registry(2), &parked_cfg(1)).is_none());
+    }
+
+    #[test]
+    fn same_worktree_resume_can_be_disabled() {
+        assert!(select_next_ready_task(&parked_registry(0), &parked_cfg(0)).is_none());
+    }
+
+    #[test]
+    fn a_normally_assigned_task_is_still_skipped() {
+        // Guard against loosening the original rule: a `todo` task holding a
+        // worktree while its runtime is *not* failed is still mid-assignment
+        // and must not be picked up.
+        let registry = json!({
+          "tasks": [
+            {
+              "id":"T-ASSIGNED","title":"assigned","state":"todo","priority":"1",
+              "dependencies":[],"exclusive_resources":[],
+              "worktree":{
+                "worktree_path":"/repo/.macc/worktree/worker-01",
+                "branch":"ai/codex/worker-01-2026"
+              },
+              "task_runtime":{"status":"running"}
+            }
+          ],
+          "resource_locks": {}
+        });
+        assert!(select_next_ready_task(&registry, &parked_cfg(2)).is_none());
+    }
+
+    #[test]
+    fn parked_task_without_a_branch_is_not_resumable() {
+        // No branch means there are no commits to preserve; such a task must
+        // not claim a resume slot.
+        let registry = json!({
+          "tasks": [
+            {
+              "id":"T-NOBRANCH","title":"no branch","state":"todo","priority":"1",
+              "dependencies":[],"exclusive_resources":[],
+              "worktree":{"worktree_path":"/repo/.macc/worktree/worker-01"},
+              "task_runtime":{"status":"failed"}
+            }
+          ],
+          "resource_locks": {}
+        });
+        assert!(select_next_ready_task(&registry, &parked_cfg(2)).is_none());
+    }
+
+    #[test]
+    fn a_clean_todo_task_carries_no_resume_worktree() {
+        let registry = json!({
+          "tasks": [
+            {"id":"T-FRESH","title":"fresh","state":"todo","priority":"1","dependencies":[],"exclusive_resources":[]}
+          ],
+          "resource_locks": {}
+        });
+        let selected = select_next_ready_task(&registry, &parked_cfg(2)).expect("selected");
+        assert_eq!(selected.id, "T-FRESH");
+        assert!(selected.resume_worktree.is_none());
     }
 }
