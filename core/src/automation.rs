@@ -187,4 +187,45 @@ mod tests {
             "embedded performer script uses the collapse-prone `select(length>0)` jq pattern outside a comment"
         );
     }
+
+    /// The coordinator signals a continuation by exporting `MACC_RESUME_ATTEMPT`
+    /// and `MACC_BASE_REF` (see `control_plane::dispatch`). The embedded script
+    /// must read both, or a resumed task silently receives the from-scratch
+    /// prompt again and redoes work it already committed.
+    #[test]
+    fn embedded_performer_script_reads_the_resume_signal() {
+        for var in ["MACC_RESUME_ATTEMPT", "MACC_BASE_REF"] {
+            assert!(
+                EMBEDDED_PERFORMER_SH.contains(var),
+                "embedded performer script ignores {}; continuation prompts would never trigger",
+                var
+            );
+        }
+        assert!(
+            EMBEDDED_PERFORMER_SH.contains("build_continuation_section"),
+            "embedded performer script has no continuation prompt path"
+        );
+    }
+
+    /// A terminal `error_*` result must always carry an explanation -- it is the
+    /// only record of why the tool stopped, and the continuation prompt for the
+    /// next attempt is built from it.
+    #[test]
+    fn embedded_performer_script_requires_an_error_explanation() {
+        assert!(
+            EMBEDDED_PERFORMER_SH.contains("resolve_task_result_exp"),
+            "embedded performer script does not enforce an explanation on error results"
+        );
+        let raw_extract_uses = EMBEDDED_PERFORMER_SH
+            .lines()
+            .filter(|line| {
+                let t = line.trim_start();
+                !t.starts_with('#') && t.contains("result_exp=\"$(extract_task_result_exp")
+            })
+            .count();
+        assert_eq!(
+            raw_extract_uses, 0,
+            "emit paths must go through resolve_task_result_exp so a missing explanation is made explicit"
+        );
+    }
 }

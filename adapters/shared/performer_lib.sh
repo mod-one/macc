@@ -94,20 +94,68 @@ session_max_age_seconds="${SESSION_MAX_AGE_SECONDS:-$(jq -r '.performer.session.
 session_pool_cap="${SESSION_POOL_CAP:-$(jq -r '.performer.session.pool_cap // 8' "$tool_json")}"
 mkdir -p "$(dirname "$session_state_file")"
 
-acquire_session_lock() {
-  local attempts=0
-  until mkdir "$session_lock_dir" 2>/dev/null; do
-    attempts=$((attempts + 1))
-    if [[ "$attempts" -ge 80 ]]; then
-      echo "Error: timed out acquiring session lock: $session_lock_dir" >&2
-      return 1
+# Session-state locking.
+#
+# This lock guards `.macc/state/tool-sessions.json`, which is also written from
+# Rust (`core/src/coordinator/session_manager.rs`). Both sides must therefore
+# use the SAME primitive on the SAME path or they do not interlock at all.
+#
+# Rust uses `flock(2)` on the lock file, so this side does too, via flock(1).
+# An earlier `mkdir`-based lock here was doubly wrong: it could not interlock
+# with the Rust side (which holds a regular file at that path, making every
+# `mkdir` fail forever), and a performer killed mid-run left the directory
+# behind, wedging session state until it was removed by hand.
+#
+# `flock` is released by the kernel when the holding process dies, so neither
+# failure mode can recur.
+session_lock_fd=9
+session_lock_supported=""
+
+session_lock_available() {
+  if [[ -z "$session_lock_supported" ]]; then
+    if command -v flock >/dev/null 2>&1; then
+      session_lock_supported="yes"
+    else
+      session_lock_supported="no"
+      echo "Warning: flock(1) not found; tool-session updates run without cross-process locking." >&2
     fi
-    sleep 0.1
-  done
+  fi
+  [[ "$session_lock_supported" == "yes" ]]
+}
+
+acquire_session_lock() {
+  # Writes to the session file are atomic (temp + mv), so when no locking
+  # primitive is available we degrade to "no cross-process exclusion" rather
+  # than blocking the performer.
+  session_lock_available || return 0
+
+  # An older build locked by creating a *directory* here. A leftover one can
+  # only be a remnant of a process that died (the old scheme removed it on the
+  # way out), and it would make every open below fail, so reclaim it.
+  if [[ -d "$session_lock_dir" ]]; then
+    rmdir "$session_lock_dir" 2>/dev/null || rm -rf "$session_lock_dir" 2>/dev/null || true
+  fi
+
+  # Create the lock file if absent; never remove it. Unlinking a lock file lets
+  # a second process create a fresh inode at the same path and lock that
+  # instead, so both would believe they hold the lock.
+  : >>"$session_lock_dir" 2>/dev/null || {
+    echo "Warning: cannot create session lock file: $session_lock_dir" >&2
+    return 0
+  }
+
+  eval "exec ${session_lock_fd}>>\"\$session_lock_dir\"" 2>/dev/null || return 0
+  if ! flock -w 30 -x "$session_lock_fd"; then
+    echo "Error: timed out acquiring session lock: $session_lock_dir" >&2
+    eval "exec ${session_lock_fd}>&-" 2>/dev/null || true
+    return 1
+  fi
 }
 
 release_session_lock() {
-  rmdir "$session_lock_dir" >/dev/null 2>&1 || true
+  session_lock_available || return 0
+  # Closing the descriptor releases the flock; the file itself stays in place.
+  eval "exec ${session_lock_fd}>&-" 2>/dev/null || true
 }
 
 now_iso() {

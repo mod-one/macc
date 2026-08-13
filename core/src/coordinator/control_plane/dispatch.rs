@@ -55,6 +55,11 @@ pub(super) struct DispatchClaim {
     base_branch: String,
     active_session_id: Option<String>,
     claim_id: String,
+    /// Non-zero when this dispatch resumes a task that was parked after
+    /// reporting `error_with_changes`. Surfaced to the performer so the prompt
+    /// describes the already-committed work instead of asking the tool to start
+    /// the task over on top of it.
+    resume_attempt: usize,
 }
 
 pub(super) struct LaunchPerformerContext<'a> {
@@ -419,6 +424,11 @@ pub(super) fn claim_task_in_registry(
         base_branch: candidate.task.base_branch.clone(),
         active_session_id: worktree.active_session_id.clone(),
         claim_id: session_id,
+        resume_attempt: if candidate.task.resume_worktree.is_some() {
+            retry_count_for_task(registry, &candidate.task.id).max(1)
+        } else {
+            0
+        },
     })
 }
 
@@ -496,7 +506,11 @@ pub(super) async fn launch_performer(
         .unwrap_or(0);
     // Compute model routing decision for this task (spec §8–§11).
     // Reads routing_hints from the task's extra fields; defaults to Standard if absent.
-    let routing_env = compute_routing_env(repo_root, &claim.task_id, canonical);
+    let mut routing_env = compute_routing_env(repo_root, &claim.task_id, canonical);
+    if claim.resume_attempt > 0 {
+        routing_env.push(("MACC_RESUME_ATTEMPT", claim.resume_attempt.to_string()));
+        routing_env.push(("MACC_BASE_REF", claim.base_branch.clone()));
+    }
 
     let pid = coordinator_runtime::spawn_performer_job(
         &current_exe,
