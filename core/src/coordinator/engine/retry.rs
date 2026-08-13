@@ -34,6 +34,15 @@ pub(super) enum RetryStrategy {
     NoOp,
 }
 
+/// A same-worktree retry keeps the task's worktree so the next attempt can build
+/// on the commits already made. That is only safe while attempts remain: the
+/// dispatcher will not select a `todo` task holding a worktree once its budget
+/// is spent, so the task would become unschedulable while still looking healthy.
+/// Past the budget the task must be blocked instead.
+fn same_worktree_budget_exhausted(task: &Task, input: &JobCompletionInput) -> bool {
+    task.task_runtime.retries_count() >= input.max_attempts.max(1)
+}
+
 pub(super) fn resolve_retry_strategy(
     task: &Task,
     input: &JobCompletionInput,
@@ -69,6 +78,16 @@ pub(super) fn resolve_retry_strategy(
             let same_worktree = completion_kind == PerformerCompletionKind::ErrorWithChanges
                 && classification.has_commits
                 && is_healthy_worktree;
+            if same_worktree && same_worktree_budget_exhausted(task, input) {
+                return RetryStrategy::Block {
+                    reason: input.status_text.clone(),
+                    outcome: BlockOutcome::RetryBudgetExhausted {
+                        completion_kind,
+                        tool_error: Box::new(None),
+                        attempts: task.task_runtime.retries_count(),
+                    },
+                };
+            }
             return RetryStrategy::Retry {
                 same_worktree,
                 reason: input.status_text.clone(),
@@ -127,6 +146,16 @@ pub(super) fn resolve_retry_strategy(
             let same_worktree = completion_kind == PerformerCompletionKind::ErrorWithChanges
                 && classification.has_commits
                 && is_healthy_worktree;
+            if same_worktree && same_worktree_budget_exhausted(task, input) {
+                return RetryStrategy::Block {
+                    reason: input.status_text.clone(),
+                    outcome: BlockOutcome::RetryBudgetExhausted {
+                        completion_kind,
+                        tool_error: Box::new(tool_error),
+                        attempts: task.task_runtime.retries_count(),
+                    },
+                };
+            }
             return RetryStrategy::Retry {
                 same_worktree,
                 reason: input.status_text.clone(),

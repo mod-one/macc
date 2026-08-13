@@ -259,6 +259,48 @@ pub(super) fn apply_state_transitions(
                     tool_error: tool_error.as_ref().clone(),
                 }
             }
+            BlockOutcome::RetryBudgetExhausted {
+                completion_kind,
+                tool_error,
+                attempts,
+            } => {
+                // Keep the worktree and session chain attached: the branch still
+                // holds committed work, and the operator needs to find it. Only
+                // the workflow state differs from a normal same-worktree park --
+                // `blocked` instead of `todo`, so the task is visible as stuck
+                // rather than masquerading as ready.
+                task.set_workflow_state(WorkflowState::Blocked);
+                preserve_active_session_chain(task);
+                let branch = task.branch().unwrap_or_default().to_string();
+                let runtime = task.ensure_runtime();
+                runtime.completion_kind = Some(completion_kind.as_str().to_string());
+                runtime.set_status(RuntimeStatus::Failed);
+                runtime.current_phase = None;
+                runtime.pid = None;
+                let detail = if branch.is_empty() {
+                    format!(
+                        "{} (retry budget exhausted after {} attempt(s) in the same worktree)",
+                        reason, attempts
+                    )
+                } else {
+                    format!(
+                        "{} (retry budget exhausted after {} attempt(s); committed work is unmerged on branch {})",
+                        reason, attempts, branch
+                    )
+                };
+                runtime.set_last_error_details("E902", "coordinator", detail.clone());
+                runtime.last_error = Some(detail.clone());
+                task.tool = None;
+                task.assignee = None;
+                task.touch_state_changed(now);
+                JobCompletionResult {
+                    should_retry: false,
+                    status_label: "retry_budget_exhausted",
+                    detail,
+                    completion_kind: Some(*completion_kind),
+                    tool_error: tool_error.as_ref().clone(),
+                }
+            }
         },
         RetryStrategy::Merge {
             detail,

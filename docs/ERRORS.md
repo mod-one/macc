@@ -78,3 +78,4 @@ These are internal error codes emitted by the coordinator engine (E-series codes
 - `E416` (Force termination failed): Failed to kill a performer process/group during force-stop. **Not retryable**.
 - `E417` (Dirty worktree blocks recovery): Worktree has uncommitted local changes blocking clean checkout. **Not retryable**.
 - `E418` (Stale event rejected): Received an out-of-order or expired event/epoch. **Not retryable**.
+- `E902` (Retry budget exhausted): A task that reported `error_with_changes` used up its same-worktree retry budget. The task is set to `blocked`, and its worktree and branch stay attached so the committed work can be found and merged or discarded. **Not retryable** — requires operator action. See `automation.coordinator.phase_runner_max_attempts`.

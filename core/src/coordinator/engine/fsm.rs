@@ -1169,6 +1169,21 @@ pub(super) enum BlockOutcome {
         tool_error: Box<Option<ToolError>>,
         now_ts: u64,
     },
+    /// A task that kept its worktree for a same-worktree retry has used up its
+    /// attempt budget.
+    ///
+    /// It must not go back to `todo`: a `todo` task holding a worktree is only
+    /// dispatchable while it still has attempts left, so past that point it
+    /// would sit unschedulable and *look healthy* while its committed work went
+    /// unmerged — the coordinator would then die with a misleading
+    /// "made no progress" error instead of naming the real problem. Blocking
+    /// makes the run end with "finished with blocked tasks", which is both
+    /// accurate and actionable.
+    RetryBudgetExhausted {
+        completion_kind: PerformerCompletionKind,
+        tool_error: Box<Option<ToolError>>,
+        attempts: usize,
+    },
 }
 
 #[allow(dead_code)]
@@ -3744,6 +3759,93 @@ mod tests {
         let task: crate::coordinator::model::Task =
             serde_json::from_value(task_val).expect("typed task");
         assert!(task.is_awaiting_same_worktree_retry());
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    /// Once the same-worktree budget is spent the task must be `blocked`, not
+    /// `todo`. A `todo` task holding a worktree past its budget is not
+    /// selectable, so it would sit unschedulable while looking healthy and the
+    /// run would end with a misleading "made no progress" error.
+    #[test]
+    fn error_with_changes_blocks_once_the_retry_budget_is_exhausted() {
+        let repo = make_repo_with_commit_ahead("main");
+        let wt = repo.to_string_lossy().to_string();
+        let mut task_val = json!({
+            "id": "BUDGET-1",
+            "state": "claimed",
+            "tool": "codex",
+            "worktree": { "worktree_path": wt, "branch": "ai/codex/worker-01", "base_branch": "main" },
+            // Already parked once; max_attempts in the input below is 1.
+            "task_runtime": { "status": "running", "pid": 42, "retries": 1 }
+        });
+        let out = apply_job_completion(
+            &mut task_val,
+            &make_error_completion_input(PerformerCompletionKind::ErrorWithChanges),
+            &NormalizerRegistry::empty(),
+            "2026-04-12T00:00:00Z",
+        );
+
+        assert_eq!(task_val["state"], "blocked", "must not go back to todo");
+        assert_eq!(out.status_label, "retry_budget_exhausted");
+        assert!(!out.should_retry);
+        assert_eq!(task_val["task_runtime"]["last_error_code"], "E902");
+
+        // The branch is named so the operator can find the unmerged work.
+        let detail = task_val["task_runtime"]["last_error"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(detail.contains("ai/codex/worker-01"), "got: {detail}");
+        assert!(detail.contains("retry budget exhausted"), "got: {detail}");
+
+        // Worktree stays attached: the commits are still there to recover.
+        assert_eq!(task_val["worktree"]["branch"], "ai/codex/worker-01");
+        assert_eq!(
+            task_val["task_runtime"]["completion_kind"], "error_with_changes",
+            "the reason for blocking must remain visible"
+        );
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    /// Full lifecycle: first failure parks for retry, second blocks. Nothing in
+    /// between leaves the task in an unschedulable `todo` state.
+    #[test]
+    fn same_worktree_retry_goes_park_then_block_never_stuck_todo() {
+        let repo = make_repo_with_commit_ahead("main");
+        let wt = repo.to_string_lossy().to_string();
+        let mut task_val = json!({
+            "id": "BUDGET-2",
+            "state": "claimed",
+            "tool": "codex",
+            "worktree": { "worktree_path": wt, "branch": "ai/codex/worker-02", "base_branch": "main" },
+            "task_runtime": { "status": "running", "retries": 0 }
+        });
+
+        // Attempt 1 -> parked for retry, still dispatchable.
+        apply_job_completion(
+            &mut task_val,
+            &make_error_completion_input(PerformerCompletionKind::ErrorWithChanges),
+            &NormalizerRegistry::empty(),
+            "2026-04-12T00:00:00Z",
+        );
+        assert_eq!(task_val["state"], "todo");
+        assert_eq!(task_val["task_runtime"]["retries"], 1);
+        let parked: crate::coordinator::model::Task =
+            serde_json::from_value(task_val.clone()).expect("typed");
+        assert!(
+            parked.is_awaiting_same_worktree_retry(),
+            "the parked task must be recognisable as resumable"
+        );
+
+        // Attempt 2 -> budget spent, blocked.
+        task_val["state"] = json!("claimed");
+        task_val["task_runtime"]["status"] = json!("running");
+        apply_job_completion(
+            &mut task_val,
+            &make_error_completion_input(PerformerCompletionKind::ErrorWithChanges),
+            &NormalizerRegistry::empty(),
+            "2026-04-12T00:01:00Z",
+        );
+        assert_eq!(task_val["state"], "blocked");
         let _ = fs::remove_dir_all(&repo);
     }
 
