@@ -289,17 +289,12 @@ git_command!(
     "run git checkout"
 );
 
-git_command!(
-    checkout_reset_branch,
-    checkout_reset_branch_async,
-    (branch: &str, force: bool),
-    if force {
-        vec!["checkout", "-f", "-B", branch, branch]
-    } else {
-        vec!["checkout", "-B", branch, branch]
-    },
-    "run git checkout -B"
-);
+// NOTE: there is deliberately no `git checkout -B <branch> <branch>` helper.
+// `-B` overrides git's "already used by worktree" guard, putting one branch in
+// two worktrees at once; a commit in either then silently moves the other's
+// HEAD, and ref publication can no longer tell which checkout is authoritative.
+// Detach instead (`checkout_detach`, or `checkout_detach_force` when a specific
+// revision is required) -- the same commit, without claiming the branch.
 
 // Detach HEAD in a worktree. This avoids the "branch already checked out"
 // error that occurs when two worktrees share the same branch name.
@@ -891,7 +886,44 @@ pub fn worktrees_for_branch(repo_root: &Path, branch: &str) -> Result<Vec<std::p
             current_path = None;
         }
     }
+
+    // Deterministic order, primary worktree first.
+    //
+    // Callers that publish a ref into a checkout (see
+    // `coordinator::integration::IntegrationWorktree::publish`) take the first
+    // entry. Git normally lists the main worktree first, but that is not a
+    // documented guarantee, and relying on it means a pool worktree could be
+    // fast-forwarded instead of the operator's checkout -- leaving the
+    // operator's files stale against a ref that moved. Sort explicitly.
+    // Compare canonicalized paths: `git worktree list` and the common dir can
+    // spell the same directory differently (on macOS `/tmp` resolves to
+    // `/private/tmp`), and a mismatch would silently drop the ordering
+    // guarantee back to alphabetical.
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let primary = primary_worktree_path(repo_root).ok().map(|p| canon(&p));
+    paths.sort_by(|a, b| {
+        let rank = |p: &std::path::PathBuf| match &primary {
+            Some(main) if canon(p) == *main => 0,
+            _ => 1,
+        };
+        rank(a).cmp(&rank(b)).then_with(|| a.cmp(b))
+    });
     Ok(paths)
+}
+
+/// Absolute path of the repository's main worktree.
+///
+/// Derived from the git *common* dir, which for a non-bare repository is
+/// `<main-worktree>/.git` regardless of which worktree the command runs from.
+pub fn primary_worktree_path(repo_or_worktree: &Path) -> Result<PathBuf> {
+    let common = git_common_dir(repo_or_worktree)?;
+    common
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| MaccError::Git {
+            operation: "primary_worktree_path".to_string(),
+            message: format!("git common dir {} has no parent worktree", common.display()),
+        })
 }
 
 /// Run `git -C <path> status --porcelain=v1` and return parsed entries.
@@ -1380,5 +1412,88 @@ mod tests {
             .await
             .expect("create tag");
         run_git(&repo, &["rev-parse", "--verify", "refs/tags/v-test-async"]);
+    }
+
+    // ── worktree/branch safety ─────────────────────────────────────────────
+
+    #[test]
+    fn primary_worktree_is_resolved_from_any_worktree() {
+        let repo = make_test_repo();
+        let wt = repo.join("wt-a");
+        run_git(
+            &repo,
+            &["worktree", "add", "-q", "-b", "side", wt.to_str().unwrap()],
+        );
+
+        let from_main = super::primary_worktree_path(&repo).expect("from main");
+        let from_side = super::primary_worktree_path(&wt).expect("from side worktree");
+        assert_eq!(from_main.canonicalize().ok(), from_side.canonicalize().ok());
+        assert_eq!(
+            from_main.canonicalize().ok(),
+            repo.canonicalize().ok(),
+            "the primary worktree is the repo root, seen from anywhere"
+        );
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    /// `publish` takes the first entry to fast-forward, so the operator's
+    /// checkout must come first. Git usually lists it first but does not
+    /// promise to; picking a pool worktree instead would advance the ref while
+    /// leaving the operator's files stale.
+    #[test]
+    fn worktrees_for_branch_lists_the_primary_worktree_first() {
+        let repo = make_test_repo();
+        let wt = repo.join("wt-dup");
+        run_git(
+            &repo,
+            &["worktree", "add", "-q", "--detach", wt.to_str().unwrap()],
+        );
+        // Force the duplicate checkout the old `-B` fallback used to create.
+        run_git(&wt, &["checkout", "-B", "main", "main"]);
+
+        let holders = super::worktrees_for_branch(&repo, "main").expect("holders");
+        assert_eq!(holders.len(), 2, "both worktrees hold main: {holders:?}");
+        assert_eq!(
+            holders[0].canonicalize().ok(),
+            repo.canonicalize().ok(),
+            "primary worktree must sort first, got {holders:?}"
+        );
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    /// The replacement for the removed `checkout -B` fallback: reach the base
+    /// commit without claiming the branch a second time.
+    #[test]
+    fn detaching_reaches_base_without_claiming_the_branch() {
+        let repo = make_test_repo();
+        create_commit(&repo, "b.txt", "second\n", "second");
+        let head = super::resolve_ref(&repo, "main").expect("main sha");
+        let wt = repo.join("wt-detach");
+        run_git(
+            &repo,
+            &["worktree", "add", "-q", "-b", "other", wt.to_str().unwrap()],
+        );
+
+        // A plain checkout of main must fail here -- the primary holds it.
+        assert!(
+            !super::checkout(&wt, "main", false).expect("checkout attempt"),
+            "git must refuse to check out a branch held by another worktree"
+        );
+        // The supported fallback: detach at the base commit.
+        super::checkout_detach_force(&wt, "main").expect("detach to base");
+
+        assert_eq!(
+            super::head_commit(&wt).expect("head").as_str(),
+            head,
+            "the worktree must land on the base commit"
+        );
+        assert_eq!(
+            super::worktrees_for_branch(&repo, "main")
+                .expect("holders")
+                .len(),
+            1,
+            "only the primary worktree may hold the branch"
+        );
+        let _ = fs::remove_dir_all(&repo);
     }
 }

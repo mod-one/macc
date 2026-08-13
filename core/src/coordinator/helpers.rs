@@ -411,11 +411,15 @@ fn prepare_reused_worktree_base(
     if !crate::git::clean_fd(worktree_path)? {
         return Ok((false, false));
     }
-    // Try checkout base_branch directly first. If that fails (e.g. because
-    // the branch is already checked out in another worktree), detach HEAD
-    // and reset to the base commit instead.
+    // Try checking base_branch out directly. If that fails -- normally because
+    // the operator has it checked out in the primary worktree -- detach HEAD
+    // instead; the `reset --hard <base_branch>` below moves the worktree onto
+    // the base commit after the fetch.
+    //
+    // Never force the branch in with `checkout -B`: that overrides git's
+    // "already used by worktree" guard and leaves one branch live in two
+    // worktrees, where a commit in either silently moves the other's HEAD.
     if !crate::git::checkout(worktree_path, base_branch, false)?
-        && !crate::git::checkout_reset_branch(worktree_path, base_branch, false)?
         && !crate::git::checkout_detach(worktree_path)?
     {
         return Ok((false, false));
