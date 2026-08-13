@@ -2347,7 +2347,8 @@ fn build_readiness_text(
     // If a doctor check has been run, show its detailed output instead of the ladder.
     if let Some(summary) = doctor_summary {
         let mut out = summary.to_string();
-        out.push_str("\nActions: [d] re-check  [r] start coordinator  [a] apply  [v] live view");
+        out.push_str("\nRecommended: fix the blocking issue(s) above, then [d] re-check.");
+        out.push_str("\nOther actions: [a] apply  [v] live view  [?] help");
         return out;
     }
 
@@ -2368,18 +2369,81 @@ fn build_readiness_text(
     out.push('\n');
     if ladder.is_ready() {
         out.push_str("✅ Ready to dispatch a task\n\n");
-        out.push_str("Actions: [r] start coordinator  [v] live view  [d] doctor check");
+        out.push_str("Recommended: [r] Start coordinator\n");
+        out.push_str("Why: all required setup checks are green.\n\n");
+        out.push_str("Other actions: [v] live view  [d] doctor check");
     } else {
         out.push_str(&format!("❌ {} step(s) pending\n\n", ladder.blocking_count));
-        out.push_str("Actions:\n");
+        let recommendation = readiness_recommendation(ladder);
+        out.push_str("Recommended next step:\n");
+        out.push_str(&format!("  {}\n", recommendation.action));
+        out.push_str(&format!("  Why: {}\n\n", recommendation.reason));
+        out.push_str("Other actions:\n");
         out.push_str("  [d] Doctor check\n");
-        out.push_str("  [a] Apply config\n");
-        out.push_str("  [r] Start coordinator\n");
-        out.push_str("  [v] Coordinator live view\n");
+        for action in recommendation.other_actions {
+            out.push_str(&format!("  {}\n", action));
+        }
         out.push_str("  [?] All Keybindings\n");
-        out.push_str("  CLI: macc quickstart");
     }
     out
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReadinessRecommendation {
+    action: &'static str,
+    reason: &'static str,
+    other_actions: &'static [&'static str],
+}
+
+fn readiness_recommendation(
+    ladder: &macc_core::onboarding::ReadinessLadder,
+) -> ReadinessRecommendation {
+    let first_pending = ladder
+        .steps
+        .iter()
+        .find(|step| matches!(step.status, macc_core::onboarding::ReadinessStatus::Pending));
+
+    match first_pending.map(|step| step.number) {
+        Some(1) => ReadinessRecommendation {
+            action: "CLI: macc init",
+            reason: "this folder is not initialized as a MACC project yet.",
+            other_actions: &["CLI: macc quickstart"],
+        },
+        Some(2) => ReadinessRecommendation {
+            action: "[t] Open Tools Configuration and select one tool",
+            reason: "MACC needs a performer tool before it can run tasks.",
+            other_actions: &["[a] Apply config", "[v] Coordinator live view"],
+        },
+        Some(3) => ReadinessRecommendation {
+            action: "[a] Apply config",
+            reason: "the selected configuration has not been written to managed files yet.",
+            other_actions: &["[t] Review tools", "[d] Doctor check"],
+        },
+        Some(4) => ReadinessRecommendation {
+            action: "Create or import a PRD at .macc/prd.json",
+            reason: "the coordinator cannot dispatch work until at least one task is ready. Starting it now will not create tasks.",
+            other_actions: &[
+                "CLI: macc prd generate --from <brief.md> --promote",
+                "[d] Doctor check",
+                "[v] Coordinator live view",
+            ],
+        },
+        Some(5) => ReadinessRecommendation {
+            action: "Configure git user.name and user.email",
+            reason: "MACC needs a commit identity before performers can safely create commits.",
+            other_actions: &["CLI: git config user.name <name>", "CLI: git config user.email <email>"],
+        },
+        Some(6) => ReadinessRecommendation {
+            action: "[r] Start coordinator",
+            reason: "setup and tasks are ready; only the coordinator process is stopped.",
+            other_actions: &["[v] Coordinator live view", "[d] Doctor check"],
+        },
+        _ => ReadinessRecommendation {
+            action: "[d] Doctor check",
+            reason: "MACC needs more detail before choosing a safe action.",
+            other_actions: &["[a] Apply config", "[v] Coordinator live view"],
+        },
+    }
 }
 
 fn render_watch_screen(f: &mut Frame, state: &AppState, area: Rect) {
@@ -2769,7 +2833,60 @@ fn footer_hints_line(state: &AppState, theme: &ui::Theme, max_chars: usize) -> L
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use super::*;
+    use macc_core::onboarding::{ReadinessLadder, ReadinessStatus, ReadinessStep};
+
+    fn step(number: u8, label: &str, status: ReadinessStatus) -> ReadinessStep {
+        ReadinessStep {
+            number,
+            label: label.to_string(),
+            status,
+            detail: None,
+        }
+    }
+
+    #[test]
+    fn readiness_recommends_prd_before_starting_coordinator() {
+        let ladder = ReadinessLadder {
+            steps: vec![
+                step(1, "Project initialized", ReadinessStatus::Done),
+                step(2, "Tool adapter selected", ReadinessStatus::Done),
+                step(3, "Config applied", ReadinessStatus::Done),
+                step(4, "PRD/task available", ReadinessStatus::Pending),
+                step(5, "Git identity configured", ReadinessStatus::Done),
+                step(6, "Coordinator running", ReadinessStatus::Pending),
+            ],
+            blocking_count: 2,
+        };
+
+        let text = build_readiness_text(&ladder, None);
+
+        assert!(text.contains("Recommended next step:"));
+        assert!(text.contains("Create or import a PRD at .macc/prd.json"));
+        assert!(text.contains("Starting it now will not create tasks"));
+    }
+
+    #[test]
+    fn readiness_recommends_starting_coordinator_only_after_prd_exists() {
+        let ladder = ReadinessLadder {
+            steps: vec![
+                step(1, "Project initialized", ReadinessStatus::Done),
+                step(2, "Tool adapter selected", ReadinessStatus::Done),
+                step(3, "Config applied", ReadinessStatus::Done),
+                step(4, "PRD/task available", ReadinessStatus::Done),
+                step(5, "Git identity configured", ReadinessStatus::Done),
+                step(6, "Coordinator running", ReadinessStatus::Pending),
+            ],
+            blocking_count: 1,
+        };
+
+        let recommendation = readiness_recommendation(&ladder);
+
+        assert_eq!(recommendation.action, "[r] Start coordinator");
+        assert!(recommendation.reason.contains("tasks are ready"));
+    }
+}
 
 fn render_coordinator_pause_overlay(f: &mut Frame, state: &AppState) {
     let area = ui::centered_rect(75, 45, f.size());
