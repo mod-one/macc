@@ -2043,7 +2043,7 @@ impl AppState {
             .find(|screen| *screen != current && **screen != home);
 
         match parent {
-            Some(parent) => format!("Home > ... > {} > {}", parent.title(), current.title()),
+            Some(parent) => format!("... > {} > {}", parent.title(), current.title()),
             None if *current == home => "Home".to_string(),
             None => format!("Home > {}", current.title()),
         }
@@ -6104,7 +6104,7 @@ mod tests {
         );
         assert_eq!(
             state.display_breadcrumbs(),
-            "Home > ... > Tools Configuration > Coordinator Live"
+            "... > Tools Configuration > Coordinator Live"
         );
     }
 
