@@ -653,7 +653,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
         .constraints([
             Constraint::Length(header_height), // Compact 3-line header, plus warnings if needed
             Constraint::Min(0),                // Body
-            Constraint::Length(4),             // Footer / Navigation help
+            Constraint::Length(3),             // Path + actions
         ])
         .split(f.size());
     let header_area = chunks[0];
@@ -2262,14 +2262,6 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
     }
 
     // Footer
-    let badges = state.status_badges().join(" | ");
-    let search = if state.search_editing {
-        format!("search> {}_", state.search_query)
-    } else if !state.search_query.is_empty() {
-        format!("search: {}", state.search_query)
-    } else {
-        "search: (off)".to_string()
-    };
     let footer = Paragraph::new(vec![
         Line::from(vec![
             Span::styled("Path: ", Style::default().fg(theme.muted)),
@@ -2278,16 +2270,9 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 footer_area.width.saturating_sub(8) as usize,
             )),
         ]),
-        Line::from(vec![
-            Span::styled("State: ", Style::default().fg(theme.muted)),
-            Span::raw(ui::truncate_middle(
-                &format!("{} | {}", badges, search),
-                footer_area.width.saturating_sub(9) as usize,
-            )),
-        ]),
-        footer_hints_line(state, &theme, footer_area.width.saturating_sub(20) as usize),
+        footer_hints_line(state, &theme, footer_area.width.saturating_sub(9) as usize),
     ])
-    .block(panel("Navigation"));
+    .block(panel("Guide"));
     f.render_widget(footer, footer_area);
 
     if state.has_coordinator_pause_prompt() {
@@ -2980,10 +2965,9 @@ fn footer_hints_line(state: &AppState, theme: &ui::Theme, max_chars: usize) -> L
 fn screen_action_bindings(screen: Screen) -> Vec<(&'static str, &'static str)> {
     match screen {
         Screen::Home => vec![
-            ("d", "Doctor"),
-            ("a", "Apply"),
             ("r", "Start coordinator"),
-            ("v", "Live"),
+            ("d", "Doctor"),
+            ("p", "Preview"),
         ],
         Screen::Tools => vec![
             ("↑↓", "Move"),
@@ -3064,12 +3048,12 @@ fn action_bar_line(
     let mut used = 0usize;
     for (idx, (key, desc, disabled)) in bindings.into_iter().enumerate() {
         let chunk = if idx == 0 {
-            format!("{key}: {desc}")
+            format!("{key} {desc}")
         } else {
-            format!(" | {key}: {desc}")
+            format!(" | {key} {desc}")
         };
         let chunk_len = chunk.chars().count();
-        if used + chunk_len > max_chars {
+        if used + chunk_len + 9 > max_chars {
             break;
         }
         if idx > 0 {
@@ -3081,14 +3065,16 @@ fn action_bar_line(
             Style::default()
         };
         spans.push(Span::styled(key.to_string(), style));
-        spans.push(Span::styled(": ", style));
+        spans.push(Span::styled(" ", style));
         spans.push(Span::styled(desc.to_string(), style));
         used += chunk_len;
     }
 
-    spans.push(Span::raw("  "));
-    spans.push(Span::styled("Press ?", Style::default().fg(theme.accent)));
-    spans.push(Span::raw(" for help"));
+    if !spans.is_empty() {
+        spans.push(Span::raw(" | "));
+    }
+    spans.push(Span::styled("?", Style::default().fg(theme.accent)));
+    spans.push(Span::raw(" Help"));
 
     let mut with_label = vec![Span::styled("Actions: ", Style::default().fg(theme.muted))];
     with_label.extend(spans);
@@ -3286,6 +3272,23 @@ mod tests {
 
         assert_eq!(lines.len(), 4);
         assert!(lines[3].to_string().contains("Trust: terminal allowed"));
+    }
+
+    #[test]
+    fn home_footer_actions_are_user_facing() {
+        let theme = theme();
+        let line = action_bar_line(
+            screen_action_bindings(Screen::Home)
+                .into_iter()
+                .map(|(key, desc)| (key, desc, false))
+                .collect(),
+            &theme,
+            120,
+        );
+        let text = line.to_string();
+
+        assert!(text.contains("Actions: r Start coordinator | d Doctor | p Preview | ? Help"));
+        assert!(!text.contains("cache:missing"));
     }
 }
 
