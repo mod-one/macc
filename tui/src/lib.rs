@@ -635,7 +635,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(8), // Title + status badges + trust strip + override strip
+            Constraint::Length(5), // Compact title + project/status + ops guardrails
             Constraint::Min(0),    // Body
             Constraint::Length(4), // Footer / Navigation help
         ])
@@ -663,38 +663,33 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             "warn"
         }
     );
-    let trust_strip = if let (Some(paths), Some(config)) =
-        (&state.project_paths, state.working_copy.as_ref())
-    {
-        let trust = macc_core::ops_motif::calculate_trust_summary(paths, config);
-        let local_only = if trust.local_only { "yes" } else { "no" };
-        let terminal = if trust.terminal_enabled {
-            "enabled"
+    let trust_strip =
+        if let (Some(paths), Some(config)) = (&state.project_paths, state.working_copy.as_ref()) {
+            let trust = macc_core::ops_motif::calculate_trust_summary(paths, config);
+            let local_only = if trust.local_only { "yes" } else { "no" };
+            let terminal = if trust.terminal_enabled { "on" } else { "off" };
+            let backups = if trust.backups_ready {
+                "ready"
+            } else {
+                "missing"
+            };
+            let catalog = if trust.catalog_pinned {
+                "pinned"
+            } else {
+                "unpinned"
+            };
+            let secrets = if trust.secrets_redacted {
+                "redacted"
+            } else {
+                "visible"
+            };
+            Some(format!(
+                "local:{} terminal:{} writes:{} backups:{} catalog:{} secrets:{}",
+                local_only, terminal, trust.user_level_writes, backups, catalog, secrets
+            ))
         } else {
-            "disabled"
+            None
         };
-        let backups = if trust.backups_ready {
-            "ready"
-        } else {
-            "missing"
-        };
-        let catalog = if trust.catalog_pinned {
-            "pinned"
-        } else {
-            "unpinned"
-        };
-        let secrets = if trust.secrets_redacted {
-            "redacted"
-        } else {
-            "unredacted"
-        };
-        Some(format!(
-            "Local only: {} | Terminal: {} | User writes: {} | Backups: {} | Catalog: {} | Secrets: {}",
-            local_only, terminal, trust.user_level_writes, backups, catalog, secrets
-        ))
-    } else {
-        None
-    };
     let header_ctx = HeaderContext {
         app_name: "[M][A][C][C]",
         screen_title: current_screen.title(),

@@ -126,7 +126,7 @@ pub struct HeaderContext<'a> {
 
 pub fn header_lines(ctx: &HeaderContext<'_>, t: &Theme) -> Vec<Line<'static>> {
     let max = ctx.width.saturating_sub(6) as usize;
-    let project_short = truncate_middle(ctx.project, max.saturating_sub(12));
+    let project_short = truncate_middle(ctx.project, max.saturating_sub(42));
     let mut top_line = vec![
         Span::styled(
             ctx.app_name.to_string(),
@@ -158,6 +158,17 @@ pub fn header_lines(ctx: &HeaderContext<'_>, t: &Theme) -> Vec<Line<'static>> {
         ));
     }
 
+    let status_text = ctx
+        .status
+        .as_ref()
+        .map(|(_, msg)| msg.as_str())
+        .unwrap_or("idle");
+    let status_style = ctx
+        .status
+        .as_ref()
+        .map(|(lvl, _)| status_style(*lvl, t))
+        .unwrap_or_default();
+
     let mut lines = vec![
         Line::from(top_line),
         Line::from(vec![
@@ -175,35 +186,36 @@ pub fn header_lines(ctx: &HeaderContext<'_>, t: &Theme) -> Vec<Line<'static>> {
                 ctx.errors.to_string(),
                 Style::default().fg(if ctx.errors == 0 { t.good } else { t.bad }),
             ),
+            Span::raw("  "),
+            Span::styled("status", Style::default().fg(t.muted)),
+            Span::raw(": "),
+            Span::styled(
+                truncate_middle(status_text, max.saturating_sub(48)),
+                status_style,
+            ),
         ]),
     ];
 
+    let mut ops_parts = Vec::new();
     if let Some(strip) = &ctx.trust_strip {
-        lines.push(Line::from(vec![
-            Span::styled("trust  ", Style::default().fg(t.muted)),
-            Span::raw(": "),
-            Span::raw(strip.clone()),
-        ]));
+        ops_parts.push(format!("ops: {}", strip));
     }
 
     if let Some(overrides) = &ctx.override_strip {
+        ops_parts.push(format!("overrides: {}", overrides));
+    }
+
+    if !ops_parts.is_empty() {
+        let ops_style = if ctx.override_strip.is_some() {
+            Style::default().fg(t.warn).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(t.muted)
+        };
         lines.push(Line::from(vec![Span::styled(
-            format!("overrides: {}", overrides),
-            Style::default().fg(t.warn).add_modifier(Modifier::BOLD),
+            truncate_middle(&ops_parts.join(" | "), max),
+            ops_style,
         )]));
     }
 
-    if let Some((lvl, msg)) = &ctx.status {
-        lines.push(Line::from(vec![
-            Span::styled("status", Style::default().fg(t.muted)),
-            Span::raw(": "),
-            Span::styled(truncate_middle(msg, max), status_style(*lvl, t)),
-        ]));
-    } else {
-        lines.push(Line::from(vec![
-            Span::styled("status", Style::default().fg(t.muted)),
-            Span::raw(": idle"),
-        ]));
-    }
     lines
 }
