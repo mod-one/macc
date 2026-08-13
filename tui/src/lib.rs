@@ -2252,7 +2252,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
         Line::from(vec![
             Span::styled("Path: ", Style::default().fg(theme.muted)),
             Span::raw(ui::truncate_middle(
-                &state.breadcrumbs(),
+                &state.display_breadcrumbs(),
                 chunks[2].width.saturating_sub(8) as usize,
             )),
         ]),

@@ -2026,6 +2026,29 @@ impl AppState {
             .join(" > ")
     }
 
+    pub fn display_breadcrumbs(&self) -> String {
+        let Some(current) = self.screen_stack.last() else {
+            return "Home".to_string();
+        };
+        if self.screen_stack.len() <= 2 {
+            return self.breadcrumbs();
+        }
+
+        let home = Screen::Home;
+        let parent = self
+            .screen_stack
+            .iter()
+            .rev()
+            .skip(1)
+            .find(|screen| *screen != current && **screen != home);
+
+        match parent {
+            Some(parent) => format!("Home > ... > {} > {}", parent.title(), current.title()),
+            None if *current == home => "Home".to_string(),
+            None => format!("Home > {}", current.title()),
+        }
+    }
+
     pub fn active_tool_label(&self) -> String {
         if let Some(desc) = self.tool_descriptors.get(self.selected_tool_index) {
             return desc.id.to_string();
@@ -6063,6 +6086,26 @@ mod tests {
         state.pop_screen();
         assert_eq!(state.current_screen(), Screen::Home);
         assert_eq!(state.screen_stack.len(), 1);
+    }
+
+    #[test]
+    fn display_breadcrumbs_compacts_navigation_history() {
+        let engine = Arc::new(MaccEngine::new(ToolRegistry::new()));
+        let mut state = AppState::with_engine(engine);
+
+        state.push_screen(Screen::Tools);
+        state.push_screen(Screen::Automation);
+        state.push_screen(Screen::Tools);
+        state.push_screen(Screen::CoordinatorLive);
+
+        assert_eq!(
+            state.breadcrumbs(),
+            "Home > Tools Configuration > Automation / Coordinator > Tools Configuration > Coordinator Live"
+        );
+        assert_eq!(
+            state.display_breadcrumbs(),
+            "Home > ... > Tools Configuration > Coordinator Live"
+        );
     }
 
     #[test]
