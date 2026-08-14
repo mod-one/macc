@@ -369,6 +369,31 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
         }
         return;
     }
+    if current_screen == Screen::CoordinatorLive && state.coordinator_stop_task_confirm_id.is_some()
+    {
+        match key {
+            KeyCode::Enter | KeyCode::Char('y') => {
+                if let Some(task_id) = state.coordinator_stop_task_confirm_id.take() {
+                    state.stop_selected_task(task_id.clone());
+                    state.set_status(
+                        UiStatusLevel::Info,
+                        format!("Sent stop request to task {}", task_id),
+                        Some(Duration::from_secs(3)),
+                    );
+                }
+            }
+            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('q') => {
+                state.coordinator_stop_task_confirm_id = None;
+                state.set_status(
+                    UiStatusLevel::Info,
+                    "Stop task cancelled.",
+                    Some(Duration::from_secs(2)),
+                );
+            }
+            _ => {}
+        }
+        return;
+    }
     if current_screen == Screen::CoordinatorLive && state.coordinator_recover_dialog_open {
         match key {
             KeyCode::Up => {
@@ -549,10 +574,11 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
         }
         KeyCode::Char('s') if current_screen == Screen::CoordinatorLive => {
             if let Some(task) = state.selected_live_task() {
-                state.stop_selected_task(task.task_id.clone());
+                state.coordinator_stop_task_confirm_id = Some(task.task_id.clone());
+            } else {
                 state.set_status(
-                    UiStatusLevel::Info,
-                    format!("Sent kill request to task {}", task.task_id),
+                    UiStatusLevel::Warning,
+                    "No task selected to stop.",
                     Some(Duration::from_secs(3)),
                 );
             }
@@ -664,12 +690,17 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
     let header_height = 5
         + u16::from(trust_strip.is_some())
         + u16::from(state.coordinator_phase_overrides.is_some());
+    let footer_height = if current_screen == Screen::CoordinatorLive {
+        4
+    } else {
+        3
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(header_height), // Compact 3-line header, plus warnings if needed
             Constraint::Min(0),                // Body
-            Constraint::Length(3),             // Path + actions
+            Constraint::Length(footer_height), // Path + actions, plus danger when needed
         ])
         .split(f.size());
     let header_area = chunks[0];
@@ -2276,7 +2307,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
     }
 
     // Footer
-    let footer = Paragraph::new(vec![
+    let mut footer_lines = vec![
         Line::from(vec![
             Span::styled("Path: ", Style::default().fg(theme.muted)),
             Span::raw(ui::truncate_middle(
@@ -2285,8 +2316,15 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             )),
         ]),
         footer_hints_line(state, &theme, footer_area.width.saturating_sub(9) as usize),
-    ])
-    .block(panel("Guide"));
+    ];
+    if current_screen == Screen::CoordinatorLive {
+        footer_lines.push(danger_actions_line(
+            state,
+            &theme,
+            footer_area.width.saturating_sub(8) as usize,
+        ));
+    }
+    let footer = Paragraph::new(footer_lines).block(panel("Guide"));
     f.render_widget(footer, footer_area);
 
     if state.has_coordinator_pause_prompt() {
@@ -2307,6 +2345,9 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
     if state.current_screen() == Screen::CoordinatorLive {
         if state.coordinator_stop_dialog_open {
             render_coordinator_stop_dialog(f, state);
+        }
+        if state.coordinator_stop_task_confirm_id.is_some() {
+            render_stop_task_confirm_dialog(f, state);
         }
         if state.coordinator_recover_dialog_open {
             render_coordinator_recover_dialog(f, state);
@@ -3151,7 +3192,6 @@ fn footer_hints_line(state: &AppState, theme: &ui::Theme, max_chars: usize) -> L
         ("y", "Sync Registry", is_viewer),
         ("c", "Reconcile", is_viewer),
         ("u", "Resume Paused Run", is_viewer),
-        ("k", "Stop Options", is_viewer),
         ("v", "Recover Options", is_viewer),
         ("l", "Refresh Live Status", false),
         ("T", "Request Takeover", !is_viewer),
@@ -3159,6 +3199,21 @@ fn footer_hints_line(state: &AppState, theme: &ui::Theme, max_chars: usize) -> L
     ];
 
     action_bar_line(bindings, theme, max_chars)
+}
+
+fn danger_actions_line(state: &AppState, theme: &ui::Theme, max_chars: usize) -> Line<'static> {
+    let task_label = state
+        .selected_live_task()
+        .map(|task| format!("s Stop selected task ({})", task.task_id))
+        .unwrap_or_else(|| "s Stop selected task (none selected)".to_string());
+    let text = ui::truncate_middle(
+        &format!("Danger: k Stop coordinator | {}", task_label),
+        max_chars,
+    );
+    Line::from(vec![Span::styled(
+        text,
+        Style::default().fg(theme.bad).add_modifier(Modifier::BOLD),
+    )])
 }
 
 fn screen_action_bindings(screen: Screen) -> Vec<(&'static str, &'static str)> {
@@ -3497,6 +3552,21 @@ mod tests {
     }
 
     #[test]
+    fn coordinator_live_danger_actions_are_separated() {
+        let theme = theme();
+        let engine = Arc::new(MaccEngine::new(ToolRegistry::new()));
+        let mut state = AppState::with_engine(engine);
+        state.goto_screen(Screen::CoordinatorLive);
+
+        let normal = footer_hints_line(&state, &theme, 120).to_string();
+        let danger = danger_actions_line(&state, &theme, 120).to_string();
+
+        assert!(!normal.contains("Stop coordinator"));
+        assert!(danger.contains("Danger: k Stop coordinator"));
+        assert!(danger.contains("s Stop selected task"));
+    }
+
+    #[test]
     fn command_palette_filters_available_commands() {
         let items = filtered_command_palette_items("skill");
 
@@ -3600,6 +3670,13 @@ fn render_coordinator_stop_dialog(f: &mut Frame, state: &AppState) {
     ];
 
     let mut text = Vec::new();
+    text.push(Line::from(
+        "Stopping the coordinator affects the whole run.",
+    ));
+    text.push(Line::from(
+        "Impact depends on the mode: active performers may finish, pause, or be killed.",
+    ));
+    text.push(Line::from(""));
     text.push(Line::from("Select a stop mode:"));
     text.push(Line::from(""));
 
@@ -3635,6 +3712,29 @@ fn render_coordinator_stop_dialog(f: &mut Frame, state: &AppState) {
                 .title("Coordinator Stop Modes")
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme.accent)),
+        )
+        .wrap(Wrap { trim: true });
+    f.render_widget(popup, area);
+}
+
+fn render_stop_task_confirm_dialog(f: &mut Frame, state: &AppState) {
+    let area = ui::centered_rect(65, 32, f.size());
+    f.render_widget(Clear, area);
+    let theme = ui::theme();
+    let task_id = state
+        .coordinator_stop_task_confirm_id
+        .as_deref()
+        .unwrap_or("<unknown>");
+    let text = format!(
+        "Stop selected task?\n\nTask: {}\n\nImpact:\n- Sends a kill request for this task worker.\n- The task may be moved out of active execution.\n- Unmerged work in its worktree may remain for recovery/retry.\n\nConfirm:\n- y or Enter: stop this task\n- n or Esc: cancel",
+        task_id
+    );
+    let popup = Paragraph::new(text)
+        .block(
+            Block::default()
+                .title("Danger: Stop Selected Task")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.bad)),
         )
         .wrap(Wrap { trim: true });
     f.render_widget(popup, area);

@@ -250,6 +250,7 @@ pub struct AppState {
     coordinator_ownership_last_refresh: Option<Instant>,
     pub coordinator_stop_dialog_open: bool,
     pub coordinator_stop_dialog_selection: usize,
+    pub coordinator_stop_task_confirm_id: Option<String>,
     pub coordinator_recover_dialog_open: bool,
     pub coordinator_recover_dialog_selection: usize,
     /// §18: Human-readable summary of active runtime phase overrides, e.g. "[testing:off] [review:required]".
@@ -401,6 +402,7 @@ impl AppState {
             coordinator_ownership_last_refresh: None,
             coordinator_stop_dialog_open: false,
             coordinator_stop_dialog_selection: 0,
+            coordinator_stop_task_confirm_id: None,
             coordinator_recover_dialog_open: false,
             coordinator_recover_dialog_selection: 0,
             coordinator_phase_overrides: None,
