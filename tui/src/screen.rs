@@ -39,6 +39,7 @@ impl Screen {
     pub fn help_keybindings(&self) -> Vec<(&'static str, &'static str)> {
         let mut bindings = vec![
             ("?", "Toggle Help"),
+            (": / Ctrl-P", "Command Palette"),
             ("q/Esc", "Back / Quit"),
             ("h", "Go Home"),
             ("t", "Go to Tools"),

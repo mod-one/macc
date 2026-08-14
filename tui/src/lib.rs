@@ -1,6 +1,6 @@
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -115,7 +115,13 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, state: &mut AppState) -> io::
         if event::poll(Duration::from_millis(16))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
-                    handle_key(state, key.code);
+                    if key.code == KeyCode::Char('p')
+                        && key.modifiers.contains(KeyModifiers::CONTROL)
+                    {
+                        handle_key(state, KeyCode::Char(':'));
+                    } else {
+                        handle_key(state, key.code);
+                    }
                 }
             }
         }
@@ -166,6 +172,16 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
             KeyCode::Char('c') => state.resume_after_coordinator_pause(),
             _ => {}
         }
+        return;
+    }
+
+    if state.command_palette_open {
+        handle_command_palette_key(state, key);
+        return;
+    }
+
+    if matches!(key, KeyCode::Char(':')) {
+        open_command_palette(state);
         return;
     }
 
@@ -2296,6 +2312,9 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             render_coordinator_recover_dialog(f, state);
         }
     }
+    if state.command_palette_open {
+        render_command_palette_overlay(f, state);
+    }
     if state.help_open {
         render_help_overlay(f, state);
     }
@@ -2308,6 +2327,130 @@ fn kind_label(kind: PlannedOpKind) -> &'static str {
         PlannedOpKind::Delete => "delete",
         PlannedOpKind::Mkdir => "mkdir",
         PlannedOpKind::Other => "other",
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandPaletteAction {
+    RunCoordinator,
+    Doctor,
+    OpenLogs,
+    OpenSkills,
+    OpenMcp,
+    ApplyConfig,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CommandPaletteItem {
+    title: &'static str,
+    hint: &'static str,
+    action: CommandPaletteAction,
+}
+
+fn command_palette_items() -> Vec<CommandPaletteItem> {
+    vec![
+        CommandPaletteItem {
+            title: "Run coordinator",
+            hint: "Start a coordinator run and open live view",
+            action: CommandPaletteAction::RunCoordinator,
+        },
+        CommandPaletteItem {
+            title: "Doctor",
+            hint: "Check setup and readiness",
+            action: CommandPaletteAction::Doctor,
+        },
+        CommandPaletteItem {
+            title: "Open logs",
+            hint: "Inspect MACC and coordinator logs",
+            action: CommandPaletteAction::OpenLogs,
+        },
+        CommandPaletteItem {
+            title: "Open skills",
+            hint: "Enable, disable, or inspect skills",
+            action: CommandPaletteAction::OpenSkills,
+        },
+        CommandPaletteItem {
+            title: "Open MCP",
+            hint: "Configure MCP server selections",
+            action: CommandPaletteAction::OpenMcp,
+        },
+        CommandPaletteItem {
+            title: "Apply config",
+            hint: "Preview consent and write managed config",
+            action: CommandPaletteAction::ApplyConfig,
+        },
+    ]
+}
+
+fn filtered_command_palette_items(query: &str) -> Vec<CommandPaletteItem> {
+    let query = query.trim().to_ascii_lowercase();
+    command_palette_items()
+        .into_iter()
+        .filter(|item| {
+            query.is_empty()
+                || item.title.to_ascii_lowercase().contains(&query)
+                || item.hint.to_ascii_lowercase().contains(&query)
+        })
+        .collect()
+}
+
+fn open_command_palette(state: &mut AppState) {
+    state.command_palette_open = true;
+    state.command_palette_query.clear();
+    state.command_palette_selection = 0;
+}
+
+fn close_command_palette(state: &mut AppState) {
+    state.command_palette_open = false;
+    state.command_palette_query.clear();
+    state.command_palette_selection = 0;
+}
+
+fn handle_command_palette_key(state: &mut AppState, key: KeyCode) {
+    match key {
+        KeyCode::Esc => close_command_palette(state),
+        KeyCode::Backspace => {
+            state.command_palette_query.pop();
+            state.command_palette_selection = 0;
+        }
+        KeyCode::Up => {
+            state.command_palette_selection = state.command_palette_selection.saturating_sub(1);
+        }
+        KeyCode::Down => {
+            let max = filtered_command_palette_items(&state.command_palette_query)
+                .len()
+                .saturating_sub(1);
+            state.command_palette_selection = (state.command_palette_selection + 1).min(max);
+        }
+        KeyCode::Enter => {
+            let items = filtered_command_palette_items(&state.command_palette_query);
+            if let Some(item) = items.get(state.command_palette_selection).copied() {
+                close_command_palette(state);
+                execute_command_palette_action(state, item.action);
+            }
+        }
+        KeyCode::Char(c) => {
+            state.command_palette_query.push(c);
+            state.command_palette_selection = 0;
+        }
+        _ => {}
+    }
+}
+
+fn execute_command_palette_action(state: &mut AppState, action: CommandPaletteAction) {
+    match action {
+        CommandPaletteAction::RunCoordinator => {
+            state.start_coordinator_command(CoordinatorCommand::Run);
+            state.push_screen(Screen::CoordinatorLive);
+        }
+        CommandPaletteAction::Doctor => {
+            state.goto_screen(Screen::Home);
+            state.run_home_doctor_check();
+        }
+        CommandPaletteAction::OpenLogs => state.push_screen(Screen::Logs),
+        CommandPaletteAction::OpenSkills => state.push_screen(Screen::Skills),
+        CommandPaletteAction::OpenMcp => state.push_screen(Screen::Mcp),
+        CommandPaletteAction::ApplyConfig => state.open_apply_screen(),
     }
 }
 
@@ -2896,6 +3039,68 @@ fn render_help_overlay(f: &mut Frame, state: &AppState) {
     f.render_widget(help_para, area);
 }
 
+fn render_command_palette_overlay(f: &mut Frame, state: &AppState) {
+    let area = ui::centered_rect(64, 42, f.size());
+    f.render_widget(Clear, area);
+    let theme = theme();
+    let items = filtered_command_palette_items(&state.command_palette_query);
+
+    let mut lines = Vec::new();
+    let query = if state.command_palette_query.is_empty() {
+        "<type to search>".to_string()
+    } else {
+        state.command_palette_query.clone()
+    };
+    lines.push(Line::from(vec![
+        Span::styled("Search: ", Style::default().fg(theme.muted)),
+        Span::styled(query, Style::default().fg(theme.accent)),
+    ]));
+    lines.push(Line::from(""));
+
+    if items.is_empty() {
+        lines.push(Line::from("No matching command."));
+    } else {
+        for (idx, item) in items.iter().take(8).enumerate() {
+            let selected = idx == state.command_palette_selection.min(items.len() - 1);
+            let style = if selected {
+                Style::default()
+                    .fg(theme.accent)
+                    .bg(theme.highlight_bg)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            let prefix = if selected { "› " } else { "  " };
+            lines.push(Line::from(vec![
+                Span::styled(prefix, style),
+                Span::styled(item.title, style),
+                Span::styled(" — ", Style::default().fg(theme.muted)),
+                Span::styled(item.hint, Style::default().fg(theme.muted)),
+            ]));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("Enter", Style::default().fg(theme.accent)),
+        Span::raw(" run  "),
+        Span::styled("↑↓", Style::default().fg(theme.accent)),
+        Span::raw(" move  "),
+        Span::styled("Esc", Style::default().fg(theme.accent)),
+        Span::raw(" close"),
+    ]));
+
+    let para = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .title("Command Palette")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.accent)),
+        )
+        .wrap(Wrap { trim: true });
+    f.render_widget(para, area);
+}
+
 fn render_coordinator_ownership_banner(f: &mut Frame, area: Rect, state: &AppState) {
     use crate::ownership::{render_ownership_banner, OwnershipBannerProps};
 
@@ -3068,7 +3273,9 @@ fn action_bar_line(
         spans.push(Span::raw(" | "));
     }
     spans.push(Span::styled("?", Style::default().fg(theme.accent)));
-    spans.push(Span::raw(" Help"));
+    spans.push(Span::raw(" Help | "));
+    spans.push(Span::styled(":", Style::default().fg(theme.accent)));
+    spans.push(Span::raw(" Commands"));
 
     let mut with_label = vec![Span::styled("Actions: ", Style::default().fg(theme.muted))];
     with_label.extend(spans);
@@ -3079,6 +3286,9 @@ fn action_bar_line(
 mod tests {
     use super::*;
     use macc_core::onboarding::{ReadinessLadder, ReadinessStatus, ReadinessStep};
+    use macc_core::tool::ToolRegistry;
+    use macc_core::MaccEngine;
+    use std::sync::Arc;
 
     fn step(number: u8, label: &str, status: ReadinessStatus) -> ReadinessStep {
         ReadinessStep {
@@ -3284,6 +3494,25 @@ mod tests {
 
         assert!(text.contains("Actions: r Start coordinator | d Doctor | p Preview | ? Help"));
         assert!(!text.contains("cache:missing"));
+    }
+
+    #[test]
+    fn command_palette_filters_available_commands() {
+        let items = filtered_command_palette_items("skill");
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].action, CommandPaletteAction::OpenSkills);
+        assert_eq!(items[0].title, "Open skills");
+    }
+
+    #[test]
+    fn command_palette_executes_navigation_action() {
+        let engine = Arc::new(MaccEngine::new(ToolRegistry::new()));
+        let mut state = AppState::with_engine(engine);
+
+        execute_command_palette_action(&mut state, CommandPaletteAction::OpenMcp);
+
+        assert_eq!(state.current_screen(), Screen::Mcp);
     }
 }
 
