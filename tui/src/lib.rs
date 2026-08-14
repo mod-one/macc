@@ -1719,7 +1719,10 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 lines.push(String::new());
                 lines.push("←/→ or Space/Enter to cycle".to_string());
                 lines.push("s — Save to .macc/macc.yaml".to_string());
-                wrapped_paragraph(lines.join("\n"), "Field Info")
+                let mut text = coordinator_basics_text(state);
+                text.push_str("\n\n");
+                text.push_str(&lines.join("\n"));
+                wrapped_paragraph(text, "Field Info")
             } else {
                 // Default: show field description and current value.
                 let detail_text = if let Some((source, field_idx)) = state.current_config_field() {
@@ -1743,6 +1746,9 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                         state.config_field_help(source, field_idx),
                         state.config_field_value(source, field_idx),
                     );
+                    if state.config_tab_index == 1 {
+                        text = format!("{}\n\n{}", coordinator_basics_text(state), text);
+                    }
                     if source == 1 {
                         if let Some(validation) = state.current_automation_field_validation() {
                             text.push_str(&format!("\n\nValidation: {}", validation));
@@ -2554,6 +2560,30 @@ fn tool_detail_text(
     format!(
         "Current state: {} and {}\nNext: {}\n\nID: {}\nName: {}\nFields: {}\n\nDescription:\n{}\n",
         enabled_label, status_label, next, id, title, field_count, description
+    )
+}
+
+fn coordinator_basics_text(state: &AppState) -> String {
+    let tool = state.automation_field_display_value(0);
+    let tool = if tool.is_empty() {
+        "(auto-select)".to_string()
+    } else {
+        tool
+    };
+    let reference_branch = state.automation_field_display_value(1);
+    let max_dispatch = state.automation_field_display_value(6);
+    let max_parallel = state.automation_field_display_value(7);
+    let safety_policy = state.automation_field_display_value(32);
+    let destructive_actions = state.automation_field_display_value(33);
+
+    format!(
+        "Coordinator basics\nTool: {}\nParallelism: {} task(s), {} dispatch\nReference branch: {}\nSafety: {}, destructive actions require {}",
+        tool,
+        max_parallel,
+        max_dispatch,
+        reference_branch,
+        safety_policy,
+        destructive_actions.replace('_', " ")
     )
 }
 
@@ -3647,6 +3677,20 @@ mod tests {
 
         assert!(text.starts_with("Current state: disabled and missing"));
         assert!(text.contains("Next: Press i to install"));
+    }
+
+    #[test]
+    fn coordinator_basics_summary_is_basic_first() {
+        let engine = Arc::new(MaccEngine::new(ToolRegistry::new()));
+        let state = AppState::with_engine(engine);
+
+        let text = coordinator_basics_text(&state);
+
+        assert!(text.starts_with("Coordinator basics"));
+        assert!(text.contains("Tool:"));
+        assert!(text.contains("Parallelism:"));
+        assert!(text.contains("Reference branch:"));
+        assert!(text.contains("Safety:"));
     }
 }
 
