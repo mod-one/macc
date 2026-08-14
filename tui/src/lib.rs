@@ -2200,16 +2200,26 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                     macc_core::doctor::ToolStatus::Missing => "missing",
                     macc_core::doctor::ToolStatus::Error(_) => "error",
                 };
-                let mut detail = format!(
-                    "ID: {}\nStatus: {}\nFields: {}\n\nDescription:\n{}\n",
-                    tool.id,
-                    status_label,
+                let is_enabled = enabled_tools.contains(&tool.id);
+                let mut detail = tool_detail_text(
+                    tool.id.as_str(),
+                    tool.title.as_str(),
+                    tool.description.as_str(),
                     tool.fields.len(),
-                    tool.description
+                    status_label,
+                    is_enabled,
                 );
-                if let Some(install) = &tool.install {
+                if matches!(status, macc_core::doctor::ToolStatus::Missing) {
+                    if let Some(install) = &tool.install {
+                        detail.push_str("\nInstall:\n");
+                        detail.push_str(&install.confirm_message);
+                    }
+                }
+                if matches!(status, macc_core::doctor::ToolStatus::Missing)
+                    && tool.install.is_none()
+                {
                     detail.push_str("\nInstall:\n");
-                    detail.push_str(&install.confirm_message);
+                    detail.push_str("No guided install is available for this tool.");
                 }
                 if let macc_core::doctor::ToolStatus::Error(msg) = status {
                     detail.push_str("\nError:\n");
@@ -2522,6 +2532,29 @@ fn scope_label(scope: Scope) -> &'static str {
         Scope::Project => "project",
         Scope::User => "user",
     }
+}
+
+fn tool_detail_text(
+    id: &str,
+    title: &str,
+    description: &str,
+    field_count: usize,
+    status_label: &str,
+    enabled: bool,
+) -> String {
+    let enabled_label = if enabled { "enabled" } else { "disabled" };
+    let next = match (enabled, status_label) {
+        (true, "installed") => "Enter to configure, Space to disable",
+        (false, "installed") => "Space to enable, Enter to configure",
+        (_, "missing") => "Press i to install, or choose another installed tool",
+        (_, "error") => "Press d to refresh checks after fixing the error",
+        _ => "Review tool details",
+    };
+
+    format!(
+        "Current state: {} and {}\nNext: {}\n\nID: {}\nName: {}\nFields: {}\n\nDescription:\n{}\n",
+        enabled_label, status_label, next, id, title, field_count, description
+    )
 }
 
 fn build_readiness_text(
@@ -3583,6 +3616,37 @@ mod tests {
         execute_command_palette_action(&mut state, CommandPaletteAction::OpenMcp);
 
         assert_eq!(state.current_screen(), Screen::Mcp);
+    }
+
+    #[test]
+    fn installed_tool_detail_prioritizes_current_state_and_next_action() {
+        let text = tool_detail_text(
+            "agy",
+            "Antigravity",
+            "Workspace settings for Google Antigravity CLI.",
+            7,
+            "installed",
+            true,
+        );
+
+        assert!(text.starts_with("Current state: enabled and installed"));
+        assert!(text.contains("Next: Enter to configure, Space to disable"));
+        assert!(!text.contains("Install:"));
+    }
+
+    #[test]
+    fn missing_tool_detail_points_to_install() {
+        let text = tool_detail_text(
+            "claude",
+            "Claude",
+            "Claude CLI settings.",
+            4,
+            "missing",
+            false,
+        );
+
+        assert!(text.starts_with("Current state: disabled and missing"));
+        assert!(text.contains("Next: Press i to install"));
     }
 }
 
