@@ -1255,14 +1255,30 @@ pub(super) fn should_auto_retry_error_code(
     list.iter().any(|entry| entry.trim() == code)
 }
 
-pub fn cleanup_dead_runtime_tasks_in_registry_with<F>(
+/// Reclaim tasks whose performer process is gone.
+///
+/// `is_pid_running` and `has_terminal_result` are injected so this stays a pure
+/// decision function.
+///
+/// `has_terminal_result(task_id, claim_id)` answers "has this claim already
+/// reported a result?" from the durable event log. It is the difference between
+/// a performer that **crashed** and one that **finished and exited** -- both
+/// look identical to a PID check, and both stop sending heartbeats. Without it,
+/// a control-plane loop that falls behind its own grace window (which happens
+/// whenever several performers saturate the machine) reclaims tasks that
+/// succeeded, discarding the worktree that holds their committed work. The
+/// performer's result is persisted on receipt, so it is already on record well
+/// before the loop gets round to consuming it.
+pub fn cleanup_dead_runtime_tasks_in_registry_with<F, G>(
     registry: &mut Value,
     now: &str,
     heartbeat_grace_seconds: i64,
     mut is_pid_running: F,
+    mut has_terminal_result: G,
 ) -> Result<Vec<DeadRuntimeCleanupEntry>>
 where
     F: FnMut(i64) -> bool,
+    G: FnMut(&str, &str) -> bool,
 {
     let now_ts = chrono::DateTime::parse_from_rfc3339(now)
         .ok()
@@ -1277,6 +1293,16 @@ where
         let runtime_status = task.runtime_status();
         if runtime_status != RuntimeStatus::Running || is_pid_running(pid) {
             continue;
+        }
+        // The process is gone -- but did it die, or did it finish? If a result
+        // for this exact claim is already recorded, the performer completed and
+        // exited normally; the completion is simply still queued for the loop to
+        // apply. Reclaiming here would clear the task's worktree and strand the
+        // commits it just made.
+        if let Some(claim_id) = task.task_runtime.claim_id.as_deref() {
+            if has_terminal_result(&task.id, claim_id) {
+                continue;
+            }
         }
         if heartbeat_grace_seconds > 0 {
             let within_grace = task
@@ -3550,6 +3576,118 @@ mod tests {
         }));
     }
 
+    // ── Ghost cleanup must not reclaim a task that already finished ────────
+    //
+    // A performer that completes and exits is indistinguishable from one that
+    // crashed: the PID is gone and the heartbeats stop either way. When the
+    // control-plane loop falls behind (which it does whenever several
+    // performers saturate the machine), the completion sits queued while the
+    // heartbeat ages past the grace window -- and reclaiming the task clears its
+    // worktree, stranding the commits it just made. The durable event log is
+    // the tiebreaker, and it is written the moment the result arrives.
+
+    fn running_task_registry(claim_id: &str) -> serde_json::Value {
+        json!({
+            "tasks": [{
+                "id":"T-GHOST",
+                "state":"claimed",
+                "assignee":"agentA",
+                "worktree":{
+                    "worktree_path":"/repo/.macc/worktree/worker-01",
+                    "branch":"ai/codex/worker-01"
+                },
+                "task_runtime":{
+                    "status":"running",
+                    "current_phase":"dev",
+                    "pid":999,
+                    "claim_id":claim_id,
+                    "last_heartbeat":"2026-02-21T00:00:00Z"
+                }
+            }]
+        })
+    }
+
+    #[test]
+    fn a_finished_task_is_not_reclaimed_even_when_its_process_is_gone() {
+        let mut registry = running_task_registry("claim-1");
+        let cleaned = cleanup_dead_runtime_tasks_in_registry_with(
+            &mut registry,
+            "2026-02-21T00:10:00Z", // 10 minutes later: well past any grace
+            60,
+            |_| false,                                             // process gone
+            |task, claim| task == "T-GHOST" && claim == "claim-1", // result on record
+        )
+        .unwrap();
+
+        assert!(
+            cleaned.is_empty(),
+            "a task whose result is already recorded must not be reclaimed"
+        );
+        assert_eq!(registry["tasks"][0]["state"], "claimed");
+        assert_eq!(
+            registry["tasks"][0]["worktree"]["branch"], "ai/codex/worker-01",
+            "the worktree pointer must survive -- it is the only route to the commits"
+        );
+    }
+
+    #[test]
+    fn a_crashed_task_with_no_recorded_result_is_still_reclaimed() {
+        // The guard must not blanket-disable ghost cleanup: a genuinely dead
+        // performer that never reported anything still has to be reclaimed.
+        let mut registry = running_task_registry("claim-1");
+        let cleaned = cleanup_dead_runtime_tasks_in_registry_with(
+            &mut registry,
+            "2026-02-21T00:10:00Z",
+            60,
+            |_| false,
+            |_, _| false, // nothing on record
+        )
+        .unwrap();
+
+        assert_eq!(cleaned.len(), 1);
+        assert_eq!(registry["tasks"][0]["state"], "todo");
+        assert!(registry["tasks"][0]["worktree"].is_null());
+    }
+
+    #[test]
+    fn a_result_from_a_different_claim_does_not_protect_the_current_one() {
+        // Scoping matters: a result from an earlier attempt must not vouch for
+        // the attempt running now, or a retry could never be reclaimed.
+        let mut registry = running_task_registry("claim-2");
+        let cleaned = cleanup_dead_runtime_tasks_in_registry_with(
+            &mut registry,
+            "2026-02-21T00:10:00Z",
+            60,
+            |_| false,
+            |_, claim| claim == "claim-1", // stale claim only
+        )
+        .unwrap();
+
+        assert_eq!(cleaned.len(), 1, "a stale claim's result must not protect");
+        assert_eq!(registry["tasks"][0]["state"], "todo");
+    }
+
+    #[test]
+    fn a_live_process_is_never_consulted_against_the_event_log() {
+        // The cheap PID check still short-circuits, so the common path does no
+        // database work.
+        let mut registry = running_task_registry("claim-1");
+        let mut consulted = false;
+        let cleaned = cleanup_dead_runtime_tasks_in_registry_with(
+            &mut registry,
+            "2026-02-21T00:10:00Z",
+            60,
+            |_| true, // process alive
+            |_, _| {
+                consulted = true;
+                false
+            },
+        )
+        .unwrap();
+        assert!(cleaned.is_empty());
+        assert!(!consulted, "a live process needs no event-log lookup");
+    }
+
     #[test]
     fn cleanup_dead_runtime_tasks_resets_claimed_dev_to_todo() {
         let mut registry = json!({
@@ -3569,6 +3707,7 @@ mod tests {
             "2026-02-21T00:00:00Z",
             0,
             |_| false,
+            |_, _| false,
         )
         .unwrap();
         assert_eq!(cleaned.len(), 1);
@@ -3598,6 +3737,7 @@ mod tests {
             "2026-02-21T00:01:00Z",
             60,
             |_| false,
+            |_, _| false,
         )
         .unwrap();
         assert_eq!(cleaned.len(), 0);

@@ -181,12 +181,30 @@ pub fn cleanup_dead_runtime_tasks_in_typed_registry(
             registry.set_updated_at(now.clone());
         }
     }
+    // A performer that finished and exited looks exactly like one that crashed:
+    // the PID is gone and the heartbeats stopped. The durable event log is what
+    // tells them apart, so consult it before reclaiming anything. Without a
+    // repo root there is no event log to consult, and the PID/heartbeat check
+    // stands alone.
+    let sqlite = repo_root.map(|root| {
+        let project_paths = crate::ProjectPaths::from_root(root);
+        crate::coordinator_storage::SqliteStorage::new(
+            crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&project_paths),
+        )
+    });
+    let has_terminal_result = |task_id: &str, claim_id: &str| {
+        sqlite
+            .as_ref()
+            .is_some_and(|db| db.task_has_terminal_result_for_claim(task_id, claim_id))
+    };
+
     let mut registry_value = registry.to_value()?;
     let cleaned = coordinator_engine::cleanup_dead_runtime_tasks_in_registry_with(
         &mut registry_value,
         &now,
         heartbeat_grace_seconds,
         is_pid_running,
+        has_terminal_result,
     )?;
     *registry = TaskRegistry::from_value(&registry_value)?;
     let fixed = cleaned.len();
