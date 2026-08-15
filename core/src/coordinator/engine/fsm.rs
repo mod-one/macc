@@ -1579,11 +1579,65 @@ struct NativeControlPlaneBackend<'a> {
     /// Used to throttle periodic heartbeats to once every 30 seconds so that
     /// viewer TUIs always see recent activity even while performers are running.
     last_sqlite_heartbeat_at: Option<std::time::Instant>,
+    /// When the current cycle began, used to measure how long the previous one
+    /// took. See [`Self::effective_ghost_grace_seconds`].
+    cycle_started_at: Option<std::time::Instant>,
+    /// Duration of the previous cycle, in seconds.
+    ///
+    /// Liveness is judged by how long ago a performer last sent a heartbeat --
+    /// but that age only means "the performer went quiet" if the coordinator was
+    /// actually listening. When a cycle runs long (several performers saturating
+    /// the machine will do it), every heartbeat ages by that whole stall without
+    /// anything having gone wrong.
+    last_cycle_seconds: i64,
+}
+
+/// Heartbeat grace, widened by however long the previous control-plane cycle
+/// took.
+///
+/// A heartbeat's age is only evidence about the performer if the coordinator
+/// was in a position to receive one. Whenever the loop runs long -- and it does,
+/// routinely, when several performers saturate the machine -- every heartbeat
+/// ages by that whole stall without anything having gone wrong. Judging
+/// liveness against a wall clock the loop cannot keep up with is how a performer
+/// that finished normally gets reclaimed, taking its worktree (and the pointer
+/// to its commits) with it.
+///
+/// Widening by the observed stall means a cycle that overran the configured
+/// grace performs, in effect, no ghost detection that round -- the intended
+/// behaviour -- while a performer that has genuinely been silent for longer than
+/// grace *plus* the stall is still caught. Skipping outright would let a
+/// persistently slow coordinator never reclaim anything at all.
+///
+/// A non-positive configured grace means the operator disabled the heartbeat
+/// test entirely; the PID check then stands alone and there is nothing to widen.
+pub(crate) fn ghost_grace_with_stall(
+    configured_grace_seconds: i64,
+    last_cycle_seconds: i64,
+) -> i64 {
+    if configured_grace_seconds <= 0 {
+        return configured_grace_seconds;
+    }
+    configured_grace_seconds.saturating_add(last_cycle_seconds.max(0))
+}
+
+impl NativeControlPlaneBackend<'_> {
+    fn effective_ghost_grace_seconds(&self) -> i64 {
+        ghost_grace_with_stall(self.ghost_heartbeat_grace_seconds, self.last_cycle_seconds)
+    }
 }
 
 #[async_trait]
 impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
     async fn on_cycle_start(&mut self, _cycle: usize) -> Result<()> {
+        // Measure the previous cycle before starting this one, so ghost
+        // detection can tell "the performer stopped" apart from "we stopped
+        // looking".
+        let now = std::time::Instant::now();
+        if let Some(started) = self.cycle_started_at.replace(now) {
+            self.last_cycle_seconds = now.duration_since(started).as_secs() as i64;
+        }
+
         let storage_paths = crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(
             &crate::ProjectPaths::from_root(self.repo_root),
         );
@@ -1785,23 +1839,22 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
                 }
             }),
         )?;
+        let grace = self.effective_ghost_grace_seconds();
+        if grace > self.ghost_heartbeat_grace_seconds {
+            if let Some(log) = self.logger {
+                let _ = log.note(format!(
+                    "- Ghost grace widened to {}s (configured {}s + {}s spent in the previous cycle)",
+                    grace, self.ghost_heartbeat_grace_seconds, self.last_cycle_seconds
+                ));
+            }
+        }
         let cleaned = if let Some(log) = self.logger {
             let note = |line: String| {
                 let _ = log.note(line);
             };
-            cleanup_dead_runtime_tasks(
-                self.repo_root,
-                "run-cycle",
-                self.ghost_heartbeat_grace_seconds,
-                Some(&note),
-            )?
+            cleanup_dead_runtime_tasks(self.repo_root, "run-cycle", grace, Some(&note))?
         } else {
-            cleanup_dead_runtime_tasks(
-                self.repo_root,
-                "run-cycle",
-                self.ghost_heartbeat_grace_seconds,
-                None,
-            )?
+            cleanup_dead_runtime_tasks(self.repo_root, "run-cycle", grace, None)?
         };
         if cleaned > 0 {
             if let Some(log) = self.logger {
@@ -2376,6 +2429,8 @@ pub async fn run_native_control_plane(
         last_logged_counts: None,
         last_cycle_progressed: false,
         last_sqlite_heartbeat_at: None,
+        cycle_started_at: None,
+        last_cycle_seconds: 0,
     };
 
     let timeout_seconds = env_cfg.timeout_seconds.unwrap_or(cfg.timeout_seconds);
@@ -3718,6 +3773,88 @@ mod tests {
         .unwrap();
         assert!(cleaned.is_empty());
         assert!(!consulted, "a live process needs no event-log lookup");
+    }
+
+    // ── Grace must account for the loop's own stalls ───────────────────────
+    //
+    // From a real run: the coordinator's normal cycle was 32s, but with three
+    // performers saturating the machine it repeatedly took 120-259s while
+    // `ghost_heartbeat_grace_seconds` was 90. Any performer that finished
+    // during one of those stalls looked dead by the time the loop got round to
+    // checking, and was reclaimed -- along with the worktree holding its
+    // commits.
+
+    #[test]
+    fn a_stalled_cycle_widens_the_grace_window() {
+        // The exact numbers from the run that lost three tasks.
+        assert_eq!(super::ghost_grace_with_stall(90, 259), 349);
+        assert_eq!(
+            super::ghost_grace_with_stall(90, 120),
+            210,
+            "a 120s stall must not let a 90s-stale heartbeat count as death"
+        );
+    }
+
+    #[test]
+    fn a_prompt_cycle_leaves_the_grace_alone() {
+        // 32s was this coordinator's healthy cadence; detection stays tight.
+        assert_eq!(super::ghost_grace_with_stall(90, 0), 90);
+        assert_eq!(super::ghost_grace_with_stall(90, 32), 122);
+    }
+
+    #[test]
+    fn a_disabled_grace_is_never_widened() {
+        // <= 0 means the operator turned the heartbeat test off; the PID check
+        // stands alone and widening would silently re-enable a window.
+        assert_eq!(super::ghost_grace_with_stall(0, 300), 0);
+        assert_eq!(super::ghost_grace_with_stall(-1, 300), -1);
+    }
+
+    #[test]
+    fn grace_widening_tolerates_nonsense_inputs() {
+        // A clock that went backwards must not shrink the window, and a huge
+        // stall must not overflow it into a negative one.
+        assert_eq!(super::ghost_grace_with_stall(90, -500), 90);
+        assert_eq!(super::ghost_grace_with_stall(i64::MAX, 10), i64::MAX);
+    }
+
+    /// The widened grace is what actually protects the task: with it, a
+    /// heartbeat that is stale only because the loop stalled no longer trips
+    /// ghost detection.
+    #[test]
+    fn a_heartbeat_stale_only_because_of_a_stall_is_not_a_ghost() {
+        let mut registry = running_task_registry("claim-1");
+        // Heartbeat is 150s old; configured grace 90s; previous cycle took 200s.
+        let cleaned = cleanup_dead_runtime_tasks_in_registry_with(
+            &mut registry,
+            "2026-02-21T00:02:30Z",
+            super::ghost_grace_with_stall(90, 200),
+            |_| false,
+            |_, _| false,
+            |_| false,
+        )
+        .unwrap();
+        assert!(
+            cleaned.is_empty(),
+            "the coordinator was not listening for most of that window"
+        );
+
+        // Same heartbeat age, healthy cycle: still detected.
+        let mut registry = running_task_registry("claim-1");
+        let cleaned = cleanup_dead_runtime_tasks_in_registry_with(
+            &mut registry,
+            "2026-02-21T00:02:30Z",
+            super::ghost_grace_with_stall(90, 0),
+            |_| false,
+            |_, _| false,
+            |_| false,
+        )
+        .unwrap();
+        assert_eq!(
+            cleaned.len(),
+            1,
+            "a genuinely silent performer is still caught"
+        );
     }
 
     // ── A reclaimed task must never lose the pointer to committed work ─────
