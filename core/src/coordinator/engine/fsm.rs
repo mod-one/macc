@@ -1269,16 +1269,25 @@ pub(super) fn should_auto_retry_error_code(
 /// succeeded, discarding the worktree that holds their committed work. The
 /// performer's result is persisted on receipt, so it is already on record well
 /// before the loop gets round to consuming it.
-pub fn cleanup_dead_runtime_tasks_in_registry_with<F, G>(
+///
+/// `holds_unmerged_work(task)` reports whether the task's branch still carries
+/// commits the base branch does not have. Requeuing clears the worktree, and
+/// that attachment is the only record of which branch holds those commits --
+/// once it is gone the work is reachable only by digging through reflogs. Such a
+/// task is blocked instead, keeping the pointer intact for an operator. It
+/// should answer conservatively: when it cannot tell, say yes.
+pub fn cleanup_dead_runtime_tasks_in_registry_with<F, G, H>(
     registry: &mut Value,
     now: &str,
     heartbeat_grace_seconds: i64,
     mut is_pid_running: F,
     mut has_terminal_result: G,
+    mut holds_unmerged_work: H,
 ) -> Result<Vec<DeadRuntimeCleanupEntry>>
 where
     F: FnMut(i64) -> bool,
     G: FnMut(&str, &str) -> bool,
+    H: FnMut(&Task) -> bool,
 {
     let now_ts = chrono::DateTime::parse_from_rfc3339(now)
         .ok()
@@ -1320,20 +1329,39 @@ where
         let task_id = task.id.clone();
         let phase = task.current_phase().to_string();
         let old_state = task.state.clone();
+        let branch = task.branch().unwrap_or_default().to_string();
+        // Checked before the runtime is borrowed mutably below.
+        let unmerged = !branch.is_empty() && holds_unmerged_work(task);
 
         let runtime = task.ensure_runtime();
         runtime.pid = None;
         runtime.set_status(RuntimeStatus::Stale);
-        runtime.last_error = Some(format!("runtime pid {} is not running; auto-reset", pid));
         runtime.last_error_code =
             Some(crate::coordinator::error_normalizer::E414_PERFORMER_PROCESS_DEAD.to_string());
-        let new_state = if old_state == WorkflowState::Claimed.as_str() && phase == "dev" {
+
+        let requeue = old_state == WorkflowState::Claimed.as_str() && phase == "dev" && !unmerged;
+        let new_state = if requeue {
+            runtime.last_error = Some(format!("runtime pid {} is not running; auto-reset", pid));
             task.set_workflow_state(WorkflowState::Todo);
             task.assignee = None;
-            // Clear worktree attachment so the task can be re-dispatched.
+            // Nothing committed on the branch, so the attachment records nothing
+            // worth keeping -- release it so the task can be dispatched fresh.
             task.worktree = None;
             WorkflowState::Todo.as_str().to_string()
         } else {
+            // Keep the worktree attached. It names the branch holding the
+            // commits, and it is what lets later recovery steps (abandonment
+            // tagging, `macc coordinator status`) attribute that work to this
+            // task rather than reporting it as unknown.
+            let detail = if unmerged {
+                format!(
+                    "runtime pid {} is not running; committed work is unmerged on branch {} -- blocked instead of requeued so it is not lost",
+                    pid, branch
+                )
+            } else {
+                format!("runtime pid {} is not running; auto-reset", pid)
+            };
+            runtime.last_error = Some(detail);
             task.set_workflow_state(WorkflowState::Blocked);
             WorkflowState::Blocked.as_str().to_string()
         };
@@ -3616,6 +3644,7 @@ mod tests {
             60,
             |_| false,                                             // process gone
             |task, claim| task == "T-GHOST" && claim == "claim-1", // result on record
+            |_| false,
         )
         .unwrap();
 
@@ -3641,6 +3670,7 @@ mod tests {
             60,
             |_| false,
             |_, _| false, // nothing on record
+            |_| false,
         )
         .unwrap();
 
@@ -3660,6 +3690,7 @@ mod tests {
             60,
             |_| false,
             |_, claim| claim == "claim-1", // stale claim only
+            |_| false,
         )
         .unwrap();
 
@@ -3682,10 +3713,103 @@ mod tests {
                 consulted = true;
                 false
             },
+            |_| false,
         )
         .unwrap();
         assert!(cleaned.is_empty());
         assert!(!consulted, "a live process needs no event-log lookup");
+    }
+
+    // ── A reclaimed task must never lose the pointer to committed work ─────
+    //
+    // Requeuing clears `task.worktree`, and that attachment is the only record
+    // of which branch holds the task's commits. Once cleared the work is
+    // reachable only through reflogs, and later recovery steps can no longer
+    // attribute it to the task -- an abandonment tag for it comes out labelled
+    // `unknown-task`.
+
+    #[test]
+    fn a_dead_task_with_committed_work_is_blocked_not_requeued() {
+        let mut registry = running_task_registry("claim-1");
+        let cleaned = cleanup_dead_runtime_tasks_in_registry_with(
+            &mut registry,
+            "2026-02-21T00:10:00Z",
+            60,
+            |_| false,    // process genuinely gone
+            |_, _| false, // no result recorded: a real ghost
+            |_| true,     // ...but its branch holds unmerged commits
+        )
+        .unwrap();
+
+        assert_eq!(cleaned.len(), 1);
+        assert_eq!(cleaned[0].new_state, "blocked");
+        assert_eq!(registry["tasks"][0]["state"], "blocked");
+        assert_eq!(
+            registry["tasks"][0]["worktree"]["branch"], "ai/codex/worker-01",
+            "the branch pointer must survive so the commits can be found"
+        );
+        let detail = registry["tasks"][0]["task_runtime"]["last_error"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            detail.contains("ai/codex/worker-01") && detail.contains("unmerged"),
+            "the reason must name the branch at risk: {detail}"
+        );
+    }
+
+    #[test]
+    fn a_dead_task_with_nothing_committed_is_still_requeued() {
+        // The guard must not stop ordinary reclamation: with no commits on the
+        // branch the attachment records nothing worth keeping.
+        let mut registry = running_task_registry("claim-1");
+        let cleaned = cleanup_dead_runtime_tasks_in_registry_with(
+            &mut registry,
+            "2026-02-21T00:10:00Z",
+            60,
+            |_| false,
+            |_, _| false,
+            |_| false, // branch has no commits ahead of base
+        )
+        .unwrap();
+
+        assert_eq!(cleaned.len(), 1);
+        assert_eq!(cleaned[0].new_state, "todo");
+        assert_eq!(registry["tasks"][0]["state"], "todo");
+        assert!(registry["tasks"][0]["worktree"].is_null());
+    }
+
+    #[test]
+    fn a_dead_task_with_no_branch_is_never_asked_about_commits() {
+        // Nothing to preserve, and no branch to ask about.
+        let mut registry = json!({
+            "tasks": [{
+                "id":"T-NOBRANCH",
+                "state":"claimed",
+                "task_runtime":{
+                    "status":"running",
+                    "current_phase":"dev",
+                    "pid":999,
+                    "claim_id":"claim-1",
+                    "last_heartbeat":"2026-02-21T00:00:00Z"
+                }
+            }]
+        });
+        let mut asked = false;
+        let cleaned = cleanup_dead_runtime_tasks_in_registry_with(
+            &mut registry,
+            "2026-02-21T00:10:00Z",
+            60,
+            |_| false,
+            |_, _| false,
+            |_| {
+                asked = true;
+                true
+            },
+        )
+        .unwrap();
+
+        assert_eq!(cleaned[0].new_state, "todo");
+        assert!(!asked, "no branch means no git comparison is needed");
     }
 
     #[test]
@@ -3708,6 +3832,7 @@ mod tests {
             0,
             |_| false,
             |_, _| false,
+            |_| false,
         )
         .unwrap();
         assert_eq!(cleaned.len(), 1);
@@ -3738,6 +3863,7 @@ mod tests {
             60,
             |_| false,
             |_, _| false,
+            |_| false,
         )
         .unwrap();
         assert_eq!(cleaned.len(), 0);

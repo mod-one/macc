@@ -198,6 +198,41 @@ pub fn cleanup_dead_runtime_tasks_in_typed_registry(
             .is_some_and(|db| db.task_has_terminal_result_for_claim(task_id, claim_id))
     };
 
+    // Reference branch to compare task branches against, for deciding whether a
+    // reclaimed task still holds work worth preserving.
+    let reference_branch = repo_root
+        .and_then(|root| {
+            crate::config::load_canonical_config(&crate::ProjectPaths::from_root(root).config_path)
+                .ok()
+        })
+        .map(|canonical| {
+            crate::config::CoordinatorConfigResolved::resolve(
+                canonical.automation.coordinator.as_ref(),
+            )
+            .reference_branch
+        })
+        .unwrap_or_else(|| "master".to_string());
+
+    // Deliberately conservative: when the comparison cannot be made (unknown
+    // base, unreadable repo), assume there IS unmerged work. Blocking a task
+    // that could have been requeued costs an operator one command; clearing a
+    // worktree that held commits loses the only pointer to them.
+    let holds_unmerged_work = |task: &crate::coordinator::model::Task| {
+        let Some(root) = repo_root else {
+            return false;
+        };
+        let Some(branch) = task.branch() else {
+            return false;
+        };
+        let base = task.base_branch(&reference_branch);
+        if base.is_empty() || base == branch {
+            return false;
+        }
+        crate::git::commits_between(root, &base, branch)
+            .map(|commits| !commits.is_empty())
+            .unwrap_or(true)
+    };
+
     let mut registry_value = registry.to_value()?;
     let cleaned = coordinator_engine::cleanup_dead_runtime_tasks_in_registry_with(
         &mut registry_value,
@@ -205,6 +240,7 @@ pub fn cleanup_dead_runtime_tasks_in_typed_registry(
         heartbeat_grace_seconds,
         is_pid_running,
         has_terminal_result,
+        holds_unmerged_work,
     )?;
     *registry = TaskRegistry::from_value(&registry_value)?;
     let fixed = cleaned.len();
@@ -1193,6 +1229,100 @@ mod tests {
         );
         assert_eq!(task.state, "todo");
         assert!(task.worktree.is_some());
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    /// End-to-end through the real wiring: a genuinely dead performer whose
+    /// branch carries commits must be blocked with its worktree intact, using
+    /// actual git state rather than an injected answer.
+    #[test]
+    fn reclaiming_a_dead_task_preserves_a_branch_that_holds_commits() {
+        let repo = make_test_git_repo();
+        run_git(&repo, &["checkout", "-q", "-b", "ai/codex/worker-01"]);
+        fs::write(repo.join("work.txt"), "work\n").expect("write");
+        run_git(&repo, &["add", "work.txt"]);
+        run_git(&repo, &["commit", "-qm", "task work"]);
+        run_git(&repo, &["checkout", "-q", "main"]);
+
+        let mut registry: TaskRegistry = serde_json::from_value(serde_json::json!({
+            "tasks": [{
+                "id":"T-DEAD",
+                "state":"claimed",
+                "base_branch":"main",
+                "worktree":{
+                    "worktree_path": repo.join(".macc/worktree/worker-01").to_string_lossy(),
+                    "branch":"ai/codex/worker-01",
+                    "base_branch":"master"
+                },
+                "task_runtime":{
+                    "status":"running",
+                    "current_phase":"dev",
+                    "pid":21474836,
+                    "claim_id":"claim-1",
+                    "last_heartbeat":"2020-01-01T00:00:00Z"
+                }
+            }]
+        }))
+        .expect("typed registry");
+
+        let fixed = cleanup_dead_runtime_tasks_in_typed_registry(
+            &mut registry,
+            "test",
+            60,
+            None,
+            Some(&repo),
+        )
+        .expect("cleanup");
+
+        assert_eq!(fixed, 1);
+        let task = &registry.tasks[0];
+        assert_eq!(task.state, "blocked", "committed work must not be requeued");
+        assert!(
+            task.worktree.is_some(),
+            "the worktree attachment is the only pointer to the commits"
+        );
+        assert!(task
+            .task_runtime
+            .last_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("ai/codex/worker-01"));
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    /// The mirror case, also through real git: no commits ahead of base means
+    /// nothing to preserve, so ordinary reclamation still happens.
+    #[test]
+    fn reclaiming_a_dead_task_with_an_empty_branch_still_requeues() {
+        let repo = make_test_git_repo();
+        run_git(&repo, &["branch", "ai/codex/worker-01"]); // no commits ahead
+
+        let mut registry: TaskRegistry = serde_json::from_value(serde_json::json!({
+            "tasks": [{
+                "id":"T-DEAD-EMPTY",
+                "state":"claimed",
+                "base_branch":"main",
+                "worktree":{
+                    "worktree_path": repo.join(".macc/worktree/worker-01").to_string_lossy(),
+                    "branch":"ai/codex/worker-01",
+                    "base_branch":"master"
+                },
+                "task_runtime":{
+                    "status":"running",
+                    "current_phase":"dev",
+                    "pid":21474836,
+                    "claim_id":"claim-1",
+                    "last_heartbeat":"2020-01-01T00:00:00Z"
+                }
+            }]
+        }))
+        .expect("typed registry");
+
+        cleanup_dead_runtime_tasks_in_typed_registry(&mut registry, "test", 60, None, Some(&repo))
+            .expect("cleanup");
+
+        assert_eq!(registry.tasks[0].state, "todo");
+        assert!(registry.tasks[0].worktree.is_none());
         let _ = fs::remove_dir_all(&repo);
     }
 
