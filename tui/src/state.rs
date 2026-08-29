@@ -1212,10 +1212,16 @@ impl AppState {
             .working_copy
             .as_ref()
             .and_then(|c| c.automation.coordinator.as_ref());
+        // Hand the TUI's own ownership identity to the child. The TUI claims the
+        // project lease after a successful start; without propagating that id the
+        // spawned child mints a fresh `cli-<pid>` and is rejected by the very
+        // lease this TUI holds.
+        let client_id = self.client_context.client_id.clone();
         match self.engine.coordinator_start_managed_command_process(
             paths,
             &command,
             coordinator_cfg,
+            Some(client_id.as_str()),
         ) {
             Ok(()) => {
                 self.wait_for_coordinator_registration(Duration::from_secs(2));

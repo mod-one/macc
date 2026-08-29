@@ -555,6 +555,7 @@ impl macc_core::engine::Engine for WebTestEngine {
         _paths: &ProjectPaths,
         _command: &macc_core::service::coordinator_workflow::CoordinatorCommand,
         _cfg: Option<&macc_core::config::CoordinatorConfig>,
+        _client_id: Option<&str>,
     ) -> Result<()> {
         self.managed_run_result
             .lock()

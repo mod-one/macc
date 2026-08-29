@@ -1324,7 +1324,7 @@ fn launch_coordinator_with_client(
             let url = format!("http://{}:{}/ops/console", host, port);
 
             // Start coordinator as background daemon.
-            let coord_pid = run_coordinator_daemon(paths, coordinator_cfg)?;
+            let coord_pid = run_coordinator_daemon(paths, coordinator_cfg, &input.client_id)?;
 
             // Start supervisor with coordinator child PID (not CLI PID).
             if input.supervisor {
@@ -1358,7 +1358,7 @@ fn launch_coordinator_with_client(
 
         CoordinatorClientMode::None | CoordinatorClientMode::Interactive => {
             // Start coordinator as background daemon; return immediately.
-            let coord_pid = run_coordinator_daemon(paths, coordinator_cfg)?;
+            let coord_pid = run_coordinator_daemon(paths, coordinator_cfg, &input.client_id)?;
             if input.supervisor {
                 let _ = spawn_attached_supervisor(&paths.root, coord_pid as u32);
             }
@@ -1399,6 +1399,7 @@ fn build_phase_overrides_label(input: &CoordinatorCommandInput) -> Option<String
 fn run_coordinator_daemon(
     paths: &macc_core::ProjectPaths,
     coordinator_cfg: Option<&macc_core::config::CoordinatorConfig>,
+    client_id: &str,
 ) -> Result<i32> {
     use macc_core::service::coordinator::coordinator_start_managed_command_process_with_pid;
     use macc_core::service::coordinator_workflow::coordinator_command_invocation;
@@ -1411,6 +1412,7 @@ fn run_coordinator_daemon(
         invocation.action,
         &invocation.args,
         coordinator_cfg,
+        Some(client_id),
     )?;
 
     println!("Coordinator started (pid {}).", pid);

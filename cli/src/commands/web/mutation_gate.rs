@@ -49,7 +49,7 @@ pub(super) fn require_project_owner(
     Ok(())
 }
 
-fn client_id_from_headers(headers: &HeaderMap) -> Option<String> {
+pub(super) fn client_id_from_headers(headers: &HeaderMap) -> Option<String> {
     headers
         .get(WEB_CLIENT_HEADER)
         .and_then(|v| v.to_str().ok())

@@ -99,8 +99,10 @@ pub fn coordinator_start_managed_command_process(
     command: &str,
     args: &[String],
     cfg: Option<&CoordinatorConfig>,
+    client_id: Option<&str>,
 ) -> Result<()> {
-    coordinator_start_managed_command_process_with_pid(paths, command, args, cfg).map(|_| ())
+    coordinator_start_managed_command_process_with_pid(paths, command, args, cfg, client_id)
+        .map(|_| ())
 }
 
 /// Like `coordinator_start_managed_command_process` but also returns the
@@ -110,6 +112,7 @@ pub fn coordinator_start_managed_command_process_with_pid(
     command: &str,
     args: &[String],
     cfg: Option<&CoordinatorConfig>,
+    client_id: Option<&str>,
 ) -> Result<i32> {
     let key = handle_key(paths, command);
     if let Some(existing) = active_managed_command(paths)? {
@@ -119,7 +122,8 @@ pub fn coordinator_start_managed_command_process_with_pid(
         )));
     }
 
-    let (handle, pid) = coordinator_start_command_process_with_pid(paths, command, args, cfg)?;
+    let (handle, pid) =
+        coordinator_start_command_process_with_pid(paths, command, args, cfg, client_id)?;
     upsert_managed_command(paths, command, pid)?;
     local_handles_by_root()
         .lock()
@@ -277,8 +281,24 @@ pub fn coordinator_start_command_process(
     command: &str,
     args: &[String],
     _cfg: Option<&CoordinatorConfig>,
+    client_id: Option<&str>,
 ) -> Result<CoordinatorProcessHandle> {
-    coordinator_start_command_process_with_pid(paths, command, args, _cfg).map(|(handle, _)| handle)
+    coordinator_start_command_process_with_pid(paths, command, args, _cfg, client_id)
+        .map(|(handle, _)| handle)
+}
+
+/// Propagate the spawning client's ownership identity to the child process.
+///
+/// Without this the child computes a fresh `cli-<pid>` identity and is rejected
+/// by the project lease its own parent holds (`gate_owner_action`), so a TUI or
+/// web client that has claimed the lease can never start a coordinator run.
+///
+/// A blank identity is treated as absent rather than exported as an empty
+/// string, which would fail the gate just as surely but far less legibly.
+fn apply_client_identity_env(cmd: &mut Command, client_id: Option<&str>) {
+    if let Some(client_id) = client_id.map(str::trim).filter(|id| !id.is_empty()) {
+        cmd.env("MACC_CLIENT_ID", client_id);
+    }
 }
 
 fn coordinator_start_command_process_with_pid(
@@ -286,6 +306,7 @@ fn coordinator_start_command_process_with_pid(
     command: &str,
     args: &[String],
     _cfg: Option<&CoordinatorConfig>,
+    client_id: Option<&str>,
 ) -> Result<(CoordinatorProcessHandle, i32)> {
     let root = &paths.root;
     let mut cmd = if command == "run" {
@@ -319,6 +340,8 @@ fn coordinator_start_command_process_with_pid(
             .env("REPO_DIR", root);
         cmd
     };
+
+    apply_client_identity_env(&mut cmd, client_id);
 
     cmd.env("MACC_INTERNAL_INVOCATION", "1")
         .stdin(Stdio::null())
@@ -597,4 +620,60 @@ fn read_dispatch_limit_reason(paths: &ProjectPaths) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod client_identity_tests {
+    use super::apply_client_identity_env;
+    use std::process::Command;
+
+    fn client_identity_of(cmd: &Command) -> Option<String> {
+        cmd.get_envs().find_map(|(k, v)| {
+            (k == "MACC_CLIENT_ID").then(|| {
+                v.expect("MACC_CLIENT_ID must be set, not cleared")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+        })
+    }
+
+    #[test]
+    fn client_identity_is_exported_to_the_child() {
+        let mut cmd = Command::new("true");
+        apply_client_identity_env(&mut cmd, Some("tui-18d0428a72195943"));
+        assert_eq!(
+            client_identity_of(&cmd).as_deref(),
+            Some("tui-18d0428a72195943"),
+            "the child must inherit the spawning client's identity or it cannot \
+             pass the project lease gate its parent already passed"
+        );
+    }
+
+    #[test]
+    fn surrounding_whitespace_is_trimmed() {
+        let mut cmd = Command::new("true");
+        apply_client_identity_env(&mut cmd, Some("  tui-abc  "));
+        assert_eq!(client_identity_of(&cmd).as_deref(), Some("tui-abc"));
+    }
+
+    #[test]
+    fn absent_identity_sets_nothing() {
+        let mut cmd = Command::new("true");
+        apply_client_identity_env(&mut cmd, None);
+        assert_eq!(client_identity_of(&cmd), None);
+    }
+
+    #[test]
+    fn blank_identity_is_not_exported_as_empty() {
+        for blank in ["", "   ", "\t"] {
+            let mut cmd = Command::new("true");
+            apply_client_identity_env(&mut cmd, Some(blank));
+            assert_eq!(
+                client_identity_of(&cmd),
+                None,
+                "a blank identity must be treated as absent, not exported as an \
+                 empty string that fails the gate opaquely (input {blank:?})"
+            );
+        }
+    }
 }

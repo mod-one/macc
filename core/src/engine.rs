@@ -591,8 +591,11 @@ pub trait Engine {
         command: &str,
         args: &[String],
         cfg: Option<&crate::config::CoordinatorConfig>,
+        client_id: Option<&str>,
     ) -> Result<crate::service::coordinator::CoordinatorProcessHandle> {
-        crate::service::coordinator::coordinator_start_command_process(paths, command, args, cfg)
+        crate::service::coordinator::coordinator_start_command_process(
+            paths, command, args, cfg, client_id,
+        )
     }
 
     fn coordinator_poll_command_process(
@@ -610,11 +613,19 @@ pub trait Engine {
         crate::service::coordinator::coordinator_stop_command_process(handle, graceful)
     }
 
+    /// Spawn a managed coordinator command.
+    ///
+    /// `client_id` is the ownership identity of the *caller* (TUI, web server,
+    /// CLI). It is propagated to the child via `MACC_CLIENT_ID` so the child
+    /// passes the same ownership gate its parent already passed. Passing
+    /// `None` makes the child fall back to a fresh `cli-<pid>` identity, which
+    /// only works while the project lease is unowned.
     fn coordinator_start_managed_command_process(
         &self,
         paths: &ProjectPaths,
         command: &crate::service::coordinator_workflow::CoordinatorCommand,
         cfg: Option<&crate::config::CoordinatorConfig>,
+        client_id: Option<&str>,
     ) -> Result<()> {
         let invocation =
             crate::service::coordinator_workflow::coordinator_command_invocation(command)?;
@@ -623,6 +634,7 @@ pub trait Engine {
             invocation.action,
             &invocation.args,
             cfg,
+            client_id,
         )
     }
 

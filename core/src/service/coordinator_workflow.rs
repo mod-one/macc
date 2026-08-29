@@ -162,6 +162,10 @@ pub enum CoordinatorCommand {
 pub struct CoordinatorRunOptions {
     pub extra_args: Vec<String>,
     pub env_cfg: CoordinatorEnvConfig,
+    /// Ownership identity to hand to the spawned coordinator child so it
+    /// passes the same project lease gate this caller passed. `None` makes the
+    /// child fall back to a fresh `cli-<pid>` identity.
+    pub client_id: Option<String>,
 }
 
 pub struct CoordinatorCommandRequest<'a> {
@@ -642,6 +646,7 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
                 &CoordinatorRunOptions {
                     extra_args: Vec::new(),
                     env_cfg: request.env_cfg.clone(),
+                    client_id: std::env::var("MACC_CLIENT_ID").ok(),
                 },
             )?;
         }
@@ -1421,7 +1426,13 @@ pub fn coordinator_run(
     options: &CoordinatorRunOptions,
 ) -> Result<()> {
     let _ = options.env_cfg;
-    coordinator_start_managed_command_process(paths, "run", &options.extra_args, cfg)?;
+    coordinator_start_managed_command_process(
+        paths,
+        "run",
+        &options.extra_args,
+        cfg,
+        options.client_id.as_deref(),
+    )?;
 
     loop {
         match coordinator_poll_managed_command_process(paths)? {
