@@ -257,6 +257,57 @@ pub struct UnschedulableTask {
     /// Branch still attached to the task, when it holds one. The caller can
     /// enrich the reason with how much unmerged work is sitting on it.
     pub branch: Option<String>,
+    /// This entry is itself a terminally blocked task.
+    pub blocked_root: bool,
+    /// This todo task reaches a blocked root through its dependency graph.
+    pub depends_on_blocked: bool,
+}
+
+fn blocked_dependency_path<'a>(
+    task: &'a Task,
+    tasks_by_id: &HashMap<&str, &'a Task>,
+    satisfied_ids: &HashSet<String>,
+    visiting: &mut HashSet<String>,
+) -> Option<Vec<String>> {
+    if !visiting.insert(task.id.clone()) {
+        return None;
+    }
+    for dependency_id in task.dependency_ids() {
+        if satisfied_ids.contains(&dependency_id) {
+            continue;
+        }
+        let Some(dependency) = tasks_by_id.get(dependency_id.as_str()).copied() else {
+            continue;
+        };
+        if dependency.workflow_state() == Some(crate::coordinator::WorkflowState::Blocked) {
+            return Some(vec![task.id.clone(), dependency.id.clone()]);
+        }
+        if let Some(mut path) =
+            blocked_dependency_path(dependency, tasks_by_id, satisfied_ids, visiting)
+        {
+            path.insert(0, task.id.clone());
+            return Some(path);
+        }
+    }
+    visiting.remove(&task.id);
+    None
+}
+
+fn blocked_task_reason(task: &Task) -> String {
+    let code = task
+        .task_runtime
+        .last_error_code
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unknown error");
+    let message = task
+        .task_runtime
+        .last_error_message
+        .as_deref()
+        .or(task.task_runtime.last_error.as_deref())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("no blocking explanation was recorded");
+    format!("blocked ({code}): {message}")
 }
 
 /// Explain why no `todo` task was dispatchable.
@@ -281,6 +332,8 @@ pub fn diagnose_unschedulable_tasks(
             id: "-".to_string(),
             reason: format!("dispatch blocked: {:?}", reason),
             branch: None,
+            blocked_root: false,
+            depends_on_blocked: false,
         });
         return out;
     }
@@ -299,6 +352,8 @@ pub fn diagnose_unschedulable_tasks(
                 config.max_parallel
             ),
             branch: None,
+            blocked_root: false,
+            depends_on_blocked: false,
         });
         return out;
     }
@@ -309,10 +364,35 @@ pub fn diagnose_unschedulable_tasks(
         .filter(|task| task.is_merged())
         .map(|task| task.id.clone())
         .collect();
+    let satisfied_ids: HashSet<String> = merged_ids
+        .union(&config.external_merged_ids)
+        .cloned()
+        .collect();
     let mut active_by_tool: HashMap<String, usize> = HashMap::new();
     for task in active_tasks {
         if let Some(tool) = task.task_tool() {
             *active_by_tool.entry(tool.to_string()).or_insert(0) += 1;
+        }
+    }
+
+    let tasks_by_id: HashMap<&str, &Task> = registry
+        .tasks
+        .iter()
+        .filter(|task| !task.id.is_empty())
+        .map(|task| (task.id.as_str(), task))
+        .collect();
+
+    // Root causes come first. Previously blocked tasks were skipped entirely,
+    // leaving clients with dependency symptoms but no error code or explanation.
+    for task in &registry.tasks {
+        if task.workflow_state() == Some(crate::coordinator::WorkflowState::Blocked) {
+            out.push(UnschedulableTask {
+                id: task.id.clone(),
+                reason: blocked_task_reason(task),
+                branch: task.branch().map(ToString::to_string),
+                blocked_root: true,
+                depends_on_blocked: false,
+            });
         }
     }
 
@@ -326,6 +406,8 @@ pub fn diagnose_unschedulable_tasks(
                 id: task.id.clone(),
                 reason,
                 branch: branch.clone(),
+                blocked_root: false,
+                depends_on_blocked: false,
             });
         };
 
@@ -362,6 +444,26 @@ pub fn diagnose_unschedulable_tasks(
             .cloned()
             .collect();
         if !unmet.is_empty() {
+            if let Some(path) =
+                blocked_dependency_path(task, &tasks_by_id, &satisfied_ids, &mut HashSet::new())
+            {
+                let root_id = path.last().cloned().unwrap_or_default();
+                let root_reason = tasks_by_id
+                    .get(root_id.as_str())
+                    .map(|root| blocked_task_reason(root))
+                    .unwrap_or_else(|| "blocked".to_string());
+                out.push(UnschedulableTask {
+                    id: task.id.clone(),
+                    reason: format!(
+                        "depends on blocked task {root_id} via {}; root {root_id} is {root_reason}",
+                        path.join(" -> ")
+                    ),
+                    branch: branch.clone(),
+                    blocked_root: false,
+                    depends_on_blocked: true,
+                });
+                continue;
+            }
             push(
                 &mut out,
                 format!("waiting on dependencies: {}", unmet.join(", ")),
@@ -1219,6 +1321,67 @@ mod tests {
             !out[0].contains("DEP-1"),
             "satisfied deps must not be listed"
         );
+    }
+
+    #[test]
+    fn diagnosis_surfaces_blocked_root_and_transitive_dependency_path() {
+        let registry = json!({
+          "tasks": [
+            {
+              "id":"L4K-ROLLOUT-001","state":"blocked","dependencies":[],
+              "task_runtime":{
+                "status":"failed",
+                "last_error_code":"E902",
+                "last_error_message":"V-001 accessibility parity is unresolved"
+              }
+            },
+            {"id":"L4K-ROLLOUT-ACCEPTANCE-001","state":"todo","dependencies":["L4K-ROLLOUT-001"]},
+            {"id":"L4K-REACTFLOW-CLEANUP-001","state":"todo","dependencies":["L4K-ROLLOUT-ACCEPTANCE-001"]},
+            {"id":"L4K-VERIFY-002","state":"todo","dependencies":["L4K-REACTFLOW-CLEANUP-001"]}
+          ],
+          "resource_locks": {}
+        });
+        let typed = TaskRegistry::from_value(&registry).expect("typed registry");
+        let diagnosed = diagnose_unschedulable_tasks(&typed, &parked_cfg(1));
+
+        let root = diagnosed
+            .iter()
+            .find(|task| task.blocked_root)
+            .expect("blocked root");
+        assert_eq!(root.id, "L4K-ROLLOUT-001");
+        assert!(root.reason.contains("E902"));
+        assert!(root.reason.contains("V-001"));
+
+        let leaf = diagnosed
+            .iter()
+            .find(|task| task.id == "L4K-VERIFY-002")
+            .expect("transitive dependent");
+        assert!(leaf.depends_on_blocked);
+        assert!(leaf.reason.contains(
+            "L4K-VERIFY-002 -> L4K-REACTFLOW-CLEANUP-001 -> L4K-ROLLOUT-ACCEPTANCE-001 -> L4K-ROLLOUT-001"
+        ));
+        assert!(leaf.reason.contains("V-001"));
+    }
+
+    #[test]
+    fn diagnosis_does_not_follow_satisfied_dependencies_to_old_blockers() {
+        let registry = json!({
+          "tasks": [
+            {"id":"OLD-BLOCKER","state":"blocked","dependencies":[],"task_runtime":{"last_error_code":"E902"}},
+            {"id":"ALREADY-MERGED","state":"merged","dependencies":["OLD-BLOCKER"]},
+            {"id":"CURRENT","state":"todo","dependencies":["ALREADY-MERGED","MISSING"]}
+          ],
+          "resource_locks": {}
+        });
+        let typed = TaskRegistry::from_value(&registry).expect("typed registry");
+        let diagnosed = diagnose_unschedulable_tasks(&typed, &parked_cfg(1));
+        let current = diagnosed
+            .iter()
+            .find(|task| task.id == "CURRENT")
+            .expect("current task diagnosis");
+
+        assert!(!current.depends_on_blocked);
+        assert_eq!(current.reason, "waiting on dependencies: MISSING");
     }
 
     #[test]

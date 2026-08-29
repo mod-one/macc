@@ -171,15 +171,15 @@ pub fn diagnose_stall_native(
     coordinator: Option<&crate::config::CoordinatorConfig>,
     env_cfg: &CoordinatorEnvConfig,
     state: &CoordinatorRunState,
-) -> Vec<String> {
+) -> crate::coordinator::engine::StallDiagnosis {
     let cfg = CoordinatorConfigResolved::resolve(coordinator);
     let Ok(registry_value) =
         crate::coordinator::state::coordinator_state_registry_load(repo_root, &BTreeMap::new())
     else {
-        return Vec::new();
+        return crate::coordinator::engine::StallDiagnosis::default();
     };
     let Ok(registry) = crate::coordinator::model::TaskRegistry::from_value(&registry_value) else {
-        return Vec::new();
+        return crate::coordinator::engine::StallDiagnosis::default();
     };
     let selector_cfg = build_task_selector_config(
         repo_root,
@@ -192,7 +192,19 @@ pub fn diagnose_stall_native(
     );
     let base_branch = selector_cfg.default_base_branch.clone();
 
-    crate::coordinator::task_selector::diagnose_unschedulable_tasks(&registry, &selector_cfg)
+    let todo_count = registry
+        .tasks
+        .iter()
+        .filter(|task| task.workflow_state() == Some(crate::coordinator::WorkflowState::Todo))
+        .count();
+    let diagnosed =
+        crate::coordinator::task_selector::diagnose_unschedulable_tasks(&registry, &selector_cfg);
+    let terminal_dependents = diagnosed
+        .iter()
+        .filter(|task| task.depends_on_blocked)
+        .count();
+    let has_blocked_root = diagnosed.iter().any(|task| task.blocked_root);
+    let lines = diagnosed
         .into_iter()
         .map(|stuck| {
             let mut line = format!("{} ({})", stuck.id, stuck.reason);
@@ -207,7 +219,12 @@ pub fn diagnose_stall_native(
             }
             line
         })
-        .collect()
+        .collect();
+    crate::coordinator::engine::StallDiagnosis {
+        lines,
+        terminal_blocked: has_blocked_root
+            && (todo_count == 0 || terminal_dependents == todo_count),
+    }
 }
 
 pub(super) fn select_dispatch_candidate(

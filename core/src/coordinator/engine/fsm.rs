@@ -206,6 +206,12 @@ pub enum ControlPlaneDecision {
     Complete,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StallDiagnosis {
+    pub lines: Vec<String>,
+    pub terminal_blocked: bool,
+}
+
 pub struct CoordinatorRunController {
     cfg: ControlPlaneLoopConfig,
     started: Instant,
@@ -248,8 +254,8 @@ pub trait ControlPlaneBackend {
     ///
     /// Only called when a run is about to abort for lack of progress, so it may
     /// read the registry and git without slowing the normal path.
-    fn diagnose_stall(&self) -> Vec<String> {
-        Vec::new()
+    fn diagnose_stall(&self) -> StallDiagnosis {
+        StallDiagnosis::default()
     }
 }
 
@@ -1390,7 +1396,7 @@ impl CoordinatorRunController {
         counts: CoordinatorCounts,
         last_dispatch_failure: Option<&str>,
     ) -> Result<ControlPlaneDecision> {
-        self.on_cycle_counts_with(counts, last_dispatch_failure, Vec::new)
+        self.on_cycle_counts_with(counts, last_dispatch_failure, StallDiagnosis::default)
     }
 
     /// As [`Self::on_cycle_counts`], but able to explain a stall.
@@ -1407,13 +1413,22 @@ impl CoordinatorRunController {
         diagnose: F,
     ) -> Result<ControlPlaneDecision>
     where
-        F: FnOnce() -> Vec<String>,
+        F: FnOnce() -> StallDiagnosis,
     {
         if counts.todo == 0 && counts.active == 0 {
             if counts.blocked > 0 {
+                let stalled = diagnose();
+                let details = stalled
+                    .lines
+                    .iter()
+                    .map(|line| format!("  - {line}"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 return Err(MaccError::Validation(format!(
-                    "Coordinator run finished with blocked tasks: {}. Run `macc coordinator status`, then `macc coordinator unlock --all`, and inspect logs with `macc logs tail --component coordinator`.",
-                    counts.blocked
+                    "Coordinator cannot continue: the run finished with blocked tasks ({}).{}{}\nInspect the blocked task, fix its recorded cause, then retry the coordinator.",
+                    counts.blocked,
+                    if details.is_empty() { "" } else { "\n\nRoot blocked task(s):\n" },
+                    details
                 )));
             }
             return Ok(ControlPlaneDecision::Complete);
@@ -1434,19 +1449,32 @@ impl CoordinatorRunController {
                 None => String::new(),
             };
             let stalled = diagnose();
-            let diagnosis = if stalled.is_empty() {
+            let diagnosis = if stalled.lines.is_empty() {
                 String::new()
             } else {
                 format!(
                     "\n\n{} task(s) could not be dispatched:\n{}\n",
-                    stalled.len(),
+                    stalled.lines.len(),
                     stalled
+                        .lines
                         .iter()
                         .map(|line| format!("  - {}", line))
                         .collect::<Vec<_>>()
                         .join("\n")
                 )
             };
+            if stalled.terminal_blocked {
+                let blocking_diagnosis = stalled
+                    .lines
+                    .iter()
+                    .map(|line| format!("  - {line}"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return Err(MaccError::Validation(format!(
+                    "Coordinator cannot continue: a task is blocked and every remaining todo task depends on a blocked task.\n\nBlocking diagnosis:\n{}\nInspect the blocked task, fix its recorded cause, then retry the coordinator.",
+                    blocking_diagnosis
+                )));
+            }
             return Err(MaccError::Validation(format!(
                 "Coordinator made no progress for {} cycles (todo={}, active={}, blocked={}).{}{}\nRun `macc coordinator status`, then `macc coordinator unlock --all`, and inspect logs with `macc logs tail --component coordinator`.",
                 self.no_progress_cycles, counts.todo, counts.active, counts.blocked, hint, diagnosis
@@ -2040,7 +2068,7 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
         self.run_state.last_dispatch_failure.clone()
     }
 
-    fn diagnose_stall(&self) -> Vec<String> {
+    fn diagnose_stall(&self) -> StallDiagnosis {
         crate::coordinator::control_plane::diagnose_stall_native(
             self.repo_root,
             self.canonical,
@@ -2481,6 +2509,11 @@ pub async fn run_native_control_plane(
 
     let mut is_clean_exit = false;
     let mut final_status = "success".to_string();
+    let is_terminal_blocked = matches!(
+        &run_result,
+        Err(MaccError::Validation(message))
+            if message.starts_with("Coordinator cannot continue:")
+    );
     if let Err(MaccError::Validation(ref msg)) = run_result {
         if msg == "draining complete"
             || msg == "graceful stop complete"
@@ -2497,7 +2530,9 @@ pub async fn run_native_control_plane(
 
     let run_result = if is_clean_exit { Ok(()) } else { run_result };
 
-    let result_label = if run_result.is_err() {
+    let result_label = if is_terminal_blocked {
+        "blocked"
+    } else if run_result.is_err() {
         "failed"
     } else {
         let is_shutdown = *shutdown_rx.borrow();
@@ -2547,7 +2582,9 @@ pub async fn run_native_control_plane(
 
     let _ = sqlite.get_active_coordinator_run().map(|run_opt| {
         if let Some(mut r) = run_opt {
-            r.status = if is_clean_exit {
+            r.status = if is_terminal_blocked {
+                "blocked".to_string()
+            } else if is_clean_exit {
                 final_status.clone()
             } else if run_result.is_err() {
                 "crashed".to_string()
@@ -2555,8 +2592,8 @@ pub async fn run_native_control_plane(
                 "stopped".to_string()
             };
             r.stopped_at = Some(chrono::Utc::now().to_rfc3339());
-            if !is_clean_exit && run_result.is_err() {
-                r.stop_reason = Some(format!("{:?}", run_result));
+            if is_terminal_blocked || (!is_clean_exit && run_result.is_err()) {
+                r.stop_reason = run_result.as_ref().err().map(ToString::to_string);
             } else if is_clean_exit {
                 r.stop_reason = Some(final_status.clone());
             } else {

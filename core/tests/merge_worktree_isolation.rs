@@ -351,7 +351,7 @@ fn a_failed_merge_on_the_last_task_ends_the_run_with_blocked_tasks() {
 #[test]
 fn no_progress_abort_reports_the_stuck_tasks() {
     use macc_core::coordinator::engine::{
-        ControlPlaneLoopConfig, CoordinatorCounts, CoordinatorRunController,
+        ControlPlaneLoopConfig, CoordinatorCounts, CoordinatorRunController, StallDiagnosis,
     };
 
     let mut controller = CoordinatorRunController::new(ControlPlaneLoopConfig {
@@ -365,14 +365,15 @@ fn no_progress_abort_reports_the_stuck_tasks() {
         blocked: 0,
         merged: 0,
     };
-    let diagnosis = || {
-        vec![
+    let diagnosis = || StallDiagnosis {
+        lines: vec![
             "L4H-ADDPERSON-001 (worktree attached, not resumable: retry budget spent (2/1)); \
              branch ai/codex/worker-01 holds 1 unmerged commit(s)"
                 .to_string(),
             "L4H-OVERVIEW-REFACTOR-001 (waiting on dependencies: L4H-OVERVIEW-SOURCES-001)"
                 .to_string(),
-        ]
+        ],
+        terminal_blocked: false,
     };
 
     // First call establishes the baseline counts; the second trips the limit.
@@ -433,6 +434,48 @@ fn no_progress_abort_without_a_diagnosis_stays_terse() {
         !msg.contains("could not be dispatched"),
         "no diagnosis means no empty section: {msg}"
     );
+}
+
+#[test]
+fn terminal_blocked_stall_reports_cause_without_unlock_advice() {
+    use macc_core::coordinator::engine::{
+        ControlPlaneLoopConfig, CoordinatorCounts, CoordinatorRunController, StallDiagnosis,
+    };
+
+    let mut controller = CoordinatorRunController::new(ControlPlaneLoopConfig {
+        timeout: None,
+        max_no_progress_cycles: 1,
+    });
+    let counts = CoordinatorCounts {
+        total: 4,
+        todo: 3,
+        active: 0,
+        blocked: 1,
+        merged: 0,
+    };
+    let diagnosis = || StallDiagnosis {
+        lines: vec![
+            "L4K-ROLLOUT-001 (blocked (E902): V-001 accessibility parity is unresolved)"
+                .to_string(),
+            "L4K-VERIFY-002 (depends on blocked task L4K-ROLLOUT-001)".to_string(),
+        ],
+        terminal_blocked: true,
+    };
+
+    controller
+        .on_cycle_counts_with(counts, None, diagnosis)
+        .expect("first cycle establishes baseline");
+    let message = controller
+        .on_cycle_counts_with(counts, None, diagnosis)
+        .expect_err("terminal dependency chain must stop")
+        .to_string();
+
+    assert!(message.contains("cannot continue"), "got: {message}");
+    assert!(message.contains("L4K-ROLLOUT-001"));
+    assert!(message.contains("E902"));
+    assert!(message.contains("V-001"));
+    assert!(!message.contains("unlock --all"), "got: {message}");
+    assert!(!message.contains("made no progress"), "got: {message}");
 }
 
 #[test]

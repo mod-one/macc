@@ -22,6 +22,10 @@ pub struct ManagedCommandRecord {
     pub started_at: String,
     #[serde(default)]
     pub last_heartbeat: String,
+    /// The launcher writes a durable exit-code file for this process. Retain a
+    /// dead record until the poller consumes that result (or reports it absent).
+    #[serde(default)]
+    pub result_expected: bool,
 }
 
 impl ManagedCommandRecord {
@@ -33,6 +37,7 @@ impl ManagedCommandRecord {
             pid,
             started_at: now.clone(),
             last_heartbeat: now,
+            result_expected: false,
         }
     }
 
@@ -155,7 +160,7 @@ impl ManagedCommandStore {
     {
         let _guard = acquire_store_lock(repo_root)?;
         let mut store = Self::load_raw(repo_root)?;
-        let evicted = store.evict_dead_pids();
+        let evicted = store.evict_dead_pids(repo_root);
         let output = action(&mut store)?;
         if evicted || store_path(repo_root).exists() || !store.records.is_empty() {
             store.save(repo_root)?;
@@ -198,9 +203,13 @@ impl ManagedCommandStore {
         Some(self.records.remove(index))
     }
 
-    fn evict_dead_pids(&mut self) -> bool {
+    fn evict_dead_pids(&mut self, repo_root: &Path) -> bool {
         let original_len = self.records.len();
-        self.records.retain(|record| pid_is_alive(record.pid));
+        self.records.retain(|record| {
+            pid_is_alive(record.pid)
+                || record.result_expected
+                || managed_command_result_path(repo_root, &record.kind, record.pid).exists()
+        });
         self.records.len() != original_len
     }
 }
@@ -259,6 +268,16 @@ pub fn upsert_managed_command(paths: &ProjectPaths, kind: &str, pid: i32) -> Res
     ManagedCommandRegistry::new(&paths.root).upsert(ManagedCommandRecord::new(paths, kind, pid))
 }
 
+pub fn upsert_managed_command_with_result(
+    paths: &ProjectPaths,
+    kind: &str,
+    pid: i32,
+) -> Result<()> {
+    let mut record = ManagedCommandRecord::new(paths, kind, pid);
+    record.result_expected = true;
+    ManagedCommandRegistry::new(&paths.root).upsert(record)
+}
+
 pub fn remove_managed_command(
     paths: &ProjectPaths,
     kind: &str,
@@ -268,6 +287,24 @@ pub fn remove_managed_command(
 
 fn store_path(repo_root: &Path) -> PathBuf {
     repo_root.join(STORE_RELATIVE_PATH)
+}
+
+pub fn managed_command_result_dir(repo_root: &Path) -> PathBuf {
+    repo_root.join(".macc/state/managed-command-results")
+}
+
+pub fn managed_command_result_path(repo_root: &Path, kind: &str, pid: i32) -> PathBuf {
+    let safe_kind: String = kind
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    managed_command_result_dir(repo_root).join(format!("{safe_kind}-{pid}.exit"))
 }
 
 fn temp_path(path: &Path) -> PathBuf {
