@@ -926,6 +926,41 @@ run_tool() {
     local result_kind=""
     local changed="false"
     result_kind="$(detect_success_result_kind "$output_capture")"
+    if [[ "$result_kind" == error_* ]]; then
+      # The tool process exited 0, but emitted an explicit error result marker
+      # (e.g. error_without_changes or error_with_changes). This is a failure,
+      # not a successful completion. It must NOT be marked passed.
+      if [[ -z "$LAST_ERROR_CODE" ]]; then
+        set_last_error "E101" "runner" "tool reported ${result_kind}"
+      fi
+      local result_exp=""
+      result_exp="$(resolve_task_result_exp "$output_capture" "$result_kind")"
+      must_emit_performer_event "phase_result" "$CURRENT_PHASE" "failed" "$(jq -nc \
+        --arg attempt "$attempt" \
+        --arg result_kind "$result_kind" \
+        --arg code "$LAST_ERROR_CODE" \
+        --arg origin "$LAST_ERROR_ORIGIN" \
+        --arg message "$LAST_ERROR_MESSAGE" \
+        --arg result_exp "$result_exp" \
+        '({
+          attempt:($attempt|tonumber?),
+          result_kind:$result_kind,
+          exit_status:0
+        }
+        + (if $code       != "" then {error_code:$code}       else {} end)
+        + (if $origin     != "" then {origin:$origin}         else {} end)
+        + (if $message    != "" then {message:$message}       else {} end)
+        + (if $result_exp != "" then {result_exp:$result_exp} else {} end))')"
+      log_task_line "- Result kind: ${result_kind}"
+      if [[ -n "$result_exp" ]]; then
+        log_task_line "- Explanation: ${result_exp}"
+      fi
+      log_task_line ""
+      log_task_line "- Exit status: 0 (failed due to ${result_kind})"
+      log_task_line ""
+      rm -f "$output_capture"
+      return 1
+    fi
     if [[ "$result_kind" == "success_with_changes" ]]; then
       changed="true"
     fi
@@ -1105,14 +1140,48 @@ performer_session_key() {
   fi
 }
 
-# Read the current session ID from tool-sessions.json for this worktree/tool.
+# Read an available session ID from tool-sessions.json for this tool from the UUID pool.
 performer_read_session_id() {
-  local key
-  key="$(performer_session_key)"
   [[ -f "$performer_session_state_file" ]] || { echo ""; return 0; }
-  jq -r --arg tool "$tool" --arg key "$key" '
-    .tools[$tool].sessions[$key].session_id // empty
-  ' "$performer_session_state_file" 2>/dev/null || echo ""
+  local sids
+  sids="$(jq -r --arg tool "$tool" '
+    (.tools[$tool].sessions // {}) | to_entries[] |
+    select(
+      (.value | type) == "object" and
+      (.value.session_id == null) and
+      ((.value.status // "available") != "active")
+    ) |
+    .key
+  ' "$performer_session_state_file" 2>/dev/null)"
+  local sid
+  while IFS= read -r sid; do
+    [[ -n "$sid" ]] && { echo "$sid"; return 0; }
+  done <<< "$sids"
+
+  # Also check sessions marked active whose owner PID has died
+  sids="$(jq -r --arg tool "$tool" '
+    (.tools[$tool].sessions // {}) | to_entries[] |
+    select(
+      (.value | type) == "object" and
+      (.value.session_id == null) and
+      ((.value.status // "available") == "active")
+    ) |
+    .key + "\t" + ((.value.owner_pid // "")|tostring)
+  ' "$performer_session_state_file" 2>/dev/null)"
+  local line entry_sid entry_pid
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    entry_sid="${line%%$'\t'*}"
+    entry_pid="${line#*$'\t'}"
+    if [[ -n "$entry_pid" && "$entry_pid" =~ ^[0-9]+$ ]]; then
+      if ! kill -0 "$entry_pid" 2>/dev/null; then
+        echo "$entry_sid"
+        return 0
+      fi
+    fi
+  done <<< "$sids"
+
+  echo ""
 }
 
 # Initialise performer_session_id from tool-sessions.json.

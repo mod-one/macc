@@ -170,11 +170,61 @@ now_epoch() {
   date -u +%s
 }
 
+log_session_event() {
+  local event_type="$1"
+  local sid="$2"
+  local owner_pid="$3"
+  local detail="$4"
+  local events_file="${repo}/.macc/log/events.jsonl"
+  local now seq payload
+  now="$(now_iso)"
+  seq="$(date +%s%N 2>/dev/null || date +%s)"
+  [[ -d "$(dirname "$events_file")" ]] || mkdir -p "$(dirname "$events_file")" 2>/dev/null || true
+  payload="$(jq -nc \
+    --arg schema "1" \
+    --arg event_id "evt-${event_type}-${task_id:-session}-${seq}" \
+    --arg run_id "${COORDINATOR_RUN_ID:-}" \
+    --argjson seq "$seq" \
+    --arg ts "$now" \
+    --arg source "performer:runner:${tool_id}" \
+    --arg task "${task_id:--}" \
+    --arg type "$event_type" \
+    --arg phase "session" \
+    --arg status "ok" \
+    --arg severity "info" \
+    --arg sid "$sid" \
+    --arg tool "$tool_id" \
+    --arg pid "$owner_pid" \
+    --arg detail "$detail" \
+    '{
+      schema_version: $schema,
+      event_id: $event_id,
+      run_id: (if $run_id != "" then $run_id else null end),
+      seq: ($seq|tonumber?),
+      ts: $ts,
+      source: $source,
+      task_id: $task,
+      type: $type,
+      phase: $phase,
+      status: $status,
+      severity: $severity,
+      payload: {
+        session_id: $sid,
+        tool: $tool,
+        task_id: (if $task != "-" then $task else null end),
+        owner_pid: (if $pid != "" then ($pid|tonumber?) else null end),
+        message: ("session " + $sid + " tool=" + $tool + " task=" + $task + " pid=" + $pid + ": " + $detail),
+        detail: $detail
+      }
+    }')"
+  echo "$payload" >> "$events_file" 2>/dev/null || true
+}
+
 # Returns true (exit 0) when session $sid is actively held by another live
 # process that has refreshed its heartbeat within session_lease_ttl.
 session_occupied_by_other() {
   local sid="$1"
-  local status hb now age
+  local status hb now age pid
   [[ -n "$sid" ]] || return 1
   [[ -f "$session_state_file" ]] || return 1
 
@@ -183,6 +233,17 @@ session_occupied_by_other() {
     "$session_state_file" 2>/dev/null)"
   [[ "$status" == "active" ]] || return 1
 
+  pid="$(jq -r --arg tool "$tool_id" --arg sid "$sid" \
+    '(.tools[$tool].sessions[$sid].owner_pid // empty)' \
+    "$session_state_file" 2>/dev/null)"
+  if [[ -n "$pid" && "$pid" =~ ^[0-9]+$ ]]; then
+    if ! kill -0 "$pid" 2>/dev/null; then
+      # PID is dead! The session lease leaked.
+      log_session_event "session_recovered_stale" "$sid" "$pid" "stale lease recovered (owner PID $pid no longer alive)"
+      return 1
+    fi
+  fi
+
   hb="$(jq -r --arg tool "$tool_id" --arg sid "$sid" \
     '(.tools[$tool].sessions[$sid].heartbeat_epoch // 0)' \
     "$session_state_file" 2>/dev/null)"
@@ -190,7 +251,10 @@ session_occupied_by_other() {
 
   now="$(now_epoch)"
   age=$((now - hb))
-  (( age <= session_lease_ttl )) && return 0
+  if (( age <= session_lease_ttl )); then
+    return 0
+  fi
+  log_session_event "session_recovered_stale" "$sid" "${pid:-}" "stale lease recovered (heartbeat age ${age}s > TTL ${session_lease_ttl}s)"
   return 1
 }
 
@@ -243,10 +307,14 @@ find_available_session_id() {
 write_active_lease() {
   local sid="$1"
   local creation_reason="${2:-new}"
-  local now ts tmp
+  local now ts tmp prev_uses
   now="$(now_iso)"
   ts="$(now_epoch)"
   tmp="$(mktemp)"
+
+  prev_uses="$(jq -r --arg tool "$tool_id" --arg sid "$sid" \
+    '(.tools[$tool].sessions[$sid].use_count // 0)' "$session_state_file" 2>/dev/null || echo "0")"
+  [[ "$prev_uses" =~ ^[0-9]+$ ]] || prev_uses=0
 
   if [[ -f "$session_state_file" ]]; then
     jq \
@@ -309,6 +377,12 @@ write_active_lease() {
   fi
 
   mv "$tmp" "$session_state_file"
+
+  if [[ "$prev_uses" -eq 0 || "$creation_reason" == "generated" || "${sid_is_new:-0}" -eq 1 ]]; then
+    log_session_event "session_reserved" "$sid" "$$" "new session reserved"
+  else
+    log_session_event "session_reused" "$sid" "$$" "reused session (use_count=$((prev_uses + 1)))"
+  fi
 }
 
 # Remove the oldest available (non-active) sessions for this tool so the pool
@@ -374,6 +448,9 @@ mark_lease_status() {
     else . end
     ' "$session_state_file" >"$tmp"
   mv "$tmp" "$session_state_file"
+  if [[ "$status" == "available" ]]; then
+    log_session_event "session_released" "$sid" "$$" "released session lease back to available"
+  fi
 }
 
 extract_session_id_from_output() {

@@ -1243,6 +1243,27 @@ pub async fn monitor_active_jobs_native(
                     &registry,
                 )?;
 
+                // Release any active session leases associated with this finished job.
+                // Ensures sessions don't remain stuck "active" when performers fail or exit without cleanup.
+                if let Ok(released_sessions) = crate::coordinator::session_manager::release_job_sessions(
+                    repo_root,
+                    Some(&job.tool),
+                    Some(&job.worktree_path),
+                    Some(&evt.task_id),
+                ) {
+                    for rel in released_sessions {
+                        let _ = crate::coordinator::helpers::append_session_event(
+                            repo_root,
+                            "session_released",
+                            rel.task_id.as_deref().unwrap_or(&evt.task_id),
+                            &rel.tool_id,
+                            &rel.session_id,
+                            rel.owner_pid,
+                            "job_completed",
+                        );
+                    }
+                }
+
                 // Coordinator Integrity Guard (see
                 // docs/prd/8_3_MACC_Coordinator_Integrity_Recommendations.md §4.3):
                 // E901 means the performer exited without persisting a valid
@@ -1828,6 +1849,24 @@ fn force_kill_stale_failures(
                 "warning",
             );
             killed.push(task_id.clone());
+            if let Ok(released) = crate::coordinator::session_manager::release_job_sessions(
+                repo_root,
+                Some(&job.tool),
+                Some(&job.worktree_path),
+                Some(task_id),
+            ) {
+                for rel in released {
+                    let _ = crate::coordinator::helpers::append_session_event(
+                        repo_root,
+                        "session_released",
+                        task_id,
+                        &rel.tool_id,
+                        &rel.session_id,
+                        rel.owner_pid,
+                        "force_killed",
+                    );
+                }
+            }
         } else if let Some(log) = logger {
             let _ = log.note(format!(
                 "- Force-kill requested but no PID for task={} (already exited?)",

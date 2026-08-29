@@ -89,6 +89,20 @@ pub(super) fn read_session_id_from_state(
         if status != "active" {
             return Some(session_id.clone());
         }
+        let pid = entry.get("owner_pid").and_then(|v| {
+            if let Some(n) = v.as_i64() {
+                Some(n)
+            } else if let Some(s) = v.as_str() {
+                s.parse::<i64>().ok()
+            } else {
+                None
+            }
+        });
+        if let Some(p) = pid {
+            if !crate::coordinator::helpers::is_pid_running(p) {
+                return Some(session_id.clone());
+            }
+        }
     }
     None
 }
