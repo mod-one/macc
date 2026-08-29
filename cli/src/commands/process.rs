@@ -27,7 +27,7 @@ impl<'a> Command for ProcessCommand<'a> {
                 Ok(())
             }
             ProcessCommands::Ownership { kind, pid } => {
-                let handle = build_handle(&paths.root, *kind, *pid);
+                let handle = build_handle(&paths.root, *kind, *pid)?;
                 let record = self
                     .app
                     .engine
@@ -42,7 +42,7 @@ impl<'a> Command for ProcessCommand<'a> {
                 Ok(())
             }
             ProcessCommands::Claim { kind, pid } => {
-                let handle = build_handle(&paths.root, *kind, *pid);
+                let handle = build_handle(&paths.root, *kind, *pid)?;
                 let identity = cli_identity();
                 let (status, _owner_guard, _viewer_guard) = self
                     .app
@@ -56,7 +56,7 @@ impl<'a> Command for ProcessCommand<'a> {
                 pid,
                 client_id,
             } => {
-                let handle = build_handle(&paths.root, *kind, *pid);
+                let handle = build_handle(&paths.root, *kind, *pid)?;
                 self.app
                     .engine
                     .process_ownership_release(&paths.root, &handle, client_id)?;
@@ -80,7 +80,7 @@ impl<'a> Command for ProcessCommand<'a> {
             }
             ProcessCommands::Takeover { takeover_command } => match takeover_command {
                 TakeoverCommands::Request { kind, pid } => {
-                    let handle = build_handle(&paths.root, *kind, *pid);
+                    let handle = build_handle(&paths.root, *kind, *pid)?;
                     let identity = cli_identity();
                     let request_id = self.app.engine.process_ownership_request_takeover(
                         &paths.root,
@@ -96,7 +96,7 @@ impl<'a> Command for ProcessCommand<'a> {
                     owner_client_id,
                     request_id,
                 } => {
-                    let handle = build_handle(&paths.root, *kind, *pid);
+                    let handle = build_handle(&paths.root, *kind, *pid)?;
                     self.app.engine.process_ownership_respond_takeover(
                         &paths.root,
                         &handle,
@@ -113,7 +113,7 @@ impl<'a> Command for ProcessCommand<'a> {
                     owner_client_id,
                     request_id,
                 } => {
-                    let handle = build_handle(&paths.root, *kind, *pid);
+                    let handle = build_handle(&paths.root, *kind, *pid)?;
                     self.app.engine.process_ownership_respond_takeover(
                         &paths.root,
                         &handle,
@@ -137,22 +137,46 @@ pub enum ProcessCommands {
     Ownership {
         #[arg(long, value_enum)]
         kind: ProcessKindArg,
-        #[arg(long)]
-        pid: i32,
+        #[arg(
+            long,
+            required_if_eq_any([
+                ("kind", "coordinator"),
+                ("kind", "supervisor"),
+                ("kind", "web-server"),
+                ("kind", "terminal-session")
+            ])
+        )]
+        pid: Option<i32>,
     },
     /// Claim ownership for a process as this CLI client
     Claim {
         #[arg(long, value_enum)]
         kind: ProcessKindArg,
-        #[arg(long)]
-        pid: i32,
+        #[arg(
+            long,
+            required_if_eq_any([
+                ("kind", "coordinator"),
+                ("kind", "supervisor"),
+                ("kind", "web-server"),
+                ("kind", "terminal-session")
+            ])
+        )]
+        pid: Option<i32>,
     },
     /// Release ownership for a specific client ID
     Release {
         #[arg(long, value_enum)]
         kind: ProcessKindArg,
-        #[arg(long)]
-        pid: i32,
+        #[arg(
+            long,
+            required_if_eq_any([
+                ("kind", "coordinator"),
+                ("kind", "supervisor"),
+                ("kind", "web-server"),
+                ("kind", "terminal-session")
+            ])
+        )]
+        pid: Option<i32>,
         #[arg(long)]
         client_id: String,
     },
@@ -175,15 +199,31 @@ pub enum TakeoverCommands {
     Request {
         #[arg(long, value_enum)]
         kind: ProcessKindArg,
-        #[arg(long)]
-        pid: i32,
+        #[arg(
+            long,
+            required_if_eq_any([
+                ("kind", "coordinator"),
+                ("kind", "supervisor"),
+                ("kind", "web-server"),
+                ("kind", "terminal-session")
+            ])
+        )]
+        pid: Option<i32>,
     },
     /// Accept a pending takeover request (only the current owner may accept).
     Accept {
         #[arg(long, value_enum)]
         kind: ProcessKindArg,
-        #[arg(long)]
-        pid: i32,
+        #[arg(
+            long,
+            required_if_eq_any([
+                ("kind", "coordinator"),
+                ("kind", "supervisor"),
+                ("kind", "web-server"),
+                ("kind", "terminal-session")
+            ])
+        )]
+        pid: Option<i32>,
         #[arg(long)]
         owner_client_id: String,
         #[arg(long)]
@@ -193,8 +233,16 @@ pub enum TakeoverCommands {
     Reject {
         #[arg(long, value_enum)]
         kind: ProcessKindArg,
-        #[arg(long)]
-        pid: i32,
+        #[arg(
+            long,
+            required_if_eq_any([
+                ("kind", "coordinator"),
+                ("kind", "supervisor"),
+                ("kind", "web-server"),
+                ("kind", "terminal-session")
+            ])
+        )]
+        pid: Option<i32>,
         #[arg(long)]
         owner_client_id: String,
         #[arg(long)]
@@ -223,12 +271,25 @@ impl From<ProcessKindArg> for ProcessKind {
     }
 }
 
-fn build_handle(project_root: &std::path::Path, kind: ProcessKindArg, pid: i32) -> ProcessHandle {
-    ProcessHandle {
+fn build_handle(
+    project_root: &std::path::Path,
+    kind: ProcessKindArg,
+    pid: Option<i32>,
+) -> Result<ProcessHandle> {
+    let pid = match kind {
+        ProcessKindArg::Project => None,
+        _ => Some(pid.ok_or_else(|| {
+            MaccError::Validation(format!(
+                "--pid is required when --kind is {}",
+                format_process_kind(&ProcessKind::from(kind)).to_ascii_lowercase()
+            ))
+        })?),
+    };
+    Ok(ProcessHandle {
         kind: kind.into(),
         project_root: project_root.to_path_buf(),
-        pid: Some(pid),
-    }
+        pid,
+    })
 }
 
 fn cli_identity() -> ClientIdentity {
@@ -286,8 +347,13 @@ fn format_process_kind(kind: &ProcessKind) -> &'static str {
     }
 }
 
-fn format_process_handle(kind: ProcessKindArg, pid: i32) -> String {
-    format!("{}:{}", format_process_kind(&ProcessKind::from(kind)), pid)
+fn format_process_handle(kind: ProcessKindArg, pid: Option<i32>) -> String {
+    let kind_name = format_process_kind(&ProcessKind::from(kind));
+    match (kind, pid) {
+        (ProcessKindArg::Project, _) => kind_name.to_string(),
+        (_, Some(pid)) => format!("{kind_name}:{pid}"),
+        (_, None) => kind_name.to_string(),
+    }
 }
 
 fn truncate_cell(value: &str, width: usize) -> String {
@@ -321,7 +387,8 @@ mod tests {
     #[test]
     fn build_handle_uses_project_root_and_pid() {
         let root = std::path::Path::new("/tmp/project");
-        let handle = build_handle(root, ProcessKindArg::Coordinator, 1234);
+        let handle = build_handle(root, ProcessKindArg::Coordinator, Some(1234))
+            .expect("coordinator handle");
         assert_eq!(
             handle,
             ProcessHandle {
@@ -330,6 +397,30 @@ mod tests {
                 pid: Some(1234),
             }
         );
+    }
+
+    #[test]
+    fn build_project_handle_does_not_require_pid() {
+        let root = std::path::Path::new("/tmp/project");
+        let handle = build_handle(root, ProcessKindArg::Project, None).expect("project handle");
+        assert_eq!(
+            handle,
+            ProcessHandle {
+                kind: ProcessKind::Project,
+                project_root: root.to_path_buf(),
+                pid: None,
+            }
+        );
+    }
+
+    #[test]
+    fn build_non_project_handle_requires_pid() {
+        let root = std::path::Path::new("/tmp/project");
+        let err = build_handle(root, ProcessKindArg::Coordinator, None)
+            .expect_err("coordinator PID must be required");
+        assert!(err
+            .to_string()
+            .contains("--pid is required when --kind is coordinator"));
     }
 
     #[test]

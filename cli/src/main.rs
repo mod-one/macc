@@ -3005,12 +3005,50 @@ mod tests {
             Some(Commands::Process { process_command }) => match process_command {
                 commands::process::ProcessCommands::Claim { kind, pid } => {
                     assert_eq!(kind, commands::process::ProcessKindArg::Coordinator);
-                    assert_eq!(pid, 1234);
+                    assert_eq!(pid, Some(1234));
                 }
                 _ => panic!("unexpected process command"),
             },
             _ => panic!("unexpected command"),
         }
+    }
+
+    #[test]
+    fn test_parse_project_takeover_request_without_pid() {
+        let cli = Cli::try_parse_from([
+            "macc", "process", "takeover", "request", "--kind", "project",
+        ])
+        .expect("parse project takeover without PID");
+        match cli.command {
+            Some(Commands::Process { process_command }) => match process_command {
+                commands::process::ProcessCommands::Takeover { takeover_command } => {
+                    match takeover_command {
+                        commands::process::TakeoverCommands::Request { kind, pid } => {
+                            assert_eq!(kind, commands::process::ProcessKindArg::Project);
+                            assert_eq!(pid, None);
+                        }
+                        _ => panic!("unexpected takeover command"),
+                    }
+                }
+                _ => panic!("unexpected process command"),
+            },
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_process_target_requires_pid_outside_project_kind() {
+        let err = Cli::try_parse_from([
+            "macc",
+            "process",
+            "takeover",
+            "request",
+            "--kind",
+            "coordinator",
+        ])
+        .err()
+        .expect("coordinator takeover must require PID");
+        assert!(err.to_string().contains("--pid <PID>"));
     }
 
     #[test]
