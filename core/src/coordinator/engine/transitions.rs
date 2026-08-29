@@ -69,13 +69,10 @@ pub(super) fn apply_state_transitions(
                     task.worktree = None;
                 }
                 let runtime = task.ensure_runtime();
-                if *same_worktree {
-                    // The task keeps its worktree so the retry can resume on top
-                    // of the commits already made. Count the attempt here so the
-                    // selector can bound how many times it is re-dispatched --
-                    // without this the task would be eligible forever.
-                    runtime.increment_retries();
-                }
+                // Tool-reported errors are re-dispatched as new runner
+                // invocations. Count every re-dispatch so failures without
+                // changes cannot bypass the retry budget indefinitely.
+                runtime.increment_retries();
                 runtime.completion_kind = Some(completion_kind.as_str().to_string());
                 runtime.set_status(RuntimeStatus::Failed);
                 runtime.current_phase = None;
@@ -313,23 +310,29 @@ pub(super) fn apply_state_transitions(
                 tool_error,
                 attempts,
             } => {
-                // Keep the worktree and session chain attached: the branch still
-                // holds committed work, and the operator needs to find it. Only
-                // the workflow state differs from a normal same-worktree park --
-                // `blocked` instead of `todo`, so the task is visible as stuck
-                // rather than masquerading as ready.
+                // Preserve committed work for error-with-changes so the operator
+                // can recover it. A failure without changes has no worktree state
+                // worth retaining.
                 // Carry the tool's own explanation into the blocked record too:
                 // it is the operator's only account of why the task kept failing.
                 let described = describe_tool_error(task, reason);
                 task.set_workflow_state(WorkflowState::Blocked);
                 preserve_active_session_chain(task);
                 let branch = task.branch().unwrap_or_default().to_string();
+                if *completion_kind == PerformerCompletionKind::ErrorWithoutChanges {
+                    task.worktree = None;
+                }
                 let runtime = task.ensure_runtime();
                 runtime.completion_kind = Some(completion_kind.as_str().to_string());
                 runtime.set_status(RuntimeStatus::Failed);
                 runtime.current_phase = None;
                 runtime.pid = None;
-                let detail = if branch.is_empty() {
+                let detail = if *completion_kind == PerformerCompletionKind::ErrorWithoutChanges {
+                    format!(
+                        "{} (retry budget exhausted after {} attempt(s))",
+                        described, attempts
+                    )
+                } else if branch.is_empty() {
                     format!(
                         "{} (retry budget exhausted after {} attempt(s) in the same worktree)",
                         described, attempts

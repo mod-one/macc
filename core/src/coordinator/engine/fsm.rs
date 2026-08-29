@@ -1176,16 +1176,12 @@ pub(super) enum BlockOutcome {
         tool_error: Box<Option<ToolError>>,
         now_ts: u64,
     },
-    /// A task that kept its worktree for a same-worktree retry has used up its
-    /// attempt budget.
+    /// A tool-reported task error has used up its re-dispatch budget.
     ///
-    /// It must not go back to `todo`: a `todo` task holding a worktree is only
-    /// dispatchable while it still has attempts left, so past that point it
-    /// would sit unschedulable and *look healthy* while its committed work went
-    /// unmerged — the coordinator would then die with a misleading
-    /// "made no progress" error instead of naming the real problem. Blocking
-    /// makes the run end with "finished with blocked tasks", which is both
-    /// accurate and actionable.
+    /// It must not go back to `todo`: failures without changes would otherwise
+    /// be re-dispatched forever, while a task retaining committed work would sit
+    /// unschedulable once its same-worktree budget was spent. Blocking makes the
+    /// exhausted task and its explanation visible to the operator.
     RetryBudgetExhausted {
         completion_kind: PerformerCompletionKind,
         tool_error: Box<Option<ToolError>>,
@@ -4372,10 +4368,10 @@ mod tests {
         let _ = fs::remove_dir_all(&repo);
     }
 
-    /// Without commits the worktree is dropped, so there is nothing to resume
-    /// and no attempt is charged against the same-worktree budget.
+    /// Without commits the worktree is dropped, but the re-dispatch still counts
+    /// against the task retry budget.
     #[test]
-    fn error_without_changes_does_not_count_a_same_worktree_attempt() {
+    fn error_without_changes_counts_a_task_retry() {
         let mut task_val = json!({
             "id": "RETRY-COUNT-2",
             "state": "claimed",
@@ -4391,7 +4387,38 @@ mod tests {
         );
         assert_eq!(task_val["state"], "todo");
         assert!(task_val["worktree"].is_null(), "worktree must be released");
-        assert_eq!(task_val["task_runtime"]["retries"], 0);
+        assert_eq!(task_val["task_runtime"]["retries"], 1);
+    }
+
+    #[test]
+    fn error_without_changes_blocks_once_the_retry_budget_is_exhausted() {
+        let mut task_val = json!({
+            "id": "BUDGET-NO-CHANGES-1",
+            "state": "claimed",
+            "tool": "codex",
+            "worktree": { "worktree_path": "/tmp/wt-no-changes" },
+            "task_runtime": { "status": "running", "pid": 42, "retries": 1 }
+        });
+
+        let out = apply_job_completion(
+            &mut task_val,
+            &make_error_completion_input(PerformerCompletionKind::ErrorWithoutChanges),
+            &NormalizerRegistry::empty(),
+            "2026-04-12T00:01:00Z",
+        );
+
+        assert_eq!(task_val["state"], "blocked");
+        assert_eq!(task_val["task_runtime"]["status"], "failed");
+        assert_eq!(task_val["task_runtime"]["last_error_code"], "E902");
+        assert_eq!(
+            task_val["task_runtime"]["completion_kind"],
+            "error_without_changes"
+        );
+        assert!(task_val["worktree"].is_null());
+        assert_eq!(out.status_label, "retry_budget_exhausted");
+        assert!(!out.should_retry);
+        assert!(out.detail.contains("retry budget exhausted"));
+        assert!(!out.detail.contains("same worktree"));
     }
 
     #[test]
@@ -4551,6 +4578,36 @@ mod tests {
             repo.to_string_lossy().to_string()
         );
         let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn error_without_changes_stdout_marker_respects_the_retry_budget() {
+        let mut task_val = json!({
+            "id": "BUDGET-STDOUT-NO-CHANGES",
+            "state": "claimed",
+            "tool": "claude",
+            "worktree": { "worktree_path": "/tmp/wt-stdout-no-changes" },
+            "task_runtime": { "status": "running", "retries": 1 }
+        });
+        let mut input = make_error_completion_input(PerformerCompletionKind::ErrorWithoutChanges);
+        input.success = false;
+        input.completion_kind = None;
+        input.normalizer_input = Some(NormalizerInput {
+            exit_code: 1,
+            stderr: String::new(),
+            stdout: "MACC_TASK_RESULT: error_without_changes".to_string(),
+        });
+
+        let out = apply_job_completion(
+            &mut task_val,
+            &input,
+            &NormalizerRegistry::empty(),
+            "2026-04-12T00:01:00Z",
+        );
+
+        assert_eq!(task_val["state"], "blocked");
+        assert_eq!(out.status_label, "retry_budget_exhausted");
+        assert!(!out.should_retry);
     }
 
     #[test]
