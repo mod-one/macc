@@ -2506,6 +2506,46 @@ async fn coordinator_run_endpoint_returns_envelope() {
 }
 
 #[tokio::test]
+async fn coordinator_run_exit_releases_web_client_lease() {
+    let root = temp_root("run-release-lease");
+    fs::create_dir_all(&root).expect("create root");
+    let client_id = "web-run-owner";
+    claim_web_project_lease(&root, client_id);
+
+    let state = test_web_state(
+        &root,
+        Arc::new(WebTestEngine::with_managed_run_result(Ok(()))),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/coordinator/run")
+                .method("POST")
+                .header("X-Macc-Client-Id", client_id)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+
+    let mut released = false;
+    for _ in 0..50 {
+        let lease = macc_core::service::process_ownership::project_lease(&root)
+            .expect("load lease")
+            .expect("project lease");
+        if lease.owner.is_none() {
+            released = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(released, "web lease must be released after coordinator exit");
+}
+
+#[tokio::test]
 async fn coordinator_run_endpoint_maps_errors() {
     let root = temp_root("run-error");
     fs::create_dir_all(&root).expect("create root");
@@ -2737,6 +2777,102 @@ async fn coordinator_stop_endpoint_returns_envelope() {
     ] {
         assert!(payload.get(key).is_some(), "missing {}", key);
     }
+}
+
+#[tokio::test]
+async fn coordinator_stop_releases_web_client_lease() {
+    let root = temp_root("stop-release-lease");
+    fs::create_dir_all(&root).expect("create root");
+    let client_id = "web-stop-owner";
+    claim_web_project_lease(&root, client_id);
+
+    let state = test_web_state(
+        &root,
+        Arc::new(WebTestEngine::with_stop_result(Ok(()))),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/coordinator/stop")
+                .method("POST")
+                .header("X-Macc-Client-Id", client_id)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let lease = macc_core::service::process_ownership::project_lease(&root)
+        .expect("load lease")
+        .expect("project lease");
+    assert!(lease.owner.is_none());
+}
+
+#[tokio::test]
+async fn coordinator_drain_keeps_web_client_lease_until_exit() {
+    let root = temp_root("drain-keeps-lease");
+    fs::create_dir_all(&root).expect("create root");
+    let client_id = "web-drain-owner";
+    claim_web_project_lease(&root, client_id);
+
+    let state = test_web_state(
+        &root,
+        Arc::new(WebTestEngine::with_stop_result(Ok(()))),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/coordinator/stop")
+                .method("POST")
+                .header("Content-Type", "application/json")
+                .header("X-Macc-Client-Id", client_id)
+                .body(Body::from(r#"{"mode":"drain"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let lease = macc_core::service::process_ownership::project_lease(&root)
+        .expect("load lease")
+        .expect("project lease");
+    assert_eq!(
+        lease.owner.as_ref().map(|owner| owner.client_id.as_str()),
+        Some(client_id)
+    );
+}
+
+#[tokio::test]
+async fn stale_web_run_monitor_cannot_release_newer_generation() {
+    let root = temp_root("stale-run-monitor");
+    fs::create_dir_all(&root).expect("create root");
+    let client_id = "web-generation-owner";
+    claim_web_project_lease(&root, client_id);
+    let state = test_web_state(
+        &root,
+        Arc::new(WebTestEngine::new(Ok(CoordinatorCommandResult::default()))),
+        WebAssetsMode::Embedded,
+    );
+    state
+        .coordinator_lease_generation
+        .store(2, std::sync::atomic::Ordering::SeqCst);
+
+    super::coordinator_lease::release_if_current(&state, client_id, 1)
+        .await
+        .expect("stale release is ignored");
+
+    let lease = macc_core::service::process_ownership::project_lease(&root)
+        .expect("load lease")
+        .expect("project lease");
+    assert_eq!(
+        lease.owner.as_ref().map(|owner| owner.client_id.as_str()),
+        Some(client_id)
+    );
 }
 
 #[tokio::test]
