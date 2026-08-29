@@ -113,16 +113,47 @@ Optional performer fields:
   - `scope`: `project` or `worktree`
   - `init_prompt`
   - `extract_regex`
-  - `resume` (command + args)
+  - `resume` (command + args) — CONTINUES an existing session
+  - `create` (command + args) — OPENS a session under a caller-chosen id;
+    optional, used on the first use of a freshly reserved id under
+    `id_strategy: generated`. When absent the runner falls back to `resume`,
+    which is correct for tools whose resume flag also creates on miss.
+  - `create_only_flags` (list of strings) — flags that OPEN a session rather
+    than continue one
   - `discover` (command + args)
   - `id_strategy`: `generated` or `discovered`
+
+### Create vs resume
+
+Some CLIs use different flags to open a session under a given id and to
+continue one. MACC pools and re-issues session ids, so putting a *create* flag
+in `resume.args` produces a command that succeeds exactly once per id and then
+fails on every reuse — which surfaces as a task that fails instantly, is
+re-dispatched, and fails again. Declare such flags in `create_only_flags` and
+give the tool a separate `create` block; validation then rejects the mistake.
+
+```yaml
+session:
+  id_strategy: generated
+  create_only_flags: ["--session-id"]
+  resume:                       # continues an existing session
+    command: mytool
+    args: ["-r", "{session_id}"]
+  create:                       # opens a session under a chosen id
+    command: mytool
+    args: ["--session-id", "{session_id}"]
+```
 
 Validation notes:
 
 - `prompt.mode` must be `stdin` or `arg`.
 - If `prompt.mode` is `arg`, `prompt.arg` is required.
-- `retry.command`, `session.resume.command`, and `session.discover.command` cannot be empty.
+- `retry.command`, `session.resume.command`, `session.create.command`, and
+  `session.discover.command` cannot be empty.
 - `session.id_strategy` must be `generated` or `discovered`.
+- No flag listed in `session.create_only_flags` may appear in
+  `session.resume.args` or in `performer.retry.args` (retry args are merged into
+  the resume invocation, where the session already exists).
 
 Runtime config note:
 

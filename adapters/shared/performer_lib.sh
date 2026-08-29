@@ -79,6 +79,10 @@ session_scope="$(jq -r '.performer.session.scope // "worktree"' "$tool_json")"
 session_init_prompt="$(jq -r '.performer.session.init_prompt // "Bonjour"' "$tool_json")"
 session_extract_regex="$(jq -r '.performer.session.extract_regex // "session[[:space:]]+id:[[:space:]]*([[:alnum:]-]+)"' "$tool_json")"
 session_resume_command="$(jq -r '.performer.session.resume.command // empty' "$tool_json")"
+# Command that opens a NEW session under a caller-chosen id. Distinct from
+# resume for tools where those are different flags (claude: --session-id vs -r).
+# Falls back to the resume command when a tool declares no separate create.
+session_create_command="$(jq -r '.performer.session.create.command // .performer.session.resume.command // empty' "$tool_json")"
 session_discover_command="$(jq -r '.performer.session.discover.command // empty' "$tool_json")"
 session_id_strategy="$(jq -r '.performer.session.id_strategy // "discovered"' "$tool_json")"
 session_state_file="${repo}/.macc/state/tool-sessions.json"
@@ -419,10 +423,23 @@ run_resume_and_capture() {
   local expanded_retry_args=()
   local i=0
 
-  # 1. Base resume args from config
+  # 1. Base args from config.
+  #
+  # A session id we just reserved does not exist on the tool's side yet, so it
+  # must be OPENED, not resumed. For tools where those are different flags
+  # (claude: `--session-id <uuid>` creates, `-r <uuid>` continues) using the
+  # resume flag on a fresh id fails, and using the create flag on an existing
+  # id fails with "Session ID <uuid> is already in use" on every reuse.
+  local args_selector=".performer.session.resume.args[]?"
+  local invoke_command="$session_resume_command"
+  if [[ "$sid_is_new" == "1" ]] \
+     && jq -e '.performer.session.create.args' "$tool_json" >/dev/null 2>&1; then
+    args_selector=".performer.session.create.args[]?"
+    invoke_command="$session_create_command"
+  fi
   while IFS= read -r arg; do
     final_args+=("${arg//\{session_id\}/$sid}")
-  done < <(jq -r '.performer.session.resume.args[]?' "$tool_json")
+  done < <(jq -r "$args_selector" "$tool_json")
 
   # 2. Inject attempt-specific flags from retry overrides.
   expand_config_args "$sid" expanded_retry_args
@@ -469,9 +486,9 @@ run_resume_and_capture() {
   fi
 
   if [[ "$prompt_mode" == "arg" && -n "$prompt_arg" ]]; then
-    run_and_capture "$output_file" "$session_resume_command" "${final_args[@]}" "$prompt_arg" "$prompt"
+    run_and_capture "$output_file" "$invoke_command" "${final_args[@]}" "$prompt_arg" "$prompt"
   else
-    run_and_capture "$output_file" "$session_resume_command" "${final_args[@]}" "$prompt"
+    run_and_capture "$output_file" "$invoke_command" "${final_args[@]}" "$prompt"
   fi
 }
 
@@ -672,6 +689,9 @@ prompt_arg="$(jq -r '.performer.prompt.arg // empty' "$tool_json")"
 prompt_text="$(cat "$prompt_file")"
 output_capture="$(mktemp)"
 active_session_id=""
+# 1 when `sid` was reserved by us this invocation and therefore does not exist
+# on the tool's side yet; selects `session.create` over `session.resume`.
+sid_is_new=0
 sid=""
 
 cleanup_runner() {
@@ -809,6 +829,8 @@ if [[ "$session_enabled" == "true" && -n "$session_resume_command" ]]; then
       sid="$(reserve_generated_session_id || true)"
       release_session_lock
     fi
+    # Freshly minted: the tool has never seen this id, so it must be created.
+    [[ -n "$sid" ]] && sid_is_new=1
   fi
 
   if [[ "$attempt" -gt 1 && -z "$sid" ]]; then
