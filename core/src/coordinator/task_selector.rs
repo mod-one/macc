@@ -95,12 +95,7 @@ pub fn dispatch_block_reason_typed(
         return None;
     }
 
-    let merged_ids: HashSet<String> = registry
-        .tasks
-        .iter()
-        .filter(|task| task.is_merged())
-        .map(|task| task.id.clone())
-        .collect();
+    let satisfied_ids = satisfied_dependency_ids(registry);
     let resource_locks = &registry.resource_locks;
 
     for task in &registry.tasks {
@@ -113,7 +108,7 @@ pub fn dispatch_block_reason_typed(
         if task.id.is_empty() || task.priority_rank() != 0 {
             continue;
         }
-        if !dependencies_ready(task, &merged_ids, &config.external_merged_ids) {
+        if !dependencies_ready(task, &satisfied_ids, &config.external_merged_ids) {
             continue;
         }
         if !resources_available(task, resource_locks) {
@@ -157,12 +152,7 @@ pub fn select_next_ready_task_typed(
         return None;
     }
 
-    let merged_ids: HashSet<String> = registry
-        .tasks
-        .iter()
-        .filter(|task| task.is_merged())
-        .map(|task| task.id.clone())
-        .collect();
+    let satisfied_ids = satisfied_dependency_ids(registry);
 
     let mut active_by_tool: HashMap<String, usize> = HashMap::new();
     for task in active_tasks {
@@ -193,7 +183,7 @@ pub fn select_next_ready_task_typed(
         if task.id.is_empty() {
             continue;
         }
-        if !dependencies_ready(task, &merged_ids, &config.external_merged_ids) {
+        if !dependencies_ready(task, &satisfied_ids, &config.external_merged_ids) {
             continue;
         }
         if !resources_available(task, resource_locks) {
@@ -279,7 +269,9 @@ fn blocked_dependency_path<'a>(
         let Some(dependency) = tasks_by_id.get(dependency_id.as_str()).copied() else {
             continue;
         };
-        if dependency.workflow_state() == Some(crate::coordinator::WorkflowState::Blocked) {
+        if dependency.workflow_state() == Some(crate::coordinator::WorkflowState::Blocked)
+            || (dependency.is_merged() && !dependency.gate_verdict_satisfies_dependencies())
+        {
             return Some(vec![task.id.clone(), dependency.id.clone()]);
         }
         if let Some(mut path) =
@@ -294,6 +286,14 @@ fn blocked_dependency_path<'a>(
 }
 
 fn blocked_task_reason(task: &Task) -> String {
+    if task.is_merged() && !task.gate_verdict_satisfies_dependencies() {
+        let verdict = task
+            .task_runtime
+            .gate_verdict
+            .map(|value| format!("{value:?}").to_ascii_lowercase())
+            .unwrap_or_else(|| "missing".to_string());
+        return format!("gate verdict is {verdict}; an accepted verdict is required");
+    }
     let code = task
         .task_runtime
         .last_error_code
@@ -358,13 +358,8 @@ pub fn diagnose_unschedulable_tasks(
         return out;
     }
 
-    let merged_ids: HashSet<String> = registry
-        .tasks
-        .iter()
-        .filter(|task| task.is_merged())
-        .map(|task| task.id.clone())
-        .collect();
-    let satisfied_ids: HashSet<String> = merged_ids
+    let local_satisfied_ids = satisfied_dependency_ids(registry);
+    let satisfied_ids: HashSet<String> = local_satisfied_ids
         .union(&config.external_merged_ids)
         .cloned()
         .collect();
@@ -440,7 +435,9 @@ pub fn diagnose_unschedulable_tasks(
         let unmet: Vec<String> = task
             .dependency_ids()
             .iter()
-            .filter(|dep| !merged_ids.contains(*dep) && !config.external_merged_ids.contains(*dep))
+            .filter(|dep| {
+                !local_satisfied_ids.contains(*dep) && !config.external_merged_ids.contains(*dep)
+            })
             .cloned()
             .collect();
         if !unmet.is_empty() {
@@ -513,12 +510,141 @@ pub fn diagnose_unschedulable_tasks(
 
 fn dependencies_ready(
     task: &Task,
-    merged_ids: &HashSet<String>,
+    satisfied_ids: &HashSet<String>,
     external_merged_ids: &HashSet<String>,
 ) -> bool {
     task.dependency_ids().iter().all(|dependency| {
-        merged_ids.contains(dependency) || external_merged_ids.contains(dependency)
+        satisfied_ids.contains(dependency) || external_merged_ids.contains(dependency)
     })
+}
+
+fn satisfied_dependency_ids(registry: &TaskRegistry) -> HashSet<String> {
+    registry
+        .tasks
+        .iter()
+        .filter(|task| task.is_merged() && task.gate_verdict_satisfies_dependencies())
+        .map(|task| task.id.clone())
+        .collect()
+}
+
+/// Materialize durable external and transitive dependency blocks.
+///
+/// This keeps a blocked subtree from returning to the dispatcher on the next
+/// run. Blocks created here are reversible: once the root gate is accepted or
+/// an external declaration is resolved, propagated dependants return to
+/// `todo` and can be selected normally.
+pub fn reconcile_task_blocks(registry: &mut TaskRegistry, now: &str) -> Vec<String> {
+    let mut changed = BTreeSet::new();
+    loop {
+        let snapshot = registry.clone();
+        let tasks_by_id: HashMap<&str, &Task> = snapshot
+            .tasks
+            .iter()
+            .filter(|task| !task.id.is_empty())
+            .map(|task| (task.id.as_str(), task))
+            .collect();
+        let satisfied_ids = satisfied_dependency_ids(&snapshot);
+        let mut pass_changed = false;
+
+        for task in &mut registry.tasks {
+            let external_block = task
+                .blocked_on_external
+                .as_ref()
+                .filter(|_| !task.external_block_is_cleared())
+                .cloned();
+            if let Some(block) = external_block {
+                if task.workflow_state() == Some(crate::coordinator::WorkflowState::Todo) {
+                    task.set_workflow_state(crate::coordinator::WorkflowState::Blocked);
+                    let detail = format!(
+                        "External condition is not met: {} Clears when: {}{}",
+                        block.reason,
+                        block.clears_when,
+                        block
+                            .tracking_id
+                            .as_deref()
+                            .map(|id| format!(" (tracking: {id})"))
+                            .unwrap_or_default()
+                    );
+                    let runtime = task.ensure_runtime();
+                    runtime.set_status(crate::coordinator::RuntimeStatus::Failed);
+                    runtime.set_last_error_details("E904", "external_precondition", &detail);
+                    runtime.last_error = Some(detail);
+                    task.touch_state_changed(now);
+                    changed.insert(task.id.clone());
+                    pass_changed = true;
+                }
+                continue;
+            }
+
+            let propagated = task.task_runtime.last_error_code.as_deref() == Some("E905");
+            let path = tasks_by_id.get(task.id.as_str()).and_then(|snapshot_task| {
+                blocked_dependency_path(
+                    snapshot_task,
+                    &tasks_by_id,
+                    &satisfied_ids,
+                    &mut HashSet::new(),
+                )
+            });
+            if let Some(path) = path {
+                if task.workflow_state() == Some(crate::coordinator::WorkflowState::Todo) {
+                    let root_id = path.last().cloned().unwrap_or_default();
+                    let root_reason = tasks_by_id
+                        .get(root_id.as_str())
+                        .map(|root| blocked_task_reason(root))
+                        .unwrap_or_else(|| "blocked".to_string());
+                    let detail = format!(
+                        "Dependency chain is blocked via {}; root {} is {}",
+                        path.join(" -> "),
+                        root_id,
+                        root_reason
+                    );
+                    task.set_workflow_state(crate::coordinator::WorkflowState::Blocked);
+                    let runtime = task.ensure_runtime();
+                    runtime.set_status(crate::coordinator::RuntimeStatus::Failed);
+                    runtime.set_last_error_details("E905", "dependency", &detail);
+                    runtime.last_error = Some(detail);
+                    runtime.extra.insert(
+                        "blocked_dependency_path".to_string(),
+                        serde_json::json!(path),
+                    );
+                    task.touch_state_changed(now);
+                    changed.insert(task.id.clone());
+                    pass_changed = true;
+                }
+            } else if propagated
+                && task.workflow_state() == Some(crate::coordinator::WorkflowState::Blocked)
+            {
+                task.set_workflow_state(crate::coordinator::WorkflowState::Todo);
+                let runtime = task.ensure_runtime();
+                runtime.set_status(crate::coordinator::RuntimeStatus::Idle);
+                runtime.last_error = None;
+                runtime.last_error_code = None;
+                runtime.last_error_origin = None;
+                runtime.last_error_message = None;
+                runtime.extra.remove("blocked_dependency_path");
+                task.touch_state_changed(now);
+                changed.insert(task.id.clone());
+                pass_changed = true;
+            } else if task.task_runtime.last_error_code.as_deref() == Some("E904")
+                && task.workflow_state() == Some(crate::coordinator::WorkflowState::Blocked)
+            {
+                task.set_workflow_state(crate::coordinator::WorkflowState::Todo);
+                let runtime = task.ensure_runtime();
+                runtime.set_status(crate::coordinator::RuntimeStatus::Idle);
+                runtime.last_error = None;
+                runtime.last_error_code = None;
+                runtime.last_error_origin = None;
+                runtime.last_error_message = None;
+                task.touch_state_changed(now);
+                changed.insert(task.id.clone());
+                pass_changed = true;
+            }
+        }
+        if !pass_changed {
+            break;
+        }
+    }
+    changed.into_iter().collect()
 }
 
 fn resources_available(
@@ -1469,5 +1595,110 @@ mod tests {
         let selected = select_next_ready_task(&registry, &parked_cfg(2)).expect("selected");
         assert_eq!(selected.id, "T-FRESH");
         assert!(selected.resume_worktree.is_none());
+    }
+
+    #[test]
+    fn rejected_gate_does_not_satisfy_merge_dependency_and_blocks_transitively() {
+        let value = json!({
+          "tasks": [
+            {
+              "id":"ACCEPTANCE","state":"merged","gate":{"required_verdict":"accepted"},
+              "task_runtime":{"gate_verdict":"rejected"}
+            },
+            {"id":"CLEANUP","state":"todo","priority":"1","dependencies":["ACCEPTANCE"]},
+            {"id":"VERIFY","state":"todo","priority":"1","dependencies":["CLEANUP"]}
+          ]
+        });
+        let mut registry = TaskRegistry::from_value(&value).expect("registry");
+
+        let changed = reconcile_task_blocks(&mut registry, "2026-08-30T10:00:00Z");
+
+        assert_eq!(changed, vec!["CLEANUP".to_string(), "VERIFY".to_string()]);
+        assert_eq!(registry.find_task("CLEANUP").unwrap().state, "blocked");
+        assert_eq!(
+            registry
+                .find_task("CLEANUP")
+                .unwrap()
+                .task_runtime
+                .last_error_code
+                .as_deref(),
+            Some("E905")
+        );
+        assert!(registry
+            .find_task("VERIFY")
+            .unwrap()
+            .task_runtime
+            .last_error_message
+            .as_deref()
+            .unwrap()
+            .contains("VERIFY -> CLEANUP"));
+        assert!(select_next_ready_task_typed(&registry, &parked_cfg(1)).is_none());
+    }
+
+    #[test]
+    fn accepting_gate_unblocks_propagated_dependants() {
+        let value = json!({
+          "tasks": [
+            {
+              "id":"ACCEPTANCE","state":"merged","gate":{"required_verdict":"accepted"},
+              "task_runtime":{"gate_verdict":"rejected"}
+            },
+            {"id":"CLEANUP","state":"todo","priority":"1","dependencies":["ACCEPTANCE"]}
+          ]
+        });
+        let mut registry = TaskRegistry::from_value(&value).expect("registry");
+        reconcile_task_blocks(&mut registry, "2026-08-30T10:00:00Z");
+        registry
+            .find_task_mut("ACCEPTANCE")
+            .unwrap()
+            .task_runtime
+            .gate_verdict = Some(crate::coordinator::model::GateVerdict::Accepted);
+
+        reconcile_task_blocks(&mut registry, "2026-08-30T11:00:00Z");
+
+        assert_eq!(registry.find_task("CLEANUP").unwrap().state, "todo");
+        assert_eq!(
+            select_next_ready_task_typed(&registry, &parked_cfg(1))
+                .expect("cleanup ready")
+                .id,
+            "CLEANUP"
+        );
+    }
+
+    #[test]
+    fn declared_external_block_prevents_dispatch_until_resolved() {
+        let value = json!({
+          "tasks": [{
+            "id":"FLEET-WINDOW","state":"todo","priority":"1",
+            "blocked_on_external":{
+              "reason":"fleet observation has not run",
+              "clears_when":"seven-day window is complete",
+              "tracking_id":"GAP-WP4-017"
+            }
+          }]
+        });
+        let mut registry = TaskRegistry::from_value(&value).expect("registry");
+        reconcile_task_blocks(&mut registry, "2026-08-30T10:00:00Z");
+        assert_eq!(registry.find_task("FLEET-WINDOW").unwrap().state, "blocked");
+        assert_eq!(
+            registry
+                .find_task("FLEET-WINDOW")
+                .unwrap()
+                .task_runtime
+                .last_error_code
+                .as_deref(),
+            Some("E904")
+        );
+
+        let task = registry.find_task_mut("FLEET-WINDOW").unwrap();
+        task.task_runtime.external_block_resolution =
+            Some(crate::coordinator::model::ExternalBlockResolution {
+                evidence: "window report 2026-09-06".to_string(),
+                resolved_at: "2026-09-06T10:00:00Z".to_string(),
+                block_reason: "fleet observation has not run".to_string(),
+                tracking_id: Some("GAP-WP4-017".to_string()),
+            });
+        reconcile_task_blocks(&mut registry, "2026-09-06T10:00:00Z");
+        assert_eq!(registry.find_task("FLEET-WINDOW").unwrap().state, "todo");
     }
 }

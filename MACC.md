@@ -350,6 +350,8 @@ Default command is `run`. The coordinator starts, runs until the queue is exhaus
 | `select-ready-task` | Select the next ready task to dispatch |
 | `state-apply-transition` | Apply a workflow state transition |
 | `state-set-runtime` | Set runtime metadata for a task |
+| `block-task --task <id> --reason <text> --clears-when <text> [--tracking-id <id>]` | Declare a durable external block without dispatching the task |
+| `unblock-task --task <id> --evidence <text>` | Record evidence that clears a block; dependent tasks reconcile automatically |
 
 #### Key coordinator flags
 
@@ -755,6 +757,15 @@ For tools that use a config file for effort (e.g. Codex with `.codex/config.toml
       "tool": "claude",
       "base_branch": "main",
       "dependencies": [],
+      "blocked_on_external": {
+        "reason": "Production observation window has not run",
+        "clears_when": "The seven-day report is published",
+        "tracking_id": "GAP-WP4-017"
+      },
+      "gate": {
+        "required_verdict": "accepted",
+        "description": "Release acceptance decision"
+      },
       "extra": {
         "routing_hints": { "risk_level": "high" }
       }
@@ -762,6 +773,8 @@ For tools that use a config file for effort (e.g. Codex with `.codex/config.toml
   ]
 }
 ```
+
+`blocked_on_external` is scheduler-visible and starts the task in `blocked`; do not encode “do not retry” only in prose. A task with `gate` must emit `MACC_TASK_GATE_VERDICT: accepted|rejected|pending`. Its implementation may merge successfully while a rejected verdict keeps dependants blocked. A correct runtime refusal uses `MACC_TASK_RESULT: precondition_unmet` and is never retried.
 
 ### PRD generation workflow
 

@@ -2016,6 +2016,41 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                     Span::styled("   Tool: ", Style::default().fg(theme.muted)),
                     Span::styled(&t.tool, Style::default()),
                 ]));
+                if let Some(gate) = full_task.as_ref().and_then(|task| task.gate.as_ref()) {
+                    let verdict = full_task
+                        .as_ref()
+                        .and_then(|task| task.task_runtime.gate_verdict)
+                        .map(|value| format!("{value:?}").to_ascii_lowercase())
+                        .unwrap_or_else(|| "pending".to_string());
+                    detail_lines.push(Line::from(vec![
+                        Span::styled("Gate:       ", Style::default().fg(theme.muted)),
+                        Span::styled(
+                            format!("{} (required: {:?})", verdict, gate.required_verdict)
+                                .to_ascii_lowercase(),
+                            if verdict == "accepted" {
+                                Style::default().fg(theme.good)
+                            } else {
+                                Style::default().fg(theme.warn)
+                            },
+                        ),
+                    ]));
+                }
+                if let Some(block) = full_task
+                    .as_ref()
+                    .and_then(|task| task.blocked_on_external.as_ref())
+                {
+                    detail_lines.push(Line::from(vec![
+                        Span::styled("External:   ", Style::default().fg(theme.muted)),
+                        Span::styled(
+                            format!(
+                                "{}; clears when {} (source: {:?})",
+                                block.reason, block.clears_when, block.source
+                            )
+                            .to_ascii_lowercase(),
+                            Style::default().fg(theme.warn),
+                        ),
+                    ]));
+                }
                 if let Some(ref msg) = t.current_message {
                     detail_lines.push(Line::from(vec![
                         Span::styled("Message:    ", Style::default().fg(theme.muted)),

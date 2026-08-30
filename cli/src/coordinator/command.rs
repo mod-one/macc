@@ -365,6 +365,16 @@ Performers cannot commit without it. Fix this first:\n\
         },
     )?;
 
+    match &command {
+        CoordinatorCommand::BlockTask { task_id, .. } => {
+            println!("Task {task_id} is blocked. Dependants were reconciled.");
+        }
+        CoordinatorCommand::UnblockTask { task_id, evidence } => {
+            println!("Task {task_id} is unblocked with evidence: {evidence}");
+        }
+        _ => {}
+    }
+
     if let Some(status) = response.status {
         print_status_summary(&paths.root, &status);
     }
@@ -476,6 +486,8 @@ fn command_requires_owner_gate(command: &CoordinatorCommand) -> bool {
             | CoordinatorCommand::Stop { .. }
             | CoordinatorCommand::ResumePausedRun
             | CoordinatorCommand::Unlock { .. }
+            | CoordinatorCommand::BlockTask { .. }
+            | CoordinatorCommand::UnblockTask { .. }
             | CoordinatorCommand::DispatchReadyTasks
             | CoordinatorCommand::AdvanceTasks
             | CoordinatorCommand::CleanupMaintenance

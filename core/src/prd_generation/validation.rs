@@ -101,7 +101,11 @@ pub fn validate_prd_file(file_path: &Path, target_dir: Option<&Path>) -> Validat
             }
         }
         for task in tasks {
-            if let Some(deps) = task.get("depends_on").and_then(|d| d.as_array()) {
+            if let Some(deps) = task
+                .get("dependencies")
+                .or_else(|| task.get("depends_on"))
+                .and_then(|d| d.as_array())
+            {
                 for dep in deps {
                     if let Some(dep_id) = dep.as_str() {
                         if !all_ids.contains(dep_id) {
@@ -116,10 +120,67 @@ pub fn validate_prd_file(file_path: &Path, target_dir: Option<&Path>) -> Validat
         }
         for task in tasks {
             check_routing_hints_neutral(task, &mut result);
+            check_scheduler_contract(task, &mut result);
         }
     }
 
     result
+}
+
+fn check_scheduler_contract(task: &Value, result: &mut ValidationResult) {
+    let task_id = task
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("<unknown>");
+    if let Some(block) = task.get("blocked_on_external") {
+        let valid = block.as_object().is_some_and(|object| {
+            ["reason", "clears_when"].iter().all(|field| {
+                object
+                    .get(*field)
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.trim().is_empty())
+            })
+        });
+        if !valid {
+            result.add_error(format!(
+                "Task '{task_id}' has invalid blocked_on_external; non-empty reason and clears_when are required"
+            ));
+        }
+    }
+    if let Some(gate) = task.get("gate") {
+        let valid = gate.as_object().is_some_and(|object| {
+            object
+                .get("required_verdict")
+                .is_none_or(|value| value.as_str() == Some("accepted"))
+        });
+        if !valid {
+            result.add_error(format!(
+                "Task '{task_id}' has invalid gate.required_verdict; only 'accepted' is currently supported"
+            ));
+        }
+    }
+    let notes = task
+        .get("notes")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if task.get("blocked_on_external").is_none()
+        && (notes.contains("blocked on external") || notes.contains("do not retry"))
+    {
+        result.add_warning(format!(
+            "Task '{task_id}' describes a scheduler block only in prose; add blocked_on_external"
+        ));
+    }
+    let category = task
+        .get("category")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if task.get("gate").is_none() && matches!(category.as_str(), "gate" | "acceptance") {
+        result.add_warning(format!(
+            "Task '{task_id}' has category '{category}' but no gate declaration"
+        ));
+    }
 }
 
 fn check_routing_hints_neutral(task: &Value, result: &mut ValidationResult) {
@@ -154,4 +215,77 @@ fn looks_like_provider_model(s: &str) -> bool {
         || lower.contains("sonnet")
         || lower.contains("haiku")
         || lower.contains("mistral") // macc:allow-tool-name
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn validate(value: Value) -> ValidationResult {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("macc_prd_validation_{nonce}"));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("prd.json");
+        fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+        let result = validate_prd_file(&path, Some(&root));
+        let _ = fs::remove_dir_all(root);
+        result
+    }
+
+    #[test]
+    fn warns_when_external_block_exists_only_in_prose() {
+        let result = validate(serde_json::json!({
+            "lot": "L1",
+            "tasks": [{
+                "id": "TASK-1",
+                "notes": "BLOCKED ON EXTERNAL EVIDENCE - do not retry."
+            }]
+        }));
+
+        assert!(result.ok);
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("add blocked_on_external")));
+    }
+
+    #[test]
+    fn accepts_structured_gate_and_external_block() {
+        let result = validate(serde_json::json!({
+            "lot": "L1",
+            "tasks": [{
+                "id": "GATE-1",
+                "category": "acceptance",
+                "gate": {},
+                "blocked_on_external": {
+                    "reason": "Observation window has not run",
+                    "clears_when": "GAP-WP4-017 is accepted",
+                    "tracking_id": "GAP-WP4-017"
+                }
+            }]
+        }));
+
+        assert!(result.ok, "unexpected errors: {:?}", result.errors);
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    }
+
+    #[test]
+    fn rejects_incomplete_scheduler_contracts() {
+        let result = validate(serde_json::json!({
+            "lot": "L1",
+            "tasks": [{
+                "id": "GATE-1",
+                "gate": { "required_verdict": "maybe" },
+                "blocked_on_external": { "reason": "Waiting" }
+            }]
+        }));
+
+        assert!(!result.ok);
+        assert_eq!(result.errors.len(), 2);
+    }
 }

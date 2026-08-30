@@ -94,6 +94,7 @@ pub struct CoordinatorJobEvent {
     pub error_origin: Option<String>,
     pub error_message: Option<String>,
     pub result_explanation: Option<String>,
+    pub gate_verdict: Option<crate::coordinator::model::GateVerdict>,
 }
 
 #[derive(Debug, Clone)]
@@ -1401,6 +1402,9 @@ pub fn spawn_performer_job(
             result_explanation: completion_details
                 .as_ref()
                 .and_then(|details| details.result_explanation.clone()),
+            gate_verdict: completion_details
+                .as_ref()
+                .and_then(|details| details.gate_verdict),
         });
     });
     Ok(pid)
@@ -1418,6 +1422,7 @@ struct CompletionDetails {
     result_kind: Option<PerformerCompletionKind>,
     message: Option<String>,
     result_explanation: Option<String>,
+    gate_verdict: Option<crate::coordinator::model::GateVerdict>,
 }
 
 const COORDINATOR_COMPAT_PHASE_RESULT_LOG_FALLBACK: &str =
@@ -1502,6 +1507,7 @@ fn read_last_completion_details_once(
             result_kind: event.payload_result_kind(),
             message: event.message().map(|value| value.to_string()),
             result_explanation: event.payload_result_exp(),
+            gate_verdict: event.payload_gate_verdict(),
         });
     }
     if attempt < 2 {
@@ -1523,6 +1529,7 @@ fn read_completion_details_from_worktree_log(
     let mut result_kind = None;
     let mut message = None;
     let mut result_explanation = None;
+    let mut gate_verdict = None;
     for line in raw.lines().rev() {
         let trimmed = line.trim();
         if result_explanation.is_none() {
@@ -1545,6 +1552,12 @@ fn read_completion_details_from_worktree_log(
                 continue;
             }
         }
+        if gate_verdict.is_none() {
+            if let Some(raw_verdict) = trimmed.strip_prefix("MACC_TASK_GATE_VERDICT:") {
+                gate_verdict = raw_verdict.trim().parse().ok();
+                continue;
+            }
+        }
         if message.is_none()
             && !trimmed.is_empty()
             && !trimmed.starts_with('-')
@@ -1557,6 +1570,7 @@ fn read_completion_details_from_worktree_log(
         result_kind: Some(kind),
         message,
         result_explanation,
+        gate_verdict,
     })
 }
 

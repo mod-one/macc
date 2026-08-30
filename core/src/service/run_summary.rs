@@ -196,6 +196,15 @@ fn headline_for(run: &CoordinatorRun, blocked: Option<&Task>, dependent_count: u
 
 fn next_action_for(run: &CoordinatorRun, blocked: Option<&Task>, code: Option<&str>) -> String {
     if let Some(task) = blocked {
+        if matches!(code, Some("E903" | "E904" | "E906" | "E907")) {
+            return format!(
+                "Resolve the recorded condition, then run `macc coordinator unblock-task --task {} --evidence \"<evidence>\"`.",
+                task.id
+            );
+        }
+        if code == Some("E905") {
+            return "Resolve the blocked root task named in the dependency chain; dependants will unblock automatically.".to_string();
+        }
         return format!(
             "Resolve {} ({}) or explicitly abandon it, then start a new coordinator run.",
             task.id,

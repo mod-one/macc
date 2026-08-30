@@ -225,6 +225,30 @@ pub(super) fn task_to_api(task: &Task, events: &[ApiRegistryEvent]) -> ApiRegist
         last_error: task.task_runtime.last_error.clone(),
         last_error_code: task.task_runtime.last_error_code.clone(),
         result_explanation: task.task_runtime.result_explanation.clone(),
+        gate_verdict: task
+            .task_runtime
+            .gate_verdict
+            .map(|value| format!("{value:?}").to_ascii_lowercase()),
+        gate_required_verdict: task
+            .gate
+            .as_ref()
+            .map(|gate| format!("{:?}", gate.required_verdict).to_ascii_lowercase()),
+        external_block_reason: task
+            .blocked_on_external
+            .as_ref()
+            .map(|block| block.reason.clone()),
+        external_block_clears_when: task
+            .blocked_on_external
+            .as_ref()
+            .map(|block| block.clears_when.clone()),
+        external_block_tracking_id: task
+            .blocked_on_external
+            .as_ref()
+            .and_then(|block| block.tracking_id.clone()),
+        external_block_source: task
+            .blocked_on_external
+            .as_ref()
+            .map(|block| format!("{:?}", block.source).to_ascii_lowercase()),
         description: task
             .extra
             .get("description")

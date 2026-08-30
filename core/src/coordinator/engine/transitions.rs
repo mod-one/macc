@@ -356,6 +356,47 @@ pub(super) fn apply_state_transitions(
                     tool_error: tool_error.as_ref().clone(),
                 }
             }
+            BlockOutcome::ToolReportedTerminal {
+                completion_kind,
+                error_code,
+                attempts,
+            } => {
+                let described = describe_tool_error(task, reason);
+                task.set_workflow_state(WorkflowState::Blocked);
+                preserve_active_session_chain(task);
+                capture_last_assignment_before_clear(task);
+                if *completion_kind != PerformerCompletionKind::ErrorWithChanges {
+                    task.worktree = None;
+                }
+                let runtime = task.ensure_runtime();
+                runtime.completion_kind = Some(completion_kind.as_str().to_string());
+                runtime.set_status(RuntimeStatus::Failed);
+                runtime.current_phase = None;
+                runtime.pid = None;
+                let suffix = match completion_kind {
+                    PerformerCompletionKind::PreconditionUnmet => {
+                        "correct terminal stop; precondition is not met".to_string()
+                    }
+                    _ if *error_code == "E907" => format!(
+                        "identical explanation repeated on {} consecutive attempts",
+                        attempts
+                    ),
+                    _ => "explained failure without repository changes; not retried".to_string(),
+                };
+                let detail = format!("{} ({})", described, suffix);
+                runtime.set_last_error_details(*error_code, "coordinator", detail.clone());
+                runtime.last_error = Some(detail.clone());
+                task.tool = None;
+                task.assignee = None;
+                task.touch_state_changed(now);
+                JobCompletionResult {
+                    should_retry: false,
+                    status_label: completion_kind.as_str(),
+                    detail,
+                    completion_kind: Some(*completion_kind),
+                    tool_error: None,
+                }
+            }
         },
         RetryStrategy::Merge {
             detail,

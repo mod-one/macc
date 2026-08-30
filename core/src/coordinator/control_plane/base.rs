@@ -675,6 +675,15 @@ pub fn sync_registry_from_prd_native(
         task.coordinator_tool = prd_task.coordinator_tool.clone();
         task.dependencies = prd_task.dependencies.clone();
         task.exclusive_resources = prd_task.exclusive_resources.clone();
+        if let Some(mut block) = prd_task.blocked_on_external.clone() {
+            block.source = crate::coordinator::model::ExternalBlockSource::Prd;
+            task.blocked_on_external = Some(block);
+        } else if !task.blocked_on_external.as_ref().is_some_and(|block| {
+            block.source == crate::coordinator::model::ExternalBlockSource::Operator
+        }) {
+            task.blocked_on_external = None;
+        }
+        task.gate = prd_task.gate.clone();
         task.extra.retain(|key, _| {
             !matches!(
                 key.as_str(),
@@ -688,11 +697,14 @@ pub fn sync_registry_from_prd_native(
                     | "base_branch"
                     | "coordinator_tool"
                     | "scope"
+                    | "blocked_on_external"
+                    | "gate"
             )
         });
         for (key, value) in prd_task.extra {
             task.extra.insert(key, value);
         }
+        let has_external_block = task.blocked_on_external.is_some();
         let runtime = task.ensure_runtime();
         if runtime.status.is_none() {
             runtime.status = Some("idle".to_string());
@@ -703,12 +715,19 @@ pub fn sync_registry_from_prd_native(
         if runtime.merge_result_file.is_none() {
             runtime.merge_result_file = None;
         }
+        if !has_external_block {
+            runtime.external_block_resolution = None;
+        }
         task.updated_at = Some(now_iso_coordinator());
         merged.push(task);
     }
 
     let tasks_changed = registry.tasks != merged;
     registry.tasks = merged;
+    let reconciled_blocks = crate::coordinator::task_selector::reconcile_task_blocks(
+        &mut registry,
+        &now_iso_coordinator(),
+    );
     registry.recompute_resource_locks(&now_iso_coordinator());
     registry.set_updated_at(now_iso_coordinator());
     crate::coordinator::state::coordinator_state_registry_save(
@@ -732,6 +751,12 @@ pub fn sync_registry_from_prd_native(
                 registry.tasks.len()
             ));
             LAST_LOG_TS.store(now, Ordering::Relaxed);
+        }
+        if !reconciled_blocks.is_empty() {
+            let _ = log.note(format!(
+                "Reconciled declared/dependency blocks: {}",
+                reconciled_blocks.join(", ")
+            ));
         }
     }
     Ok(())
@@ -1210,6 +1235,13 @@ pub async fn monitor_active_jobs_native(
                     &state.normalizer_registry,
                     &now_iso_coordinator(),
                 )?;
+                if let Some(verdict) = evt.gate_verdict {
+                    coordinator_engine::set_task_gate_verdict_in_registry(
+                        &mut registry,
+                        &evt.task_id,
+                        verdict,
+                    )?;
+                }
                 if let Some(log) = logger {
                     if let Some(source) = evt.completion_details_source.as_deref() {
                         let _ = log.note(format!(
@@ -1245,12 +1277,14 @@ pub async fn monitor_active_jobs_native(
 
                 // Release any active session leases associated with this finished job.
                 // Ensures sessions don't remain stuck "active" when performers fail or exit without cleanup.
-                if let Ok(released_sessions) = crate::coordinator::session_manager::release_job_sessions(
-                    repo_root,
-                    Some(&job.tool),
-                    Some(&job.worktree_path),
-                    Some(&evt.task_id),
-                ) {
+                if let Ok(released_sessions) =
+                    crate::coordinator::session_manager::release_job_sessions(
+                        repo_root,
+                        Some(&job.tool),
+                        Some(&job.worktree_path),
+                        Some(&evt.task_id),
+                    )
+                {
                     for rel in released_sessions {
                         let _ = crate::coordinator::helpers::append_session_event(
                             repo_root,
@@ -2427,11 +2461,11 @@ mod tests {
     use super::{
         maybe_rollback_new_worktree_on_sanitize_failure, merge_gate_check, prepare_clean_worktree,
         record_dispatch_retry_or_block, refresh_task_active_session_id_in_registry,
-        select_dispatch_candidate, should_emit_priority_zero_dispatch_skip, MergeGateResult,
-        SanitizeOptions,
+        select_dispatch_candidate, should_emit_priority_zero_dispatch_skip,
+        sync_registry_from_prd_native, MergeGateResult, SanitizeOptions,
     };
     use crate::coordinator::control_plane::sanitize::RollbackWorktreeOptions;
-    use crate::coordinator::model::{Task, TaskRegistry};
+    use crate::coordinator::model::{ExternalBlockSource, ExternalTaskBlock, Task, TaskRegistry};
     use crate::coordinator::runtime::CoordinatorRunState;
     use rusqlite::Connection;
     use serde_json::json;
@@ -2507,6 +2541,57 @@ mod tests {
         )
         .expect("create worktree");
         created.pop().expect("one worktree created").path
+    }
+
+    #[test]
+    fn prd_sync_preserves_operator_declared_external_block() {
+        let repo = make_test_repo();
+        let mut task = Task {
+            id: "TASK-1".to_string(),
+            state: "todo".to_string(),
+            blocked_on_external: Some(ExternalTaskBlock {
+                reason: "Waiting for operator evidence".to_string(),
+                clears_when: "The operator records approval".to_string(),
+                tracking_id: Some("OPS-1".to_string()),
+                source: ExternalBlockSource::Operator,
+            }),
+            ..Task::default()
+        };
+        task.ensure_runtime();
+        let registry = TaskRegistry {
+            tasks: vec![task],
+            ..TaskRegistry::default()
+        };
+        crate::coordinator::state::coordinator_state_registry_save(
+            &repo,
+            &BTreeMap::new(),
+            &registry.to_value().unwrap(),
+        )
+        .unwrap();
+        let prd_path = repo.join("prd.json");
+        fs::write(
+            &prd_path,
+            serde_json::to_vec(&json!({"tasks": [{"id": "TASK-1"}]})).unwrap(),
+        )
+        .unwrap();
+
+        sync_registry_from_prd_native(&repo, &prd_path, None).unwrap();
+
+        let stored =
+            crate::coordinator::state::coordinator_state_registry_load(&repo, &BTreeMap::new())
+                .unwrap();
+        let registry = TaskRegistry::from_value(&stored).unwrap();
+        let task = registry.find_task("TASK-1").unwrap();
+        assert_eq!(
+            task.workflow_state(),
+            Some(crate::coordinator::WorkflowState::Blocked)
+        );
+        assert_eq!(
+            task.blocked_on_external.as_ref().map(|block| block.source),
+            Some(ExternalBlockSource::Operator)
+        );
+
+        let _ = fs::remove_dir_all(repo);
     }
 
     fn has_worktree_orphan_cleaned_event(

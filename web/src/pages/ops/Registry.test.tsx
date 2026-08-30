@@ -44,6 +44,12 @@ describe('Registry page', () => {
         worktree: null,
         events: [],
         updatedAt: null,
+        gateVerdict: null,
+        gateRequiredVerdict: null,
+        externalBlockReason: null,
+        externalBlockClearsWhen: null,
+        externalBlockTrackingId: null,
+        externalBlockSource: null,
       },
       {
         id: 'task-2',
@@ -67,6 +73,12 @@ describe('Registry page', () => {
         worktree: null,
         events: [],
         updatedAt: null,
+        gateVerdict: 'rejected',
+        gateRequiredVerdict: 'accepted',
+        externalBlockReason: 'Observation window has not run',
+        externalBlockClearsWhen: 'GAP-WP4-017 is accepted',
+        externalBlockTrackingId: 'GAP-WP4-017',
+        externalBlockSource: 'prd',
       },
     ]);
     getConfigMock.mockResolvedValue({ enabledTools: ['codex'] });
@@ -87,6 +99,12 @@ describe('Registry page', () => {
     await waitFor(() => {
       expect(screen.getByText('Current Phase')).toBeInTheDocument();
       expect(screen.getByText('dev')).toBeInTheDocument();
+      expect(screen.getByText(/Gate verdict:/)).toHaveTextContent(
+        'Gate verdict: rejected · required: accepted',
+      );
+      expect(screen.getByText(/External block:/)).toHaveTextContent(
+        'External block: Observation window has not run · Clears when: GAP-WP4-017 is accepted · Tracking: GAP-WP4-017 · Source: prd',
+      );
     });
   });
 });

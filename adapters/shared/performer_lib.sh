@@ -815,7 +815,7 @@ run_default_call() {
 override_rc_for_success_marker() {
   local rc="$1"
   [[ "$rc" -eq 0 ]] && { echo 0; return; }
-  if grep -qE 'MACC_TASK_RESULT:[[:space:]]*(success_with_changes|success_without_changes|already_satisfied|error_with_changes|error_without_changes)' \
+  if grep -qE 'MACC_TASK_RESULT:[[:space:]]*(success_with_changes|success_without_changes|already_satisfied|error_with_changes|error_without_changes|precondition_unmet)' \
       "$output_capture" 2>/dev/null; then
     echo 0
   else

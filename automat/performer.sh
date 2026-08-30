@@ -739,10 +739,12 @@ Instructions:
    - MACC_TASK_RESULT: already_satisfied
    - MACC_TASK_RESULT: error_with_changes   (if you started work but cannot finish)
    - MACC_TASK_RESULT: error_without_changes (if you could not start or make any progress)
+   - MACC_TASK_RESULT: precondition_unmet (if execution is correct but a required gate or external condition is not met; never retryable)
 11) Use already_satisfied only when you verified the task is already done and can cite the evidence briefly.
-12) Use error_with_changes or error_without_changes ONLY when THIS task could not be completed (sandbox failures, environment issues, missing dependencies, permission errors, etc.). Include a brief explanation of why on the line before the marker. The explanation must start with "MACC_TASK_RESULT_EXP:".
+12) Use error_with_changes or error_without_changes ONLY when THIS task could not be completed because execution malfunctioned (sandbox failures, environment issues, permission errors, etc.). Use precondition_unmet instead when stopping is the task's correct specified behavior. All three require a brief "MACC_TASK_RESULT_EXP:" line.
 13) Pre-existing repository problems that this task did not cause and is not scoped to fix are NOT a reason to report an error. If a repo-wide check (test suite, build, lint) fails only in areas unrelated to this task, and this task's own work is complete and verified, report success and note the unrelated failures in your explanation. Judge this task by its own acceptance criteria, not by the health of the whole repository.
 14) If you finish successfully but forget the marker, the runner will infer the result from repository state; still print the marker explicitly.
+15) If the task JSON contains `gate`, also print exactly one `MACC_TASK_GATE_VERDICT: accepted|rejected|pending` line. A successful task execution does not imply an accepted gate verdict.
 
 ${prompt_closing_line}
 PROMPT
@@ -759,6 +761,7 @@ extract_task_result_marker() {
     already_satisfied|already_done|noop_success) printf '%s' "already_satisfied" ;;
     error_with_changes) printf '%s' "error_with_changes" ;;
     error_without_changes|error|failed) printf '%s' "error_without_changes" ;;
+    precondition_unmet|blocked) printf '%s' "precondition_unmet" ;;
     *) printf '%s' "" ;;
   esac
 }
@@ -768,6 +771,18 @@ extract_task_result_exp() {
   local raw=""
   raw="$(grep -E 'MACC_TASK_RESULT_EXP:' "$output_file" | tail -n 1 | sed -E 's/^.*MACC_TASK_RESULT_EXP:[[:space:]]*//')"
   printf '%s' "$raw" | tr -d '\r' | xargs
+}
+
+extract_task_gate_verdict() {
+  local output_file="$1"
+  local raw=""
+  raw="$(grep -E 'MACC_TASK_GATE_VERDICT:' "$output_file" | tail -n 1 | sed -E 's/^.*MACC_TASK_GATE_VERDICT:[[:space:]]*//')"
+  raw="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | tr '-' '_' | tr -d '\r' | xargs)"
+  case "$raw" in
+    accepted|rejected|pending) printf '%s' "$raw" ;;
+    not_accepted) printf '%s' "rejected" ;;
+    *) printf '%s' "" ;;
+  esac
 }
 
 # A terminal `error_*` result without an explanation leaves the coordinator --
@@ -780,7 +795,7 @@ resolve_task_result_exp() {
   local result_kind="$2"
   local exp=""
   exp="$(extract_task_result_exp "$output_file")"
-  if [[ -z "$exp" && "$result_kind" == error_* ]]; then
+  if [[ -z "$exp" && ( "$result_kind" == error_* || "$result_kind" == "precondition_unmet" ) ]]; then
     # A terminal error with no explanation is not accepted as-is: the tool's
     # own account is the only record of why it stopped, and the continuation
     # prompt for the next attempt is built from it. Substitute an explicit
@@ -803,7 +818,7 @@ resolve_task_result_exp() {
 validate_terminal_result_contract() {
   local output_file="$1"
   local result_kind="$2"
-  [[ "$result_kind" == error_* ]] || return 0
+  [[ "$result_kind" == error_* || "$result_kind" == "precondition_unmet" ]] || return 0
   local raw
   raw="$(extract_task_result_exp "$output_file")"
   [[ -n "$raw" ]]
@@ -926,12 +941,16 @@ run_tool() {
     local result_kind=""
     local changed="false"
     result_kind="$(detect_success_result_kind "$output_capture")"
-    if [[ "$result_kind" == error_* ]]; then
+    if [[ "$result_kind" == error_* || "$result_kind" == "precondition_unmet" ]]; then
       # The tool process exited 0, but emitted an explicit error result marker
-      # (e.g. error_without_changes or error_with_changes). This is a failure,
-      # not a successful completion. It must NOT be marked passed.
+      # This is a failure or an intentional terminal block, not a successful
+      # completion. It must NOT be marked passed.
       if [[ -z "$LAST_ERROR_CODE" ]]; then
-        set_last_error "E101" "runner" "tool reported ${result_kind}"
+        if [[ "$result_kind" == "precondition_unmet" ]]; then
+          set_last_error "E903" "precondition" "task precondition is not met"
+        else
+          set_last_error "E101" "runner" "tool reported ${result_kind}"
+        fi
       fi
       local result_exp=""
       result_exp="$(resolve_task_result_exp "$output_capture" "$result_kind")"
@@ -966,6 +985,8 @@ run_tool() {
     fi
     local result_exp=""
     result_exp="$(resolve_task_result_exp "$output_capture" "$result_kind")"
+    local gate_verdict=""
+    gate_verdict="$(extract_task_gate_verdict "$output_capture")"
     if ! validate_terminal_result_contract "$output_capture" "$result_kind"; then
       emit_performer_event "contract_violation" "$CURRENT_PHASE" "warning" "$(jq -nc \
         --arg kind "$result_kind" \
@@ -991,6 +1012,7 @@ run_tool() {
       --arg result_kind "$result_kind" \
       --argjson changed "$changed" \
       --arg result_exp "$result_exp" \
+      --arg gate_verdict "$gate_verdict" \
       '({
         attempt:($attempt|tonumber?),
         changed:$changed,
@@ -1002,7 +1024,8 @@ run_tool() {
                  end)
       }
       + (if $result_kind != "" then {result_kind:$result_kind} else {} end)
-      + (if $result_exp  != "" then {result_exp:$result_exp}  else {} end))')"; then
+      + (if $result_exp  != "" then {result_exp:$result_exp}  else {} end)
+      + (if $gate_verdict != "" then {gate_verdict:$gate_verdict} else {} end))')"; then
       echo "Error: failed to persist terminal phase_result event (status=done); refusing to mark task passed" >&2
       log_task_line "- Exit status: ${status}"
       exit 1
@@ -1010,6 +1033,9 @@ run_tool() {
     log_task_line "- Result kind: ${result_kind}"
     if [[ -n "$result_exp" ]]; then
       log_task_line "- Explanation: ${result_exp}"
+    fi
+    if [[ -n "$gate_verdict" ]]; then
+      log_task_line "- Gate verdict: ${gate_verdict}"
     fi
   else
     # RL-PERFORMER-009: classify rate-limit signals before falling back to E101.

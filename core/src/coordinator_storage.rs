@@ -2348,6 +2348,16 @@ mod tests {
                     "title": "Task One",
                     "state": "in_progress",
                     "tool": "codex",
+                    "gate": {
+                        "required_verdict": "accepted",
+                        "description": "Release gate"
+                    },
+                    "blocked_on_external": {
+                        "reason": "Waiting for production evidence",
+                        "clears_when": "GAP-1 is accepted",
+                        "tracking_id": "GAP-1",
+                        "source": "operator"
+                    },
                     "task_runtime": {
                         "status": "running",
                         "pid": 1234,
@@ -2355,6 +2365,13 @@ mod tests {
                         "last_heartbeat": "2026-02-20T00:00:05Z",
                         "metrics": {
                             "retries": 2
+                        },
+                        "gate_verdict": "rejected",
+                        "external_block_resolution": {
+                            "evidence": "Approved in release review",
+                            "resolved_at": "2026-02-20T00:00:04Z",
+                            "block_reason": "Waiting for production evidence",
+                            "tracking_id": "GAP-1"
                         },
                         "last_error": null
                     }
@@ -2531,6 +2548,26 @@ mod tests {
             task["task_runtime"]["metrics"]["retries"].as_i64(),
             Some(2),
             "runtime retries metric should survive sqlite roundtrip"
+        );
+        assert_eq!(
+            task["gate"]["required_verdict"].as_str(),
+            Some("accepted"),
+            "gate contract should survive sqlite roundtrip"
+        );
+        assert_eq!(
+            task["task_runtime"]["gate_verdict"].as_str(),
+            Some("rejected"),
+            "gate verdict should survive sqlite roundtrip"
+        );
+        assert_eq!(
+            task["task_runtime"]["external_block_resolution"]["tracking_id"].as_str(),
+            Some("GAP-1"),
+            "external block resolution should survive sqlite roundtrip"
+        );
+        assert_eq!(
+            task["blocked_on_external"]["source"].as_str(),
+            Some("operator"),
+            "external block provenance should survive sqlite roundtrip"
         );
 
         let _ = fs::remove_dir_all(root);

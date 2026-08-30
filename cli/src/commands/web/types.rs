@@ -769,6 +769,21 @@ pub(crate) struct ApiRegistryTask {
     pub last_error_code: Option<String>,
     /// Explanation of the task completion result/error.
     pub result_explanation: Option<String>,
+    /// Verdict reported by a scheduler-visible gate task.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gate_verdict: Option<String>,
+    /// Verdict required before dependants become ready.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gate_required_verdict: Option<String>,
+    /// Current external blocking condition, when declared by the PRD.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_block_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_block_clears_when: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_block_tracking_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_block_source: Option<String>,
     /// Human-readable task description.
     pub description: Option<String>,
     /// Task objective summary.

@@ -600,6 +600,12 @@ export interface ApiRegistryTask {
   lastError: string | null;
   lastErrorCode: string | null;
   resultExplanation: string | null;
+  gateVerdict?: string | null;
+  gateRequiredVerdict?: string | null;
+  externalBlockReason?: string | null;
+  externalBlockClearsWhen?: string | null;
+  externalBlockTrackingId?: string | null;
+  externalBlockSource?: string | null;
   description: string | null;
   objective: string | null;
   result: string | null;

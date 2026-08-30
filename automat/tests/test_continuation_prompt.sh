@@ -25,6 +25,7 @@ extract_fns() {
   sed -n \
     -e '/^extract_task_result_exp()/,/^}/p' \
     -e '/^resolve_task_result_exp()/,/^}/p' \
+    -e '/^extract_task_gate_verdict()/,/^}/p' \
     -e '/^validate_terminal_result_contract()/,/^}/p' \
     -e '/^previous_result_explanation()/,/^}/p' \
     -e '/^build_prior_work_summary()/,/^}/p' \
@@ -112,6 +113,11 @@ check_contains "feature.txt"                                   "changed files ar
 check_contains "Do not re-derive the implementation"           "instructs against redoing the work"
 check_contains "unsalvageable"                                 "provides an escape hatch for bad prior work"
 check_contains "MACC_TASK_RESULT: error_without_changes"       "escape hatch names the marker to emit"
+if grep -q 'MACC_TASK_RESULT: precondition_unmet' "$PERFORMER"; then
+  pass "prompt documents correct terminal precondition result"
+else
+  fail "prompt documents correct terminal precondition result"
+fi
 
 # A task with no commits must not claim there is prior work to build on.
 wt2="$tmp_root/wt2"
@@ -145,6 +151,14 @@ if run_harness "$tmp_root" 0 "" "validate_terminal_result_contract '$out_file' '
   pass "success results are not subject to the explanation contract"
 else
   fail "success results are not subject to the explanation contract" "validator rejected a success"
+fi
+
+printf 'MACC_TASK_GATE_VERDICT: not-accepted\n' >"$out_file"
+got="$(run_harness "$tmp_root" 0 "" "extract_task_gate_verdict '$out_file'" 2>/dev/null)"
+if [[ "$got" == "rejected" ]]; then
+  pass "gate verdict aliases normalize"
+else
+  fail "gate verdict aliases normalize" "got: '$got'"
 fi
 
 # ── 4. session lock is flock-based and self-healing ─────────────────────────

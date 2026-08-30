@@ -581,6 +581,7 @@ pub fn apply_job_completion_in_registry(
             message: format!("Task '{}' not found in registry", task_id),
         })?;
     let out = apply_job_completion_typed(task, input, normalizer_registry, now);
+    crate::coordinator::task_selector::reconcile_task_blocks(&mut typed, now);
     *registry = typed.to_value()?;
     Ok(out)
 }
@@ -604,6 +605,7 @@ pub fn apply_merge_result_in_registry(
     } else {
         apply_merge_failure_typed(task, reason, now)?
     }
+    crate::coordinator::task_selector::reconcile_task_blocks(&mut typed, now);
     *registry = typed.to_value()?;
     Ok(())
 }
@@ -1193,6 +1195,13 @@ pub(super) enum BlockOutcome {
         tool_error: Box<Option<ToolError>>,
         attempts: usize,
     },
+    /// A semantically terminal performer report. Unlike retry exhaustion this
+    /// does not imply malfunction and consumes no additional dispatch.
+    ToolReportedTerminal {
+        completion_kind: PerformerCompletionKind,
+        error_code: &'static str,
+        attempts: usize,
+    },
 }
 
 #[allow(dead_code)]
@@ -1240,6 +1249,23 @@ fn apply_job_completion_typed(
     );
     task.task_runtime.result_explanation = input.result_explanation.clone();
     apply_state_transitions(task, &strategy, now)
+}
+
+pub fn set_task_gate_verdict_in_registry(
+    registry: &mut Value,
+    task_id: &str,
+    verdict: crate::coordinator::model::GateVerdict,
+) -> Result<()> {
+    let mut typed = TaskRegistry::from_value(registry)?;
+    let task = typed
+        .find_task_mut(task_id)
+        .ok_or_else(|| MaccError::Coordinator {
+            code: "task_not_found",
+            message: format!("Task '{task_id}' not found in registry"),
+        })?;
+    task.task_runtime.gate_verdict = Some(verdict);
+    *registry = typed.to_value()?;
+    Ok(())
 }
 
 pub(super) fn should_auto_retry_error_code(
@@ -4458,6 +4484,74 @@ mod tests {
         assert!(!out.should_retry);
         assert!(out.detail.contains("retry budget exhausted"));
         assert!(!out.detail.contains("same worktree"));
+    }
+
+    #[test]
+    fn precondition_unmet_blocks_immediately_without_retry() {
+        let mut task = json!({
+            "id":"GATED","state":"claimed","tool":"codex",
+            "task_runtime":{"status":"running","retries":0}
+        });
+        let mut input = make_error_completion_input(PerformerCompletionKind::PreconditionUnmet);
+        input.success = false;
+        input.result_explanation = Some("acceptance verdict is rejected".to_string());
+
+        let out = apply_job_completion(
+            &mut task,
+            &input,
+            &NormalizerRegistry::empty(),
+            "2026-08-30T10:00:00Z",
+        );
+
+        assert_eq!(task["state"], "blocked");
+        assert_eq!(task["task_runtime"]["last_error_code"], "E903");
+        assert_eq!(task["task_runtime"]["retries"].as_i64().unwrap_or(0), 0);
+        assert_eq!(out.status_label, "precondition_unmet");
+    }
+
+    #[test]
+    fn explained_error_without_changes_is_not_retried() {
+        let mut task = json!({
+            "id":"DETERMINISTIC","state":"claimed","tool":"codex",
+            "task_runtime":{"status":"running","retries":0}
+        });
+        let mut input = make_error_completion_input(PerformerCompletionKind::ErrorWithoutChanges);
+        input.result_explanation = Some("required external evidence is absent".to_string());
+
+        apply_job_completion(
+            &mut task,
+            &input,
+            &NormalizerRegistry::empty(),
+            "2026-08-30T10:00:00Z",
+        );
+
+        assert_eq!(task["state"], "blocked");
+        assert_eq!(task["task_runtime"]["last_error_code"], "E906");
+        assert_eq!(task["task_runtime"]["retries"].as_i64().unwrap_or(0), 0);
+    }
+
+    #[test]
+    fn identical_explanation_trips_the_retry_circuit_breaker() {
+        let mut task = json!({
+            "id":"REPEATED","state":"claimed","tool":"codex",
+            "task_runtime":{
+                "status":"running","retries":1,
+                "result_explanation":"same deterministic refusal"
+            }
+        });
+        let mut input = make_error_completion_input(PerformerCompletionKind::ErrorWithChanges);
+        input.result_explanation = Some("same deterministic refusal".to_string());
+
+        let out = apply_job_completion(
+            &mut task,
+            &input,
+            &NormalizerRegistry::empty(),
+            "2026-08-30T10:00:00Z",
+        );
+
+        assert_eq!(task["state"], "blocked");
+        assert_eq!(task["task_runtime"]["last_error_code"], "E907");
+        assert!(out.detail.contains("identical explanation repeated"));
     }
 
     #[test]
