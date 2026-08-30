@@ -924,6 +924,35 @@ impl SqliteStorage {
         }
     }
 
+    pub fn get_recent_coordinator_runs(&self, limit: usize) -> Result<Vec<CoordinatorRun>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.open()?;
+        self.init_schema(&conn)?;
+        let mut stmt = conn
+            .prepare("SELECT run_id, pid, hostname, started_at, last_tick_at, stopped_at, status, epoch, version, stop_reason FROM coordinator_runs ORDER BY started_at DESC LIMIT ?1")
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map([limit as i64], |row| {
+                Ok(CoordinatorRun {
+                    run_id: row.get(0)?,
+                    pid: row.get(1)?,
+                    hostname: row.get(2)?,
+                    started_at: row.get(3)?,
+                    last_tick_at: row.get(4)?,
+                    stopped_at: row.get(5)?,
+                    status: row.get(6)?,
+                    epoch: row.get(7)?,
+                    version: row.get(8)?,
+                    stop_reason: row.get(9)?,
+                })
+            })
+            .map_err(sql_err)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sql_err)
+    }
+
     pub fn get_cursor(&self, name: &str) -> Result<Option<(u64, String)>> {
         let conn = self.open()?;
         self.init_schema(&conn)?;

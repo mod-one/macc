@@ -32,6 +32,7 @@ pub struct CoordinatorStatus {
     pub pause_phase: Option<String>,
     pub run_id: Option<String>,
     pub epoch: Option<i64>,
+    pub last_run_summary: Option<crate::service::run_summary::CoordinatorRunSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

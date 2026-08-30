@@ -17,8 +17,8 @@ impl RuntimeSnapshotBuilder {
             JsonStorage::new(storage_paths.clone()).load_snapshot()
         };
 
-        let (queue, workers, tasks, throttled_tools, mut coordinator) = match snapshot {
-            Ok(s) => build_from_snapshot(&s),
+        let (queue, workers, tasks, throttled_tools, mut coordinator) = match &snapshot {
+            Ok(s) => build_from_snapshot(s),
             Err(_) => (
                 QueueSummary::default(),
                 Vec::new(),
@@ -42,13 +42,17 @@ impl RuntimeSnapshotBuilder {
         }
 
         // Check the coordinator_runs table for an active run.
-        let active_run = SqliteStorage::new(storage_paths)
-            .get_active_coordinator_run()
-            .unwrap_or(None);
+        let sqlite = SqliteStorage::new(storage_paths);
+        let active_run = sqlite.get_active_coordinator_run().unwrap_or(None);
         if let Some(run) = active_run {
             coordinator.running = matches!(run.status.as_str(), "running" | "draining");
             coordinator.run_id = Some(run.run_id);
             coordinator.epoch = Some(run.epoch);
+        }
+        if let Ok(snapshot) = &snapshot {
+            coordinator.last_run_summary =
+                crate::service::run_summary::load_latest_run_summary(&sqlite, &snapshot.registry)
+                    .unwrap_or(None);
         }
 
         let recent_events = load_recent_events(paths);

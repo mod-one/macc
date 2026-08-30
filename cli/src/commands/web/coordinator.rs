@@ -10,6 +10,7 @@ use macc_core::service::coordinator_workflow::{
     PsProcessEntry, RecoveryReportEntry, ThrottledToolStatus,
 };
 use macc_core::service::diagnostic::{FailureKind, FailureReport};
+use macc_core::service::run_summary::CoordinatorRunSummary;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::Ordering;
 
@@ -34,6 +35,8 @@ pub(super) struct ApiCoordinatorStatus {
     pub last_run_status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_run_stop_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_run_summary: Option<CoordinatorRunSummary>,
 }
 
 #[derive(Debug, Serialize)]
@@ -75,6 +78,7 @@ impl From<CoordinatorStatus> for ApiCoordinatorStatus {
             effective_max_parallel: status.effective_max_parallel,
             last_run_status: status.last_run_status,
             last_run_stop_reason: status.last_run_stop_reason,
+            last_run_summary: status.last_run_summary,
         }
     }
 }

@@ -157,14 +157,40 @@ fn print_coordinator_section(coord: &CoordinatorStatus) {
         if let Some(reason) = &coord.pause_reason {
             println!("  Reason: {}", reason);
         }
-        println!();
-        println!("  Next action:");
-        println!("    macc coordinator run");
     } else {
         println!("  State: not running");
-        println!();
-        println!("  Next action:");
-        println!("    macc coordinator run");
+    }
+
+    if !coord.running {
+        if let Some(summary) = &coord.last_run_summary {
+            println!("  Last result: {} ({})", summary.headline, summary.severity);
+            println!(
+                "  When:        {}",
+                heartbeat_age_label(Some(&summary.occurred_at))
+            );
+            if let Some(task_id) = &summary.task_id {
+                let code = summary.error_code.as_deref().unwrap_or("unknown error");
+                println!("  Root cause:  {} ({})", task_id, code);
+            }
+            println!("  Cause:       {}", summary.cause);
+            if !summary.dependent_task_ids.is_empty() {
+                println!("  Dependents:  {}", summary.dependent_task_ids.join(", "));
+            }
+            if summary.repeated_count > 1 {
+                println!(
+                    "  Repeated:    {} identical results in the last {} runs",
+                    summary.repeated_count,
+                    summary.recent_runs.len()
+                );
+            }
+            println!();
+            println!("  Next action:");
+            println!("    {}", summary.next_action);
+        } else {
+            println!();
+            println!("  Next action:");
+            println!("    macc coordinator run");
+        }
     }
 }
 

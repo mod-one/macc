@@ -12,6 +12,7 @@ pub mod migrate;
 pub mod process_ownership;
 pub mod process_ownership_gate;
 pub mod project;
+pub mod run_summary;
 pub mod task_runner;
 pub mod tooling;
 pub mod worktree;

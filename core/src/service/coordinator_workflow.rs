@@ -235,13 +235,15 @@ pub struct CoordinatorStatus {
     pub throttled_tools: Vec<ThrottledToolStatus>,
     /// RL-WEB-008: effective max_parallel after concurrency reductions from rate-limiting.
     pub effective_max_parallel: Option<usize>,
-    /// Status of the most recent coordinator run ("stopped", "crashed",
-    /// "force_stopping", "running", ...). Lets clients distinguish a normal stop
+    /// Status of the most recent coordinator run (`success`, `blocked`, `failed`,
+    /// `stopped_by_user`, `crashed`, etc.). Lets clients distinguish a normal stop
     /// from a degraded/error stop when the coordinator is no longer running.
     pub last_run_status: Option<String>,
     /// Human-readable reason the most recent run stopped (e.g. "all tasks
     /// completed", "dispatch limit reached", or an error detail).
     pub last_run_stop_reason: Option<String>,
+    /// Durable, run-scoped result shared by CLI, TUI and Web clients.
+    pub last_run_summary: Option<crate::service::run_summary::CoordinatorRunSummary>,
 }
 
 /// RL-WEB-008: per-tool throttle status for API exposure.
@@ -1546,6 +1548,8 @@ pub fn get_coordinator_status(paths: &ProjectPaths) -> Result<CoordinatorStatus>
         status.last_run_status = Some(run.status);
         status.last_run_stop_reason = run.stop_reason;
     }
+    status.last_run_summary =
+        crate::service::run_summary::load_latest_run_summary(&sqlite, &snapshot.registry)?;
 
     // RL-WEB-008: parse effective_max_parallel from the most recent concurrency_adjusted event.
     status.effective_max_parallel = snapshot

@@ -139,6 +139,25 @@ fn format_hms(total_secs: u64) -> String {
     format!("{}:{:02}:{:02}", hours, minutes, seconds)
 }
 
+fn relative_time_label(timestamp: &str) -> String {
+    let Ok(timestamp) = chrono::DateTime::parse_from_rfc3339(timestamp) else {
+        return timestamp.to_string();
+    };
+    let seconds = chrono::Utc::now()
+        .signed_duration_since(timestamp.with_timezone(&chrono::Utc))
+        .num_seconds()
+        .max(0);
+    if seconds < 60 {
+        format!("{}s ago", seconds)
+    } else if seconds < 3_600 {
+        format!("{}m ago", seconds / 60)
+    } else if seconds < 86_400 {
+        format!("{}h ago", seconds / 3_600)
+    } else {
+        format!("{}d ago", seconds / 86_400)
+    }
+}
+
 fn handle_key(state: &mut AppState, key: KeyCode) {
     if state.coordinator_task_diff_popup.is_some() || state.coordinator_task_explain_popup.is_some()
     {
@@ -1774,9 +1793,14 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 .split(body_area);
             render_coordinator_ownership_banner(f, live_chunks[0], state);
 
+            let durable_run_active = state
+                .coordinator_run_summary
+                .as_ref()
+                .is_some_and(|summary| matches!(summary.status.as_str(), "running" | "draining"));
+            let coordinator_active = state.is_coordinator_running() || durable_run_active;
             let status_line = if state.is_coordinator_paused() {
                 "PAUSED (awaiting resume)".to_string()
-            } else if state.is_coordinator_running() {
+            } else if coordinator_active {
                 format!(
                     "Running: {} ({}) {}",
                     state
@@ -2028,10 +2052,90 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 .wrap(Wrap { trim: true });
             f.render_widget(detail_para, body_chunks[1]);
 
-            // Pane 3: LIVE LOGS timeline (optional)
+            // Pane 3: live signal while running, durable run result while idle.
             if state.coordinator_log_pane_visible {
                 let mut logs_lines = Vec::new();
-                if let Some(ref t) = selected_task {
+                let panel_title;
+                if !coordinator_active {
+                    panel_title = "LAST RESULT";
+                    if let Some(summary) = state.coordinator_run_summary.as_ref() {
+                        let severity_style = match summary.severity.as_str() {
+                            "error" => Style::default().fg(theme.bad).add_modifier(Modifier::BOLD),
+                            "warning" => {
+                                Style::default().fg(theme.warn).add_modifier(Modifier::BOLD)
+                            }
+                            "success" => {
+                                Style::default().fg(theme.good).add_modifier(Modifier::BOLD)
+                            }
+                            _ => Style::default().fg(theme.accent),
+                        };
+                        logs_lines.push(Line::from(vec![
+                            Span::styled(summary.severity.to_ascii_uppercase(), severity_style),
+                            Span::raw("  "),
+                            Span::styled(
+                                summary.status.clone(),
+                                Style::default().fg(theme.accent_dim),
+                            ),
+                            Span::raw("  "),
+                            Span::styled(
+                                relative_time_label(&summary.occurred_at),
+                                Style::default().fg(theme.muted),
+                            ),
+                        ]));
+                        logs_lines.push(Line::from(Span::styled(
+                            summary.headline.clone(),
+                            Style::default().add_modifier(Modifier::BOLD),
+                        )));
+                        logs_lines.push(Line::from(vec![
+                            Span::styled("Cause: ", Style::default().fg(theme.muted)),
+                            Span::raw(summary.cause.clone()),
+                        ]));
+                        if !summary.dependent_task_ids.is_empty() {
+                            logs_lines.push(Line::from(vec![
+                                Span::styled("Affected: ", Style::default().fg(theme.muted)),
+                                Span::raw(summary.dependent_task_ids.join(", ")),
+                            ]));
+                        }
+                        logs_lines.push(Line::from(vec![
+                            Span::styled("Next: ", Style::default().fg(theme.accent)),
+                            Span::raw(summary.next_action.clone()),
+                        ]));
+                        if summary.repeated_count > 1 {
+                            logs_lines.push(Line::from(Span::styled(
+                                format!(
+                                    "Same result occurred {} times in the last {} runs. Do not retry unchanged.",
+                                    summary.repeated_count,
+                                    summary.recent_runs.len()
+                                ),
+                                Style::default().fg(theme.warn),
+                            )));
+                        }
+                        if summary.recent_runs.len() > 1 {
+                            logs_lines.push(Line::from(Span::styled(
+                                "Recent runs:",
+                                Style::default().fg(theme.muted),
+                            )));
+                            for run in summary.recent_runs.iter().take(5) {
+                                let at = run.stopped_at.as_deref().unwrap_or(&run.started_at);
+                                logs_lines.push(Line::from(format!(
+                                    "  {}  {}  {}",
+                                    relative_time_label(at),
+                                    run.status,
+                                    ui::truncate_middle(
+                                        run.stop_reason.as_deref().unwrap_or("no reason recorded"),
+                                        120,
+                                    )
+                                )));
+                            }
+                        }
+                    } else {
+                        logs_lines.push(Line::from("No coordinator run has been recorded yet."));
+                        logs_lines.push(Line::from(
+                            "Next: prepare a PRD task, then press r to start the coordinator.",
+                        ));
+                    }
+                } else if let Some(ref t) = selected_task {
+                    panel_title = "LIVE LOGS";
                     let full_task = state
                         .load_coordinator_storage_snapshot()
                         .ok()
@@ -2068,6 +2172,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                         }
                     }
                 } else {
+                    panel_title = "LIVE LOGS";
                     if coordinator_live_empty {
                         logs_lines.extend(coordinator_live_empty_lines(
                             true,
@@ -2084,7 +2189,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                     }
                 }
                 let logs_para = Paragraph::new(logs_lines)
-                    .block(panel("LIVE LOGS"))
+                    .block(panel(panel_title))
                     .wrap(Wrap { trim: true });
                 f.render_widget(logs_para, body_chunks[2]);
             }

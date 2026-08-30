@@ -181,10 +181,14 @@ const Layout: React.FC = () => {
   const lastRunStatus = status?.last_run_status;
   const stopReason = status?.last_run_stop_reason ?? undefined;
   const idleState =
-    lastRunStatus === 'crashed'
+    lastRunStatus === 'blocked'
+      ? { label: 'Blocked', tone: 'failed' as const, title: stopReason }
+      : lastRunStatus === 'failed' || lastRunStatus === 'crashed'
       ? { label: 'Stopped (error)', tone: 'failed' as const, title: stopReason }
-      : lastRunStatus === 'stopped' || lastRunStatus === 'force_stopping'
+      : lastRunStatus === 'stopped_by_user' || lastRunStatus === 'stopped' || lastRunStatus === 'force_stopping'
         ? { label: 'Stopped', tone: 'todo' as const, title: stopReason }
+        : lastRunStatus === 'success'
+          ? { label: 'Completed', tone: 'merged' as const, title: stopReason }
         : { label: 'Idle', tone: 'todo' as const, title: undefined };
 
   const coordState =

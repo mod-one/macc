@@ -21,6 +21,7 @@ use macc_core::service::coordinator_workflow::{
 };
 use macc_core::service::process_ownership::{ProcessOwnershipGuard, ProcessViewerGuard};
 use macc_core::service::process_ownership_gate::{gate_owner_action, ClientContext};
+use macc_core::service::run_summary::CoordinatorRunSummary;
 use macc_core::tool::{ActionKind, FieldDefault, FieldKind, ToolDescriptor, ToolField};
 use macc_core::{find_project_root, Engine, MaccError, ProjectPaths};
 use serde_json::{Map, Value};
@@ -205,6 +206,7 @@ pub struct AppState {
     pub worktree_status: Option<WorktreeStatus>,
     pub ui_status: Option<UiStatus>,
     pub coordinator_snapshot: Option<CoordinatorTaskSnapshot>,
+    pub coordinator_run_summary: Option<CoordinatorRunSummary>,
     pub coordinator_last_refresh: Option<Instant>,
     pub coordinator_running_command: Option<String>,
     pub coordinator_last_result: Option<String>,
@@ -352,6 +354,7 @@ impl AppState {
             worktree_status: None,
             ui_status: None,
             coordinator_snapshot: None,
+            coordinator_run_summary: None,
             coordinator_last_refresh: None,
             coordinator_running_command: None,
             coordinator_last_result: None,
@@ -929,6 +932,11 @@ impl AppState {
             }
             Err(err) => {
                 self.coordinator_last_result = Some(format_actionable_error(&err));
+            }
+        }
+        if let Some(paths) = self.project_paths.as_ref() {
+            if let Ok(status) = self.engine.get_coordinator_status(paths) {
+                self.coordinator_run_summary = status.last_run_summary;
             }
         }
     }

@@ -115,6 +115,29 @@ export interface ApiFailureReport {
   suggested_fixes: string[];
 }
 
+export interface ApiCoordinatorRunHistoryItem {
+  run_id: string;
+  status: string;
+  started_at: string;
+  stopped_at: string | null;
+  stop_reason: string | null;
+}
+
+export interface ApiCoordinatorRunSummary {
+  run_id: string;
+  status: string;
+  severity: 'info' | 'success' | 'warning' | 'error';
+  headline: string;
+  cause: string;
+  task_id: string | null;
+  error_code: string | null;
+  occurred_at: string;
+  next_action: string;
+  dependent_task_ids: string[];
+  repeated_count: number;
+  recent_runs: ApiCoordinatorRunHistoryItem[];
+}
+
 export interface ApiCoordinatorStatus {
   total: number;
   todo: number;
@@ -133,6 +156,8 @@ export interface ApiCoordinatorStatus {
   last_run_status?: string;
   /** Human-readable reason the most recent run stopped. */
   last_run_stop_reason?: string;
+  /** Durable, run-scoped result used by CLI, TUI and Web. */
+  last_run_summary?: ApiCoordinatorRunSummary;
 }
 
 export interface ApiSelectedTask {

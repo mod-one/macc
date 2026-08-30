@@ -2520,15 +2520,14 @@ pub async fn run_native_control_plane(
             || msg == "force stopped by operator"
         {
             is_clean_exit = true;
-            final_status = if msg == "draining complete" || msg == "graceful stop complete" {
-                "stopped".to_string()
-            } else {
-                "force_stopping".to_string()
-            };
+            final_status = "stopped_by_user".to_string();
         }
     }
 
     let run_result = if is_clean_exit { Ok(()) } else { run_result };
+    let pause_state = crate::coordinator::state_runtime::read_coordinator_pause_file(repo_root)
+        .ok()
+        .flatten();
 
     let result_label = if is_terminal_blocked {
         "blocked"
@@ -2537,14 +2536,10 @@ pub async fn run_native_control_plane(
     } else {
         let is_shutdown = *shutdown_rx.borrow();
         if is_shutdown {
-            "stopped"
+            "stopped_by_user"
         } else if is_clean_exit {
             &final_status
-        } else if crate::coordinator::state_runtime::read_coordinator_pause_file(repo_root)
-            .ok()
-            .flatten()
-            .is_some()
-        {
+        } else if pause_state.is_some() {
             "paused"
         } else {
             "success"
@@ -2582,20 +2577,27 @@ pub async fn run_native_control_plane(
 
     let _ = sqlite.get_active_coordinator_run().map(|run_opt| {
         if let Some(mut r) = run_opt {
+            let stopped_by_signal = *shutdown_rx.borrow();
             r.status = if is_terminal_blocked {
                 "blocked".to_string()
             } else if is_clean_exit {
                 final_status.clone()
             } else if run_result.is_err() {
-                "crashed".to_string()
+                "failed".to_string()
+            } else if stopped_by_signal {
+                "stopped_by_user".to_string()
+            } else if pause_state.is_some() {
+                "paused".to_string()
             } else {
-                "stopped".to_string()
+                "success".to_string()
             };
             r.stopped_at = Some(chrono::Utc::now().to_rfc3339());
             if is_terminal_blocked || (!is_clean_exit && run_result.is_err()) {
                 r.stop_reason = run_result.as_ref().err().map(ToString::to_string);
             } else if is_clean_exit {
                 r.stop_reason = Some(final_status.clone());
+            } else if let Some(pause) = pause_state.as_ref() {
+                r.stop_reason = Some(pause.reason.clone());
             } else {
                 // Normal completion (exit 0): persist the human-readable reason so
                 // it is not lost the way it previously was.
