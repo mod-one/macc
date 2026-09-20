@@ -5,6 +5,71 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::str::FromStr;
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GateVerdict {
+    #[default]
+    Pending,
+    Accepted,
+    Rejected,
+}
+
+impl FromStr for GateVerdict {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "pending" | "unknown" => Ok(Self::Pending),
+            "accepted" | "accept" | "positive" | "passed" => Ok(Self::Accepted),
+            "rejected" | "reject" | "negative" | "not_accepted" | "failed" => Ok(Self::Rejected),
+            other => Err(format!("unknown gate verdict: {other}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct TaskGate {
+    #[serde(default = "default_required_gate_verdict")]
+    pub required_verdict: GateVerdict,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+fn default_required_gate_verdict() -> GateVerdict {
+    GateVerdict::Accepted
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalBlockSource {
+    #[default]
+    Prd,
+    Operator,
+}
+
+fn is_prd_block_source(source: &ExternalBlockSource) -> bool {
+    *source == ExternalBlockSource::Prd
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ExternalTaskBlock {
+    pub reason: String,
+    pub clears_when: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracking_id: Option<String>,
+    #[serde(default, skip_serializing_if = "is_prd_block_source")]
+    pub source: ExternalBlockSource,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ExternalBlockResolution {
+    pub evidence: String,
+    pub resolved_at: String,
+    pub block_reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracking_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct TaskRegistry {
     #[serde(default)]
@@ -58,6 +123,10 @@ pub struct Task {
     pub dependencies: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exclusive_resources: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_on_external: Option<ExternalTaskBlock>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate: Option<TaskGate>,
     #[serde(default, skip_serializing_if = "is_default_task_runtime")]
     pub task_runtime: TaskRuntime,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -213,6 +282,12 @@ pub struct TaskRuntime {
     /// in performer output. Displayed in TUI/WEB coordinator live view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_explanation: Option<String>,
+    /// Verdict produced by a task declared with `gate`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_verdict: Option<GateVerdict>,
+    /// Operator evidence that clears the current external block declaration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_block_resolution: Option<ExternalBlockResolution>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -293,6 +368,10 @@ pub struct PrdTaskInput {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub exclusive_resources: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_on_external: Option<ExternalTaskBlock>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate: Option<TaskGate>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -584,6 +663,24 @@ impl Task {
         })
     }
 
+    /// True when the task was parked by the same-worktree retry path and is
+    /// waiting to be re-dispatched into the worktree it already holds.
+    ///
+    /// A tool that reports `error_with_changes` after committing work is
+    /// requeued to `todo` with its worktree deliberately *kept* (see
+    /// `engine::transitions::apply_state_transitions`), so the retry can resume
+    /// on top of those commits. The dispatcher otherwise skips every `todo`
+    /// task that has a worktree attached, which would make such a task
+    /// permanently unschedulable — it is neither active nor blocked, so no
+    /// recovery path reclaims it either. This predicate is what lets the
+    /// selector tell "parked for retry" apart from "already assigned".
+    pub fn is_awaiting_same_worktree_retry(&self) -> bool {
+        self.workflow_state() == Some(WorkflowState::Todo)
+            && self.runtime_status() == RuntimeStatus::Failed
+            && self.branch().is_some()
+            && self.worktree_path().is_some()
+    }
+
     pub fn task_tool(&self) -> Option<&str> {
         self.tool.as_deref().filter(|tool| !tool.is_empty())
     }
@@ -624,6 +721,25 @@ impl Task {
 
     pub fn dependency_ids(&self) -> Vec<String> {
         self.dependencies.clone()
+    }
+
+    pub fn gate_verdict_satisfies_dependencies(&self) -> bool {
+        self.gate
+            .as_ref()
+            .is_none_or(|gate| self.task_runtime.gate_verdict == Some(gate.required_verdict))
+    }
+
+    pub fn external_block_is_cleared(&self) -> bool {
+        let Some(block) = self.blocked_on_external.as_ref() else {
+            return true;
+        };
+        self.task_runtime
+            .external_block_resolution
+            .as_ref()
+            .is_some_and(|resolution| {
+                resolution.tracking_id == block.tracking_id
+                    && resolution.block_reason == block.reason
+            })
     }
 
     pub fn branch(&self) -> Option<&str> {
@@ -897,6 +1013,28 @@ mod tests {
     #[test]
     fn requires_integrity_pause_false_when_no_error_code() {
         assert!(!requires_integrity_pause(None, true, false));
+    }
+
+    #[test]
+    fn prd_task_deserializes_scheduler_visible_gate_and_external_block() {
+        let task: PrdTaskInput = serde_json::from_value(json!({
+            "id":"GATE-1",
+            "blocked_on_external":{
+                "reason":"observation missing",
+                "clears_when":"report exists",
+                "tracking_id":"GAP-17"
+            },
+            "gate":{"required_verdict":"accepted","description":"release gate"}
+        }))
+        .expect("PRD task");
+
+        assert_eq!(
+            task.blocked_on_external.unwrap().tracking_id.as_deref(),
+            Some("GAP-17")
+        );
+        assert_eq!(task.gate.unwrap().required_verdict, GateVerdict::Accepted);
+        assert!(!task.extra.contains_key("blocked_on_external"));
+        assert!(!task.extra.contains_key("gate"));
     }
 }
 

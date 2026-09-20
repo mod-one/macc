@@ -1,6 +1,7 @@
 use crate::config::CoordinatorConfig;
 use crate::coordinator::managed_command_registry::{
-    list_managed_commands, remove_managed_command, upsert_managed_command,
+    list_managed_commands, managed_command_result_dir, managed_command_result_path,
+    remove_managed_command, upsert_managed_command_with_result,
 };
 use crate::{ensure_embedded_automation_scripts, MaccError, ProjectPaths, Result};
 #[cfg(unix)]
@@ -39,6 +40,7 @@ pub enum CoordinatorManagedCommandPoll {
         success: bool,
         code: Option<i32>,
         elapsed_secs: u64,
+        started_at: String,
     },
 }
 
@@ -99,8 +101,10 @@ pub fn coordinator_start_managed_command_process(
     command: &str,
     args: &[String],
     cfg: Option<&CoordinatorConfig>,
+    client_id: Option<&str>,
 ) -> Result<()> {
-    coordinator_start_managed_command_process_with_pid(paths, command, args, cfg).map(|_| ())
+    coordinator_start_managed_command_process_with_pid(paths, command, args, cfg, client_id)
+        .map(|_| ())
 }
 
 /// Like `coordinator_start_managed_command_process` but also returns the
@@ -110,17 +114,21 @@ pub fn coordinator_start_managed_command_process_with_pid(
     command: &str,
     args: &[String],
     cfg: Option<&CoordinatorConfig>,
+    client_id: Option<&str>,
 ) -> Result<i32> {
     let key = handle_key(paths, command);
-    if let Some(existing) = active_managed_command(paths)? {
+    if let CoordinatorManagedCommandPoll::Running { command, .. } =
+        coordinator_poll_managed_command_process(paths)?
+    {
         return Err(MaccError::Validation(format!(
             "coordinator command '{}' is already running for this project",
-            existing.kind
+            command
         )));
     }
 
-    let (handle, pid) = coordinator_start_command_process_with_pid(paths, command, args, cfg)?;
-    upsert_managed_command(paths, command, pid)?;
+    let (handle, pid) =
+        coordinator_start_command_process_with_pid(paths, command, args, cfg, client_id, true)?;
+    upsert_managed_command_with_result(paths, command, pid)?;
     local_handles_by_root()
         .lock()
         .map_err(|_| MaccError::Validation("coordinator local handle table lock poisoned".into()))?
@@ -153,6 +161,11 @@ pub fn coordinator_poll_managed_command_process(
             }
             CoordinatorProcessPoll::Exited { success, code } => {
                 let _ = remove_managed_command(paths, &record.kind)?;
+                let _ = std::fs::remove_file(managed_command_result_path(
+                    &paths.root,
+                    &record.kind,
+                    record.pid,
+                ));
                 local_handles_by_root()
                     .lock()
                     .map_err(|_| {
@@ -164,6 +177,7 @@ pub fn coordinator_poll_managed_command_process(
                     success,
                     code,
                     elapsed_secs,
+                    started_at: record.started_at,
                 });
             }
         }
@@ -175,12 +189,18 @@ pub fn coordinator_poll_managed_command_process(
             elapsed_secs,
         })
     } else {
+        let result_path = managed_command_result_path(&paths.root, &record.kind, record.pid);
+        let code = std::fs::read_to_string(&result_path)
+            .ok()
+            .and_then(|raw| raw.trim().parse::<i32>().ok());
         let _ = remove_managed_command(paths, &record.kind)?;
+        let _ = std::fs::remove_file(result_path);
         Ok(CoordinatorManagedCommandPoll::Exited {
             command,
-            success: false,
-            code: None,
+            success: code == Some(0),
+            code,
             elapsed_secs,
+            started_at: record.started_at,
         })
     }
 }
@@ -208,16 +228,22 @@ pub fn coordinator_poll_managed_command_state(
             success,
             code,
             elapsed_secs,
+            started_at,
         } => {
             if success {
-                let finish_reason = read_dispatch_limit_reason(paths);
+                let finish_reason = if command == "run" {
+                    read_dispatch_limit_reason(paths, &started_at)
+                } else {
+                    None
+                };
                 return Ok(CoordinatorManagedCommandState::Succeeded {
                     command,
                     elapsed_secs,
                     finish_reason,
                 });
             }
-            let failure = crate::service::diagnostic::analyze_last_failure(paths)?;
+            let failure =
+                crate::service::diagnostic::analyze_last_failure_since(paths, &started_at)?;
             let reason = failure
                 .as_ref()
                 .map(|f| f.message.clone())
@@ -277,8 +303,24 @@ pub fn coordinator_start_command_process(
     command: &str,
     args: &[String],
     _cfg: Option<&CoordinatorConfig>,
+    client_id: Option<&str>,
 ) -> Result<CoordinatorProcessHandle> {
-    coordinator_start_command_process_with_pid(paths, command, args, _cfg).map(|(handle, _)| handle)
+    coordinator_start_command_process_with_pid(paths, command, args, _cfg, client_id, false)
+        .map(|(handle, _)| handle)
+}
+
+/// Propagate the spawning client's ownership identity to the child process.
+///
+/// Without this the child computes a fresh `cli-<pid>` identity and is rejected
+/// by the project lease its own parent holds (`gate_owner_action`), so a TUI or
+/// web client that has claimed the lease can never start a coordinator run.
+///
+/// A blank identity is treated as absent rather than exported as an empty
+/// string, which would fail the gate just as surely but far less legibly.
+fn apply_client_identity_env(cmd: &mut Command, client_id: Option<&str>) {
+    if let Some(client_id) = client_id.map(str::trim).filter(|id| !id.is_empty()) {
+        cmd.env("MACC_CLIENT_ID", client_id);
+    }
 }
 
 fn coordinator_start_command_process_with_pid(
@@ -286,6 +328,8 @@ fn coordinator_start_command_process_with_pid(
     command: &str,
     args: &[String],
     _cfg: Option<&CoordinatorConfig>,
+    client_id: Option<&str>,
+    persist_exit_code: bool,
 ) -> Result<(CoordinatorProcessHandle, i32)> {
     let root = &paths.root;
     let mut cmd = if command == "run" {
@@ -319,6 +363,12 @@ fn coordinator_start_command_process_with_pid(
             .env("REPO_DIR", root);
         cmd
     };
+
+    apply_client_identity_env(&mut cmd, client_id);
+
+    if persist_exit_code {
+        cmd = wrap_command_with_exit_record(cmd, root, command)?;
+    }
 
     cmd.env("MACC_INTERNAL_INVOCATION", "1")
         .stdin(Stdio::null())
@@ -360,6 +410,68 @@ fn coordinator_start_command_process_with_pid(
         .map_err(|_| MaccError::Validation("coordinator process table lock poisoned".into()))?;
     table.insert(id, ManagedCoordinatorProcess { child });
     Ok((handle, pid))
+}
+
+fn wrap_command_with_exit_record(
+    command: Command,
+    root: &std::path::Path,
+    kind: &str,
+) -> Result<Command> {
+    let result_dir = managed_command_result_dir(root);
+    std::fs::create_dir_all(&result_dir).map_err(|e| MaccError::Io {
+        path: result_dir.to_string_lossy().into(),
+        action: "create managed command result directory".into(),
+        source: e,
+    })?;
+
+    let program = command.get_program().to_os_string();
+    let args = command
+        .get_args()
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    let current_dir = command.get_current_dir().map(ToOwned::to_owned);
+    let envs = command
+        .get_envs()
+        .map(|(key, value)| (key.to_os_string(), value.map(ToOwned::to_owned)))
+        .collect::<Vec<_>>();
+
+    let safe_kind: String = kind
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let mut wrapped = Command::new("/bin/sh");
+    if let Some(current_dir) = current_dir {
+        wrapped.current_dir(current_dir);
+    }
+    for (key, value) in envs {
+        if let Some(value) = value {
+            wrapped.env(key, value);
+        } else {
+            wrapped.env_remove(key);
+        }
+    }
+    wrapped
+        .env("MACC_MANAGED_RESULT_DIR", result_dir)
+        .env("MACC_MANAGED_COMMAND_KIND", safe_kind)
+        .arg("-c")
+        .arg(
+            r#""$@"
+status=$?
+result_path="$MACC_MANAGED_RESULT_DIR/$MACC_MANAGED_COMMAND_KIND-$$.exit"
+tmp_path="$result_path.tmp"
+printf '%s\n' "$status" > "$tmp_path" && mv "$tmp_path" "$result_path"
+exit "$status""#,
+        )
+        .arg("macc-managed-command")
+        .arg(program)
+        .args(args);
+    Ok(wrapped)
 }
 
 pub fn coordinator_poll_command_process(
@@ -561,7 +673,7 @@ fn pid_is_alive(pid: i32) -> bool {
 /// Check whether the most recent coordinator run ended because the dispatch
 /// limit was reached. Returns a user-friendly message if so, or `None` for
 /// a normal full-completion.
-fn read_dispatch_limit_reason(paths: &ProjectPaths) -> Option<String> {
+fn read_dispatch_limit_reason(paths: &ProjectPaths, started_at: &str) -> Option<String> {
     use crate::coordinator_storage::{
         CoordinatorSnapshot, CoordinatorStorage, CoordinatorStoragePaths, JsonStorage,
         SqliteStorage,
@@ -573,9 +685,13 @@ fn read_dispatch_limit_reason(paths: &ProjectPaths) -> Option<String> {
     } else {
         JsonStorage::new(storage_paths).load_snapshot().ok()?
     };
-    // Scan the last 20 events newest-first for the dispatch_limit_reached marker.
+    let started_at = chrono::DateTime::parse_from_rfc3339(started_at).ok()?;
+    // Scan recent events from this command only for the dispatch-limit marker.
     for event in snapshot.events.iter().rev().take(20) {
-        if event.event_type == "dispatch_limit_reached" {
+        let in_scope = chrono::DateTime::parse_from_rfc3339(&event.ts)
+            .ok()
+            .is_some_and(|timestamp| timestamp >= started_at);
+        if in_scope && event.event_type == "dispatch_limit_reached" {
             let detail = event.message().unwrap_or("").to_string();
             let dispatched = detail.split_whitespace().find_map(|s| {
                 s.strip_prefix("run_total=")
@@ -597,4 +713,133 @@ fn read_dispatch_limit_reason(paths: &ProjectPaths) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod client_identity_tests {
+    use super::apply_client_identity_env;
+    use std::process::Command;
+
+    fn client_identity_of(cmd: &Command) -> Option<String> {
+        cmd.get_envs().find_map(|(k, v)| {
+            (k == "MACC_CLIENT_ID").then(|| {
+                v.expect("MACC_CLIENT_ID must be set, not cleared")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+        })
+    }
+
+    #[test]
+    fn client_identity_is_exported_to_the_child() {
+        let mut cmd = Command::new("true");
+        apply_client_identity_env(&mut cmd, Some("tui-18d0428a72195943"));
+        assert_eq!(
+            client_identity_of(&cmd).as_deref(),
+            Some("tui-18d0428a72195943"),
+            "the child must inherit the spawning client's identity or it cannot \
+             pass the project lease gate its parent already passed"
+        );
+    }
+
+    #[test]
+    fn surrounding_whitespace_is_trimmed() {
+        let mut cmd = Command::new("true");
+        apply_client_identity_env(&mut cmd, Some("  tui-abc  "));
+        assert_eq!(client_identity_of(&cmd).as_deref(), Some("tui-abc"));
+    }
+
+    #[test]
+    fn absent_identity_sets_nothing() {
+        let mut cmd = Command::new("true");
+        apply_client_identity_env(&mut cmd, None);
+        assert_eq!(client_identity_of(&cmd), None);
+    }
+
+    #[test]
+    fn blank_identity_is_not_exported_as_empty() {
+        for blank in ["", "   ", "\t"] {
+            let mut cmd = Command::new("true");
+            apply_client_identity_env(&mut cmd, Some(blank));
+            assert_eq!(
+                client_identity_of(&cmd),
+                None,
+                "a blank identity must be treated as absent, not exported as an \
+                 empty string that fails the gate opaquely (input {blank:?})"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod managed_command_result_tests {
+    use super::{
+        coordinator_poll_managed_command_process, wrap_command_with_exit_record,
+        CoordinatorManagedCommandPoll,
+    };
+    use crate::coordinator::managed_command_registry::{
+        managed_command_result_dir, managed_command_result_path, upsert_managed_command_with_result,
+    };
+    use crate::ProjectPaths;
+
+    #[test]
+    fn fallback_poll_reads_persisted_exit_code() {
+        let root = tempfile::tempdir().expect("temp project");
+        let paths = ProjectPaths::from_root(root.path());
+        let pid = 999_999;
+        upsert_managed_command_with_result(&paths, "reconcile", pid).expect("managed record");
+        std::fs::create_dir_all(managed_command_result_dir(root.path())).expect("result directory");
+        std::fs::write(
+            managed_command_result_path(root.path(), "reconcile", pid),
+            "0\n",
+        )
+        .expect("exit result");
+
+        let poll = coordinator_poll_managed_command_process(&paths).expect("poll");
+        assert!(matches!(
+            poll,
+            CoordinatorManagedCommandPoll::Exited {
+                command,
+                success: true,
+                code: Some(0),
+                ..
+            } if command == "reconcile"
+        ));
+    }
+
+    #[test]
+    fn fallback_poll_reports_missing_expected_result_as_unknown_failure() {
+        let root = tempfile::tempdir().expect("temp project");
+        let paths = ProjectPaths::from_root(root.path());
+        let pid = 999_999;
+        upsert_managed_command_with_result(&paths, "reconcile", pid).expect("managed record");
+
+        let poll = coordinator_poll_managed_command_process(&paths).expect("poll");
+        assert!(matches!(
+            poll,
+            CoordinatorManagedCommandPoll::Exited {
+                success: false,
+                code: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn wrapper_persists_the_real_child_exit_code_before_exit() {
+        let root = tempfile::tempdir().expect("temp project");
+        let mut command = std::process::Command::new("/bin/sh");
+        command.arg("-c").arg("exit 7");
+        let mut wrapped =
+            wrap_command_with_exit_record(command, root.path(), "reconcile").expect("wrap command");
+        let mut child = wrapped.spawn().expect("spawn wrapped command");
+        let pid = child.id() as i32;
+        let status = child.wait().expect("wait for wrapper");
+
+        assert_eq!(status.code(), Some(7));
+        let persisted =
+            std::fs::read_to_string(managed_command_result_path(root.path(), "reconcile", pid))
+                .expect("persisted exit code");
+        assert_eq!(persisted.trim(), "7");
+    }
 }

@@ -4,6 +4,7 @@ use crate::coordinator_storage::{
     CoordinatorSnapshot, CoordinatorStorage, CoordinatorStoragePaths, JsonStorage, SqliteStorage,
 };
 use crate::{ProjectPaths, Result};
+use chrono::{DateTime, Utc};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum FailureKind {
@@ -26,45 +27,131 @@ pub struct FailureReport {
 }
 
 pub fn analyze_last_failure(paths: &ProjectPaths) -> Result<Option<FailureReport>> {
-    if let Some(pause) = state_runtime::read_coordinator_pause_file(&paths.root)? {
-        let message = if pause.reason.is_empty() {
-            "Coordinator paused due to a blocking error.".to_string()
-        } else {
-            pause.reason.clone()
-        };
-        return Ok(Some(build_failure_report(
-            message,
-            Some(pause.task_id),
-            Some(pause.phase),
-            "pause_file",
-            true,
-            Some("pause".to_string()),
-        )));
-    }
-
     let storage_paths = CoordinatorStoragePaths::from_project_paths(paths);
     let sqlite = SqliteStorage::new(storage_paths.clone());
+    let since = sqlite
+        .get_latest_coordinator_run()?
+        .and_then(|run| parse_timestamp(&run.started_at));
+    analyze_failure(paths, since, storage_paths, sqlite)
+}
+
+/// Analyze only failures emitted during the managed command being polled.
+/// This prevents a completed reconcile/sync from inheriting an unrelated error
+/// from an earlier coordinator run.
+pub fn analyze_last_failure_since(
+    paths: &ProjectPaths,
+    started_at: &str,
+) -> Result<Option<FailureReport>> {
+    let storage_paths = CoordinatorStoragePaths::from_project_paths(paths);
+    let sqlite = SqliteStorage::new(storage_paths.clone());
+    let Some(started_at) = parse_timestamp(started_at) else {
+        return Ok(None);
+    };
+    analyze_failure(paths, Some(started_at), storage_paths, sqlite)
+}
+
+fn analyze_failure(
+    paths: &ProjectPaths,
+    since: Option<DateTime<Utc>>,
+    storage_paths: CoordinatorStoragePaths,
+    sqlite: SqliteStorage,
+) -> Result<Option<FailureReport>> {
+    if let Some(pause) = state_runtime::read_coordinator_pause_file(&paths.root)? {
+        if timestamp_is_in_scope(&pause.updated_at, since.as_ref()) {
+            let message = if pause.reason.is_empty() {
+                "Coordinator paused due to a blocking error.".to_string()
+            } else {
+                pause.reason.clone()
+            };
+            return Ok(Some(build_failure_report(
+                message,
+                Some(pause.task_id),
+                Some(pause.phase),
+                "pause_file",
+                true,
+                Some("pause".to_string()),
+            )));
+        }
+    }
+
     let snapshot: CoordinatorSnapshot = if sqlite.has_snapshot_data()? {
         sqlite.load_snapshot()?
     } else {
         JsonStorage::new(storage_paths).load_snapshot()?
     };
 
-    if let Some(report) = report_from_events(&snapshot.events) {
+    if let Some(report) = report_from_events(&snapshot.events, since.as_ref()) {
         return Ok(Some(report));
     }
 
-    let logs = crate::service::logs::read_log_content(paths, "coordinator", None, None)
-        .unwrap_or_default();
-    if let Some(report) = report_from_logs(&logs) {
-        return Ok(Some(report));
+    // Legacy logs do not carry a reliable structured timestamp on every line.
+    // They remain a fallback only for unscoped legacy state; using them for a
+    // managed command would reintroduce cross-run error attribution.
+    if since.is_none() {
+        let logs = crate::service::logs::read_log_content(paths, "coordinator", None, None)
+            .unwrap_or_default();
+        if let Some(report) = report_from_logs(&logs) {
+            return Ok(Some(report));
+        }
     }
 
     Ok(None)
 }
 
-fn report_from_events(events: &[CoordinatorEventRecord]) -> Option<FailureReport> {
+fn parse_timestamp(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|value| value.with_timezone(&Utc))
+}
+
+fn timestamp_is_in_scope(value: &str, since: Option<&DateTime<Utc>>) -> bool {
+    since.is_none_or(|since| parse_timestamp(value).is_some_and(|value| value >= *since))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::report_from_events;
+    use crate::coordinator::CoordinatorEventRecord;
+    use chrono::{DateTime, Utc};
+    use serde_json::json;
+
+    fn event(ts: &str, message: &str) -> CoordinatorEventRecord {
+        serde_json::from_value(json!({
+            "event_id": format!("event-{ts}"),
+            "ts": ts,
+            "type": "command_error",
+            "status": "failed",
+            "severity": "blocking",
+            "task_id": "-",
+            "payload": {"message": message}
+        }))
+        .expect("event")
+    }
+
+    #[test]
+    fn scoped_analysis_never_attributes_an_older_failure() {
+        let events = vec![event("2026-08-29T18:00:00Z", "old coordinator run failed")];
+        let since = DateTime::parse_from_rfc3339("2026-08-30T00:48:59Z")
+            .expect("timestamp")
+            .with_timezone(&Utc);
+        assert!(report_from_events(&events, Some(&since)).is_none());
+        assert_eq!(
+            report_from_events(&events, None)
+                .expect("legacy unscoped failure")
+                .message,
+            "old coordinator run failed"
+        );
+    }
+}
+
+fn report_from_events(
+    events: &[CoordinatorEventRecord],
+    since: Option<&DateTime<Utc>>,
+) -> Option<FailureReport> {
     for raw in events.iter().rev() {
+        if !timestamp_is_in_scope(&raw.ts, since) {
+            continue;
+        }
         let event_type = raw.event_type.as_str();
         let status = raw.status.as_str();
         let severity = raw.severity().unwrap_or_default();

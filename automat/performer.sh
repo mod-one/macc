@@ -5,6 +5,7 @@ usage() {
   cat <<'EOF'
 Usage:
   performer.sh --repo <path> --worktree <path> --task-id <id> --tool <tool> --registry <path> --prd <path>
+               [--resume-attempt <n>] [--base-ref <ref>]
 
 Env vars:
   PERFORMER_MAX_ITERATIONS  Max tasks to run before stopping (default: 50)
@@ -19,6 +20,12 @@ task_id=""
 tool=""
 registry=""
 prd=""
+# Continuation support: when the coordinator re-dispatches a task that was
+# parked after reporting `error_with_changes`, it passes the attempt number and
+# the base ref so the prompt can describe what was already committed instead of
+# asking the tool to start over on top of its own half-finished work.
+resume_attempt="${MACC_RESUME_ATTEMPT:-0}"
+base_ref="${MACC_BASE_REF:-}"
 performer_log_dir=""
 task_log_file=""
 EVENT_FILE="${COORD_EVENTS_FILE:-}"
@@ -58,6 +65,8 @@ while [[ $# -gt 0 ]]; do
     --tool) tool="$2"; shift 2 ;;
     --registry) registry="$2"; shift 2 ;;
     --prd) prd="$2"; shift 2 ;;
+    --resume-attempt) resume_attempt="$2"; shift 2 ;;
+    --base-ref) base_ref="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; usage; exit 1 ;;
   esac
@@ -624,10 +633,85 @@ pending_task_count() {
   jq -r "${JQ_ITEMS} | map(select(.passes != true)) | length" "$prd"
 }
 
+# Read the explanation this task recorded on its previous attempt.
+#
+# The performer's own task log is the authoritative local record: it holds both
+# the raw `MACC_TASK_RESULT_EXP:` line and the normalised `- Explanation:` line
+# it writes after each attempt. Reading it here keeps the continuation prompt
+# self-contained -- no dependency on coordinator state round-tripping back.
+previous_result_explanation() {
+  local id="$1"
+  local path
+  path="$(task_log_path "$id")"
+  [[ -f "$path" ]] || return 0
+  grep -E '^- Explanation:' "$path" | tail -n 1 | sed -E 's/^- Explanation:[[:space:]]*//'
+}
+
+# Summarise what the previous attempt already committed on this branch.
+build_prior_work_summary() {
+  local base="$1"
+  [[ -n "$base" ]] || return 0
+  git rev-parse --verify "$base" >/dev/null 2>&1 || return 0
+
+  local commits stat
+  commits="$(git log --oneline "${base}..HEAD" 2>/dev/null || true)"
+  [[ -n "$commits" ]] || return 0
+  stat="$(git diff --stat "${base}..HEAD" 2>/dev/null | tail -n 40 || true)"
+
+  printf 'Commits already made on this branch (not yet merged into %s):\n\n%s\n\nFiles changed:\n\n%s\n' \
+    "$base" "$commits" "$stat"
+}
+
+build_continuation_section() {
+  local task_id="$1"
+  local prior_exp prior_work
+  prior_exp="$(previous_result_explanation "$task_id")"
+  prior_work="$(build_prior_work_summary "$base_ref")"
+
+  cat <<CONT
+
+## CONTINUATION — this task was already started
+
+This is attempt ${resume_attempt} of this task. A previous attempt implemented
+part of it, committed that work, and then reported that it could not finish.
+The commits below are already on this branch and are YOURS -- they are not
+someone else's work and they are not merged yet.
+
+Reason the previous attempt stopped:
+${prior_exp:-(not recorded)}
+
+${prior_work:-(no commits found on this branch; treat the task as unstarted)}
+
+Note: the base branch (${base_ref:-unknown}) may have advanced since those
+commits were made, so files you touched may look different from what you left.
+
+How to proceed:
+1) FIRST assess the current state: read the committed work above and check what
+   the task still requires. Do not re-derive the implementation from scratch.
+2) Then complete ONLY the remaining work. Do not revert, rewrite, or duplicate
+   what is already committed and correct.
+3) If the remaining gap is a pre-existing repository problem outside this
+   task's scope (for example an unrelated failing test or build target), the
+   task is DONE: report success and state the out-of-scope issue in your
+   explanation. Do not report an error for problems this task did not cause.
+4) If the previously committed work is genuinely unusable and must be discarded,
+   do NOT quietly rewrite it -- stop and report:
+   MACC_TASK_RESULT_EXP: prior work unsalvageable: <reason>
+   MACC_TASK_RESULT: error_without_changes
+   so the coordinator can reset the branch and restart the task cleanly.
+CONT
+}
+
 build_prompt() {
   local task_json="$1"
   local task_id="$2"
   local task_title="$3"
+  local continuation=""
+  local prompt_closing_line="Now implement the task !"
+  if [[ "${resume_attempt:-0}" =~ ^[0-9]+$ ]] && (( resume_attempt > 0 )); then
+    continuation="$(build_continuation_section "$task_id")"
+    prompt_closing_line="Now assess the committed work above, then finish the remaining task !"
+  fi
   cat <<PROMPT
 
 Context:
@@ -637,6 +721,7 @@ Context:
 
 Task (JSON):
 ${task_json}
+${continuation}
 
 Instructions:
 1) Implement ONLY the task above.
@@ -654,11 +739,14 @@ Instructions:
    - MACC_TASK_RESULT: already_satisfied
    - MACC_TASK_RESULT: error_with_changes   (if you started work but cannot finish)
    - MACC_TASK_RESULT: error_without_changes (if you could not start or make any progress)
+   - MACC_TASK_RESULT: precondition_unmet (if execution is correct but a required gate or external condition is not met; never retryable)
 11) Use already_satisfied only when you verified the task is already done and can cite the evidence briefly.
-12) Use error_with_changes or error_without_changes when you cannot complete the task (sandbox failures, environment issues, missing dependencies, permission errors, etc.). Include a brief explanation of why on the line before the marker. The explanation must start with "MACC_TASK_RESULT_EXP:".
-13) If you finish successfully but forget the marker, the runner will infer the result from repository state; still print the marker explicitly.
+12) Use error_with_changes or error_without_changes ONLY when THIS task could not be completed because execution malfunctioned (sandbox failures, environment issues, permission errors, etc.). Use precondition_unmet instead when stopping is the task's correct specified behavior. All three require a brief "MACC_TASK_RESULT_EXP:" line.
+13) Pre-existing repository problems that this task did not cause and is not scoped to fix are NOT a reason to report an error. If a repo-wide check (test suite, build, lint) fails only in areas unrelated to this task, and this task's own work is complete and verified, report success and note the unrelated failures in your explanation. Judge this task by its own acceptance criteria, not by the health of the whole repository.
+14) If you finish successfully but forget the marker, the runner will infer the result from repository state; still print the marker explicitly.
+15) If the task JSON contains `gate`, also print exactly one `MACC_TASK_GATE_VERDICT: accepted|rejected|pending` line. A successful task execution does not imply an accepted gate verdict.
 
-Now implement the task !
+${prompt_closing_line}
 PROMPT
 }
 
@@ -673,6 +761,7 @@ extract_task_result_marker() {
     already_satisfied|already_done|noop_success) printf '%s' "already_satisfied" ;;
     error_with_changes) printf '%s' "error_with_changes" ;;
     error_without_changes|error|failed) printf '%s' "error_without_changes" ;;
+    precondition_unmet|blocked) printf '%s' "precondition_unmet" ;;
     *) printf '%s' "" ;;
   esac
 }
@@ -682,6 +771,57 @@ extract_task_result_exp() {
   local raw=""
   raw="$(grep -E 'MACC_TASK_RESULT_EXP:' "$output_file" | tail -n 1 | sed -E 's/^.*MACC_TASK_RESULT_EXP:[[:space:]]*//')"
   printf '%s' "$raw" | tr -d '\r' | xargs
+}
+
+extract_task_gate_verdict() {
+  local output_file="$1"
+  local raw=""
+  raw="$(grep -E 'MACC_TASK_GATE_VERDICT:' "$output_file" | tail -n 1 | sed -E 's/^.*MACC_TASK_GATE_VERDICT:[[:space:]]*//')"
+  raw="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | tr '-' '_' | tr -d '\r' | xargs)"
+  case "$raw" in
+    accepted|rejected|pending) printf '%s' "$raw" ;;
+    not_accepted) printf '%s' "rejected" ;;
+    *) printf '%s' "" ;;
+  esac
+}
+
+# A terminal `error_*` result without an explanation leaves the coordinator --
+# and the operator, and any later continuation attempt -- with no record of why
+# the tool stopped. The prompt requires `MACC_TASK_RESULT_EXP:`; when the tool
+# omits it anyway, substitute an explicit placeholder rather than propagating an
+# empty string, so the gap is visible instead of silent.
+resolve_task_result_exp() {
+  local output_file="$1"
+  local result_kind="$2"
+  local exp=""
+  exp="$(extract_task_result_exp "$output_file")"
+  if [[ -z "$exp" && ( "$result_kind" == error_* || "$result_kind" == "precondition_unmet" ) ]]; then
+    # A terminal error with no explanation is not accepted as-is: the tool's
+    # own account is the only record of why it stopped, and the continuation
+    # prompt for the next attempt is built from it. Substitute an explicit
+    # statement of the omission so the failure is never unexplained, and make
+    # the contract breach visible in the log and on stderr.
+    exp="(no explanation provided: the tool reported ${result_kind} without the required MACC_TASK_RESULT_EXP line)"
+    echo "Warning: ${result_kind} reported without MACC_TASK_RESULT_EXP" >&2
+    log_task_line "- Warning: ${result_kind} reported without MACC_TASK_RESULT_EXP"
+  fi
+  printf '%s' "$exp"
+}
+
+# Reject a terminal result whose contract is incomplete.
+#
+# `error_*` markers must carry MACC_TASK_RESULT_EXP. The check is deliberately
+# non-fatal: refusing to emit the terminal event at all would leave the
+# coordinator with no record of the task's outcome, which is strictly worse
+# than an error with a stated-missing explanation (see the fatal-on-rejection
+# note on the "done" path below). Returns 1 so callers can log the breach.
+validate_terminal_result_contract() {
+  local output_file="$1"
+  local result_kind="$2"
+  [[ "$result_kind" == error_* || "$result_kind" == "precondition_unmet" ]] || return 0
+  local raw
+  raw="$(extract_task_result_exp "$output_file")"
+  [[ -n "$raw" ]]
 }
 
 has_committable_changes() {
@@ -801,11 +941,57 @@ run_tool() {
     local result_kind=""
     local changed="false"
     result_kind="$(detect_success_result_kind "$output_capture")"
+    if [[ "$result_kind" == error_* || "$result_kind" == "precondition_unmet" ]]; then
+      # The tool process exited 0, but emitted an explicit error result marker
+      # This is a failure or an intentional terminal block, not a successful
+      # completion. It must NOT be marked passed.
+      if [[ -z "$LAST_ERROR_CODE" ]]; then
+        if [[ "$result_kind" == "precondition_unmet" ]]; then
+          set_last_error "E903" "precondition" "task precondition is not met"
+        else
+          set_last_error "E101" "runner" "tool reported ${result_kind}"
+        fi
+      fi
+      local result_exp=""
+      result_exp="$(resolve_task_result_exp "$output_capture" "$result_kind")"
+      must_emit_performer_event "phase_result" "$CURRENT_PHASE" "failed" "$(jq -nc \
+        --arg attempt "$attempt" \
+        --arg result_kind "$result_kind" \
+        --arg code "$LAST_ERROR_CODE" \
+        --arg origin "$LAST_ERROR_ORIGIN" \
+        --arg message "$LAST_ERROR_MESSAGE" \
+        --arg result_exp "$result_exp" \
+        '({
+          attempt:($attempt|tonumber?),
+          result_kind:$result_kind,
+          exit_status:0
+        }
+        + (if $code       != "" then {error_code:$code}       else {} end)
+        + (if $origin     != "" then {origin:$origin}         else {} end)
+        + (if $message    != "" then {message:$message}       else {} end)
+        + (if $result_exp != "" then {result_exp:$result_exp} else {} end))')"
+      log_task_line "- Result kind: ${result_kind}"
+      if [[ -n "$result_exp" ]]; then
+        log_task_line "- Explanation: ${result_exp}"
+      fi
+      log_task_line ""
+      log_task_line "- Exit status: 0 (failed due to ${result_kind})"
+      log_task_line ""
+      rm -f "$output_capture"
+      return 1
+    fi
     if [[ "$result_kind" == "success_with_changes" ]]; then
       changed="true"
     fi
     local result_exp=""
-    result_exp="$(extract_task_result_exp "$output_capture")"
+    result_exp="$(resolve_task_result_exp "$output_capture" "$result_kind")"
+    local gate_verdict=""
+    gate_verdict="$(extract_task_gate_verdict "$output_capture")"
+    if ! validate_terminal_result_contract "$output_capture" "$result_kind"; then
+      emit_performer_event "contract_violation" "$CURRENT_PHASE" "warning" "$(jq -nc \
+        --arg kind "$result_kind" \
+        '{violation:"missing_result_explanation", result_kind:$kind}')" || true
+    fi
     # Build the payload additively: optional string fields are merged in only
     # when non-empty. Do NOT use `field:($x|select(length>0))` inside the object
     # literal — jq's `select` yields `empty` for an empty string, and a field
@@ -826,6 +1012,7 @@ run_tool() {
       --arg result_kind "$result_kind" \
       --argjson changed "$changed" \
       --arg result_exp "$result_exp" \
+      --arg gate_verdict "$gate_verdict" \
       '({
         attempt:($attempt|tonumber?),
         changed:$changed,
@@ -837,7 +1024,8 @@ run_tool() {
                  end)
       }
       + (if $result_kind != "" then {result_kind:$result_kind} else {} end)
-      + (if $result_exp  != "" then {result_exp:$result_exp}  else {} end))')"; then
+      + (if $result_exp  != "" then {result_exp:$result_exp}  else {} end)
+      + (if $gate_verdict != "" then {gate_verdict:$gate_verdict} else {} end))')"; then
       echo "Error: failed to persist terminal phase_result event (status=done); refusing to mark task passed" >&2
       log_task_line "- Exit status: ${status}"
       exit 1
@@ -846,6 +1034,9 @@ run_tool() {
     if [[ -n "$result_exp" ]]; then
       log_task_line "- Explanation: ${result_exp}"
     fi
+    if [[ -n "$gate_verdict" ]]; then
+      log_task_line "- Gate verdict: ${gate_verdict}"
+    fi
   else
     # RL-PERFORMER-009: classify rate-limit signals before falling back to E101.
     detect_rate_limit "$output_capture"
@@ -853,7 +1044,7 @@ run_tool() {
       set_last_error "E101" "runner" "runner exited non-zero"
     fi
     local result_exp=""
-    result_exp="$(extract_task_result_exp "$output_capture")"
+    result_exp="$(resolve_task_result_exp "$output_capture" "error_runner_exit")"
     # Same additive-merge pattern as the success path above: never let an empty
     # optional field collapse the whole object (which would drop error_code and
     # cause the failure to be misclassified).
@@ -975,14 +1166,48 @@ performer_session_key() {
   fi
 }
 
-# Read the current session ID from tool-sessions.json for this worktree/tool.
+# Read an available session ID from tool-sessions.json for this tool from the UUID pool.
 performer_read_session_id() {
-  local key
-  key="$(performer_session_key)"
   [[ -f "$performer_session_state_file" ]] || { echo ""; return 0; }
-  jq -r --arg tool "$tool" --arg key "$key" '
-    .tools[$tool].sessions[$key].session_id // empty
-  ' "$performer_session_state_file" 2>/dev/null || echo ""
+  local sids
+  sids="$(jq -r --arg tool "$tool" '
+    (.tools[$tool].sessions // {}) | to_entries[] |
+    select(
+      (.value | type) == "object" and
+      (.value.session_id == null) and
+      ((.value.status // "available") != "active")
+    ) |
+    .key
+  ' "$performer_session_state_file" 2>/dev/null)"
+  local sid
+  while IFS= read -r sid; do
+    [[ -n "$sid" ]] && { echo "$sid"; return 0; }
+  done <<< "$sids"
+
+  # Also check sessions marked active whose owner PID has died
+  sids="$(jq -r --arg tool "$tool" '
+    (.tools[$tool].sessions // {}) | to_entries[] |
+    select(
+      (.value | type) == "object" and
+      (.value.session_id == null) and
+      ((.value.status // "available") == "active")
+    ) |
+    .key + "\t" + ((.value.owner_pid // "")|tostring)
+  ' "$performer_session_state_file" 2>/dev/null)"
+  local line entry_sid entry_pid
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    entry_sid="${line%%$'\t'*}"
+    entry_pid="${line#*$'\t'}"
+    if [[ -n "$entry_pid" && "$entry_pid" =~ ^[0-9]+$ ]]; then
+      if ! kill -0 "$entry_pid" 2>/dev/null; then
+        echo "$entry_sid"
+        return 0
+      fi
+    fi
+  done <<< "$sids"
+
+  echo ""
 }
 
 # Initialise performer_session_id from tool-sessions.json.

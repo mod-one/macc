@@ -24,18 +24,21 @@ pub(super) async fn prepare_clean_worktree(
     if !crate::git::clean_fd_async(worktree_path).await? && !options.tag_abandoned {
         return Ok(Some("clean_fd"));
     }
+    // A plain checkout fails when the base branch is already checked out in
+    // another worktree -- normally the operator's. Detach instead.
+    //
+    // There is deliberately no `git checkout -B` step here. `-B` overrides
+    // git's "already used by worktree" guard and puts the same branch in two
+    // worktrees at once, after which a commit in one silently moves the other's
+    // HEAD, and ref-publication has to guess which checkout is authoritative.
+    // Detaching reaches the same commit with none of that.
+    // The worktree is moved onto the base commit by the `reset --hard
+    // <base_branch>` below, after the fetch; detaching here only needs to get
+    // HEAD off whatever branch it held.
     if !crate::git::checkout_async(worktree_path, base_branch, options.tag_abandoned).await?
-        && !crate::git::checkout_reset_branch_async(
-            worktree_path,
-            base_branch,
-            options.tag_abandoned,
-        )
-        .await?
+        && !crate::git::checkout_detach_async(worktree_path).await?
     {
-        // Base branch may be checked out in the main worktree; detach HEAD as fallback.
-        if !crate::git::checkout_detach_async(worktree_path).await? {
-            return Ok(Some("checkout_base_branch"));
-        }
+        return Ok(Some("checkout_base_branch"));
     }
     if options.fetch_remote {
         if !crate::git::git_remote_exists_async(worktree_path, "origin").await? {

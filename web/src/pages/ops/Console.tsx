@@ -65,6 +65,16 @@ function fmtTime(seconds: number): string {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
+function relativeTime(timestamp: string): string {
+  const parsed = new Date(timestamp).getTime();
+  if (!Number.isFinite(parsed)) return timestamp;
+  const seconds = Math.max(0, Math.floor((Date.now() - parsed) / 1_000));
+  if (seconds < 60) return `${seconds}s ago`;
+  if (seconds < 3_600) return `${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86_400) return `${Math.floor(seconds / 3_600)}h ago`;
+  return `${Math.floor(seconds / 86_400)}d ago`;
+}
+
 /* ── Per-worktree live log stream hook ───────────────────────── */
 function useWorktreeStream(worktreeId: string, paused: boolean) {
   const [logs, setLogs] = useState<string[]>([]);
@@ -709,7 +719,7 @@ const Console: React.FC = () => {
       </div>
 
       {/* Failure notice */}
-      {status?.failure_report && (
+      {status?.failure_report && !status.last_run_summary && (
         <div
           style={{
             padding: '10px 14px',
@@ -730,6 +740,62 @@ const Console: React.FC = () => {
             >
               View task
             </button>
+          )}
+        </div>
+      )}
+
+      {(status?.active ?? 0) === 0 && status?.last_run_summary && (
+        <div
+          style={{
+            padding: '10px 14px',
+            borderRadius: 'var(--radius-md)',
+            background: status.last_run_summary.severity === 'error'
+              ? 'oklch(0.62 0.22 25 / 0.1)'
+              : 'oklch(0.72 0.14 145 / 0.1)',
+            border: `1px solid ${status.last_run_summary.severity === 'error' ? 'var(--error)' : 'var(--border)'}`,
+            fontSize: 'var(--text-sm)',
+            color: 'var(--text-primary)',
+            marginBottom: 16,
+          }}
+        >
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+            <strong>{status.last_run_summary.headline}</strong>
+            <span style={{ color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
+              {status.last_run_summary.status} · {relativeTime(status.last_run_summary.occurred_at)}
+            </span>
+          </div>
+          <div style={{ marginTop: 4, color: 'var(--text-muted)' }}>
+            Cause: {status.last_run_summary.cause}
+          </div>
+          {status.last_run_summary.task_id && (
+            <button
+              type="button"
+              onClick={() => navigate(`/ops/registry/tasks/${status.last_run_summary!.task_id}`)}
+              style={{ marginTop: 4, padding: 0, fontSize: '11px', color: 'var(--accent)', background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline' }}
+            >
+              Open {status.last_run_summary.task_id}{status.last_run_summary.error_code ? ` (${status.last_run_summary.error_code})` : ''}
+            </button>
+          )}
+          {status.last_run_summary.dependent_task_ids.length > 0 && (
+            <div style={{ marginTop: 4, color: 'var(--text-muted)' }}>
+              Affected: {status.last_run_summary.dependent_task_ids.join(', ')}
+            </div>
+          )}
+          <div style={{ marginTop: 4 }}>Next: {status.last_run_summary.next_action}</div>
+          {status.last_run_summary.repeated_count > 1 && (
+            <div style={{ marginTop: 4, color: 'var(--warning)' }}>
+              Same result occurred {status.last_run_summary.repeated_count} times in the last {status.last_run_summary.recent_runs.length} runs.
+            </div>
+          )}
+          {status.last_run_summary.recent_runs.length > 1 && (
+            <details style={{ marginTop: 6, color: 'var(--text-muted)' }}>
+              <summary style={{ cursor: 'pointer' }}>Recent runs</summary>
+              {status.last_run_summary.recent_runs.map((run) => (
+                <div key={run.run_id} style={{ marginTop: 3 }}>
+                  {relativeTime(run.stopped_at ?? run.started_at)} · {run.status} · {run.stop_reason ?? 'No reason recorded'}
+                </div>
+              ))}
+            </details>
           )}
         </div>
       )}

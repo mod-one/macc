@@ -335,6 +335,9 @@ fn apply_runtime_placeholders(
         if let Some(resume) = session.resume.as_mut() {
             replace_placeholders_in_args(&mut resume.args, placeholders);
         }
+        if let Some(create) = session.create.as_mut() {
+            replace_placeholders_in_args(&mut create.args, placeholders);
+        }
         if let Some(discover) = session.discover.as_mut() {
             replace_placeholders_in_args(&mut discover.args, placeholders);
         }
@@ -702,6 +705,8 @@ mod tests {
                             "{session_id}".to_string(),
                         ],
                     }),
+                    create: None,
+                    create_only_flags: Vec::new(),
                     discover: None,
                     id_strategy: None,
                 }),

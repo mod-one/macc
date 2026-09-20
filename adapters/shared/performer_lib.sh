@@ -79,6 +79,10 @@ session_scope="$(jq -r '.performer.session.scope // "worktree"' "$tool_json")"
 session_init_prompt="$(jq -r '.performer.session.init_prompt // "Bonjour"' "$tool_json")"
 session_extract_regex="$(jq -r '.performer.session.extract_regex // "session[[:space:]]+id:[[:space:]]*([[:alnum:]-]+)"' "$tool_json")"
 session_resume_command="$(jq -r '.performer.session.resume.command // empty' "$tool_json")"
+# Command that opens a NEW session under a caller-chosen id. Distinct from
+# resume for tools where those are different flags (claude: --session-id vs -r).
+# Falls back to the resume command when a tool declares no separate create.
+session_create_command="$(jq -r '.performer.session.create.command // .performer.session.resume.command // empty' "$tool_json")"
 session_discover_command="$(jq -r '.performer.session.discover.command // empty' "$tool_json")"
 session_id_strategy="$(jq -r '.performer.session.id_strategy // "discovered"' "$tool_json")"
 session_state_file="${repo}/.macc/state/tool-sessions.json"
@@ -94,20 +98,68 @@ session_max_age_seconds="${SESSION_MAX_AGE_SECONDS:-$(jq -r '.performer.session.
 session_pool_cap="${SESSION_POOL_CAP:-$(jq -r '.performer.session.pool_cap // 8' "$tool_json")}"
 mkdir -p "$(dirname "$session_state_file")"
 
-acquire_session_lock() {
-  local attempts=0
-  until mkdir "$session_lock_dir" 2>/dev/null; do
-    attempts=$((attempts + 1))
-    if [[ "$attempts" -ge 80 ]]; then
-      echo "Error: timed out acquiring session lock: $session_lock_dir" >&2
-      return 1
+# Session-state locking.
+#
+# This lock guards `.macc/state/tool-sessions.json`, which is also written from
+# Rust (`core/src/coordinator/session_manager.rs`). Both sides must therefore
+# use the SAME primitive on the SAME path or they do not interlock at all.
+#
+# Rust uses `flock(2)` on the lock file, so this side does too, via flock(1).
+# An earlier `mkdir`-based lock here was doubly wrong: it could not interlock
+# with the Rust side (which holds a regular file at that path, making every
+# `mkdir` fail forever), and a performer killed mid-run left the directory
+# behind, wedging session state until it was removed by hand.
+#
+# `flock` is released by the kernel when the holding process dies, so neither
+# failure mode can recur.
+session_lock_fd=9
+session_lock_supported=""
+
+session_lock_available() {
+  if [[ -z "$session_lock_supported" ]]; then
+    if command -v flock >/dev/null 2>&1; then
+      session_lock_supported="yes"
+    else
+      session_lock_supported="no"
+      echo "Warning: flock(1) not found; tool-session updates run without cross-process locking." >&2
     fi
-    sleep 0.1
-  done
+  fi
+  [[ "$session_lock_supported" == "yes" ]]
+}
+
+acquire_session_lock() {
+  # Writes to the session file are atomic (temp + mv), so when no locking
+  # primitive is available we degrade to "no cross-process exclusion" rather
+  # than blocking the performer.
+  session_lock_available || return 0
+
+  # An older build locked by creating a *directory* here. A leftover one can
+  # only be a remnant of a process that died (the old scheme removed it on the
+  # way out), and it would make every open below fail, so reclaim it.
+  if [[ -d "$session_lock_dir" ]]; then
+    rmdir "$session_lock_dir" 2>/dev/null || rm -rf "$session_lock_dir" 2>/dev/null || true
+  fi
+
+  # Create the lock file if absent; never remove it. Unlinking a lock file lets
+  # a second process create a fresh inode at the same path and lock that
+  # instead, so both would believe they hold the lock.
+  : >>"$session_lock_dir" 2>/dev/null || {
+    echo "Warning: cannot create session lock file: $session_lock_dir" >&2
+    return 0
+  }
+
+  eval "exec ${session_lock_fd}>>\"\$session_lock_dir\"" 2>/dev/null || return 0
+  if ! flock -w 30 -x "$session_lock_fd"; then
+    echo "Error: timed out acquiring session lock: $session_lock_dir" >&2
+    eval "exec ${session_lock_fd}>&-" 2>/dev/null || true
+    return 1
+  fi
 }
 
 release_session_lock() {
-  rmdir "$session_lock_dir" >/dev/null 2>&1 || true
+  session_lock_available || return 0
+  # Closing the descriptor releases the flock; the file itself stays in place.
+  eval "exec ${session_lock_fd}>&-" 2>/dev/null || true
 }
 
 now_iso() {
@@ -118,11 +170,61 @@ now_epoch() {
   date -u +%s
 }
 
+log_session_event() {
+  local event_type="$1"
+  local sid="$2"
+  local owner_pid="$3"
+  local detail="$4"
+  local events_file="${repo}/.macc/log/events.jsonl"
+  local now seq payload
+  now="$(now_iso)"
+  seq="$(date +%s%N 2>/dev/null || date +%s)"
+  [[ -d "$(dirname "$events_file")" ]] || mkdir -p "$(dirname "$events_file")" 2>/dev/null || true
+  payload="$(jq -nc \
+    --arg schema "1" \
+    --arg event_id "evt-${event_type}-${task_id:-session}-${seq}" \
+    --arg run_id "${COORDINATOR_RUN_ID:-}" \
+    --argjson seq "$seq" \
+    --arg ts "$now" \
+    --arg source "performer:runner:${tool_id}" \
+    --arg task "${task_id:--}" \
+    --arg type "$event_type" \
+    --arg phase "session" \
+    --arg status "ok" \
+    --arg severity "info" \
+    --arg sid "$sid" \
+    --arg tool "$tool_id" \
+    --arg pid "$owner_pid" \
+    --arg detail "$detail" \
+    '{
+      schema_version: $schema,
+      event_id: $event_id,
+      run_id: (if $run_id != "" then $run_id else null end),
+      seq: ($seq|tonumber?),
+      ts: $ts,
+      source: $source,
+      task_id: $task,
+      type: $type,
+      phase: $phase,
+      status: $status,
+      severity: $severity,
+      payload: {
+        session_id: $sid,
+        tool: $tool,
+        task_id: (if $task != "-" then $task else null end),
+        owner_pid: (if $pid != "" then ($pid|tonumber?) else null end),
+        message: ("session " + $sid + " tool=" + $tool + " task=" + $task + " pid=" + $pid + ": " + $detail),
+        detail: $detail
+      }
+    }')"
+  echo "$payload" >> "$events_file" 2>/dev/null || true
+}
+
 # Returns true (exit 0) when session $sid is actively held by another live
 # process that has refreshed its heartbeat within session_lease_ttl.
 session_occupied_by_other() {
   local sid="$1"
-  local status hb now age
+  local status hb now age pid
   [[ -n "$sid" ]] || return 1
   [[ -f "$session_state_file" ]] || return 1
 
@@ -131,6 +233,17 @@ session_occupied_by_other() {
     "$session_state_file" 2>/dev/null)"
   [[ "$status" == "active" ]] || return 1
 
+  pid="$(jq -r --arg tool "$tool_id" --arg sid "$sid" \
+    '(.tools[$tool].sessions[$sid].owner_pid // empty)' \
+    "$session_state_file" 2>/dev/null)"
+  if [[ -n "$pid" && "$pid" =~ ^[0-9]+$ ]]; then
+    if ! kill -0 "$pid" 2>/dev/null; then
+      # PID is dead! The session lease leaked.
+      log_session_event "session_recovered_stale" "$sid" "$pid" "stale lease recovered (owner PID $pid no longer alive)"
+      return 1
+    fi
+  fi
+
   hb="$(jq -r --arg tool "$tool_id" --arg sid "$sid" \
     '(.tools[$tool].sessions[$sid].heartbeat_epoch // 0)' \
     "$session_state_file" 2>/dev/null)"
@@ -138,7 +251,10 @@ session_occupied_by_other() {
 
   now="$(now_epoch)"
   age=$((now - hb))
-  (( age <= session_lease_ttl )) && return 0
+  if (( age <= session_lease_ttl )); then
+    return 0
+  fi
+  log_session_event "session_recovered_stale" "$sid" "${pid:-}" "stale lease recovered (heartbeat age ${age}s > TTL ${session_lease_ttl}s)"
   return 1
 }
 
@@ -191,10 +307,14 @@ find_available_session_id() {
 write_active_lease() {
   local sid="$1"
   local creation_reason="${2:-new}"
-  local now ts tmp
+  local now ts tmp prev_uses
   now="$(now_iso)"
   ts="$(now_epoch)"
   tmp="$(mktemp)"
+
+  prev_uses="$(jq -r --arg tool "$tool_id" --arg sid "$sid" \
+    '(.tools[$tool].sessions[$sid].use_count // 0)' "$session_state_file" 2>/dev/null || echo "0")"
+  [[ "$prev_uses" =~ ^[0-9]+$ ]] || prev_uses=0
 
   if [[ -f "$session_state_file" ]]; then
     jq \
@@ -257,6 +377,12 @@ write_active_lease() {
   fi
 
   mv "$tmp" "$session_state_file"
+
+  if [[ "$prev_uses" -eq 0 || "$creation_reason" == "generated" || "${sid_is_new:-0}" -eq 1 ]]; then
+    log_session_event "session_reserved" "$sid" "$$" "new session reserved"
+  else
+    log_session_event "session_reused" "$sid" "$$" "reused session (use_count=$((prev_uses + 1)))"
+  fi
 }
 
 # Remove the oldest available (non-active) sessions for this tool so the pool
@@ -322,6 +448,9 @@ mark_lease_status() {
     else . end
     ' "$session_state_file" >"$tmp"
   mv "$tmp" "$session_state_file"
+  if [[ "$status" == "available" ]]; then
+    log_session_event "session_released" "$sid" "$$" "released session lease back to available"
+  fi
 }
 
 extract_session_id_from_output() {
@@ -371,10 +500,23 @@ run_resume_and_capture() {
   local expanded_retry_args=()
   local i=0
 
-  # 1. Base resume args from config
+  # 1. Base args from config.
+  #
+  # A session id we just reserved does not exist on the tool's side yet, so it
+  # must be OPENED, not resumed. For tools where those are different flags
+  # (claude: `--session-id <uuid>` creates, `-r <uuid>` continues) using the
+  # resume flag on a fresh id fails, and using the create flag on an existing
+  # id fails with "Session ID <uuid> is already in use" on every reuse.
+  local args_selector=".performer.session.resume.args[]?"
+  local invoke_command="$session_resume_command"
+  if [[ "$sid_is_new" == "1" ]] \
+     && jq -e '.performer.session.create.args' "$tool_json" >/dev/null 2>&1; then
+    args_selector=".performer.session.create.args[]?"
+    invoke_command="$session_create_command"
+  fi
   while IFS= read -r arg; do
     final_args+=("${arg//\{session_id\}/$sid}")
-  done < <(jq -r '.performer.session.resume.args[]?' "$tool_json")
+  done < <(jq -r "$args_selector" "$tool_json")
 
   # 2. Inject attempt-specific flags from retry overrides.
   expand_config_args "$sid" expanded_retry_args
@@ -421,9 +563,9 @@ run_resume_and_capture() {
   fi
 
   if [[ "$prompt_mode" == "arg" && -n "$prompt_arg" ]]; then
-    run_and_capture "$output_file" "$session_resume_command" "${final_args[@]}" "$prompt_arg" "$prompt"
+    run_and_capture "$output_file" "$invoke_command" "${final_args[@]}" "$prompt_arg" "$prompt"
   else
-    run_and_capture "$output_file" "$session_resume_command" "${final_args[@]}" "$prompt"
+    run_and_capture "$output_file" "$invoke_command" "${final_args[@]}" "$prompt"
   fi
 }
 
@@ -624,6 +766,9 @@ prompt_arg="$(jq -r '.performer.prompt.arg // empty' "$tool_json")"
 prompt_text="$(cat "$prompt_file")"
 output_capture="$(mktemp)"
 active_session_id=""
+# 1 when `sid` was reserved by us this invocation and therefore does not exist
+# on the tool's side yet; selects `session.create` over `session.resume`.
+sid_is_new=0
 sid=""
 
 cleanup_runner() {
@@ -670,7 +815,7 @@ run_default_call() {
 override_rc_for_success_marker() {
   local rc="$1"
   [[ "$rc" -eq 0 ]] && { echo 0; return; }
-  if grep -qE 'MACC_TASK_RESULT:[[:space:]]*(success_with_changes|success_without_changes|already_satisfied|error_with_changes|error_without_changes)' \
+  if grep -qE 'MACC_TASK_RESULT:[[:space:]]*(success_with_changes|success_without_changes|already_satisfied|error_with_changes|error_without_changes|precondition_unmet)' \
       "$output_capture" 2>/dev/null; then
     echo 0
   else
@@ -761,6 +906,8 @@ if [[ "$session_enabled" == "true" && -n "$session_resume_command" ]]; then
       sid="$(reserve_generated_session_id || true)"
       release_session_lock
     fi
+    # Freshly minted: the tool has never seen this id, so it must be created.
+    [[ -n "$sid" ]] && sid_is_new=1
   fi
 
   if [[ "$attempt" -gt 1 && -z "$sid" ]]; then

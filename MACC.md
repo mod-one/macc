@@ -350,6 +350,8 @@ Default command is `run`. The coordinator starts, runs until the queue is exhaus
 | `select-ready-task` | Select the next ready task to dispatch |
 | `state-apply-transition` | Apply a workflow state transition |
 | `state-set-runtime` | Set runtime metadata for a task |
+| `block-task --task <id> --reason <text> --clears-when <text> [--tracking-id <id>]` | Declare a durable external block without dispatching the task |
+| `unblock-task --task <id> --evidence <text>` | Record evidence that clears a block; dependent tasks reconcile automatically |
 
 #### Key coordinator flags
 
@@ -635,6 +637,27 @@ Phases run after the main execution phase:
 
 `coordinator_tool` selects which adapter handles review/merge-fix phases. `max_review_cycles` limits the review-fix loop.
 
+### Merging (integration worktree)
+
+The coordinator never checks out branches in your working tree. All merges run in a private worktree it maintains at `<git-common-dir>/macc/integration` (normally `.git/macc/integration`), kept detached at the tip of the base branch.
+
+Because the integration worktree lives under the git *common* dir, it is invisible to `git status` in every checkout, and a conflicted merge leaves its conflict state there rather than in your files.
+
+Once a merge succeeds, the resulting commit is published to the base branch by one of two routes:
+
+| Situation | Mechanism |
+|---|---|
+| No working tree has the base branch checked out | `git update-ref <ref> <new> <old>` — an atomic compare-and-swap that fails if the branch moved |
+| A working tree has it checked out | `git merge --ff-only` in *that* worktree, advancing the ref and the files together |
+
+Consequences for day-to-day use:
+
+- **Your HEAD is never moved.** If you are on a feature branch, you stay on it while the coordinator merges into the base branch.
+- **Uncommitted work no longer blocks merges.** Git fast-forwards your checkout when your changes don't collide with the merged files, and refuses — changing nothing — when they do. Only in that second case does the merge fail, reporting `reason=base_checked_out_dirty` and naming the worktree to commit or stash.
+- **Merges are serialised** across `macc` processes by an `flock` on `<git-common-dir>/macc/integration.lock`. The kernel releases it if the holder dies, so a killed coordinator cannot wedge future merges.
+
+> Note: `macc coordinator run` still refuses to start when the reference branch is dirty (`E702`, override with `--allow-dirty-reference`). That is a separate preflight gate, not a merge-time requirement.
+
 ### Coordinator events
 
 Events are appended to `.macc/log/coordinator/events.jsonl`. The web SSE stream (`GET /api/v1/events`) streams them in real time.
@@ -734,6 +757,15 @@ For tools that use a config file for effort (e.g. Codex with `.codex/config.toml
       "tool": "claude",
       "base_branch": "main",
       "dependencies": [],
+      "blocked_on_external": {
+        "reason": "Production observation window has not run",
+        "clears_when": "The seven-day report is published",
+        "tracking_id": "GAP-WP4-017"
+      },
+      "gate": {
+        "required_verdict": "accepted",
+        "description": "Release acceptance decision"
+      },
       "extra": {
         "routing_hints": { "risk_level": "high" }
       }
@@ -741,6 +773,8 @@ For tools that use a config file for effort (e.g. Codex with `.codex/config.toml
   ]
 }
 ```
+
+`blocked_on_external` is scheduler-visible and starts the task in `blocked`; do not encode “do not retry” only in prose. A task with `gate` must emit `MACC_TASK_GATE_VERDICT: accepted|rejected|pending`. Its implementation may merge successfully while a rejected verdict keeps dependants blocked. A correct runtime refusal uses `MACC_TASK_RESULT: precondition_unmet` and is never retried.
 
 ### PRD generation workflow
 
@@ -1013,6 +1047,11 @@ In `macc.yaml`, set `debug: true` to enable persistently.
     cache/                        # fetched remote packages (gitignored)
     worktree.json                 # (in each worktree) worktree metadata
     scope.md                      # (optional) per-worktree scope
+
+  .git/
+    macc/
+      integration/                # private worktree used for all merges
+      integration.lock            # advisory lock serialising merges
 
   registry/
     tools.d/

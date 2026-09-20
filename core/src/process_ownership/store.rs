@@ -1,15 +1,17 @@
+use crate::fs_lock::AdvisoryLock;
 use crate::{MaccError, Result};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::thread;
 use std::time::Duration;
 
 use super::{evict_stale_clients, HeartbeatConfig, OwnershipRecord, ProcessHandle};
 
 const STORE_RELATIVE_PATH: &str = ".macc/state/process_ownership.json";
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(10);
-const LOCK_MAX_ATTEMPTS: usize = 200;
+/// The guarded section is a small JSON read-modify-write, so a couple of
+/// seconds is generous even under heavy contention.
+const LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct OwnershipStore {
@@ -85,7 +87,7 @@ impl OwnershipStore {
     where
         F: FnOnce(&mut Self) -> Result<T>,
     {
-        let _guard = StoreLockGuard::acquire(repo_root)?;
+        let _guard = acquire_store_lock(repo_root)?;
         let mut store = Self::load(repo_root)?;
         let output = modify(&mut store)?;
         store.save(repo_root)?;
@@ -169,54 +171,19 @@ fn lock_path(repo_root: &Path) -> PathBuf {
     repo_root.join(".macc/state/process_ownership.json.lock")
 }
 
-struct StoreLockGuard {
-    path: PathBuf,
-}
-
-impl StoreLockGuard {
-    fn acquire(repo_root: &Path) -> Result<Self> {
-        let path = lock_path(repo_root);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| MaccError::Io {
-                path: parent.to_string_lossy().into(),
-                action: "create process ownership lock parent directory".into(),
-                source: e,
-            })?;
-        }
-
-        for _ in 0..LOCK_MAX_ATTEMPTS {
-            match fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-            {
-                Ok(_) => return Ok(Self { path }),
-                Err(e) if e.kind() == ErrorKind::AlreadyExists => thread::sleep(LOCK_RETRY_DELAY),
-                Err(e) => {
-                    return Err(MaccError::Io {
-                        path: path.to_string_lossy().into(),
-                        action: "acquire process ownership store lock".into(),
-                        source: e,
-                    });
-                }
-            }
-        }
-
-        Err(MaccError::Io {
-            path: path.to_string_lossy().into(),
-            action: "acquire process ownership store lock timeout".into(),
-            source: std::io::Error::new(
-                ErrorKind::TimedOut,
-                "timed out waiting for process ownership store lock",
-            ),
-        })
-    }
-}
-
-impl Drop for StoreLockGuard {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
+/// Serialises the read-modify-write cycle in [`OwnershipStore::load_and_modify`]
+/// across processes.
+///
+/// Backed by [`AdvisoryLock`], so a `macc` process killed mid-update cannot
+/// leave the store permanently unwritable — see `crate::fs_lock` for why a
+/// `create_new` lock file is unsound here.
+fn acquire_store_lock(repo_root: &Path) -> Result<AdvisoryLock> {
+    AdvisoryLock::acquire_with_retry(
+        &lock_path(repo_root),
+        LOCK_TIMEOUT,
+        LOCK_RETRY_DELAY,
+        "process ownership store",
+    )
 }
 
 #[cfg(test)]
@@ -287,6 +254,34 @@ mod tests {
             .path()
             .join(".macc/state/process_ownership.json.tmp")
             .exists());
+    }
+
+    /// A `macc` process killed with `SIGKILL` while holding the store lock used
+    /// to leave a lock file behind that no code path ever reclaimed, making
+    /// every later ownership operation fail after a 2-second stall.
+    #[test]
+    fn a_leftover_lock_file_does_not_wedge_the_store() {
+        let repo_root = temp_repo_root("stale-lock");
+        let lock = super::lock_path(repo_root.path());
+        std::fs::create_dir_all(lock.parent().expect("parent")).expect("create state dir");
+        std::fs::write(&lock, b"").expect("write leftover lock file");
+
+        let started = std::time::Instant::now();
+        OwnershipStore::load_and_modify(repo_root.path(), |store| {
+            store.upsert_record(OwnershipRecord {
+                process: shared_process_handle(),
+                owner: None,
+                viewers: Vec::new(),
+                takeover_request: None,
+                started_at: Utc::now().to_rfc3339(),
+            });
+            Ok(())
+        })
+        .expect("a leftover lock file must never block ownership operations");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "acquisition should be immediate, not stall on the retry budget"
+        );
     }
 
     #[test]

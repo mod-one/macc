@@ -50,6 +50,16 @@ pub enum CoordinatorCommand {
         clear_all: bool,
         unlock_state: String,
     },
+    BlockTask {
+        task_id: String,
+        reason: String,
+        clears_when: String,
+        tracking_id: Option<String>,
+    },
+    UnblockTask {
+        task_id: String,
+        evidence: String,
+    },
     RetryTaskPhase {
         task_id: String,
         phase: String,
@@ -162,6 +172,10 @@ pub enum CoordinatorCommand {
 pub struct CoordinatorRunOptions {
     pub extra_args: Vec<String>,
     pub env_cfg: CoordinatorEnvConfig,
+    /// Ownership identity to hand to the spawned coordinator child so it
+    /// passes the same project lease gate this caller passed. `None` makes the
+    /// child fall back to a fresh `cli-<pid>` identity.
+    pub client_id: Option<String>,
 }
 
 pub struct CoordinatorCommandRequest<'a> {
@@ -231,13 +245,15 @@ pub struct CoordinatorStatus {
     pub throttled_tools: Vec<ThrottledToolStatus>,
     /// RL-WEB-008: effective max_parallel after concurrency reductions from rate-limiting.
     pub effective_max_parallel: Option<usize>,
-    /// Status of the most recent coordinator run ("stopped", "crashed",
-    /// "force_stopping", "running", ...). Lets clients distinguish a normal stop
+    /// Status of the most recent coordinator run (`success`, `blocked`, `failed`,
+    /// `stopped_by_user`, `crashed`, etc.). Lets clients distinguish a normal stop
     /// from a degraded/error stop when the coordinator is no longer running.
     pub last_run_status: Option<String>,
     /// Human-readable reason the most recent run stopped (e.g. "all tasks
     /// completed", "dispatch limit reached", or an error detail).
     pub last_run_stop_reason: Option<String>,
+    /// Durable, run-scoped result shared by CLI, TUI and Web clients.
+    pub last_run_summary: Option<crate::service::run_summary::CoordinatorRunSummary>,
 }
 
 /// RL-WEB-008: per-tool throttle status for API exposure.
@@ -271,6 +287,8 @@ pub fn coordinator_command_display_name(command: &CoordinatorCommand) -> &'stati
         CoordinatorCommand::AggregatePerformerLogs => "aggregate-performer-logs",
         CoordinatorCommand::EvaluateCutoverGate => "cutover-gate",
         CoordinatorCommand::Unlock { .. } => "unlock",
+        CoordinatorCommand::BlockTask { .. } => "block-task",
+        CoordinatorCommand::UnblockTask { .. } => "unblock-task",
         CoordinatorCommand::RetryTaskPhase { .. } => "retry-phase",
         CoordinatorCommand::ImportStorageJsonToSqlite => "storage-import",
         CoordinatorCommand::ExportStorageSqliteToJson => "storage-export",
@@ -372,6 +390,37 @@ pub fn coordinator_command_invocation(
                 args,
             }
         }
+        CoordinatorCommand::BlockTask {
+            task_id,
+            reason,
+            clears_when,
+            tracking_id,
+        } => {
+            let mut args = vec![
+                "--task".to_string(),
+                task_id.clone(),
+                "--reason".to_string(),
+                reason.clone(),
+                "--clears-when".to_string(),
+                clears_when.clone(),
+            ];
+            if let Some(tracking_id) = tracking_id {
+                args.extend(["--tracking-id".to_string(), tracking_id.clone()]);
+            }
+            CoordinatorCommandInvocation {
+                action: "block-task",
+                args,
+            }
+        }
+        CoordinatorCommand::UnblockTask { task_id, evidence } => CoordinatorCommandInvocation {
+            action: "unblock-task",
+            args: vec![
+                "--task".to_string(),
+                task_id.clone(),
+                "--evidence".to_string(),
+                evidence.clone(),
+            ],
+        },
         CoordinatorCommand::RetryTaskPhase {
             task_id,
             phase,
@@ -526,6 +575,19 @@ pub fn coordinator_command_from_name(
                 unlock_state,
             })
         }
+        "block-task" => {
+            let (task_id, reason, clears_when, tracking_id) = parse_block_task_args(extra_args)?;
+            Ok(CoordinatorCommand::BlockTask {
+                task_id,
+                reason,
+                clears_when,
+                tracking_id,
+            })
+        }
+        "unblock-task" => {
+            let (task_id, evidence) = parse_unblock_task_args(extra_args)?;
+            Ok(CoordinatorCommand::UnblockTask { task_id, evidence })
+        }
         "retry-phase" => {
             let (task_id, phase, skip) = parse_retry_phase_args(extra_args)?;
             Ok(CoordinatorCommand::RetryTaskPhase {
@@ -642,6 +704,7 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
                 &CoordinatorRunOptions {
                     extra_args: Vec::new(),
                     env_cfg: request.env_cfg.clone(),
+                    client_id: std::env::var("MACC_CLIENT_ID").ok(),
                 },
             )?;
         }
@@ -774,6 +837,31 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
                 request.coordinator_cfg,
                 request.env_cfg,
                 &args,
+            )?;
+        }
+        CoordinatorCommand::BlockTask {
+            task_id,
+            reason,
+            clears_when,
+            tracking_id,
+        } => {
+            coordinator_block_task(
+                paths,
+                request.coordinator_cfg,
+                request.env_cfg,
+                &task_id,
+                &reason,
+                &clears_when,
+                tracking_id.as_deref(),
+            )?;
+        }
+        CoordinatorCommand::UnblockTask { task_id, evidence } => {
+            coordinator_unblock_task(
+                paths,
+                request.coordinator_cfg,
+                request.env_cfg,
+                &task_id,
+                &evidence,
             )?;
         }
         CoordinatorCommand::RetryTaskPhase {
@@ -1421,7 +1509,13 @@ pub fn coordinator_run(
     options: &CoordinatorRunOptions,
 ) -> Result<()> {
     let _ = options.env_cfg;
-    coordinator_start_managed_command_process(paths, "run", &options.extra_args, cfg)?;
+    coordinator_start_managed_command_process(
+        paths,
+        "run",
+        &options.extra_args,
+        cfg,
+        options.client_id.as_deref(),
+    )?;
 
     loop {
         match coordinator_poll_managed_command_process(paths)? {
@@ -1535,6 +1629,8 @@ pub fn get_coordinator_status(paths: &ProjectPaths) -> Result<CoordinatorStatus>
         status.last_run_status = Some(run.status);
         status.last_run_stop_reason = run.stop_reason;
     }
+    status.last_run_summary =
+        crate::service::run_summary::load_latest_run_summary(&sqlite, &snapshot.registry)?;
 
     // RL-WEB-008: parse effective_max_parallel from the most recent concurrency_adjusted event.
     status.effective_max_parallel = snapshot
@@ -2024,6 +2120,127 @@ pub fn coordinator_unlock<E: crate::engine::Engine + ?Sized>(
     )))
 }
 
+pub fn coordinator_block_task(
+    paths: &ProjectPaths,
+    coordinator_cfg: Option<&CoordinatorConfig>,
+    env_cfg: &CoordinatorEnvConfig,
+    task_id: &str,
+    reason: &str,
+    clears_when: &str,
+    tracking_id: Option<&str>,
+) -> Result<()> {
+    let mut state_args = BTreeMap::new();
+    apply_storage_mode_args(&mut state_args, env_cfg, coordinator_cfg);
+    let value =
+        crate::coordinator::state::coordinator_state_registry_load(&paths.root, &state_args)?;
+    let mut registry = crate::coordinator::model::TaskRegistry::from_value(&value)?;
+    let task = registry
+        .find_task_mut(task_id)
+        .ok_or_else(|| MaccError::Validation(format!("Cannot block unknown task '{task_id}'.")))?;
+    if task.is_active() {
+        return Err(MaccError::Validation(format!(
+            "Cannot block active task '{task_id}'. Stop it first."
+        )));
+    }
+    task.blocked_on_external = Some(crate::coordinator::model::ExternalTaskBlock {
+        reason: reason.to_string(),
+        clears_when: clears_when.to_string(),
+        tracking_id: tracking_id.map(ToString::to_string),
+        source: crate::coordinator::model::ExternalBlockSource::Operator,
+    });
+    task.task_runtime.external_block_resolution = None;
+    task.set_workflow_state(WorkflowState::Todo);
+    crate::coordinator::task_selector::reconcile_task_blocks(
+        &mut registry,
+        &crate::coordinator::helpers::now_iso_coordinator(),
+    );
+    crate::coordinator::state::coordinator_state_registry_save(
+        &paths.root,
+        &state_args,
+        &registry.to_value()?,
+    )?;
+    let _ = crate::coordinator::helpers::append_coordinator_event_with_severity(
+        &paths.root,
+        "task_blocked_external",
+        task_id,
+        "dispatch",
+        "blocked",
+        reason,
+        "blocking",
+    );
+    Ok(())
+}
+
+pub fn coordinator_unblock_task(
+    paths: &ProjectPaths,
+    coordinator_cfg: Option<&CoordinatorConfig>,
+    env_cfg: &CoordinatorEnvConfig,
+    task_id: &str,
+    evidence: &str,
+) -> Result<()> {
+    let mut state_args = BTreeMap::new();
+    apply_storage_mode_args(&mut state_args, env_cfg, coordinator_cfg);
+    let value =
+        crate::coordinator::state::coordinator_state_registry_load(&paths.root, &state_args)?;
+    let mut registry = crate::coordinator::model::TaskRegistry::from_value(&value)?;
+    let task = registry.find_task_mut(task_id).ok_or_else(|| {
+        MaccError::Validation(format!("Cannot unblock unknown task '{task_id}'."))
+    })?;
+    if task.workflow_state() != Some(WorkflowState::Blocked) {
+        return Err(MaccError::Validation(format!(
+            "Task '{task_id}' is not blocked."
+        )));
+    }
+    if task.task_runtime.last_error_code.as_deref() == Some("E905") {
+        return Err(MaccError::Validation(format!(
+            "Task '{task_id}' is blocked by a dependency. Resolve or unblock the root task shown in its error instead."
+        )));
+    }
+    if let Some(block) = task.blocked_on_external.as_ref() {
+        task.task_runtime.external_block_resolution =
+            Some(crate::coordinator::model::ExternalBlockResolution {
+                evidence: evidence.to_string(),
+                resolved_at: crate::coordinator::helpers::now_iso_coordinator(),
+                block_reason: block.reason.clone(),
+                tracking_id: block.tracking_id.clone(),
+            });
+    }
+    task.set_workflow_state(WorkflowState::Todo);
+    let runtime = task.ensure_runtime();
+    runtime.set_status(RuntimeStatus::Idle);
+    runtime.last_error = None;
+    runtime.last_error_code = None;
+    runtime.last_error_origin = None;
+    runtime.last_error_message = None;
+    let changed = crate::coordinator::task_selector::reconcile_task_blocks(
+        &mut registry,
+        &crate::coordinator::helpers::now_iso_coordinator(),
+    );
+    crate::coordinator::state::coordinator_state_registry_save(
+        &paths.root,
+        &state_args,
+        &registry.to_value()?,
+    )?;
+    let detail = format!(
+        "Task {task_id} unblocked with evidence: {evidence}. Reconciled: {}",
+        if changed.is_empty() {
+            "none".to_string()
+        } else {
+            changed.join(", ")
+        }
+    );
+    let _ = crate::coordinator::helpers::append_coordinator_event_with_severity(
+        &paths.root,
+        "task_unblocked",
+        task_id,
+        "dispatch",
+        "todo",
+        &detail,
+        "info",
+    );
+    Ok(())
+}
+
 pub fn coordinator_cutover_gate(
     paths: &ProjectPaths,
     env_cfg: &CoordinatorEnvConfig,
@@ -2495,6 +2712,53 @@ fn parse_unlock_args(args: &[String]) -> Result<(Option<String>, Option<String>,
     Ok((task_id, resource, clear_all, unlock_state))
 }
 
+fn parse_block_task_args(args: &[String]) -> Result<(String, String, String, Option<String>)> {
+    let values = parse_named_args(
+        args,
+        &["--task", "--reason", "--clears-when", "--tracking-id"],
+    )?;
+    let required = |name: &str| {
+        values
+            .get(name)
+            .cloned()
+            .ok_or_else(|| MaccError::Validation(format!("block-task requires {name} <value>")))
+    };
+    Ok((
+        required("--task")?,
+        required("--reason")?,
+        required("--clears-when")?,
+        values.get("--tracking-id").cloned(),
+    ))
+}
+
+fn parse_unblock_task_args(args: &[String]) -> Result<(String, String)> {
+    let values = parse_named_args(args, &["--task", "--evidence"])?;
+    let required = |name: &str| {
+        values
+            .get(name)
+            .cloned()
+            .ok_or_else(|| MaccError::Validation(format!("unblock-task requires {name} <value>")))
+    };
+    Ok((required("--task")?, required("--evidence")?))
+}
+
+fn parse_named_args(args: &[String], allowed: &[&str]) -> Result<BTreeMap<String, String>> {
+    let mut out = BTreeMap::new();
+    let mut index = 0;
+    while index < args.len() {
+        let name = args[index].as_str();
+        if !allowed.contains(&name) {
+            return Err(MaccError::Validation(format!("Unknown argument: {name}")));
+        }
+        let value = args
+            .get(index + 1)
+            .ok_or_else(|| MaccError::Validation(format!("{name} requires a value")))?;
+        out.insert(name.to_string(), value.clone());
+        index += 2;
+    }
+    Ok(out)
+}
+
 fn parse_state_args(args: &[String]) -> Result<BTreeMap<String, String>> {
     parse_coordinator_extra_kv_args(args)
 }
@@ -2696,6 +2960,10 @@ fn parse_select_ready_task_command(args: &[String]) -> Result<CoordinatorCommand
             throttle_registry: Default::default(),
             rate_limit_fallback_enabled: false,
             external_merged_ids: std::collections::HashSet::new(),
+            max_same_worktree_retries: map
+                .get("max-same-worktree-retries")
+                .and_then(|raw| raw.parse::<usize>().ok())
+                .unwrap_or(1),
         },
     })
 }
@@ -2919,6 +3187,63 @@ mod tests {
                 "queued".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn block_and_unblock_commands_are_explicit_and_require_evidence() {
+        let block = coordinator_command_from_name(
+            "block-task",
+            &[
+                "--task".into(),
+                "TASK-1".into(),
+                "--reason".into(),
+                "fleet window missing".into(),
+                "--clears-when".into(),
+                "window completes".into(),
+                "--tracking-id".into(),
+                "GAP-17".into(),
+            ],
+            false,
+            false,
+            false,
+            false,
+            false,
+        )
+        .expect("block-task should parse");
+        assert!(matches!(block, CoordinatorCommand::BlockTask { .. }));
+
+        let unblock = coordinator_command_from_name(
+            "unblock-task",
+            &[
+                "--task".into(),
+                "TASK-1".into(),
+                "--evidence".into(),
+                "report.md".into(),
+            ],
+            false,
+            false,
+            false,
+            false,
+            false,
+        )
+        .expect("unblock-task should parse");
+        assert_eq!(
+            unblock,
+            CoordinatorCommand::UnblockTask {
+                task_id: "TASK-1".into(),
+                evidence: "report.md".into(),
+            }
+        );
+        assert!(coordinator_command_from_name(
+            "unblock-task",
+            &["--task".into(), "TASK-1".into()],
+            false,
+            false,
+            false,
+            false,
+            false,
+        )
+        .is_err());
     }
 
     #[test]

@@ -124,7 +124,19 @@ fn score_worktree_session_warmth_from_state(
             .and_then(serde_json::Value::as_str)
             .unwrap_or("available");
         if status == "active" {
-            continue; // in use right now
+            let pid = entry.get("owner_pid").and_then(|v| {
+                if let Some(n) = v.as_i64() {
+                    Some(n)
+                } else if let Some(s) = v.as_str() {
+                    s.parse::<i64>().ok()
+                } else {
+                    None
+                }
+            });
+            let is_alive = pid.map(is_pid_running).unwrap_or(false);
+            if is_alive {
+                continue; // in use by a real live process
+            }
         }
         let ts_str = entry
             .get("last_used_at")
@@ -411,11 +423,15 @@ fn prepare_reused_worktree_base(
     if !crate::git::clean_fd(worktree_path)? {
         return Ok((false, false));
     }
-    // Try checkout base_branch directly first. If that fails (e.g. because
-    // the branch is already checked out in another worktree), detach HEAD
-    // and reset to the base commit instead.
+    // Try checking base_branch out directly. If that fails -- normally because
+    // the operator has it checked out in the primary worktree -- detach HEAD
+    // instead; the `reset --hard <base_branch>` below moves the worktree onto
+    // the base commit after the fetch.
+    //
+    // Never force the branch in with `checkout -B`: that overrides git's
+    // "already used by worktree" guard and leaves one branch live in two
+    // worktrees, where a commit in either silently moves the other's HEAD.
     if !crate::git::checkout(worktree_path, base_branch, false)?
-        && !crate::git::checkout_reset_branch(worktree_path, base_branch, false)?
         && !crate::git::checkout_detach(worktree_path)?
     {
         return Ok((false, false));
@@ -1045,6 +1061,62 @@ pub fn append_phase_skipped_event(
         &msg_with_reason,
         "info",
     );
+    Ok(())
+}
+
+pub fn append_session_event(
+    repo_root: &Path,
+    event_type: &str,
+    task_id: &str,
+    tool_id: &str,
+    session_id: &str,
+    owner_pid: Option<i64>,
+    details: &str,
+) -> Result<()> {
+    let run_id = ensure_coordinator_run_id();
+    let epoch = std::env::var("COORDINATOR_EPOCH")
+        .ok()
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(0);
+    let now = now_iso_coordinator();
+    let seq = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default() as u64;
+    let message = format!(
+        "session {} tool={} task={} pid={}: {}",
+        session_id,
+        tool_id,
+        if task_id.is_empty() { "-" } else { task_id },
+        owner_pid
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "-".to_string()),
+        details
+    );
+    let payload = serde_json::json!({
+        "schema_version": "1",
+        "event_id": format!("evt-{}-{}-{}", event_type, if task_id.is_empty() { "session" } else { task_id }, seq),
+        "run_id": run_id,
+        "coordinator_epoch": epoch,
+        "claim_id": session_id,
+        "seq": seq,
+        "ts": now,
+        "source": "coordinator:native",
+        "task_id": if task_id.is_empty() { "-" } else { task_id },
+        "type": event_type,
+        "phase": "session",
+        "status": "ok",
+        "severity": "info",
+        "payload": {
+            "session_id": session_id,
+            "tool": tool_id,
+            "task_id": if task_id.is_empty() { serde_json::Value::Null } else { serde_json::json!(task_id) },
+            "owner_pid": owner_pid,
+            "message": message,
+            "detail": details
+        }
+    });
+    let project_paths = crate::ProjectPaths::from_root(repo_root);
+    let _ = append_event_sqlite(&project_paths, &payload)?;
+    let _ =
+        write_structured_event_jsonl(repo_root, event_type, task_id, "session", &message, "info");
     Ok(())
 }
 

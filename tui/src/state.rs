@@ -21,6 +21,7 @@ use macc_core::service::coordinator_workflow::{
 };
 use macc_core::service::process_ownership::{ProcessOwnershipGuard, ProcessViewerGuard};
 use macc_core::service::process_ownership_gate::{gate_owner_action, ClientContext};
+use macc_core::service::run_summary::CoordinatorRunSummary;
 use macc_core::tool::{ActionKind, FieldDefault, FieldKind, ToolDescriptor, ToolField};
 use macc_core::{find_project_root, Engine, MaccError, ProjectPaths};
 use serde_json::{Map, Value};
@@ -205,6 +206,7 @@ pub struct AppState {
     pub worktree_status: Option<WorktreeStatus>,
     pub ui_status: Option<UiStatus>,
     pub coordinator_snapshot: Option<CoordinatorTaskSnapshot>,
+    pub coordinator_run_summary: Option<CoordinatorRunSummary>,
     pub coordinator_last_refresh: Option<Instant>,
     pub coordinator_running_command: Option<String>,
     pub coordinator_last_result: Option<String>,
@@ -226,6 +228,9 @@ pub struct AppState {
     coordinator_events_last_seen_count: usize,
     pub search_query: String,
     pub search_editing: bool,
+    pub command_palette_open: bool,
+    pub command_palette_query: String,
+    pub command_palette_selection: usize,
     pub undo_stack: Vec<CanonicalConfig>,
     pub redo_stack: Vec<CanonicalConfig>,
     coordinator_client_id: String,
@@ -238,6 +243,10 @@ pub struct AppState {
     pub client_identity: ClientIdentity,
     pub ownership_state: crate::ownership::TuiOwnershipState,
     ownership_guard: Option<ProcessOwnershipGuard>,
+    /// True only while this TUI owns the project lease on behalf of a
+    /// registered coordinator process.
+    coordinator_ownership_attached: bool,
+    coordinator_registration_observed: bool,
     viewer_guards: Vec<ProcessViewerGuard>,
     pub client_context: ClientContext,
     last_ownership_refresh: Option<Instant>,
@@ -247,6 +256,7 @@ pub struct AppState {
     coordinator_ownership_last_refresh: Option<Instant>,
     pub coordinator_stop_dialog_open: bool,
     pub coordinator_stop_dialog_selection: usize,
+    pub coordinator_stop_task_confirm_id: Option<String>,
     pub coordinator_recover_dialog_open: bool,
     pub coordinator_recover_dialog_selection: usize,
     /// §18: Human-readable summary of active runtime phase overrides, e.g. "[testing:off] [review:required]".
@@ -344,6 +354,7 @@ impl AppState {
             worktree_status: None,
             ui_status: None,
             coordinator_snapshot: None,
+            coordinator_run_summary: None,
             coordinator_last_refresh: None,
             coordinator_running_command: None,
             coordinator_last_result: None,
@@ -362,6 +373,9 @@ impl AppState {
             coordinator_events_last_seen_count: 0,
             search_query: String::new(),
             search_editing: false,
+            command_palette_open: false,
+            command_palette_query: String::new(),
+            command_palette_selection: 0,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             coordinator_client_id: client_identity.client_id.clone(),
@@ -372,6 +386,8 @@ impl AppState {
             client_identity: client_identity.clone(),
             ownership_state: crate::ownership::TuiOwnershipState::new(),
             ownership_guard: None,
+            coordinator_ownership_attached: false,
+            coordinator_registration_observed: false,
             viewer_guards: Vec::new(),
             coordinator_selected_task_index: 0,
             coordinator_log_pane_visible: true,
@@ -395,6 +411,7 @@ impl AppState {
             coordinator_ownership_last_refresh: None,
             coordinator_stop_dialog_open: false,
             coordinator_stop_dialog_selection: 0,
+            coordinator_stop_task_confirm_id: None,
             coordinator_recover_dialog_open: false,
             coordinator_recover_dialog_selection: 0,
             coordinator_phase_overrides: None,
@@ -730,7 +747,7 @@ impl AppState {
         let tool_id = task
             .tool
             .as_deref()
-            .or_else(|| task.coordinator_tool.as_deref())
+            .or(task.coordinator_tool.as_deref())
             .unwrap_or("");
         if tool_id.is_empty() {
             return "-".to_string();
@@ -915,6 +932,11 @@ impl AppState {
             }
             Err(err) => {
                 self.coordinator_last_result = Some(format_actionable_error(&err));
+            }
+        }
+        if let Some(paths) = self.project_paths.as_ref() {
+            if let Ok(status) = self.engine.get_coordinator_status(paths) {
+                self.coordinator_run_summary = status.last_run_summary;
             }
         }
     }
@@ -1204,15 +1226,23 @@ impl AppState {
             .working_copy
             .as_ref()
             .and_then(|c| c.automation.coordinator.as_ref());
+        // Hand the TUI's own ownership identity to the child. The TUI claims the
+        // project lease after a successful start; without propagating that id the
+        // spawned child mints a fresh `cli-<pid>` and is rejected by the very
+        // lease this TUI holds.
+        let client_id = self.client_context.client_id.clone();
         match self.engine.coordinator_start_managed_command_process(
             paths,
             &command,
             coordinator_cfg,
+            Some(client_id.as_str()),
         ) {
             Ok(()) => {
-                self.wait_for_coordinator_registration(Duration::from_secs(2));
+                let coordinator_registered =
+                    self.wait_for_coordinator_registration(Duration::from_secs(2));
                 if let Some(handle) = self.coordinator_handle() {
                     self.claim_process_ownership(handle);
+                    self.coordinator_registration_observed = coordinator_registered;
                     self.refresh_ownership_state();
                 }
                 self.coordinator_running_command = Some(command_name.clone());
@@ -1392,6 +1422,7 @@ impl AppState {
         self.refresh_coordinator_events();
         match stop_result {
             Ok(result) => {
+                self.release_coordinator_ownership();
                 let mode = if result.used_group {
                     "process-group"
                 } else {
@@ -1523,6 +1554,7 @@ impl AppState {
 
         match self.engine.coordinator_execute_command(&paths, cmd, req) {
             Ok(_) => {
+                self.release_coordinator_ownership();
                 self.coordinator_pause_next_action = None;
                 self.coordinator_running_command = None;
                 self.coordinator_running_elapsed_secs = None;
@@ -1675,12 +1707,18 @@ impl AppState {
             return;
         };
 
+        let is_coordinator = matches!(handle.kind, ProcessKind::Coordinator);
+        let registered_coordinator = is_coordinator && handle.pid.is_some();
         let identity = self.coordinator_client_identity();
         match self
             .engine
             .process_ownership_claim(&paths.root, handle.clone(), identity.clone())
         {
             Ok((OwnershipStatus::Owner, owner_guard, _)) => {
+                if is_coordinator {
+                    self.coordinator_ownership_attached = true;
+                    self.coordinator_registration_observed |= registered_coordinator;
+                }
                 if self.ownership_guard.is_none() {
                     self.ownership_guard = Some(owner_guard.unwrap_or_else(|| {
                         ProcessOwnershipGuard::new(&paths.root, handle, identity.client_id.clone())
@@ -1700,15 +1738,17 @@ impl AppState {
         let Some(paths) = self.project_paths.as_ref() else {
             return false;
         };
-        let Some(handle) = self.coordinator_handle() else {
-            return false;
-        };
-
         let deadline = Instant::now() + timeout;
         while Instant::now() <= deadline {
-            match self.engine.process_ownership_status(&paths.root, &handle) {
-                Ok(Some(_)) => return true,
-                Ok(None) | Err(_) => thread::sleep(Duration::from_millis(100)),
+            match self.engine.process_list_running(&paths.root) {
+                Ok(records)
+                    if records
+                        .iter()
+                        .any(|record| matches!(record.process.kind, ProcessKind::Coordinator)) =>
+                {
+                    return true;
+                }
+                Ok(_) | Err(_) => thread::sleep(Duration::from_millis(100)),
             }
         }
 
@@ -1717,7 +1757,37 @@ impl AppState {
 
     fn cleanup_ownership_guards(&mut self) {
         self.ownership_guard = None;
+        self.coordinator_ownership_attached = false;
+        self.coordinator_registration_observed = false;
         self.viewer_guards.clear();
+    }
+
+    /// Release only the lease this TUI acquired for the coordinator lifecycle.
+    /// `release_owner` checks the client id, so a concurrent takeover remains
+    /// authoritative and cannot be undone by a late coordinator-exit event.
+    fn release_coordinator_ownership(&mut self) {
+        if !self.coordinator_ownership_attached {
+            return;
+        }
+        self.coordinator_ownership_attached = false;
+        self.coordinator_registration_observed = false;
+
+        let Some(paths) = self.project_paths.clone() else {
+            self.ownership_guard = None;
+            return;
+        };
+        let Some(handle) = self.coordinator_handle() else {
+            self.ownership_guard = None;
+            return;
+        };
+
+        self.ownership_guard = None;
+        let _ = self.engine.process_ownership_release(
+            &paths.root,
+            &handle,
+            &self.coordinator_client_id,
+        );
+        self.refresh_ownership_state();
     }
 
     pub fn scan_and_attach_to_running_processes(&mut self) {
@@ -1809,6 +1879,24 @@ impl AppState {
         let Some(paths) = self.project_paths.clone() else {
             return;
         };
+
+        if self.coordinator_ownership_attached && self.coordinator_registration_observed {
+            let coordinator_registered = self
+                .engine
+                .process_list_running(&paths.root)
+                .map(|records| {
+                    records
+                        .iter()
+                        .any(|record| matches!(record.process.kind, ProcessKind::Coordinator))
+                })
+                // A transient store error is not evidence that the process exited.
+                .unwrap_or(true);
+            if !coordinator_registered {
+                self.release_coordinator_ownership();
+                return;
+            }
+        }
+
         let Some(handle) = self.coordinator_handle().or_else(|| self.project_handle()) else {
             return;
         };
@@ -2026,6 +2114,29 @@ impl AppState {
             .join(" > ")
     }
 
+    pub fn display_breadcrumbs(&self) -> String {
+        let Some(current) = self.screen_stack.last() else {
+            return "Home".to_string();
+        };
+        if self.screen_stack.len() <= 2 {
+            return self.breadcrumbs();
+        }
+
+        let home = Screen::Home;
+        let parent = self
+            .screen_stack
+            .iter()
+            .rev()
+            .skip(1)
+            .find(|screen| *screen != current && **screen != home);
+
+        match parent {
+            Some(parent) => format!("... > {} > {}", parent.title(), current.title()),
+            None if *current == home => "Home".to_string(),
+            None => format!("Home > {}", current.title()),
+        }
+    }
+
     pub fn active_tool_label(&self) -> String {
         if let Some(desc) = self.tool_descriptors.get(self.selected_tool_index) {
             return desc.id.to_string();
@@ -2039,18 +2150,18 @@ impl AppState {
     pub fn status_badges(&self) -> Vec<String> {
         let mut badges = Vec::new();
         badges.push(if self.project_paths.is_some() {
-            "project:ok".to_string()
+            "Project ready".to_string()
         } else {
-            "project:none".to_string()
+            "No project loaded".to_string()
         });
-        badges.push(format!("warnings:{}", self.errors.len()));
+        badges.push(format!("Issues {}", self.errors.len()));
         if self.is_coordinator_running() {
             let action = self.coordinator_running_command.as_deref().unwrap_or("run");
-            badges.push(format!("coord:{}", action));
+            badges.push(format!("Coordinator running ({})", action));
         } else if self.coordinator_paused {
-            badges.push("coord:paused".to_string());
+            badges.push("Coordinator paused".to_string());
         } else {
-            badges.push("coord:off".to_string());
+            badges.push("Coordinator stopped".to_string());
         }
         let offline = self
             .working_copy
@@ -2058,9 +2169,9 @@ impl AppState {
             .map(|c| c.settings.offline)
             .unwrap_or(false);
         badges.push(if offline {
-            "offline:on".to_string()
+            "Offline mode".to_string()
         } else {
-            "offline:off".to_string()
+            "Online allowed".to_string()
         });
         let cache_ok = self
             .project_paths
@@ -2068,12 +2179,12 @@ impl AppState {
             .map(|p| self.engine.path_exists(&p.cache_dir))
             .unwrap_or(false);
         badges.push(if cache_ok {
-            "cache:ok".to_string()
+            "Cache ready".to_string()
         } else {
-            "cache:missing".to_string()
+            "Cache not prepared".to_string()
         });
         if !self.search_query.is_empty() {
-            badges.push(format!("search:'{}'", self.search_query));
+            badges.push(format!("Filtered by '{}'", self.search_query));
         }
         badges
     }
@@ -2291,6 +2402,7 @@ impl AppState {
 
         let mut finished_message: Option<(UiStatusLevel, String)> = None;
         let mut post_success_action: Option<CoordinatorPauseNextAction> = None;
+        let mut release_coordinator_ownership = false;
         if let Some(paths) = self.project_paths.as_ref() {
             match self.engine.coordinator_managed_command_state(paths) {
                 Ok(CoordinatorManagedCommandState::Succeeded {
@@ -2321,6 +2433,7 @@ impl AppState {
                     );
                     self.coordinator_running_command = None;
                     self.coordinator_running_elapsed_secs = None;
+                    release_coordinator_ownership = true;
                     self.refresh_coordinator_snapshot();
                     self.refresh_coordinator_events();
                     if self.coordinator_run_auto_quit {
@@ -2369,6 +2482,7 @@ impl AppState {
                     );
                     self.coordinator_running_command = None;
                     self.coordinator_running_elapsed_secs = None;
+                    release_coordinator_ownership = true;
                     self.refresh_coordinator_snapshot();
                     self.refresh_coordinator_events();
                 }
@@ -2388,6 +2502,7 @@ impl AppState {
                     }
                 }
                 Ok(CoordinatorManagedCommandState::Idle) => {
+                    release_coordinator_ownership = self.coordinator_running_command.is_some();
                     self.coordinator_running_command = None;
                     self.coordinator_running_elapsed_secs = None;
                 }
@@ -2416,6 +2531,10 @@ impl AppState {
                     ));
                 }
             }
+        }
+
+        if release_coordinator_ownership {
+            self.release_coordinator_ownership();
         }
 
         if let Some((level, msg)) = finished_message {
@@ -5960,7 +6079,9 @@ mod tests {
     use super::*;
     use macc_core::plan::{PlannedOpKind, PlannedOpMetadata, Scope};
     use macc_core::process_ownership::{ClientIdentity, ClientKind, ProcessHandle, ProcessKind};
-    use macc_core::service::process_ownership::{claim_owner, register_process};
+    use macc_core::service::process_ownership::{
+        claim_owner, project_lease, register_process, unregister_process,
+    };
     use macc_core::tool::ToolDiagnostic;
     use macc_core::{MaccEngine, ToolRegistry};
     use std::cell::RefCell;
@@ -6063,6 +6184,26 @@ mod tests {
         state.pop_screen();
         assert_eq!(state.current_screen(), Screen::Home);
         assert_eq!(state.screen_stack.len(), 1);
+    }
+
+    #[test]
+    fn display_breadcrumbs_compacts_navigation_history() {
+        let engine = Arc::new(MaccEngine::new(ToolRegistry::new()));
+        let mut state = AppState::with_engine(engine);
+
+        state.push_screen(Screen::Tools);
+        state.push_screen(Screen::Automation);
+        state.push_screen(Screen::Tools);
+        state.push_screen(Screen::CoordinatorLive);
+
+        assert_eq!(
+            state.breadcrumbs(),
+            "Home > Tools Configuration > Automation / Coordinator > Tools Configuration > Coordinator Live"
+        );
+        assert_eq!(
+            state.display_breadcrumbs(),
+            "... > Tools Configuration > Coordinator Live"
+        );
     }
 
     #[test]
@@ -6226,8 +6367,90 @@ mod tests {
         state.scan_and_attach_to_running_processes();
 
         assert!(state.ownership_guard.is_some());
+        assert!(state.coordinator_ownership_attached);
+        assert!(state.coordinator_registration_observed);
         assert!(state.ownership_state.is_owner);
         assert!(state.viewer_guards.is_empty());
+    }
+
+    #[test]
+    fn coordinator_exit_releases_lease_while_tui_stays_open() {
+        let dir = tempdir().expect("tempdir");
+        sample_project(dir.path());
+        let handle = ProcessHandle {
+            kind: ProcessKind::Coordinator,
+            project_root: dir.path().to_path_buf(),
+            pid: Some(4242),
+        };
+        register_process(dir.path(), handle.clone()).expect("register process");
+
+        let engine = Arc::new(NoopEngine::default());
+        let mut state = AppState::with_engine(engine);
+        state.project_paths = Some(ProjectPaths::from_root(dir.path()));
+        state.client_context.project_root = dir.path().to_path_buf();
+        state.scan_and_attach_to_running_processes();
+        assert!(state.ownership_state.is_owner);
+
+        // The coordinator's RegisteredProcessGuard performs this on normal exit.
+        unregister_process(dir.path(), &handle).expect("unregister exited coordinator");
+        state.tick_ownership();
+
+        let lease = project_lease(dir.path())
+            .expect("load lease")
+            .expect("project lease");
+        assert!(lease.owner.is_none());
+        assert!(!state.coordinator_ownership_attached);
+        assert!(state.ownership_guard.is_none());
+        assert!(!state.should_quit, "the TUI must remain open");
+    }
+
+    #[test]
+    fn successful_tui_stop_releases_coordinator_lease() {
+        let dir = tempdir().expect("tempdir");
+        sample_project(dir.path());
+        let handle = ProcessHandle {
+            kind: ProcessKind::Coordinator,
+            project_root: dir.path().to_path_buf(),
+            pid: Some(4242),
+        };
+        register_process(dir.path(), handle).expect("register process");
+
+        let engine = Arc::new(NoopEngine::default());
+        let mut state = AppState::with_engine(engine);
+        state.project_paths = Some(ProjectPaths::from_root(dir.path()));
+        state.client_context.project_root = dir.path().to_path_buf();
+        state.scan_and_attach_to_running_processes();
+
+        state.stop_coordinator_command();
+
+        let lease = project_lease(dir.path())
+            .expect("load lease")
+            .expect("project lease");
+        assert!(lease.owner.is_none());
+        assert!(!state.coordinator_ownership_attached);
+    }
+
+    #[test]
+    fn unobserved_registration_does_not_release_an_active_command_lease() {
+        let dir = tempdir().expect("tempdir");
+        sample_project(dir.path());
+
+        let engine = Arc::new(NoopEngine::default());
+        let mut state = AppState::with_engine(engine);
+        state.project_paths = Some(ProjectPaths::from_root(dir.path()));
+        state.client_context.project_root = dir.path().to_path_buf();
+        let handle = state.coordinator_handle().expect("coordinator handle");
+        state.claim_process_ownership(handle);
+        assert!(state.coordinator_ownership_attached);
+        assert!(!state.coordinator_registration_observed);
+
+        state.tick_ownership();
+
+        let lease = project_lease(dir.path())
+            .expect("load lease")
+            .expect("project lease");
+        assert!(lease.owner.is_some());
+        assert!(state.coordinator_ownership_attached);
     }
 
     #[test]
@@ -6637,6 +6860,7 @@ mod tests {
         assert_eq!(
             current_skills,
             vec![
+                "macc-auditor".to_string(),
                 "macc-performer".to_string(),
                 "macc-prd-planner".to_string(),
                 "macc-reviewer".to_string(),

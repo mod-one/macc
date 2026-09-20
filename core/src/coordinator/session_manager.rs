@@ -1,3 +1,4 @@
+use crate::fs_lock::AdvisoryLock;
 use crate::{MaccError, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -30,30 +31,31 @@ fn persist_sessions_file(path: &Path, value: &Value) -> Result<()> {
     Ok(())
 }
 
-fn acquire_lock(lock_dir: &PathBuf) -> Result<()> {
-    for _ in 0..80 {
-        match fs::create_dir(lock_dir) {
-            Ok(()) => return Ok(()),
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            Err(err) => {
-                return Err(MaccError::Io {
-                    path: lock_dir.to_string_lossy().into(),
-                    action: "acquire tool session lock".into(),
-                    source: err,
-                });
-            }
-        }
-    }
-    Err(MaccError::Validation(format!(
-        "Timed out acquiring tool session lock '{}'",
-        lock_dir.display()
-    )))
-}
+/// How long to wait for another process to release the tool-sessions lock.
+const SESSION_LOCK_TIMEOUT: Duration = Duration::from_secs(8);
+/// Delay between acquisition attempts.
+const SESSION_LOCK_RETRY_DELAY: Duration = Duration::from_millis(100);
 
-fn release_lock(lock_dir: &PathBuf) {
-    let _ = fs::remove_dir(lock_dir);
+/// Guard concurrent access to `tool-sessions.json`.
+///
+/// Returns an RAII guard, so the lock is released on every exit path — earlier
+/// revisions released it by hand and could leak it on an early return.
+///
+/// Older builds locked by `mkdir`-ing a *directory* at this same path and
+/// removing it afterwards, which deadlocked permanently if the holder was
+/// killed. Any leftover directory here can only be such a remnant (the old
+/// scheme never left one behind while running), so it is removed before
+/// locking — otherwise opening the path as a file would fail forever.
+fn acquire_session_lock(lock_path: &Path) -> Result<AdvisoryLock> {
+    if lock_path.is_dir() {
+        let _ = fs::remove_dir_all(lock_path);
+    }
+    AdvisoryLock::acquire_with_retry(
+        lock_path,
+        SESSION_LOCK_TIMEOUT,
+        SESSION_LOCK_RETRY_DELAY,
+        "tool session store",
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -123,17 +125,15 @@ pub fn save_sessions(repo_root: &Path, name: Option<&str>) -> Result<SavedSessio
         ));
     }
 
-    let lock_dir = sessions_path.with_extension("json.lock");
-    acquire_lock(&lock_dir)?;
-    let raw = fs::read_to_string(&sessions_path).map_err(|e| {
-        release_lock(&lock_dir);
-        MaccError::Io {
+    let lock_path = sessions_path.with_extension("json.lock");
+    let raw = {
+        let _guard = acquire_session_lock(&lock_path)?;
+        fs::read_to_string(&sessions_path).map_err(|e| MaccError::Io {
             path: sessions_path.to_string_lossy().into(),
             action: "read tool sessions for save".into(),
             source: e,
-        }
-    })?;
-    release_lock(&lock_dir);
+        })?
+    };
 
     let root: Value = serde_json::from_str(&raw).map_err(|e| {
         MaccError::Validation(format!(
@@ -258,8 +258,8 @@ pub fn restore_sessions(repo_root: &Path, name: &str, dry_run: bool) -> Result<S
     }
 
     let sessions_path = repo_root.join(TOOL_SESSIONS_REL_PATH);
-    let lock_dir = sessions_path.with_extension("json.lock");
-    acquire_lock(&lock_dir)?;
+    let lock_path = sessions_path.with_extension("json.lock");
+    let _guard = acquire_session_lock(&lock_path)?;
 
     let result = (|| {
         // Load or initialize current sessions file
@@ -364,7 +364,6 @@ pub fn restore_sessions(repo_root: &Path, name: &str, dry_run: bool) -> Result<S
         Ok(meta)
     })();
 
-    release_lock(&lock_dir);
     result
 }
 
@@ -426,18 +425,149 @@ pub fn list_saved_sessions(repo_root: &Path) -> Result<Vec<SavedSessionMeta>> {
     Ok(results)
 }
 
-/// At coordinator startup, reset sessions that are stuck "active" because the
-/// performer exited without running its EXIT trap (e.g. SIGKILL, OOM).
-/// Any session whose heartbeat_epoch is 0 or older than `lease_ttl_seconds`
-/// is transitioned to "available" with owner fields cleared.
+/// Metadata for a released session.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReleasedSession {
+    pub tool_id: String,
+    pub session_id: String,
+    pub owner_pid: Option<i64>,
+    pub task_id: Option<String>,
+}
+
+/// Release any active session lease associated with a finished job (by tool, worktree, or task_id).
+/// This ensures sessions do not remain stuck "active" when performers exit unexpectedly
+/// without executing their EXIT trap.
+pub fn release_job_sessions(
+    repo_root: &Path,
+    tool_id: Option<&str>,
+    worktree: Option<&Path>,
+    task_id: Option<&str>,
+) -> Result<Vec<ReleasedSession>> {
+    let sessions_path = repo_root.join(TOOL_SESSIONS_REL_PATH);
+    if !sessions_path.exists() {
+        return Ok(Vec::new());
+    }
+    let lock_path = sessions_path.with_extension("json.lock");
+    let _guard = acquire_session_lock(&lock_path)?;
+    let result = (|| {
+        let raw = fs::read_to_string(&sessions_path).map_err(|e| MaccError::Io {
+            path: sessions_path.to_string_lossy().into(),
+            action: "read tool sessions for job release".into(),
+            source: e,
+        })?;
+        let mut root: Value = serde_json::from_str(&raw).map_err(|e| {
+            MaccError::Validation(format!(
+                "Failed to parse sessions file '{}': {}",
+                sessions_path.display(),
+                e
+            ))
+        })?;
+        let mut released = Vec::new();
+        let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let wt_str = worktree.map(|p| p.to_string_lossy().to_string());
+        if let Some(tools) = root.get_mut("tools").and_then(Value::as_object_mut) {
+            for (curr_tool_id, tool_val) in tools.iter_mut() {
+                if let Some(target_tool) = tool_id {
+                    if curr_tool_id != target_tool {
+                        continue;
+                    }
+                }
+                if let Some(sessions) = tool_val.get_mut("sessions").and_then(Value::as_object_mut)
+                {
+                    for (sid, entry) in sessions.iter_mut() {
+                        if entry.get("session_id").is_some() {
+                            continue; // skip old format
+                        }
+                        let status = entry
+                            .get("status")
+                            .and_then(Value::as_str)
+                            .unwrap_or("available");
+                        if status != "active" {
+                            continue;
+                        }
+                        let owner_tid = entry
+                            .get("owner_task_id")
+                            .and_then(Value::as_str)
+                            .map(|s| s.to_string());
+                        let owner_wt = entry
+                            .get("owner_worktree")
+                            .and_then(Value::as_str)
+                            .map(|s| s.to_string());
+                        let pid = entry.get("owner_pid").and_then(|v| {
+                            if let Some(n) = v.as_i64() {
+                                Some(n)
+                            } else if let Some(s) = v.as_str() {
+                                s.parse::<i64>().ok()
+                            } else {
+                                None
+                            }
+                        });
+
+                        let matches = match (task_id, &wt_str) {
+                            (Some(tid), Some(wt)) => {
+                                owner_tid.as_deref() == Some(tid)
+                                    || owner_wt.as_deref() == Some(wt.as_str())
+                            }
+                            (Some(tid), None) => owner_tid.as_deref() == Some(tid),
+                            (None, Some(wt)) => owner_wt.as_deref() == Some(wt.as_str()),
+                            (None, None) => true,
+                        };
+
+                        if matches {
+                            let tid_to_record =
+                                task_id.map(|s| s.to_string()).or(owner_tid.clone());
+                            if let Some(obj) = entry.as_object_mut() {
+                                obj.insert(
+                                    "status".to_string(),
+                                    Value::String("available".to_string()),
+                                );
+                                obj.insert(
+                                    "heartbeat_epoch".to_string(),
+                                    serde_json::Value::Number(0.into()),
+                                );
+                                obj.insert("last_used_at".to_string(), Value::String(now.clone()));
+                                if let Some(ref tid) = tid_to_record {
+                                    obj.insert(
+                                        "last_task_id".to_string(),
+                                        Value::String(tid.clone()),
+                                    );
+                                }
+                                obj.remove("owner_worktree");
+                                obj.remove("owner_task_id");
+                                obj.remove("owner_pid");
+                            }
+                            released.push(ReleasedSession {
+                                tool_id: curr_tool_id.clone(),
+                                session_id: sid.clone(),
+                                owner_pid: pid,
+                                task_id: tid_to_record,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        if !released.is_empty() {
+            persist_sessions_file(&sessions_path, &root)?;
+        }
+        Ok(released)
+    })();
+    result
+}
+
+/// At coordinator startup or during recovery, reset sessions that are stuck "active"
+/// because the performer exited without running its EXIT trap (e.g. SIGKILL, OOM),
+/// or whose owner process is no longer alive.
+/// Any session whose heartbeat_epoch is 0, older than `lease_ttl_seconds`, or whose
+/// owner_pid is dead is transitioned to "available" with owner fields cleared.
 /// Returns the number of sessions that were reset.
 pub fn reset_stale_active_sessions(repo_root: &Path, lease_ttl_seconds: u64) -> Result<usize> {
     let sessions_path = repo_root.join(TOOL_SESSIONS_REL_PATH);
     if !sessions_path.exists() {
         return Ok(0);
     }
-    let lock_dir = sessions_path.with_extension("json.lock");
-    acquire_lock(&lock_dir)?;
+    let lock_path = sessions_path.with_extension("json.lock");
+    let _guard = acquire_session_lock(&lock_path)?;
     let result = (|| {
         let raw = fs::read_to_string(&sessions_path).map_err(|e| MaccError::Io {
             path: sessions_path.to_string_lossy().into(),
@@ -453,12 +583,13 @@ pub fn reset_stale_active_sessions(repo_root: &Path, lease_ttl_seconds: u64) -> 
         })?;
         let now = chrono::Utc::now().timestamp();
         let mut reset_count = 0usize;
+        let mut recovered_records = Vec::new();
         let recovered_at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
         if let Some(tools) = root.get_mut("tools").and_then(Value::as_object_mut) {
-            for (_tool_id, tool_val) in tools.iter_mut() {
+            for (tool_id, tool_val) in tools.iter_mut() {
                 if let Some(sessions) = tool_val.get_mut("sessions").and_then(Value::as_object_mut)
                 {
-                    for (_sid, entry) in sessions.iter_mut() {
+                    for (sid, entry) in sessions.iter_mut() {
                         // Skip old-format entries (keyed by worktree path).
                         if entry.get("session_id").is_some() {
                             continue;
@@ -475,7 +606,25 @@ pub fn reset_stale_active_sessions(repo_root: &Path, lease_ttl_seconds: u64) -> 
                             .and_then(Value::as_i64)
                             .unwrap_or(0);
                         let age = now - hb;
-                        if hb == 0 || age > lease_ttl_seconds as i64 {
+
+                        let pid = entry.get("owner_pid").and_then(|v| {
+                            if let Some(n) = v.as_i64() {
+                                Some(n)
+                            } else if let Some(s) = v.as_str() {
+                                s.parse::<i64>().ok()
+                            } else {
+                                None
+                            }
+                        });
+                        let pid_dead = pid
+                            .map(|p| !crate::coordinator::helpers::is_pid_running(p))
+                            .unwrap_or(false);
+
+                        if hb == 0 || age > lease_ttl_seconds as i64 || pid_dead {
+                            let task_id = entry
+                                .get("owner_task_id")
+                                .and_then(Value::as_str)
+                                .map(|s| s.to_string());
                             if let Some(obj) = entry.as_object_mut() {
                                 obj.insert(
                                     "status".to_string(),
@@ -493,6 +642,20 @@ pub fn reset_stale_active_sessions(repo_root: &Path, lease_ttl_seconds: u64) -> 
                                     Value::String(recovered_at.clone()),
                                 );
                             }
+                            let reason = if pid_dead {
+                                "owner PID is not running"
+                            } else if hb == 0 {
+                                "heartbeat epoch is 0"
+                            } else {
+                                "lease heartbeat expired"
+                            };
+                            recovered_records.push((
+                                tool_id.clone(),
+                                sid.clone(),
+                                pid,
+                                task_id,
+                                reason.to_string(),
+                            ));
                             reset_count += 1;
                         }
                     }
@@ -501,10 +664,20 @@ pub fn reset_stale_active_sessions(repo_root: &Path, lease_ttl_seconds: u64) -> 
         }
         if reset_count > 0 {
             persist_sessions_file(&sessions_path, &root)?;
+            for (tool_id, sid, pid, task_id, reason) in recovered_records {
+                let _ = crate::coordinator::helpers::append_session_event(
+                    repo_root,
+                    "session_recovered_stale",
+                    task_id.as_deref().unwrap_or("-"),
+                    &tool_id,
+                    &sid,
+                    pid,
+                    &reason,
+                );
+            }
         }
         Ok(reset_count)
     })();
-    release_lock(&lock_dir);
     result
 }
 
@@ -529,6 +702,51 @@ pub fn delete_saved_session(repo_root: &Path, name: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A killed holder used to leave the mkdir-based lock directory behind,
+    /// deadlocking every later session operation after an 8-second stall.
+    /// Upgrading must reclaim that directory rather than fail on it forever.
+    #[test]
+    fn a_leftover_lock_directory_from_the_old_scheme_is_reclaimed() {
+        let root = temp_dir("session-stale-lock");
+        let sessions_path = root.join(TOOL_SESSIONS_REL_PATH);
+        std::fs::create_dir_all(sessions_path.parent().expect("parent")).expect("create dirs");
+        let lock_path = sessions_path.with_extension("json.lock");
+        std::fs::create_dir(&lock_path).expect("create leftover lock directory");
+
+        let started = std::time::Instant::now();
+        let guard = acquire_session_lock(&lock_path)
+            .expect("a leftover lock directory must not block acquisition");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "acquisition should be immediate, not stall on the retry budget"
+        );
+        assert!(
+            lock_path.is_file(),
+            "the lock should now be a regular file, not a directory"
+        );
+        drop(guard);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn session_lock_is_released_on_every_exit_path() {
+        let root = temp_dir("session-lock-raii");
+        let sessions_path = root.join(TOOL_SESSIONS_REL_PATH);
+        std::fs::create_dir_all(sessions_path.parent().expect("parent")).expect("create dirs");
+        let lock_path = sessions_path.with_extension("json.lock");
+
+        // An early return inside a guarded section must still free the lock.
+        let failed: Result<()> = (|| {
+            let _guard = acquire_session_lock(&lock_path)?;
+            Err(MaccError::Validation("simulated early return".into()))
+        })();
+        assert!(failed.is_err());
+
+        acquire_session_lock(&lock_path)
+            .expect("the lock must be free after a guarded section returns early");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     fn temp_dir(prefix: &str) -> PathBuf {
         let id = format!(
@@ -842,6 +1060,7 @@ mod tests {
         let now = chrono::Utc::now().timestamp();
         let fresh_hb = now - 60; // 60 s ago → still within 1800 s TTL
         let stale_hb = now - 3600; // 1 h ago → beyond 1800 s TTL
+        let current_pid = std::process::id().to_string();
 
         let sessions = json!({
             "tools": {
@@ -852,21 +1071,28 @@ mod tests {
                             "created_at": "2026-01-01T00:00:00Z",
                             "heartbeat_epoch": fresh_hb,
                             "owner_task_id": "TASK-A",
-                            "owner_pid": "1234"
+                            "owner_pid": current_pid
                         },
                         "stale-sid": {
                             "status": "active",
                             "created_at": "2026-01-01T00:00:00Z",
                             "heartbeat_epoch": stale_hb,
                             "owner_task_id": "TASK-B",
-                            "owner_pid": "5678"
+                            "owner_pid": current_pid
                         },
                         "zero-hb-sid": {
                             "status": "active",
                             "created_at": "2026-01-01T00:00:00Z",
                             "heartbeat_epoch": 0,
                             "owner_task_id": "TASK-C",
-                            "owner_pid": "9999"
+                            "owner_pid": current_pid
+                        },
+                        "dead-pid-sid": {
+                            "status": "active",
+                            "created_at": "2026-01-01T00:00:00Z",
+                            "heartbeat_epoch": fresh_hb,
+                            "owner_task_id": "TASK-D",
+                            "owner_pid": "99999999"
                         },
                         "already-avail-sid": {
                             "status": "available",
@@ -880,13 +1106,16 @@ mod tests {
         persist_sessions_file(&sessions_path, &sessions).expect("seed");
 
         let reset = reset_stale_active_sessions(&root, 1800).expect("reset");
-        assert_eq!(reset, 2, "stale-sid and zero-hb-sid should be reset");
+        assert_eq!(
+            reset, 3,
+            "stale-sid, zero-hb-sid, and dead-pid-sid should be reset"
+        );
 
         let after: Value =
             serde_json::from_str(&fs::read_to_string(&sessions_path).unwrap()).unwrap();
         let codex = &after["tools"]["codex"]["sessions"];
 
-        // Fresh session untouched.
+        // Fresh session with live PID untouched.
         assert_eq!(codex["fresh-sid"]["status"].as_str(), Some("active"));
         assert_eq!(codex["fresh-sid"]["owner_task_id"].as_str(), Some("TASK-A"));
 
@@ -899,11 +1128,76 @@ mod tests {
         assert_eq!(codex["zero-hb-sid"]["status"].as_str(), Some("available"));
         assert!(codex["zero-hb-sid"]["owner_pid"].is_null());
 
+        assert_eq!(codex["dead-pid-sid"]["status"].as_str(), Some("available"));
+        assert!(codex["dead-pid-sid"]["owner_pid"].is_null());
+
         // Already-available session untouched.
         assert_eq!(
             codex["already-avail-sid"]["status"].as_str(),
             Some("available")
         );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn release_job_sessions_releases_matched_active_session() {
+        let root = temp_dir("macc_sess_release_job");
+        fs::create_dir_all(root.join(".macc/state")).expect("create state dir");
+        let sessions_path = root.join(TOOL_SESSIONS_REL_PATH);
+
+        let sessions = json!({
+            "tools": {
+                "claude": {
+                    "sessions": {
+                        "job-sid-1": {
+                            "status": "active",
+                            "created_at": "2026-01-01T00:00:00Z",
+                            "heartbeat_epoch": 123456,
+                            "owner_task_id": "TASK-100",
+                            "owner_worktree": "/path/to/worker-01",
+                            "owner_pid": "5555"
+                        },
+                        "job-sid-2": {
+                            "status": "active",
+                            "created_at": "2026-01-01T00:00:00Z",
+                            "heartbeat_epoch": 123456,
+                            "owner_task_id": "TASK-200",
+                            "owner_worktree": "/path/to/worker-02",
+                            "owner_pid": "6666"
+                        }
+                    }
+                }
+            }
+        });
+        persist_sessions_file(&sessions_path, &sessions).expect("seed");
+
+        let released = release_job_sessions(
+            &root,
+            Some("claude"),
+            Some(Path::new("/path/to/worker-01")),
+            Some("TASK-100"),
+        )
+        .expect("release");
+        assert_eq!(released.len(), 1);
+        assert_eq!(released[0].session_id, "job-sid-1");
+        assert_eq!(released[0].owner_pid, Some(5555));
+
+        let after: Value =
+            serde_json::from_str(&fs::read_to_string(&sessions_path).unwrap()).unwrap();
+        let claude = &after["tools"]["claude"]["sessions"];
+
+        assert_eq!(claude["job-sid-1"]["status"].as_str(), Some("available"));
+        assert_eq!(claude["job-sid-1"]["heartbeat_epoch"].as_i64(), Some(0));
+        assert!(claude["job-sid-1"]["owner_worktree"].is_null());
+        assert!(claude["job-sid-1"]["owner_pid"].is_null());
+        assert_eq!(
+            claude["job-sid-1"]["last_task_id"].as_str(),
+            Some("TASK-100")
+        );
+
+        // Second session remains active
+        assert_eq!(claude["job-sid-2"]["status"].as_str(), Some("active"));
 
         let _ = fs::remove_dir_all(&root);
     }

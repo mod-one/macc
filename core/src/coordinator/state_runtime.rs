@@ -181,12 +181,66 @@ pub fn cleanup_dead_runtime_tasks_in_typed_registry(
             registry.set_updated_at(now.clone());
         }
     }
+    // A performer that finished and exited looks exactly like one that crashed:
+    // the PID is gone and the heartbeats stopped. The durable event log is what
+    // tells them apart, so consult it before reclaiming anything. Without a
+    // repo root there is no event log to consult, and the PID/heartbeat check
+    // stands alone.
+    let sqlite = repo_root.map(|root| {
+        let project_paths = crate::ProjectPaths::from_root(root);
+        crate::coordinator_storage::SqliteStorage::new(
+            crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&project_paths),
+        )
+    });
+    let has_terminal_result = |task_id: &str, claim_id: &str| {
+        sqlite
+            .as_ref()
+            .is_some_and(|db| db.task_has_terminal_result_for_claim(task_id, claim_id))
+    };
+
+    // Reference branch to compare task branches against, for deciding whether a
+    // reclaimed task still holds work worth preserving.
+    let reference_branch = repo_root
+        .and_then(|root| {
+            crate::config::load_canonical_config(&crate::ProjectPaths::from_root(root).config_path)
+                .ok()
+        })
+        .map(|canonical| {
+            crate::config::CoordinatorConfigResolved::resolve(
+                canonical.automation.coordinator.as_ref(),
+            )
+            .reference_branch
+        })
+        .unwrap_or_else(|| "master".to_string());
+
+    // Deliberately conservative: when the comparison cannot be made (unknown
+    // base, unreadable repo), assume there IS unmerged work. Blocking a task
+    // that could have been requeued costs an operator one command; clearing a
+    // worktree that held commits loses the only pointer to them.
+    let holds_unmerged_work = |task: &crate::coordinator::model::Task| {
+        let Some(root) = repo_root else {
+            return false;
+        };
+        let Some(branch) = task.branch() else {
+            return false;
+        };
+        let base = task.base_branch(&reference_branch);
+        if base.is_empty() || base == branch {
+            return false;
+        }
+        crate::git::commits_between(root, &base, branch)
+            .map(|commits| !commits.is_empty())
+            .unwrap_or(true)
+    };
+
     let mut registry_value = registry.to_value()?;
     let cleaned = coordinator_engine::cleanup_dead_runtime_tasks_in_registry_with(
         &mut registry_value,
         &now,
         heartbeat_grace_seconds,
         is_pid_running,
+        has_terminal_result,
+        holds_unmerged_work,
     )?;
     *registry = TaskRegistry::from_value(&registry_value)?;
     let fixed = cleaned.len();
@@ -380,6 +434,81 @@ pub struct StartupRecoveryEntry {
 /// any new task dispatch.
 ///
 /// Returns the list of classification entries produced, one per active task.
+#[derive(Debug, Clone, Copy)]
+enum MutationAction {
+    Merge,
+    Stale,
+    Blocked,
+    PhaseDone,
+    Requeue,
+}
+
+/// Classify a `todo` task that still holds a worktree.
+///
+/// Returns `None` when the task needs no repair -- either it carries no
+/// worktree at all, or it is parked with attempts remaining and the dispatcher
+/// will resume it normally.
+///
+/// When repair is needed the choice is deliberate:
+/// * the branch holds unmerged commits -> **block**, naming the branch. Work is
+///   at stake, so an operator must decide whether to recover or discard it.
+/// * the branch holds nothing -> **requeue**, clearing the stale attachment so
+///   the task can be dispatched fresh. Nothing is lost.
+///
+/// Never silently discard a branch with commits on it.
+#[allow(clippy::type_complexity)]
+fn classify_parked_todo_task(
+    task: &crate::coordinator::model::Task,
+    repo_root: &Path,
+    reference_branch: &str,
+    same_worktree_budget: usize,
+    logger: Option<&dyn Fn(String)>,
+) -> Option<(String, String, String, MutationAction)> {
+    if !task.has_worktree_attached() {
+        return None;
+    }
+    // Parked for a same-worktree retry with attempts left: dispatch will pick
+    // it up on this run, so leave it alone.
+    let resumable = task.is_awaiting_same_worktree_retry()
+        && task.task_runtime.retries_count() <= same_worktree_budget;
+    if resumable {
+        return None;
+    }
+
+    let branch = task.branch().unwrap_or_default().to_string();
+    let has_commits = !branch.is_empty()
+        && crate::git::commits_between(repo_root, reference_branch, &branch)
+            .map(|commits| !commits.is_empty())
+            .unwrap_or(false);
+
+    let (situation, classification, action, act) = if has_commits {
+        (
+            format!(
+                "Task is todo but holds worktree with unmerged commits on {}",
+                branch
+            ),
+            "parked_unschedulable_with_commits".to_string(),
+            "Block for operator review; committed work is unmerged".to_string(),
+            MutationAction::Blocked,
+        )
+    } else {
+        (
+            "Task is todo but holds a worktree it can no longer be dispatched into".to_string(),
+            "parked_unschedulable".to_string(),
+            "Release the stale worktree attachment and requeue".to_string(),
+            MutationAction::Requeue,
+        )
+    };
+
+    if let Some(log) = logger {
+        log(format!(
+            "- Recovery sweep task={} classification={} action=\"{}\"",
+            task.id, classification, action
+        ));
+    }
+    Some((situation, classification, action, act))
+}
+
 pub fn execute_startup_recovery_sweep(
     repo_root: &Path,
     reference_branch: &str,
@@ -405,17 +534,48 @@ pub fn execute_startup_recovery_sweep(
     let mut entries = Vec::new();
     let mut changed = false;
 
-    enum MutationAction {
-        Merge,
-        Stale,
-        Blocked,
-        PhaseDone,
-        Requeue,
-    }
-
     let mut proposed_mutations = Vec::new();
 
+    // Same-worktree retry budget, so the sweep can tell a task that is parked
+    // and still dispatchable from one that has run out of attempts.
+    let same_worktree_budget = crate::config::load_canonical_config(&project_paths.config_path)
+        .ok()
+        .map(|canonical| {
+            crate::config::CoordinatorConfigResolved::resolve(
+                canonical.automation.coordinator.as_ref(),
+            )
+            .phase_runner_max_attempts
+            .max(1)
+        })
+        .unwrap_or(1);
+
     for task in &snapshot.registry.tasks {
+        // `todo` tasks are normally none of the sweep's business, with one
+        // exception: a task parked by the same-worktree retry path keeps its
+        // worktree on purpose. If it has also run out of attempts it is
+        // unschedulable -- neither active nor blocked, so nothing else reclaims
+        // it -- and it sits looking healthy while committed work goes unmerged.
+        // That is exactly the state that must not stay invisible.
+        if task.state == "todo" {
+            if let Some(entry) = classify_parked_todo_task(
+                task,
+                repo_root,
+                reference_branch,
+                same_worktree_budget,
+                logger,
+            ) {
+                let (situation, classification, action, act) = entry;
+                entries.push(StartupRecoveryEntry {
+                    task_id: task.id.clone(),
+                    situation,
+                    classification: classification.clone(),
+                    action,
+                    mutated: !dry_run,
+                });
+                proposed_mutations.push((task.id.clone(), act, classification));
+            }
+            continue;
+        }
         if !task.is_active() && task.state != "blocked" {
             continue;
         }
@@ -557,10 +717,14 @@ pub fn execute_startup_recovery_sweep(
         changed = true;
         for (task_id, act, classification) in proposed_mutations {
             if let Some(task) = snapshot.registry.find_task_mut(&task_id) {
+                let branch = task.branch().unwrap_or_default().to_string();
                 let err_code = match classification.as_str() {
                     "heartbeat_stale" => Some("E413".to_string()),
                     "process_dead" => Some("E414".to_string()),
                     "blocked_dirty_worktree" => Some("E417".to_string()),
+                    // Same code the live path uses when a same-worktree retry
+                    // budget runs out, so both routes to this state read alike.
+                    "parked_unschedulable_with_commits" => Some("E902".to_string()),
                     _ => None,
                 };
                 if let Some(code) = err_code {
@@ -570,6 +734,10 @@ pub fn execute_startup_recovery_sweep(
                         "heartbeat_stale" => "Performer heartbeat stale".to_string(),
                         "process_dead" => "Performer process dead".to_string(),
                         "blocked_dirty_worktree" => "Dirty worktree blocks recovery".to_string(),
+                        "parked_unschedulable_with_commits" => format!(
+                            "Task could no longer be dispatched into its own worktree; committed work is unmerged on branch {}",
+                            branch
+                        ),
                         _ => "Recovery classification".to_string(),
                     });
                 }
@@ -916,5 +1084,274 @@ mod tests {
             "alive task with fresh heartbeat should be adopted"
         );
         assert!(!entry.mutated, "adopted task should not be mutated");
+    }
+
+    // ── Parked `todo` tasks holding a worktree ─────────────────────────────
+    //
+    // These are the tasks the sweep used to skip entirely: `is_active()`
+    // excludes `todo`, so a task parked by the same-worktree retry path with
+    // its budget spent was neither repaired nor reported. It sat looking
+    // healthy while committed work went unmerged, and a restart did not help.
+
+    fn run_git(repo: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("run git");
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Build a snapshot with one parked `todo` task and run the sweep.
+    fn sweep_parked_task(
+        repo: &Path,
+        branch: &str,
+        retries: i64,
+        runtime_status: &str,
+    ) -> (Vec<StartupRecoveryEntry>, crate::coordinator::model::Task) {
+        let project_paths = crate::ProjectPaths::from_root(repo);
+        let storage_paths =
+            crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&project_paths);
+        let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
+
+        let mut snapshot = crate::coordinator_storage::CoordinatorSnapshot::empty();
+        let task_json = serde_json::json!({
+            "id": "task-parked",
+            "title": "Parked task holding a worktree",
+            "state": "todo",
+            "dependencies": [],
+            "exclusive_resources": [],
+            "worktree": {
+                "worktree_path": repo.join(".macc/worktree/worker-01").to_string_lossy(),
+                "branch": branch,
+                "base_branch": "main"
+            },
+            "task_runtime": { "status": runtime_status, "retries": retries }
+        });
+        let task: crate::coordinator::model::Task =
+            serde_json::from_value(task_json).expect("parse task");
+        snapshot.registry.tasks.push(task);
+        sqlite.save_snapshot(&snapshot).expect("save snapshot");
+
+        let entries = execute_startup_recovery_sweep(repo, "main", false, None)
+            .expect("recovery sweep should succeed");
+        let reloaded = sqlite.load_snapshot().expect("reload snapshot");
+        let task = reloaded
+            .registry
+            .tasks
+            .into_iter()
+            .find(|t| t.id == "task-parked")
+            .expect("task should still exist");
+        (entries, task)
+    }
+
+    #[test]
+    fn sweep_blocks_a_parked_task_whose_branch_holds_unmerged_commits() {
+        let repo = make_test_git_repo();
+        run_git(&repo, &["checkout", "-q", "-b", "ai/codex/worker-01"]);
+        fs::write(repo.join("work.txt"), "work\n").expect("write");
+        run_git(&repo, &["add", "work.txt"]);
+        run_git(&repo, &["commit", "-qm", "task work"]);
+        run_git(&repo, &["checkout", "-q", "main"]);
+
+        // retries (5) exceeds the default budget, so the task is unschedulable.
+        let (entries, task) = sweep_parked_task(&repo, "ai/codex/worker-01", 5, "failed");
+
+        assert_eq!(
+            entries.len(),
+            1,
+            "the parked task must be reported: {entries:?}"
+        );
+        assert_eq!(
+            entries[0].classification,
+            "parked_unschedulable_with_commits"
+        );
+        assert!(entries[0].mutated);
+        assert_eq!(
+            task.state, "blocked",
+            "work is at stake, so an operator must decide"
+        );
+        assert_eq!(task.task_runtime.last_error_code.as_deref(), Some("E902"));
+        assert!(
+            task.task_runtime
+                .last_error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("ai/codex/worker-01"),
+            "the branch holding the work must be named: {:?}",
+            task.task_runtime.last_error
+        );
+        assert!(
+            task.worktree.is_some(),
+            "the worktree pointer must survive so the work can be found"
+        );
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn sweep_requeues_a_parked_task_with_nothing_at_stake() {
+        let repo = make_test_git_repo();
+        run_git(&repo, &["branch", "ai/codex/worker-01"]); // no commits ahead
+
+        let (entries, task) = sweep_parked_task(&repo, "ai/codex/worker-01", 5, "failed");
+
+        assert_eq!(entries.len(), 1, "got: {entries:?}");
+        assert_eq!(entries[0].classification, "parked_unschedulable");
+        assert_eq!(task.state, "todo");
+        assert!(
+            task.worktree.is_none(),
+            "the stale attachment must be released so the task can dispatch again"
+        );
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn sweep_leaves_a_resumable_parked_task_alone() {
+        // Budget remains, so dispatch will resume it this run. Touching it
+        // would throw away the commits the retry is meant to build on.
+        let repo = make_test_git_repo();
+        run_git(&repo, &["checkout", "-q", "-b", "ai/codex/worker-01"]);
+        fs::write(repo.join("work.txt"), "work\n").expect("write");
+        run_git(&repo, &["add", "work.txt"]);
+        run_git(&repo, &["commit", "-qm", "task work"]);
+        run_git(&repo, &["checkout", "-q", "main"]);
+
+        let (entries, task) = sweep_parked_task(&repo, "ai/codex/worker-01", 1, "failed");
+
+        assert!(
+            entries.is_empty(),
+            "a resumable task needs no repair: {entries:?}"
+        );
+        assert_eq!(task.state, "todo");
+        assert!(task.worktree.is_some());
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    /// End-to-end through the real wiring: a genuinely dead performer whose
+    /// branch carries commits must be blocked with its worktree intact, using
+    /// actual git state rather than an injected answer.
+    #[test]
+    fn reclaiming_a_dead_task_preserves_a_branch_that_holds_commits() {
+        let repo = make_test_git_repo();
+        run_git(&repo, &["checkout", "-q", "-b", "ai/codex/worker-01"]);
+        fs::write(repo.join("work.txt"), "work\n").expect("write");
+        run_git(&repo, &["add", "work.txt"]);
+        run_git(&repo, &["commit", "-qm", "task work"]);
+        run_git(&repo, &["checkout", "-q", "main"]);
+
+        let mut registry: TaskRegistry = serde_json::from_value(serde_json::json!({
+            "tasks": [{
+                "id":"T-DEAD",
+                "state":"claimed",
+                "base_branch":"main",
+                "worktree":{
+                    "worktree_path": repo.join(".macc/worktree/worker-01").to_string_lossy(),
+                    "branch":"ai/codex/worker-01",
+                    "base_branch":"master"
+                },
+                "task_runtime":{
+                    "status":"running",
+                    "current_phase":"dev",
+                    "pid":21474836,
+                    "claim_id":"claim-1",
+                    "last_heartbeat":"2020-01-01T00:00:00Z"
+                }
+            }]
+        }))
+        .expect("typed registry");
+
+        let fixed = cleanup_dead_runtime_tasks_in_typed_registry(
+            &mut registry,
+            "test",
+            60,
+            None,
+            Some(&repo),
+        )
+        .expect("cleanup");
+
+        assert_eq!(fixed, 1);
+        let task = &registry.tasks[0];
+        assert_eq!(task.state, "blocked", "committed work must not be requeued");
+        assert!(
+            task.worktree.is_some(),
+            "the worktree attachment is the only pointer to the commits"
+        );
+        assert!(task
+            .task_runtime
+            .last_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("ai/codex/worker-01"));
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    /// The mirror case, also through real git: no commits ahead of base means
+    /// nothing to preserve, so ordinary reclamation still happens.
+    #[test]
+    fn reclaiming_a_dead_task_with_an_empty_branch_still_requeues() {
+        let repo = make_test_git_repo();
+        run_git(&repo, &["branch", "ai/codex/worker-01"]); // no commits ahead
+
+        let mut registry: TaskRegistry = serde_json::from_value(serde_json::json!({
+            "tasks": [{
+                "id":"T-DEAD-EMPTY",
+                "state":"claimed",
+                "base_branch":"main",
+                "worktree":{
+                    "worktree_path": repo.join(".macc/worktree/worker-01").to_string_lossy(),
+                    "branch":"ai/codex/worker-01",
+                    "base_branch":"master"
+                },
+                "task_runtime":{
+                    "status":"running",
+                    "current_phase":"dev",
+                    "pid":21474836,
+                    "claim_id":"claim-1",
+                    "last_heartbeat":"2020-01-01T00:00:00Z"
+                }
+            }]
+        }))
+        .expect("typed registry");
+
+        cleanup_dead_runtime_tasks_in_typed_registry(&mut registry, "test", 60, None, Some(&repo))
+            .expect("cleanup");
+
+        assert_eq!(registry.tasks[0].state, "todo");
+        assert!(registry.tasks[0].worktree.is_none());
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn sweep_ignores_a_clean_todo_task() {
+        let repo = make_test_git_repo();
+        let project_paths = crate::ProjectPaths::from_root(&repo);
+        let storage_paths =
+            crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&project_paths);
+        let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
+
+        let mut snapshot = crate::coordinator_storage::CoordinatorSnapshot::empty();
+        let task: crate::coordinator::model::Task = serde_json::from_value(serde_json::json!({
+            "id": "task-fresh",
+            "state": "todo",
+            "dependencies": [],
+            "exclusive_resources": [],
+            "task_runtime": {}
+        }))
+        .expect("parse task");
+        snapshot.registry.tasks.push(task);
+        sqlite.save_snapshot(&snapshot).expect("save snapshot");
+
+        let entries = execute_startup_recovery_sweep(&repo, "main", false, None)
+            .expect("recovery sweep should succeed");
+        assert!(
+            entries.is_empty(),
+            "an ordinary todo task must not be touched: {entries:?}"
+        );
+        let _ = fs::remove_dir_all(&repo);
     }
 }

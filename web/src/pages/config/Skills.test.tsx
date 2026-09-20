@@ -1,14 +1,18 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ApiConfigResponse } from '../../api/models';
+import type { ApiCatalogMcpEntry, ApiCatalogSkillEntry, ApiConfigResponse } from '../../api/models';
 import Skills from './Skills';
 
 const getConfigMock = vi.fn();
 const updateConfigMock = vi.fn();
+const getCatalogSkillsAvailableMock = vi.fn();
+const getCatalogMcpAvailableMock = vi.fn();
 
 vi.mock('../../api/client', () => ({
   getConfig: (...args: unknown[]) => getConfigMock(...args),
   updateConfig: (...args: unknown[]) => updateConfigMock(...args),
+  getCatalogSkillsAvailable: (...args: unknown[]) => getCatalogSkillsAvailableMock(...args),
+  getCatalogMcpAvailable: (...args: unknown[]) => getCatalogMcpAvailableMock(...args),
   ApiClientError: class ApiClientError extends Error {
     envelope = {
       error: {
@@ -82,14 +86,55 @@ function buildConfig(overrides: Partial<ApiConfigResponse> = {}): ApiConfigRespo
   };
 }
 
+function buildSkill(entry: Partial<ApiCatalogSkillEntry> = {}): ApiCatalogSkillEntry {
+  return {
+    id: 'macc-performer',
+    name: 'MACC Performer',
+    description: 'Task-scoped implementation performer for MACC worktrees.',
+    tags: ['macc'],
+    tools: ['codex'],
+    recommended_ref: null,
+    risk: null,
+    requires_mcp: false,
+    writes_user_level_config: false,
+    mandatory: false,
+    category: null,
+    targets: {},
+    source: {
+      kind: 'git',
+      url: 'https://github.com/mod-one/skills.git',
+      ref: 'main',
+      checksum: null,
+    },
+    ...entry,
+  };
+}
+
+function buildMcp(entry: Partial<ApiCatalogMcpEntry> = {}): ApiCatalogMcpEntry {
+  return {
+    id: 'filesystem-mcp',
+    name: 'Filesystem MCP',
+    description: 'MCP server for local filesystem browsing and reads.',
+    tags: ['mcp'],
+    selector: { subpath: 'servers/filesystem' },
+    source: {
+      kind: 'git',
+      url: 'https://example.com/mcp.git',
+      ref: 'main',
+      checksum: null,
+    },
+    ...entry,
+  };
+}
+
 describe('Skills page', () => {
   beforeEach(() => {
     getConfigMock.mockReset();
     updateConfigMock.mockReset();
-    if (typeof window.localStorage.removeItem === 'function') {
-      window.localStorage.removeItem('macc.web.skills.customCatalog.v1');
-      window.localStorage.removeItem('macc.web.skills.cachedItems.v1');
-    }
+    getCatalogSkillsAvailableMock.mockReset();
+    getCatalogMcpAvailableMock.mockReset();
+    getCatalogSkillsAvailableMock.mockResolvedValue({ skills: [buildSkill()] });
+    getCatalogMcpAvailableMock.mockResolvedValue({ mcp: [buildMcp()] });
   });
 
   it('filters catalog items by search and kind', async () => {
@@ -109,38 +154,27 @@ describe('Skills page', () => {
     expect(screen.getByText('Filesystem MCP')).toBeInTheDocument();
   });
 
-  it('installs from Add by URL via config update', async () => {
+  it('installs a catalog skill via config update', async () => {
     const initial = buildConfig();
-    const saved = buildConfig({ selectedSkills: ['custom-package'] });
+    const saved = buildConfig({ selectedSkills: ['macc-performer'] });
     getConfigMock.mockResolvedValue(initial);
     updateConfigMock.mockResolvedValue(saved);
 
     render(<Skills />);
     await screen.findByText('Skills & Catalog');
 
-    fireEvent.click(screen.getByRole('button', { name: 'Add by URL' }));
-    await screen.findByRole('heading', { name: 'Security Review' });
-
-    fireEvent.click(screen.getByRole('button', { name: 'Configuration' }));
-    fireEvent.change(screen.getByDisplayValue('custom-package'), {
-      target: { value: 'custom-package' },
-    });
-    fireEvent.change(screen.getByPlaceholderText('https://example.com/package.git'), {
-      target: { value: 'https://example.com/custom-package.git' },
-    });
-
-    fireEvent.click(screen.getByRole('button', { name: 'Install' }));
+    fireEvent.click(screen.getAllByRole('button', { name: 'Install' })[0]);
 
     await waitFor(() => {
       expect(updateConfigMock).toHaveBeenCalledTimes(1);
     });
 
     const payload = updateConfigMock.mock.calls[0][0] as Record<string, unknown>;
-    expect(payload.selectedSkills).toEqual(['custom-package']);
+    expect(payload.selectedSkills).toEqual(['macc-performer']);
   });
 
   it('removes an installed item with confirmation', async () => {
-    const initial = buildConfig({ selectedSkills: ['custom-package'] });
+    const initial = buildConfig({ selectedSkills: ['macc-performer'] });
     const saved = buildConfig({ selectedSkills: [] });
     getConfigMock.mockResolvedValue(initial);
     updateConfigMock.mockResolvedValue(saved);
@@ -151,7 +185,7 @@ describe('Skills page', () => {
     fireEvent.click(screen.getAllByRole('button', { name: 'Remove' })[0]);
 
     const phraseInput = screen.getByLabelText(/Type/i);
-    fireEvent.change(phraseInput, { target: { value: 'custom-package' } });
+    fireEvent.change(phraseInput, { target: { value: 'macc-performer' } });
     fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
 
     await waitFor(() => {
@@ -169,6 +203,9 @@ describe('Skills page', () => {
         mandatorySkills: ['macc-performer'],
       }),
     );
+    getCatalogSkillsAvailableMock.mockResolvedValue({
+      skills: [buildSkill({ mandatory: true })],
+    });
 
     render(<Skills />);
     await screen.findByText('Skills & Catalog');

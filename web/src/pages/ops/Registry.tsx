@@ -456,6 +456,28 @@ const Registry: React.FC = () => {
               </div>
             )}
 
+            {selectedTask.gateRequiredVerdict && (
+              <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] p-4 text-sm text-[var(--text-muted)]">
+                Gate verdict: <strong>{selectedTask.gateVerdict ?? 'pending'}</strong>
+                {' · '}required: {selectedTask.gateRequiredVerdict}
+              </div>
+            )}
+
+            {selectedTask.externalBlockReason && (
+              <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-4 text-sm text-[var(--warning)]">
+                External block: {selectedTask.externalBlockReason}
+                {selectedTask.externalBlockClearsWhen && (
+                  <> · Clears when: {selectedTask.externalBlockClearsWhen}</>
+                )}
+                {selectedTask.externalBlockTrackingId && (
+                  <> · Tracking: {selectedTask.externalBlockTrackingId}</>
+                )}
+                {selectedTask.externalBlockSource && (
+                  <> · Source: {selectedTask.externalBlockSource}</>
+                )}
+              </div>
+            )}
+
             <div className="space-y-4">
               <h3 className="text-sm font-bold uppercase tracking-wider text-[var(--text-secondary)] px-1">Event History</h3>
               <div className="relative space-y-4 before:absolute before:inset-0 before:ml-[11px] before:h-full before:w-0.5 before:bg-[var(--border)]">

@@ -16,6 +16,19 @@ pub(super) async fn available_handler(
     Ok(Json(serde_json::json!({ "skills": entries })))
 }
 
+// ── GET /api/v1/catalog/mcp/available ────────────────────────────────────────
+
+/// `GET /api/v1/catalog/mcp/available`
+///
+/// Lists MCP servers available from configured catalogs.
+pub(super) async fn mcp_available_handler(
+    State(state): State<WebState>,
+) -> std::result::Result<Json<serde_json::Value>, ApiError> {
+    let catalog =
+        macc_core::catalog::load_effective_mcp_catalog(&state.paths).map_err(ApiError::from)?;
+    Ok(Json(serde_json::json!({ "mcp": catalog.entries })))
+}
+
 // ── GET /api/v1/catalog/skills/status ────────────────────────────────────────
 
 /// `GET /api/v1/catalog/skills/status`

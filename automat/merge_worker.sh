@@ -1,6 +1,32 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# ---------------------------------------------------------------------------
+# RETIRED — do not run.
+#
+# Merging moved into the Rust control plane
+# (`coordinator::runtime::merge_task_with_policy_native`), which integrates in a
+# private worktree under the git common dir. Nothing invokes this script; it
+# remains only so existing `.macc/automation/` copies keep a known entry point.
+#
+# The logic below still checks out the base branch in the *operator's* working
+# tree, which is exactly the behaviour the integration worktree exists to
+# prevent. Running it would move the operator's HEAD and can leave conflict
+# state in their checkout, so the script refuses to execute.
+# ---------------------------------------------------------------------------
+cat >&2 <<'EOF'
+merge_worker.sh is retired and does nothing.
+
+Local merges are performed by the coordinator itself:
+
+  macc coordinator run
+
+It integrates in a dedicated worktree and never checks out branches in your
+working tree. If you reached this message from an automation script, remove the
+merge_worker.sh call — the coordinator already handles merging.
+EOF
+exit 1
+
 usage() {
   cat <<'EOF'
 Usage:

@@ -360,7 +360,7 @@ enum Commands {
     /// Run the project coordinator automation script
     #[command(trailing_var_arg = true)]
     Coordinator {
-        /// Coordinator command (run, control-plane-run, dispatch, advance, resume, sync, sync-prd, status, reconcile, unlock, cleanup, retry-phase, cutover-gate, stop, sessions, validate-transition, validate-runtime-transition, runtime-status-from-event, storage-import, storage-export, events-export, storage-verify, storage-sync, select-ready-task, state-apply-transition, state-set-runtime, state-task-field, state-task-exists, state-counts, state-locks, state-set-merge-pending, state-set-merge-processed, state-increment-retries, state-upsert-slo-warning, state-slo-metric)
+        /// Coordinator command (run, control-plane-run, dispatch, advance, resume, sync, sync-prd, status, reconcile, block-task, unblock-task, unlock, cleanup, retry-phase, cutover-gate, stop, sessions, validate-transition, validate-runtime-transition, runtime-status-from-event, storage-import, storage-export, events-export, storage-verify, storage-sync, select-ready-task, state-apply-transition, state-set-runtime, state-task-field, state-task-exists, state-counts, state-locks, state-set-merge-pending, state-set-merge-processed, state-increment-retries, state-upsert-slo-warning, state-slo-metric)
         #[arg(default_value = "run")]
         command_name: String,
         /// Start the coordinator after a relative delay, for example 30m or 2h
@@ -2165,9 +2165,7 @@ fn run_with_engine_provider(
                     command_name: command_name.clone(),
                     run_in: run_in.clone(),
                     at: at.clone(),
-                    client_id: as_client
-                        .clone()
-                        .unwrap_or_else(|| format!("cli-{}", std::process::id())),
+                    client_id: resolve_client_identity(as_client.as_deref()),
                     client_mode: {
                         use coordinator::command::CoordinatorClientMode;
                         if *no_client {
@@ -2403,6 +2401,33 @@ fn build_plan_preview_ops(
         .collect()
 }
 
+/// Resolve this process's ownership identity for the project lease gate.
+///
+/// Precedence: explicit `--as-client` > inherited `MACC_CLIENT_ID` > a fresh
+/// `cli-<pid>`. The resolved value is written back to `MACC_CLIENT_ID` so every
+/// child this process spawns (the coordinator daemon, the automation scripts,
+/// and anything they spawn in turn) inherits the same identity and passes the
+/// gate its parent already passed. Without this a TUI or web client that holds
+/// the project lease can never start a coordinator run: the spawned child would
+/// mint a `cli-<pid>` id that can never match the owner.
+///
+/// Mirrors the `MACC_CLIENT_ID` handling in `commands::mod::require_project_owner`.
+fn resolve_client_identity(as_client: Option<&str>) -> String {
+    let resolved = as_client
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            std::env::var("MACC_CLIENT_ID")
+                .ok()
+                .map(|id| id.trim().to_string())
+                .filter(|id| !id.is_empty())
+        })
+        .unwrap_or_else(|| format!("cli-{}", std::process::id()));
+    std::env::set_var("MACC_CLIENT_ID", &resolved);
+    resolved
+}
+
 fn print_plan_preview_ops(ops: &[macc_core::plan::PlannedOp], explain: bool) {
     for op in ops {
         let scope = match op.scope {
@@ -2533,6 +2558,52 @@ fn confirm_user_scope_apply(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `resolve_client_identity` mutates the process environment, so these
+    /// cases share one test to keep them serialized within this binary.
+    #[test]
+    fn resolve_client_identity_precedence_and_export() {
+        let saved = std::env::var("MACC_CLIENT_ID").ok();
+
+        // 1. No flag, no env -> fresh cli-<pid>, exported for children.
+        std::env::remove_var("MACC_CLIENT_ID");
+        let generated = resolve_client_identity(None);
+        assert_eq!(generated, format!("cli-{}", std::process::id()));
+        assert_eq!(
+            std::env::var("MACC_CLIENT_ID").as_deref(),
+            Ok(generated.as_str()),
+            "resolved identity must be exported so spawned children inherit it"
+        );
+
+        // 2. Inherited env wins over the pid fallback. This is the case that
+        //    unblocks a coordinator child spawned by a TUI holding the lease.
+        std::env::set_var("MACC_CLIENT_ID", "tui-18d0428a72195943");
+        assert_eq!(resolve_client_identity(None), "tui-18d0428a72195943");
+
+        // 3. Explicit --as-client wins over the inherited env.
+        assert_eq!(
+            resolve_client_identity(Some("cli-explicit")),
+            "cli-explicit"
+        );
+        assert_eq!(
+            std::env::var("MACC_CLIENT_ID").as_deref(),
+            Ok("cli-explicit"),
+            "an explicit override must also be re-exported to children"
+        );
+
+        // 4. Blank values on either channel are ignored, not propagated as an
+        //    empty identity that would silently fail the gate.
+        std::env::set_var("MACC_CLIENT_ID", "   ");
+        assert_eq!(
+            resolve_client_identity(Some("  ")),
+            format!("cli-{}", std::process::id())
+        );
+
+        match saved {
+            Some(v) => std::env::set_var("MACC_CLIENT_ID", v),
+            None => std::env::remove_var("MACC_CLIENT_ID"),
+        }
+    }
 
     #[test]
     fn test_parse_since_to_seconds() {
@@ -2934,12 +3005,50 @@ mod tests {
             Some(Commands::Process { process_command }) => match process_command {
                 commands::process::ProcessCommands::Claim { kind, pid } => {
                     assert_eq!(kind, commands::process::ProcessKindArg::Coordinator);
-                    assert_eq!(pid, 1234);
+                    assert_eq!(pid, Some(1234));
                 }
                 _ => panic!("unexpected process command"),
             },
             _ => panic!("unexpected command"),
         }
+    }
+
+    #[test]
+    fn test_parse_project_takeover_request_without_pid() {
+        let cli = Cli::try_parse_from([
+            "macc", "process", "takeover", "request", "--kind", "project",
+        ])
+        .expect("parse project takeover without PID");
+        match cli.command {
+            Some(Commands::Process { process_command }) => match process_command {
+                commands::process::ProcessCommands::Takeover { takeover_command } => {
+                    match takeover_command {
+                        commands::process::TakeoverCommands::Request { kind, pid } => {
+                            assert_eq!(kind, commands::process::ProcessKindArg::Project);
+                            assert_eq!(pid, None);
+                        }
+                        _ => panic!("unexpected takeover command"),
+                    }
+                }
+                _ => panic!("unexpected process command"),
+            },
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_process_target_requires_pid_outside_project_kind() {
+        let err = Cli::try_parse_from([
+            "macc",
+            "process",
+            "takeover",
+            "request",
+            "--kind",
+            "coordinator",
+        ])
+        .err()
+        .expect("coordinator takeover must require PID");
+        assert!(err.to_string().contains("--pid <PID>"));
     }
 
     #[test]

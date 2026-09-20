@@ -115,6 +115,29 @@ export interface ApiFailureReport {
   suggested_fixes: string[];
 }
 
+export interface ApiCoordinatorRunHistoryItem {
+  run_id: string;
+  status: string;
+  started_at: string;
+  stopped_at: string | null;
+  stop_reason: string | null;
+}
+
+export interface ApiCoordinatorRunSummary {
+  run_id: string;
+  status: string;
+  severity: 'info' | 'success' | 'warning' | 'error';
+  headline: string;
+  cause: string;
+  task_id: string | null;
+  error_code: string | null;
+  occurred_at: string;
+  next_action: string;
+  dependent_task_ids: string[];
+  repeated_count: number;
+  recent_runs: ApiCoordinatorRunHistoryItem[];
+}
+
 export interface ApiCoordinatorStatus {
   total: number;
   todo: number;
@@ -133,6 +156,8 @@ export interface ApiCoordinatorStatus {
   last_run_status?: string;
   /** Human-readable reason the most recent run stopped. */
   last_run_stop_reason?: string;
+  /** Durable, run-scoped result used by CLI, TUI and Web. */
+  last_run_summary?: ApiCoordinatorRunSummary;
 }
 
 export interface ApiSelectedTask {
@@ -575,6 +600,12 @@ export interface ApiRegistryTask {
   lastError: string | null;
   lastErrorCode: string | null;
   resultExplanation: string | null;
+  gateVerdict?: string | null;
+  gateRequiredVerdict?: string | null;
+  externalBlockReason?: string | null;
+  externalBlockClearsWhen?: string | null;
+  externalBlockTrackingId?: string | null;
+  externalBlockSource?: string | null;
   description: string | null;
   objective: string | null;
   result: string | null;
@@ -782,6 +813,23 @@ export interface ApiCatalogSkillEntry {
   mandatory: boolean;
   category: string | null;
   targets: Record<string, string[]>;
+  source: {
+    kind: string;
+    url: string;
+    ref: string;
+    checksum: string | null;
+  };
+}
+
+/** An MCP server available from configured catalogs. */
+export interface ApiCatalogMcpEntry {
+  id: string;
+  name: string;
+  description: string;
+  tags: string[];
+  selector: {
+    subpath: string;
+  };
   source: {
     kind: string;
     url: string;

@@ -7,6 +7,7 @@ mod backups;
 mod catalog_skills;
 mod config;
 mod coordinator;
+mod coordinator_lease;
 #[allow(clippy::result_large_err)]
 mod doctor;
 mod errors;
@@ -51,6 +52,7 @@ use macc_core::process_ownership::{ClientKind, ProcessHandle, ProcessKind};
 use macc_core::service::process_ownership::RegisteredProcessGuard;
 use macc_core::{MaccError, ProjectPaths, Result};
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -79,6 +81,7 @@ struct WebState {
     assets_mode: WebAssetsMode,
     tail_stream_limiter: logs::TailStreamLimiter,
     terminal_sessions: terminal::TerminalSessionStore,
+    coordinator_lease_generation: Arc<AtomicU64>,
     #[allow(dead_code)]
     registered_process_guard: Option<Arc<RegisteredProcessGuard>>,
 }
@@ -190,6 +193,7 @@ impl Command for WebCommand {
             assets_mode: config.assets_mode,
             tail_stream_limiter: logs::TailStreamLimiter::default(),
             terminal_sessions: terminal::TerminalSessionStore::default(),
+            coordinator_lease_generation: Arc::new(AtomicU64::new(0)),
             registered_process_guard: Some(Arc::new(guard)),
         };
         let app = build_web_router(state.clone());
@@ -428,6 +432,7 @@ fn build_web_router(state: WebState) -> Router {
         .route("/api/v1/search", get(search::search_handler))
         // ── Catalog skills lifecycle (spec §16) ──────────────────────────
         .route("/api/v1/catalog/skills/available", get(catalog_skills::available_handler))
+        .route("/api/v1/catalog/mcp/available", get(catalog_skills::mcp_available_handler))
         .route("/api/v1/catalog/skills/status", get(catalog_skills::status_handler))
         .route("/api/v1/catalog/skills/installed", get(catalog_skills::installed_handler))
         .route("/api/v1/catalog/skills/verify", post(catalog_skills::verify_handler))

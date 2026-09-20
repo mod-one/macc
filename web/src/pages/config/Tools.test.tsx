@@ -86,7 +86,7 @@ describe('Tools page', () => {
     renderPage();
 
     await screen.findByText('Tools & Adapters');
-    fireEvent.click(screen.getByRole('heading', { name: 'Codex' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Configure' }));
     fireEvent.click(screen.getByRole('button', { name: 'Raw JSON' }));
 
     const rawEditor = screen.getByLabelText('Raw JSON editor') as HTMLTextAreaElement;
@@ -103,8 +103,8 @@ describe('Tools page', () => {
     renderPage();
 
     await screen.findByText('Tools & Adapters');
-    fireEvent.click(screen.getByRole('checkbox', { name: /enabled/i }));
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh Schema' }));
+    fireEvent.click(screen.getByRole('switch', { name: /disable codex/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
 
     expect(confirmSpy).toHaveBeenCalledTimes(1);
     expect(getConfigMock).toHaveBeenCalledTimes(1);
@@ -122,7 +122,7 @@ describe('Tools page', () => {
     renderPage();
 
     await screen.findByText('Tools & Adapters');
-    expect(screen.getByRole('heading', { name: 'Codex' })).toBeInTheDocument();
+    expect(screen.getByText('Codex')).toBeInTheDocument();
   });
 
   it('renders descriptor-backed fields like model selection', async () => {
@@ -131,7 +131,7 @@ describe('Tools page', () => {
     renderPage();
 
     await screen.findByText('Tools & Adapters');
-    fireEvent.click(screen.getByRole('heading', { name: 'Codex' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Configure' }));
 
     expect(await screen.findByLabelText('Model')).toBeInTheDocument();
     expect(screen.getByText(/Choose the model for Codex/i)).toBeInTheDocument();

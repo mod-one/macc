@@ -188,8 +188,31 @@ fn test_web_state(
         assets_mode,
         tail_stream_limiter: logs::TailStreamLimiter::default(),
         terminal_sessions: terminal::TerminalSessionStore::default(),
+        coordinator_lease_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         registered_process_guard: None,
     }
+}
+
+fn claim_web_project_lease(root: &Path, client_id: &str) {
+    let handle = macc_core::process_ownership::ProcessHandle {
+        kind: macc_core::process_ownership::ProcessKind::Coordinator,
+        project_root: root.to_path_buf(),
+        pid: Some(std::process::id() as i32),
+    };
+    macc_core::service::process_ownership::register_process(root, handle.clone())
+        .expect("register coordinator");
+    let now = chrono::Utc::now().to_rfc3339();
+    macc_core::service::process_ownership::claim_owner(
+        root,
+        &handle,
+        macc_core::process_ownership::ClientIdentity {
+            client_id: client_id.to_string(),
+            kind: macc_core::process_ownership::ClientKind::Web,
+            connected_at: now.clone(),
+            last_heartbeat: now,
+        },
+    )
+    .expect("claim project lease");
 }
 
 fn read_ops_log_entries(root: &Path) -> Vec<serde_json::Value> {
@@ -555,6 +578,7 @@ impl macc_core::engine::Engine for WebTestEngine {
         _paths: &ProjectPaths,
         _command: &macc_core::service::coordinator_workflow::CoordinatorCommand,
         _cfg: Option<&macc_core::config::CoordinatorConfig>,
+        _client_id: Option<&str>,
     ) -> Result<()> {
         self.managed_run_result
             .lock()

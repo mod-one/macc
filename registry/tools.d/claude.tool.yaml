@@ -17,12 +17,23 @@ performer:
     scope: worktree
     init_prompt: "Bonjour"
     id_strategy: generated
+    # `-r <uuid>` CONTINUES an existing conversation. `--session-id <uuid>`
+    # OPENS one under that id and fails with "Session ID <uuid> is already in
+    # use" on every later call, so it belongs under `create`, never under
+    # `resume` or `retry`. Declaring it here makes ToolSpec::validate enforce
+    # that, since MACC pools and re-issues session ids.
+    create_only_flags: ["--session-id"]
     resume:
       command: claude
+      args: ["--model", "{model}", "-r", "{session_id}", "--output-format", "text", "--dangerously-skip-permissions"]
+    create:
+      command: claude
       args: ["--model", "{model}", "--session-id", "{session_id}", "--output-format", "text", "--dangerously-skip-permissions"]
+  # Retry args are merged into the resume invocation (attempt > 1), where the
+  # session already exists, so this must be the resume flag too.
   retry:
     command: claude
-    args: ["--model", "{model}", "--session-id", "{session_id}", "--output-format", "text", "--dangerously-skip-permissions"]
+    args: ["--model", "{model}", "-r", "{session_id}", "--output-format", "text", "--dangerously-skip-permissions"]
   # Claude CLI accepts --effort <low|medium|high|xhigh|max> to set reasoning depth.
   effort_flag: "--effort"
 model_tiers:

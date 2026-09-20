@@ -1,3 +1,4 @@
+use crate::coordinator::integration::{IntegrationWorktree, PublishOutcome};
 use std::path::Path;
 
 #[derive(Debug, PartialEq)]
@@ -7,6 +8,14 @@ pub(super) enum MergeGateResult {
     NoBranchProceed,
 }
 
+/// Salvage any already-committed work on a task's branches before re-dispatching.
+///
+/// Runs entirely against the object database and the coordinator's private
+/// integration worktree: candidate branches are compared to the base with
+/// `git log base..branch` rather than by checking them out, and the merge itself
+/// happens in [`IntegrationWorktree`]. The operator's checkout is never read for
+/// cleanliness nor written to, so a dirty working tree no longer turns every
+/// salvageable task into a conflict.
 pub(super) fn merge_gate_check(
     task_id: &str,
     base_branch: &str,
@@ -28,68 +37,61 @@ pub(super) fn merge_gate_check(
         return MergeGateResult::NoBranchProceed;
     }
 
-    let original_branch = crate::git::current_branch_name(repo_root).ok();
-    let mut attempted_merge = false;
+    // Which candidates actually carry work the base does not already have?
+    // `git log base..branch` answers this without touching a working tree.
+    let mut mergeable = Vec::new();
     let mut conflict_or_error = false;
-    let mut merged = false;
-
     for branch in branch_candidates {
         if branch == base_branch {
             continue;
         }
-        if !crate::git::checkout(repo_root, &branch, false).unwrap_or(false) {
-            conflict_or_error = true;
-            continue;
+        match crate::git::commits_between(repo_root, base_branch, &branch) {
+            Ok(commits) if commits.is_empty() => {}
+            Ok(_) => mergeable.push(branch),
+            Err(_) => conflict_or_error = true,
         }
-        let commits_ahead = match crate::git::commits_ahead_of_base(repo_root, base_branch) {
-            Ok(commits) => commits,
-            Err(_) => {
-                conflict_or_error = true;
-                continue;
-            }
+    }
+
+    if mergeable.is_empty() {
+        return if conflict_or_error {
+            MergeGateResult::ConflictProceed
+        } else {
+            MergeGateResult::NoBranchProceed
         };
-        if commits_ahead.is_empty() {
-            continue;
-        }
-        attempted_merge = true;
-        if !crate::git::checkout(repo_root, base_branch, false).unwrap_or(false) {
-            conflict_or_error = true;
-            continue;
-        }
-        if crate::git::merge_ff_only(repo_root, &branch).unwrap_or(false) {
-            merged = true;
-            break;
-        }
-        let merge_no_edit = crate::git::run_git_output_mapped(
-            repo_root,
-            &["merge", "--no-edit", &branch],
-            "run git merge --no-edit",
-        );
-        if merge_no_edit
-            .map(|out| out.status.success())
-            .unwrap_or(false)
+    }
+
+    let Ok(integration) = IntegrationWorktree::acquire(repo_root, base_branch) else {
+        return MergeGateResult::ConflictProceed;
+    };
+
+    for branch in mergeable {
+        if try_merge_branch(&integration, &branch)
+            && matches!(
+                integration.publish(),
+                Ok(PublishOutcome::Published { .. }) | Ok(PublishOutcome::UpToDate)
+            )
         {
-            merged = true;
+            return MergeGateResult::Merged;
+        }
+        // Discard whatever this attempt left behind before trying the next
+        // candidate, so a conflict cannot leak into the following merge.
+        if integration.reset().is_err() {
             break;
         }
-        let _ = crate::git::run_git_output_mapped(
-            repo_root,
-            &["merge", "--abort"],
-            "abort merge gate conflict",
-        );
-        conflict_or_error = true;
     }
 
-    if let Some(branch) = original_branch {
-        let _ = crate::git::checkout(repo_root, &branch, false);
-    }
+    // At least one candidate carried work that could not be integrated.
+    MergeGateResult::ConflictProceed
+}
 
-    if merged {
-        return MergeGateResult::Merged;
+/// Merge `branch` into the integration worktree's detached HEAD, preferring a
+/// fast-forward. Returns `false` when the merge could not be completed.
+fn try_merge_branch(integration: &IntegrationWorktree, branch: &str) -> bool {
+    let dir = integration.path();
+    if crate::git::merge_ff_only(dir, branch).unwrap_or(false) {
+        return true;
     }
-    if attempted_merge || conflict_or_error {
-        MergeGateResult::ConflictProceed
-    } else {
-        MergeGateResult::NoBranchProceed
-    }
+    crate::git::run_git_output_mapped(dir, &["merge", "--no-edit", branch], "run merge gate merge")
+        .map(|out| out.status.success())
+        .unwrap_or(false)
 }

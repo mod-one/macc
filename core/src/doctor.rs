@@ -293,7 +293,41 @@ pub fn collect_all_findings(
     findings.extend(check_task_readiness(&paths.macc_dir));
     findings.extend(check_tool_login_states(paths));
     findings.extend(check_reference_branch(paths));
+    findings.extend(check_coordinator_config(paths));
     findings
+}
+
+/// Report coordinator settings the runtime accepts but silently ignores.
+///
+/// The canonical case: `max_review_cycles: 0` alongside `phases.review.enabled:
+/// true` (often with `mode: required`). The config loads, the coordinator runs,
+/// and review never executes -- there is no way to notice from behaviour alone.
+pub fn check_coordinator_config(paths: &crate::ProjectPaths) -> Vec<DiagnosticFinding> {
+    let Ok(canonical) = crate::config::load_canonical_config(&paths.config_path) else {
+        // Config problems that stop it loading are reported by other checks.
+        return Vec::new();
+    };
+    let warnings =
+        crate::config::coordinator_config_warnings(canonical.automation.coordinator.as_ref());
+    if warnings.is_empty() {
+        return vec![DiagnosticFinding::ok(
+            "MACC-CONFIG-COORDINATOR",
+            "config",
+            "Coordinator phase settings are consistent",
+        )];
+    }
+    warnings
+        .into_iter()
+        .map(|warning| {
+            DiagnosticFinding::warning(
+                "MACC-CONFIG-COORDINATOR",
+                "config",
+                "Coordinator setting has no effect",
+                &format!("{} {}", warning.setting, warning.message),
+                Some("Edit .macc/macc.yaml so the setting matches the intended behaviour."),
+            )
+        })
+        .collect()
 }
 
 /// Check that the configured reference branch exists locally and is clean (spec §19.2 item 10).

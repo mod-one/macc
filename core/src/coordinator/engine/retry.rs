@@ -34,6 +34,53 @@ pub(super) enum RetryStrategy {
     NoOp,
 }
 
+/// Tool-reported errors are re-dispatched rather than retried inside the current
+/// phase-runner invocation, so their budget must be tracked on the task. This
+/// applies whether or not the failed attempt produced commits.
+fn retry_budget_exhausted(task: &Task, input: &JobCompletionInput) -> bool {
+    task.task_runtime.retries_count() >= input.max_attempts.max(1)
+}
+
+fn terminal_tool_report(
+    task: &Task,
+    input: &JobCompletionInput,
+    completion_kind: PerformerCompletionKind,
+) -> Option<RetryStrategy> {
+    let explanation = input
+        .result_explanation
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let previous = task
+        .task_runtime
+        .result_explanation
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let (error_code, attempts) = if completion_kind == PerformerCompletionKind::PreconditionUnmet {
+        ("E903", 1)
+    } else if completion_kind == PerformerCompletionKind::ErrorWithoutChanges
+        && explanation.is_some()
+    {
+        ("E906", 1)
+    } else if explanation.is_some()
+        && explanation == previous
+        && task.task_runtime.retries_count() > 0
+    {
+        ("E907", task.task_runtime.retries_count() + 1)
+    } else {
+        return None;
+    };
+    Some(RetryStrategy::Block {
+        reason: input.status_text.clone(),
+        outcome: BlockOutcome::ToolReportedTerminal {
+            completion_kind,
+            error_code,
+            attempts,
+        },
+    })
+}
+
 pub(super) fn resolve_retry_strategy(
     task: &Task,
     input: &JobCompletionInput,
@@ -61,6 +108,14 @@ pub(super) fn resolve_retry_strategy(
         .map(|dt| dt.timestamp() as u64)
         .unwrap_or(0);
 
+    if let Some(completion_kind) = classification.completion_kind {
+        if completion_kind.is_error() {
+            if let Some(strategy) = terminal_tool_report(task, input, completion_kind) {
+                return strategy;
+            }
+        }
+    }
+
     if classification.completion_success {
         let completion_kind = classification
             .completion_kind
@@ -69,6 +124,16 @@ pub(super) fn resolve_retry_strategy(
             let same_worktree = completion_kind == PerformerCompletionKind::ErrorWithChanges
                 && classification.has_commits
                 && is_healthy_worktree;
+            if retry_budget_exhausted(task, input) {
+                return RetryStrategy::Block {
+                    reason: input.status_text.clone(),
+                    outcome: BlockOutcome::RetryBudgetExhausted {
+                        completion_kind,
+                        tool_error: Box::new(None),
+                        attempts: task.task_runtime.retries_count(),
+                    },
+                };
+            }
             return RetryStrategy::Retry {
                 same_worktree,
                 reason: input.status_text.clone(),
@@ -127,6 +192,16 @@ pub(super) fn resolve_retry_strategy(
             let same_worktree = completion_kind == PerformerCompletionKind::ErrorWithChanges
                 && classification.has_commits
                 && is_healthy_worktree;
+            if retry_budget_exhausted(task, input) {
+                return RetryStrategy::Block {
+                    reason: input.status_text.clone(),
+                    outcome: BlockOutcome::RetryBudgetExhausted {
+                        completion_kind,
+                        tool_error: Box::new(tool_error),
+                        attempts: task.task_runtime.retries_count(),
+                    },
+                };
+            }
             return RetryStrategy::Retry {
                 same_worktree,
                 reason: input.status_text.clone(),

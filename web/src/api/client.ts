@@ -36,6 +36,7 @@ import type {
   ApiRuntimeSnapshot,
   ApiSkillItem,
   ApiCatalogSkillEntry,
+  ApiCatalogMcpEntry,
   ApiCatalogSkillStatus,
   ApiSkillLockEntry,
   ApiVerifyFinding,
@@ -765,6 +766,16 @@ export async function getCatalogSkillsAvailable(
 ): Promise<{ skills: ApiCatalogSkillEntry[] }> {
   return requestJson<{ skills: ApiCatalogSkillEntry[] }>(
     '/catalog/skills/available',
+    { method: 'GET', signal: options.signal },
+    options.baseUrl,
+  );
+}
+
+export async function getCatalogMcpAvailable(
+  options: ApiRequestOptions = {},
+): Promise<{ mcp: ApiCatalogMcpEntry[] }> {
+  return requestJson<{ mcp: ApiCatalogMcpEntry[] }>(
+    '/catalog/mcp/available',
     { method: 'GET', signal: options.signal },
     options.baseUrl,
   );

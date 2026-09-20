@@ -522,6 +522,49 @@ impl SqliteStorage {
         Ok(inserted > 0)
     }
 
+    /// Has this task already reported a terminal `phase_result` for the given
+    /// claim?
+    ///
+    /// The performer's IPC event is persisted here the moment it is received
+    /// (see `coordinator::ipc`), well before the control-plane loop drains its
+    /// event bus. A task whose result is already on record has finished -- it
+    /// must never be treated as a dead process, however long ago it last sent a
+    /// heartbeat.
+    ///
+    /// Scoped by `claim_id` so a result from an earlier attempt cannot vouch for
+    /// the current one. Events carrying a stale claim are already rejected at
+    /// ingest (E418), so anything stored under this claim genuinely belongs to
+    /// it.
+    ///
+    /// Returns `false` on any read failure: an unreadable event log must not
+    /// keep a genuinely dead task alive forever.
+    pub fn task_has_terminal_result_for_claim(&self, task_id: &str, claim_id: &str) -> bool {
+        if task_id.is_empty() || claim_id.is_empty() {
+            return false;
+        }
+        let Ok(conn) = self.open() else {
+            return false;
+        };
+        let mut stmt = match conn.prepare(
+            "SELECT raw_json FROM events WHERE task_id = ?1 AND event_type = 'phase_result'",
+        ) {
+            Ok(stmt) => stmt,
+            Err(_) => return false,
+        };
+        let Ok(rows) = stmt.query_map(params![task_id], |row| row.get::<_, String>(0)) else {
+            return false;
+        };
+        for raw in rows.flatten() {
+            let Ok(value) = serde_json::from_str::<Value>(&raw) else {
+                continue;
+            };
+            if value.get("claim_id").and_then(Value::as_str) == Some(claim_id) {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn open(&self) -> Result<Connection> {
         ensure_parent_dir(&self.paths.sqlite_path)?;
         let conn = Connection::open(&self.paths.sqlite_path).map_err(sql_err)?;
@@ -630,6 +673,12 @@ impl SqliteStorage {
               payload_json TEXT NOT NULL,
               raw_json TEXT NOT NULL
             );
+            -- Ghost cleanup looks up whether a task already reported a result,
+            -- once per dead-PID candidate. Without this the lookup scans the
+            -- whole event log, which is dominated by heartbeats and grows all
+            -- run long.
+            CREATE INDEX IF NOT EXISTS idx_events_task_type
+              ON events (task_id, event_type);
             CREATE TABLE IF NOT EXISTS cursors (
               name TEXT PRIMARY KEY,
               path TEXT,
@@ -873,6 +922,35 @@ impl SqliteStorage {
         } else {
             Ok(None)
         }
+    }
+
+    pub fn get_recent_coordinator_runs(&self, limit: usize) -> Result<Vec<CoordinatorRun>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.open()?;
+        self.init_schema(&conn)?;
+        let mut stmt = conn
+            .prepare("SELECT run_id, pid, hostname, started_at, last_tick_at, stopped_at, status, epoch, version, stop_reason FROM coordinator_runs ORDER BY started_at DESC LIMIT ?1")
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map([limit as i64], |row| {
+                Ok(CoordinatorRun {
+                    run_id: row.get(0)?,
+                    pid: row.get(1)?,
+                    hostname: row.get(2)?,
+                    started_at: row.get(3)?,
+                    last_tick_at: row.get(4)?,
+                    stopped_at: row.get(5)?,
+                    status: row.get(6)?,
+                    epoch: row.get(7)?,
+                    version: row.get(8)?,
+                    stop_reason: row.get(9)?,
+                })
+            })
+            .map_err(sql_err)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(sql_err)
     }
 
     pub fn get_cursor(&self, name: &str) -> Result<Option<(u64, String)>> {
@@ -2270,6 +2348,16 @@ mod tests {
                     "title": "Task One",
                     "state": "in_progress",
                     "tool": "codex",
+                    "gate": {
+                        "required_verdict": "accepted",
+                        "description": "Release gate"
+                    },
+                    "blocked_on_external": {
+                        "reason": "Waiting for production evidence",
+                        "clears_when": "GAP-1 is accepted",
+                        "tracking_id": "GAP-1",
+                        "source": "operator"
+                    },
                     "task_runtime": {
                         "status": "running",
                         "pid": 1234,
@@ -2277,6 +2365,13 @@ mod tests {
                         "last_heartbeat": "2026-02-20T00:00:05Z",
                         "metrics": {
                             "retries": 2
+                        },
+                        "gate_verdict": "rejected",
+                        "external_block_resolution": {
+                            "evidence": "Approved in release review",
+                            "resolved_at": "2026-02-20T00:00:04Z",
+                            "block_reason": "Waiting for production evidence",
+                            "tracking_id": "GAP-1"
                         },
                         "last_error": null
                     }
@@ -2454,6 +2549,26 @@ mod tests {
             Some(2),
             "runtime retries metric should survive sqlite roundtrip"
         );
+        assert_eq!(
+            task["gate"]["required_verdict"].as_str(),
+            Some("accepted"),
+            "gate contract should survive sqlite roundtrip"
+        );
+        assert_eq!(
+            task["task_runtime"]["gate_verdict"].as_str(),
+            Some("rejected"),
+            "gate verdict should survive sqlite roundtrip"
+        );
+        assert_eq!(
+            task["task_runtime"]["external_block_resolution"]["tracking_id"].as_str(),
+            Some("GAP-1"),
+            "external block resolution should survive sqlite roundtrip"
+        );
+        assert_eq!(
+            task["blocked_on_external"]["source"].as_str(),
+            Some("operator"),
+            "external block provenance should survive sqlite roundtrip"
+        );
 
         let _ = fs::remove_dir_all(root);
     }
@@ -2620,6 +2735,75 @@ mod tests {
             .count();
         assert_eq!(matching_events, 1, "event insert must stay idempotent");
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// Ghost cleanup asks this question to tell "the performer crashed" apart
+    /// from "the performer finished and exited". Both leave a dead PID and a
+    /// stale heartbeat; only the event log distinguishes them.
+    #[test]
+    fn terminal_result_lookup_is_scoped_to_the_claim() {
+        let root = temp_project_root("macc_terminal_result");
+        let project_paths = ProjectPaths::from_root(&root);
+        let sqlite =
+            SqliteStorage::new(CoordinatorStoragePaths::from_project_paths(&project_paths));
+
+        let mut event = CoordinatorEventRecord {
+            event_id: "T1-1-abc".to_string(),
+            seq: 1,
+            ts: "2026-08-14T11:39:12Z".to_string(),
+            source: "coordinator-worktree:T1".to_string(),
+            task_id: Some("T1".to_string()),
+            event_type: "phase_result".to_string(),
+            claim_id: Some("claim-1".to_string()),
+            ..Default::default()
+        };
+        sqlite.append_event_record(&event).expect("append event");
+
+        assert!(
+            sqlite.task_has_terminal_result_for_claim("T1", "claim-1"),
+            "the claim that produced the result must be recognised"
+        );
+        assert!(
+            !sqlite.task_has_terminal_result_for_claim("T1", "claim-2"),
+            "a later claim must not inherit an earlier claim's result"
+        );
+        assert!(
+            !sqlite.task_has_terminal_result_for_claim("T2", "claim-1"),
+            "results must not leak across tasks"
+        );
+        assert!(
+            !sqlite.task_has_terminal_result_for_claim("", "claim-1")
+                && !sqlite.task_has_terminal_result_for_claim("T1", ""),
+            "an unidentified task or claim proves nothing"
+        );
+
+        // A non-terminal event for the same claim must not count as a result.
+        event.event_id = "T1-2-def".to_string();
+        event.seq = 2;
+        event.event_type = "heartbeat".to_string();
+        sqlite
+            .append_event_record(&event)
+            .expect("append heartbeat");
+        assert!(
+            !sqlite.task_has_terminal_result_for_claim("T1", "claim-9"),
+            "heartbeats are not results"
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// An unreadable or absent event log must not keep a dead task alive.
+    #[test]
+    fn terminal_result_lookup_fails_closed() {
+        let root = temp_project_root("macc_terminal_result_missing");
+        let project_paths = ProjectPaths::from_root(&root);
+        let sqlite =
+            SqliteStorage::new(CoordinatorStoragePaths::from_project_paths(&project_paths));
+        assert!(
+            !sqlite.task_has_terminal_result_for_claim("T1", "claim-1"),
+            "no event log means no proof of completion"
+        );
         let _ = fs::remove_dir_all(root);
     }
 }

@@ -8,6 +8,7 @@ pub mod coordinator_storage;
 pub mod doctor;
 pub mod domain;
 pub mod engine;
+pub mod fs_lock;
 pub mod git;
 pub use config::migrate;
 pub mod mcp_json;
@@ -64,7 +65,7 @@ pub enum MaccError {
     Validation(String),
 
     #[error(
-        "Operation rejected: client is not the owner of this process. Current owner: {}. Request takeover with 'macc process takeover request --kind <kind> --pid <pid>'.",
+        "Operation rejected: client is not the owner of this process. Current owner: {}. Retry with '--as-client <owner-client-id>', request control with 'macc process takeover request --kind project', or clear an abandoned lease with 'macc process release-stale'.",
         .current_owner.as_deref().unwrap_or("none")
     )]
     NotProcessOwner {
@@ -1744,6 +1745,24 @@ mod tests {
     #[test]
     fn test_version() {
         assert!(!version().is_empty());
+    }
+
+    #[test]
+    fn not_process_owner_message_lists_actionable_recovery_commands() {
+        let error = MaccError::NotProcessOwner {
+            handle: crate::process_ownership::ProcessHandle {
+                kind: crate::process_ownership::ProcessKind::Project,
+                project_root: std::path::PathBuf::from("/tmp/project"),
+                pid: None,
+            },
+            current_owner: Some("tui-owner".to_string()),
+        };
+
+        let message = error.to_string();
+        assert!(message.contains("Current owner: tui-owner"));
+        assert!(message.contains("--as-client <owner-client-id>"));
+        assert!(message.contains("macc process takeover request --kind project"));
+        assert!(message.contains("macc process release-stale"));
     }
 
     #[test]

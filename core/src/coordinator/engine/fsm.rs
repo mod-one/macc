@@ -206,6 +206,12 @@ pub enum ControlPlaneDecision {
     Complete,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StallDiagnosis {
+    pub lines: Vec<String>,
+    pub terminal_blocked: bool,
+}
+
 pub struct CoordinatorRunController {
     cfg: ControlPlaneLoopConfig,
     started: Instant,
@@ -243,6 +249,13 @@ pub trait ControlPlaneBackend {
     }
     fn last_dispatch_failure(&self) -> Option<String> {
         None
+    }
+    /// Explain, one line per task, why nothing could be dispatched.
+    ///
+    /// Only called when a run is about to abort for lack of progress, so it may
+    /// read the registry and git without slowing the normal path.
+    fn diagnose_stall(&self) -> StallDiagnosis {
+        StallDiagnosis::default()
     }
 }
 
@@ -568,6 +581,7 @@ pub fn apply_job_completion_in_registry(
             message: format!("Task '{}' not found in registry", task_id),
         })?;
     let out = apply_job_completion_typed(task, input, normalizer_registry, now);
+    crate::coordinator::task_selector::reconcile_task_blocks(&mut typed, now);
     *registry = typed.to_value()?;
     Ok(out)
 }
@@ -591,6 +605,7 @@ pub fn apply_merge_result_in_registry(
     } else {
         apply_merge_failure_typed(task, reason, now)?
     }
+    crate::coordinator::task_selector::reconcile_task_blocks(&mut typed, now);
     *registry = typed.to_value()?;
     Ok(())
 }
@@ -1169,6 +1184,24 @@ pub(super) enum BlockOutcome {
         tool_error: Box<Option<ToolError>>,
         now_ts: u64,
     },
+    /// A tool-reported task error has used up its re-dispatch budget.
+    ///
+    /// It must not go back to `todo`: failures without changes would otherwise
+    /// be re-dispatched forever, while a task retaining committed work would sit
+    /// unschedulable once its same-worktree budget was spent. Blocking makes the
+    /// exhausted task and its explanation visible to the operator.
+    RetryBudgetExhausted {
+        completion_kind: PerformerCompletionKind,
+        tool_error: Box<Option<ToolError>>,
+        attempts: usize,
+    },
+    /// A semantically terminal performer report. Unlike retry exhaustion this
+    /// does not imply malfunction and consumes no additional dispatch.
+    ToolReportedTerminal {
+        completion_kind: PerformerCompletionKind,
+        error_code: &'static str,
+        attempts: usize,
+    },
 }
 
 #[allow(dead_code)]
@@ -1218,6 +1251,23 @@ fn apply_job_completion_typed(
     apply_state_transitions(task, &strategy, now)
 }
 
+pub fn set_task_gate_verdict_in_registry(
+    registry: &mut Value,
+    task_id: &str,
+    verdict: crate::coordinator::model::GateVerdict,
+) -> Result<()> {
+    let mut typed = TaskRegistry::from_value(registry)?;
+    let task = typed
+        .find_task_mut(task_id)
+        .ok_or_else(|| MaccError::Coordinator {
+            code: "task_not_found",
+            message: format!("Task '{task_id}' not found in registry"),
+        })?;
+    task.task_runtime.gate_verdict = Some(verdict);
+    *registry = typed.to_value()?;
+    Ok(())
+}
+
 pub(super) fn should_auto_retry_error_code(
     code: &str,
     list: &[String],
@@ -1233,14 +1283,39 @@ pub(super) fn should_auto_retry_error_code(
     list.iter().any(|entry| entry.trim() == code)
 }
 
-pub fn cleanup_dead_runtime_tasks_in_registry_with<F>(
+/// Reclaim tasks whose performer process is gone.
+///
+/// `is_pid_running` and `has_terminal_result` are injected so this stays a pure
+/// decision function.
+///
+/// `has_terminal_result(task_id, claim_id)` answers "has this claim already
+/// reported a result?" from the durable event log. It is the difference between
+/// a performer that **crashed** and one that **finished and exited** -- both
+/// look identical to a PID check, and both stop sending heartbeats. Without it,
+/// a control-plane loop that falls behind its own grace window (which happens
+/// whenever several performers saturate the machine) reclaims tasks that
+/// succeeded, discarding the worktree that holds their committed work. The
+/// performer's result is persisted on receipt, so it is already on record well
+/// before the loop gets round to consuming it.
+///
+/// `holds_unmerged_work(task)` reports whether the task's branch still carries
+/// commits the base branch does not have. Requeuing clears the worktree, and
+/// that attachment is the only record of which branch holds those commits --
+/// once it is gone the work is reachable only by digging through reflogs. Such a
+/// task is blocked instead, keeping the pointer intact for an operator. It
+/// should answer conservatively: when it cannot tell, say yes.
+pub fn cleanup_dead_runtime_tasks_in_registry_with<F, G, H>(
     registry: &mut Value,
     now: &str,
     heartbeat_grace_seconds: i64,
     mut is_pid_running: F,
+    mut has_terminal_result: G,
+    mut holds_unmerged_work: H,
 ) -> Result<Vec<DeadRuntimeCleanupEntry>>
 where
     F: FnMut(i64) -> bool,
+    G: FnMut(&str, &str) -> bool,
+    H: FnMut(&Task) -> bool,
 {
     let now_ts = chrono::DateTime::parse_from_rfc3339(now)
         .ok()
@@ -1255,6 +1330,16 @@ where
         let runtime_status = task.runtime_status();
         if runtime_status != RuntimeStatus::Running || is_pid_running(pid) {
             continue;
+        }
+        // The process is gone -- but did it die, or did it finish? If a result
+        // for this exact claim is already recorded, the performer completed and
+        // exited normally; the completion is simply still queued for the loop to
+        // apply. Reclaiming here would clear the task's worktree and strand the
+        // commits it just made.
+        if let Some(claim_id) = task.task_runtime.claim_id.as_deref() {
+            if has_terminal_result(&task.id, claim_id) {
+                continue;
+            }
         }
         if heartbeat_grace_seconds > 0 {
             let within_grace = task
@@ -1272,20 +1357,39 @@ where
         let task_id = task.id.clone();
         let phase = task.current_phase().to_string();
         let old_state = task.state.clone();
+        let branch = task.branch().unwrap_or_default().to_string();
+        // Checked before the runtime is borrowed mutably below.
+        let unmerged = !branch.is_empty() && holds_unmerged_work(task);
 
         let runtime = task.ensure_runtime();
         runtime.pid = None;
         runtime.set_status(RuntimeStatus::Stale);
-        runtime.last_error = Some(format!("runtime pid {} is not running; auto-reset", pid));
         runtime.last_error_code =
             Some(crate::coordinator::error_normalizer::E414_PERFORMER_PROCESS_DEAD.to_string());
-        let new_state = if old_state == WorkflowState::Claimed.as_str() && phase == "dev" {
+
+        let requeue = old_state == WorkflowState::Claimed.as_str() && phase == "dev" && !unmerged;
+        let new_state = if requeue {
+            runtime.last_error = Some(format!("runtime pid {} is not running; auto-reset", pid));
             task.set_workflow_state(WorkflowState::Todo);
             task.assignee = None;
-            // Clear worktree attachment so the task can be re-dispatched.
+            // Nothing committed on the branch, so the attachment records nothing
+            // worth keeping -- release it so the task can be dispatched fresh.
             task.worktree = None;
             WorkflowState::Todo.as_str().to_string()
         } else {
+            // Keep the worktree attached. It names the branch holding the
+            // commits, and it is what lets later recovery steps (abandonment
+            // tagging, `macc coordinator status`) attribute that work to this
+            // task rather than reporting it as unknown.
+            let detail = if unmerged {
+                format!(
+                    "runtime pid {} is not running; committed work is unmerged on branch {} -- blocked instead of requeued so it is not lost",
+                    pid, branch
+                )
+            } else {
+                format!("runtime pid {} is not running; auto-reset", pid)
+            };
+            runtime.last_error = Some(detail);
             task.set_workflow_state(WorkflowState::Blocked);
             WorkflowState::Blocked.as_str().to_string()
         };
@@ -1318,11 +1422,39 @@ impl CoordinatorRunController {
         counts: CoordinatorCounts,
         last_dispatch_failure: Option<&str>,
     ) -> Result<ControlPlaneDecision> {
+        self.on_cycle_counts_with(counts, last_dispatch_failure, StallDiagnosis::default)
+    }
+
+    /// As [`Self::on_cycle_counts`], but able to explain a stall.
+    ///
+    /// `diagnose` is only invoked when the run is actually about to abort for
+    /// lack of progress, so the (registry-reading) diagnosis costs nothing on
+    /// the normal path. Reporting bare counts leaves the operator to guess why
+    /// nothing moved; naming the stuck tasks and their causes is the difference
+    /// between an actionable failure and a mystery.
+    pub fn on_cycle_counts_with<F>(
+        &mut self,
+        counts: CoordinatorCounts,
+        last_dispatch_failure: Option<&str>,
+        diagnose: F,
+    ) -> Result<ControlPlaneDecision>
+    where
+        F: FnOnce() -> StallDiagnosis,
+    {
         if counts.todo == 0 && counts.active == 0 {
             if counts.blocked > 0 {
+                let stalled = diagnose();
+                let details = stalled
+                    .lines
+                    .iter()
+                    .map(|line| format!("  - {line}"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 return Err(MaccError::Validation(format!(
-                    "Coordinator run finished with blocked tasks: {}. Run `macc coordinator status`, then `macc coordinator unlock --all`, and inspect logs with `macc logs tail --component coordinator`.",
-                    counts.blocked
+                    "Coordinator cannot continue: the run finished with blocked tasks ({}).{}{}\nInspect the blocked task, fix its recorded cause, then retry the coordinator.",
+                    counts.blocked,
+                    if details.is_empty() { "" } else { "\n\nRoot blocked task(s):\n" },
+                    details
                 )));
             }
             return Ok(ControlPlaneDecision::Complete);
@@ -1342,9 +1474,36 @@ impl CoordinatorRunController {
                 Some(msg) => format!(" Last dispatch failure: {}", msg),
                 None => String::new(),
             };
+            let stalled = diagnose();
+            let diagnosis = if stalled.lines.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "\n\n{} task(s) could not be dispatched:\n{}\n",
+                    stalled.lines.len(),
+                    stalled
+                        .lines
+                        .iter()
+                        .map(|line| format!("  - {}", line))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                )
+            };
+            if stalled.terminal_blocked {
+                let blocking_diagnosis = stalled
+                    .lines
+                    .iter()
+                    .map(|line| format!("  - {line}"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return Err(MaccError::Validation(format!(
+                    "Coordinator cannot continue: a task is blocked and every remaining todo task depends on a blocked task.\n\nBlocking diagnosis:\n{}\nInspect the blocked task, fix its recorded cause, then retry the coordinator.",
+                    blocking_diagnosis
+                )));
+            }
             return Err(MaccError::Validation(format!(
-                "Coordinator made no progress for {} cycles (todo={}, active={}, blocked={}).{} Run `macc coordinator status`, then `macc coordinator unlock --all`, and inspect logs with `macc logs tail --component coordinator`.",
-                self.no_progress_cycles, counts.todo, counts.active, counts.blocked, hint
+                "Coordinator made no progress for {} cycles (todo={}, active={}, blocked={}).{}{}\nRun `macc coordinator status`, then `macc coordinator unlock --all`, and inspect logs with `macc logs tail --component coordinator`.",
+                self.no_progress_cycles, counts.todo, counts.active, counts.blocked, hint, diagnosis
             )));
         }
 
@@ -1449,7 +1608,7 @@ async fn run_control_plane_cycle<B: ControlPlaneBackend + ?Sized>(
         return Ok(ControlPlaneDecision::Complete);
     }
     let last_fail = backend.last_dispatch_failure();
-    controller.on_cycle_counts(counts, last_fail.as_deref())
+    controller.on_cycle_counts_with(counts, last_fail.as_deref(), || backend.diagnose_stall())
 }
 
 struct NativeControlPlaneBackend<'a> {
@@ -1470,11 +1629,65 @@ struct NativeControlPlaneBackend<'a> {
     /// Used to throttle periodic heartbeats to once every 30 seconds so that
     /// viewer TUIs always see recent activity even while performers are running.
     last_sqlite_heartbeat_at: Option<std::time::Instant>,
+    /// When the current cycle began, used to measure how long the previous one
+    /// took. See [`Self::effective_ghost_grace_seconds`].
+    cycle_started_at: Option<std::time::Instant>,
+    /// Duration of the previous cycle, in seconds.
+    ///
+    /// Liveness is judged by how long ago a performer last sent a heartbeat --
+    /// but that age only means "the performer went quiet" if the coordinator was
+    /// actually listening. When a cycle runs long (several performers saturating
+    /// the machine will do it), every heartbeat ages by that whole stall without
+    /// anything having gone wrong.
+    last_cycle_seconds: i64,
+}
+
+/// Heartbeat grace, widened by however long the previous control-plane cycle
+/// took.
+///
+/// A heartbeat's age is only evidence about the performer if the coordinator
+/// was in a position to receive one. Whenever the loop runs long -- and it does,
+/// routinely, when several performers saturate the machine -- every heartbeat
+/// ages by that whole stall without anything having gone wrong. Judging
+/// liveness against a wall clock the loop cannot keep up with is how a performer
+/// that finished normally gets reclaimed, taking its worktree (and the pointer
+/// to its commits) with it.
+///
+/// Widening by the observed stall means a cycle that overran the configured
+/// grace performs, in effect, no ghost detection that round -- the intended
+/// behaviour -- while a performer that has genuinely been silent for longer than
+/// grace *plus* the stall is still caught. Skipping outright would let a
+/// persistently slow coordinator never reclaim anything at all.
+///
+/// A non-positive configured grace means the operator disabled the heartbeat
+/// test entirely; the PID check then stands alone and there is nothing to widen.
+pub(crate) fn ghost_grace_with_stall(
+    configured_grace_seconds: i64,
+    last_cycle_seconds: i64,
+) -> i64 {
+    if configured_grace_seconds <= 0 {
+        return configured_grace_seconds;
+    }
+    configured_grace_seconds.saturating_add(last_cycle_seconds.max(0))
+}
+
+impl NativeControlPlaneBackend<'_> {
+    fn effective_ghost_grace_seconds(&self) -> i64 {
+        ghost_grace_with_stall(self.ghost_heartbeat_grace_seconds, self.last_cycle_seconds)
+    }
 }
 
 #[async_trait]
 impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
     async fn on_cycle_start(&mut self, _cycle: usize) -> Result<()> {
+        // Measure the previous cycle before starting this one, so ghost
+        // detection can tell "the performer stopped" apart from "we stopped
+        // looking".
+        let now = std::time::Instant::now();
+        if let Some(started) = self.cycle_started_at.replace(now) {
+            self.last_cycle_seconds = now.duration_since(started).as_secs() as i64;
+        }
+
         let storage_paths = crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(
             &crate::ProjectPaths::from_root(self.repo_root),
         );
@@ -1676,23 +1889,22 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
                 }
             }),
         )?;
+        let grace = self.effective_ghost_grace_seconds();
+        if grace > self.ghost_heartbeat_grace_seconds {
+            if let Some(log) = self.logger {
+                let _ = log.note(format!(
+                    "- Ghost grace widened to {}s (configured {}s + {}s spent in the previous cycle)",
+                    grace, self.ghost_heartbeat_grace_seconds, self.last_cycle_seconds
+                ));
+            }
+        }
         let cleaned = if let Some(log) = self.logger {
             let note = |line: String| {
                 let _ = log.note(line);
             };
-            cleanup_dead_runtime_tasks(
-                self.repo_root,
-                "run-cycle",
-                self.ghost_heartbeat_grace_seconds,
-                Some(&note),
-            )?
+            cleanup_dead_runtime_tasks(self.repo_root, "run-cycle", grace, Some(&note))?
         } else {
-            cleanup_dead_runtime_tasks(
-                self.repo_root,
-                "run-cycle",
-                self.ghost_heartbeat_grace_seconds,
-                None,
-            )?
+            cleanup_dead_runtime_tasks(self.repo_root, "run-cycle", grace, None)?
         };
         if cleaned > 0 {
             if let Some(log) = self.logger {
@@ -1880,6 +2092,16 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
 
     fn last_dispatch_failure(&self) -> Option<String> {
         self.run_state.last_dispatch_failure.clone()
+    }
+
+    fn diagnose_stall(&self) -> StallDiagnosis {
+        crate::coordinator::control_plane::diagnose_stall_native(
+            self.repo_root,
+            self.canonical,
+            self.coordinator,
+            self.env_cfg,
+            &self.run_state,
+        )
     }
 }
 
@@ -2257,6 +2479,8 @@ pub async fn run_native_control_plane(
         last_logged_counts: None,
         last_cycle_progressed: false,
         last_sqlite_heartbeat_at: None,
+        cycle_started_at: None,
+        last_cycle_seconds: 0,
     };
 
     let timeout_seconds = env_cfg.timeout_seconds.unwrap_or(cfg.timeout_seconds);
@@ -2311,35 +2535,37 @@ pub async fn run_native_control_plane(
 
     let mut is_clean_exit = false;
     let mut final_status = "success".to_string();
+    let is_terminal_blocked = matches!(
+        &run_result,
+        Err(MaccError::Validation(message))
+            if message.starts_with("Coordinator cannot continue:")
+    );
     if let Err(MaccError::Validation(ref msg)) = run_result {
         if msg == "draining complete"
             || msg == "graceful stop complete"
             || msg == "force stopped by operator"
         {
             is_clean_exit = true;
-            final_status = if msg == "draining complete" || msg == "graceful stop complete" {
-                "stopped".to_string()
-            } else {
-                "force_stopping".to_string()
-            };
+            final_status = "stopped_by_user".to_string();
         }
     }
 
     let run_result = if is_clean_exit { Ok(()) } else { run_result };
+    let pause_state = crate::coordinator::state_runtime::read_coordinator_pause_file(repo_root)
+        .ok()
+        .flatten();
 
-    let result_label = if run_result.is_err() {
+    let result_label = if is_terminal_blocked {
+        "blocked"
+    } else if run_result.is_err() {
         "failed"
     } else {
         let is_shutdown = *shutdown_rx.borrow();
         if is_shutdown {
-            "stopped"
+            "stopped_by_user"
         } else if is_clean_exit {
             &final_status
-        } else if crate::coordinator::state_runtime::read_coordinator_pause_file(repo_root)
-            .ok()
-            .flatten()
-            .is_some()
-        {
+        } else if pause_state.is_some() {
             "paused"
         } else {
             "success"
@@ -2377,18 +2603,27 @@ pub async fn run_native_control_plane(
 
     let _ = sqlite.get_active_coordinator_run().map(|run_opt| {
         if let Some(mut r) = run_opt {
-            r.status = if is_clean_exit {
+            let stopped_by_signal = *shutdown_rx.borrow();
+            r.status = if is_terminal_blocked {
+                "blocked".to_string()
+            } else if is_clean_exit {
                 final_status.clone()
             } else if run_result.is_err() {
-                "crashed".to_string()
+                "failed".to_string()
+            } else if stopped_by_signal {
+                "stopped_by_user".to_string()
+            } else if pause_state.is_some() {
+                "paused".to_string()
             } else {
-                "stopped".to_string()
+                "success".to_string()
             };
             r.stopped_at = Some(chrono::Utc::now().to_rfc3339());
-            if !is_clean_exit && run_result.is_err() {
-                r.stop_reason = Some(format!("{:?}", run_result));
+            if is_terminal_blocked || (!is_clean_exit && run_result.is_err()) {
+                r.stop_reason = run_result.as_ref().err().map(ToString::to_string);
             } else if is_clean_exit {
                 r.stop_reason = Some(final_status.clone());
+            } else if let Some(pause) = pause_state.as_ref() {
+                r.stop_reason = Some(pause.reason.clone());
             } else {
                 // Normal completion (exit 0): persist the human-readable reason so
                 // it is not lost the way it previously was.
@@ -3485,6 +3720,296 @@ mod tests {
         }));
     }
 
+    // ── Ghost cleanup must not reclaim a task that already finished ────────
+    //
+    // A performer that completes and exits is indistinguishable from one that
+    // crashed: the PID is gone and the heartbeats stop either way. When the
+    // control-plane loop falls behind (which it does whenever several
+    // performers saturate the machine), the completion sits queued while the
+    // heartbeat ages past the grace window -- and reclaiming the task clears its
+    // worktree, stranding the commits it just made. The durable event log is
+    // the tiebreaker, and it is written the moment the result arrives.
+
+    fn running_task_registry(claim_id: &str) -> serde_json::Value {
+        json!({
+            "tasks": [{
+                "id":"T-GHOST",
+                "state":"claimed",
+                "assignee":"agentA",
+                "worktree":{
+                    "worktree_path":"/repo/.macc/worktree/worker-01",
+                    "branch":"ai/codex/worker-01"
+                },
+                "task_runtime":{
+                    "status":"running",
+                    "current_phase":"dev",
+                    "pid":999,
+                    "claim_id":claim_id,
+                    "last_heartbeat":"2026-02-21T00:00:00Z"
+                }
+            }]
+        })
+    }
+
+    #[test]
+    fn a_finished_task_is_not_reclaimed_even_when_its_process_is_gone() {
+        let mut registry = running_task_registry("claim-1");
+        let cleaned = cleanup_dead_runtime_tasks_in_registry_with(
+            &mut registry,
+            "2026-02-21T00:10:00Z", // 10 minutes later: well past any grace
+            60,
+            |_| false,                                             // process gone
+            |task, claim| task == "T-GHOST" && claim == "claim-1", // result on record
+            |_| false,
+        )
+        .unwrap();
+
+        assert!(
+            cleaned.is_empty(),
+            "a task whose result is already recorded must not be reclaimed"
+        );
+        assert_eq!(registry["tasks"][0]["state"], "claimed");
+        assert_eq!(
+            registry["tasks"][0]["worktree"]["branch"], "ai/codex/worker-01",
+            "the worktree pointer must survive -- it is the only route to the commits"
+        );
+    }
+
+    #[test]
+    fn a_crashed_task_with_no_recorded_result_is_still_reclaimed() {
+        // The guard must not blanket-disable ghost cleanup: a genuinely dead
+        // performer that never reported anything still has to be reclaimed.
+        let mut registry = running_task_registry("claim-1");
+        let cleaned = cleanup_dead_runtime_tasks_in_registry_with(
+            &mut registry,
+            "2026-02-21T00:10:00Z",
+            60,
+            |_| false,
+            |_, _| false, // nothing on record
+            |_| false,
+        )
+        .unwrap();
+
+        assert_eq!(cleaned.len(), 1);
+        assert_eq!(registry["tasks"][0]["state"], "todo");
+        assert!(registry["tasks"][0]["worktree"].is_null());
+    }
+
+    #[test]
+    fn a_result_from_a_different_claim_does_not_protect_the_current_one() {
+        // Scoping matters: a result from an earlier attempt must not vouch for
+        // the attempt running now, or a retry could never be reclaimed.
+        let mut registry = running_task_registry("claim-2");
+        let cleaned = cleanup_dead_runtime_tasks_in_registry_with(
+            &mut registry,
+            "2026-02-21T00:10:00Z",
+            60,
+            |_| false,
+            |_, claim| claim == "claim-1", // stale claim only
+            |_| false,
+        )
+        .unwrap();
+
+        assert_eq!(cleaned.len(), 1, "a stale claim's result must not protect");
+        assert_eq!(registry["tasks"][0]["state"], "todo");
+    }
+
+    #[test]
+    fn a_live_process_is_never_consulted_against_the_event_log() {
+        // The cheap PID check still short-circuits, so the common path does no
+        // database work.
+        let mut registry = running_task_registry("claim-1");
+        let mut consulted = false;
+        let cleaned = cleanup_dead_runtime_tasks_in_registry_with(
+            &mut registry,
+            "2026-02-21T00:10:00Z",
+            60,
+            |_| true, // process alive
+            |_, _| {
+                consulted = true;
+                false
+            },
+            |_| false,
+        )
+        .unwrap();
+        assert!(cleaned.is_empty());
+        assert!(!consulted, "a live process needs no event-log lookup");
+    }
+
+    // ── Grace must account for the loop's own stalls ───────────────────────
+    //
+    // From a real run: the coordinator's normal cycle was 32s, but with three
+    // performers saturating the machine it repeatedly took 120-259s while
+    // `ghost_heartbeat_grace_seconds` was 90. Any performer that finished
+    // during one of those stalls looked dead by the time the loop got round to
+    // checking, and was reclaimed -- along with the worktree holding its
+    // commits.
+
+    #[test]
+    fn a_stalled_cycle_widens_the_grace_window() {
+        // The exact numbers from the run that lost three tasks.
+        assert_eq!(super::ghost_grace_with_stall(90, 259), 349);
+        assert_eq!(
+            super::ghost_grace_with_stall(90, 120),
+            210,
+            "a 120s stall must not let a 90s-stale heartbeat count as death"
+        );
+    }
+
+    #[test]
+    fn a_prompt_cycle_leaves_the_grace_alone() {
+        // 32s was this coordinator's healthy cadence; detection stays tight.
+        assert_eq!(super::ghost_grace_with_stall(90, 0), 90);
+        assert_eq!(super::ghost_grace_with_stall(90, 32), 122);
+    }
+
+    #[test]
+    fn a_disabled_grace_is_never_widened() {
+        // <= 0 means the operator turned the heartbeat test off; the PID check
+        // stands alone and widening would silently re-enable a window.
+        assert_eq!(super::ghost_grace_with_stall(0, 300), 0);
+        assert_eq!(super::ghost_grace_with_stall(-1, 300), -1);
+    }
+
+    #[test]
+    fn grace_widening_tolerates_nonsense_inputs() {
+        // A clock that went backwards must not shrink the window, and a huge
+        // stall must not overflow it into a negative one.
+        assert_eq!(super::ghost_grace_with_stall(90, -500), 90);
+        assert_eq!(super::ghost_grace_with_stall(i64::MAX, 10), i64::MAX);
+    }
+
+    /// The widened grace is what actually protects the task: with it, a
+    /// heartbeat that is stale only because the loop stalled no longer trips
+    /// ghost detection.
+    #[test]
+    fn a_heartbeat_stale_only_because_of_a_stall_is_not_a_ghost() {
+        let mut registry = running_task_registry("claim-1");
+        // Heartbeat is 150s old; configured grace 90s; previous cycle took 200s.
+        let cleaned = cleanup_dead_runtime_tasks_in_registry_with(
+            &mut registry,
+            "2026-02-21T00:02:30Z",
+            super::ghost_grace_with_stall(90, 200),
+            |_| false,
+            |_, _| false,
+            |_| false,
+        )
+        .unwrap();
+        assert!(
+            cleaned.is_empty(),
+            "the coordinator was not listening for most of that window"
+        );
+
+        // Same heartbeat age, healthy cycle: still detected.
+        let mut registry = running_task_registry("claim-1");
+        let cleaned = cleanup_dead_runtime_tasks_in_registry_with(
+            &mut registry,
+            "2026-02-21T00:02:30Z",
+            super::ghost_grace_with_stall(90, 0),
+            |_| false,
+            |_, _| false,
+            |_| false,
+        )
+        .unwrap();
+        assert_eq!(
+            cleaned.len(),
+            1,
+            "a genuinely silent performer is still caught"
+        );
+    }
+
+    // ── A reclaimed task must never lose the pointer to committed work ─────
+    //
+    // Requeuing clears `task.worktree`, and that attachment is the only record
+    // of which branch holds the task's commits. Once cleared the work is
+    // reachable only through reflogs, and later recovery steps can no longer
+    // attribute it to the task -- an abandonment tag for it comes out labelled
+    // `unknown-task`.
+
+    #[test]
+    fn a_dead_task_with_committed_work_is_blocked_not_requeued() {
+        let mut registry = running_task_registry("claim-1");
+        let cleaned = cleanup_dead_runtime_tasks_in_registry_with(
+            &mut registry,
+            "2026-02-21T00:10:00Z",
+            60,
+            |_| false,    // process genuinely gone
+            |_, _| false, // no result recorded: a real ghost
+            |_| true,     // ...but its branch holds unmerged commits
+        )
+        .unwrap();
+
+        assert_eq!(cleaned.len(), 1);
+        assert_eq!(cleaned[0].new_state, "blocked");
+        assert_eq!(registry["tasks"][0]["state"], "blocked");
+        assert_eq!(
+            registry["tasks"][0]["worktree"]["branch"], "ai/codex/worker-01",
+            "the branch pointer must survive so the commits can be found"
+        );
+        let detail = registry["tasks"][0]["task_runtime"]["last_error"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            detail.contains("ai/codex/worker-01") && detail.contains("unmerged"),
+            "the reason must name the branch at risk: {detail}"
+        );
+    }
+
+    #[test]
+    fn a_dead_task_with_nothing_committed_is_still_requeued() {
+        // The guard must not stop ordinary reclamation: with no commits on the
+        // branch the attachment records nothing worth keeping.
+        let mut registry = running_task_registry("claim-1");
+        let cleaned = cleanup_dead_runtime_tasks_in_registry_with(
+            &mut registry,
+            "2026-02-21T00:10:00Z",
+            60,
+            |_| false,
+            |_, _| false,
+            |_| false, // branch has no commits ahead of base
+        )
+        .unwrap();
+
+        assert_eq!(cleaned.len(), 1);
+        assert_eq!(cleaned[0].new_state, "todo");
+        assert_eq!(registry["tasks"][0]["state"], "todo");
+        assert!(registry["tasks"][0]["worktree"].is_null());
+    }
+
+    #[test]
+    fn a_dead_task_with_no_branch_is_never_asked_about_commits() {
+        // Nothing to preserve, and no branch to ask about.
+        let mut registry = json!({
+            "tasks": [{
+                "id":"T-NOBRANCH",
+                "state":"claimed",
+                "task_runtime":{
+                    "status":"running",
+                    "current_phase":"dev",
+                    "pid":999,
+                    "claim_id":"claim-1",
+                    "last_heartbeat":"2026-02-21T00:00:00Z"
+                }
+            }]
+        });
+        let mut asked = false;
+        let cleaned = cleanup_dead_runtime_tasks_in_registry_with(
+            &mut registry,
+            "2026-02-21T00:10:00Z",
+            60,
+            |_| false,
+            |_, _| false,
+            |_| {
+                asked = true;
+                true
+            },
+        )
+        .unwrap();
+
+        assert_eq!(cleaned[0].new_state, "todo");
+        assert!(!asked, "no branch means no git comparison is needed");
+    }
+
     #[test]
     fn cleanup_dead_runtime_tasks_resets_claimed_dev_to_todo() {
         let mut registry = json!({
@@ -3503,6 +4028,8 @@ mod tests {
             &mut registry,
             "2026-02-21T00:00:00Z",
             0,
+            |_| false,
+            |_, _| false,
             |_| false,
         )
         .unwrap();
@@ -3532,6 +4059,8 @@ mod tests {
             &mut registry,
             "2026-02-21T00:01:00Z",
             60,
+            |_| false,
+            |_, _| false,
             |_| false,
         )
         .unwrap();
@@ -3713,6 +4242,318 @@ mod tests {
         let _ = fs::remove_dir_all(&repo);
     }
 
+    /// Parking a task for same-worktree retry must advance the attempt counter.
+    /// The selector uses it to bound how many times the task is re-dispatched;
+    /// without it a task that keeps failing would be eligible forever.
+    #[test]
+    fn error_with_changes_counts_the_attempt_when_keeping_the_worktree() {
+        let repo = make_repo_with_commit_ahead("main");
+        let wt = repo.to_string_lossy().to_string();
+        let mut task_val = json!({
+            "id": "RETRY-COUNT-1",
+            "state": "claimed",
+            "tool": "codex",
+            "worktree": { "worktree_path": wt, "branch": "ai/codex/worker-01", "base_branch": "main" },
+            "task_runtime": { "status": "running", "pid": 42, "retries": 0 }
+        });
+        apply_job_completion(
+            &mut task_val,
+            &make_error_completion_input(PerformerCompletionKind::ErrorWithChanges),
+            &NormalizerRegistry::empty(),
+            "2026-04-12T00:00:00Z",
+        );
+        assert_eq!(task_val["state"], "todo");
+        assert_eq!(task_val["task_runtime"]["status"], "failed");
+        assert_eq!(
+            task_val["task_runtime"]["retries"], 1,
+            "same-worktree park must count as an attempt"
+        );
+
+        // And the parked task is exactly what the selector recognises.
+        let task: crate::coordinator::model::Task =
+            serde_json::from_value(task_val).expect("typed task");
+        assert!(task.is_awaiting_same_worktree_retry());
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    /// The tool's own account of why it stopped must reach the *typed* error
+    /// fields. `result_explanation` lives in the runtime's serialized payload,
+    /// which later writes overwrite, so failures were routinely recorded with
+    /// nothing but the generic "Tool execution failed…" line.
+    #[test]
+    fn tool_explanation_is_surfaced_in_last_error_message() {
+        let repo = make_repo_with_commit_ahead("main");
+        let wt = repo.to_string_lossy().to_string();
+        let mut task_val = json!({
+            "id": "EXP-1",
+            "state": "claimed",
+            "tool": "codex",
+            "worktree": { "worktree_path": wt, "branch": "ai/codex/worker-01" },
+            "task_runtime": { "status": "running", "retries": 0 }
+        });
+        let mut input = make_error_completion_input(PerformerCompletionKind::ErrorWithChanges);
+        input.result_explanation =
+            Some("pnpm test and pnpm build fail for unrelated pre-existing reasons".to_string());
+
+        let out = apply_job_completion(
+            &mut task_val,
+            &input,
+            &NormalizerRegistry::empty(),
+            "2026-04-12T00:00:00Z",
+        );
+
+        let message = task_val["task_runtime"]["last_error_message"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            message.contains("unrelated pre-existing reasons"),
+            "the explanation must reach last_error_message: {message}"
+        );
+        assert_eq!(task_val["task_runtime"]["last_error_code"], "E104");
+        assert_eq!(task_val["task_runtime"]["last_error_origin"], "tool");
+        assert!(
+            out.detail.contains("unrelated pre-existing reasons"),
+            "the emitted detail must carry it too: {}",
+            out.detail
+        );
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    /// A tool that omits the explanation must not produce a failure with no
+    /// recorded reason — the omission itself is recorded.
+    #[test]
+    fn a_missing_explanation_is_recorded_as_missing() {
+        let mut task_val = json!({
+            "id": "EXP-2",
+            "state": "claimed",
+            "tool": "codex",
+            "worktree": { "worktree_path": "/tmp/wt-exp2" },
+            "task_runtime": { "status": "running" }
+        });
+        apply_job_completion(
+            &mut task_val,
+            &make_error_completion_input(PerformerCompletionKind::ErrorWithoutChanges),
+            &NormalizerRegistry::empty(),
+            "2026-04-12T00:00:00Z",
+        );
+        let message = task_val["task_runtime"]["last_error_message"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            message.contains("no explanation provided"),
+            "an unexplained failure must say so: {message}"
+        );
+        assert_eq!(task_val["task_runtime"]["last_error_code"], "E105");
+    }
+
+    /// Once the same-worktree budget is spent the task must be `blocked`, not
+    /// `todo`. A `todo` task holding a worktree past its budget is not
+    /// selectable, so it would sit unschedulable while looking healthy and the
+    /// run would end with a misleading "made no progress" error.
+    #[test]
+    fn error_with_changes_blocks_once_the_retry_budget_is_exhausted() {
+        let repo = make_repo_with_commit_ahead("main");
+        let wt = repo.to_string_lossy().to_string();
+        let mut task_val = json!({
+            "id": "BUDGET-1",
+            "state": "claimed",
+            "tool": "codex",
+            "worktree": { "worktree_path": wt, "branch": "ai/codex/worker-01", "base_branch": "main" },
+            // Already parked once; max_attempts in the input below is 1.
+            "task_runtime": { "status": "running", "pid": 42, "retries": 1 }
+        });
+        let out = apply_job_completion(
+            &mut task_val,
+            &make_error_completion_input(PerformerCompletionKind::ErrorWithChanges),
+            &NormalizerRegistry::empty(),
+            "2026-04-12T00:00:00Z",
+        );
+
+        assert_eq!(task_val["state"], "blocked", "must not go back to todo");
+        assert_eq!(out.status_label, "retry_budget_exhausted");
+        assert!(!out.should_retry);
+        assert_eq!(task_val["task_runtime"]["last_error_code"], "E902");
+
+        // The branch is named so the operator can find the unmerged work.
+        let detail = task_val["task_runtime"]["last_error"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(detail.contains("ai/codex/worker-01"), "got: {detail}");
+        assert!(detail.contains("retry budget exhausted"), "got: {detail}");
+
+        // Worktree stays attached: the commits are still there to recover.
+        assert_eq!(task_val["worktree"]["branch"], "ai/codex/worker-01");
+        assert_eq!(
+            task_val["task_runtime"]["completion_kind"], "error_with_changes",
+            "the reason for blocking must remain visible"
+        );
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    /// Full lifecycle: first failure parks for retry, second blocks. Nothing in
+    /// between leaves the task in an unschedulable `todo` state.
+    #[test]
+    fn same_worktree_retry_goes_park_then_block_never_stuck_todo() {
+        let repo = make_repo_with_commit_ahead("main");
+        let wt = repo.to_string_lossy().to_string();
+        let mut task_val = json!({
+            "id": "BUDGET-2",
+            "state": "claimed",
+            "tool": "codex",
+            "worktree": { "worktree_path": wt, "branch": "ai/codex/worker-02", "base_branch": "main" },
+            "task_runtime": { "status": "running", "retries": 0 }
+        });
+
+        // Attempt 1 -> parked for retry, still dispatchable.
+        apply_job_completion(
+            &mut task_val,
+            &make_error_completion_input(PerformerCompletionKind::ErrorWithChanges),
+            &NormalizerRegistry::empty(),
+            "2026-04-12T00:00:00Z",
+        );
+        assert_eq!(task_val["state"], "todo");
+        assert_eq!(task_val["task_runtime"]["retries"], 1);
+        let parked: crate::coordinator::model::Task =
+            serde_json::from_value(task_val.clone()).expect("typed");
+        assert!(
+            parked.is_awaiting_same_worktree_retry(),
+            "the parked task must be recognisable as resumable"
+        );
+
+        // Attempt 2 -> budget spent, blocked.
+        task_val["state"] = json!("claimed");
+        task_val["task_runtime"]["status"] = json!("running");
+        apply_job_completion(
+            &mut task_val,
+            &make_error_completion_input(PerformerCompletionKind::ErrorWithChanges),
+            &NormalizerRegistry::empty(),
+            "2026-04-12T00:01:00Z",
+        );
+        assert_eq!(task_val["state"], "blocked");
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    /// Without commits the worktree is dropped, but the re-dispatch still counts
+    /// against the task retry budget.
+    #[test]
+    fn error_without_changes_counts_a_task_retry() {
+        let mut task_val = json!({
+            "id": "RETRY-COUNT-2",
+            "state": "claimed",
+            "tool": "codex",
+            "worktree": { "worktree_path": "/tmp/wt-none" },
+            "task_runtime": { "status": "running", "retries": 0 }
+        });
+        apply_job_completion(
+            &mut task_val,
+            &make_error_completion_input(PerformerCompletionKind::ErrorWithoutChanges),
+            &NormalizerRegistry::empty(),
+            "2026-04-12T00:00:00Z",
+        );
+        assert_eq!(task_val["state"], "todo");
+        assert!(task_val["worktree"].is_null(), "worktree must be released");
+        assert_eq!(task_val["task_runtime"]["retries"], 1);
+    }
+
+    #[test]
+    fn error_without_changes_blocks_once_the_retry_budget_is_exhausted() {
+        let mut task_val = json!({
+            "id": "BUDGET-NO-CHANGES-1",
+            "state": "claimed",
+            "tool": "codex",
+            "worktree": { "worktree_path": "/tmp/wt-no-changes" },
+            "task_runtime": { "status": "running", "pid": 42, "retries": 1 }
+        });
+
+        let out = apply_job_completion(
+            &mut task_val,
+            &make_error_completion_input(PerformerCompletionKind::ErrorWithoutChanges),
+            &NormalizerRegistry::empty(),
+            "2026-04-12T00:01:00Z",
+        );
+
+        assert_eq!(task_val["state"], "blocked");
+        assert_eq!(task_val["task_runtime"]["status"], "failed");
+        assert_eq!(task_val["task_runtime"]["last_error_code"], "E902");
+        assert_eq!(
+            task_val["task_runtime"]["completion_kind"],
+            "error_without_changes"
+        );
+        assert!(task_val["worktree"].is_null());
+        assert_eq!(out.status_label, "retry_budget_exhausted");
+        assert!(!out.should_retry);
+        assert!(out.detail.contains("retry budget exhausted"));
+        assert!(!out.detail.contains("same worktree"));
+    }
+
+    #[test]
+    fn precondition_unmet_blocks_immediately_without_retry() {
+        let mut task = json!({
+            "id":"GATED","state":"claimed","tool":"codex",
+            "task_runtime":{"status":"running","retries":0}
+        });
+        let mut input = make_error_completion_input(PerformerCompletionKind::PreconditionUnmet);
+        input.success = false;
+        input.result_explanation = Some("acceptance verdict is rejected".to_string());
+
+        let out = apply_job_completion(
+            &mut task,
+            &input,
+            &NormalizerRegistry::empty(),
+            "2026-08-30T10:00:00Z",
+        );
+
+        assert_eq!(task["state"], "blocked");
+        assert_eq!(task["task_runtime"]["last_error_code"], "E903");
+        assert_eq!(task["task_runtime"]["retries"].as_i64().unwrap_or(0), 0);
+        assert_eq!(out.status_label, "precondition_unmet");
+    }
+
+    #[test]
+    fn explained_error_without_changes_is_not_retried() {
+        let mut task = json!({
+            "id":"DETERMINISTIC","state":"claimed","tool":"codex",
+            "task_runtime":{"status":"running","retries":0}
+        });
+        let mut input = make_error_completion_input(PerformerCompletionKind::ErrorWithoutChanges);
+        input.result_explanation = Some("required external evidence is absent".to_string());
+
+        apply_job_completion(
+            &mut task,
+            &input,
+            &NormalizerRegistry::empty(),
+            "2026-08-30T10:00:00Z",
+        );
+
+        assert_eq!(task["state"], "blocked");
+        assert_eq!(task["task_runtime"]["last_error_code"], "E906");
+        assert_eq!(task["task_runtime"]["retries"].as_i64().unwrap_or(0), 0);
+    }
+
+    #[test]
+    fn identical_explanation_trips_the_retry_circuit_breaker() {
+        let mut task = json!({
+            "id":"REPEATED","state":"claimed","tool":"codex",
+            "task_runtime":{
+                "status":"running","retries":1,
+                "result_explanation":"same deterministic refusal"
+            }
+        });
+        let mut input = make_error_completion_input(PerformerCompletionKind::ErrorWithChanges);
+        input.result_explanation = Some("same deterministic refusal".to_string());
+
+        let out = apply_job_completion(
+            &mut task,
+            &input,
+            &NormalizerRegistry::empty(),
+            "2026-08-30T10:00:00Z",
+        );
+
+        assert_eq!(task["state"], "blocked");
+        assert_eq!(task["task_runtime"]["last_error_code"], "E907");
+        assert!(out.detail.contains("identical explanation repeated"));
+    }
+
     #[test]
     fn error_with_changes_prefers_active_session_chain_over_claim_session() {
         let mut task_val = json!({
@@ -3870,6 +4711,36 @@ mod tests {
             repo.to_string_lossy().to_string()
         );
         let _ = fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn error_without_changes_stdout_marker_respects_the_retry_budget() {
+        let mut task_val = json!({
+            "id": "BUDGET-STDOUT-NO-CHANGES",
+            "state": "claimed",
+            "tool": "claude",
+            "worktree": { "worktree_path": "/tmp/wt-stdout-no-changes" },
+            "task_runtime": { "status": "running", "retries": 1 }
+        });
+        let mut input = make_error_completion_input(PerformerCompletionKind::ErrorWithoutChanges);
+        input.success = false;
+        input.completion_kind = None;
+        input.normalizer_input = Some(NormalizerInput {
+            exit_code: 1,
+            stderr: String::new(),
+            stdout: "MACC_TASK_RESULT: error_without_changes".to_string(),
+        });
+
+        let out = apply_job_completion(
+            &mut task_val,
+            &input,
+            &NormalizerRegistry::empty(),
+            "2026-04-12T00:01:00Z",
+        );
+
+        assert_eq!(task_val["state"], "blocked");
+        assert_eq!(out.status_label, "retry_budget_exhausted");
+        assert!(!out.should_retry);
     }
 
     #[test]

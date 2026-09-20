@@ -101,11 +101,11 @@ describe('Settings page', () => {
     getConfigMock.mockResolvedValue(buildConfig());
     renderPage();
 
-    expect(screen.getByText('Loading settings...')).toBeInTheDocument();
+    expect(screen.getByText(/Loading settings/i)).toBeInTheDocument();
     await screen.findByText('Settings');
-    expect(screen.getByText('Web Interface Port')).toBeInTheDocument();
-    expect(screen.getByText('Offline Mode')).toBeInTheDocument();
-    expect(screen.getByText('Quiet Mode')).toBeInTheDocument();
+    expect(screen.getByText('Web port')).toBeInTheDocument();
+    expect(screen.getByText('Offline mode')).toBeInTheDocument();
+    expect(screen.getByText('Quiet mode')).toBeInTheDocument();
   });
 
   it('shows error banner when config fetch fails', async () => {
@@ -120,13 +120,13 @@ describe('Settings page', () => {
     renderPage();
 
     await screen.findByText('Settings');
-    fireEvent.click(screen.getByRole('button', { name: 'Advanced' }));
+    fireEvent.click(screen.getByRole('button', { name: /Advanced/i }));
 
-    expect(screen.getByText('Max Dispatch')).toBeInTheDocument();
+    expect(screen.getByText('Max dispatch')).toBeInTheDocument();
     expect(screen.getByText('Max Parallel Per Tool')).toBeInTheDocument();
     expect(screen.getByText('Tool Specializations')).toBeInTheDocument();
-    expect(screen.getByText('Error Code Retry List')).toBeInTheDocument();
-    expect(screen.getByText('Backoff Base (seconds)')).toBeInTheDocument();
+    expect(screen.getByText('Retry error codes')).toBeInTheDocument();
+    expect(screen.getByText('Backoff base (s)')).toBeInTheDocument();
   });
 
   it('opens the matching tab when navigated from global search', async () => {
@@ -137,7 +137,7 @@ describe('Settings page', () => {
         initialEntries={[
           {
             pathname: '/config/settings',
-            state: { highlightSettingKey: 'maxParallel' },
+            state: { highlightSettingKey: 'maxDispatch' },
           },
         ]}
       >
@@ -146,8 +146,7 @@ describe('Settings page', () => {
     );
 
     await screen.findByText('Settings');
-    expect(screen.getByText('Focused key: maxParallel')).toBeInTheDocument();
-    expect(screen.getByText('Task Execution & Routing')).toBeInTheDocument();
+    expect(screen.getByText('Max dispatch')).toBeInTheDocument();
   });
 
   it('switches to Raw JSON tab and shows raw JSON editor', async () => {
@@ -155,10 +154,10 @@ describe('Settings page', () => {
     renderPage();
 
     await screen.findByText('Settings');
-    fireEvent.click(screen.getByRole('button', { name: 'Raw JSON' }));
+    fireEvent.click(screen.getByRole('button', { name: /Raw JSON/i }));
 
-    expect(screen.getByText('Raw Configuration (JSON)')).toBeInTheDocument();
     const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;
+    expect(textarea).toBeInTheDocument();
     expect(textarea.value).toContain('"webPort": 3450');
   });
 
@@ -167,12 +166,12 @@ describe('Settings page', () => {
     renderPage();
 
     await screen.findByText('Settings');
-    expect(screen.queryByText('You have unsaved changes.')).not.toBeInTheDocument();
+    expect(screen.queryByText('Unsaved changes')).not.toBeInTheDocument();
 
-    const offlineCheckbox = screen.getByRole('checkbox', { name: /Offline Mode/i });
+    const offlineCheckbox = screen.getByRole('checkbox', { name: /Offline mode/i });
     fireEvent.click(offlineCheckbox);
 
-    expect(screen.getByText('You have unsaved changes.')).toBeInTheDocument();
+    expect(screen.getByText('Unsaved changes')).toBeInTheDocument();
   });
 
   it('discard restores original config', async () => {
@@ -180,13 +179,13 @@ describe('Settings page', () => {
     renderPage();
 
     await screen.findByText('Settings');
-    const offlineCheckbox = screen.getByRole('checkbox', { name: /Offline Mode/i });
+    const offlineCheckbox = screen.getByRole('checkbox', { name: /Offline mode/i });
     fireEvent.click(offlineCheckbox);
 
-    expect(screen.getByText('You have unsaved changes.')).toBeInTheDocument();
+    expect(screen.getByText('Unsaved changes')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Discard' }));
 
-    expect(screen.queryByText('You have unsaved changes.')).not.toBeInTheDocument();
+    expect(screen.queryByText('Unsaved changes')).not.toBeInTheDocument();
   });
 
   it('saves changes via updateConfig and shows success toast', async () => {
@@ -197,8 +196,8 @@ describe('Settings page', () => {
     renderPage();
 
     await screen.findByText('Settings');
-    fireEvent.click(screen.getByRole('checkbox', { name: /Offline Mode/i }));
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: /Offline mode/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
 
     await waitFor(() => {
       expect(updateConfigMock).toHaveBeenCalledTimes(1);
@@ -212,8 +211,8 @@ describe('Settings page', () => {
     renderPage();
 
     await screen.findByText('Settings');
-    fireEvent.click(screen.getByRole('checkbox', { name: /Offline Mode/i }));
-    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: /Offline mode/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
 
     expect(await screen.findByText('Failed to save')).toBeInTheDocument();
     expect(screen.getByText('Server error')).toBeInTheDocument();
@@ -233,26 +232,21 @@ describe('Settings page', () => {
     renderPage();
 
     await screen.findByText('Settings');
-    fireEvent.click(screen.getByRole('button', { name: 'Advanced' }));
-    expect(screen.getByPlaceholderText('claude, codex, gemini')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Advanced/i }));
+    expect(screen.getByText('PRD file')).toBeInTheDocument();
   });
 
-  it('lets coordinator JSON object fields update the draft', async () => {
-    getConfigMock.mockResolvedValue(buildConfig());
+  it('lets coordinator tool settings update the draft', async () => {
+    getConfigMock.mockResolvedValue(buildConfig({ enabledTools: ['claude', 'codex'] }));
     renderPage();
 
     await screen.findByText('Settings');
-    fireEvent.click(screen.getByRole('button', { name: 'Advanced' }));
+    fireEvent.click(screen.getByRole('button', { name: /Advanced/i }));
 
-    const fields = screen.getAllByRole('textbox');
-    const maxParallelPerToolEditor = fields.find((field) =>
-      (field as HTMLTextAreaElement).value.includes('{}'),
-    ) as HTMLTextAreaElement;
-    fireEvent.change(maxParallelPerToolEditor, {
-      target: { value: '{\n  "claude": 2,\n  "codex": 1\n}' },
-    });
+    const increaseBtn = screen.getAllByRole('button', { name: 'Increase' })[0];
+    fireEvent.click(increaseBtn);
 
-    expect(screen.getByText('You have unsaved changes.')).toBeInTheDocument();
+    expect(screen.getByText('Unsaved changes')).toBeInTheDocument();
   });
 
   it('Advanced tab Apply JSON updates draft', async () => {
@@ -260,7 +254,7 @@ describe('Settings page', () => {
     renderPage();
 
     await screen.findByText('Settings');
-    fireEvent.click(screen.getByRole('button', { name: 'Raw JSON' }));
+    fireEvent.click(screen.getByRole('button', { name: /Raw JSON/i }));
 
     const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;
     const modified = JSON.parse(textarea.value);
@@ -269,7 +263,7 @@ describe('Settings page', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Apply JSON' }));
 
     // Switch to Basic tab — the webPort field should reflect the new value
-    fireEvent.click(screen.getByRole('button', { name: 'Basic' }));
+    fireEvent.click(screen.getByRole('button', { name: /Basic/i }));
     const portInput = screen.getByDisplayValue('9999');
     expect(portInput).toBeInTheDocument();
   });
@@ -279,7 +273,7 @@ describe('Settings page', () => {
     renderPage();
 
     await screen.findByText('Settings');
-    fireEvent.click(screen.getByRole('button', { name: 'Raw JSON' }));
+    fireEvent.click(screen.getByRole('button', { name: /Raw JSON/i }));
 
     const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;
     fireEvent.change(textarea, { target: { value: '{invalid' } });

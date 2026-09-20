@@ -9,6 +9,7 @@ pub mod control_plane;
 pub mod engine;
 pub mod error_normalizer;
 pub mod helpers;
+pub mod integration;
 pub mod ipc;
 pub mod logs;
 pub mod managed_command_registry;
@@ -203,6 +204,9 @@ pub enum PerformerCompletionKind {
     ErrorWithChanges,
     /// The tool failed and produced no changes (e.g. sandbox error, env issue).
     ErrorWithoutChanges,
+    /// The task ran correctly but a declared prerequisite is not currently met.
+    /// This is terminal and must never consume retry budget.
+    PreconditionUnmet,
 }
 
 impl PerformerCompletionKind {
@@ -213,6 +217,7 @@ impl PerformerCompletionKind {
             PerformerCompletionKind::AlreadySatisfied => "already_satisfied",
             PerformerCompletionKind::ErrorWithChanges => "error_with_changes",
             PerformerCompletionKind::ErrorWithoutChanges => "error_without_changes",
+            PerformerCompletionKind::PreconditionUnmet => "precondition_unmet",
         }
     }
 
@@ -222,6 +227,7 @@ impl PerformerCompletionKind {
             self,
             PerformerCompletionKind::ErrorWithChanges
                 | PerformerCompletionKind::ErrorWithoutChanges
+                | PerformerCompletionKind::PreconditionUnmet
         )
     }
 }
@@ -240,6 +246,7 @@ impl FromStr for PerformerCompletionKind {
             "error_without_changes" | "error" | "failed" => {
                 Ok(PerformerCompletionKind::ErrorWithoutChanges)
             }
+            "precondition_unmet" | "blocked" => Ok(PerformerCompletionKind::PreconditionUnmet),
             other => Err(format!("unknown performer completion kind: {}", other)),
         }
     }
@@ -509,6 +516,8 @@ pub struct CoordinatorPhaseResultPayload {
     pub attempt: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_kind: Option<PerformerCompletionKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_verdict: Option<crate::coordinator::model::GateVerdict>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -774,6 +783,17 @@ impl CoordinatorEventRecord {
                     .get("result_kind")
                     .and_then(Value::as_str)
                     .and_then(|value| PerformerCompletionKind::from_str(value).ok())
+            })
+    }
+
+    pub fn payload_gate_verdict(&self) -> Option<crate::coordinator::model::GateVerdict> {
+        let norm = self.normalized_payload();
+        self.phase_result_payload()
+            .and_then(|payload| payload.gate_verdict)
+            .or_else(|| {
+                norm.get("gate_verdict")
+                    .and_then(Value::as_str)
+                    .and_then(|value| value.parse().ok())
             })
     }
 

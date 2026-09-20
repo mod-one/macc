@@ -1,6 +1,6 @@
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -27,7 +27,7 @@ use macc_core::plan::{PlannedOpKind, Scope};
 use macc_core::tool::{FieldDefault, FieldKind};
 use screen::Screen;
 use state::{AppState, UiStatusLevel};
-use ui::{compact_help_line, header_lines, panel, theme, wrapped_paragraph, HeaderContext};
+use ui::{header_lines, panel, theme, wrapped_paragraph, HeaderContext};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LaunchMode {
@@ -115,7 +115,13 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, state: &mut AppState) -> io::
         if event::poll(Duration::from_millis(16))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
-                    handle_key(state, key.code);
+                    if key.code == KeyCode::Char('p')
+                        && key.modifiers.contains(KeyModifiers::CONTROL)
+                    {
+                        handle_key(state, KeyCode::Char(':'));
+                    } else {
+                        handle_key(state, key.code);
+                    }
                 }
             }
         }
@@ -131,6 +137,25 @@ fn format_hms(total_secs: u64) -> String {
     let minutes = (total_secs % 3600) / 60;
     let seconds = total_secs % 60;
     format!("{}:{:02}:{:02}", hours, minutes, seconds)
+}
+
+fn relative_time_label(timestamp: &str) -> String {
+    let Ok(timestamp) = chrono::DateTime::parse_from_rfc3339(timestamp) else {
+        return timestamp.to_string();
+    };
+    let seconds = chrono::Utc::now()
+        .signed_duration_since(timestamp.with_timezone(&chrono::Utc))
+        .num_seconds()
+        .max(0);
+    if seconds < 60 {
+        format!("{}s ago", seconds)
+    } else if seconds < 3_600 {
+        format!("{}m ago", seconds / 60)
+    } else if seconds < 86_400 {
+        format!("{}h ago", seconds / 3_600)
+    } else {
+        format!("{}d ago", seconds / 86_400)
+    }
 }
 
 fn handle_key(state: &mut AppState, key: KeyCode) {
@@ -166,6 +191,16 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
             KeyCode::Char('c') => state.resume_after_coordinator_pause(),
             _ => {}
         }
+        return;
+    }
+
+    if state.command_palette_open {
+        handle_command_palette_key(state, key);
+        return;
+    }
+
+    if matches!(key, KeyCode::Char(':')) {
+        open_command_palette(state);
         return;
     }
 
@@ -353,6 +388,31 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
         }
         return;
     }
+    if current_screen == Screen::CoordinatorLive && state.coordinator_stop_task_confirm_id.is_some()
+    {
+        match key {
+            KeyCode::Enter | KeyCode::Char('y') => {
+                if let Some(task_id) = state.coordinator_stop_task_confirm_id.take() {
+                    state.stop_selected_task(task_id.clone());
+                    state.set_status(
+                        UiStatusLevel::Info,
+                        format!("Sent stop request to task {}", task_id),
+                        Some(Duration::from_secs(3)),
+                    );
+                }
+            }
+            KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('q') => {
+                state.coordinator_stop_task_confirm_id = None;
+                state.set_status(
+                    UiStatusLevel::Info,
+                    "Stop task cancelled.",
+                    Some(Duration::from_secs(2)),
+                );
+            }
+            _ => {}
+        }
+        return;
+    }
     if current_screen == Screen::CoordinatorLive && state.coordinator_recover_dialog_open {
         match key {
             KeyCode::Up => {
@@ -533,10 +593,11 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
         }
         KeyCode::Char('s') if current_screen == Screen::CoordinatorLive => {
             if let Some(task) = state.selected_live_task() {
-                state.stop_selected_task(task.task_id.clone());
+                state.coordinator_stop_task_confirm_id = Some(task.task_id.clone());
+            } else {
                 state.set_status(
-                    UiStatusLevel::Info,
-                    format!("Sent kill request to task {}", task.task_id),
+                    UiStatusLevel::Warning,
+                    "No task selected to stop.",
                     Some(Duration::from_secs(3)),
                 );
             }
@@ -632,86 +693,74 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
     if full_clear {
         f.render_widget(Clear, f.size());
     }
+    let current_screen = state.current_screen();
+    let frame_width = f.size().width;
+    let next_step_full = next_step_text(state, frame_width.saturating_sub(10) as usize);
+    let next_step_label = next_step_full
+        .strip_prefix("Next step: ")
+        .unwrap_or(next_step_full.as_str())
+        .to_string();
+    let trust_strip =
+        if let (Some(paths), Some(config)) = (&state.project_paths, state.working_copy.as_ref()) {
+            trust_warning_strip(paths, config)
+        } else {
+            None
+        };
+    let header_height = 5
+        + u16::from(trust_strip.is_some())
+        + u16::from(state.coordinator_phase_overrides.is_some());
+    let footer_height = if current_screen == Screen::CoordinatorLive {
+        4
+    } else {
+        3
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(8), // Title + status badges + trust strip + override strip
-            Constraint::Min(0),    // Body
-            Constraint::Length(4), // Footer / Navigation help
+            Constraint::Length(header_height), // Compact 3-line header, plus warnings if needed
+            Constraint::Min(0),                // Body
+            Constraint::Length(footer_height), // Path + actions, plus danger when needed
         ])
         .split(f.size());
-
-    let current_screen = state.current_screen();
+    let header_area = chunks[0];
+    let body_area = chunks[1];
+    let footer_area = chunks[2];
 
     // Header
     let project_label = state
         .project_paths
         .as_ref()
-        .map(|p| p.root.display().to_string())
+        .map(|p| {
+            p.root
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("project")
+                .to_string()
+        })
         .unwrap_or_else(|| "(no project)".to_string());
-    let (config_label, config_color) = if state.working_copy.is_some() {
-        ("loaded", theme.good)
+    let config_status = if state.working_copy.is_some() {
+        "ok"
     } else {
-        ("missing", theme.warn)
-    };
-    let config_status = format!(
-        "{} ({})",
-        config_label,
-        if config_color == theme.good {
-            "ok"
-        } else {
-            "warn"
-        }
-    );
-    let trust_strip = if let (Some(paths), Some(config)) =
-        (&state.project_paths, state.working_copy.as_ref())
-    {
-        let trust = macc_core::ops_motif::calculate_trust_summary(paths, config);
-        let local_only = if trust.local_only { "yes" } else { "no" };
-        let terminal = if trust.terminal_enabled {
-            "enabled"
-        } else {
-            "disabled"
-        };
-        let backups = if trust.backups_ready {
-            "ready"
-        } else {
-            "missing"
-        };
-        let catalog = if trust.catalog_pinned {
-            "pinned"
-        } else {
-            "unpinned"
-        };
-        let secrets = if trust.secrets_redacted {
-            "redacted"
-        } else {
-            "unredacted"
-        };
-        Some(format!(
-            "Local only: {} | Terminal: {} | User writes: {} | Backups: {} | Catalog: {} | Secrets: {}",
-            local_only, terminal, trust.user_level_writes, backups, catalog, secrets
-        ))
-    } else {
-        None
+        "missing"
     };
     let header_ctx = HeaderContext {
         app_name: "[M][A][C][C]",
         screen_title: current_screen.title(),
         mode: state.interaction_mode_label(),
         project: &project_label,
-        config_label: &config_status,
+        config_label: config_status,
         errors: state.errors.len(),
         coordinator_active: state.is_coordinator_running(),
         coordinator_paused: state.is_coordinator_paused(),
         coordinator_command: state.coordinator_running_command.as_deref(),
+        next_step: &next_step_label,
         status: state.status_line(),
-        width: chunks[0].width,
+        width: header_area.width,
         trust_strip,
         override_strip: state.coordinator_phase_overrides.clone(),
     };
     let title = Paragraph::new(header_lines(&header_ctx, &theme)).block(panel("MACC"));
-    f.render_widget(title, chunks[0]);
+    f.render_widget(title, header_area);
 
     // Body
     match current_screen {
@@ -719,7 +768,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             let body_chunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(chunks[1]);
+                .split(body_area);
             let selected_skills = state.selected_skills();
 
             let mut list_state = ListState::default();
@@ -781,7 +830,6 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 if current_skill.mandatory {
                     desc_text.push_str("\n\nMandatory skill: always enabled from catalog policy.");
                 }
-                desc_text.push_str("\n\n---\nShortcuts:\n'a' - Select All\n'n' - Select None");
 
                 let desc_para = Paragraph::new(desc_text).block(panel("Details"));
                 f.render_widget(desc_para, body_chunks[1]);
@@ -791,7 +839,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             let body_chunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(chunks[1]);
+                .split(body_area);
             let selected_ids = state
                 .working_copy
                 .as_ref()
@@ -868,7 +916,9 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 } else {
                     detail.push_str(&current.tags.join(", "));
                 }
-                detail.push_str("\n\nNotes:\n- MCP packages are merged into .mcp.json on apply.\n- Secrets are never stored by MACC.\n\nShortcuts:\n'a' - Select All\n'n' - Select None");
+                detail.push_str(
+                    "\n\nNotes:\n- MCP packages are merged into .mcp.json on apply.\n- Secrets are never stored by MACC.",
+                );
 
                 let desc_para = Paragraph::new(detail).block(panel("Details"));
                 f.render_widget(desc_para, body_chunks[1]);
@@ -878,7 +928,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             let body_chunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
-                .split(chunks[1]);
+                .split(body_area);
 
             let mut list_state = ListState::default();
             let visible = state.filtered_log_indices();
@@ -926,7 +976,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             let body_chunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(chunks[1]);
+                .split(body_area);
 
             let selected_agents = state.selected_agents();
 
@@ -985,7 +1035,6 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 let mut desc_text = format!("ID: {}\n\n", current_agent.id);
                 desc_text.push_str("Purpose:\n");
                 desc_text.push_str(&current_agent.description);
-                desc_text.push_str("\n\n---\nShortcuts:\n'a' - Select All\n'n' - Select None");
 
                 let desc_para = Paragraph::new(desc_text).block(panel("Details"));
                 f.render_widget(desc_para, body_chunks[1]);
@@ -1002,7 +1051,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             let preview_chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints(&preview_constraints)
-                .split(chunks[1]);
+                .split(body_area);
 
             let mut chunk_index = 0;
             if let Some(error) = &state.preview_error {
@@ -1212,7 +1261,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                     Constraint::Percentage(15),
                     Constraint::Percentage(25),
                 ])
-                .split(chunks[1]);
+                .split(body_area);
 
             let summary_rect = apply_chunks[0];
             let operations_rect = apply_chunks[1];
@@ -1359,7 +1408,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             let body_chunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-                .split(chunks[1]);
+                .split(body_area);
 
             let mut overview = String::new();
             if !state.errors.is_empty() {
@@ -1459,7 +1508,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             )
             .block(panel("Settings — Moved"))
             .wrap(Wrap { trim: false });
-            f.render_widget(notice, chunks[1]);
+            f.render_widget(notice, body_area);
         }
         Screen::Automation => {
             // ── Unified tabbed configuration screen ───────────────────────────
@@ -1467,7 +1516,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             let outer_chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Length(1), Constraint::Min(0)])
-                .split(chunks[1]);
+                .split(body_area);
 
             // ── Tab bar ───────────────────────────────────────────────────────
             let tab_spans: Vec<Span> = AppState::CONFIG_TAB_NAMES
@@ -1689,7 +1738,10 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 lines.push(String::new());
                 lines.push("←/→ or Space/Enter to cycle".to_string());
                 lines.push("s — Save to .macc/macc.yaml".to_string());
-                wrapped_paragraph(lines.join("\n"), "Field Info")
+                let mut text = coordinator_basics_text(state);
+                text.push_str("\n\n");
+                text.push_str(&lines.join("\n"));
+                wrapped_paragraph(text, "Field Info")
             } else {
                 // Default: show field description and current value.
                 let detail_text = if let Some((source, field_idx)) = state.current_config_field() {
@@ -1713,14 +1765,14 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                         state.config_field_help(source, field_idx),
                         state.config_field_value(source, field_idx),
                     );
+                    if state.config_tab_index == 1 {
+                        text = format!("{}\n\n{}", coordinator_basics_text(state), text);
+                    }
                     if source == 1 {
                         if let Some(validation) = state.current_automation_field_validation() {
                             text.push_str(&format!("\n\nValidation: {}", validation));
                         }
                     }
-                    text.push_str(
-                        "\n\nShortcuts:\nSpace/Enter  edit or cycle\nEsc          cancel edit\ns            save to .macc/macc.yaml\nTab          next tab\n1-6          jump to tab",
-                    );
                     text
                 } else {
                     "No field selected.".to_string()
@@ -1738,12 +1790,17 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                     Constraint::Length(1), // summary header status line
                     Constraint::Min(0),    // vertical stacked panes
                 ])
-                .split(chunks[1]);
+                .split(body_area);
             render_coordinator_ownership_banner(f, live_chunks[0], state);
 
+            let durable_run_active = state
+                .coordinator_run_summary
+                .as_ref()
+                .is_some_and(|summary| matches!(summary.status.as_str(), "running" | "draining"));
+            let coordinator_active = state.is_coordinator_running() || durable_run_active;
             let status_line = if state.is_coordinator_paused() {
                 "PAUSED (awaiting resume)".to_string()
-            } else if state.is_coordinator_running() {
+            } else if coordinator_active {
                 format!(
                     "Running: {} ({}) {}",
                     state
@@ -1794,100 +1851,119 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
 
             // Pane 1: LIVE TASKS Table
             let filtered_tasks = state.filtered_active_tasks();
-            let mut rows = Vec::new();
-            for task in &filtered_tasks {
-                let health_symbol = task.health.symbol();
+            let snapshot_total = state
+                .coordinator_snapshot
+                .as_ref()
+                .map(|s| s.total)
+                .unwrap_or(0);
+            let coordinator_live_empty = !state.is_coordinator_running()
+                && !state.is_coordinator_paused()
+                && snapshot_total == 0
+                && filtered_tasks.is_empty();
+            if filtered_tasks.is_empty() {
+                let empty_lines = coordinator_live_empty_lines(
+                    coordinator_live_empty,
+                    !state.search_query.is_empty(),
+                    snapshot_total,
+                );
+                let empty_para = Paragraph::new(empty_lines)
+                    .block(panel("LIVE TASKS"))
+                    .wrap(Wrap { trim: true });
+                f.render_widget(empty_para, body_chunks[0]);
+            } else {
+                let mut rows = Vec::new();
+                for task in &filtered_tasks {
+                    let health_symbol = task.health.symbol();
 
-                let health_style = match task.health {
-                    macc_core::coordinator::view_model::TaskHealth::Warning => {
-                        Style::default().fg(theme.bad)
-                    }
-                    macc_core::coordinator::view_model::TaskHealth::Stale => {
-                        Style::default().fg(theme.warn)
-                    }
-                    macc_core::coordinator::view_model::TaskHealth::Healthy => {
-                        Style::default().fg(theme.good)
-                    }
-                    _ => Style::default().fg(theme.muted),
-                };
+                    let health_style = match task.health {
+                        macc_core::coordinator::view_model::TaskHealth::Warning => {
+                            Style::default().fg(theme.bad)
+                        }
+                        macc_core::coordinator::view_model::TaskHealth::Stale => {
+                            Style::default().fg(theme.warn)
+                        }
+                        macc_core::coordinator::view_model::TaskHealth::Healthy => {
+                            Style::default().fg(theme.good)
+                        }
+                        _ => Style::default().fg(theme.muted),
+                    };
 
-                let status_label = task.status_label();
+                    let status_label = task.status_label();
 
-                let phase_label = task.phase.compact_label();
+                    let phase_label = task.phase.compact_label();
 
-                let status_text = if phase_label.is_empty() {
-                    status_label
-                } else {
-                    format!("{} {}", status_label, phase_label)
-                };
+                    let status_text = if phase_label.is_empty() {
+                        status_label
+                    } else {
+                        format!("{} {}", status_label, phase_label)
+                    };
 
-                let age_label = task.age_label();
-                let hb_label = task.heartbeat_age_label();
+                    let age_label = task.age_label();
+                    let hb_label = task.heartbeat_age_label();
 
-                let worker = if task.worker_id.is_empty() {
-                    "-"
-                } else {
-                    &task.worker_id
-                };
-                let tool = if task.tool.is_empty() {
-                    "-"
-                } else {
-                    &task.tool
-                };
-                let model = if task.model.is_empty() {
-                    "-"
-                } else {
-                    &task.model
-                };
+                    let worker = if task.worker_id.is_empty() {
+                        "-"
+                    } else {
+                        &task.worker_id
+                    };
+                    let tool = if task.tool.is_empty() {
+                        "-"
+                    } else {
+                        &task.tool
+                    };
+                    let model = if task.model.is_empty() {
+                        "-"
+                    } else {
+                        &task.model
+                    };
 
-                let cells = vec![
-                    Cell::from(health_symbol).style(health_style),
-                    Cell::from(worker.to_string()),
-                    Cell::from(task.task_id.clone()),
-                    Cell::from(status_text),
-                    Cell::from(tool.to_string()),
-                    Cell::from(model.to_string()),
-                    Cell::from(age_label),
-                    Cell::from(hb_label),
+                    let cells = vec![
+                        Cell::from(health_symbol).style(health_style),
+                        Cell::from(worker.to_string()),
+                        Cell::from(task.task_id.clone()),
+                        Cell::from(status_text),
+                        Cell::from(tool.to_string()),
+                        Cell::from(model.to_string()),
+                        Cell::from(age_label),
+                        Cell::from(hb_label),
+                    ];
+                    rows.push(Row::new(cells));
+                }
+
+                let headers = Row::new(vec![
+                    Cell::from("Health").style(Style::default().fg(theme.accent)),
+                    Cell::from("Worker").style(Style::default().fg(theme.accent)),
+                    Cell::from("Task ID").style(Style::default().fg(theme.accent)),
+                    Cell::from("Status").style(Style::default().fg(theme.accent)),
+                    Cell::from("Tool").style(Style::default().fg(theme.accent)),
+                    Cell::from("Model").style(Style::default().fg(theme.accent)),
+                    Cell::from("Age").style(Style::default().fg(theme.accent)),
+                    Cell::from("HB").style(Style::default().fg(theme.accent)),
+                ]);
+
+                let widths = [
+                    Constraint::Length(8),
+                    Constraint::Length(12),
+                    Constraint::Length(25),
+                    Constraint::Length(12),
+                    Constraint::Length(10),
+                    Constraint::Length(15),
+                    Constraint::Length(8),
+                    Constraint::Length(8),
                 ];
-                rows.push(Row::new(cells));
-            }
+                let tasks_table = Table::new(rows, widths)
+                    .header(headers)
+                    .block(panel("LIVE TASKS"))
+                    .highlight_style(Style::default().bg(theme.highlight_bg))
+                    .highlight_symbol("› ");
 
-            let headers = Row::new(vec![
-                Cell::from("Health").style(Style::default().fg(theme.accent)),
-                Cell::from("Worker").style(Style::default().fg(theme.accent)),
-                Cell::from("Task ID").style(Style::default().fg(theme.accent)),
-                Cell::from("Status").style(Style::default().fg(theme.accent)),
-                Cell::from("Tool").style(Style::default().fg(theme.accent)),
-                Cell::from("Model").style(Style::default().fg(theme.accent)),
-                Cell::from("Age").style(Style::default().fg(theme.accent)),
-                Cell::from("HB").style(Style::default().fg(theme.accent)),
-            ]);
-
-            let widths = [
-                Constraint::Length(8),
-                Constraint::Length(12),
-                Constraint::Length(25),
-                Constraint::Length(12),
-                Constraint::Length(10),
-                Constraint::Length(15),
-                Constraint::Length(8),
-                Constraint::Length(8),
-            ];
-            let tasks_table = Table::new(rows, widths)
-                .header(headers)
-                .block(panel("LIVE TASKS (↑↓ navigate, Enter details, d diff, r retry, s stop task, k stop coordinator)"))
-                .highlight_style(Style::default().bg(theme.highlight_bg))
-                .highlight_symbol("› ");
-
-            let mut table_state = TableState::default();
-            if !filtered_tasks.is_empty() {
+                let mut table_state = TableState::default();
                 let clamped_idx = state
                     .coordinator_selected_task_index
                     .min(filtered_tasks.len() - 1);
                 table_state.select(Some(clamped_idx));
+                f.render_stateful_widget(tasks_table, body_chunks[0], &mut table_state);
             }
-            f.render_stateful_widget(tasks_table, body_chunks[0], &mut table_state);
 
             // Pane 2: SELECTED TASK DETAIL
             let selected_task = state.selected_live_task();
@@ -1940,6 +2016,41 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                     Span::styled("   Tool: ", Style::default().fg(theme.muted)),
                     Span::styled(&t.tool, Style::default()),
                 ]));
+                if let Some(gate) = full_task.as_ref().and_then(|task| task.gate.as_ref()) {
+                    let verdict = full_task
+                        .as_ref()
+                        .and_then(|task| task.task_runtime.gate_verdict)
+                        .map(|value| format!("{value:?}").to_ascii_lowercase())
+                        .unwrap_or_else(|| "pending".to_string());
+                    detail_lines.push(Line::from(vec![
+                        Span::styled("Gate:       ", Style::default().fg(theme.muted)),
+                        Span::styled(
+                            format!("{} (required: {:?})", verdict, gate.required_verdict)
+                                .to_ascii_lowercase(),
+                            if verdict == "accepted" {
+                                Style::default().fg(theme.good)
+                            } else {
+                                Style::default().fg(theme.warn)
+                            },
+                        ),
+                    ]));
+                }
+                if let Some(block) = full_task
+                    .as_ref()
+                    .and_then(|task| task.blocked_on_external.as_ref())
+                {
+                    detail_lines.push(Line::from(vec![
+                        Span::styled("External:   ", Style::default().fg(theme.muted)),
+                        Span::styled(
+                            format!(
+                                "{}; clears when {} (source: {:?})",
+                                block.reason, block.clears_when, block.source
+                            )
+                            .to_ascii_lowercase(),
+                            Style::default().fg(theme.warn),
+                        ),
+                    ]));
+                }
                 if let Some(ref msg) = t.current_message {
                     detail_lines.push(Line::from(vec![
                         Span::styled("Message:    ", Style::default().fg(theme.muted)),
@@ -1959,17 +2070,107 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                     ]));
                 }
             } else {
-                detail_lines.push(Line::from("No task selected. Use ↑/↓ to navigate."));
+                if coordinator_live_empty {
+                    detail_lines.extend(coordinator_live_empty_lines(true, false, snapshot_total));
+                } else if !state.search_query.is_empty() {
+                    detail_lines.push(Line::from(
+                        "No task matches the current search. Clear search with Esc or adjust it.",
+                    ));
+                } else {
+                    detail_lines.push(Line::from(
+                        "No task selected. When tasks appear, use ↑/↓ to navigate.",
+                    ));
+                }
             }
             let detail_para = Paragraph::new(detail_lines)
                 .block(panel("SELECTED TASK DETAIL"))
                 .wrap(Wrap { trim: true });
             f.render_widget(detail_para, body_chunks[1]);
 
-            // Pane 3: LIVE LOGS timeline (optional)
+            // Pane 3: live signal while running, durable run result while idle.
             if state.coordinator_log_pane_visible {
                 let mut logs_lines = Vec::new();
-                if let Some(ref t) = selected_task {
+                let panel_title;
+                if !coordinator_active {
+                    panel_title = "LAST RESULT";
+                    if let Some(summary) = state.coordinator_run_summary.as_ref() {
+                        let severity_style = match summary.severity.as_str() {
+                            "error" => Style::default().fg(theme.bad).add_modifier(Modifier::BOLD),
+                            "warning" => {
+                                Style::default().fg(theme.warn).add_modifier(Modifier::BOLD)
+                            }
+                            "success" => {
+                                Style::default().fg(theme.good).add_modifier(Modifier::BOLD)
+                            }
+                            _ => Style::default().fg(theme.accent),
+                        };
+                        logs_lines.push(Line::from(vec![
+                            Span::styled(summary.severity.to_ascii_uppercase(), severity_style),
+                            Span::raw("  "),
+                            Span::styled(
+                                summary.status.clone(),
+                                Style::default().fg(theme.accent_dim),
+                            ),
+                            Span::raw("  "),
+                            Span::styled(
+                                relative_time_label(&summary.occurred_at),
+                                Style::default().fg(theme.muted),
+                            ),
+                        ]));
+                        logs_lines.push(Line::from(Span::styled(
+                            summary.headline.clone(),
+                            Style::default().add_modifier(Modifier::BOLD),
+                        )));
+                        logs_lines.push(Line::from(vec![
+                            Span::styled("Cause: ", Style::default().fg(theme.muted)),
+                            Span::raw(summary.cause.clone()),
+                        ]));
+                        if !summary.dependent_task_ids.is_empty() {
+                            logs_lines.push(Line::from(vec![
+                                Span::styled("Affected: ", Style::default().fg(theme.muted)),
+                                Span::raw(summary.dependent_task_ids.join(", ")),
+                            ]));
+                        }
+                        logs_lines.push(Line::from(vec![
+                            Span::styled("Next: ", Style::default().fg(theme.accent)),
+                            Span::raw(summary.next_action.clone()),
+                        ]));
+                        if summary.repeated_count > 1 {
+                            logs_lines.push(Line::from(Span::styled(
+                                format!(
+                                    "Same result occurred {} times in the last {} runs. Do not retry unchanged.",
+                                    summary.repeated_count,
+                                    summary.recent_runs.len()
+                                ),
+                                Style::default().fg(theme.warn),
+                            )));
+                        }
+                        if summary.recent_runs.len() > 1 {
+                            logs_lines.push(Line::from(Span::styled(
+                                "Recent runs:",
+                                Style::default().fg(theme.muted),
+                            )));
+                            for run in summary.recent_runs.iter().take(5) {
+                                let at = run.stopped_at.as_deref().unwrap_or(&run.started_at);
+                                logs_lines.push(Line::from(format!(
+                                    "  {}  {}  {}",
+                                    relative_time_label(at),
+                                    run.status,
+                                    ui::truncate_middle(
+                                        run.stop_reason.as_deref().unwrap_or("no reason recorded"),
+                                        120,
+                                    )
+                                )));
+                            }
+                        }
+                    } else {
+                        logs_lines.push(Line::from("No coordinator run has been recorded yet."));
+                        logs_lines.push(Line::from(
+                            "Next: prepare a PRD task, then press r to start the coordinator.",
+                        ));
+                    }
+                } else if let Some(ref t) = selected_task {
+                    panel_title = "LIVE LOGS";
                     let full_task = state
                         .load_coordinator_storage_snapshot()
                         .ok()
@@ -2006,15 +2207,24 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                         }
                     }
                 } else {
-                    logs_lines.push(Line::from(
-                        "No task selected. Showing recent coordinator events:",
-                    ));
+                    panel_title = "LIVE LOGS";
+                    if coordinator_live_empty {
+                        logs_lines.extend(coordinator_live_empty_lines(
+                            true,
+                            false,
+                            snapshot_total,
+                        ));
+                    } else {
+                        logs_lines.push(Line::from(
+                            "No task selected. Showing recent coordinator events:",
+                        ));
+                    }
                     for line in state.coordinator_events.iter().rev().take(15).rev() {
                         logs_lines.push(Line::from(line.clone()));
                     }
                 }
                 let logs_para = Paragraph::new(logs_lines)
-                    .block(panel("LIVE LOGS"))
+                    .block(panel(panel_title))
                     .wrap(Wrap { trim: true });
                 f.render_widget(logs_para, body_chunks[2]);
             }
@@ -2041,7 +2251,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             let body_chunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
-                .split(chunks[1]);
+                .split(body_area);
 
             let enabled_tools = state
                 .working_copy
@@ -2136,22 +2346,31 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                     macc_core::doctor::ToolStatus::Missing => "missing",
                     macc_core::doctor::ToolStatus::Error(_) => "error",
                 };
-                let mut detail = format!(
-                    "ID: {}\nStatus: {}\nFields: {}\n\nDescription:\n{}\n",
-                    tool.id,
-                    status_label,
+                let is_enabled = enabled_tools.contains(&tool.id);
+                let mut detail = tool_detail_text(
+                    tool.id.as_str(),
+                    tool.title.as_str(),
+                    tool.description.as_str(),
                     tool.fields.len(),
-                    tool.description
+                    status_label,
+                    is_enabled,
                 );
-                if let Some(install) = &tool.install {
+                if matches!(status, macc_core::doctor::ToolStatus::Missing) {
+                    if let Some(install) = &tool.install {
+                        detail.push_str("\nInstall:\n");
+                        detail.push_str(&install.confirm_message);
+                    }
+                }
+                if matches!(status, macc_core::doctor::ToolStatus::Missing)
+                    && tool.install.is_none()
+                {
                     detail.push_str("\nInstall:\n");
-                    detail.push_str(&install.confirm_message);
+                    detail.push_str("No guided install is available for this tool.");
                 }
                 if let macc_core::doctor::ToolStatus::Error(msg) = status {
                     detail.push_str("\nError:\n");
                     detail.push_str(&msg);
                 }
-                detail.push_str("\n\nShortcuts:\nSpace - Toggle\nEnter - Configure\n'i' - Install missing tool\n'd' - Refresh checks\n'f' - Generate context file");
                 if state.is_tool_install_confirmation_open() {
                     detail.push_str(
                         "\n\nInstall confirmation pending: press 'y' to install, 'n' to cancel.",
@@ -2168,7 +2387,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             let body_chunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-                .split(chunks[1]);
+                .split(body_area);
 
             if let Some(desc) = state.current_tool_descriptor() {
                 let mut list_state = ListState::default();
@@ -2219,7 +2438,6 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 } else {
                     detail.push_str("No field selected.");
                 }
-                detail.push_str("\n\nShortcuts:\nSpace/Enter - Edit\nEsc - Cancel edit");
 
                 if let Some(validation) = state.current_tool_field_validation() {
                     detail.push_str("\n\nValidation:\n");
@@ -2229,7 +2447,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 f.render_widget(detail_para, body_chunks[1]);
             } else {
                 let body = wrapped_paragraph("No tool selected. Return to Tools.", "Tool Settings");
-                f.render_widget(body, chunks[1]);
+                f.render_widget(body, body_area);
             }
         }
         Screen::About => {
@@ -2237,41 +2455,33 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 "About MACC\n\nThis is the v0.2 prototype.\n\nUse Backspace or Esc to go back.",
                 "About",
             );
-            f.render_widget(body, chunks[1]);
+            f.render_widget(body, body_area);
         }
         Screen::Watch => {
-            render_watch_screen(f, state, chunks[1]);
+            render_watch_screen(f, state, body_area);
         }
     }
 
     // Footer
-    let badges = state.status_badges().join(" | ");
-    let search = if state.search_editing {
-        format!("search> {}_", state.search_query)
-    } else if !state.search_query.is_empty() {
-        format!("search: {}", state.search_query)
-    } else {
-        "search: (off)".to_string()
-    };
-    let footer = Paragraph::new(vec![
+    let mut footer_lines = vec![
         Line::from(vec![
             Span::styled("Path: ", Style::default().fg(theme.muted)),
             Span::raw(ui::truncate_middle(
-                &state.breadcrumbs(),
-                chunks[2].width.saturating_sub(8) as usize,
+                &state.display_breadcrumbs(),
+                footer_area.width.saturating_sub(8) as usize,
             )),
         ]),
-        Line::from(vec![
-            Span::styled("State: ", Style::default().fg(theme.muted)),
-            Span::raw(ui::truncate_middle(
-                &format!("{} | {}", badges, search),
-                chunks[2].width.saturating_sub(9) as usize,
-            )),
-        ]),
-        footer_hints_line(state, &theme, chunks[2].width.saturating_sub(20) as usize),
-    ])
-    .block(panel("Navigation"));
-    f.render_widget(footer, chunks[2]);
+        footer_hints_line(state, &theme, footer_area.width.saturating_sub(9) as usize),
+    ];
+    if current_screen == Screen::CoordinatorLive {
+        footer_lines.push(danger_actions_line(
+            state,
+            &theme,
+            footer_area.width.saturating_sub(8) as usize,
+        ));
+    }
+    let footer = Paragraph::new(footer_lines).block(panel("Guide"));
+    f.render_widget(footer, footer_area);
 
     if state.has_coordinator_pause_prompt() {
         render_coordinator_pause_overlay(f, state);
@@ -2292,9 +2502,15 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
         if state.coordinator_stop_dialog_open {
             render_coordinator_stop_dialog(f, state);
         }
+        if state.coordinator_stop_task_confirm_id.is_some() {
+            render_stop_task_confirm_dialog(f, state);
+        }
         if state.coordinator_recover_dialog_open {
             render_coordinator_recover_dialog(f, state);
         }
+    }
+    if state.command_palette_open {
+        render_command_palette_overlay(f, state);
     }
     if state.help_open {
         render_help_overlay(f, state);
@@ -2308,6 +2524,130 @@ fn kind_label(kind: PlannedOpKind) -> &'static str {
         PlannedOpKind::Delete => "delete",
         PlannedOpKind::Mkdir => "mkdir",
         PlannedOpKind::Other => "other",
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandPaletteAction {
+    RunCoordinator,
+    Doctor,
+    OpenLogs,
+    OpenSkills,
+    OpenMcp,
+    ApplyConfig,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CommandPaletteItem {
+    title: &'static str,
+    hint: &'static str,
+    action: CommandPaletteAction,
+}
+
+fn command_palette_items() -> Vec<CommandPaletteItem> {
+    vec![
+        CommandPaletteItem {
+            title: "Run coordinator",
+            hint: "Start a coordinator run and open live view",
+            action: CommandPaletteAction::RunCoordinator,
+        },
+        CommandPaletteItem {
+            title: "Doctor",
+            hint: "Check setup and readiness",
+            action: CommandPaletteAction::Doctor,
+        },
+        CommandPaletteItem {
+            title: "Open logs",
+            hint: "Inspect MACC and coordinator logs",
+            action: CommandPaletteAction::OpenLogs,
+        },
+        CommandPaletteItem {
+            title: "Open skills",
+            hint: "Enable, disable, or inspect skills",
+            action: CommandPaletteAction::OpenSkills,
+        },
+        CommandPaletteItem {
+            title: "Open MCP",
+            hint: "Configure MCP server selections",
+            action: CommandPaletteAction::OpenMcp,
+        },
+        CommandPaletteItem {
+            title: "Apply config",
+            hint: "Preview consent and write managed config",
+            action: CommandPaletteAction::ApplyConfig,
+        },
+    ]
+}
+
+fn filtered_command_palette_items(query: &str) -> Vec<CommandPaletteItem> {
+    let query = query.trim().to_ascii_lowercase();
+    command_palette_items()
+        .into_iter()
+        .filter(|item| {
+            query.is_empty()
+                || item.title.to_ascii_lowercase().contains(&query)
+                || item.hint.to_ascii_lowercase().contains(&query)
+        })
+        .collect()
+}
+
+fn open_command_palette(state: &mut AppState) {
+    state.command_palette_open = true;
+    state.command_palette_query.clear();
+    state.command_palette_selection = 0;
+}
+
+fn close_command_palette(state: &mut AppState) {
+    state.command_palette_open = false;
+    state.command_palette_query.clear();
+    state.command_palette_selection = 0;
+}
+
+fn handle_command_palette_key(state: &mut AppState, key: KeyCode) {
+    match key {
+        KeyCode::Esc => close_command_palette(state),
+        KeyCode::Backspace => {
+            state.command_palette_query.pop();
+            state.command_palette_selection = 0;
+        }
+        KeyCode::Up => {
+            state.command_palette_selection = state.command_palette_selection.saturating_sub(1);
+        }
+        KeyCode::Down => {
+            let max = filtered_command_palette_items(&state.command_palette_query)
+                .len()
+                .saturating_sub(1);
+            state.command_palette_selection = (state.command_palette_selection + 1).min(max);
+        }
+        KeyCode::Enter => {
+            let items = filtered_command_palette_items(&state.command_palette_query);
+            if let Some(item) = items.get(state.command_palette_selection).copied() {
+                close_command_palette(state);
+                execute_command_palette_action(state, item.action);
+            }
+        }
+        KeyCode::Char(c) => {
+            state.command_palette_query.push(c);
+            state.command_palette_selection = 0;
+        }
+        _ => {}
+    }
+}
+
+fn execute_command_palette_action(state: &mut AppState, action: CommandPaletteAction) {
+    match action {
+        CommandPaletteAction::RunCoordinator => {
+            state.start_coordinator_command(CoordinatorCommand::Run);
+            state.push_screen(Screen::CoordinatorLive);
+        }
+        CommandPaletteAction::Doctor => {
+            state.goto_screen(Screen::Home);
+            state.run_home_doctor_check();
+        }
+        CommandPaletteAction::OpenLogs => state.push_screen(Screen::Logs),
+        CommandPaletteAction::OpenSkills => state.push_screen(Screen::Skills),
+        CommandPaletteAction::OpenMcp => state.push_screen(Screen::Mcp),
+        CommandPaletteAction::ApplyConfig => state.open_apply_screen(),
     }
 }
 
@@ -2340,6 +2680,53 @@ fn scope_label(scope: Scope) -> &'static str {
     }
 }
 
+fn tool_detail_text(
+    id: &str,
+    title: &str,
+    description: &str,
+    field_count: usize,
+    status_label: &str,
+    enabled: bool,
+) -> String {
+    let enabled_label = if enabled { "enabled" } else { "disabled" };
+    let next = match (enabled, status_label) {
+        (true, "installed") => "Enter to configure, Space to disable",
+        (false, "installed") => "Space to enable, Enter to configure",
+        (_, "missing") => "Press i to install, or choose another installed tool",
+        (_, "error") => "Press d to refresh checks after fixing the error",
+        _ => "Review tool details",
+    };
+
+    format!(
+        "Current state: {} and {}\nNext: {}\n\nID: {}\nName: {}\nFields: {}\n\nDescription:\n{}\n",
+        enabled_label, status_label, next, id, title, field_count, description
+    )
+}
+
+fn coordinator_basics_text(state: &AppState) -> String {
+    let tool = state.automation_field_display_value(0);
+    let tool = if tool.is_empty() {
+        "(auto-select)".to_string()
+    } else {
+        tool
+    };
+    let reference_branch = state.automation_field_display_value(1);
+    let max_dispatch = state.automation_field_display_value(6);
+    let max_parallel = state.automation_field_display_value(7);
+    let safety_policy = state.automation_field_display_value(32);
+    let destructive_actions = state.automation_field_display_value(33);
+
+    format!(
+        "Coordinator basics\nTool: {}\nParallelism: {} task(s), {} dispatch\nReference branch: {}\nSafety: {}, destructive actions require {}",
+        tool,
+        max_parallel,
+        max_dispatch,
+        reference_branch,
+        safety_policy,
+        destructive_actions.replace('_', " ")
+    )
+}
+
 fn build_readiness_text(
     ladder: &macc_core::onboarding::ReadinessLadder,
     doctor_summary: Option<&str>,
@@ -2347,7 +2734,8 @@ fn build_readiness_text(
     // If a doctor check has been run, show its detailed output instead of the ladder.
     if let Some(summary) = doctor_summary {
         let mut out = summary.to_string();
-        out.push_str("\nActions: [d] re-check  [r] start coordinator  [a] apply  [v] live view");
+        out.push_str("\nRecommended: fix the blocking issue(s) above, then [d] re-check.");
+        out.push_str("\nOther actions: [a] apply  [v] live view  [?] help");
         return out;
     }
 
@@ -2356,30 +2744,254 @@ fn build_readiness_text(
     for step in &ladder.steps {
         let symbol = step.symbol();
         let detail = step.detail.as_deref().unwrap_or("");
+        let fix = if matches!(step.status, macc_core::onboarding::ReadinessStatus::Pending) {
+            readiness_step_fix(step.number)
+        } else {
+            None
+        };
         if detail.is_empty() {
-            out.push_str(&format!("{}. {}  {}\n", step.number, step.label, symbol));
+            out.push_str(&format!(
+                "{}. {}  {}{}\n",
+                step.number,
+                step.label,
+                symbol,
+                fix.map(|fix| format!("  Fix: {}", fix.summary))
+                    .unwrap_or_default()
+            ));
         } else {
             out.push_str(&format!(
-                "{}. {}  {}  {}\n",
-                step.number, step.label, symbol, detail
+                "{}. {}  {}  {}{}\n",
+                step.number,
+                step.label,
+                symbol,
+                detail,
+                fix.map(|fix| format!("  Fix: {}", fix.summary))
+                    .unwrap_or_default()
             ));
+        }
+        if let Some(fix) = fix {
+            out.push_str(&format!("   Action: {}\n", fix.action));
         }
     }
     out.push('\n');
     if ladder.is_ready() {
         out.push_str("✅ Ready to dispatch a task\n\n");
-        out.push_str("Actions: [r] start coordinator  [v] live view  [d] doctor check");
+        out.push_str("Recommended: [r] Start coordinator\n");
+        out.push_str("Why: all required setup checks are green.\n\n");
+        out.push_str("Other actions: [v] live view  [d] doctor check");
     } else {
         out.push_str(&format!("❌ {} step(s) pending\n\n", ladder.blocking_count));
-        out.push_str("Actions:\n");
+        let recommendation = readiness_recommendation(ladder);
+        out.push_str("Recommended next step:\n");
+        out.push_str(&format!("  {}\n", recommendation.action));
+        out.push_str(&format!("  Why: {}\n\n", recommendation.reason));
+        out.push_str("Other actions:\n");
         out.push_str("  [d] Doctor check\n");
-        out.push_str("  [a] Apply config\n");
-        out.push_str("  [r] Start coordinator\n");
-        out.push_str("  [v] Coordinator live view\n");
+        for action in recommendation.other_actions {
+            out.push_str(&format!("  {}\n", action));
+        }
         out.push_str("  [?] All Keybindings\n");
-        out.push_str("  CLI: macc quickstart");
     }
     out
+}
+
+fn next_step_text(state: &AppState, max_chars: usize) -> String {
+    let Some(paths) = &state.project_paths else {
+        return ui::truncate_middle(
+            "Next step: Initialize this project. Run `macc init`.",
+            max_chars,
+        );
+    };
+
+    let ladder = state.engine.readiness_ladder(paths);
+    let text = next_step_text_for_ladder(&ladder, state.is_coordinator_running());
+
+    ui::truncate_middle(text, max_chars)
+}
+
+fn next_step_text_for_ladder(
+    ladder: &macc_core::onboarding::ReadinessLadder,
+    coordinator_running: bool,
+) -> &'static str {
+    let first_pending = ladder
+        .steps
+        .iter()
+        .find(|step| matches!(step.status, macc_core::onboarding::ReadinessStatus::Pending));
+
+    match first_pending.map(|step| step.number) {
+        Some(1) => "Next step: Project not initialized. Run `macc init`.",
+        Some(2) => "Next step: Tool missing. Press t to select a performer tool.",
+        Some(3) => "Next step: Config not applied. Press a to apply configuration.",
+        Some(4) => {
+            "Next step: PRD/task missing. Run `macc prd generate --from <brief.md> --promote`."
+        }
+        Some(5) => "Next step: Git identity missing. Configure git user.name and user.email.",
+        Some(6) => "Next step: Ready to run. Press r to start coordinator.",
+        Some(_) => "Next step: Run Doctor. Press d from Home to inspect the blocking setup step.",
+        None if coordinator_running => {
+            "Next step: Coordinator is running. Press v to watch live tasks."
+        }
+        None => "Next step: Ready to run. Press r to start coordinator.",
+    }
+}
+
+fn trust_warning_strip(
+    paths: &macc_core::ProjectPaths,
+    config: &macc_core::config::CanonicalConfig,
+) -> Option<String> {
+    let trust = macc_core::ops_motif::calculate_trust_summary(paths, config);
+    let mut warnings = Vec::new();
+
+    if trust.terminal_enabled {
+        warnings.push("terminal allowed".to_string());
+    }
+    if trust.user_level_writes > 0 {
+        warnings.push(format!("{} user-file write(s)", trust.user_level_writes));
+    }
+    if !trust.backups_ready {
+        warnings.push("backups missing".to_string());
+    }
+    if !trust.catalog_pinned {
+        warnings.push("catalog unpinned".to_string());
+    }
+    if !trust.secrets_redacted {
+        warnings.push("secrets visible".to_string());
+    }
+
+    if warnings.is_empty() {
+        None
+    } else {
+        Some(warnings.join(" | "))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReadinessRecommendation {
+    action: &'static str,
+    reason: &'static str,
+    other_actions: &'static [&'static str],
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ReadinessStepFix {
+    summary: &'static str,
+    action: &'static str,
+}
+
+fn readiness_step_fix(number: u8) -> Option<ReadinessStepFix> {
+    match number {
+        1 => Some(ReadinessStepFix {
+            summary: "initialize this project",
+            action: "CLI: macc init",
+        }),
+        2 => Some(ReadinessStepFix {
+            summary: "select a performer tool",
+            action: "Press t to open Tools Configuration",
+        }),
+        3 => Some(ReadinessStepFix {
+            summary: "apply the selected configuration",
+            action: "Press a to open Apply",
+        }),
+        4 => Some(ReadinessStepFix {
+            summary: "create/promote a PRD task",
+            action: "Press p to preview PRD/task state, or CLI: macc prd generate --from brief.md",
+        }),
+        5 => Some(ReadinessStepFix {
+            summary: "configure git identity",
+            action: "CLI: git config user.name <name> && git config user.email <email>",
+        }),
+        6 => Some(ReadinessStepFix {
+            summary: "start the coordinator",
+            action: "Press r to start coordinator",
+        }),
+        _ => None,
+    }
+}
+
+fn readiness_recommendation(
+    ladder: &macc_core::onboarding::ReadinessLadder,
+) -> ReadinessRecommendation {
+    let first_pending = ladder
+        .steps
+        .iter()
+        .find(|step| matches!(step.status, macc_core::onboarding::ReadinessStatus::Pending));
+
+    match first_pending.map(|step| step.number) {
+        Some(1) => ReadinessRecommendation {
+            action: "CLI: macc init",
+            reason: "this folder is not initialized as a MACC project yet.",
+            other_actions: &["CLI: macc quickstart"],
+        },
+        Some(2) => ReadinessRecommendation {
+            action: "[t] Open Tools Configuration and select one tool",
+            reason: "MACC needs a performer tool before it can run tasks.",
+            other_actions: &["[a] Apply config", "[v] Coordinator live view"],
+        },
+        Some(3) => ReadinessRecommendation {
+            action: "[a] Apply config",
+            reason: "the selected configuration has not been written to managed files yet.",
+            other_actions: &["[t] Review tools", "[d] Doctor check"],
+        },
+        Some(4) => ReadinessRecommendation {
+            action: "Create or import a PRD at .macc/prd.json",
+            reason: "the coordinator cannot dispatch work until at least one task is ready. Starting it now will not create tasks.",
+            other_actions: &[
+                "CLI: macc prd generate --from <brief.md> --promote",
+                "[d] Doctor check",
+                "[v] Coordinator live view",
+            ],
+        },
+        Some(5) => ReadinessRecommendation {
+            action: "Configure git user.name and user.email",
+            reason: "MACC needs a commit identity before performers can safely create commits.",
+            other_actions: &["CLI: git config user.name <name>", "CLI: git config user.email <email>"],
+        },
+        Some(6) => ReadinessRecommendation {
+            action: "[r] Start coordinator",
+            reason: "setup and tasks are ready; only the coordinator process is stopped.",
+            other_actions: &["[v] Coordinator live view", "[d] Doctor check"],
+        },
+        _ => ReadinessRecommendation {
+            action: "[d] Doctor check",
+            reason: "MACC needs more detail before choosing a safe action.",
+            other_actions: &["[a] Apply config", "[v] Coordinator live view"],
+        },
+    }
+}
+
+fn coordinator_live_empty_lines(
+    no_run_and_no_tasks: bool,
+    search_active: bool,
+    total_tasks: usize,
+) -> Vec<Line<'static>> {
+    if no_run_and_no_tasks {
+        return vec![
+            Line::from("No tasks available"),
+            Line::from("Reason: no PRD/task registry entries are ready"),
+            Line::from("Next: create/promote a PRD task, then press r to run"),
+            Line::from("Useful: d Doctor | h Home | p Preview"),
+        ];
+    }
+
+    if search_active {
+        return vec![
+            Line::from("No visible tasks match the current search."),
+            Line::from("Next: clear or adjust search to see existing coordinator tasks."),
+        ];
+    }
+
+    if total_tasks > 0 {
+        return vec![
+            Line::from("No live task is currently active."),
+            Line::from("Next: start or resume the coordinator to dispatch ready work."),
+            Line::from("Shortcut: [r] run/requeue, [u] resume, [c] reconcile."),
+        ];
+    }
+
+    vec![
+        Line::from("No live task is currently active."),
+        Line::from("Next: run Doctor from Home to find the blocking setup step."),
+    ]
 }
 
 fn render_watch_screen(f: &mut Frame, state: &AppState, area: Rect) {
@@ -2671,6 +3283,68 @@ fn render_help_overlay(f: &mut Frame, state: &AppState) {
     f.render_widget(help_para, area);
 }
 
+fn render_command_palette_overlay(f: &mut Frame, state: &AppState) {
+    let area = ui::centered_rect(64, 42, f.size());
+    f.render_widget(Clear, area);
+    let theme = theme();
+    let items = filtered_command_palette_items(&state.command_palette_query);
+
+    let mut lines = Vec::new();
+    let query = if state.command_palette_query.is_empty() {
+        "<type to search>".to_string()
+    } else {
+        state.command_palette_query.clone()
+    };
+    lines.push(Line::from(vec![
+        Span::styled("Search: ", Style::default().fg(theme.muted)),
+        Span::styled(query, Style::default().fg(theme.accent)),
+    ]));
+    lines.push(Line::from(""));
+
+    if items.is_empty() {
+        lines.push(Line::from("No matching command."));
+    } else {
+        for (idx, item) in items.iter().take(8).enumerate() {
+            let selected = idx == state.command_palette_selection.min(items.len() - 1);
+            let style = if selected {
+                Style::default()
+                    .fg(theme.accent)
+                    .bg(theme.highlight_bg)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            let prefix = if selected { "› " } else { "  " };
+            lines.push(Line::from(vec![
+                Span::styled(prefix, style),
+                Span::styled(item.title, style),
+                Span::styled(" — ", Style::default().fg(theme.muted)),
+                Span::styled(item.hint, Style::default().fg(theme.muted)),
+            ]));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("Enter", Style::default().fg(theme.accent)),
+        Span::raw(" run  "),
+        Span::styled("↑↓", Style::default().fg(theme.accent)),
+        Span::raw(" move  "),
+        Span::styled("Esc", Style::default().fg(theme.accent)),
+        Span::raw(" close"),
+    ]));
+
+    let para = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .title("Command Palette")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.accent)),
+        )
+        .wrap(Wrap { trim: true });
+    f.render_widget(para, area);
+}
+
 fn render_coordinator_ownership_banner(f: &mut Frame, area: Rect, state: &AppState) {
     use crate::ownership::{render_ownership_banner, OwnershipBannerProps};
 
@@ -2704,16 +3378,11 @@ fn render_coordinator_ownership_banner(f: &mut Frame, area: Rect, state: &AppSta
 
 fn footer_hints_line(state: &AppState, theme: &ui::Theme, max_chars: usize) -> Line<'static> {
     if state.current_screen() != Screen::CoordinatorLive {
-        return Line::from(vec![
-            Span::styled("Hints: ", Style::default().fg(theme.muted)),
-            Span::raw(compact_help_line(
-                state.current_screen().help_keybindings(),
-                max_chars,
-            )),
-            Span::raw("  "),
-            Span::styled("Press ?", Style::default().fg(theme.accent)),
-            Span::raw(" for help"),
-        ]);
+        let bindings = screen_action_bindings(state.current_screen())
+            .into_iter()
+            .map(|(key, desc)| (key, desc, false))
+            .collect();
+        return action_bar_line(bindings, theme, max_chars);
     }
 
     let is_viewer = !state.coordinator_ownership.is_owner;
@@ -2726,23 +3395,122 @@ fn footer_hints_line(state: &AppState, theme: &ui::Theme, max_chars: usize) -> L
         ("y", "Sync Registry", is_viewer),
         ("c", "Reconcile", is_viewer),
         ("u", "Resume Paused Run", is_viewer),
-        ("k", "Stop Options", is_viewer),
         ("v", "Recover Options", is_viewer),
         ("l", "Refresh Live Status", false),
         ("T", "Request Takeover", !is_viewer),
         ("a/r", "Accept / Reject", !has_pending),
     ];
 
+    action_bar_line(bindings, theme, max_chars)
+}
+
+fn danger_actions_line(state: &AppState, theme: &ui::Theme, max_chars: usize) -> Line<'static> {
+    let task_label = state
+        .selected_live_task()
+        .map(|task| format!("s Stop selected task ({})", task.task_id))
+        .unwrap_or_else(|| "s Stop selected task (none selected)".to_string());
+    let text = ui::truncate_middle(
+        &format!("Danger: k Stop coordinator | {}", task_label),
+        max_chars,
+    );
+    Line::from(vec![Span::styled(
+        text,
+        Style::default().fg(theme.bad).add_modifier(Modifier::BOLD),
+    )])
+}
+
+fn screen_action_bindings(screen: Screen) -> Vec<(&'static str, &'static str)> {
+    match screen {
+        Screen::Home => vec![
+            ("r", "Start coordinator"),
+            ("d", "Doctor"),
+            ("p", "Preview"),
+        ],
+        Screen::Tools => vec![
+            ("↑↓", "Move"),
+            ("Space", "Toggle"),
+            ("Enter", "Configure"),
+            ("i", "Install"),
+            ("d", "Refresh"),
+            ("f", "Context"),
+        ],
+        Screen::Automation | Screen::Settings => vec![
+            ("Tab/1-6", "Tabs"),
+            ("↑↓", "Move"),
+            ("Space/Enter", "Edit"),
+            ("s", "Save"),
+        ],
+        Screen::ToolSettings => vec![
+            ("↑↓", "Move"),
+            ("Space/Enter", "Edit"),
+            ("Esc", "Cancel edit"),
+            ("s", "Save"),
+        ],
+        Screen::Skills => vec![
+            ("↑↓", "Move"),
+            ("Space/Enter", "Toggle"),
+            ("a", "All"),
+            ("n", "None"),
+            ("/", "Search"),
+        ],
+        Screen::Mcp => vec![
+            ("↑↓", "Move"),
+            ("Space/Enter", "Toggle"),
+            ("a", "All"),
+            ("n", "None"),
+            ("/", "Search"),
+        ],
+        Screen::Agents => vec![
+            ("↑↓", "Move"),
+            ("Space/Enter", "Toggle"),
+            ("a", "All"),
+            ("n", "None"),
+            ("/", "Search"),
+        ],
+        Screen::Logs => vec![
+            ("↑↓", "Files"),
+            ("PgUp/PgDn", "Scroll"),
+            ("r", "Refresh"),
+            ("/", "Search"),
+        ],
+        Screen::Preview => vec![
+            ("↑↓", "Ops"),
+            ("PgUp/PgDn", "Diff"),
+            ("r", "Refresh"),
+            ("x", "Apply"),
+        ],
+        Screen::Apply => vec![
+            ("YES", "Consent"),
+            ("Enter", "Apply"),
+            ("Backspace", "Delete"),
+            ("Esc", "Back"),
+        ],
+        Screen::Watch => vec![
+            ("↑↓", "Workers"),
+            ("f", "Logs"),
+            ("e/w/a", "Filter"),
+            ("r/l", "Refresh"),
+        ],
+        Screen::About => vec![("Esc/q", "Back")],
+        Screen::CoordinatorLive => Vec::new(),
+    }
+}
+
+fn action_bar_line(
+    bindings: Vec<(&'static str, &'static str, bool)>,
+    theme: &ui::Theme,
+    max_chars: usize,
+) -> Line<'static> {
     let mut spans = Vec::new();
     let mut used = 0usize;
     for (idx, (key, desc, disabled)) in bindings.into_iter().enumerate() {
         let chunk = if idx == 0 {
-            format!("{key}: {desc}")
+            format!("{key} {desc}")
         } else {
-            format!(" | {key}: {desc}")
+            format!(" | {key} {desc}")
         };
         let chunk_len = chunk.chars().count();
-        if used + chunk_len > max_chars {
+        if used + chunk_len + 9 > max_chars {
             break;
         }
         if idx > 0 {
@@ -2754,22 +3522,317 @@ fn footer_hints_line(state: &AppState, theme: &ui::Theme, max_chars: usize) -> L
             Style::default()
         };
         spans.push(Span::styled(key.to_string(), style));
-        spans.push(Span::styled(": ", style));
+        spans.push(Span::styled(" ", style));
         spans.push(Span::styled(desc.to_string(), style));
         used += chunk_len;
     }
 
-    spans.push(Span::raw("  "));
-    spans.push(Span::styled("Press ?", Style::default().fg(theme.accent)));
-    spans.push(Span::raw(" for help"));
+    if !spans.is_empty() {
+        spans.push(Span::raw(" | "));
+    }
+    spans.push(Span::styled("?", Style::default().fg(theme.accent)));
+    spans.push(Span::raw(" Help | "));
+    spans.push(Span::styled(":", Style::default().fg(theme.accent)));
+    spans.push(Span::raw(" Commands"));
 
-    let mut with_label = vec![Span::styled("Hints: ", Style::default().fg(theme.muted))];
+    let mut with_label = vec![Span::styled("Actions: ", Style::default().fg(theme.muted))];
     with_label.extend(spans);
     Line::from(with_label)
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use super::*;
+    use macc_core::onboarding::{ReadinessLadder, ReadinessStatus, ReadinessStep};
+    use macc_core::tool::ToolRegistry;
+    use macc_core::MaccEngine;
+    use std::sync::Arc;
+
+    fn step(number: u8, label: &str, status: ReadinessStatus) -> ReadinessStep {
+        ReadinessStep {
+            number,
+            label: label.to_string(),
+            status,
+            detail: None,
+        }
+    }
+
+    #[test]
+    fn readiness_recommends_prd_before_starting_coordinator() {
+        let ladder = ReadinessLadder {
+            steps: vec![
+                step(1, "Project initialized", ReadinessStatus::Done),
+                step(2, "Tool adapter selected", ReadinessStatus::Done),
+                step(3, "Config applied", ReadinessStatus::Done),
+                step(4, "PRD/task available", ReadinessStatus::Pending),
+                step(5, "Git identity configured", ReadinessStatus::Done),
+                step(6, "Coordinator running", ReadinessStatus::Pending),
+            ],
+            blocking_count: 2,
+        };
+
+        let text = build_readiness_text(&ladder, None);
+
+        assert!(text.contains("Recommended next step:"));
+        assert!(text.contains("Create or import a PRD at .macc/prd.json"));
+        assert!(text.contains("Starting it now will not create tasks"));
+    }
+
+    #[test]
+    fn readiness_checklist_shows_actionable_fix_for_missing_prd() {
+        let ladder = ReadinessLadder {
+            steps: vec![
+                step(1, "Project initialized", ReadinessStatus::Done),
+                step(4, "PRD/task available", ReadinessStatus::Pending),
+            ],
+            blocking_count: 1,
+        };
+
+        let text = build_readiness_text(&ladder, None);
+
+        assert!(text.contains("4. PRD/task available  ❌  Fix: create/promote a PRD task"));
+        assert!(text.contains(
+            "Action: Press p to preview PRD/task state, or CLI: macc prd generate --from brief.md"
+        ));
+        assert!(!text.contains("1. Project initialized  ✅  Fix:"));
+    }
+
+    #[test]
+    fn readiness_recommends_starting_coordinator_only_after_prd_exists() {
+        let ladder = ReadinessLadder {
+            steps: vec![
+                step(1, "Project initialized", ReadinessStatus::Done),
+                step(2, "Tool adapter selected", ReadinessStatus::Done),
+                step(3, "Config applied", ReadinessStatus::Done),
+                step(4, "PRD/task available", ReadinessStatus::Done),
+                step(5, "Git identity configured", ReadinessStatus::Done),
+                step(6, "Coordinator running", ReadinessStatus::Pending),
+            ],
+            blocking_count: 1,
+        };
+
+        let recommendation = readiness_recommendation(&ladder);
+
+        assert_eq!(recommendation.action, "[r] Start coordinator");
+        assert!(recommendation.reason.contains("tasks are ready"));
+    }
+
+    #[test]
+    fn coordinator_live_empty_state_explains_next_prd_action() {
+        let lines = coordinator_live_empty_lines(true, false, 0);
+        let text = lines
+            .iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("No tasks available"));
+        assert!(text.contains("Reason: no PRD/task registry entries are ready"));
+        assert!(text.contains("Next: create/promote a PRD task, then press r to run"));
+        assert!(text.contains("Useful: d Doctor | h Home | p Preview"));
+    }
+
+    #[test]
+    fn coordinator_live_empty_state_respects_search_filter() {
+        let lines = coordinator_live_empty_lines(false, true, 3);
+        let text = lines
+            .iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("current search"));
+        assert!(!text.contains("create or promote a PRD"));
+    }
+
+    #[test]
+    fn next_step_band_prioritizes_missing_prd() {
+        let ladder = ReadinessLadder {
+            steps: vec![
+                step(1, "Project initialized", ReadinessStatus::Done),
+                step(2, "Tool adapter selected", ReadinessStatus::Done),
+                step(3, "Config applied", ReadinessStatus::Done),
+                step(4, "PRD/task available", ReadinessStatus::Pending),
+                step(6, "Coordinator running", ReadinessStatus::Pending),
+            ],
+            blocking_count: 2,
+        };
+
+        assert_eq!(
+            next_step_text_for_ladder(&ladder, false),
+            "Next step: PRD/task missing. Run `macc prd generate --from <brief.md> --promote`."
+        );
+    }
+
+    #[test]
+    fn next_step_band_recommends_run_when_setup_is_ready() {
+        let ladder = ReadinessLadder {
+            steps: vec![
+                step(1, "Project initialized", ReadinessStatus::Done),
+                step(2, "Tool adapter selected", ReadinessStatus::Done),
+                step(3, "Config applied", ReadinessStatus::Done),
+                step(4, "PRD/task available", ReadinessStatus::Done),
+                step(5, "Git identity configured", ReadinessStatus::Done),
+                step(6, "Coordinator running", ReadinessStatus::Pending),
+            ],
+            blocking_count: 1,
+        };
+
+        assert_eq!(
+            next_step_text_for_ladder(&ladder, false),
+            "Next step: Ready to run. Press r to start coordinator."
+        );
+    }
+
+    #[test]
+    fn compact_header_uses_three_lines_without_trust_warning() {
+        let theme = theme();
+        let ctx = HeaderContext {
+            app_name: "[M][A][C][C]",
+            screen_title: "Home",
+            mode: "browse",
+            project: "macc",
+            config_label: "ok",
+            errors: 0,
+            coordinator_active: false,
+            coordinator_paused: false,
+            coordinator_command: None,
+            next_step: "Ready to run. Press r to start coordinator.",
+            status: None,
+            width: 120,
+            trust_strip: None,
+            override_strip: None,
+        };
+
+        let lines = header_lines(&ctx, &theme);
+
+        assert_eq!(lines.len(), 3);
+        assert!(lines[1].to_string().contains("Next: Ready to run"));
+        assert!(lines[2].to_string().contains("Status: idle"));
+    }
+
+    #[test]
+    fn compact_header_adds_trust_line_only_for_warning() {
+        let theme = theme();
+        let ctx = HeaderContext {
+            app_name: "[M][A][C][C]",
+            screen_title: "Home",
+            mode: "browse",
+            project: "macc",
+            config_label: "ok",
+            errors: 0,
+            coordinator_active: false,
+            coordinator_paused: false,
+            coordinator_command: None,
+            next_step: "Ready to run. Press r to start coordinator.",
+            status: None,
+            width: 120,
+            trust_strip: Some("terminal allowed".to_string()),
+            override_strip: None,
+        };
+
+        let lines = header_lines(&ctx, &theme);
+
+        assert_eq!(lines.len(), 4);
+        assert!(lines[3].to_string().contains("Trust: terminal allowed"));
+    }
+
+    #[test]
+    fn home_footer_actions_are_user_facing() {
+        let theme = theme();
+        let line = action_bar_line(
+            screen_action_bindings(Screen::Home)
+                .into_iter()
+                .map(|(key, desc)| (key, desc, false))
+                .collect(),
+            &theme,
+            120,
+        );
+        let text = line.to_string();
+
+        assert!(text.contains("Actions: r Start coordinator | d Doctor | p Preview | ? Help"));
+        assert!(!text.contains("cache:missing"));
+    }
+
+    #[test]
+    fn coordinator_live_danger_actions_are_separated() {
+        let theme = theme();
+        let engine = Arc::new(MaccEngine::new(ToolRegistry::new()));
+        let mut state = AppState::with_engine(engine);
+        state.goto_screen(Screen::CoordinatorLive);
+
+        let normal = footer_hints_line(&state, &theme, 120).to_string();
+        let danger = danger_actions_line(&state, &theme, 120).to_string();
+
+        assert!(!normal.contains("Stop coordinator"));
+        assert!(danger.contains("Danger: k Stop coordinator"));
+        assert!(danger.contains("s Stop selected task"));
+    }
+
+    #[test]
+    fn command_palette_filters_available_commands() {
+        let items = filtered_command_palette_items("skill");
+
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].action, CommandPaletteAction::OpenSkills);
+        assert_eq!(items[0].title, "Open skills");
+    }
+
+    #[test]
+    fn command_palette_executes_navigation_action() {
+        let engine = Arc::new(MaccEngine::new(ToolRegistry::new()));
+        let mut state = AppState::with_engine(engine);
+
+        execute_command_palette_action(&mut state, CommandPaletteAction::OpenMcp);
+
+        assert_eq!(state.current_screen(), Screen::Mcp);
+    }
+
+    #[test]
+    fn installed_tool_detail_prioritizes_current_state_and_next_action() {
+        let text = tool_detail_text(
+            "agy",
+            "Antigravity",
+            "Workspace settings for Google Antigravity CLI.",
+            7,
+            "installed",
+            true,
+        );
+
+        assert!(text.starts_with("Current state: enabled and installed"));
+        assert!(text.contains("Next: Enter to configure, Space to disable"));
+        assert!(!text.contains("Install:"));
+    }
+
+    #[test]
+    fn missing_tool_detail_points_to_install() {
+        let text = tool_detail_text(
+            "claude",
+            "Claude",
+            "Claude CLI settings.",
+            4,
+            "missing",
+            false,
+        );
+
+        assert!(text.starts_with("Current state: disabled and missing"));
+        assert!(text.contains("Next: Press i to install"));
+    }
+
+    #[test]
+    fn coordinator_basics_summary_is_basic_first() {
+        let engine = Arc::new(MaccEngine::new(ToolRegistry::new()));
+        let state = AppState::with_engine(engine);
+
+        let text = coordinator_basics_text(&state);
+
+        assert!(text.starts_with("Coordinator basics"));
+        assert!(text.contains("Tool:"));
+        assert!(text.contains("Parallelism:"));
+        assert!(text.contains("Reference branch:"));
+        assert!(text.contains("Safety:"));
+    }
+}
 
 fn render_coordinator_pause_overlay(f: &mut Frame, state: &AppState) {
     let area = ui::centered_rect(75, 45, f.size());
@@ -2854,9 +3917,15 @@ fn render_coordinator_stop_dialog(f: &mut Frame, state: &AppState) {
         "Force Stop + Cleanup: Terminate and delete worktrees/branches.",
     ];
 
-    let mut text = Vec::new();
-    text.push(Line::from("Select a stop mode:"));
-    text.push(Line::from(""));
+    let mut text = vec![
+        Line::from("Stopping the coordinator affects the whole run."),
+        Line::from(
+            "Impact depends on the mode: active performers may finish, pause, or be killed.",
+        ),
+        Line::from(""),
+        Line::from("Select a stop mode:"),
+        Line::from(""),
+    ];
 
     for (idx, opt) in options.iter().enumerate() {
         let style = if idx == state.coordinator_stop_dialog_selection {
@@ -2890,6 +3959,29 @@ fn render_coordinator_stop_dialog(f: &mut Frame, state: &AppState) {
                 .title("Coordinator Stop Modes")
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme.accent)),
+        )
+        .wrap(Wrap { trim: true });
+    f.render_widget(popup, area);
+}
+
+fn render_stop_task_confirm_dialog(f: &mut Frame, state: &AppState) {
+    let area = ui::centered_rect(65, 32, f.size());
+    f.render_widget(Clear, area);
+    let theme = ui::theme();
+    let task_id = state
+        .coordinator_stop_task_confirm_id
+        .as_deref()
+        .unwrap_or("<unknown>");
+    let text = format!(
+        "Stop selected task?\n\nTask: {}\n\nImpact:\n- Sends a kill request for this task worker.\n- The task may be moved out of active execution.\n- Unmerged work in its worktree may remain for recovery/retry.\n\nConfirm:\n- y or Enter: stop this task\n- n or Esc: cancel",
+        task_id
+    );
+    let popup = Paragraph::new(text)
+        .block(
+            Block::default()
+                .title("Danger: Stop Selected Task")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.bad)),
         )
         .wrap(Wrap { trim: true });
     f.render_widget(popup, area);

@@ -45,12 +45,46 @@ pub struct ToolPerformerSessionSpec {
     pub init_prompt: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extract_regex: Option<String>,
+    /// Command that *continues* an existing session. Must use the tool's own
+    /// resume flag, never one of `create_only_flags`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resume: Option<ToolPerformerCommand>,
+    /// Command that *opens* a session under a caller-chosen id, used on the
+    /// first use of a freshly reserved id under `id_strategy: generated`.
+    /// Optional: when absent the runner falls back to `resume`, which is
+    /// correct for tools whose resume flag also creates on miss.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub create: Option<ToolPerformerCommand>,
+    /// Flags that ask this tool to OPEN a session under a given id rather than
+    /// continue one, declared by the tool spec that owns that knowledge.
+    ///
+    /// Using one in `resume.args` (or in `performer.retry.args`, which are
+    /// merged into the resume invocation) yields a command that succeeds
+    /// exactly once per id and fails on every later use. Because MACC pools and
+    /// re-issues session ids, that becomes an unbounded dispatch/fail loop
+    /// capable of consuming an entire coordinator run, so `validate` rejects it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub create_only_flags: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub discover: Option<ToolPerformerCommand>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id_strategy: Option<String>,
+}
+
+/// Return the first flag from `create_only` that appears in `args`, if any.
+///
+/// Both `--flag value` and `--flag=value` spellings are recognised so the
+/// second cannot slip past a rule written for the first.
+pub fn create_only_flag_in<'a>(create_only: &'a [String], args: &[String]) -> Option<&'a str> {
+    args.iter()
+        .map(String::as_str)
+        .map(|arg| arg.split('=').next().unwrap_or(arg))
+        .find_map(|arg| {
+            create_only
+                .iter()
+                .map(String::as_str)
+                .find(|flag| *flag == arg)
+        })
 }
 
 /// Describes how to write the selected model to a tool-specific config file.
@@ -484,6 +518,34 @@ impl ToolSpec {
                     if resume.command.trim().is_empty() {
                         return Err(MaccError::Validation(format!(
                             "Performer session resume command must be set for tool '{}'",
+                            self.id
+                        )));
+                    }
+                    if let Some(flag) =
+                        create_only_flag_in(&session.create_only_flags, &resume.args)
+                    {
+                        return Err(MaccError::Validation(format!(
+                            "Performer session resume args for tool '{}' use '{}', which this spec declares under session.create_only_flags: it opens a session under a given id rather than continuing one, so it succeeds only on an id's first use and fails on every reuse. Use the tool's resume flag here and put '{}' under 'session.create'.",
+                            self.id, flag, flag
+                        )));
+                    }
+                }
+                // Retry args are merged into the resume invocation on attempt > 1,
+                // where the session already exists — so a create-only flag is
+                // just as wrong there as in `resume.args`.
+                if let Some(retry) = &performer.retry {
+                    if let Some(flag) = create_only_flag_in(&session.create_only_flags, &retry.args)
+                    {
+                        return Err(MaccError::Validation(format!(
+                            "Performer retry args for tool '{}' use '{}', which this spec declares under session.create_only_flags. Retry args are merged into the resume invocation, where the session already exists, so this fails on every retry. Use the tool's resume flag here.",
+                            self.id, flag
+                        )));
+                    }
+                }
+                if let Some(create) = &session.create {
+                    if create.command.trim().is_empty() {
+                        return Err(MaccError::Validation(format!(
+                            "Performer session create command must be set for tool '{}'",
                             self.id
                         )));
                     }
