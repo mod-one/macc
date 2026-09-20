@@ -277,6 +277,9 @@ pub struct CoordinatorConfig {
     pub reference_branch_preflight: Option<ReferenceBranchPreflightConfigRaw>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prd_file: Option<String>,
+    /// Ordered, explicit PRD queue. An explicit --prd overrides this queue.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prd_files: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_registry_file: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -592,6 +595,7 @@ impl Default for CoordinatorConfig {
             reference_branch_preflight: None,
             client: None,
             prd_file: None,
+            prd_files: Vec::new(),
             task_registry_file: None,
             tool_priority: Vec::new(),
             max_parallel_per_tool: BTreeMap::new(),

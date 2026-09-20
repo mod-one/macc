@@ -1657,16 +1657,8 @@ pub fn coordinator_dispatch<E: crate::engine::Engine + ?Sized>(
     env_cfg: &CoordinatorEnvConfig,
     logger: Option<&dyn CoordinatorLog>,
 ) -> Result<()> {
-    let prd_file = env_cfg
-        .prd
-        .as_ref()
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            coordinator_cfg
-                .and_then(|c| c.prd_file.clone())
-                .map(std::path::PathBuf::from)
-        })
-        .unwrap_or_else(|| paths.root.join("prd.json"));
+    let prd_file =
+        crate::prd_queue::active_path(&paths.root, coordinator_cfg, env_cfg.prd.as_deref())?;
     engine.coordinator_sync_registry_from_prd(&paths.root, &prd_file)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_time()
@@ -1801,16 +1793,8 @@ pub fn coordinator_sync<E: crate::engine::Engine + ?Sized>(
     env_cfg: &CoordinatorEnvConfig,
     logger: Option<&dyn CoordinatorLog>,
 ) -> Result<()> {
-    let prd_file = env_cfg
-        .prd
-        .as_ref()
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            coordinator_cfg
-                .and_then(|c| c.prd_file.clone())
-                .map(std::path::PathBuf::from)
-        })
-        .unwrap_or_else(|| paths.root.join("prd.json"));
+    let prd_file =
+        crate::prd_queue::active_path(&paths.root, coordinator_cfg, env_cfg.prd.as_deref())?;
     let storage_mode = coordinator_engine::resolve_storage_mode(env_cfg, coordinator_cfg)?;
     if storage_mode != CoordinatorStorageMode::Json {
         engine.coordinator_storage_import_json_to_sqlite(paths)?;

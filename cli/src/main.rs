@@ -361,6 +361,7 @@ enum Commands {
     #[command(trailing_var_arg = true)]
     Coordinator {
         /// Coordinator command (run, control-plane-run, dispatch, advance, resume, sync, sync-prd, status, reconcile, block-task, unblock-task, unlock, cleanup, retry-phase, cutover-gate, stop, sessions, validate-transition, validate-runtime-transition, runtime-status-from-event, storage-import, storage-export, events-export, storage-verify, storage-sync, select-ready-task, state-apply-transition, state-set-runtime, state-task-field, state-task-exists, state-counts, state-locks, state-set-merge-pending, state-set-merge-processed, state-increment-retries, state-upsert-slo-warning, state-slo-metric)
+        /// Use `prds help` to manage the ordered PRD file queue and visual editor.
         #[arg(default_value = "run")]
         command_name: String,
         /// Start the coordinator after a relative delay, for example 30m or 2h

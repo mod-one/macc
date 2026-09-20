@@ -2146,6 +2146,25 @@ pub async fn run_native_control_plane(
     env_cfg: &crate::coordinator::types::CoordinatorEnvConfig,
     logger: Option<&dyn CoordinatorLog>,
 ) -> Result<()> {
+    let _queue_lock = crate::fs_lock::AdvisoryLock::acquire(
+        &repo_root.join(".macc/state/prd-queue.lock"),
+        std::time::Duration::ZERO,
+        "coordinator PRD queue",
+    )?;
+    if env_cfg.prd.is_some() || coordinator.is_none_or(|c| c.prd_files.is_empty()) {
+        return run_single_prd_control_plane(repo_root, canonical, coordinator, env_cfg, logger)
+            .await;
+    }
+    crate::prd_queue::run(repo_root, canonical, coordinator.unwrap(), env_cfg, logger).await
+}
+
+pub(crate) async fn run_single_prd_control_plane(
+    repo_root: &Path,
+    canonical: &CanonicalConfig,
+    coordinator: Option<&CoordinatorConfig>,
+    env_cfg: &crate::coordinator::types::CoordinatorEnvConfig,
+    logger: Option<&dyn CoordinatorLog>,
+) -> Result<()> {
     let cfg = CanonicalCoordinatorConfigResolved::resolve(coordinator);
     let run_id = if let Ok(existing) = std::env::var("COORDINATOR_RUN_ID") {
         let trimmed = existing.trim();

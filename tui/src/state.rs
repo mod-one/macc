@@ -135,6 +135,7 @@ fn requires_owner_gate(command: &CoordinatorCommand) -> bool {
 }
 
 pub struct AppState {
+    pub prd_queue_editor: Option<crate::prd_queue::Editor>,
     pub engine: Arc<dyn Engine>,
     pub project_paths: Option<ProjectPaths>,
     pub config: Option<CanonicalConfig>,
@@ -315,6 +316,7 @@ impl AppState {
             automation_field_editing: false,
             automation_field_input: String::new(),
             coordinator_tool_cycle_idx: 0,
+            prd_queue_editor: None,
             tool_priority_editor_active: false,
             tool_priority_editor_index: 0,
             tool_priority_editor_grabbed: false,
@@ -2746,7 +2748,7 @@ impl AppState {
         );
     }
 
-    fn snapshot_before_config_change(&mut self) {
+    pub(crate) fn snapshot_before_config_change(&mut self) {
         let Some(cfg) = self.working_copy.as_ref() else {
             return;
         };
@@ -3019,6 +3021,7 @@ impl AppState {
         // Text editing AND special-mode editors all count as "editing" for
         // purposes of blocking global key handlers.
         self.automation_field_editing
+            || self.prd_queue_editor.is_some()
             || self.tool_priority_editor_active
             || self.tool_parallel_editor_active
     }
@@ -3046,9 +3049,18 @@ impl AppState {
             // General: global settings (quiet, offline, debug, web port)
             0 => &[(0, 0), (0, 1), (0, 3), (0, 2)],
             // Coordinator: core coordinator settings
-            1 => &[(1, 0), (1, 1), (1, 7), (1, 6), (1, 8), (1, 32), (1, 33)],
+            1 => &[
+                (1, 0),
+                (1, 1),
+                (1, 2),
+                (1, 7),
+                (1, 6),
+                (1, 8),
+                (1, 32),
+                (1, 33),
+            ],
             // Tools: routing and priority
-            2 => &[(1, 3), (1, 4), (1, 5), (1, 2)],
+            2 => &[(1, 3), (1, 4), (1, 5)],
             // Phases: pipeline phase controls
             3 => &[
                 (1, 34),
@@ -3267,7 +3279,7 @@ impl AppState {
         match index {
             0 => "[Basic] Coordinator Tool",
             1 => "[Basic] Reference Branch",
-            2 => "[Advanced] PRD File",
+            2 => "PRD Queue",
             3 => "[Basic] Tool Priority (CSV)",
             4 => "[Advanced] Max Parallel Per Tool (JSON)",
             5 => "[Advanced] Tool Specializations (JSON)",
@@ -3314,7 +3326,7 @@ impl AppState {
         match index {
             0 => "Fixed tool for coordinator phase hooks (review/fix). Empty means task/default tool.",
             1 => "Default git branch used when task.base_branch is not set (default: main).",
-            2 => "Path to PRD JSON used by coordinator.sh (default: prd.json).",
+            2 => "Enter: edit ordered PRD queue; add files/directories, Space + arrows to reorder. Accept then s to save config. Empty queue uses legacy prd_file.",
             3 => "Tool priority order as comma-separated values, e.g. tool-a,tool-b,tool-c.",
             4 => "Per-tool concurrency caps as JSON object, e.g. {\"tool-a\":3,\"tool-b\":2}.",
             5 => "Category routing as JSON object, e.g. {\"frontend\":[\"tool-b\",\"tool-c\"]}.",
@@ -3426,7 +3438,13 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
                 .and_then(|c| c.reference_branch.clone())
                 .unwrap_or_else(|| "main".to_string()),
             2 => coordinator
-                .and_then(|c| c.prd_file.clone())
+                .map(|c| {
+                    if c.prd_files.is_empty() {
+                        c.prd_file.clone().unwrap_or_else(|| "prd.json".into())
+                    } else {
+                        format!("{} PRDs: {}", c.prd_files.len(), c.prd_files.join(" -> "))
+                    }
+                })
                 .unwrap_or_else(|| "prd.json".to_string()),
             3 => coordinator
                 .map(|c| c.tool_priority.join(", "))
@@ -3754,6 +3772,25 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
             }
             3 => {
                 self.start_tool_priority_editor();
+                return;
+            }
+            2 => {
+                if let (Some(paths), Some(config)) = (&self.project_paths, &self.working_copy) {
+                    let files = config
+                        .automation
+                        .coordinator
+                        .as_ref()
+                        .map(|c| {
+                            if c.prd_files.is_empty() {
+                                c.prd_file.iter().cloned().collect()
+                            } else {
+                                c.prd_files.clone()
+                            }
+                        })
+                        .unwrap_or_default();
+                    self.prd_queue_editor =
+                        Some(crate::prd_queue::Editor::new(paths.root.clone(), files));
+                }
                 return;
             }
             4 => {
@@ -4989,6 +5026,20 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
             Screen::Apply => self.attempt_apply(),
             _ => {}
         }
+    }
+
+    pub fn reset_prd_queue_progress(&self) -> macc_core::Result<()> {
+        self.gate_project_mutation()?;
+        let paths = self
+            .project_paths
+            .as_ref()
+            .ok_or_else(|| macc_core::MaccError::Validation("No project loaded".into()))?;
+        let _lock = macc_core::fs_lock::AdvisoryLock::acquire(
+            &paths.root.join(".macc/state/prd-queue.lock"),
+            Duration::ZERO,
+            "PRD queue reset",
+        )?;
+        macc_core::prd_queue::save(&paths.root, &macc_core::prd_queue::Progress::default())
     }
 
     pub fn save_config(&mut self) {

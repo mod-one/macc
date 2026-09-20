@@ -163,7 +163,11 @@ pub fn compute_readiness_from_state(
     };
 
     // Step 4: PRD/task available
-    let prd_path = paths.macc_dir.join("prd.json");
+    let prd_path = canonical
+        .and_then(|c| c.automation.coordinator.as_ref())
+        .and_then(|c| c.prd_files.first().or(c.prd_file.as_ref()))
+        .map(|path| paths.root.join(path))
+        .unwrap_or_else(|| paths.macc_dir.join("prd.json"));
     let task_count = if prd_path.exists() {
         crate::doctor::count_ready_tasks_public(&prd_path)
     } else {

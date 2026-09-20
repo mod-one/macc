@@ -640,6 +640,18 @@ pub fn sync_registry_from_prd_native(
     let registry_value =
         crate::coordinator::state::coordinator_state_registry_load(repo_root, &BTreeMap::new())?;
     let mut registry = TaskRegistry::from_value(&registry_value)?;
+    let queue = crate::prd_queue::load(repo_root)?;
+    if let Some(current) = queue.entries.get(queue.next) {
+        if prd_file.canonicalize().ok().is_some_and(|path| {
+            repo_root.join(&current.path).canonicalize().ok().as_ref() == Some(&path)
+        }) {
+            for completed in queue.entries.iter().take(queue.next) {
+                registry
+                    .external_merged_task_ids
+                    .extend(completed.task_ids.iter().cloned());
+            }
+        }
+    }
     let raw_prd = std::fs::read_to_string(prd_file).map_err(|e| MaccError::Io {
         path: prd_file.to_string_lossy().into(),
         action: "read coordinator prd".into(),

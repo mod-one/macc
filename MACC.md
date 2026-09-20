@@ -325,6 +325,67 @@ Default command is `run`. The coordinator starts, runs until the queue is exhaus
 
 #### Coordinator commands
 
+##### Ordered PRD Queue (CLI and TUI)
+
+Configure an explicit sequence in `.macc/macc.yaml`:
+
+```yaml
+automation:
+  coordinator:
+    prd_files:
+      - docs/prd/01-foundations.json
+      - docs/prd/02-delivery.json
+```
+
+Paths are relative to the project root (absolute paths also work). `prd_files`
+takes precedence over legacy `prd_file`; explicit `--prd PATH` runs only that
+file, without consuming queue progress. An empty queue retains the legacy input.
+
+```bash
+macc coordinator prds add docs/prd/01-foundations.json
+macc coordinator prds add docs/prd/release
+macc coordinator prds list
+macc coordinator prds move 3 1
+macc coordinator prds remove 2
+macc coordinator prds edit
+macc coordinator prds check
+macc coordinator prds status
+macc coordinator prds status --json
+macc coordinator run --no-client
+```
+
+Directory import snapshots immediate `*.json` children in lexical filename order;
+it is not recursive and does not discover new files during execution. Use padded
+filenames (`01`, `02`, `10`). Every JSON file must be a PRD with a nonempty tasks
+array; an invalid file rejects the entire import. Existing paths are deduplicated.
+
+In **TUI Settings > Coordinator > PRD Queue**, press Enter to open the same
+editor as `prds edit`: `a` adds a file/directory, Space grabs/releases an entry,
+arrows reorder it, `d` removes it, Enter accepts, Escape cancels. In the TUI,
+press `s` after closing the editor to save the configuration. CLI edit saves on
+accept. File removal only removes a queue entry, never the file from disk.
+`R` in the editor offers a separately confirmed reset of saved progress, refused
+while a coordinator is running. This reset is immediate; it does not save draft
+file edits and is not undone by subsequently cancelling the editor.
+
+PRDs execute sequentially; normal task parallelism remains available within each
+PRD. Advance requires every task to be merged and every declared gate to satisfy
+its required verdict. A blocked task, incomplete delivery, pause or stop prevents
+advancing. Task IDs must be unique across the queue. Dependencies on earlier PRDs
+are supported; dependencies on later PRDs are rejected before launch.
+
+Progress, file fingerprints and the last blocking reason survive client restarts
+in `.macc/state/prd-queue.json`. Registry snapshots are archived alongside it before
+switching PRDs and after successful delivery. Relaunch resumes the current PRD.
+Changing files or their order requires reviewing the queue and explicitly running
+`macc coordinator prds reset --confirm`. Reset affects queue progress only; it
+does not undo commits or clear task delivery state. Configuration changes do not
+silently reset a running queue. The runtime/edit lock prevents concurrent CLI
+queue edits and runs; unfinished work from another input must be resolved before
+replacing its registry. The Web frontend has no new queue editor in this release.
+
+##### Command Reference
+
 | Command | Description |
 |---|---|
 | `run` | Start orchestration (default) |

@@ -129,6 +129,29 @@ pub fn handle(
     }
 
     let context = ProjectContext::load(absolute_cwd, engine)?;
+    if input.command_name == "prds" {
+        if !matches!(
+            input
+                .extra_args
+                .first()
+                .map(String::as_str)
+                .unwrap_or("list"),
+            "list" | "check" | "status" | "help" | "--help"
+        ) {
+            gate_owner_action(
+                &ClientContext {
+                    client_id: input.client_id.clone(),
+                    project_root: context.paths.root.clone(),
+                },
+                &ProcessHandle {
+                    project_root: context.paths.root.clone(),
+                    kind: ProcessKind::Project,
+                    pid: None,
+                },
+            )?;
+        }
+        return crate::coordinator::prd_queue::handle(&context.paths, &input.extra_args);
+    }
     let paths = &context.paths;
     let canonical = &context.canonical;
     let coordinator_cfg = context.coordinator_cfg.as_ref();
@@ -163,6 +186,12 @@ pub fn handle(
     // The review and choice happen before any wait so the user sees the summary
     // and confirms (or cancels) immediately after typing the command.
     if matches!(command, CoordinatorCommand::Run) {
+        if input.env_cfg.prd.is_none() {
+            if let Some(config) = coordinator_cfg.filter(|c| !c.prd_files.is_empty()) {
+                macc_core::prd_queue::validate(&paths.root, &config.prd_files)?;
+                macc_core::prd_queue::active_path(&paths.root, Some(config), None)?;
+            }
+        }
         // Preflight: git identity must be set before workers can commit.
         {
             let missing = macc_core::git::missing_git_identity_fields(&paths.root);
@@ -1175,7 +1204,12 @@ fn print_launch_review(
     use macc_core::config::CoordinatorConfigResolved;
     let resolved = CoordinatorConfigResolved::resolve(coordinator_cfg);
 
-    let prd = resolved.prd_file.as_deref().unwrap_or("prd.json");
+    let prd = input
+        .env_cfg
+        .prd
+        .as_deref()
+        .or(resolved.prd_file.as_deref())
+        .unwrap_or("prd.json");
     let ref_branch = input
         .env_cfg
         .reference_branch
@@ -1203,7 +1237,19 @@ fn print_launch_review(
     // ── Project and task source ───────────────────────────────────────────────
     println!("Project:");
     println!("  Root:              {}", paths.root.display());
-    println!("  PRD:               {}", prd);
+    if input.env_cfg.prd.is_some() || coordinator_cfg.is_none_or(|c| c.prd_files.is_empty()) {
+        println!("  PRD:               {}", prd);
+    }
+    if input.env_cfg.prd.is_none() {
+        if let Some(config) = coordinator_cfg.filter(|c| !c.prd_files.is_empty()) {
+            println!("  PRD queue (sequential; stops on incomplete delivery):");
+            for (i, file) in config.prd_files.iter().enumerate() {
+                println!("    {}. {}", i + 1, file);
+            }
+        }
+    } else {
+        println!("  Explicit --prd overrides the configured queue.");
+    }
     println!("  Reference branch:  {}", ref_branch);
     println!();
 

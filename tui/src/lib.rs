@@ -19,6 +19,7 @@ use ratatui::{
 use std::{collections::BTreeMap, io, time::Duration};
 
 pub mod ownership;
+pub mod prd_queue;
 pub mod screen;
 pub mod state;
 pub mod ui;
@@ -194,6 +195,31 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
         return;
     }
 
+    if let Some(editor) = &mut state.prd_queue_editor {
+        match editor.key(key) {
+            prd_queue::Outcome::Continue => {}
+            prd_queue::Outcome::Cancel => state.prd_queue_editor = None,
+            prd_queue::Outcome::Reset => {
+                let result = state.reset_prd_queue_progress();
+                if let Some(editor) = &mut state.prd_queue_editor {
+                    editor.report_reset(result);
+                }
+            }
+            prd_queue::Outcome::Save => {
+                let files = editor.files.clone();
+                state.snapshot_before_config_change();
+                if let Some(config) = &mut state.working_copy {
+                    config
+                        .automation
+                        .coordinator
+                        .get_or_insert_with(Default::default)
+                        .prd_files = files;
+                }
+                state.prd_queue_editor = None;
+            }
+        }
+        return;
+    }
     if state.command_palette_open {
         handle_command_palette_key(state, key);
         return;
@@ -689,6 +715,10 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
 }
 
 fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
+    if let Some(editor) = &state.prd_queue_editor {
+        editor.draw(f);
+        return;
+    }
     let theme = theme();
     if full_clear {
         f.render_widget(Clear, f.size());
