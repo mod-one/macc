@@ -747,7 +747,7 @@ impl AppState {
         let tool_id = task
             .tool
             .as_deref()
-            .or_else(|| task.coordinator_tool.as_deref())
+            .or(task.coordinator_tool.as_deref())
             .unwrap_or("");
         if tool_id.is_empty() {
             return "-".to_string();

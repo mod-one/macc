@@ -1085,7 +1085,9 @@ pub fn append_session_event(
         session_id,
         tool_id,
         if task_id.is_empty() { "-" } else { task_id },
-        owner_pid.map(|p| p.to_string()).unwrap_or_else(|| "-".to_string()),
+        owner_pid
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "-".to_string()),
         details
     );
     let payload = serde_json::json!({
@@ -1113,14 +1115,8 @@ pub fn append_session_event(
     });
     let project_paths = crate::ProjectPaths::from_root(repo_root);
     let _ = append_event_sqlite(&project_paths, &payload)?;
-    let _ = write_structured_event_jsonl(
-        repo_root,
-        event_type,
-        task_id,
-        "session",
-        &message,
-        "info",
-    );
+    let _ =
+        write_structured_event_jsonl(repo_root, event_type, task_id, "session", &message, "info");
     Ok(())
 }
 

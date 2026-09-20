@@ -36,21 +36,46 @@ done
 
 echo "Checking for forbidden tool strings in UI/client sources..."
 
-FAILED=0
 cd "$REPO_ROOT"
+
+if command -v cargo >/dev/null 2>&1; then
+    if ! cargo test -p macc-core --test tool_name_guardrail --quiet -- --nocapture; then
+        echo ""
+        echo "ERROR: Tool-specific names found in UI/client source layers (cli/tui)."
+        echo "Use generic IDs/capabilities and resolve concrete tools via ToolSpec + registry."
+        exit 1
+    fi
+    echo "Check passed: source layers are tool-agnostic."
+    exit 0
+fi
+
+FAILED=0
 for DIR in "${TARGET_DIRS[@]}"; do
     if [ -d "$DIR" ]; then
-        MATCHES=$(
-            rg -n -i --pcre2 "$PATTERN" "$DIR" \
-                -g '*.rs' \
-                -g '!**/target/**' \
-                || true
-        )
+        MATCHES=""
+        if command -v rg >/dev/null 2>&1; then
+            MATCHES=$(
+                rg -n -i --pcre2 "$PATTERN" "$DIR" \
+                    -g '*.rs' \
+                    -g '!**/target/**' \
+                    || true
+            )
+        elif command -v grep >/dev/null 2>&1; then
+            MATCHES=$(
+                grep -rnEI "$PATTERN" "$DIR" \
+                    --include="*.rs" \
+                    --exclude-dir="target" \
+                    || true
+            )
+        fi
 
         if [ -n "$MATCHES" ]; then
-            echo "Forbidden strings found in $DIR/:
-$MATCHES"
-            FAILED=1
+            FILTERED_MATCHES=$(echo "$MATCHES" | grep -v "macc:allow-tool-name" | grep -v "tests_body.inc" || true)
+            if [ -n "$FILTERED_MATCHES" ]; then
+                echo "Forbidden strings found in $DIR/:
+$FILTERED_MATCHES"
+                FAILED=1
+            fi
         fi
     fi
 done

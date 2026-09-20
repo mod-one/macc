@@ -19,7 +19,9 @@ pub(super) async fn get_config_handler(
         .engine
         .load_canonical_config(&state.paths)
         .map_err(ApiError::from)?;
-    config_response_with_mandatory(&state.paths, canonical).map(Json)
+    config_response_with_mandatory(&state.paths, canonical)
+        .map(Json)
+        .map_err(ApiError::from)
 }
 
 pub(super) async fn get_tool_descriptors_handler(
@@ -279,9 +281,8 @@ impl From<CanonicalConfig> for ApiConfigResponse {
 fn config_response_with_mandatory(
     paths: &ProjectPaths,
     canonical: CanonicalConfig,
-) -> std::result::Result<ApiConfigResponse, ApiError> {
-    let mandatory_skills =
-        macc_core::catalog::mandatory_skill_ids(paths).map_err(ApiError::from)?;
+) -> macc_core::Result<ApiConfigResponse> {
+    let mandatory_skills = macc_core::catalog::mandatory_skill_ids(paths)?;
     Ok(response_from_canonical(canonical, mandatory_skills))
 }
 

@@ -505,7 +505,8 @@ pub fn release_job_sessions(
 
                         let matches = match (task_id, &wt_str) {
                             (Some(tid), Some(wt)) => {
-                                owner_tid.as_deref() == Some(tid) || owner_wt.as_deref() == Some(wt.as_str())
+                                owner_tid.as_deref() == Some(tid)
+                                    || owner_wt.as_deref() == Some(wt.as_str())
                             }
                             (Some(tid), None) => owner_tid.as_deref() == Some(tid),
                             (None, Some(wt)) => owner_wt.as_deref() == Some(wt.as_str()),
@@ -513,7 +514,8 @@ pub fn release_job_sessions(
                         };
 
                         if matches {
-                            let tid_to_record = task_id.map(|s| s.to_string()).or(owner_tid.clone());
+                            let tid_to_record =
+                                task_id.map(|s| s.to_string()).or(owner_tid.clone());
                             if let Some(obj) = entry.as_object_mut() {
                                 obj.insert(
                                     "status".to_string(),
@@ -523,10 +525,7 @@ pub fn release_job_sessions(
                                     "heartbeat_epoch".to_string(),
                                     serde_json::Value::Number(0.into()),
                                 );
-                                obj.insert(
-                                    "last_used_at".to_string(),
-                                    Value::String(now.clone()),
-                                );
+                                obj.insert("last_used_at".to_string(), Value::String(now.clone()));
                                 if let Some(ref tid) = tid_to_record {
                                     obj.insert(
                                         "last_task_id".to_string(),
@@ -1107,7 +1106,10 @@ mod tests {
         persist_sessions_file(&sessions_path, &sessions).expect("seed");
 
         let reset = reset_stale_active_sessions(&root, 1800).expect("reset");
-        assert_eq!(reset, 3, "stale-sid, zero-hb-sid, and dead-pid-sid should be reset");
+        assert_eq!(
+            reset, 3,
+            "stale-sid, zero-hb-sid, and dead-pid-sid should be reset"
+        );
 
         let after: Value =
             serde_json::from_str(&fs::read_to_string(&sessions_path).unwrap()).unwrap();
@@ -1189,7 +1191,10 @@ mod tests {
         assert_eq!(claude["job-sid-1"]["heartbeat_epoch"].as_i64(), Some(0));
         assert!(claude["job-sid-1"]["owner_worktree"].is_null());
         assert!(claude["job-sid-1"]["owner_pid"].is_null());
-        assert_eq!(claude["job-sid-1"]["last_task_id"].as_str(), Some("TASK-100"));
+        assert_eq!(
+            claude["job-sid-1"]["last_task_id"].as_str(),
+            Some("TASK-100")
+        );
 
         // Second session remains active
         assert_eq!(claude["job-sid-2"]["status"].as_str(), Some("active"));

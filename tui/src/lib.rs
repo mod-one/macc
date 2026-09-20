@@ -748,7 +748,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
         screen_title: current_screen.title(),
         mode: state.interaction_mode_label(),
         project: &project_label,
-        config_label: &config_status,
+        config_label: config_status,
         errors: state.errors.len(),
         coordinator_active: state.is_coordinator_running(),
         coordinator_paused: state.is_coordinator_paused(),
@@ -3917,16 +3917,15 @@ fn render_coordinator_stop_dialog(f: &mut Frame, state: &AppState) {
         "Force Stop + Cleanup: Terminate and delete worktrees/branches.",
     ];
 
-    let mut text = Vec::new();
-    text.push(Line::from(
-        "Stopping the coordinator affects the whole run.",
-    ));
-    text.push(Line::from(
-        "Impact depends on the mode: active performers may finish, pause, or be killed.",
-    ));
-    text.push(Line::from(""));
-    text.push(Line::from("Select a stop mode:"));
-    text.push(Line::from(""));
+    let mut text = vec![
+        Line::from("Stopping the coordinator affects the whole run."),
+        Line::from(
+            "Impact depends on the mode: active performers may finish, pause, or be killed.",
+        ),
+        Line::from(""),
+        Line::from("Select a stop mode:"),
+        Line::from(""),
+    ];
 
     for (idx, opt) in options.iter().enumerate() {
         let style = if idx == state.coordinator_stop_dialog_selection {
