@@ -148,22 +148,26 @@ describe('Init page', () => {
     const user = userEvent.setup();
     render(<Init />);
 
-    await screen.findByText('Project initialization wizard');
-    expect(screen.getByText('Step 1')).toBeInTheDocument();
+    await screen.findByRole('heading', { name: 'Project root' });
+    expect(screen.getByText('1 of 4')).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: 'Next' }));
-    await user.click(screen.getByRole('button', { name: 'Next' }));
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    expect(await screen.findByRole('heading', { name: 'Tool detection' })).toBeInTheDocument();
 
-    expect(await screen.findByText('Standards preset')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    expect(await screen.findByRole('heading', { name: 'Standards' })).toBeInTheDocument();
+    expect(await screen.findByText('Standards preview')).toBeInTheDocument();
     expect(getStandardsPreviewMock).toHaveBeenCalledTimes(1);
 
-    await user.click(screen.getByRole('button', { name: 'Next' }));
+    await user.click(screen.getByRole('button', { name: 'Continue' }));
+    expect(await screen.findByRole('heading', { name: 'Review' })).toBeInTheDocument();
     expect(await screen.findByText('Config preview')).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'Preview plan' }));
-    expect(await screen.findByText('Total actions: 2')).toBeInTheDocument();
+    expect(await screen.findByText('Total actions')).toBeInTheDocument();
+    expect(screen.getAllByText('2').length).toBeGreaterThanOrEqual(1);
 
-    await user.click(screen.getByRole('checkbox', { name: 'I reviewed the config preview' }));
+    await user.click(screen.getByRole('checkbox', { name: 'I reviewed the configuration' }));
     await user.click(screen.getByRole('button', { name: 'Create project' }));
 
     await waitFor(() => {
@@ -184,11 +188,11 @@ describe('Init page', () => {
     const user = userEvent.setup();
     render(<Init />);
 
-    await screen.findByText('Project initialization wizard');
+    await screen.findByRole('heading', { name: 'Project root' });
     await user.click(screen.getByRole('button', { name: 'Skip to defaults' }));
 
     expect(await screen.findByText('Config preview')).toBeInTheDocument();
-    await user.click(screen.getByRole('checkbox', { name: 'I reviewed the config preview' }));
+    await user.click(screen.getByRole('checkbox', { name: 'I reviewed the configuration' }));
     await user.click(screen.getByRole('button', { name: 'Create project' }));
 
     await waitFor(() => {
@@ -210,10 +214,10 @@ describe('Init page', () => {
     const user = userEvent.setup();
     render(<Init />);
 
-    await screen.findByText('Project initialization wizard');
+    await screen.findByRole('heading', { name: 'Project root' });
     await user.click(screen.getByRole('button', { name: 'Skip to defaults' }));
     expect(await screen.findByText('Config preview')).toBeInTheDocument();
-    await user.click(screen.getByRole('checkbox', { name: 'I reviewed the config preview' }));
+    await user.click(screen.getByRole('checkbox', { name: 'I reviewed the configuration' }));
     await user.click(screen.getByRole('button', { name: 'Create project' }));
 
     expect(await screen.findByText('Enable at least one tool before continuing.')).toBeInTheDocument();
@@ -238,8 +242,8 @@ describe('Init page', () => {
 
     render(<Init />);
 
-    await screen.findByText('Project initialization wizard');
-    expect(screen.getByText('Step 1')).toBeInTheDocument();
+    await screen.findByRole('heading', { name: 'Project root' });
+    expect(screen.getByText('1 of 4')).toBeInTheDocument();
     expect(screen.getByLabelText('Project root')).toBeInTheDocument();
   });
 });

@@ -20,6 +20,7 @@ import {
 } from '../api/client';
 import type { ApiOwnershipRecord } from '../api/models';
 import { useCoordinatorStore } from '../store';
+import { getHelpSectionForRoute } from '../pages/helpDocs';
 
 /* ── Navigation structure ────────────────────────────────────────── */
 interface NavItem { path: string; label: string; icon: React.FC; }
@@ -108,8 +109,14 @@ const Layout: React.FC = () => {
   const isOwner        = ownership?.owner?.client_id === webClientId;
   const pendingTakeover = ownership?.takeover_request ?? null;
   const showGitPanel   = !location.pathname.startsWith('/ops/git');
+  const contextualHelpSection = getHelpSectionForRoute(location.pathname);
+  const contextualHelpHref = `/help?section=${encodeURIComponent(contextualHelpSection)}`;
 
   useNotificationCenter();
+
+  useEffect(() => {
+    mainRef.current?.focus();
+  }, [location.pathname]);
 
   useEffect(() => {
     getHealth().then((h) => { if (h.project_root) setProjectRoot(h.project_root); }).catch(() => null);
@@ -201,6 +208,13 @@ const Layout: React.FC = () => {
 
   return (
     <div style={{ display: 'flex', height: '100vh', overflow: 'hidden', background: 'var(--bg-primary)', color: 'var(--text-primary)' }}>
+      {/* Skip to content link */}
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:absolute focus:z-50 focus:p-2 focus:bg-[var(--bg-card)] focus:text-[var(--text-primary)]"
+      >
+        Skip to content
+      </a>
 
       {/* ── Sidebar ────────────────────────────────────────────── */}
       <aside
@@ -500,6 +514,27 @@ const Layout: React.FC = () => {
                 </span>
               )}
             </button>
+
+            {/* Contextual help link */}
+            <Link
+              to={contextualHelpHref}
+              aria-label="Open contextual help"
+              title="Contextual help"
+              style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                width: 30, height: 30,
+                color: 'var(--text-muted)',
+                borderRadius: 'var(--radius-sm)',
+                textDecoration: 'none',
+                fontSize: '14px',
+                fontWeight: 600,
+                transition: 'color 100ms ease, background 100ms ease',
+              }}
+              onMouseEnter={(e) => { const el = e.currentTarget; el.style.color = 'var(--text-primary)'; el.style.background = 'var(--bg-elevated)'; }}
+              onMouseLeave={(e) => { const el = e.currentTarget; el.style.color = 'var(--text-muted)'; el.style.background = 'none'; }}
+            >
+              ?
+            </Link>
 
             {/* Command palette */}
             <button

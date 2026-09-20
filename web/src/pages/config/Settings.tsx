@@ -262,6 +262,7 @@ function ArrowBtn({ children, onClick, disabled, label }: { children: React.Reac
       onClick={onClick}
       disabled={disabled}
       title={label}
+      aria-label={label}
       style={{
         width: 22, height: 22,
         display: 'flex', alignItems: 'center', justifyContent: 'center',
