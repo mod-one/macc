@@ -1449,7 +1449,10 @@ mod tests {
             &["worktree", "add", "-q", "--detach", wt.to_str().unwrap()],
         );
         // Force the duplicate checkout the old `-B` fallback used to create.
-        run_git(&wt, &["checkout", "-B", "main", "main"]);
+        run_git(
+            &wt,
+            &["checkout", "--ignore-other-worktrees", "-B", "main", "main"],
+        );
 
         let holders = super::worktrees_for_branch(&repo, "main").expect("holders");
         assert_eq!(holders.len(), 2, "both worktrees hold main: {holders:?}");
