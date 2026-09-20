@@ -2,12 +2,14 @@ name: fetch-repo-stats
 concurrency: fetch-repo-stats
 
 on:
-  schedule:
-    - cron: "0 23 * * *"
+  # Temporarily disabled
+  # schedule:
+  #   - cron: "0 23 * * *"
   workflow_dispatch:
 
 jobs:
   run-ghrs:
+    if: false # Temporarily disabled
     runs-on: ubuntu-latest
     steps:
       - name: github-repo-stats
