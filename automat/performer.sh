@@ -742,6 +742,7 @@ Instructions:
    - MACC_TASK_RESULT: precondition_unmet (if execution is correct but a required gate or external condition is not met; never retryable)
 11) Use already_satisfied only when you verified the task is already done and can cite the evidence briefly.
 12) Use error_with_changes or error_without_changes ONLY when THIS task could not be completed because execution malfunctioned (sandbox failures, environment issues, permission errors, etc.). Use precondition_unmet instead when stopping is the task's correct specified behavior. All three require a brief "MACC_TASK_RESULT_EXP:" line.
+    With precondition_unmet, ALSO print one "MACC_TASK_PRECONDITION: <condition>" line per unsatisfied precondition, each on its own line, before the result marker. Name the concrete condition (the dependency verdict, approval, decision, data, or environment that is missing), not a generic summary. These lines are shown to the operator as the reason the task cannot be implemented yet.
 13) Pre-existing repository problems that this task did not cause and is not scoped to fix are NOT a reason to report an error. If a repo-wide check (test suite, build, lint) fails only in areas unrelated to this task, and this task's own work is complete and verified, report success and note the unrelated failures in your explanation. Judge this task by its own acceptance criteria, not by the health of the whole repository.
 14) If you finish successfully but forget the marker, the runner will infer the result from repository state; still print the marker explicitly.
 15) If the task JSON contains `gate`, also print exactly one `MACC_TASK_GATE_VERDICT: accepted|rejected|pending` line. A successful task execution does not imply an accepted gate verdict.
@@ -783,6 +784,23 @@ extract_task_gate_verdict() {
     not_accepted) printf '%s' "rejected" ;;
     *) printf '%s' "" ;;
   esac
+}
+
+# One entry per `MACC_TASK_PRECONDITION:` line, in emission order, blank and
+# duplicate lines dropped. Printed newline-separated so callers can iterate.
+extract_task_preconditions() {
+  local output_file="$1"
+  grep -E 'MACC_TASK_PRECONDITION:' "$output_file" \
+    | sed -E 's/^.*MACC_TASK_PRECONDITION:[[:space:]]*//' \
+    | tr -d '\r' \
+    | sed -E 's/^[[:space:]]+|[[:space:]]+$//g' \
+    | awk 'NF && !seen[$0]++'
+}
+
+# The same list as a JSON array (`[]` when none), for the phase_result payload.
+task_preconditions_json() {
+  local output_file="$1"
+  extract_task_preconditions "$output_file" | jq -R . | jq -sc .
 }
 
 # A terminal `error_*` result without an explanation leaves the coordinator --
@@ -954,6 +972,16 @@ run_tool() {
       fi
       local result_exp=""
       result_exp="$(resolve_task_result_exp "$output_capture" "$result_kind")"
+      # The list of unsatisfied preconditions travels as a structured array so
+      # every client can show "cannot be implemented because: …" verbatim.
+      local unmet_json="[]"
+      if [[ "$result_kind" == "precondition_unmet" ]]; then
+        unmet_json="$(task_preconditions_json "$output_capture")"
+        if [[ "$unmet_json" == "[]" ]]; then
+          echo "Warning: precondition_unmet reported without any MACC_TASK_PRECONDITION line; only the summary explanation will be shown" >&2
+          log_task_line "- Warning: precondition_unmet reported without MACC_TASK_PRECONDITION lines"
+        fi
+      fi
       must_emit_performer_event "phase_result" "$CURRENT_PHASE" "failed" "$(jq -nc \
         --arg attempt "$attempt" \
         --arg result_kind "$result_kind" \
@@ -961,6 +989,7 @@ run_tool() {
         --arg origin "$LAST_ERROR_ORIGIN" \
         --arg message "$LAST_ERROR_MESSAGE" \
         --arg result_exp "$result_exp" \
+        --argjson unmet "$unmet_json" \
         '({
           attempt:($attempt|tonumber?),
           result_kind:$result_kind,
@@ -969,10 +998,16 @@ run_tool() {
         + (if $code       != "" then {error_code:$code}       else {} end)
         + (if $origin     != "" then {origin:$origin}         else {} end)
         + (if $message    != "" then {message:$message}       else {} end)
-        + (if $result_exp != "" then {result_exp:$result_exp} else {} end))')"
+        + (if $result_exp != "" then {result_exp:$result_exp} else {} end)
+        + (if ($unmet|length) > 0 then {unmet_preconditions:$unmet} else {} end))')"
       log_task_line "- Result kind: ${result_kind}"
       if [[ -n "$result_exp" ]]; then
         log_task_line "- Explanation: ${result_exp}"
+      fi
+      if [[ "$unmet_json" != "[]" ]]; then
+        while IFS= read -r unmet_item; do
+          [[ -n "$unmet_item" ]] && log_task_line "- Unmet precondition: ${unmet_item}"
+        done < <(extract_task_preconditions "$output_capture")
       fi
       log_task_line ""
       log_task_line "- Exit status: 0 (failed due to ${result_kind})"

@@ -30,6 +30,10 @@ pub struct CoordinatorRunSummary {
     pub dependent_task_ids: Vec<String>,
     pub repeated_count: usize,
     pub recent_runs: Vec<CoordinatorRunHistoryItem>,
+    /// Preconditions the root task reported as unsatisfied (E903). Clients
+    /// render these as a list under "cannot be implemented because…".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unmet_preconditions: Vec<String>,
 }
 
 pub fn load_latest_run_summary(
@@ -49,6 +53,9 @@ pub fn load_latest_run_summary(
         .or_else(|| latest.stop_reason.clone())
         .unwrap_or_else(|| default_cause(&latest.status).to_string());
     let error_code = blocked_task.and_then(|task| task.task_runtime.last_error_code.clone());
+    let unmet_preconditions = blocked_task
+        .map(|task| task.task_runtime.unmet_preconditions.clone())
+        .unwrap_or_default();
     let task_id = blocked_task.map(|task| task.id.clone());
     let severity = severity_for(latest, blocked_task.is_some(), registry);
     let headline = headline_for(latest, blocked_task, dependent_task_ids.len());
@@ -80,6 +87,7 @@ pub fn load_latest_run_summary(
             .into_iter()
             .map(CoordinatorRunHistoryItem::from)
             .collect(),
+        unmet_preconditions,
     }))
 }
 
@@ -177,6 +185,20 @@ fn headline_for(run: &CoordinatorRun, blocked: Option<&Task>, dependent_count: u
             .last_error_code
             .as_deref()
             .unwrap_or("unknown error");
+        if code == "E903" {
+            // Runs recorded before the structured list existed carry no
+            // items: say "a precondition" rather than inventing a count.
+            let count = task.task_runtime.unmet_preconditions.len();
+            let what = match count {
+                0 => "a precondition is not satisfied".to_string(),
+                1 => "1 precondition is not satisfied".to_string(),
+                n => format!("{n} preconditions are not satisfied"),
+            };
+            return format!(
+                "{} cannot be implemented yet: {}; {} remaining task(s) depend on it.",
+                task.id, what, dependent_count
+            );
+        }
         return format!(
             "Cannot continue: {} is blocked ({}) and {} remaining task(s) depend on it.",
             task.id, code, dependent_count
@@ -196,7 +218,13 @@ fn headline_for(run: &CoordinatorRun, blocked: Option<&Task>, dependent_count: u
 
 fn next_action_for(run: &CoordinatorRun, blocked: Option<&Task>, code: Option<&str>) -> String {
     if let Some(task) = blocked {
-        if matches!(code, Some("E903" | "E904" | "E906" | "E907")) {
+        if code == Some("E903") {
+            return format!(
+                "Satisfy the recorded precondition(s) (this is not a tool failure; retrying unchanged will stop again), then run `macc coordinator unblock-task --task {} --evidence \"<evidence>\"`.",
+                task.id
+            );
+        }
+        if matches!(code, Some("E904" | "E906" | "E907")) {
             return format!(
                 "Resolve the recorded condition, then run `macc coordinator unblock-task --task {} --evidence \"<evidence>\"`.",
                 task.id
@@ -331,6 +359,55 @@ mod tests {
         assert_eq!(summary.repeated_count, 2);
         assert!(!summary.next_action.contains("unlock"));
         assert!(summary.next_action.contains("L4K-ROLLOUT-001"));
+    }
+
+    #[test]
+    fn precondition_stop_is_summarised_as_cannot_be_implemented_with_the_list() {
+        let root = tempfile::tempdir().expect("temp project");
+        let paths = ProjectPaths::from_root(root.path());
+        let sqlite = SqliteStorage::new(CoordinatorStoragePaths::from_project_paths(&paths));
+        sqlite
+            .upsert_coordinator_run(&run("run-1", "2026-09-21T09:48:00Z", "blocked", "blocked"))
+            .expect("run");
+        let registry = TaskRegistry::from_value(&json!({
+            "tasks": [
+                {
+                    "id": "SEC-API-003",
+                    "state": "blocked",
+                    "task_runtime": {
+                        "run_id": "run-1",
+                        "last_error_code": "E903",
+                        "last_error_message": "Task SEC-API-003 cannot be implemented because the following preconditions are not satisfied:\n  - SEC-CR-001 approval pending\n  - recovery-code entity undecided",
+                        "unmet_preconditions": ["SEC-CR-001 approval pending", "recovery-code entity undecided"]
+                    }
+                },
+                {"id":"SEC-API-004","state":"blocked","dependencies":["SEC-API-003"],
+                 "task_runtime":{"last_error_code":"E905"}}
+            ]
+        }))
+        .expect("registry");
+
+        let summary = load_latest_run_summary(&sqlite, &registry)
+            .expect("summary")
+            .expect("latest run");
+
+        assert_eq!(summary.task_id.as_deref(), Some("SEC-API-003"));
+        assert_eq!(summary.error_code.as_deref(), Some("E903"));
+        assert_eq!(summary.unmet_preconditions.len(), 2);
+        assert!(
+            summary.headline.contains("cannot be implemented yet")
+                && summary
+                    .headline
+                    .contains("2 preconditions are not satisfied"),
+            "{}",
+            summary.headline
+        );
+        assert!(summary.cause.contains("- SEC-CR-001 approval pending"));
+        assert!(summary
+            .next_action
+            .contains("unblock-task --task SEC-API-003"));
+        assert!(summary.next_action.contains("not a tool failure"));
+        assert_eq!(summary.dependent_task_ids, vec!["SEC-API-004".to_string()]);
     }
 
     #[test]

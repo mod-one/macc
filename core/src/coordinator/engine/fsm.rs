@@ -123,6 +123,8 @@ pub struct JobCompletionInput {
     pub error_origin: Option<String>,
     pub error_message: Option<String>,
     pub result_explanation: Option<String>,
+    /// Preconditions the tool reported as unsatisfied (`precondition_unmet`).
+    pub unmet_preconditions: Vec<String>,
     pub auto_retry_error_codes: Vec<String>,
     pub auto_retry_max: usize,
     /// Base backoff delay in seconds for E601 rate-limit retries.
@@ -1248,6 +1250,7 @@ fn apply_job_completion_typed(
         now,
     );
     task.task_runtime.result_explanation = input.result_explanation.clone();
+    task.task_runtime.unmet_preconditions = input.unmet_preconditions.clone();
     apply_state_transitions(task, &strategy, now)
 }
 
@@ -2729,6 +2732,7 @@ mod tests {
             error_origin: None,
             error_message: None,
             result_explanation: None,
+            unmet_preconditions: Vec::new(),
             auto_retry_error_codes: Vec::new(),
             auto_retry_max: 0,
             backoff_base_seconds: 30,
@@ -3134,6 +3138,7 @@ mod tests {
                 error_origin: None,
                 error_message: None,
                 result_explanation: None,
+                unmet_preconditions: Vec::new(),
                 auto_retry_error_codes: Vec::new(),
                 auto_retry_max: 0,
                 backoff_base_seconds: 30,
@@ -3168,6 +3173,7 @@ mod tests {
                 error_origin: None,
                 error_message: None,
                 result_explanation: None,
+                unmet_preconditions: Vec::new(),
                 auto_retry_error_codes: Vec::new(),
                 auto_retry_max: 0,
                 backoff_base_seconds: 30,
@@ -3208,6 +3214,7 @@ mod tests {
                 error_origin: None,
                 error_message: None,
                 result_explanation: None,
+                unmet_preconditions: Vec::new(),
                 auto_retry_error_codes: Vec::new(),
                 auto_retry_max: 0,
                 backoff_base_seconds: 30,
@@ -3253,6 +3260,7 @@ mod tests {
                 error_origin: Some("runner".to_string()),
                 error_message: Some("non-zero exit".to_string()),
                 result_explanation: None,
+                unmet_preconditions: Vec::new(),
                 auto_retry_error_codes: Vec::new(),
                 auto_retry_max: 0,
                 backoff_base_seconds: 30,
@@ -3297,6 +3305,7 @@ mod tests {
                 error_origin: Some("runner".to_string()),
                 error_message: Some("auth error".to_string()),
                 result_explanation: None,
+                unmet_preconditions: Vec::new(),
                 auto_retry_error_codes: Vec::new(),
                 auto_retry_max: 0,
                 backoff_base_seconds: 30,
@@ -3636,6 +3645,7 @@ mod tests {
                 error_origin: None,
                 error_message: None,
                 result_explanation: None,
+                unmet_preconditions: Vec::new(),
                 auto_retry_error_codes: Vec::new(),
                 auto_retry_max: 0,
                 backoff_base_seconds: 30,
@@ -3709,6 +3719,7 @@ mod tests {
                 error_origin: None,
                 error_message: None,
                 result_explanation: None,
+                unmet_preconditions: Vec::new(),
                 auto_retry_error_codes: Vec::new(),
                 auto_retry_max: 0,
                 backoff_base_seconds: 30,
@@ -4139,6 +4150,7 @@ mod tests {
             error_origin: None,
             error_message: None,
             result_explanation: None,
+            unmet_preconditions: Vec::new(),
             auto_retry_error_codes: Vec::new(),
             auto_retry_max: 0,
             backoff_base_seconds: 30,
@@ -4184,6 +4196,7 @@ mod tests {
                 error_origin: Some("runner".to_string()),
                 error_message: Some("auth error".to_string()),
                 result_explanation: None,
+                unmet_preconditions: Vec::new(),
                 auto_retry_error_codes: Vec::new(),
                 auto_retry_max: 0,
                 backoff_base_seconds: 30,
@@ -4214,6 +4227,7 @@ mod tests {
             error_origin: None,
             error_message: None,
             result_explanation: None,
+            unmet_preconditions: Vec::new(),
             auto_retry_error_codes: Vec::new(),
             auto_retry_max: 0,
             backoff_base_seconds: 30,
@@ -4529,6 +4543,58 @@ mod tests {
     }
 
     #[test]
+    fn precondition_unmet_records_the_conditions_as_cannot_be_implemented() {
+        // The GTransport SEC-API-003 case: codex listed the unmet conditions,
+        // MACC stored only "tool execution failed". The recorded message must
+        // now carry the list, and the list must persist on the task itself.
+        let mut task = json!({
+            "id":"SEC-API-003","state":"claimed","tool":"codex",
+            "task_runtime":{"status":"running","retries":0}
+        });
+        let mut input = make_error_completion_input(PerformerCompletionKind::PreconditionUnmet);
+        input.success = false;
+        input.status_text = "tool execution failed".to_string();
+        input.result_explanation = Some(
+            "Required approval and recovery-code data-model decisions remain unresolved."
+                .to_string(),
+        );
+        input.unmet_preconditions = vec![
+            "SEC-CR-001 is still explicitly pending Product Owner and lead architect approval."
+                .to_string(),
+            "Recovery-code persistence remains undecided and has no database entity.".to_string(),
+        ];
+
+        let out = apply_job_completion(
+            &mut task,
+            &input,
+            &NormalizerRegistry::empty(),
+            "2026-09-21T09:48:09Z",
+        );
+
+        assert_eq!(task["state"], "blocked");
+        assert!(!out.should_retry);
+        assert_eq!(task["task_runtime"]["last_error_code"], "E903");
+        assert_eq!(task["task_runtime"]["last_error_origin"], "precondition");
+        let message = task["task_runtime"]["last_error_message"]
+            .as_str()
+            .expect("message recorded");
+        assert!(
+            message.starts_with("Task SEC-API-003 cannot be implemented because the following preconditions are not satisfied:"),
+            "{message}"
+        );
+        assert!(message.contains("- SEC-CR-001 is still explicitly pending"));
+        assert!(message.contains("- Recovery-code persistence remains undecided"));
+        assert!(
+            !message.contains("tool execution failed"),
+            "a correct stop must not be recorded as a tool failure: {message}"
+        );
+        let stored = task["task_runtime"]["unmet_preconditions"]
+            .as_array()
+            .expect("list persisted on the task");
+        assert_eq!(stored.len(), 2);
+    }
+
+    #[test]
     fn explained_error_without_changes_is_not_retried() {
         let mut task = json!({
             "id":"DETERMINISTIC","state":"claimed","tool":"codex",
@@ -4711,6 +4777,7 @@ mod tests {
                 error_origin: None,
                 error_message: None,
                 result_explanation: None,
+                unmet_preconditions: Vec::new(),
                 auto_retry_error_codes: Vec::new(),
                 auto_retry_max: 0,
                 backoff_base_seconds: 30,
@@ -4893,6 +4960,7 @@ mod tests {
                 error_origin: None,
                 error_message: None,
                 result_explanation: None,
+                unmet_preconditions: Vec::new(),
                 auto_retry_error_codes: Vec::new(),
                 auto_retry_max: 0,
                 backoff_base_seconds: 30,

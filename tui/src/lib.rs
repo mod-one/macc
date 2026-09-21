@@ -2151,10 +2151,24 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                             summary.headline.clone(),
                             Style::default().add_modifier(Modifier::BOLD),
                         )));
-                        logs_lines.push(Line::from(vec![
-                            Span::styled("Cause: ", Style::default().fg(theme.muted)),
-                            Span::raw(summary.cause.clone()),
-                        ]));
+                        if summary.unmet_preconditions.is_empty() {
+                            logs_lines.push(Line::from(vec![
+                                Span::styled("Cause: ", Style::default().fg(theme.muted)),
+                                Span::raw(summary.cause.clone()),
+                            ]));
+                        } else {
+                            logs_lines.push(Line::from(vec![
+                                Span::styled("Cause: ", Style::default().fg(theme.muted)),
+                                Span::raw(format!(
+                                    "{} cannot be implemented because the following precondition{} not satisfied:",
+                                    summary.task_id.as_deref().unwrap_or("the blocked task"),
+                                    if summary.unmet_preconditions.len() == 1 { " is" } else { "s are" }
+                                )),
+                            ]));
+                            for item in &summary.unmet_preconditions {
+                                logs_lines.push(Line::from(format!("  - {}", item)));
+                            }
+                        }
                         if !summary.dependent_task_ids.is_empty() {
                             logs_lines.push(Line::from(vec![
                                 Span::styled("Affected: ", Style::default().fg(theme.muted)),
@@ -3880,6 +3894,81 @@ fn render_coordinator_pause_overlay(f: &mut Frame, state: &AppState) {
         (Some(task), None) => format!("task={} phase=dev", task),
         _ => "global/blocking (no task context)".to_string(),
     };
+    let summary = state.coordinator_run_summary.as_ref();
+    let (title, text, border) = pause_overlay_content(
+        message,
+        &retry_target,
+        command_name,
+        summary.and_then(|s| s.error_code.as_deref()),
+        summary.and_then(|s| s.task_id.as_deref()),
+        summary
+            .map(|s| s.unmet_preconditions.as_slice())
+            .unwrap_or(&[]),
+        summary.map(|s| s.next_action.as_str()),
+    );
+    let popup = Paragraph::new(text)
+        .block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(border)),
+        )
+        .wrap(Wrap { trim: true });
+    f.render_widget(popup, area);
+}
+
+/// Title, body and border colour of the pause/stop overlay.
+///
+/// Pure so the wording can be unit-tested. A `precondition_unmet` stop (E903)
+/// is *not* an error: the tool did exactly what the task specified. It gets
+/// its own title and a body that lists the unsatisfied conditions instead of
+/// the retry/skip menu, which would only re-run the same correct refusal.
+fn pause_overlay_content(
+    message: &str,
+    retry_target: &str,
+    command_name: &str,
+    error_code: Option<&str>,
+    blocked_task_id: Option<&str>,
+    unmet_preconditions: &[String],
+    next_action: Option<&str>,
+) -> (&'static str, String, Color) {
+    let is_precondition_stop = error_code == Some("E903") || message.contains("[E903]");
+    if is_precondition_stop {
+        let task = blocked_task_id.unwrap_or("The blocked task");
+        let mut body = format!(
+            "{} cannot be implemented because the following precondition{} not satisfied:\n",
+            task,
+            if unmet_preconditions.len() == 1 {
+                " is"
+            } else {
+                "s are"
+            }
+        );
+        if unmet_preconditions.is_empty() {
+            // No structured list: fall back to the recorded message, which
+            // already carries the tool's explanation.
+            body.push_str(&format!("\n{}\n", message.trim()));
+        } else {
+            for item in unmet_preconditions {
+                body.push_str(&format!("  - {}\n", item));
+            }
+        }
+        body.push_str(
+            "\nThis is not a tool failure: the task stopped as its specification requires. Retrying unchanged will stop again.\n",
+        );
+        if let Some(action) = next_action {
+            body.push_str(&format!("\nNext: {}\n", action));
+        }
+        body.push_str(
+            "\n- Press 'o': open Logs screen\n- Press 'k' or Esc: close and keep the run stopped\n",
+        );
+        body.push_str(&format!("\nCommand: {}\n", command_name));
+        return (
+            "Coordinator Blocked — Preconditions Not Satisfied",
+            body,
+            Color::Yellow,
+        );
+    }
     // RL-TUI-007: show a specific banner when quota is exhausted (E602).
     let is_quota_error = message.contains("quota_exhausted")
         || message.contains("E602")
@@ -3901,15 +3990,7 @@ fn render_coordinator_pause_overlay(f: &mut Frame, state: &AppState) {
             ),
         )
     };
-    let popup = Paragraph::new(text)
-        .block(
-            Block::default()
-                .title(title)
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Red)),
-        )
-        .wrap(Wrap { trim: true });
-    f.render_widget(popup, area);
+    (title, text, Color::Red)
 }
 
 fn render_coordinator_finished_overlay(f: &mut Frame, state: &AppState) {
@@ -4077,5 +4158,70 @@ fn get_last_lines_of_file(path: &std::path::Path, limit: usize) -> Vec<String> {
         lines[start..].to_vec()
     } else {
         Vec::new()
+    }
+}
+
+#[cfg(test)]
+mod pause_overlay_content_tests {
+    use super::pause_overlay_content;
+
+    #[test]
+    fn precondition_stop_gets_its_own_title_and_lists_the_conditions() {
+        let unmet = vec![
+            "SEC-CR-001 approval pending".to_string(),
+            "recovery-code entity undecided".to_string(),
+        ];
+        let (title, body, _) = pause_overlay_content(
+            "Validation error: Coordinator cannot continue …",
+            "task=SEC-API-003 phase=dev",
+            "run",
+            Some("E903"),
+            Some("SEC-API-003"),
+            &unmet,
+            Some("Satisfy the listed preconditions."),
+        );
+        assert_eq!(title, "Coordinator Blocked — Preconditions Not Satisfied");
+        assert!(body.starts_with(
+            "SEC-API-003 cannot be implemented because the following preconditions are not satisfied:"
+        ), "{body}");
+        assert!(body.contains("  - SEC-CR-001 approval pending\n"));
+        assert!(body.contains("  - recovery-code entity undecided\n"));
+        assert!(body.contains("not a tool failure"));
+        assert!(body.contains("Next: Satisfy the listed preconditions."));
+        assert!(
+            !body.contains("retry failed phase"),
+            "retry menu must not be offered: {body}"
+        );
+        assert!(!body.contains("Coordinator Paused (blocking error)"));
+    }
+
+    #[test]
+    fn precondition_stop_is_recognised_from_the_message_when_no_summary_is_loaded() {
+        let (title, body, _) = pause_overlay_content(
+            "Task X cannot be implemented because the following precondition is not satisfied:\n  - gate rejected [E903]",
+            "global/blocking (no task context)",
+            "run",
+            None,
+            None,
+            &[],
+            None,
+        );
+        assert_eq!(title, "Coordinator Blocked — Preconditions Not Satisfied");
+        assert!(body.contains("gate rejected"), "{body}");
+    }
+
+    #[test]
+    fn genuine_errors_keep_the_error_overlay() {
+        let (title, body, _) = pause_overlay_content(
+            "sandbox denied network",
+            "task=T phase=dev",
+            "run",
+            Some("E902"),
+            Some("T"),
+            &[],
+            None,
+        );
+        assert_eq!(title, "Coordinator Error");
+        assert!(body.contains("retry failed phase"));
     }
 }

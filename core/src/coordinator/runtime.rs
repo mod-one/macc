@@ -95,6 +95,8 @@ pub struct CoordinatorJobEvent {
     pub error_message: Option<String>,
     pub result_explanation: Option<String>,
     pub gate_verdict: Option<crate::coordinator::model::GateVerdict>,
+    /// Preconditions the tool reported as unsatisfied (`precondition_unmet`).
+    pub unmet_preconditions: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1405,6 +1407,10 @@ pub fn spawn_performer_job(
             gate_verdict: completion_details
                 .as_ref()
                 .and_then(|details| details.gate_verdict),
+            unmet_preconditions: completion_details
+                .as_ref()
+                .map(|details| details.unmet_preconditions.clone())
+                .unwrap_or_default(),
         });
     });
     Ok(pid)
@@ -1423,6 +1429,7 @@ struct CompletionDetails {
     message: Option<String>,
     result_explanation: Option<String>,
     gate_verdict: Option<crate::coordinator::model::GateVerdict>,
+    unmet_preconditions: Vec<String>,
 }
 
 const COORDINATOR_COMPAT_PHASE_RESULT_LOG_FALLBACK: &str =
@@ -1508,6 +1515,7 @@ fn read_last_completion_details_once(
             message: event.message().map(|value| value.to_string()),
             result_explanation: event.payload_result_exp(),
             gate_verdict: event.payload_gate_verdict(),
+            unmet_preconditions: event.payload_unmet_preconditions(),
         });
     }
     if attempt < 2 {
@@ -1530,8 +1538,20 @@ fn read_completion_details_from_worktree_log(
     let mut message = None;
     let mut result_explanation = None;
     let mut gate_verdict = None;
+    // Collected in reverse file order, restored below.
+    let mut unmet_preconditions: Vec<String> = Vec::new();
     for line in raw.lines().rev() {
         let trimmed = line.trim();
+        if let Some(item) = trimmed
+            .strip_prefix("MACC_TASK_PRECONDITION:")
+            .or_else(|| trimmed.strip_prefix("- Unmet precondition:"))
+        {
+            let item = item.trim();
+            if !item.is_empty() {
+                unmet_preconditions.push(item.to_string());
+            }
+            continue;
+        }
         if result_explanation.is_none() {
             if let Some(exp) = trimmed.strip_prefix("- Explanation:") {
                 result_explanation = Some(exp.trim().to_string());
@@ -1566,11 +1586,17 @@ fn read_completion_details_from_worktree_log(
             message = Some(trimmed.to_string());
         }
     }
+    unmet_preconditions.reverse();
+    // Order-preserving global de-duplication: a tool that repeats a condition
+    // (e.g. once in prose, once as a marker) must not list it twice.
+    let mut seen = std::collections::HashSet::new();
+    unmet_preconditions.retain(|item| seen.insert(item.clone()));
     result_kind.map(|kind| CompletionDetails {
         result_kind: Some(kind),
         message,
         result_explanation,
         gate_verdict,
+        unmet_preconditions,
     })
 }
 
@@ -2551,5 +2577,55 @@ pub fn terminate_process_group_gracefully(pgid: i64, grace_secs: u64) {
         unsafe {
             let _ = libc::killpg(pgid as libc::pid_t, libc::SIGKILL);
         }
+    }
+}
+
+#[cfg(test)]
+mod precondition_log_fallback_tests {
+    use super::{performer_task_log_path, read_completion_details_from_worktree_log};
+    use crate::coordinator::PerformerCompletionKind;
+
+    #[test]
+    fn worktree_log_fallback_collects_preconditions_in_order_without_duplicates() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let log = performer_task_log_path(dir.path(), "SEC-API-003");
+        std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+        std::fs::write(
+            &log,
+            "codex\nMACC_TASK_PRECONDITION: first condition\r\nMACC_TASK_PRECONDITION:   second condition  \nMACC_TASK_PRECONDITION: first condition\nMACC_TASK_RESULT_EXP: summary line\nMACC_TASK_RESULT: precondition_unmet\n- Result kind: precondition_unmet\n- Unmet precondition: third condition\n",
+        )
+        .unwrap();
+
+        let details = read_completion_details_from_worktree_log(dir.path(), "SEC-API-003")
+            .expect("details parsed");
+        assert_eq!(
+            details.result_kind,
+            Some(PerformerCompletionKind::PreconditionUnmet)
+        );
+        assert_eq!(details.result_explanation.as_deref(), Some("summary line"));
+        assert_eq!(
+            details.unmet_preconditions,
+            vec![
+                "first condition".to_string(),
+                "second condition".to_string(),
+                "third condition".to_string()
+            ],
+            "emission order kept, whitespace and CR trimmed, exact duplicates dropped"
+        );
+    }
+
+    #[test]
+    fn worktree_log_fallback_without_precondition_lines_yields_empty_list() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let log = performer_task_log_path(dir.path(), "T-1");
+        std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+        std::fs::write(
+            &log,
+            "MACC_TASK_RESULT_EXP: why\nMACC_TASK_RESULT: precondition_unmet\n",
+        )
+        .unwrap();
+        let details =
+            read_completion_details_from_worktree_log(dir.path(), "T-1").expect("details");
+        assert!(details.unmet_preconditions.is_empty());
     }
 }

@@ -172,7 +172,20 @@ fn print_coordinator_section(coord: &CoordinatorStatus) {
                 let code = summary.error_code.as_deref().unwrap_or("unknown error");
                 println!("  Root cause:  {} ({})", task_id, code);
             }
-            println!("  Cause:       {}", summary.cause);
+            if summary.unmet_preconditions.is_empty() {
+                println!("  Cause:       {}", summary.cause);
+            } else {
+                // E903: the task is correct but cannot proceed. Show the
+                // conditions as a list, not a one-line failure string.
+                println!(
+                    "  Cause:       {} cannot be implemented because the following precondition{} not satisfied:",
+                    summary.task_id.as_deref().unwrap_or("the blocked task"),
+                    if summary.unmet_preconditions.len() == 1 { " is" } else { "s are" }
+                );
+                for item in &summary.unmet_preconditions {
+                    println!("                 - {}", item);
+                }
+            }
             if !summary.dependent_task_ids.is_empty() {
                 println!("  Dependents:  {}", summary.dependent_task_ids.join(", "));
             }

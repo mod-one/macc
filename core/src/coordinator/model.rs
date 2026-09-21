@@ -282,6 +282,11 @@ pub struct TaskRuntime {
     /// in performer output. Displayed in TUI/WEB coordinator live view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_explanation: Option<String>,
+    /// Preconditions the tool reported as unsatisfied when it stopped with
+    /// `precondition_unmet` (`MACC_TASK_PRECONDITION:` markers). Rendered as
+    /// the "cannot be implemented because…" list in every client.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unmet_preconditions: Vec<String>,
     /// Verdict produced by a task declared with `gate`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate_verdict: Option<GateVerdict>,
@@ -837,6 +842,7 @@ impl TaskRuntime {
         self.last_error_origin = None;
         self.last_error_message = None;
         self.result_explanation = None;
+        self.unmet_preconditions.clear();
     }
 
     pub fn ensure_metrics(&mut self) -> &mut TaskRuntimeMetrics {

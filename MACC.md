@@ -835,7 +835,7 @@ For tools that use a config file for effort (e.g. Codex with `.codex/config.toml
 }
 ```
 
-`blocked_on_external` is scheduler-visible and starts the task in `blocked`; do not encode “do not retry” only in prose. A task with `gate` must emit `MACC_TASK_GATE_VERDICT: accepted|rejected|pending`. Its implementation may merge successfully while a rejected verdict keeps dependants blocked. A correct runtime refusal uses `MACC_TASK_RESULT: precondition_unmet` and is never retried.
+`blocked_on_external` is scheduler-visible and starts the task in `blocked`; do not encode “do not retry” only in prose. A task with `gate` must emit `MACC_TASK_GATE_VERDICT: accepted|rejected|pending`. Its implementation may merge successfully while a rejected verdict keeps dependants blocked. A correct runtime refusal uses `MACC_TASK_RESULT: precondition_unmet` and is never retried; it must also print one `MACC_TASK_PRECONDITION: <condition>` line per unsatisfied precondition, which MACC records on the task (`unmet_preconditions`) and shows verbatim as "Task X cannot be implemented because the following preconditions are not satisfied: …" in the run stop reason, `macc status`, the TUI overlay and the web run summary.
 
 ### PRD generation workflow
 

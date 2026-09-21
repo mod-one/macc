@@ -1232,6 +1232,7 @@ pub async fn monitor_active_jobs_native(
                         error_origin: evt.error_origin.clone(),
                         error_message: evt.error_message.clone(),
                         result_explanation: evt.result_explanation.clone(),
+                        unmet_preconditions: evt.unmet_preconditions.clone(),
                         auto_retry_error_codes: retry_codes.clone(),
                         auto_retry_max: retry_max,
                         backoff_base_seconds: resolve_rate_limit_backoff_base_seconds(

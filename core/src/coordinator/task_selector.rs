@@ -307,6 +307,12 @@ fn blocked_task_reason(task: &Task) -> String {
         .or(task.task_runtime.last_error.as_deref())
         .filter(|value| !value.is_empty())
         .unwrap_or("no blocking explanation was recorded");
+    if code == "E903" {
+        // Not a failure: the recorded message already reads "Task X cannot be
+        // implemented because …" with the conditions listed. Keep it intact
+        // so the operator sees the conditions, not a "blocked" label.
+        return format!("{message} [{code}]");
+    }
     format!("blocked ({code}): {message}")
 }
 
@@ -1700,5 +1706,43 @@ mod tests {
             });
         reconcile_task_blocks(&mut registry, "2026-09-06T10:00:00Z");
         assert_eq!(registry.find_task("FLEET-WINDOW").unwrap().state, "todo");
+    }
+}
+
+#[cfg(test)]
+mod precondition_reason_tests {
+    use super::blocked_task_reason;
+    use crate::coordinator::model::TaskRegistry;
+    use serde_json::json;
+
+    #[test]
+    fn e903_root_reason_keeps_the_cannot_be_implemented_text_intact() {
+        let registry = TaskRegistry::from_value(&json!({"tasks":[{
+            "id":"SEC-API-003","state":"blocked",
+            "task_runtime":{
+                "last_error_code":"E903",
+                "last_error_message":"Task SEC-API-003 cannot be implemented because the following precondition is not satisfied:\n  - SEC-CR-001 approval pending"
+            }
+        }]})).expect("registry");
+        let reason = blocked_task_reason(&registry.tasks[0]);
+        assert!(
+            reason.starts_with("Task SEC-API-003 cannot be implemented"),
+            "{reason}"
+        );
+        assert!(reason.ends_with("[E903]"), "{reason}");
+        assert!(!reason.starts_with("blocked ("), "{reason}");
+    }
+
+    #[test]
+    fn other_codes_keep_the_blocked_prefix() {
+        let registry = TaskRegistry::from_value(&json!({"tasks":[{
+            "id":"T","state":"blocked",
+            "task_runtime":{"last_error_code":"E902","last_error_message":"budget spent"}
+        }]}))
+        .expect("registry");
+        assert_eq!(
+            blocked_task_reason(&registry.tasks[0]),
+            "blocked (E902): budget spent"
+        );
     }
 }

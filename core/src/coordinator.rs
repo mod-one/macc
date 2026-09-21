@@ -518,6 +518,11 @@ pub struct CoordinatorPhaseResultPayload {
     pub result_kind: Option<PerformerCompletionKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate_verdict: Option<crate::coordinator::model::GateVerdict>,
+    /// Each precondition the tool found unsatisfied, one entry per
+    /// `MACC_TASK_PRECONDITION:` line. Only meaningful with
+    /// `result_kind = precondition_unmet`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unmet_preconditions: Vec<String>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -808,6 +813,35 @@ impl CoordinatorEventRecord {
             .or_else(|| self.extra.get("result_exp").and_then(Value::as_str))
             .filter(|s| !s.is_empty())
             .map(ToString::to_string)
+    }
+
+    /// Extract the list of unsatisfied preconditions reported by the tool
+    /// (`MACC_TASK_PRECONDITION:` markers, one per line). Empty when the tool
+    /// reported none, so callers fall back to `payload_result_exp`.
+    pub fn payload_unmet_preconditions(&self) -> Vec<String> {
+        let norm = self.normalized_payload();
+        let from = |value: Option<&Value>| -> Vec<String> {
+            value
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::trim)
+                        .filter(|item| !item.is_empty())
+                        .map(ToString::to_string)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let mut out = from(norm.get("unmet_preconditions"));
+        if out.is_empty() {
+            out = from(self.payload.get("unmet_preconditions"));
+        }
+        if out.is_empty() {
+            out = from(self.extra.get("unmet_preconditions"));
+        }
+        out
     }
 
     pub fn is_terminal_success(&self) -> bool {
@@ -1184,6 +1218,43 @@ mod tests {
             .map(|s| s.to_string())
             .collect();
         assert_eq!(schema_types, core_types);
+    }
+
+    #[test]
+    fn phase_result_payload_exposes_unmet_preconditions() {
+        let mut event = CoordinatorEventRecord {
+            schema_version: COORDINATOR_EVENT_SCHEMA_VERSION.to_string(),
+            event_id: "evt-1".to_string(),
+            run_id: Some("run-1".to_string()),
+            coordinator_epoch: None,
+            claim_id: None,
+            seq: 1,
+            ts: "2026-09-21T00:00:00Z".to_string(),
+            source: "performer:test".to_string(),
+            task_id: Some("SEC-API-003".to_string()),
+            event_type: "phase_result".to_string(),
+            phase: Some("dev".to_string()),
+            status: "failed".to_string(),
+            payload: serde_json::json!({
+                "result_kind": "precondition_unmet",
+                "result_exp": "decisions unresolved",
+                "unmet_preconditions": ["  approval pending ", "", "entity undecided"]
+            }),
+            detail: None,
+            msg: None,
+            extra: BTreeMap::new(),
+        };
+        assert_eq!(
+            event.payload_unmet_preconditions(),
+            vec![
+                "approval pending".to_string(),
+                "entity undecided".to_string()
+            ],
+            "trimmed, blanks dropped"
+        );
+        // Older payloads without the field must not break anything.
+        event.payload = serde_json::json!({"result_kind": "precondition_unmet"});
+        assert!(event.payload_unmet_preconditions().is_empty());
     }
 
     #[test]

@@ -46,6 +46,55 @@ fn describe_tool_error(task: &Task, reason: &str) -> String {
     }
 }
 
+/// Build the operator-facing record for a task that stopped because its
+/// preconditions are not satisfied (`precondition_unmet`, E903).
+///
+/// This is the text every client shows verbatim — the run's stop reason, the
+/// TUI overlay, `macc status`, the web summary — so it must name the task, say
+/// plainly that it *cannot be implemented yet* (this is not a malfunction), and
+/// list each unmet condition. When the tool listed none, its explanation
+/// stands in as the single condition rather than leaving the list empty.
+pub fn describe_unmet_preconditions(
+    task_id: &str,
+    unmet: &[String],
+    explanation: Option<&str>,
+) -> String {
+    let explanation = explanation.map(str::trim).filter(|value| !value.is_empty());
+    let items: Vec<&str> = if unmet.is_empty() {
+        explanation.into_iter().collect()
+    } else {
+        unmet.iter().map(String::as_str).collect()
+    };
+    let mut out = format!(
+        "Task {} cannot be implemented because the following precondition{} not satisfied:",
+        task_id,
+        if items.len() == 1 { " is" } else { "s are" }
+    );
+    if items.is_empty() {
+        out.push_str(
+            "
+  - (the tool did not name the condition: MACC_TASK_PRECONDITION and MACC_TASK_RESULT_EXP were both missing)",
+        );
+    }
+    for item in &items {
+        out.push_str(
+            "
+  - ",
+        );
+        out.push_str(item);
+    }
+    if !unmet.is_empty() {
+        if let Some(explanation) = explanation {
+            out.push_str(
+                "
+Tool summary: ",
+            );
+            out.push_str(explanation);
+        }
+    }
+    out
+}
+
 pub(super) fn apply_state_transitions(
     task: &mut Task,
     strategy: &RetryStrategy,
@@ -361,7 +410,32 @@ pub(super) fn apply_state_transitions(
                 error_code,
                 attempts,
             } => {
-                let described = describe_tool_error(task, reason);
+                // A precondition stop is a correct outcome, not a tool error:
+                // record it as "cannot be implemented because …" with the
+                // conditions listed, never as "tool execution failed".
+                let detail = if *completion_kind == PerformerCompletionKind::PreconditionUnmet {
+                    describe_unmet_preconditions(
+                        &task.id,
+                        &task.task_runtime.unmet_preconditions,
+                        task.task_runtime.result_explanation.as_deref(),
+                    )
+                } else {
+                    let described = describe_tool_error(task, reason);
+                    let suffix = if *error_code == "E907" {
+                        format!(
+                            "identical explanation repeated on {} consecutive attempts",
+                            attempts
+                        )
+                    } else {
+                        "explained failure without repository changes; not retried".to_string()
+                    };
+                    format!("{} ({})", described, suffix)
+                };
+                let origin = if *completion_kind == PerformerCompletionKind::PreconditionUnmet {
+                    "precondition"
+                } else {
+                    "coordinator"
+                };
                 task.set_workflow_state(WorkflowState::Blocked);
                 preserve_active_session_chain(task);
                 capture_last_assignment_before_clear(task);
@@ -373,18 +447,7 @@ pub(super) fn apply_state_transitions(
                 runtime.set_status(RuntimeStatus::Failed);
                 runtime.current_phase = None;
                 runtime.pid = None;
-                let suffix = match completion_kind {
-                    PerformerCompletionKind::PreconditionUnmet => {
-                        "correct terminal stop; precondition is not met".to_string()
-                    }
-                    _ if *error_code == "E907" => format!(
-                        "identical explanation repeated on {} consecutive attempts",
-                        attempts
-                    ),
-                    _ => "explained failure without repository changes; not retried".to_string(),
-                };
-                let detail = format!("{} ({})", described, suffix);
-                runtime.set_last_error_details(*error_code, "coordinator", detail.clone());
+                runtime.set_last_error_details(*error_code, origin, detail.clone());
                 runtime.last_error = Some(detail.clone());
                 task.tool = None;
                 task.assignee = None;
@@ -448,5 +511,60 @@ pub(super) fn apply_state_transitions(
             completion_kind: None,
             tool_error: None,
         },
+    }
+}
+
+#[cfg(test)]
+mod describe_unmet_preconditions_tests {
+    use super::describe_unmet_preconditions;
+
+    #[test]
+    fn lists_every_condition_and_names_the_task() {
+        let unmet = vec![
+            "SEC-CR-001 is still pending Product Owner approval".to_string(),
+            "Recovery-code persistence has no database entity".to_string(),
+        ];
+        let text = describe_unmet_preconditions(
+            "SEC-API-003",
+            &unmet,
+            Some("Required decisions unresolved."),
+        );
+        assert!(text.starts_with(
+            "Task SEC-API-003 cannot be implemented because the following preconditions are not satisfied:"
+        ), "{text}");
+        assert!(text.contains("\n  - SEC-CR-001 is still pending Product Owner approval"));
+        assert!(text.contains("\n  - Recovery-code persistence has no database entity"));
+        assert!(text.contains("\nTool summary: Required decisions unresolved."));
+        assert!(!text.to_ascii_lowercase().contains("tool execution failed"));
+    }
+
+    #[test]
+    fn single_condition_uses_singular_wording() {
+        let unmet = vec!["the observation window has not run".to_string()];
+        let text = describe_unmet_preconditions("T-1", &unmet, None);
+        assert!(
+            text.contains("the following precondition is not satisfied:"),
+            "{text}"
+        );
+        assert!(text.contains("\n  - the observation window has not run"));
+        assert!(!text.contains("Tool summary"));
+    }
+
+    #[test]
+    fn explanation_stands_in_when_no_condition_was_listed() {
+        // Older tools (or a tool that ignored the contract) emit only the
+        // one-line explanation; it must still surface as the condition.
+        let text = describe_unmet_preconditions("T-1", &[], Some("acceptance verdict is rejected"));
+        assert!(text.contains("precondition is not satisfied:"), "{text}");
+        assert!(text.contains("\n  - acceptance verdict is rejected"));
+    }
+
+    #[test]
+    fn total_silence_is_stated_not_hidden() {
+        let text = describe_unmet_preconditions("T-1", &[], None);
+        assert!(
+            text.contains("the tool did not name the condition"),
+            "{text}"
+        );
     }
 }
