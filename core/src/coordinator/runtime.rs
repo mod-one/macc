@@ -1547,7 +1547,9 @@ fn read_completion_details_from_worktree_log(
             .or_else(|| trimmed.strip_prefix("- Unmet precondition:"))
         {
             let item = item.trim();
-            if !item.is_empty() {
+            // `<condition>` is the placeholder from the prompt contract; a
+            // tool that echoes its prompt must not turn it into a condition.
+            if !item.is_empty() && !item.starts_with('<') {
                 unmet_preconditions.push(item.to_string());
             }
             continue;
@@ -2592,7 +2594,7 @@ mod precondition_log_fallback_tests {
         std::fs::create_dir_all(log.parent().unwrap()).unwrap();
         std::fs::write(
             &log,
-            "codex\nMACC_TASK_PRECONDITION: first condition\r\nMACC_TASK_PRECONDITION:   second condition  \nMACC_TASK_PRECONDITION: first condition\nMACC_TASK_RESULT_EXP: summary line\nMACC_TASK_RESULT: precondition_unmet\n- Result kind: precondition_unmet\n- Unmet precondition: third condition\n",
+            "  With precondition_unmet, ALSO print one \"MACC_TASK_PRECONDITION: <condition>\" line.\ncodex\nMACC_TASK_PRECONDITION: <condition>\nMACC_TASK_PRECONDITION: first condition\r\nMACC_TASK_PRECONDITION:   second condition  \nMACC_TASK_PRECONDITION: first condition\nMACC_TASK_RESULT_EXP: summary line\nMACC_TASK_RESULT: precondition_unmet\n- Result kind: precondition_unmet\n- Unmet precondition: third condition\n",
         )
         .unwrap();
 

@@ -52,7 +52,14 @@ printf 'MACC_TASK_PRECONDITION:   \nMACC_TASK_PRECONDITION: real one\n' >"$out"
 got="$(run_harness "task_preconditions_json '$out'")"
 [[ "$got" == '["real one"]' ]] && pass "blank marker values are dropped" || fail "blank marker values are dropped" "got: $got"
 
-# 5. the prompt tells the tool to emit the marker with precondition_unmet
+# 5. an echoed prompt must not contribute a condition (GTransport, 2026-09-21:
+#    codex printed its prompt, and the instruction line became item #1)
+printf '    With precondition_unmet, ALSO print one "MACC_TASK_PRECONDITION: <condition>" line per unsatisfied precondition.\nMACC_TASK_PRECONDITION: real condition\nMACC_TASK_PRECONDITION: <placeholder>\n' >"$out"
+got="$(run_harness "task_preconditions_json '$out'")"
+[[ "$got" == '["real condition"]' ]] && pass "echoed prompt text and placeholders are ignored" \
+  || fail "echoed prompt text and placeholders are ignored" "got: $got"
+
+# 6. the prompt tells the tool to emit the marker with precondition_unmet
 if grep -q 'MACC_TASK_PRECONDITION: <condition>' "$PERFORMER" \
    && grep -q 'unmet_preconditions:\$unmet' "$PERFORMER"; then
   pass "prompt contract and payload wiring are present in performer.sh"

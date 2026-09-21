@@ -770,7 +770,11 @@ extract_task_result_marker() {
 extract_task_result_exp() {
   local output_file="$1"
   local raw=""
-  raw="$(grep -E 'MACC_TASK_RESULT_EXP:' "$output_file" | tail -n 1 | sed -E 's/^.*MACC_TASK_RESULT_EXP:[[:space:]]*//')"
+  # Anchored at line start: tools that echo the prompt reproduce
+  # `…a brief "MACC_TASK_RESULT_EXP:" line.` mid-sentence; when the tool then
+  # omits its own explanation, an unanchored match would report `" line.` as
+  # the explanation instead of the explicit missing-explanation placeholder.
+  raw="$(grep -E '^[[:space:]]*MACC_TASK_RESULT_EXP:' "$output_file" | tail -n 1 | sed -E 's/^[[:space:]]*MACC_TASK_RESULT_EXP:[[:space:]]*//')"
   printf '%s' "$raw" | tr -d '\r' | xargs
 }
 
@@ -790,10 +794,16 @@ extract_task_gate_verdict() {
 # duplicate lines dropped. Printed newline-separated so callers can iterate.
 extract_task_preconditions() {
   local output_file="$1"
-  grep -E 'MACC_TASK_PRECONDITION:' "$output_file" \
-    | sed -E 's/^.*MACC_TASK_PRECONDITION:[[:space:]]*//' \
+  # Anchored at line start: some tools (codex) echo the prompt into their
+  # output, and the prompt itself contains `"MACC_TASK_PRECONDITION: <condition>"`
+  # mid-sentence. An unanchored match turned that instruction into a bogus
+  # first "condition" shown to the operator. A placeholder value (`<…>`) is
+  # rejected for the same reason.
+  grep -E '^[[:space:]]*MACC_TASK_PRECONDITION:' "$output_file" \
+    | sed -E 's/^[[:space:]]*MACC_TASK_PRECONDITION:[[:space:]]*//' \
     | tr -d '\r' \
     | sed -E 's/^[[:space:]]+|[[:space:]]+$//g' \
+    | grep -vE '^<' \
     | awk 'NF && !seen[$0]++'
 }
 

@@ -80,6 +80,16 @@ else
   fail "a provided explanation is passed through verbatim" "got: '$got'"
 fi
 
+# An echoed prompt must not pass for an explanation: without the tool's own
+# EXP line the placeholder must win, not the `" line.` fragment of item 12.
+printf '12) ...All three require a brief "MACC_TASK_RESULT_EXP:" line.\nMACC_TASK_RESULT: error_without_changes\n' >"$out_file"
+got="$(run_harness "$tmp_root" 0 "" "resolve_task_result_exp '$out_file' 'error_without_changes'" 2>/dev/null)"
+if [[ "$got" == *"no explanation provided"* ]]; then
+  pass "echoed prompt text is not mistaken for an explanation"
+else
+  fail "echoed prompt text is not mistaken for an explanation" "got: '$got'"
+fi
+
 printf 'MACC_TASK_RESULT: success_with_changes\n' >"$out_file"
 got="$(run_harness "$tmp_root" 0 "" "resolve_task_result_exp '$out_file' 'success_with_changes'" 2>/dev/null)"
 if [[ -z "$got" ]]; then
