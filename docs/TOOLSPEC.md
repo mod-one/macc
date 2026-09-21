@@ -123,6 +123,28 @@ Optional performer fields:
   - `discover` (command + args)
   - `id_strategy`: `generated` or `discovered`
 
+### Argument placeholders
+
+Performer, retry, and session `args` may use these placeholders:
+
+| Placeholder | Resolved | Source |
+|---|---|---|
+| `{model}` | when `tool.json` is written | the tool's `model` field in `macc.yaml`, else its default; a routing tier replaces the value after `--model`/`-m` at run time |
+| `{effort}` | when `tool.json` is written | the field whose id is `effort_config.key` (else a field `effort`, else `defaults.effort`); a routing tier rewrites the `<effort_config.key>="…"` argument at run time |
+| `{session_id}` | at run time | the session being created or resumed |
+
+`{effort}` is optional: when no effort is configured, the argument containing it is removed together with the option flag in front of it, so the tool falls back to its own default instead of receiving a literal `{effort}`.
+
+Arguments are passed to the tool as an argv array, never through a shell. Write the value exactly as the tool must receive it. For Codex, `-c` parses its value as TOML, so the argument is `model_reasoning_effort="high"`; YAML needs outer quotes to hold it, `'model_reasoning_effort="{effort}"'`, and no further shell quoting:
+
+```yaml
+args: ["--model", "{model}", "-c", 'model_reasoning_effort="{effort}"', "--yolo", "exec"]
+effort_config:            # still written, so config file and command line agree
+  path: ".codex/config.toml"
+  format: toml
+  key: model_reasoning_effort
+```
+
 ### Create vs resume
 
 Some CLIs use different flags to open a session under a given id and to

@@ -539,6 +539,9 @@ run_resume_and_capture() {
     i=$((i + 1))
   done
 
+  # Apply the tier effort to the resume/retry invocation as well.
+  _replace_effort_in_args final_args
+
   # Apply tier model override to resume args.
   # Config-file updates (model_config, effort_config) were already done by
   # _apply_tier_model_to_args before the first call — no need to repeat them.
@@ -759,7 +762,29 @@ _apply_tier_model_to_args() {
   fi
 }
 
+# Inline effort override: tools that take reasoning effort as a config
+# override argument (codex: `-c model_reasoning_effort="high"`) carry it in
+# their args as `<effort_config.key>="<effort>"`, resolved from the tool config
+# when tool.json is written. When routing selects a tier effort, rewrite that
+# argument so the CLI and the config file (effort_config, written above) agree.
+# No-op when there is no tier effort, no effort_config key, or no such argument.
+_replace_effort_in_args() {
+  # $1 = name of array variable to modify (passed by name via nameref)
+  [[ -z "$_tier_effort" ]] && return 0
+  local _key
+  _key="$(jq -r '.performer.effort_config.key // empty' "$tool_json" 2>/dev/null || true)"
+  [[ -z "$_key" ]] && return 0
+  local -n _eff_ref="$1"
+  local _i
+  for _i in "${!_eff_ref[@]}"; do
+    if [[ "${_eff_ref[$_i]}" == "${_key}="* ]]; then
+      _eff_ref[$_i]="${_key}=\"${_tier_effort}\""
+    fi
+  done
+}
+
 _apply_tier_model_to_args
+_replace_effort_in_args args
 
 prompt_mode="$(jq -r '.performer.prompt.mode // "stdin"' "$tool_json")"
 prompt_arg="$(jq -r '.performer.prompt.arg // empty' "$tool_json")"

@@ -257,7 +257,49 @@ fn resolve_runtime_placeholders(
     if let Some(model) = resolve_tool_model(spec, canonical) {
         placeholders.insert("model".to_string(), model);
     }
+    if let Some(effort) = resolve_tool_effort(spec, canonical) {
+        placeholders.insert("effort".to_string(), effort);
+    }
     placeholders
+}
+
+/// Configured reasoning effort for `{effort}` in performer args.
+///
+/// Read from the tool field whose id is the `effort_config.key` (the same
+/// setting the tool's config file uses), else a field with id `effort`, else
+/// `defaults.effort`. Tier routing overrides this value at run time.
+fn resolve_tool_effort(
+    spec: &crate::tool::ToolSpec,
+    canonical: &CanonicalConfig,
+) -> Option<String> {
+    let key = spec
+        .performer
+        .as_ref()
+        .and_then(|performer| performer.effort_config.as_ref())
+        .map(|config| config.key.clone());
+    let field = spec
+        .fields
+        .iter()
+        .find(|field| Some(&field.id) == key.as_ref())
+        .or_else(|| spec.fields.iter().find(|field| field.id == "effort"));
+    if let Some(field) = field {
+        if let Some(value) = field
+            .pointer
+            .as_deref()
+            .and_then(|pointer| resolve_tool_pointer_value(canonical, &spec.id, pointer))
+            .and_then(json_scalar_to_string)
+            .filter(|value| !value.trim().is_empty())
+        {
+            return Some(value);
+        }
+        if let Some(default) = field.default.as_ref().and_then(json_scalar_to_string) {
+            return Some(default);
+        }
+    }
+    spec.defaults
+        .as_ref()
+        .and_then(|defaults| defaults.get("effort"))
+        .and_then(json_scalar_to_string)
 }
 
 fn resolve_tool_model(spec: &crate::tool::ToolSpec, canonical: &CanonicalConfig) -> Option<String> {
@@ -344,10 +386,34 @@ fn apply_runtime_placeholders(
     }
 }
 
-fn replace_placeholders_in_args(args: &mut [String], placeholders: &BTreeMap<String, String>) {
-    for arg in args {
+fn replace_placeholders_in_args(args: &mut Vec<String>, placeholders: &BTreeMap<String, String>) {
+    for arg in args.iter_mut() {
         *arg = replace_placeholders(arg, placeholders);
     }
+    drop_unresolved_optional(args, "{effort}");
+}
+
+/// Remove an argument that still contains an unresolved *optional*
+/// placeholder, together with the option flag introducing it.
+///
+/// `{effort}` is optional: a tool without a configured effort must run with
+/// its own default, not receive `model_reasoning_effort="{effort}"`.
+/// Runtime placeholders such as `{session_id}` are never touched.
+fn drop_unresolved_optional(args: &mut Vec<String>, placeholder: &str) {
+    let mut out = Vec::with_capacity(args.len());
+    for arg in args.drain(..) {
+        if arg.contains(placeholder) {
+            if out
+                .last()
+                .is_some_and(|prev: &String| prev.starts_with('-'))
+            {
+                out.pop();
+            }
+            continue;
+        }
+        out.push(arg);
+    }
+    *args = out;
 }
 
 fn replace_placeholders(value: &str, placeholders: &BTreeMap<String, String>) -> String {
@@ -668,6 +734,110 @@ mod tests {
         assert_eq!(
             resolve_tool_model(&spec, &canonical).as_deref(),
             Some("user-selected-model")
+        );
+    }
+
+    fn shipped_codex_spec() -> crate::tool::ToolSpec {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("registry/tools.d/codex.tool.yaml");
+        serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    fn canonical_with_codex(config: serde_json::Value) -> CanonicalConfig {
+        let mut canonical = CanonicalConfig::default();
+        canonical.tools.config = BTreeMap::from([("codex".to_string(), config)]);
+        canonical
+    }
+
+    fn rendered(
+        spec: &crate::tool::ToolSpec,
+        canonical: &CanonicalConfig,
+    ) -> crate::tool::ToolRuntimeConfig {
+        let mut runtime = spec.to_runtime_config().expect("performer section");
+        apply_runtime_placeholders(&mut runtime, &resolve_runtime_placeholders(spec, canonical));
+        runtime
+    }
+
+    #[test]
+    fn codex_receives_the_configured_effort_on_every_invocation() {
+        let spec = shipped_codex_spec();
+        let runtime = rendered(
+            &spec,
+            &canonical_with_codex(
+                json!({"model": "gpt-5.6-sol", "model_reasoning_effort": "high"}),
+            ),
+        );
+        let expect_prefix = [
+            "--model",
+            "gpt-5.6-sol",
+            "-c",
+            "model_reasoning_effort=\"high\"",
+            "--yolo",
+            "exec",
+        ];
+        assert_eq!(runtime.performer.args, expect_prefix, "base invocation");
+        let resume = &runtime
+            .performer
+            .session
+            .as_ref()
+            .unwrap()
+            .resume
+            .as_ref()
+            .unwrap()
+            .args;
+        assert_eq!(resume[..6], expect_prefix, "resume invocation");
+        assert_eq!(
+            resume[6..],
+            ["resume", "{session_id}"],
+            "{{session_id}} stays for run time"
+        );
+        assert_eq!(
+            runtime.performer.retry.as_ref().unwrap().args,
+            *resume,
+            "retry == resume"
+        );
+        // Plain argv: TOML string quotes only, never shell single quotes.
+        assert!(!runtime.performer.args.iter().any(|a| a.contains('\'')));
+        // effort_config still targets the same key in .codex/config.toml.
+        assert_eq!(
+            runtime.performer.effort_config.as_ref().unwrap().key,
+            "model_reasoning_effort"
+        );
+    }
+
+    #[test]
+    fn codex_effort_falls_back_to_the_field_default() {
+        let runtime = rendered(&shipped_codex_spec(), &canonical_with_codex(json!({})));
+        assert!(
+            runtime
+                .performer
+                .args
+                .iter()
+                .any(|a| a == "model_reasoning_effort=\"medium\""),
+            "{:?}",
+            runtime.performer.args
+        );
+    }
+
+    #[test]
+    fn an_unresolved_effort_drops_its_option_instead_of_leaking_the_placeholder() {
+        let mut args = vec![
+            "--model".to_string(),
+            "m".to_string(),
+            "-c".to_string(),
+            "model_reasoning_effort=\"{effort}\"".to_string(),
+            "--yolo".to_string(),
+            "exec".to_string(),
+            "resume".to_string(),
+            "{session_id}".to_string(),
+        ];
+        replace_placeholders_in_args(&mut args, &BTreeMap::new());
+        assert_eq!(
+            args,
+            ["--model", "m", "--yolo", "exec", "resume", "{session_id}"],
+            "-c pair removed; runtime placeholders untouched"
         );
     }
 

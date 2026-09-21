@@ -10,9 +10,16 @@ performer:
   command: codex
   # Codex accepts instructions as a bare positional argument: `codex exec "<instructions>"`.
   # No "-" (stdin) needed — the prompt is appended directly as the last positional.
-  args: ["--model", "{model}", "--yolo", "exec"]
-  # Codex reads reasoning effort from .codex/config.toml (model_reasoning_effort),
-  # not from a CLI flag. effort_config writes the tier effort there automatically.
+  #
+  # Reasoning effort is passed explicitly on every invocation, as the official
+  # Codex SDK does: `-c model_reasoning_effort="<effort>"`. The `-c` value is
+  # parsed as TOML, so the argument is exactly model_reasoning_effort="high"
+  # (argv, no shell: no extra single quotes). `{effort}` is resolved from the
+  # model_reasoning_effort setting; routing tiers rewrite it at run time; when
+  # no effort is configured the `-c` pair is dropped and codex uses its default.
+  args: ["--model", "{model}", "-c", 'model_reasoning_effort="{effort}"', "--yolo", "exec"]
+  # effort_config still writes the same effort to .codex/config.toml, so the
+  # config file and the command line never disagree.
   effort_config:
     path: ".codex/config.toml"
     format: toml
@@ -28,10 +35,10 @@ performer:
     extract_regex: "session[[:space:]]+id:[[:space:]]*([[:alnum:]-]+)"
     resume:
       command: codex
-      args: ["--model", "{model}", "--yolo", "exec", "resume", "{session_id}"]
+      args: ["--model", "{model}", "-c", 'model_reasoning_effort="{effort}"', "--yolo", "exec", "resume", "{session_id}"]
   retry:
     command: codex
-    args: ["--model", "{model}", "--yolo", "exec", "resume", "{session_id}"]
+    args: ["--model", "{model}", "-c", 'model_reasoning_effort="{effort}"', "--yolo", "exec", "resume", "{session_id}"]
 model_tiers:
   mini:
     model: gpt-5.4-mini
