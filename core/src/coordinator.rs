@@ -3,6 +3,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::str::FromStr;
 
+pub mod approval;
 pub mod args;
 pub mod commit_reconciler;
 pub mod control_plane;
@@ -107,6 +108,18 @@ pub enum WorkflowState {
     Merged,
     Blocked,
     Abandoned,
+    /// A `human_approval` gate whose dependencies are satisfied and which is
+    /// waiting for its approval quorum. No performer runs; no worker is used.
+    WaitingApproval,
+    /// A `human_approval` gate whose quorum was met for the bound revision.
+    /// Satisfies dependants exactly like `merged`.
+    Approved,
+    /// A `human_approval` gate an approver rejected. Blocks dependants like a
+    /// blocked root until an operator re-opens it.
+    Rejected,
+    /// An approval that outlived `expires_after_days` or whose subject changed
+    /// after approval. Needs a fresh approval round.
+    Expired,
 }
 
 impl WorkflowState {
@@ -123,7 +136,16 @@ impl WorkflowState {
             WorkflowState::Merged => "merged",
             WorkflowState::Blocked => "blocked",
             WorkflowState::Abandoned => "abandoned",
+            WorkflowState::WaitingApproval => "waiting_approval",
+            WorkflowState::Approved => "approved",
+            WorkflowState::Rejected => "rejected",
+            WorkflowState::Expired => "expired",
         }
+    }
+
+    /// States that satisfy a dependency edge: delivered work or an approved gate.
+    pub fn satisfies_dependants(self) -> bool {
+        matches!(self, WorkflowState::Merged | WorkflowState::Approved)
     }
 }
 
@@ -143,6 +165,10 @@ impl FromStr for WorkflowState {
             "merged" => Ok(WorkflowState::Merged),
             "blocked" => Ok(WorkflowState::Blocked),
             "abandoned" => Ok(WorkflowState::Abandoned),
+            "waiting_approval" => Ok(WorkflowState::WaitingApproval),
+            "approved" => Ok(WorkflowState::Approved),
+            "rejected" => Ok(WorkflowState::Rejected),
+            "expired" => Ok(WorkflowState::Expired),
             other => Err(format!("unknown workflow state: {}", other)),
         }
     }

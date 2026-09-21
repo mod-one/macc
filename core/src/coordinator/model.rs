@@ -27,16 +27,362 @@ impl FromStr for GateVerdict {
     }
 }
 
+/// What kind of decision a gate task represents.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GateKind {
+    /// Evaluated by the tool that runs the task (`MACC_TASK_GATE_VERDICT`).
+    #[default]
+    Verdict,
+    /// Decided by named humans through `macc coordinator approve`. Never
+    /// dispatched to a performer; an agent cannot produce this approval.
+    HumanApproval,
+}
+
+/// One role that must sign off, and how many holders of it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RequiredApprover {
+    pub role: String,
+    #[serde(default = "default_one")]
+    pub count: usize,
+}
+
+fn default_one() -> usize {
+    1
+}
+
+/// How many of `required_approvers` must be satisfied. Written in the PRD as
+/// `"all"` (default), `"any"`, or a number.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Quorum {
+    /// Every declared role must reach its count (the default).
+    #[default]
+    All,
+    /// Any single declared role reaching its count is enough.
+    Any,
+    /// At least this many distinct approvals, across declared roles.
+    Count(usize),
+}
+
+impl Serialize for Quorum {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        match self {
+            Quorum::All => serializer.serialize_str("all"),
+            Quorum::Any => serializer.serialize_str("any"),
+            Quorum::Count(n) => serializer.serialize_u64(*n as u64),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Quorum {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        match Value::deserialize(deserializer)? {
+            Value::String(s) => match s.trim().to_ascii_lowercase().as_str() {
+                "all" => Ok(Quorum::All),
+                "any" => Ok(Quorum::Any),
+                other => other.parse::<usize>().map(Quorum::Count).map_err(|_| {
+                    serde::de::Error::custom(format!(
+                        "invalid gate quorum '{other}': use \"all\", \"any\" or a number"
+                    ))
+                }),
+            },
+            Value::Number(n) => n
+                .as_u64()
+                .map(|n| Quorum::Count(n as usize))
+                .ok_or_else(|| serde::de::Error::custom("gate quorum must be a positive integer")),
+            other => Err(serde::de::Error::custom(format!(
+                "invalid gate quorum {other}: use \"all\", \"any\" or a number"
+            ))),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct TaskGate {
     #[serde(default = "default_required_gate_verdict")]
     pub required_verdict: GateVerdict,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// `verdict` (default, agent-evaluated) or `human_approval`.
+    #[serde(default)]
+    pub kind: GateKind,
+    /// The task whose delivered revision is being approved. Must be one of
+    /// this gate's dependencies so the subject is merged before approval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject_task: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_approvers: Vec<RequiredApprover>,
+    #[serde(default)]
+    pub quorum: Quorum,
+    /// What an approval is bound to. Only `commit_sha` is supported: the
+    /// approval names the subject revision and is invalidated when it moves.
+    #[serde(default = "default_bind_to")]
+    pub bind_to: String,
+    /// Where the durable human proof lives (`pull_request_review`, `adr`,
+    /// `changelog`, `manual`). Informational; recorded with each approval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_type: Option<String>,
+    #[serde(default = "default_true")]
+    pub invalidate_on_subject_change: bool,
+    /// Approvals older than this are expired and must be renewed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_after_days: Option<u32>,
+    /// Risks the approvers must weigh, declared by the planner and shown with
+    /// the approval request.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub risks: Vec<String>,
+    /// Specification governance source the required roles were derived from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub governance_ref: Option<String>,
+    /// Why this decision needs people (`adr`, `irreversible-migration`,
+    /// `security`, …), as declared by the planner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_trigger: Option<String>,
 }
 
 fn default_required_gate_verdict() -> GateVerdict {
     GateVerdict::Accepted
+}
+
+fn default_bind_to() -> String {
+    "commit_sha".to_string()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl TaskGate {
+    pub fn is_human_approval(&self) -> bool {
+        self.kind == GateKind::HumanApproval
+    }
+
+    /// Structural rules a `human_approval` gate must satisfy before the
+    /// scheduler will honour it. Returned as a list so a PRD author sees every
+    /// defect at once.
+    pub fn validate_human_approval(&self, task_id: &str, dependencies: &[String]) -> Vec<String> {
+        let mut problems = Vec::new();
+        if !self.is_human_approval() {
+            return problems;
+        }
+        match self.subject_task.as_deref().map(str::trim) {
+            None | Some("") => problems.push(format!(
+                "{task_id}: gate.subject_task is required for a human_approval gate"
+            )),
+            Some(subject) if !dependencies.iter().any(|dep| dep == subject) => {
+                problems.push(format!(
+                    "{task_id}: gate.subject_task '{subject}' must also be listed in dependencies so it is delivered before approval"
+                ))
+            }
+            _ => {}
+        }
+        if self.required_approvers.is_empty() {
+            problems.push(format!(
+                "{task_id}: gate.required_approvers must name at least one role"
+            ));
+        }
+        for approver in &self.required_approvers {
+            if approver.role.trim().is_empty() {
+                problems.push(format!("{task_id}: a required approver has an empty role"));
+            }
+            if approver.count == 0 {
+                problems.push(format!(
+                    "{task_id}: required approver '{}' has count 0",
+                    approver.role
+                ));
+            }
+        }
+        if let Quorum::Count(n) = self.quorum {
+            let max: usize = self.required_approvers.iter().map(|a| a.count).sum();
+            if n == 0 || n > max {
+                problems.push(format!(
+                    "{task_id}: gate.quorum {n} is outside 1..={max} (the total approvals declared)"
+                ));
+            }
+        }
+        if self.bind_to != "commit_sha" {
+            problems.push(format!(
+                "{task_id}: gate.bind_to '{}' is not supported; use commit_sha",
+                self.bind_to
+            ));
+        }
+        problems
+    }
+
+    /// Whether `approvals` (already filtered to the current round) satisfy the
+    /// declared quorum.
+    pub fn quorum_met(&self, approvals: &[ApprovalRecord]) -> bool {
+        // Distinct people per role: one person approving twice is one approval.
+        let approved = |role: &str| {
+            approvals
+                .iter()
+                .filter(|a| a.decision == ApprovalDecision::Approved && a.role == role)
+                .map(|a| a.actor.as_str())
+                .collect::<HashSet<_>>()
+                .len()
+        };
+        match self.quorum {
+            Quorum::All => self
+                .required_approvers
+                .iter()
+                .all(|r| approved(&r.role) >= r.count),
+            Quorum::Any => self
+                .required_approvers
+                .iter()
+                .any(|r| approved(&r.role) >= r.count),
+            Quorum::Count(n) => {
+                let declared: HashSet<&str> = self
+                    .required_approvers
+                    .iter()
+                    .map(|r| r.role.as_str())
+                    .collect();
+                approvals
+                    .iter()
+                    .filter(|a| {
+                        a.decision == ApprovalDecision::Approved
+                            && declared.contains(a.role.as_str())
+                    })
+                    .map(|a| (a.actor.as_str(), a.role.as_str()))
+                    .collect::<HashSet<_>>()
+                    .len()
+                    >= n
+            }
+        }
+    }
+
+    /// "ROLE 1/2, ROLE2 0/1" for display.
+    pub fn approval_progress(&self, approvals: &[ApprovalRecord]) -> String {
+        self.required_approvers
+            .iter()
+            .map(|r| {
+                let have = approvals
+                    .iter()
+                    .filter(|a| a.decision == ApprovalDecision::Approved && a.role == r.role)
+                    .map(|a| a.actor.as_str())
+                    .collect::<HashSet<_>>()
+                    .len();
+                format!("{} {}/{}", r.role, have.min(r.count), r.count)
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    pub fn required_roles(&self) -> Vec<String> {
+        self.required_approvers
+            .iter()
+            .map(|r| r.role.clone())
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalDecision {
+    Approved,
+    Rejected,
+    ChangesRequested,
+}
+
+impl ApprovalDecision {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Approved => "approved",
+            Self::Rejected => "rejected",
+            Self::ChangesRequested => "changes_requested",
+        }
+    }
+}
+
+impl FromStr for ApprovalDecision {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+            "approved" | "approve" => Ok(Self::Approved),
+            "rejected" | "reject" => Ok(Self::Rejected),
+            "changes_requested" | "request_changes" => Ok(Self::ChangesRequested),
+            other => Err(format!("unknown approval decision: {other}")),
+        }
+    }
+}
+
+/// One human decision, as recorded by `macc coordinator approve|reject|request-changes`.
+/// Written only by the CLI path; no performer event can create or alter one.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ApprovalRecord {
+    pub decision: ApprovalDecision,
+    pub role: String,
+    /// Who decided: `--as`, else the git identity of the operator.
+    pub actor: String,
+    /// The subject revision the decision applies to (`bind_to: commit_sha`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+    /// Durable proof: pull-request review URL, ADR path, changelog entry…
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    pub recorded_at: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalStatus {
+    #[default]
+    WaitingApproval,
+    ChangesRequested,
+    Approved,
+    Rejected,
+    Expired,
+}
+
+impl ApprovalStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::WaitingApproval => "waiting_approval",
+            Self::ChangesRequested => "changes_requested",
+            Self::Approved => "approved",
+            Self::Rejected => "rejected",
+            Self::Expired => "expired",
+        }
+    }
+}
+
+/// Operational approval state of a `human_approval` gate, derived every cycle
+/// from the append-only decision ledger (`gate_decisions` table). It is a
+/// cache for display: nothing reads it to decide whether a gate is approved.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct ApprovalState {
+    #[serde(default)]
+    pub status: ApprovalStatus,
+    /// The subject revision decisions must be bound to: the latest commit
+    /// carrying `[macc:task <subject>]` on the reference branch, or, when the
+    /// subject has no such commit, the revision named by the latest decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject_revision: Option<String>,
+    /// Decisions that currently count: bound to `subject_revision`, not
+    /// expired, latest per (actor, role).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effective: Vec<ApprovalRecord>,
+    /// Every decision ever recorded for this gate, oldest first (audit trail).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<ApprovalRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_at: Option<String>,
+    /// The revision the gate was last approved at; a different current
+    /// revision means the approval was invalidated by a subject change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_revision: Option<String>,
+    /// Human-readable explanation of the current status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -293,6 +639,10 @@ pub struct TaskRuntime {
     /// Operator evidence that clears the current external block declaration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_block_resolution: Option<ExternalBlockResolution>,
+    /// Approval ledger of a `human_approval` gate. Only the CLI approve /
+    /// reject / request-changes commands write here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<ApprovalState>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -602,10 +952,25 @@ impl TaskRegistry {
                 | WorkflowState::PrOpen
                 | WorkflowState::ChangesRequested
                 | WorkflowState::Queued => active += 1,
-                WorkflowState::Abandoned => {}
+                WorkflowState::Approved => merged += 1,
+                WorkflowState::Rejected => blocked += 1,
+                // Waiting gates use no worker and are not stalled work; they
+                // are counted separately by `waiting_approval_count`.
+                WorkflowState::Abandoned
+                | WorkflowState::WaitingApproval
+                | WorkflowState::Expired => {}
             }
         }
         (total, todo, active, blocked, merged)
+    }
+
+    /// Human gates currently waiting for a decision (including expired ones,
+    /// which wait for a renewed approval).
+    pub fn waiting_approval_count(&self) -> usize {
+        self.tasks
+            .iter()
+            .filter(|task| task.is_awaiting_approval())
+            .count()
     }
 }
 
@@ -648,6 +1013,24 @@ impl Task {
 
     pub fn is_merged(&self) -> bool {
         matches!(self.workflow_state(), Some(WorkflowState::Merged))
+    }
+
+    pub fn is_human_approval_gate(&self) -> bool {
+        self.gate.as_ref().is_some_and(TaskGate::is_human_approval)
+    }
+
+    pub fn is_awaiting_approval(&self) -> bool {
+        matches!(
+            self.workflow_state(),
+            Some(WorkflowState::WaitingApproval | WorkflowState::Expired)
+        )
+    }
+
+    /// Delivered work or an approved gate: satisfies dependants.
+    pub fn satisfies_dependants(&self) -> bool {
+        self.workflow_state()
+            .is_some_and(WorkflowState::satisfies_dependants)
+            && self.gate_verdict_satisfies_dependencies()
     }
 
     pub fn worktree_path(&self) -> Option<&str> {
@@ -729,9 +1112,12 @@ impl Task {
     }
 
     pub fn gate_verdict_satisfies_dependencies(&self) -> bool {
-        self.gate
-            .as_ref()
-            .is_none_or(|gate| self.task_runtime.gate_verdict == Some(gate.required_verdict))
+        self.gate.as_ref().is_none_or(|gate| {
+            // A human gate is decided by its workflow state (`approved`),
+            // never by a tool-reported verdict.
+            gate.is_human_approval()
+                || self.task_runtime.gate_verdict == Some(gate.required_verdict)
+        })
     }
 
     pub fn external_block_is_cleared(&self) -> bool {
@@ -1053,5 +1439,96 @@ fn parse_priority_value(priority: Option<&str>) -> i32 {
         Some(value) if value == "p4" => 4,
         Some(value) => value.parse::<i32>().unwrap_or(99),
         None => 99,
+    }
+}
+
+#[cfg(test)]
+mod human_gate_validation_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn gate(v: serde_json::Value) -> TaskGate {
+        serde_json::from_value(v).expect("gate parses")
+    }
+
+    #[test]
+    fn prd_shape_parses_with_defaults() {
+        let g = gate(json!({
+            "kind": "human_approval",
+            "subject_task": "SEC-ADR-003",
+            "required_approvers": [{"role":"PRODUCT_OWNER"},{"role":"SECURITY_OWNER","count":2}],
+            "quorum": "all",
+            "evidence_type": "pull_request_review",
+            "risks": ["irreversible migration"],
+            "governance_ref": "docs/16-decisions.md"
+        }));
+        assert!(g.is_human_approval());
+        assert_eq!(g.required_approvers[0].count, 1, "count defaults to 1");
+        assert_eq!(g.bind_to, "commit_sha");
+        assert!(g.invalidate_on_subject_change, "invalidation defaults on");
+        assert_eq!(g.quorum, Quorum::All);
+        assert!(g
+            .validate_human_approval("SEC-APP-003", &["SEC-ADR-003".into()])
+            .is_empty());
+        let numeric = gate(json!({"kind":"human_approval","quorum":2}));
+        assert_eq!(numeric.quorum, Quorum::Count(2));
+        let any = gate(json!({"kind":"human_approval","quorum":"any"}));
+        assert_eq!(any.quorum, Quorum::Any);
+        // Round-trips in the same shape the planner writes.
+        assert_eq!(serde_json::to_value(Quorum::All).unwrap(), json!("all"));
+        assert_eq!(serde_json::to_value(Quorum::Count(2)).unwrap(), json!(2));
+        assert!(serde_json::from_value::<TaskGate>(json!({"quorum":"most"})).is_err());
+    }
+
+    #[test]
+    fn a_legacy_verdict_gate_is_unchanged() {
+        let g = gate(json!({"required_verdict":"accepted"}));
+        assert_eq!(g.kind, GateKind::Verdict);
+        assert!(g.validate_human_approval("ACC", &[]).is_empty());
+    }
+
+    #[test]
+    fn every_structural_defect_is_reported_at_once() {
+        let g = gate(json!({
+            "kind":"human_approval",
+            "subject_task":"SEC-ADR-003",
+            "required_approvers":[{"role":"","count":0}],
+            "quorum": 5,
+            "bind_to":"tag"
+        }));
+        let problems = g.validate_human_approval("SEC-APP-003", &[]);
+        let text = problems.join("\n");
+        assert!(
+            text.contains("must also be listed in dependencies"),
+            "{text}"
+        );
+        assert!(text.contains("empty role"), "{text}");
+        assert!(text.contains("count 0"), "{text}");
+        assert!(text.contains("quorum 5"), "{text}");
+        assert!(text.contains("bind_to 'tag'"), "{text}");
+        let missing = gate(json!({"kind":"human_approval"}));
+        let text = missing.validate_human_approval("X", &[]).join("\n");
+        assert!(text.contains("subject_task is required"));
+        assert!(text.contains("at least one role"));
+    }
+
+    #[test]
+    fn approved_satisfies_dependants_and_waiting_does_not() {
+        let reg = TaskRegistry::from_value(&json!({"tasks":[
+            {"id":"G1","state":"approved","gate":{"kind":"human_approval"}},
+            {"id":"G2","state":"waiting_approval","gate":{"kind":"human_approval"}},
+            {"id":"G3","state":"rejected","gate":{"kind":"human_approval"}},
+            {"id":"G4","state":"expired","gate":{"kind":"human_approval"}}
+        ]}))
+        .unwrap();
+        let ok: Vec<bool> = reg.tasks.iter().map(Task::satisfies_dependants).collect();
+        assert_eq!(ok, vec![true, false, false, false]);
+        assert_eq!(reg.waiting_approval_count(), 2, "waiting + expired");
+        let (_, todo, active, blocked, merged) = reg.counts();
+        assert_eq!(
+            (todo, active, blocked, merged),
+            (0, 0, 1, 1),
+            "approved=merged, rejected=blocked, waiting uses no worker"
+        );
     }
 }

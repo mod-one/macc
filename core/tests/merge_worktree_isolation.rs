@@ -267,6 +267,7 @@ fn final_task_merges_before_the_run_completes_even_with_a_dirty_tree() {
                 active,
                 blocked,
                 merged,
+                waiting_approval: 0,
             },
             None,
         )
@@ -337,6 +338,7 @@ fn a_failed_merge_on_the_last_task_ends_the_run_with_blocked_tasks() {
                 active,
                 blocked,
                 merged,
+                waiting_approval: 0,
             },
             None,
         )
@@ -364,6 +366,7 @@ fn no_progress_abort_reports_the_stuck_tasks() {
         active: 0,
         blocked: 0,
         merged: 0,
+        waiting_approval: 0,
     };
     let diagnosis = || StallDiagnosis {
         lines: vec![
@@ -421,6 +424,7 @@ fn no_progress_abort_without_a_diagnosis_stays_terse() {
         active: 0,
         blocked: 0,
         merged: 0,
+        waiting_approval: 0,
     };
     controller
         .on_cycle_counts(counts, None)
@@ -452,6 +456,7 @@ fn terminal_blocked_stall_reports_cause_without_unlock_advice() {
         active: 0,
         blocked: 1,
         merged: 0,
+        waiting_approval: 0,
     };
     let diagnosis = || StallDiagnosis {
         lines: vec![

@@ -208,6 +208,8 @@ pub struct AppState {
     pub ui_status: Option<UiStatus>,
     pub coordinator_snapshot: Option<CoordinatorTaskSnapshot>,
     pub coordinator_run_summary: Option<CoordinatorRunSummary>,
+    /// Human approval gates waiting for a decision (shown in Coordinator Live).
+    pub coordinator_pending_approvals: Vec<macc_core::coordinator::approval::PendingApproval>,
     pub coordinator_last_refresh: Option<Instant>,
     pub coordinator_running_command: Option<String>,
     pub coordinator_last_result: Option<String>,
@@ -357,6 +359,7 @@ impl AppState {
             ui_status: None,
             coordinator_snapshot: None,
             coordinator_run_summary: None,
+            coordinator_pending_approvals: Vec::new(),
             coordinator_last_refresh: None,
             coordinator_running_command: None,
             coordinator_last_result: None,
@@ -939,6 +942,7 @@ impl AppState {
         if let Some(paths) = self.project_paths.as_ref() {
             if let Ok(status) = self.engine.get_coordinator_status(paths) {
                 self.coordinator_run_summary = status.last_run_summary;
+                self.coordinator_pending_approvals = status.pending_approvals;
             }
         }
     }

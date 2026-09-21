@@ -715,6 +715,18 @@ impl SqliteStorage {
               version TEXT NOT NULL,
               stop_reason TEXT
             );
+            CREATE TABLE IF NOT EXISTS gate_decisions (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              task_id TEXT NOT NULL,
+              decision TEXT NOT NULL,
+              role TEXT NOT NULL,
+              actor TEXT NOT NULL,
+              revision TEXT,
+              evidence TEXT,
+              reason TEXT,
+              recorded_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_gate_decisions_task ON gate_decisions (task_id, id);
             CREATE TABLE IF NOT EXISTS coordinator_control (
               id INTEGER PRIMARY KEY CHECK (id = 1),
               mode TEXT NOT NULL,
@@ -826,6 +838,72 @@ impl SqliteStorage {
         } else {
             Ok(None)
         }
+    }
+
+    /// Append one human approval decision to the gate ledger.
+    ///
+    /// The ledger is append-only by construction: there is no update or delete
+    /// API. Gate state is derived from it on every cycle, so a decision can be
+    /// superseded only by a later decision from the same person and role.
+    pub fn append_gate_decision(
+        &self,
+        task_id: &str,
+        record: &crate::coordinator::model::ApprovalRecord,
+    ) -> Result<()> {
+        let conn = self.open()?;
+        self.init_schema(&conn)?;
+        conn.execute(
+            "INSERT INTO gate_decisions (task_id, decision, role, actor, revision, evidence, reason, recorded_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                task_id,
+                record.decision.as_str(),
+                record.role,
+                record.actor,
+                record.revision,
+                record.evidence,
+                record.reason,
+                record.recorded_at,
+            ],
+        )
+        .map_err(sql_err)?;
+        Ok(())
+    }
+
+    /// Every recorded decision, oldest first, grouped by task id.
+    pub fn gate_decisions_by_task(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, Vec<crate::coordinator::model::ApprovalRecord>>>
+    {
+        let conn = self.open()?;
+        self.init_schema(&conn)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT task_id, decision, role, actor, revision, evidence, reason, recorded_at
+                 FROM gate_decisions ORDER BY id ASC",
+            )
+            .map_err(sql_err)?;
+        let mut rows = stmt.query([]).map_err(sql_err)?;
+        let mut out: std::collections::BTreeMap<String, Vec<_>> = Default::default();
+        while let Some(row) = rows.next().map_err(sql_err)? {
+            let task_id: String = row.get(0).map_err(sql_err)?;
+            let decision: String = row.get(1).map_err(sql_err)?;
+            let Ok(decision) = decision.parse() else {
+                continue;
+            };
+            out.entry(task_id)
+                .or_default()
+                .push(crate::coordinator::model::ApprovalRecord {
+                    decision,
+                    role: row.get(2).map_err(sql_err)?,
+                    actor: row.get(3).map_err(sql_err)?,
+                    revision: row.get(4).map_err(sql_err)?,
+                    evidence: row.get(5).map_err(sql_err)?,
+                    reason: row.get(6).map_err(sql_err)?,
+                    recorded_at: row.get(7).map_err(sql_err)?,
+                });
+        }
+        Ok(out)
     }
 
     pub fn upsert_coordinator_run(&self, run: &CoordinatorRun) -> Result<()> {
@@ -2334,6 +2412,58 @@ mod tests {
         let root = std::env::temp_dir().join(format!("{}_{}", prefix, nonce));
         fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    #[test]
+    fn gate_decision_ledger_round_trips_in_order() {
+        use crate::coordinator::model::{ApprovalDecision, ApprovalRecord};
+        let root = temp_project_root("macc_gate_ledger");
+        let storage = SqliteStorage::new(CoordinatorStoragePaths::from_project_paths(
+            &crate::ProjectPaths::from_root(&root),
+        ));
+        let rec = |decision, actor: &str, at: &str| ApprovalRecord {
+            decision,
+            role: "PRODUCT_OWNER".into(),
+            actor: actor.into(),
+            revision: Some("abcdef1234".into()),
+            evidence: Some("https://example/pr/1".into()),
+            reason: None,
+            recorded_at: at.into(),
+        };
+        storage
+            .append_gate_decision(
+                "GATE-1",
+                &rec(
+                    ApprovalDecision::ChangesRequested,
+                    "alice",
+                    "2026-09-21T10:00:00Z",
+                ),
+            )
+            .unwrap();
+        storage
+            .append_gate_decision(
+                "GATE-1",
+                &rec(ApprovalDecision::Approved, "alice", "2026-09-21T11:00:00Z"),
+            )
+            .unwrap();
+        storage
+            .append_gate_decision(
+                "GATE-2",
+                &rec(ApprovalDecision::Rejected, "bob", "2026-09-21T12:00:00Z"),
+            )
+            .unwrap();
+        let ledger = storage.gate_decisions_by_task().unwrap();
+        let g1 = &ledger["GATE-1"];
+        assert_eq!(g1.len(), 2);
+        assert_eq!(
+            g1[0].decision,
+            ApprovalDecision::ChangesRequested,
+            "oldest first"
+        );
+        assert_eq!(g1[1].decision, ApprovalDecision::Approved);
+        assert_eq!(g1[1].evidence.as_deref(), Some("https://example/pr/1"));
+        assert_eq!(ledger["GATE-2"][0].actor, "bob");
+        let _ = fs::remove_dir_all(root);
     }
 
     fn seed_files(paths: &CoordinatorStoragePaths) {

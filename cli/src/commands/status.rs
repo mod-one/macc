@@ -51,6 +51,10 @@ fn print_status_human(snapshot: &RuntimeSnapshot, events_count: usize, verbose: 
 
     // Coordinator section
     print_coordinator_section(&snapshot.coordinator);
+    crate::coordinator::command::print_pending_approvals(
+        &snapshot.coordinator.pending_approvals,
+        false,
+    );
     println!();
 
     // Tasks section
@@ -63,6 +67,11 @@ fn print_status_human(snapshot: &RuntimeSnapshot, events_count: usize, verbose: 
     println!("  changes_requested: {}", q.changes_requested);
     println!("  blocked:           {}", q.blocked);
     println!("  merged:            {}", q.merged);
+    if q.waiting_approval + q.approved + q.rejected > 0 {
+        println!("  waiting_approval:  {}", q.waiting_approval);
+        println!("  approved:          {}", q.approved);
+        println!("  rejected:          {}", q.rejected);
+    }
     println!("  failed:            {}", q.failed);
     println!();
 

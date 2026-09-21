@@ -2267,6 +2267,35 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                         logs_lines.push(Line::from(line.clone()));
                     }
                 }
+                // Human approvals come first, live or idle: the run is alive but
+                // cannot proceed until someone decides, and that is the one
+                // thing the operator must see.
+                let approval_lines = approval_request_lines(&state.coordinator_pending_approvals);
+                let panel_title = if approval_lines.is_empty() {
+                    panel_title
+                } else {
+                    "APPROVAL REQUIRED"
+                };
+                let logs_lines = if approval_lines.is_empty() {
+                    logs_lines
+                } else {
+                    let mut all = approval_lines
+                        .into_iter()
+                        .map(|(text, strong)| {
+                            if strong {
+                                Line::from(Span::styled(
+                                    text,
+                                    Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
+                                ))
+                            } else {
+                                Line::from(text)
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    all.push(Line::from(""));
+                    all.extend(logs_lines);
+                    all
+                };
                 let logs_para = Paragraph::new(logs_lines)
                     .block(panel(panel_title))
                     .wrap(Wrap { trim: true });
@@ -3878,6 +3907,49 @@ mod tests {
     }
 }
 
+/// Text of the approval block in Coordinator Live: one entry per waiting gate
+/// with subject, revision, risks, approvers and the command to decide.
+/// `(line, emphasised)`; pure so the wording is testable.
+fn approval_request_lines(
+    pending: &[macc_core::coordinator::approval::PendingApproval],
+) -> Vec<(String, bool)> {
+    let mut out = Vec::new();
+    for p in pending {
+        out.push((
+            format!(
+                "{} waits for human approval [{}] — no performer runs, no worker is used",
+                p.task_id, p.status
+            ),
+            true,
+        ));
+        out.push((
+            format!(
+                "  Subject:   {} at {}",
+                p.subject_task,
+                p.subject_revision.as_deref().unwrap_or("unknown revision")
+            ),
+            false,
+        ));
+        if let Some(d) = p.description.as_deref() {
+            out.push((format!("  Decision:  {d}"), false));
+        }
+        for risk in &p.risks {
+            out.push((format!("  Risk:      {risk}"), false));
+        }
+        out.push((format!("  Approvers: {}", p.required), false));
+        if let Some(note) = p.note.as_deref() {
+            out.push((format!("  Status:    {note}"), false));
+        }
+        if let Some(stat) = p.diff_stat.as_deref() {
+            for line in stat.lines().take(8) {
+                out.push((format!("  {line}"), false));
+            }
+        }
+        out.push((format!("  Decide:    {}", p.approve_command), false));
+    }
+    out
+}
+
 fn render_coordinator_pause_overlay(f: &mut Frame, state: &AppState) {
     let area = ui::centered_rect(75, 45, f.size());
     f.render_widget(Clear, area);
@@ -4223,5 +4295,44 @@ mod pause_overlay_content_tests {
         );
         assert_eq!(title, "Coordinator Error");
         assert!(body.contains("retry failed phase"));
+    }
+}
+
+#[cfg(test)]
+mod approval_request_lines_tests {
+    use super::approval_request_lines;
+    use macc_core::coordinator::approval::PendingApproval;
+
+    #[test]
+    fn a_waiting_gate_shows_subject_approvers_and_the_command() {
+        let lines = approval_request_lines(&[PendingApproval {
+            task_id: "SEC-APP-003".into(),
+            status: "waiting_approval".into(),
+            subject_task: "SEC-ADR-003".into(),
+            subject_revision: Some("abcdef1".into()),
+            risks: vec!["Irreversible recovery-code migration".into()],
+            required: "PRODUCT_OWNER 0/1, SECURITY_OWNER 0/1".into(),
+            approve_command:
+                "macc coordinator approve SEC-APP-003 --role PRODUCT_OWNER --revision abcdef1"
+                    .into(),
+            ..PendingApproval::default()
+        }]);
+        let text = lines
+            .iter()
+            .map(|(l, _)| l.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(lines[0].1, "headline is emphasised");
+        assert!(text.contains("SEC-APP-003 waits for human approval"));
+        assert!(text.contains("no performer runs"));
+        assert!(text.contains("Subject:   SEC-ADR-003 at abcdef1"));
+        assert!(text.contains("Risk:      Irreversible recovery-code migration"));
+        assert!(text.contains("Approvers: PRODUCT_OWNER 0/1, SECURITY_OWNER 0/1"));
+        assert!(text.contains("Decide:    macc coordinator approve SEC-APP-003"));
+    }
+
+    #[test]
+    fn nothing_is_shown_when_no_gate_waits() {
+        assert!(approval_request_lines(&[]).is_empty());
     }
 }

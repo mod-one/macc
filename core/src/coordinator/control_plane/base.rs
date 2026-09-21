@@ -696,6 +696,28 @@ pub fn sync_registry_from_prd_native(
             task.blocked_on_external = None;
         }
         task.gate = prd_task.gate.clone();
+        if let Some(gate) = task.gate.as_ref() {
+            let problems = gate.validate_human_approval(&task.id, &task.dependencies);
+            if !problems.is_empty() {
+                // An invalid gate must never degrade into an ordinary task that
+                // a performer would try to "approve": park it as blocked.
+                task.set_workflow_state(crate::coordinator::WorkflowState::Blocked);
+                task.ensure_runtime().set_last_error_details(
+                    "E908",
+                    "prd",
+                    format!("Invalid human approval gate: {}", problems.join("; ")),
+                );
+            } else if gate.is_human_approval()
+                && task.task_runtime.last_error_code.as_deref() == Some("E908")
+            {
+                task.set_workflow_state(crate::coordinator::WorkflowState::Todo);
+                let runtime = task.ensure_runtime();
+                runtime.last_error = None;
+                runtime.last_error_code = None;
+                runtime.last_error_origin = None;
+                runtime.last_error_message = None;
+            }
+        }
         task.extra.retain(|key, _| {
             !matches!(
                 key.as_str(),
@@ -736,6 +758,28 @@ pub fn sync_registry_from_prd_native(
 
     let tasks_changed = registry.tasks != merged;
     registry.tasks = merged;
+    // Human approval gates first: an approval recorded since the last cycle
+    // must satisfy dependants before block propagation runs, and a gate must
+    // be parked in `waiting_approval` before the dispatcher can see it.
+    let gate_transitions = crate::coordinator::approval::reconcile_human_gates_for_project(
+        repo_root,
+        &mut registry,
+        &now_iso_coordinator(),
+    )
+    .unwrap_or_else(|err| {
+        if let Some(log) = logger {
+            let _ = log.note(format!("- Human gate reconciliation skipped: {err}"));
+        }
+        Vec::new()
+    });
+    if let Some(log) = logger {
+        for t in &gate_transitions {
+            let _ = log.note(format!(
+                "- Approval gate {} {}: {}",
+                t.task_id, t.event, t.detail
+            ));
+        }
+    }
     let reconciled_blocks = crate::coordinator::task_selector::reconcile_task_blocks(
         &mut registry,
         &now_iso_coordinator(),

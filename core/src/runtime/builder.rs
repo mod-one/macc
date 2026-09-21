@@ -53,6 +53,10 @@ impl RuntimeSnapshotBuilder {
             coordinator.last_run_summary =
                 crate::service::run_summary::load_latest_run_summary(&sqlite, &snapshot.registry)
                     .unwrap_or(None);
+            coordinator.pending_approvals =
+                crate::coordinator::approval::pending_approvals(&snapshot.registry, &|rev| {
+                    crate::coordinator::approval::revision_diff_stat(&paths.root, rev)
+                });
         }
 
         let recent_events = load_recent_events(paths);
@@ -118,6 +122,9 @@ fn build_from_snapshot(
             "blocked" => queue.blocked += 1,
             "merged" => queue.merged += 1,
             "abandoned" => queue.failed += 1,
+            "waiting_approval" | "expired" => queue.waiting_approval += 1,
+            "approved" => queue.approved += 1,
+            "rejected" => queue.rejected += 1,
             _ => {}
         }
 

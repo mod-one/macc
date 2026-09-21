@@ -404,6 +404,16 @@ Performers cannot commit without it. Fix this first:\n\
         _ => {}
     }
 
+    if let Some(line) = response.gate_decision.as_ref() {
+        println!("{line}");
+    }
+    if let Some(pending) = response.pending_approvals.as_ref() {
+        print_pending_approvals(
+            pending,
+            matches!(command, CoordinatorCommand::ListApprovals),
+        );
+    }
+
     if let Some(status) = response.status {
         print_status_summary(&paths.root, &status);
     }
@@ -508,6 +518,83 @@ Performers cannot commit without it. Fix this first:\n\
     Ok(())
 }
 
+/// Render gates waiting for a human decision: subject, revision, diff, risks,
+/// required approvers, and the exact command to decide.
+pub(crate) fn print_pending_approvals(
+    pending: &[macc_core::coordinator::approval::PendingApproval],
+    announce_empty: bool,
+) {
+    if pending.is_empty() {
+        if announce_empty {
+            println!("No approval gate is waiting for a decision.");
+        }
+        return;
+    }
+    println!();
+    println!(
+        "Approvals waiting for a human decision ({}):",
+        pending.len()
+    );
+    for p in pending {
+        println!();
+        println!(
+            "  {}{}  [{}]",
+            p.task_id,
+            p.title
+                .as_deref()
+                .map(|t| format!(" — {t}"))
+                .unwrap_or_default(),
+            p.status
+        );
+        println!(
+            "    Subject:   {} at {}",
+            p.subject_task,
+            p.subject_revision
+                .as_deref()
+                .unwrap_or("unknown revision (not landed with a [macc:task] trailer)")
+        );
+        if let Some(d) = p.description.as_deref() {
+            println!("    Decision:  {d}");
+        }
+        if let Some(trigger) = p.approval_trigger.as_deref() {
+            println!("    Why:       {trigger}");
+        }
+        for risk in &p.risks {
+            println!("    Risk:      {risk}");
+        }
+        println!(
+            "    Approvers: {}{}",
+            p.required,
+            p.governance_ref
+                .as_deref()
+                .map(|g| format!("  (per {g})"))
+                .unwrap_or_default()
+        );
+        if let Some(kind) = p.evidence_type.as_deref() {
+            println!("    Evidence:  {kind}");
+        }
+        if let Some(note) = p.note.as_deref() {
+            println!("    Status:    {note}");
+        }
+        if let Some(stat) = p.diff_stat.as_deref() {
+            println!("    Diff:");
+            for line in stat.lines() {
+                println!("      {line}");
+            }
+        }
+        println!("    Decide:");
+        println!("      {}", p.approve_command);
+        println!(
+            "      macc coordinator reject {} --role <ROLE> --reason \"…\"",
+            p.task_id
+        );
+        println!(
+            "      macc coordinator request-changes {} --role <ROLE> --reason \"…\"",
+            p.task_id
+        );
+    }
+}
+
 fn command_requires_owner_gate(command: &CoordinatorCommand) -> bool {
     matches!(
         command,
@@ -517,6 +604,7 @@ fn command_requires_owner_gate(command: &CoordinatorCommand) -> bool {
             | CoordinatorCommand::Unlock { .. }
             | CoordinatorCommand::BlockTask { .. }
             | CoordinatorCommand::UnblockTask { .. }
+            | CoordinatorCommand::GateDecision { .. }
             | CoordinatorCommand::DispatchReadyTasks
             | CoordinatorCommand::AdvanceTasks
             | CoordinatorCommand::CleanupMaintenance

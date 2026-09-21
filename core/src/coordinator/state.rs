@@ -22,6 +22,14 @@ pub fn coordinator_state_apply_transition(
 ) -> Result<()> {
     let task_id = required_arg(args, "task-id")?;
     let new_state = required_arg(args, "state")?;
+    if matches!(
+        new_state.trim().to_ascii_lowercase().as_str(),
+        "waiting_approval" | "approved" | "rejected" | "expired"
+    ) {
+        return Err(MaccError::Validation(format!(
+            "State '{new_state}' is derived from recorded human decisions and cannot be set directly. Use `macc coordinator approve|reject|request-changes {task_id}`."
+        )));
+    }
     let pr_url = args.get("pr-url").cloned().unwrap_or_default();
     let reviewer = args.get("reviewer").cloned().unwrap_or_default();
     let reason = args.get("reason").cloned().unwrap_or_default();
@@ -734,4 +742,30 @@ fn parse_optional_event_mutation(
         status: event_status,
         payload: CoordinatorEventPayload::from(payload),
     }))
+}
+
+#[cfg(test)]
+mod approval_state_guard_tests {
+    use super::coordinator_state_apply_transition;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn approval_states_cannot_be_written_through_the_generic_transition() {
+        let root = tempfile::tempdir().unwrap();
+        for state in [
+            "approved",
+            "APPROVED",
+            "waiting_approval",
+            "rejected",
+            "expired",
+        ] {
+            let mut args = BTreeMap::new();
+            args.insert("task-id".to_string(), "SEC-APP-003".to_string());
+            args.insert("state".to_string(), state.to_string());
+            let err = coordinator_state_apply_transition(root.path(), &args)
+                .expect_err("approval states are derived, never set directly")
+                .to_string();
+            assert!(err.contains("macc coordinator approve"), "{state}: {err}");
+        }
+    }
 }

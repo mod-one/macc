@@ -77,6 +77,9 @@ pub struct CoordinatorCounts {
     pub active: usize,
     pub blocked: usize,
     pub merged: usize,
+    /// Human approval gates waiting for a decision. Not work, not a stall:
+    /// the run stays alive and idle until the quorum is met.
+    pub waiting_approval: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -1266,6 +1269,11 @@ pub fn set_task_gate_verdict_in_registry(
             code: "task_not_found",
             message: format!("Task '{task_id}' not found in registry"),
         })?;
+    if task.is_human_approval_gate() {
+        // A tool can never decide a human approval. Ignore, do not fail the
+        // cycle: the attempt is recorded by the caller's event log.
+        return Ok(());
+    }
     task.task_runtime.gate_verdict = Some(verdict);
     *registry = typed.to_value()?;
     Ok(())
@@ -1444,6 +1452,16 @@ impl CoordinatorRunController {
     where
         F: FnOnce() -> StallDiagnosis,
     {
+        // A human approval gate is a checkpoint the run must wait at: nothing
+        // is stalled, no worker is busy, and the only thing that can move it is
+        // an operator decision. Never abort for "no progress" while one is
+        // open; the dispatcher resumes on its own once the quorum is met.
+        if counts.waiting_approval > 0 && counts.active == 0 {
+            self.no_progress_cycles = 0;
+            self.previous_counts = Some(counts);
+            return Ok(ControlPlaneDecision::Continue);
+        }
+
         if counts.todo == 0 && counts.active == 0 {
             if counts.blocked > 0 {
                 let stalled = diagnose();
@@ -2060,6 +2078,7 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
             active,
             blocked,
             merged,
+            waiting_approval: snapshot.registry.waiting_approval_count(),
         };
         self.last_logged_counts = Some(counts);
         Ok(counts)
@@ -4540,6 +4559,45 @@ mod tests {
         assert_eq!(task["task_runtime"]["last_error_code"], "E903");
         assert_eq!(task["task_runtime"]["retries"].as_i64().unwrap_or(0), 0);
         assert_eq!(out.status_label, "precondition_unmet");
+    }
+
+    #[test]
+    fn a_waiting_approval_gate_keeps_the_run_alive_instead_of_aborting() {
+        // One dependant in todo, nothing active, a gate waiting for humans.
+        // Without the approval rule this is "no progress for N cycles" and the
+        // run aborts; with it the run idles until someone decides.
+        let mut controller = CoordinatorRunController::new(ControlPlaneLoopConfig {
+            timeout: None,
+            max_no_progress_cycles: 3,
+        });
+        let counts = CoordinatorCounts {
+            total: 3,
+            todo: 1,
+            active: 0,
+            blocked: 0,
+            merged: 1,
+            waiting_approval: 1,
+        };
+        for _ in 0..10 {
+            let decision = controller
+                .on_cycle_counts(counts, None)
+                .expect("a waiting approval must never abort the run");
+            assert_eq!(decision, ControlPlaneDecision::Continue);
+        }
+        // Once the quorum is met and nothing waits, normal stall rules apply again.
+        let mut stuck = counts;
+        stuck.waiting_approval = 0;
+        let mut aborted = false;
+        for _ in 0..10 {
+            if controller.on_cycle_counts(stuck, None).is_err() {
+                aborted = true;
+                break;
+            }
+        }
+        assert!(
+            aborted,
+            "stall detection must resume when nothing waits for approval"
+        );
     }
 
     #[test]

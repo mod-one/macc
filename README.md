@@ -337,6 +337,10 @@ macc coordinator sync-prd           # reconcile tasks from PRD
 macc coordinator reconcile
 macc coordinator unlock
 macc coordinator cleanup
+macc coordinator approvals                   # human approval gates waiting for a decision
+macc coordinator approve <GATE> --role <ROLE> --revision <sha> --evidence <url>
+macc coordinator reject <GATE> --role <ROLE> --reason "…"
+macc coordinator request-changes <GATE> --role <ROLE> --reason "…"
 macc coordinator stop [--graceful] [--remove-worktrees]
 macc prd audit --tool claude             # moved from coordinator audit-prd
 ```

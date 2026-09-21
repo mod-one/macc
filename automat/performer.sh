@@ -745,10 +745,16 @@ Instructions:
     With precondition_unmet, ALSO print one "MACC_TASK_PRECONDITION: <condition>" line per unsatisfied precondition, each on its own line, before the result marker. Name the concrete condition (the dependency verdict, approval, decision, data, or environment that is missing), not a generic summary. These lines are shown to the operator as the reason the task cannot be implemented yet.
 13) Pre-existing repository problems that this task did not cause and is not scoped to fix are NOT a reason to report an error. If a repo-wide check (test suite, build, lint) fails only in areas unrelated to this task, and this task's own work is complete and verified, report success and note the unrelated failures in your explanation. Judge this task by its own acceptance criteria, not by the health of the whole repository.
 14) If you finish successfully but forget the marker, the runner will infer the result from repository state; still print the marker explicitly.
-15) If the task JSON contains `gate`, also print exactly one `MACC_TASK_GATE_VERDICT: accepted|rejected|pending` line. A successful task execution does not imply an accepted gate verdict.
+15) If the task JSON contains `gate` (kind `verdict` or no kind), also print exactly one `MACC_TASK_GATE_VERDICT: accepted|rejected|pending` line. A successful task execution does not imply an accepted gate verdict. Never produce, simulate, or claim a human approval: approvals are recorded only by people through `macc coordinator approve`, and a verdict you print is ignored for `human_approval` gates. If your task needs an approval that has not been recorded, that is `precondition_unmet`, not something to decide yourself.
 
 ${prompt_closing_line}
 PROMPT
+}
+
+# True when the task JSON declares `gate.kind: human_approval`.
+is_human_approval_gate() {
+  local task_json="$1"
+  [[ "$(printf '%s' "$task_json" | jq -r '.gate.kind // empty' 2>/dev/null)" == "human_approval" ]]
 }
 
 extract_task_result_marker() {
@@ -1309,6 +1315,26 @@ for ((i=1; i<=PERFORMER_MAX_ITERATIONS; i++)); do
   log_task_line ""
   echo "Performer: task ${next_id} (${tool})"
   soft_emit_performer_event "progress" "$CURRENT_PHASE" "running" "$(jq -nc --arg task "$next_id" --arg title "$next_title" '{task_id:$task, title:$title}')"
+
+  # A human approval gate is a coordinator checkpoint, never agent work: the
+  # coordinator does not dispatch it, and if something does anyway the
+  # performer must refuse rather than let a model "approve" it.
+  if is_human_approval_gate "$next_task_json"; then
+    set_last_error "E908" "approval" "human approval gate dispatched to a performer"
+    log_task_line "- Refused: ${next_id} is a human approval gate; it is decided with \`macc coordinator approve\`, not by a performer."
+    echo "Error: ${next_id} is a human approval gate and must not be run by a performer." >&2
+    if must_emit_performer_event "phase_result" "$CURRENT_PHASE" "failed" "$(jq -nc --arg id "$next_id" '{
+      attempt: 0,
+      result_kind: "error_without_changes",
+      error_code: "E908",
+      origin: "approval",
+      message: "human approval gate dispatched to a performer",
+      result_exp: ("Task " + $id + " is a human approval gate. Only `macc coordinator approve|reject|request-changes` can decide it; the performer refused to run it.")
+    }')"; then
+      TERMINAL_EVENT_EMITTED="true"
+    fi
+    exit 1
+  fi
 
   prompt_file="$(mktemp)"
   build_prompt "$next_task_json" "$next_id" "$next_title" >"$prompt_file"

@@ -60,6 +60,19 @@ pub enum CoordinatorCommand {
         task_id: String,
         evidence: String,
     },
+    /// Record a human decision on a `human_approval` gate
+    /// (`approve`, `reject`, `request-changes`).
+    GateDecision {
+        task_id: String,
+        decision: crate::coordinator::model::ApprovalDecision,
+        role: String,
+        actor: Option<String>,
+        revision: Option<String>,
+        evidence: Option<String>,
+        reason: Option<String>,
+    },
+    /// List gates waiting for a human decision.
+    ListApprovals,
     RetryTaskPhase {
         task_id: String,
         phase: String,
@@ -218,6 +231,10 @@ pub struct CoordinatorCommandResult {
     pub tool_cooldowns: Option<Vec<ToolCooldownEntry>>,
     pub processes: Option<Vec<PsProcessEntry>>,
     pub recovery_report: Option<Vec<RecoveryReportEntry>>,
+    /// Gates waiting for a human decision (`approvals`, and after a decision).
+    pub pending_approvals: Option<Vec<crate::coordinator::approval::PendingApproval>>,
+    /// Outcome line of a recorded gate decision.
+    pub gate_decision: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -254,6 +271,8 @@ pub struct CoordinatorStatus {
     pub last_run_stop_reason: Option<String>,
     /// Durable, run-scoped result shared by CLI, TUI and Web clients.
     pub last_run_summary: Option<crate::service::run_summary::CoordinatorRunSummary>,
+    /// Human approval gates waiting for a decision.
+    pub pending_approvals: Vec<crate::coordinator::approval::PendingApproval>,
 }
 
 /// RL-WEB-008: per-tool throttle status for API exposure.
@@ -289,6 +308,12 @@ pub fn coordinator_command_display_name(command: &CoordinatorCommand) -> &'stati
         CoordinatorCommand::Unlock { .. } => "unlock",
         CoordinatorCommand::BlockTask { .. } => "block-task",
         CoordinatorCommand::UnblockTask { .. } => "unblock-task",
+        CoordinatorCommand::GateDecision { decision, .. } => match decision {
+            crate::coordinator::model::ApprovalDecision::Approved => "approve",
+            crate::coordinator::model::ApprovalDecision::Rejected => "reject",
+            crate::coordinator::model::ApprovalDecision::ChangesRequested => "request-changes",
+        },
+        CoordinatorCommand::ListApprovals => "approvals",
         CoordinatorCommand::RetryTaskPhase { .. } => "retry-phase",
         CoordinatorCommand::ImportStorageJsonToSqlite => "storage-import",
         CoordinatorCommand::ExportStorageSqliteToJson => "storage-export",
@@ -534,6 +559,8 @@ pub fn coordinator_command_invocation(
         | CoordinatorCommand::Recover { .. }
         | CoordinatorCommand::Ps
         | CoordinatorCommand::KillTask { .. }
+        | CoordinatorCommand::GateDecision { .. }
+        | CoordinatorCommand::ListApprovals
         | CoordinatorCommand::AdoptTask { .. } => {
             return Err(MaccError::Validation(format!(
                 "Coordinator command '{}' is not available as a managed process invocation",
@@ -588,6 +615,8 @@ pub fn coordinator_command_from_name(
             let (task_id, evidence) = parse_unblock_task_args(extra_args)?;
             Ok(CoordinatorCommand::UnblockTask { task_id, evidence })
         }
+        "approve" | "reject" | "request-changes" => parse_gate_decision_args(action, extra_args),
+        "approvals" => Ok(CoordinatorCommand::ListApprovals),
         "retry-phase" => {
             let (task_id, phase, skip) = parse_retry_phase_args(extra_args)?;
             Ok(CoordinatorCommand::RetryTaskPhase {
@@ -863,6 +892,39 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
                 &task_id,
                 &evidence,
             )?;
+        }
+        CoordinatorCommand::GateDecision {
+            task_id,
+            decision,
+            role,
+            actor,
+            revision,
+            evidence,
+            reason,
+        } => {
+            let (line, pending) = coordinator_record_gate_decision(
+                paths,
+                request.coordinator_cfg,
+                request.env_cfg,
+                crate::coordinator::approval::DecisionRequest {
+                    task_id,
+                    decision,
+                    role,
+                    actor: actor.unwrap_or_else(|| operator_identity(&paths.root)),
+                    revision,
+                    evidence,
+                    reason,
+                },
+            )?;
+            result.gate_decision = Some(line);
+            result.pending_approvals = Some(pending);
+        }
+        CoordinatorCommand::ListApprovals => {
+            result.pending_approvals = Some(coordinator_list_approvals(
+                paths,
+                request.coordinator_cfg,
+                request.env_cfg,
+            )?);
         }
         CoordinatorCommand::RetryTaskPhase {
             task_id,
@@ -1631,6 +1693,10 @@ pub fn get_coordinator_status(paths: &ProjectPaths) -> Result<CoordinatorStatus>
     }
     status.last_run_summary =
         crate::service::run_summary::load_latest_run_summary(&sqlite, &snapshot.registry)?;
+    status.pending_approvals =
+        crate::coordinator::approval::pending_approvals(&snapshot.registry, &|rev| {
+            crate::coordinator::approval::revision_diff_stat(&paths.root, rev)
+        });
 
     // RL-WEB-008: parse effective_max_parallel from the most recent concurrency_adjusted event.
     status.effective_max_parallel = snapshot
@@ -1899,6 +1965,25 @@ pub fn coordinator_sync_prd(
         }
     }
     commit_reconciler::apply_reconcile_report(&mut snapshot.registry, &report, &now);
+    // A subject that has just been recognised as merged must open its human
+    // approval gate in this same pass, and a subject that moved must
+    // invalidate a prior approval before anything is dispatched on it.
+    let gate_transitions = crate::coordinator::approval::reconcile_human_gates_for_project(
+        &paths.root,
+        &mut snapshot.registry,
+        &now,
+    )?;
+    if !gate_transitions.is_empty() {
+        crate::coordinator::task_selector::reconcile_task_blocks(&mut snapshot.registry, &now);
+    }
+    if let Some(log) = logger {
+        for t in &gate_transitions {
+            let _ = log.note(format!(
+                "- Approval gate {} {}: {}",
+                t.task_id, t.event, t.detail
+            ));
+        }
+    }
 
     // Save back
     match storage_mode {
@@ -2223,6 +2308,137 @@ pub fn coordinator_unblock_task(
         "info",
     );
     Ok(())
+}
+
+/// Identity recorded with a decision when `--as` is not given: the operator's
+/// git identity. Never derived from anything a performer controls.
+pub fn operator_identity(repo_root: &std::path::Path) -> String {
+    let get = |key: &str| {
+        std::process::Command::new("git")
+            .args(["config", "--get", key])
+            .current_dir(repo_root)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    match (get("user.name"), get("user.email")) {
+        (Some(name), Some(email)) => format!("{name} <{email}>"),
+        (Some(name), None) => name,
+        (None, Some(email)) => email,
+        (None, None) => String::new(),
+    }
+}
+
+/// Record one human decision on a `human_approval` gate, then reconcile so the
+/// gate — and its dependants — reflect it immediately. A running coordinator
+/// picks up the new state on its next cycle and resumes dispatch by itself.
+pub fn coordinator_record_gate_decision(
+    paths: &ProjectPaths,
+    coordinator_cfg: Option<&CoordinatorConfig>,
+    env_cfg: &CoordinatorEnvConfig,
+    request: crate::coordinator::approval::DecisionRequest,
+) -> Result<(String, Vec<crate::coordinator::approval::PendingApproval>)> {
+    use crate::coordinator::approval;
+    let mut state_args = BTreeMap::new();
+    apply_storage_mode_args(&mut state_args, env_cfg, coordinator_cfg);
+    let value =
+        crate::coordinator::state::coordinator_state_registry_load(&paths.root, &state_args)?;
+    let mut registry = crate::coordinator::model::TaskRegistry::from_value(&value)?;
+    let now = crate::coordinator::helpers::now_iso_coordinator();
+    // Bring the gate up to date first so the decision is validated against the
+    // current subject revision, not a stale cached one.
+    approval::reconcile_human_gates_for_project(&paths.root, &mut registry, &now)?;
+    let subject = registry
+        .tasks
+        .iter()
+        .find(|t| t.id == request.task_id)
+        .and_then(|t| t.gate.as_ref())
+        .and_then(|g| g.subject_task.clone())
+        .unwrap_or_default();
+    let branch = approval::reference_branch(&paths.root);
+    let digest = approval::subject_revision(&paths.root, &branch, &subject);
+    let record = approval::validate_decision(&registry, &request, digest.as_deref(), &now)?;
+
+    let storage = SqliteStorage::new(CoordinatorStoragePaths::from_project_paths(paths));
+    storage.append_gate_decision(&request.task_id, &record)?;
+    let _ = crate::coordinator::helpers::append_coordinator_event_with_severity(
+        &paths.root,
+        "approval_decision_recorded",
+        &request.task_id,
+        "approval",
+        record.decision.as_str(),
+        &format!(
+            "{} by {} ({}) on {}{}{}",
+            record.decision.as_str(),
+            record.actor,
+            record.role,
+            record.revision.as_deref().unwrap_or("unknown revision"),
+            record
+                .evidence
+                .as_deref()
+                .map(|e| format!("; evidence: {e}"))
+                .unwrap_or_default(),
+            record
+                .reason
+                .as_deref()
+                .map(|r| format!("; reason: {r}"))
+                .unwrap_or_default()
+        ),
+        "info",
+    );
+
+    approval::reconcile_human_gates_for_project(&paths.root, &mut registry, &now)?;
+    let changed = crate::coordinator::task_selector::reconcile_task_blocks(&mut registry, &now);
+    crate::coordinator::state::coordinator_state_registry_save(
+        &paths.root,
+        &state_args,
+        &registry.to_value()?,
+    )?;
+    let task = registry
+        .tasks
+        .iter()
+        .find(|t| t.id == request.task_id)
+        .ok_or_else(|| MaccError::Validation(format!("Unknown task '{}'.", request.task_id)))?;
+    let note = task
+        .task_runtime
+        .approval
+        .as_ref()
+        .and_then(|a| a.note.clone())
+        .unwrap_or_default();
+    let mut line = format!(
+        "Recorded {} for {} as {} ({}). Gate is now {}: {}",
+        record.decision.as_str(),
+        request.task_id,
+        record.role,
+        record.actor,
+        task.state,
+        note
+    );
+    if !changed.is_empty() {
+        line.push_str(&format!(". Reconciled: {}", changed.join(", ")));
+    }
+    let pending = approval::pending_approvals(&registry, &|rev| {
+        approval::revision_diff_stat(&paths.root, rev)
+    });
+    Ok((line, pending))
+}
+
+pub fn coordinator_list_approvals(
+    paths: &ProjectPaths,
+    coordinator_cfg: Option<&CoordinatorConfig>,
+    env_cfg: &CoordinatorEnvConfig,
+) -> Result<Vec<crate::coordinator::approval::PendingApproval>> {
+    let mut state_args = BTreeMap::new();
+    apply_storage_mode_args(&mut state_args, env_cfg, coordinator_cfg);
+    let value =
+        crate::coordinator::state::coordinator_state_registry_load(&paths.root, &state_args)?;
+    let registry = crate::coordinator::model::TaskRegistry::from_value(&value)?;
+    Ok(crate::coordinator::approval::pending_approvals(
+        &registry,
+        &|rev| crate::coordinator::approval::revision_diff_stat(&paths.root, rev),
+    ))
 }
 
 pub fn coordinator_cutover_gate(
@@ -2713,6 +2929,57 @@ fn parse_block_task_args(args: &[String]) -> Result<(String, String, String, Opt
         required("--clears-when")?,
         values.get("--tracking-id").cloned(),
     ))
+}
+
+/// `approve|reject|request-changes <TASK> [--task <TASK>] --role <ROLE>
+/// [--revision <sha>] [--evidence <url>] [--reason <text>] [--as <identity>]`.
+/// `--decision` is accepted for `macc approve --decision rejected` style use.
+fn parse_gate_decision_args(action: &str, args: &[String]) -> Result<CoordinatorCommand> {
+    use crate::coordinator::model::ApprovalDecision;
+    let (positional, rest) = match args.first() {
+        Some(first) if !first.starts_with("--") => (Some(first.clone()), &args[1..]),
+        _ => (None, args),
+    };
+    let values = parse_named_args(
+        rest,
+        &[
+            "--task",
+            "--role",
+            "--revision",
+            "--evidence",
+            "--reason",
+            "--as",
+            "--decision",
+        ],
+    )?;
+    let task_id = values
+        .get("--task")
+        .cloned()
+        .or(positional)
+        .ok_or_else(|| MaccError::Validation(format!("{action} requires a gate task id")))?;
+    let role = values
+        .get("--role")
+        .cloned()
+        .ok_or_else(|| MaccError::Validation(format!("{action} requires --role <ROLE>")))?;
+    let decision = match values.get("--decision") {
+        Some(raw) => raw
+            .parse::<ApprovalDecision>()
+            .map_err(MaccError::Validation)?,
+        None => match action {
+            "approve" => ApprovalDecision::Approved,
+            "reject" => ApprovalDecision::Rejected,
+            _ => ApprovalDecision::ChangesRequested,
+        },
+    };
+    Ok(CoordinatorCommand::GateDecision {
+        task_id,
+        decision,
+        role,
+        actor: values.get("--as").cloned(),
+        revision: values.get("--revision").cloned(),
+        evidence: values.get("--evidence").cloned(),
+        reason: values.get("--reason").cloned(),
+    })
 }
 
 fn parse_unblock_task_args(args: &[String]) -> Result<(String, String)> {

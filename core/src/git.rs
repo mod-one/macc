@@ -609,6 +609,44 @@ pub async fn commits_ahead_of_base_async(
     )))
 }
 
+/// Latest commit on `branch` that carries the `[macc:task <task_id>]` trailer,
+/// or `None` when the task has not landed there. This is the revision a human
+/// approval of `task_id` is bound to.
+pub fn latest_commit_with_task_trailer(
+    repo: &Path,
+    branch: &str,
+    task_id: &str,
+) -> Result<Option<String>> {
+    let grep = format!("--grep=\\[macc:task {}\\]", regex_escape(task_id));
+    let output = run_git_output(
+        repo,
+        &["log", "-1", "--format=%H", &grep, branch],
+        "find latest commit for task trailer",
+    )?;
+    if !output.status.success() {
+        return Err(MaccError::Git {
+            operation: "log".to_string(),
+            message: format!(
+                "Failed to read commits for task {task_id} on {branch}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        });
+    }
+    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok((!sha.is_empty()).then_some(sha))
+}
+
+fn regex_escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if "\\.^$|?*+()[]{}".contains(ch) {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
 pub fn commits_containing_pattern(
     repo_or_worktree: &Path,
     base_branch: &str,

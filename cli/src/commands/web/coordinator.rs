@@ -37,6 +37,8 @@ pub(super) struct ApiCoordinatorStatus {
     pub last_run_stop_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_run_summary: Option<CoordinatorRunSummary>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pending_approvals: Vec<macc_core::coordinator::approval::PendingApproval>,
 }
 
 #[derive(Debug, Serialize)]
@@ -79,6 +81,7 @@ impl From<CoordinatorStatus> for ApiCoordinatorStatus {
             last_run_status: status.last_run_status,
             last_run_stop_reason: status.last_run_stop_reason,
             last_run_summary: status.last_run_summary,
+            pending_approvals: status.pending_approvals,
         }
     }
 }

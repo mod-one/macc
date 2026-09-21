@@ -168,6 +168,12 @@ pub fn select_next_ready_task_typed(
         if task.workflow_state() != Some(crate::coordinator::WorkflowState::Todo) {
             continue;
         }
+        // A human approval gate is a checkpoint, not work: it is moved to
+        // `waiting_approval` by `reconcile_human_gates` and must never reach a
+        // performer, even if reconciliation has not run yet this cycle.
+        if task.is_human_approval_gate() {
+            continue;
+        }
         // A `todo` task normally must not carry a worktree -- that would mean it
         // is still assigned somewhere. The one exception is a task parked for a
         // same-worktree retry, which keeps its worktree on purpose so the retry
@@ -269,8 +275,13 @@ fn blocked_dependency_path<'a>(
         let Some(dependency) = tasks_by_id.get(dependency_id.as_str()).copied() else {
             continue;
         };
-        if dependency.workflow_state() == Some(crate::coordinator::WorkflowState::Blocked)
-            || (dependency.is_merged() && !dependency.gate_verdict_satisfies_dependencies())
+        if matches!(
+            dependency.workflow_state(),
+            Some(
+                crate::coordinator::WorkflowState::Blocked
+                    | crate::coordinator::WorkflowState::Rejected
+            )
+        ) || (dependency.is_merged() && !dependency.gate_verdict_satisfies_dependencies())
         {
             return Some(vec![task.id.clone(), dependency.id.clone()]);
         }
@@ -286,6 +297,33 @@ fn blocked_dependency_path<'a>(
 }
 
 fn blocked_task_reason(task: &Task) -> String {
+    if task.workflow_state() == Some(crate::coordinator::WorkflowState::Rejected) {
+        let by = task
+            .task_runtime
+            .approval
+            .as_ref()
+            .and_then(|state| {
+                state
+                    .effective
+                    .iter()
+                    .rev()
+                    .find(|a| a.decision == crate::coordinator::model::ApprovalDecision::Rejected)
+                    .cloned()
+            })
+            .map(|a| {
+                format!(
+                    " by {} ({}){}",
+                    a.actor,
+                    a.role,
+                    a.reason
+                        .as_deref()
+                        .map(|r| format!(": {r}"))
+                        .unwrap_or_default()
+                )
+            })
+            .unwrap_or_default();
+        return format!("approval gate rejected{by} [E909]");
+    }
     if task.is_merged() && !task.gate_verdict_satisfies_dependencies() {
         let verdict = task
             .task_runtime
@@ -467,6 +505,26 @@ pub fn diagnose_unschedulable_tasks(
                 });
                 continue;
             }
+            let waiting: Vec<String> = unmet
+                .iter()
+                .filter(|dep| {
+                    registry
+                        .tasks
+                        .iter()
+                        .any(|t| &t.id == *dep && t.is_awaiting_approval())
+                })
+                .cloned()
+                .collect();
+            if !waiting.is_empty() {
+                push(
+                    &mut out,
+                    format!(
+                        "waiting on human approval of {} (no worker is used; run `macc coordinator approve`)",
+                        waiting.join(", ")
+                    ),
+                );
+                continue;
+            }
             push(
                 &mut out,
                 format!("waiting on dependencies: {}", unmet.join(", ")),
@@ -524,11 +582,11 @@ fn dependencies_ready(
     })
 }
 
-fn satisfied_dependency_ids(registry: &TaskRegistry) -> HashSet<String> {
+pub(crate) fn satisfied_dependency_ids(registry: &TaskRegistry) -> HashSet<String> {
     registry
         .tasks
         .iter()
-        .filter(|task| task.is_merged() && task.gate_verdict_satisfies_dependencies())
+        .filter(|task| task.satisfies_dependants())
         .map(|task| task.id.clone())
         .collect()
 }
@@ -1744,5 +1802,29 @@ mod precondition_reason_tests {
             blocked_task_reason(&registry.tasks[0]),
             "blocked (E902): budget spent"
         );
+    }
+}
+
+#[cfg(test)]
+mod human_gate_selection_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_human_gate_in_todo_is_never_selected_for_a_performer() {
+        let registry = TaskRegistry::from_value(&json!({"tasks":[
+            {"id":"SEC-ADR-003","state":"merged"},
+            {"id":"SEC-APP-003","state":"todo","priority":"1","dependencies":["SEC-ADR-003"],
+             "gate":{"kind":"human_approval","subject_task":"SEC-ADR-003",
+                     "required_approvers":[{"role":"PRODUCT_OWNER"}]}}
+        ]}))
+        .unwrap();
+        let config = TaskSelectorConfig {
+            enabled_tools: vec!["codex".into()],
+            default_tool: "codex".into(),
+            max_parallel: 3,
+            ..TaskSelectorConfig::default()
+        };
+        assert!(select_next_ready_task_typed(&registry, &config).is_none());
     }
 }

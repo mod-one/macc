@@ -837,6 +837,60 @@ For tools that use a config file for effort (e.g. Codex with `.codex/config.toml
 
 `blocked_on_external` is scheduler-visible and starts the task in `blocked`; do not encode “do not retry” only in prose. A task with `gate` must emit `MACC_TASK_GATE_VERDICT: accepted|rejected|pending`. Its implementation may merge successfully while a rejected verdict keeps dependants blocked. A correct runtime refusal uses `MACC_TASK_RESULT: precondition_unmet` and is never retried; it must also print one `MACC_TASK_PRECONDITION: <condition>` line per unsatisfied precondition, which MACC records on the task (`unmet_preconditions`) and shows verbatim as "Task X cannot be implemented because the following preconditions are not satisfied: …" in the run stop reason, `macc status`, the TUI overlay and the web run summary.
 
+### Human approval gates
+
+A decision that only people may take — a normative change or ADR, an open product decision, a sensitive architecture or data model, security/identity/payment/privacy, an irreversible migration, a production activation — is declared as its own task with `gate.kind: human_approval`:
+
+```json
+{
+  "id": "SEC-APP-003",
+  "title": "Approve the recovery-code persistence model",
+  "dependencies": ["SEC-ADR-003"],
+  "gate": {
+    "kind": "human_approval",
+    "subject_task": "SEC-ADR-003",
+    "description": "Adopt ADR-003 recovery-code persistence model",
+    "required_approvers": [
+      { "role": "PRODUCT_OWNER", "count": 1 },
+      { "role": "SECURITY_OWNER", "count": 1 }
+    ],
+    "quorum": "all",
+    "bind_to": "commit_sha",
+    "evidence_type": "pull_request_review",
+    "invalidate_on_subject_change": true,
+    "expires_after_days": 90,
+    "risks": ["Irreversible migration of identity.mfa_factor"],
+    "governance_ref": "docs/16-decisions.md"
+  }
+}
+```
+
+`subject_task` must be listed in `dependencies`. `quorum` is `all` (default), `any`, or a number of distinct approvals. The gate carries no executable work and no `change_scope`.
+
+The coordinator never dispatches a gate. Once its dependencies are delivered it moves to `waiting_approval`, bound to the subject's current revision (the latest commit carrying `[macc:task <subject>]` on the reference branch). It uses no worker, is never retried, and a run waiting on it stays alive instead of aborting for lack of progress. `macc status`, `macc coordinator approvals`, the TUI Coordinator Live pane and `GET /api/v1/coordinator/status` show the subject, revision, diff, risks, missing approvers and the exact command:
+
+```bash
+macc coordinator approvals
+macc coordinator approve SEC-APP-003 --role PRODUCT_OWNER --revision <commit-sha> --evidence <pull-request-url> [--as "Name <email>"]
+macc coordinator reject SEC-APP-003 --role SECURITY_OWNER --reason "…"
+macc coordinator request-changes SEC-APP-003 --role SECURITY_OWNER --reason "…"
+```
+
+| State | Meaning | Dependants |
+|---|---|---|
+| `waiting_approval` | Subject delivered; quorum not met (approval status `waiting_approval` or `changes_requested`) | wait |
+| `approved` | Quorum met for the current subject revision | proceed, as for `merged` |
+| `rejected` | An approver rejected the current revision (`E909`) | blocked (`E905`) |
+| `expired` | Approvals older than `expires_after_days` | wait |
+
+Each decision records the actor (`--as`, else the operator's git identity), role, revision, evidence, reason and time in the append-only `gate_decisions` table. Gate state is **derived from that ledger on every cycle**, so it cannot be set any other way: `state-apply-transition` refuses approval states, a tool-reported `MACC_TASK_GATE_VERDICT` is ignored for human gates, a performer refuses to run one (`E908`), and an `approved` state without a recorded quorum is reverted. A new subject revision automatically withdraws a prior approval (and re-opens a rejected gate) because decisions are bound to the revision they name. A wrong role, a stale revision, a missing `--revision` on approval, missing evidence when `evidence_type` is not `manual`, and a rejection without a reason are all refused.
+
+Where the proof lives: the PRD declares the approval policy; `coordinator.sqlite` holds the operational state and the decision ledger; the pull request holds the human review; the ADR and `CHANGELOG` hold the durable decision.
+
+Not yet implemented (level 1): verifying approvers against GitHub/GitLab reviews or `CODEOWNERS`, and cryptographic signing of decisions. Until then, role membership is asserted by the operator running the command, and anyone with write access to `.macc/state` can alter the ledger.
+
+`precondition_unmet` remains for a task that *cannot be executed*; a normal wait for approval is represented by a gate, never by a failure.
+
 ### PRD generation workflow
 
 1. Write a brief in Markdown (scope, requirements, constraints).
