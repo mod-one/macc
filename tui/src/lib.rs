@@ -22,6 +22,7 @@ pub mod ownership;
 pub mod prd_queue;
 pub mod screen;
 pub mod state;
+mod tool_cooldowns;
 pub mod ui;
 
 use macc_core::plan::{PlannedOpKind, Scope};
@@ -512,6 +513,9 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
             state.open_apply_screen();
         }
 
+        KeyCode::Char('C') if current_screen == Screen::Tools => {
+            state.reset_selected_tool_cooldown()
+        }
         // Navigation: Backspace to go back
         KeyCode::Backspace => state.pop_screen(),
 
@@ -1817,8 +1821,12 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Length(3), // ownership banner
-                    Constraint::Length(1), // summary header status line
-                    Constraint::Min(0),    // vertical stacked panes
+                    Constraint::Length(if state.coordinator_throttled_tools.is_empty() {
+                        1
+                    } else {
+                        2
+                    }),
+                    Constraint::Min(0), // vertical stacked panes
                 ])
                 .split(body_area);
             render_coordinator_ownership_banner(f, live_chunks[0], state);
@@ -1857,8 +1865,18 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 String::new()
             };
             let summary_para = Paragraph::new(format!(
-                "Coordinator: {} | Tasks: {}{}",
-                status_line, snapshot_line, search_line
+                "Coordinator: {} | Tasks: {}{}{}",
+                status_line,
+                snapshot_line,
+                search_line,
+                if state.coordinator_throttled_tools.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "\n{}",
+                        tool_cooldowns::label(&state.coordinator_throttled_tools)
+                    )
+                }
             ))
             .style(Style::default().fg(theme.accent_dim));
             f.render_widget(summary_para, live_chunks[1]);
@@ -2428,6 +2446,15 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                     status_label,
                     is_enabled,
                 );
+                detail.push_str("\nC: Reset MACC cooldown (does not renew provider quota).\n");
+                detail.push_str(&tool_cooldowns::label(
+                    &state
+                        .coordinator_throttled_tools
+                        .iter()
+                        .filter(|entry| entry.tool_id == tool.id)
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                ));
                 if matches!(status, macc_core::doctor::ToolStatus::Missing) {
                     if let Some(install) = &tool.install {
                         detail.push_str("\nInstall:\n");

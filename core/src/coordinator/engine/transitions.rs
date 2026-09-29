@@ -231,7 +231,6 @@ pub(super) fn apply_state_transitions(
             }
             RetryOutcome::QuotaExhaustedRequeue {
                 cooldown,
-                delayed_until,
                 error,
                 tool_error,
                 now_ts,
@@ -257,7 +256,6 @@ pub(super) fn apply_state_transitions(
                 if let Ok(v) = serde_json::to_value(&throttle) {
                     runtime.extra.insert("throttle_state".to_string(), v);
                 }
-                runtime.delayed_until = Some(delayed_until.clone());
                 runtime.set_status(RuntimeStatus::Idle);
                 runtime.completion_kind = None;
                 runtime.pid = None;
@@ -267,9 +265,17 @@ pub(super) fn apply_state_transitions(
                     error.message.clone(),
                 );
                 runtime.last_error = Some(format!("quota exhausted; cooldown {}s", cooldown));
+                // Availability belongs to the tool; another tool can run the task now.
+                runtime.delayed_until = None;
+                if *same_worktree {
+                    runtime.set_status(RuntimeStatus::Failed);
+                }
                 store_classified_error_in_extra(runtime, tool_error, *now_ts);
+                preserve_active_session_chain(task);
                 capture_last_assignment_before_clear(task);
-                task.worktree = None;
+                if !same_worktree {
+                    task.worktree = None;
+                }
                 task.set_workflow_state(WorkflowState::Todo);
                 task.touch_state_changed(now);
                 JobCompletionResult {

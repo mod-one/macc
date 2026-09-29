@@ -210,12 +210,18 @@ pub(super) fn mark_task_merged_from_merge_gate(
 fn persist_throttle_registry(
     repo_root: &Path,
     registry: &crate::coordinator::rate_limit::ToolThrottleRegistry,
-) {
+    tool_id: &str,
+) -> Result<()> {
     let paths = crate::ProjectPaths::from_root(repo_root);
     let storage_paths =
         crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&paths);
     let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
-    let _ = sqlite.save_throttle_registry(registry);
+    // Do not overwrite concurrent operator changes to other tools.
+    if let Some(state) = registry.get(tool_id) {
+        sqlite.upsert_tool_throttle(tool_id, state)
+    } else {
+        sqlite.delete_tool_throttle(tool_id).map(|_| ())
+    }
 }
 
 /// Detect transient tool unavailability in a phase failure reason string.
@@ -413,7 +419,7 @@ fn handle_phase_tool_unavailability(
         }),
     };
     state.throttle_registry.insert(tool_id.to_string(), ts);
-    persist_throttle_registry(repo_root, &state.throttle_registry);
+    persist_throttle_registry(repo_root, &state.throttle_registry, tool_id)?;
 
     // ── Step 3: check for committed work on the worktree ───────────────
     let has_committed_work = worktree_path_str
@@ -1423,7 +1429,10 @@ pub async fn monitor_active_jobs_native(
                 aggregate_performer_logs_after_completion(repo_root, &evt.task_id, logger);
                 // RL-ROUTE-005 / RL-THROTTLE-006: maintain throttle registry and
                 // adjust effective concurrency based on rate-limit signals.
-                if completion.status_label == "rate_limit_backoff" {
+                if matches!(
+                    completion.status_label,
+                    "rate_limit_backoff" | "quota_exhausted_requeue"
+                ) {
                     // Extract the throttle state written by the engine and
                     // cache it in the volatile registry so `pick_tool()` can
                     // skip this tool on the next dispatch cycle.
@@ -1437,11 +1446,17 @@ pub async fn monitor_active_jobs_native(
                             >(ts_val.clone())
                             {
                                 state.throttle_registry.insert(job.tool.clone(), ts);
-                                persist_throttle_registry(repo_root, &state.throttle_registry);
+                                persist_throttle_registry(
+                                    repo_root,
+                                    &state.throttle_registry,
+                                    &job.tool,
+                                )?;
                             }
                         }
                     }
-                    if resolve_rate_limit_throttle_parallel(env_cfg, coordinator) {
+                    if completion.status_label == "rate_limit_backoff"
+                        && resolve_rate_limit_throttle_parallel(env_cfg, coordinator)
+                    {
                         let new_val = state.reduce_parallel();
                         let msg = format!(
                             "concurrency_adjusted task={} tool={} reason=rate_limit_backoff effective_max_parallel={}",
@@ -1472,9 +1487,11 @@ pub async fn monitor_active_jobs_native(
                 {
                     // RL-ROUTE-005: clear throttle on success so the tool is
                     // re-enabled for future tasks.
-                    if state.throttle_registry.contains_key(&job.tool) {
+                    if state.throttle_registry.get(&job.tool).is_some_and(|entry| {
+                        entry.throttled_until <= chrono::Utc::now().timestamp() as u64
+                    }) {
                         state.throttle_registry.remove(&job.tool);
-                        persist_throttle_registry(repo_root, &state.throttle_registry);
+                        persist_throttle_registry(repo_root, &state.throttle_registry, &job.tool)?;
                         if resolve_rate_limit_throttle_parallel(env_cfg, coordinator) {
                             let new_val = state.restore_parallel();
                             let msg = format!(

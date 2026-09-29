@@ -84,14 +84,6 @@ fn format_hms(total_secs: u64) -> String {
     format!("{}:{:02}:{:02}", hours, minutes, seconds)
 }
 
-/// Format an ISO 8601 timestamp as "HH:MM:SS UTC" for throttle-until display.
-fn throttle_until_hms(iso: &str) -> String {
-    DateTime::parse_from_rfc3339(iso)
-        .ok()
-        .map(|dt| dt.with_timezone(&Utc).format("%H:%M:%S UTC").to_string())
-        .unwrap_or_else(|| iso.to_string())
-}
-
 pub struct CoordinatorTaskSnapshot {
     pub total: usize,
     pub todo: usize,
@@ -826,54 +818,7 @@ impl AppState {
             active_tasks: Vec::new(),
             throttled_tools: Vec::new(),
         };
-        // RL-TUI-007: collect throttled tool info from tasks whose delayed_until is in the future.
-        let now_iso = Utc::now().to_rfc3339();
-        let mut throttle_map: BTreeMap<String, ThrottledToolInfo> = BTreeMap::new();
-        for task in &root.tasks {
-            if let (Some(delayed_until), Some(tool_id)) = (
-                task.task_runtime.delayed_until.as_deref(),
-                task.tool.as_deref(),
-            ) {
-                if !tool_id.is_empty() && delayed_until > now_iso.as_str() {
-                    let (backoff_seconds, consecutive_count) = task
-                        .task_runtime
-                        .extra
-                        .get("throttle_state")
-                        .map(|v| {
-                            let bs = v
-                                .get("backoff_seconds")
-                                .and_then(|x| x.as_u64())
-                                .unwrap_or(0);
-                            let cc = v
-                                .get("consecutive_429_count")
-                                .and_then(|x| x.as_u64())
-                                .unwrap_or(0) as u32;
-                            (bs, cc)
-                        })
-                        .unwrap_or((0, 0));
-                    let entry = throttle_map.entry(tool_id.to_string()).or_insert_with(|| {
-                        ThrottledToolInfo {
-                            tool_id: tool_id.to_string(),
-                            throttled_until: delayed_until.to_string(),
-                            display_until: throttle_until_hms(delayed_until),
-                            backoff_seconds,
-                            consecutive_count,
-                        }
-                    });
-                    // Keep the latest expiry for this tool.
-                    if delayed_until > entry.throttled_until.as_str() {
-                        *entry = ThrottledToolInfo {
-                            tool_id: tool_id.to_string(),
-                            throttled_until: delayed_until.to_string(),
-                            display_until: throttle_until_hms(delayed_until),
-                            backoff_seconds,
-                            consecutive_count,
-                        };
-                    }
-                }
-            }
-        }
-        snapshot.throttled_tools = throttle_map.into_values().collect();
+        snapshot.throttled_tools = crate::tool_cooldowns::load(self.project_paths.as_ref())?;
         for task in &root.tasks {
             let state = if task.state.is_empty() {
                 "todo".to_string()
@@ -2771,6 +2716,25 @@ impl AppState {
     pub fn prev_tool(&mut self) {
         let visible = self.filtered_tool_indices();
         self.selected_tool_index = prev_visible_index(self.selected_tool_index, &visible);
+    }
+
+    pub fn reset_selected_tool_cooldown(&mut self) {
+        let Some(tool) = self.selected_tool_descriptor() else {
+            return;
+        };
+        let command = CoordinatorCommand::ToolCooldownClear {
+            tool: tool.id.clone(),
+        };
+        if let Err(error) = self.gate_coordinator_action(&command) {
+            self.set_status(
+                UiStatusLevel::Error,
+                error.to_string(),
+                Some(Duration::from_secs(6)),
+            );
+            return;
+        }
+        self.execute_coordinator_command(command);
+        self.refresh_coordinator_snapshot();
     }
 
     pub fn toggle_selected_tool(&mut self) {

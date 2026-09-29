@@ -255,6 +255,9 @@ pub trait ControlPlaneBackend {
     fn last_dispatch_failure(&self) -> Option<String> {
         None
     }
+    fn waiting_for_tools(&self) -> bool {
+        false
+    }
     /// Explain, one line per task, why nothing could be dispatched.
     ///
     /// Only called when a run is about to abort for lack of progress, so it may
@@ -1169,7 +1172,6 @@ pub(super) enum RetryOutcome {
     },
     QuotaExhaustedRequeue {
         cooldown: u64,
-        delayed_until: String,
         error: CompletionErrorDetails,
         tool_error: Option<ToolError>,
         now_ts: u64,
@@ -1629,6 +1631,10 @@ async fn run_control_plane_cycle<B: ControlPlaneBackend + ?Sized>(
         return Ok(ControlPlaneDecision::Complete);
     }
     let last_fail = backend.last_dispatch_failure();
+    if counts.active == 0 && counts.todo > 0 && backend.waiting_for_tools() {
+        controller.no_progress_cycles = 0;
+        controller.previous_counts = None;
+    }
     controller.on_cycle_counts_with(counts, last_fail.as_deref(), || backend.diagnose_stall())
 }
 
@@ -1700,6 +1706,15 @@ impl NativeControlPlaneBackend<'_> {
 
 #[async_trait]
 impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
+    fn waiting_for_tools(&self) -> bool {
+        crate::coordinator::control_plane::waiting_for_tools_native(
+            self.repo_root,
+            self.canonical,
+            self.coordinator,
+            self.env_cfg,
+            &self.run_state,
+        )
+    }
     async fn on_cycle_start(&mut self, _cycle: usize) -> Result<()> {
         // Measure the previous cycle before starting this one, so ghost
         // detection can tell "the performer stopped" apart from "we stopped
@@ -1713,6 +1728,9 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
             &crate::ProjectPaths::from_root(self.repo_root),
         );
         let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
+
+        // Observe operator cooldown changes (including clears) without restarting the run.
+        self.run_state.throttle_registry = sqlite.load_throttle_registry()?;
 
         let _ = sqlite.get_active_coordinator_run().map(|run_opt| {
             if let Some(mut r) = run_opt {

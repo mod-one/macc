@@ -108,7 +108,11 @@ pub(super) fn resolve_retry_strategy(
         .map(|dt| dt.timestamp() as u64)
         .unwrap_or(0);
 
-    if let Some(completion_kind) = classification.completion_kind {
+    let availability_failure = error_details.code == E602_QUOTA_EXHAUSTED;
+    if let Some(completion_kind) = classification
+        .completion_kind
+        .filter(|_| !availability_failure)
+    {
         if completion_kind.is_error() {
             if let Some(strategy) = terminal_tool_report(task, input, completion_kind) {
                 return strategy;
@@ -116,7 +120,7 @@ pub(super) fn resolve_retry_strategy(
         }
     }
 
-    if classification.completion_success {
+    if classification.completion_success && !availability_failure {
         let completion_kind = classification
             .completion_kind
             .unwrap_or(PerformerCompletionKind::SuccessWithChanges);
@@ -158,7 +162,11 @@ pub(super) fn resolve_retry_strategy(
         };
     }
 
-    if let Some(ref ni) = input.normalizer_input {
+    if let Some(ni) = input
+        .normalizer_input
+        .as_ref()
+        .filter(|_| !availability_failure)
+    {
         let stdout_says_done = ni.stdout.contains("MACC_TASK_RESULT: success")
             || ni.stdout.contains("already_satisfied");
         let transient_error = tool_error
@@ -245,20 +253,14 @@ pub(super) fn resolve_retry_strategy(
     if error_details.code == E602_QUOTA_EXHAUSTED {
         let retry_after = tool_error.as_ref().and_then(|te| te.retry_after_seconds);
         let cooldown = retry_after.unwrap_or(3600);
-        let delayed_until = chrono::DateTime::parse_from_rfc3339(now)
-            .ok()
-            .and_then(|dt| dt.checked_add_signed(chrono::Duration::seconds(cooldown as i64)))
-            .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
-            .unwrap_or_default();
         return RetryStrategy::Retry {
-            same_worktree: false,
+            same_worktree: classification.has_commits && is_healthy_worktree,
             reason: format!(
                 "quota exhausted; cooldown {}s, re-queued for tool fallback",
                 cooldown
             ),
             outcome: RetryOutcome::QuotaExhaustedRequeue {
                 cooldown,
-                delayed_until,
                 error: error_details,
                 tool_error,
                 now_ts,

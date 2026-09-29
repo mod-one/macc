@@ -227,6 +227,39 @@ pub fn diagnose_stall_native(
     }
 }
 
+/// A cooldown is a planned wait only if removing it would make a task dispatchable.
+pub fn waiting_for_tools_native(
+    repo_root: &Path,
+    canonical: &crate::config::CanonicalConfig,
+    coordinator: Option<&crate::config::CoordinatorConfig>,
+    env_cfg: &CoordinatorEnvConfig,
+    state: &CoordinatorRunState,
+) -> bool {
+    let cfg = CoordinatorConfigResolved::resolve(coordinator);
+    let Ok(registry) =
+        crate::coordinator::state::coordinator_state_registry_load(repo_root, &BTreeMap::new())
+    else {
+        return false;
+    };
+    let mut selector = build_task_selector_config(
+        repo_root,
+        &registry,
+        canonical,
+        env_cfg,
+        &cfg,
+        coordinator,
+        state,
+    );
+    if selector.throttle_registry.is_empty() || !selector.rate_limit_fallback_enabled {
+        return false;
+    }
+    if crate::coordinator::task_selector::select_next_ready_task(&registry, &selector).is_some() {
+        return false;
+    }
+    selector.throttle_registry.clear();
+    crate::coordinator::task_selector::select_next_ready_task(&registry, &selector).is_some()
+}
+
 pub(super) fn select_dispatch_candidate(
     registry: &serde_json::Value,
     config: &crate::coordinator::task_selector::TaskSelectorConfig,

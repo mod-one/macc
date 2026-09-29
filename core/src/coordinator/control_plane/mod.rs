@@ -2,6 +2,8 @@ mod base;
 mod dispatch;
 mod merge_gate;
 mod phase_runner;
+#[cfg(test)]
+mod quota_tests;
 mod sanitize;
 
 pub use base::{
@@ -10,5 +12,5 @@ pub use base::{
     monitor_active_jobs_native, monitor_merge_jobs_native, sync_registry_from_prd_native,
     CoordinatorLog,
 };
-pub use dispatch::diagnose_stall_native;
+pub use dispatch::{diagnose_stall_native, waiting_for_tools_native};
 pub use phase_runner::{run_phase_for_task_native, run_review_phase_for_task_native};

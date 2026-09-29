@@ -14,12 +14,14 @@ import { cn } from './styles';
 
 interface ToolCooldownPanelProps {
   className?: string;
+  tools?: string[];
 }
 
-export const ToolCooldownPanel: React.FC<ToolCooldownPanelProps> = ({ className }) => {
+export const ToolCooldownPanel: React.FC<ToolCooldownPanelProps> = ({ className, tools }) => {
   const [cooldowns, setCooldowns] = useState<ApiToolCooldownEntry[]>([]);
   const [enabledTools, setEnabledTools] = useState<string[]>([]);
   const [isBusy, setIsBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   
   // Form state
   const [selectedTool, setSelectedTool] = useState('');
@@ -30,23 +32,23 @@ export const ToolCooldownPanel: React.FC<ToolCooldownPanelProps> = ({ className 
       const result = await getToolCooldowns();
       if (result.tool_cooldowns) {
         setCooldowns(result.tool_cooldowns);
+        setError(null);
       }
     } catch (err) {
       console.error('Failed to fetch cooldowns:', err);
+      setError('Could not load tool availability. Retry or check the coordinator connection.');
     }
   }, []);
 
   const fetchConfig = useCallback(async () => {
     try {
-      const config = await getConfig();
-      setEnabledTools(config.enabledTools);
-      if (config.enabledTools.length > 0 && !selectedTool) {
-        setSelectedTool(config.enabledTools[0]);
-      }
+      const availableTools = tools ?? (await getConfig()).enabledTools;
+      setEnabledTools(availableTools);
+      setSelectedTool(previous => previous || availableTools[0] || '');
     } catch (err) {
       console.error('Failed to fetch config:', err);
     }
-  }, [selectedTool]);
+  }, [tools]);
 
   useEffect(() => {
     fetchCooldowns();
@@ -63,7 +65,7 @@ export const ToolCooldownPanel: React.FC<ToolCooldownPanelProps> = ({ className 
     const timer = setInterval(() => {
       setCooldowns(prev => prev.map(c => ({
         ...c,
-        remaining_seconds: Math.max(0, c.remaining_seconds - 1)
+        remaining_seconds: Math.max(0, c.throttled_until - Math.floor(Date.now() / 1000))
       })));
     }, 1000);
 
@@ -71,12 +73,14 @@ export const ToolCooldownPanel: React.FC<ToolCooldownPanelProps> = ({ className 
   }, [cooldowns.length]);
 
   const handleClear = async (toolId: string) => {
+    if (!window.confirm(`Reset MACC cooldown for ${toolId}? This allows another attempt but does not renew provider quota.`)) return;
     setIsBusy(true);
     try {
       await clearToolCooldown(toolId);
       await fetchCooldowns();
     } catch (err) {
       console.error('Failed to clear cooldown:', err);
+      setError(`Could not reset cooldown for ${toolId}. Check ownership and try again.`);
     } finally {
       setIsBusy(false);
     }
@@ -92,6 +96,7 @@ export const ToolCooldownPanel: React.FC<ToolCooldownPanelProps> = ({ className 
       await fetchCooldowns();
     } catch (err) {
       console.error('Failed to set cooldown:', err);
+      setError('Could not update cooldown. Check ownership and try again.');
     } finally {
       setIsBusy(false);
     }
@@ -120,6 +125,7 @@ export const ToolCooldownPanel: React.FC<ToolCooldownPanelProps> = ({ className 
 
   return (
     <div className={cn("space-y-6", className)}>
+      {error && <p role="alert">{error}</p>}
       {/* Cooldown Table */}
       <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-card)] overflow-hidden">
         <table className="w-full text-left text-sm">
@@ -154,7 +160,7 @@ export const ToolCooldownPanel: React.FC<ToolCooldownPanelProps> = ({ className 
                     {formatDuration(c.remaining_seconds)}
                   </td>
                   <td className="px-4 py-3 text-[var(--text-secondary)] hidden sm:table-cell">
-                    {new Date(c.throttled_until * 1000).toLocaleTimeString()}
+                    {new Date(c.throttled_until * 1000).toLocaleString()}
                   </td>
                   <td className="px-4 py-3 text-right text-[var(--text-muted)] hidden lg:table-cell">
                     {formatDuration(c.backoff_seconds)}
@@ -165,7 +171,7 @@ export const ToolCooldownPanel: React.FC<ToolCooldownPanelProps> = ({ className 
                       disabled={isBusy}
                       className="h-8 px-3 text-xs border-[var(--border)] bg-[var(--bg-secondary)] hover:bg-rose-500/10 hover:text-rose-500 hover:border-rose-500/50"
                     >
-                      Clear
+                      Reset cooldown
                     </Button>
                   </td>
                 </tr>

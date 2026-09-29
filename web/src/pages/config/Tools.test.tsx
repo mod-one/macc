@@ -9,6 +9,7 @@ const getToolDescriptorsMock = vi.fn();
 const updateConfigMock = vi.fn();
 
 vi.mock('../../api/client', () => ({
+  getToolCooldowns: async () => ({ tool_cooldowns: [] }),
   getConfig: (...args: unknown[]) => getConfigMock(...args),
   getToolDescriptors: (...args: unknown[]) => getToolDescriptorsMock(...args),
   updateConfig: (...args: unknown[]) => updateConfigMock(...args),

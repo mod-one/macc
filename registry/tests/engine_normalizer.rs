@@ -241,9 +241,34 @@ fn e602_requeues_task_with_cooldown() {
     assert_eq!(task_val["task_runtime"]["status"], "idle");
     assert_eq!(task_val["task_runtime"]["last_error_code"], "E602");
     assert!(
-        !task_val["task_runtime"]["delayed_until"].is_null(),
-        "delayed_until must be set for E602 re-queue"
+        task_val["task_runtime"]["delayed_until"].is_null(),
+        "quota must delay the tool, not prevent the task from using another tool"
     );
+}
+
+#[test]
+fn gtransport_quota_overrides_echoed_markers_and_routes_to_claude() {
+    use macc_core::coordinator::task_selector::{select_next_ready_task, TaskSelectorConfig};
+    let mut task = make_failure_task("codex");
+    let input = make_failure_input(
+        "ERROR: You\u{2019}ve hit your usage limit. Try again at Oct 4th, 9999 2:13 AM.\nMACC_TOOL_LIMIT: quota_exhausted tool=codex",
+        "Prompt: MACC_TASK_RESULT: success_with_changes\nMACC_TASK_RESULT: error_without_changes",
+    );
+    let out = apply_job_completion(&mut task, &input, &registry(), "2026-09-29T15:18:49Z");
+    assert_eq!(out.status_label, "quota_exhausted_requeue");
+    assert_eq!(task["state"], "todo");
+    assert!(task["task_runtime"]["delayed_until"].is_null());
+    let throttle = serde_json::from_value(task["task_runtime"]["throttle_state"].clone()).unwrap();
+    let config = TaskSelectorConfig {
+        enabled_tools: vec!["codex".into(), "claude".into()],
+        tool_priority: vec!["codex".into(), "claude".into()],
+        throttle_registry: [("codex".into(), throttle)].into_iter().collect(),
+        rate_limit_fallback_enabled: true,
+        now: "2026-09-29T15:18:50Z".into(),
+        ..Default::default()
+    };
+    let selected = select_next_ready_task(&serde_json::json!({"tasks":[task]}), &config).unwrap();
+    assert_eq!(selected.tool, "claude");
 }
 
 #[test]

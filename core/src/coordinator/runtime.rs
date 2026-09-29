@@ -1625,14 +1625,22 @@ pub fn read_performer_log_tail(
     max_bytes: usize,
 ) -> Option<String> {
     let log_path = performer_task_log_path(worktree_path, task_id);
-    let raw = std::fs::read_to_string(&log_path).ok()?;
+    // Older shell runners translated echo's trailing newline into a dash.
+    let legacy_path = log_path.with_file_name(format!("{}-.md", log_path.file_stem()?.to_str()?));
+    let raw = std::fs::read_to_string(&log_path)
+        .or_else(|_| std::fs::read_to_string(legacy_path))
+        .ok()?;
     if raw.is_empty() {
         return None;
     }
     if raw.len() <= max_bytes {
         Some(raw)
     } else {
-        Some(raw[raw.len() - max_bytes..].to_string())
+        let mut start = raw.len() - max_bytes;
+        while !raw.is_char_boundary(start) {
+            start += 1;
+        }
+        Some(raw[start..].to_string())
     }
 }
 
@@ -2586,6 +2594,26 @@ pub fn terminate_process_group_gracefully(pgid: i64, grace_secs: u64) {
 mod precondition_log_fallback_tests {
     use super::{performer_task_log_path, read_completion_details_from_worktree_log};
     use crate::coordinator::PerformerCompletionKind;
+
+    #[test]
+    fn quota_log_tail_supports_legacy_names_and_utf8_boundaries() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = performer_task_log_path(dir.path(), "SEC-API-004");
+        std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+        let legacy = log.with_file_name("SEC-API-004-.md");
+        std::fs::write(
+            &legacy,
+            "ERROR: You\u{2019}ve hit your usage limit. MACC_TOOL_LIMIT: quota_exhausted",
+        )
+        .unwrap();
+        let tail = super::read_performer_log_tail(dir.path(), "SEC-API-004", 8192).unwrap();
+        assert!(tail.contains("quota_exhausted"));
+        std::fs::write(&log, "\u{20ac}\u{20ac}").unwrap();
+        assert_eq!(
+            super::read_performer_log_tail(dir.path(), "SEC-API-004", 4).unwrap(),
+            "\u{20ac}"
+        );
+    }
 
     #[test]
     fn worktree_log_fallback_collects_preconditions_in_order_without_duplicates() {

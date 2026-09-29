@@ -1653,37 +1653,21 @@ pub fn get_coordinator_status(paths: &ProjectPaths) -> Result<CoordinatorStatus>
             .map(|line| line.trim().to_string());
     }
 
-    // RL-WEB-008: populate throttled_tools from tasks with a future delayed_until.
-    let now_iso = chrono::Utc::now().to_rfc3339();
-    let mut throttle_map: BTreeMap<String, ThrottledToolStatus> = BTreeMap::new();
-    for task in &snapshot.registry.tasks {
-        if let (Some(delayed_until), Some(tool_id)) = (
-            task.task_runtime.delayed_until.as_deref(),
-            task.tool.as_deref(),
-        ) {
-            if !tool_id.is_empty() && delayed_until > now_iso.as_str() {
-                let consecutive_count = task
-                    .task_runtime
-                    .extra
-                    .get("throttle_state")
-                    .and_then(|v| v.get("consecutive_429_count"))
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as usize;
-                let entry = throttle_map.entry(tool_id.to_string()).or_insert_with(|| {
-                    ThrottledToolStatus {
-                        tool_id: tool_id.to_string(),
-                        throttled_until: delayed_until.to_string(),
-                        consecutive_count,
-                    }
-                });
-                if delayed_until > entry.throttled_until.as_str() {
-                    entry.throttled_until = delayed_until.to_string();
-                    entry.consecutive_count = consecutive_count;
+    // The persistent tool registry remains authoritative after a task switches tools.
+    status.throttled_tools = sqlite
+        .load_throttle_registry()?
+        .into_values()
+        .filter(|entry| entry.throttled_until > chrono::Utc::now().timestamp() as u64)
+        .filter_map(|entry| {
+            chrono::DateTime::from_timestamp(entry.throttled_until as i64, 0).map(|until| {
+                ThrottledToolStatus {
+                    tool_id: entry.tool_id,
+                    throttled_until: until.to_rfc3339(),
+                    consecutive_count: entry.consecutive_429_count as usize,
                 }
-            }
-        }
-    }
-    status.throttled_tools = throttle_map.into_values().collect();
+            })
+        })
+        .collect();
 
     // Surface the most recent run's status and stop reason so clients can show
     // *why* a run ended (normal completion vs error) once it is no longer live.

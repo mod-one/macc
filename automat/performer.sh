@@ -183,7 +183,7 @@ mkdir -p "$performer_log_dir"
 task_log_path() {
   local id="$1"
   local safe
-  safe="$(echo "$id" | tr '[:space:]' '-' | tr -cd '[:alnum:]_.-')"
+  safe="$(printf '%s' "$id" | tr '[:space:]' '-' | tr -cd '[:alnum:]_.-')"
   if [[ -z "$safe" ]]; then
     safe="task"
   fi
@@ -888,19 +888,17 @@ detect_success_result_kind() {
 detect_rate_limit() {
   local output_file="$1"
   [[ -f "$output_file" ]] || return 0
-  local combined
-  combined="$(cat "$output_file" 2>/dev/null | tr '[:upper:]' '[:lower:]')"
   # E602: hard quota exhaustion — do NOT retry
-  if echo "$combined" | grep -qE \
-      'quota[[:space:]]+exceeded|insufficient[_[:space:]]quota|usage[[:space:]]+limit[[:space:]]+reached|hit[[:space:]]+your[[:space:]]+limit|billing[[:space:]]+quota'; then
+  if grep -qiE \
+      'macc_tool_limit:.*quota_exhausted|quota[[:space:]]+exceeded|insufficient[_[:space:]]quota|usage[[:space:]]+limit[[:space:]]+reached|hit[[:space:]]+your[[:space:]]+(usage[[:space:]]+|session[[:space:]]+)?limit|billing[[:space:]]+quota' "$output_file"; then
     LAST_ERROR_CODE="E602"
     LAST_ERROR_ORIGIN="runner"
-    LAST_ERROR_MESSAGE="quota exhausted"
+    LAST_ERROR_MESSAGE="quota exhausted; $(grep -iE 'try again at|retry_hint|retry.after' "$output_file" | tail -n 1 || true)"
     return 0
   fi
   # E601: transient rate-limit / 429
-  if echo "$combined" | grep -qE \
-      '429|resource_exhausted|model_capacity_exhausted|no[[:space:]]+capacity[[:space:]]+available|rate[[:space:]]+limit(ed)?|too[[:space:]]+many[[:space:]]+requests|529|overloaded'; then
+  if grep -qiE \
+      '429|resource_exhausted|model_capacity_exhausted|no[[:space:]]+capacity[[:space:]]+available|rate[[:space:]]+limit(ed)?|too[[:space:]]+many[[:space:]]+requests|529|overloaded' "$output_file"; then
     LAST_ERROR_CODE="E601"
     LAST_ERROR_ORIGIN="runner"
     LAST_ERROR_MESSAGE="rate limited"
@@ -1355,6 +1353,10 @@ for ((i=1; i<=PERFORMER_MAX_ITERATIONS; i++)); do
     else
       attempt_rc=$?
       echo "Tool failed for task ${next_id} (attempt ${attempt}/${PERFORMER_TOOL_MAX_ATTEMPTS})" >&2
+      # Let the coordinator select another tool instead of spending another attempt.
+      if [[ "$LAST_ERROR_CODE" == "E602" || "$LAST_ERROR_CODE" == "E601" ]]; then
+        break
+      fi
     fi
   done
   if [[ "$tool_success" != "true" ]]; then
