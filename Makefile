@@ -1,6 +1,6 @@
-.PHONY: fmt fmt-check lint test test-contract web-build web-ci all check check-generic
+.PHONY: fmt fmt-check lint test test-tool-runner test-contract web-build web-ci all check check-generic
 
-all: fmt lint test web-ci check-generic test-contract
+all: fmt lint test test-tool-runner web-ci check-generic test-contract
 
 fmt:
 	cargo fmt --all
@@ -15,6 +15,15 @@ test:
 	cargo test --workspace --locked
 	cd adapters && cargo test --workspace --locked
 
+# Add runner regression scripts for other tools to this target.
+test-tool-runner:
+	bash automat/tests/test_precondition_markers.sh
+	bash automat/tests/test_quota_classification.sh
+	bash automat/tests/test_continuation_prompt.sh
+	bash automat/tests/test_codex_effort_args.sh
+	bash automat/tests/test_codex_resume_failure.sh
+	bash automat/tests/test_session_resume_flags.sh
+
 test-contract:
 	cargo test -p macc-registry --test contract --locked
 
@@ -27,4 +36,4 @@ web-ci:
 check-generic:
 	@./scripts/check-ui-tool-transparency.sh
 
-check: fmt-check lint test web-ci check-generic test-contract
+check: fmt-check lint test test-tool-runner web-ci check-generic test-contract

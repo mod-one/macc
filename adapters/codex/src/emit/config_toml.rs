@@ -3,6 +3,10 @@ use macc_adapter_shared::render::format::render_toml;
 use serde_json::Value as JsonValue;
 use toml::Value;
 
+#[cfg(test)]
+#[path = "config_toml_tests.rs"]
+mod tests;
+
 pub fn render_config_toml(config: &CodexToolConfig) -> String {
     let mut merged = Value::Table(toml::map::Map::new());
     let raw = sanitize_raw_config(&config.raw);
@@ -85,9 +89,16 @@ fn sanitize_raw_config(raw: &JsonValue) -> JsonValue {
     };
 
     // MACC-internal keys that must not appear in the project-local config.toml.
-    map.remove("skills");
-    map.remove("agents");
+    // MACC selections are lists (or comma-separated strings); Codex also has
+    // native skills/agents tables, which must pass through unchanged.
+    for key in ["skills", "agents"] {
+        if !map.get(key).is_some_and(JsonValue::is_object) {
+            map.remove(key);
+        }
+    }
     map.remove("rules_enabled");
+    // Context protection and file names are consumed by MACC, not Codex.
+    map.remove("context");
     // model_tiers is a MACC routing concept, not a Codex config key.
     map.remove("model_tiers");
     // profiles is only supported in user-level config.toml, not project-local.

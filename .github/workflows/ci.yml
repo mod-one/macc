@@ -47,7 +47,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Install system deps
-        run: sudo apt-get update && sudo apt-get install -y jq curl
+        run: sudo apt-get update && sudo apt-get install -y jq curl python3-yaml
 
       - name: Format check
         run: make fmt-check
@@ -57,6 +57,9 @@ jobs:
 
       - name: Test
         run: make test
+
+      - name: Tool runner regressions
+        run: make test-tool-runner
 
       #- name: Web quality
       #  run: make web-ci

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Codex receives its reasoning effort explicitly on every invocation, as the
-# official Codex SDK does: `-c model_reasoning_effort="<effort>"`, while
-# effort_config keeps writing the same value to .codex/config.toml.
+# official Codex SDK does: `-c model_reasoning_effort="<effort>"`.
+# CLI routing must not rewrite persistent defaults.
 #
 # Drives the REAL adapters/shared/performer_lib.sh with the REAL
 # registry/tools.d/codex.tool.yaml and a stub `codex` that records argv.
@@ -50,7 +50,7 @@ run() {  # $1 = argv log; rest = extra runner args. MACC_MODEL_TIER from env.
   local log="$1"; shift; : > "$log"
   ( cd "$WORK/repo" && ARGV_LOG="$log" timeout 60 "$RUNNER" \
       --prompt-file "$WORK/prompt.txt" --tool-json "$WORK/repo/.macc/tool.json" \
-      --repo "$WORK/repo" --worktree "$WORK/repo" --task-id T-1 "$@" >/dev/null 2>&1 ) || true
+      --repo "$WORK/repo" --worktree "$WORK/repo" --task-id T-1 "$@" >/dev/null 2>&1 )
 }
 # Exact argv adjacency: "<a>" immediately followed by "<b>".
 pair() { awk -v a="$1" -v b="$2" 'prev==a && $0==b {f=1} {prev=$0} END{exit !f}' "$3"; }
@@ -66,16 +66,25 @@ grep -qxF -- "'model_reasoning_effort=\"medium\"'" "$L" \
   && fail "argument carries literal single quotes (shell quoting leaked into argv)" \
   || pass "no literal single quotes reach codex"
 
-# 2. Routing tier `heavy`: tier model and tier effort, and config.toml agrees.
-rm -f "$WORK/repo/.codex/config.toml"
+# 2. Routing tier `heavy`: CLI overrides preserve root and nested defaults.
+mkdir -p "$WORK/repo/.codex"
+cat > "$WORK/repo/.codex/config.toml" <<'TOML'
+model_reasoning_effort = "medium"
+sandbox_mode = "workspace-write"
+[features]
+shell_snapshot = false
+[profiles.review]
+model_reasoning_effort = "low"
+TOML
+cp "$WORK/repo/.codex/config.toml" "$WORK/expected.toml"
 L="$WORK/b.log"; MACC_MODEL_TIER=heavy MACC_MODEL_ROUTING_MODE=auto run "$L" --attempt 1 --max-attempts 1
 pair "--model" "gpt-5.5" "$L" && pass "tier model applied" || fail "tier model; argv: $(argv "$L")"
 pair "-c" 'model_reasoning_effort="high"' "$L" \
   && pass "tier effort applied on the command line" || fail "tier effort; argv: $(argv "$L")"
 grep -qF 'model_reasoning_effort="medium"' "$L" && fail "stale configured effort still present" || pass "no stale effort left"
-grep -qE '^model_reasoning_effort = "high"' "$WORK/repo/.codex/config.toml" 2>/dev/null \
-  && pass "effort_config still writes .codex/config.toml" \
-  || fail "effort_config not written; config.toml: $(cat "$WORK/repo/.codex/config.toml" 2>/dev/null)"
+cmp -s "$WORK/expected.toml" "$WORK/repo/.codex/config.toml" \
+  && pass "CLI effort preserves root and nested config defaults" \
+  || fail "tier routing modified persistent config"
 
 # 3. Resume with a session id under a tier: exec resume <id> keeps the effort.
 L="$WORK/c.log"; MACC_MODEL_TIER=heavy MACC_MODEL_ROUTING_MODE=auto \
@@ -83,5 +92,20 @@ L="$WORK/c.log"; MACC_MODEL_TIER=heavy MACC_MODEL_ROUTING_MODE=auto \
 pair "resume" "01a0c3f1-c956-7ab2-a9d9-78a7e85ccdc1" "$L" && pass "exec resume <session_id>" || fail "resume; argv: $(argv "$L")"
 pair "-c" 'model_reasoning_effort="high"' "$L" && pass "resume carries the tier effort" || fail "resume effort; argv: $(argv "$L")"
 [[ "$(grep -cxF -- '-c' "$L")" == "1" ]] && pass "effort passed once (no duplicate -c)" || fail "duplicate -c; argv: $(argv "$L")"
+
+# 4. Without a root effort key, routing must not append it inside [features].
+printf '[features]\nshell_snapshot = false\n' > "$WORK/repo/.codex/config.toml"
+cp "$WORK/repo/.codex/config.toml" "$WORK/expected.toml"
+L="$WORK/d.log"; MACC_MODEL_TIER=heavy run "$L" --attempt 1 --max-attempts 1
+cmp -s "$WORK/expected.toml" "$WORK/repo/.codex/config.toml" \
+  && pass "no effort key appended inside a TOML table" || fail "TOML table corrupted"
+
+# 5. Config-free runs need only the explicit CLI effort.
+rm "$WORK/repo/.codex/config.toml"
+L="$WORK/e.log"; MACC_MODEL_TIER=heavy run "$L" --attempt 1 --max-attempts 1
+[[ ! -f "$WORK/repo/.codex/config.toml" ]] \
+  && pass "CLI override does not create a config file" || fail "unexpected config file"
+pair "-c" 'model_reasoning_effort="high"' "$L" \
+  && pass "config-free run receives tier effort" || fail "tier effort missing"
 
 log "Passed: $PASS  Failed: $FAIL"; [[ $FAIL -eq 0 ]]
