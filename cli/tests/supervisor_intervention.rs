@@ -87,9 +87,21 @@ esac
 struct Supervisor(std::process::Child);
 impl Drop for Supervisor {
     fn drop(&mut self) {
-        unsafe {
-            libc::kill(self.0.id() as i32, libc::SIGTERM);
+        let signal_result = unsafe { libc::kill(self.0.id() as i32, libc::SIGTERM) };
+        if signal_result != 0 {
+            eprintln!(
+                "Supervisor fixture SIGTERM failed: {}",
+                std::io::Error::last_os_error()
+            );
         }
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            if self.0.try_wait().ok().flatten().is_some() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let _ = self.0.kill();
         let _ = self.0.wait();
     }
 }
@@ -97,6 +109,7 @@ fn start(root: &Path) -> Supervisor {
     Supervisor(
         Command::new(env!("CARGO_BIN_EXE_macc"))
             .args(["--cwd", root.to_str().unwrap(), "supervisor", "start"])
+            .env("TOKIO_WORKER_THREADS", "2")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -223,7 +236,16 @@ fn tool_timeout_kills_children_and_keeps_failure_evidence() {
             .and_then(Value::as_str)
             .unwrap(),
     );
-    let pid = std::fs::read_to_string(tree.join(".macc/tool-child.pid")).unwrap();
+    let evidence = Path::new(
+        r.pointer("/intervention/log_dir")
+            .and_then(Value::as_str)
+            .unwrap(),
+    );
+    let pid = std::fs::read_to_string(evidence.join("evidence/.macc/tool-child.pid")).unwrap();
+    assert!(
+        !tree.exists(),
+        "clean exhausted slot should be removed after archiving"
+    );
     wait_for(|| {
         std::fs::read_to_string(format!("/proc/{}/stat", pid.trim()))
             .map(|s| s.rsplit_once(") ").unwrap().1.starts_with('Z'))
@@ -263,7 +285,7 @@ fn validation_failure_blocks_integration() {
     drop(supervisor);
 }
 #[test]
-fn shutdown_marks_an_in_flight_intervention_interrupted() {
+fn stop_command_marks_an_in_flight_intervention_interrupted() {
     let temp = fixture(false);
     let root = temp.path();
     std::fs::write(root.join(".macc/fake-agent.sh"), "#!/bin/sh\nsleep 60\n").unwrap();
@@ -273,6 +295,15 @@ fn shutdown_marks_an_in_flight_intervention_interrupted() {
             v.pointer("/intervention/status").and_then(Value::as_str) == Some("diagnosing")
         })
     });
+    let output = Command::new(env!("CARGO_BIN_EXE_macc"))
+        .args(["--cwd", root.to_str().unwrap(), "supervisor", "stop"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     drop(supervisor);
     assert_eq!(
         report(root)
@@ -346,3 +377,6 @@ fn monitoring_error_is_reported_and_recovers_without_restarting_supervisor() {
     );
     drop(supervisor);
 }
+
+#[path = "support/supervisor_lifecycle.rs"]
+mod supervisor_lifecycle;

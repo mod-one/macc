@@ -7,6 +7,8 @@ use serde_json::json;
 use std::path::{Path, PathBuf};
 #[derive(Debug, Serialize, Deserialize)]
 pub(super) struct Intervention {
+    #[serde(default)]
+    pub(super) log_dir: Option<PathBuf>,
     pub(super) incident: Incident,
     pub(super) attempt: u32,
     pub(super) status: String,
@@ -86,20 +88,45 @@ pub fn record_shutdown(paths: &ProjectPaths) -> Result<()> {
     if value
         .pointer("/intervention/status")
         .and_then(|v| v.as_str())
-        .is_some_and(|s| !matches!(s, "recovered" | "escalated"))
+        .is_some_and(|s| !matches!(s, "recovered" | "escalated" | "interrupted"))
     {
         value["intervention"]["status"] = json!("interrupted");
         value["intervention"]["detail"] =
             json!("Supervisor stopped during intervention; isolated worktree and logs retained");
         write_json(&latest, &value)?;
+        let dir = value
+            .pointer("/intervention/log_dir")
+            .and_then(|v| v.as_str())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                paths.root.join(".macc/log/supervisor").join(format!(
+                    "{}-attempt-{}",
+                    slug(
+                        value
+                            .pointer("/intervention/incident/id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown")
+                    ),
+                    value
+                        .pointer("/intervention/attempt")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0)
+                ))
+            });
         if let Some(worktree) = value
             .pointer("/intervention/worktree")
             .and_then(|v| v.as_str())
+            .map(PathBuf::from)
+            .filter(|p| p.exists())
         {
-            if let Some(dir) = Path::new(worktree).parent() {
-                write_json(&dir.join("report.json"), &value)?;
+            if super::workspace::finish(&paths.root, &worktree, &dir, true)? {
+                value["intervention"]["detail"] = json!(
+                    "Supervisor stopped during intervention; evidence archived; clean slot removed"
+                );
             }
+            write_json(&latest, &value)?;
         }
+        write_json(&dir.join("report.json"), &value)?;
         let cfg = macc_core::load_canonical_config(&paths.config_path)?
             .automation
             .supervisor

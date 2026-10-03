@@ -159,6 +159,7 @@ impl<'a> SupervisorCommand<'a> {
             "supervisor",
         )?;
         if retry {
+            super::supervisor_runtime::request_retry(&paths)?;
             let ledger = paths.root.join(".macc/state/supervisor-interventions.json");
             if ledger.exists() {
                 let backup = ledger.with_extension(format!(
@@ -173,6 +174,14 @@ impl<'a> SupervisorCommand<'a> {
             }
         }
         let process_id = std::process::id();
+        let stop_request = paths.root.join(".macc/state/supervisor-stop.json");
+        if stop_request.exists() {
+            fs::remove_file(&stop_request).map_err(|source| MaccError::Io {
+                path: stop_request.display().to_string(),
+                action: "clear previous supervisor stop request".into(),
+                source,
+            })?;
+        }
         write_pid_file(&supervisor_pid_path, process_id)?;
 
         let supervisor_handle = ProcessHandle {
@@ -206,14 +215,14 @@ impl<'a> SupervisorCommand<'a> {
                 let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
                     .map_err(|e| MaccError::Validation(format!("Supervisor SIGTERM handler: {e}")))?;
                 tokio::select! {
-                    result = super::supervisor_runtime::run(paths.clone(), canonical.clone()) => result,
+                    result = super::supervisor_runtime::run(paths.clone(), canonical.clone(), attach) => result,
                     _ = term.recv() => Ok(()),
                     result = tokio::signal::ctrl_c() => result.map_err(|e| MaccError::Validation(e.to_string())),
                 }
             }
             #[cfg(not(unix))]
             { tokio::select! {
-                result = super::supervisor_runtime::run(paths.clone(), canonical.clone()) => result,
+                result = super::supervisor_runtime::run(paths.clone(), canonical.clone(), attach) => result,
                 result = tokio::signal::ctrl_c() => result.map_err(|e| MaccError::Validation(e.to_string())),
             } }
         });
@@ -253,6 +262,7 @@ impl<'a> SupervisorCommand<'a> {
             return Ok(());
         }
 
+        super::supervisor_runtime::request_stop(&paths, pid)?;
         send_signal(pid, "-TERM")?;
 
         let deadline = Instant::now() + Duration::from_secs(5);

@@ -39,3 +39,5 @@ When in doubt, prioritize:
 2. `../MACC.md`
 3. `../CONTRIBUTING.md`
 4. `../CHANGELOG.md`
+
+- [Supervisor intervention lifecycle](SUPERVISOR_LIFECYCLE.md)

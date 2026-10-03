@@ -26,14 +26,24 @@ pub(super) async fn intervene(
             "Coordinator epoch changed before intervention".into(),
         ));
     }
+    ensure_not_stopped(paths)?;
     stop_orphan_jobs(&report.incident).await?;
     let agent = tool::Agent::resolve(&paths.root, canonical, config)?;
     report.tool = Some(agent.id.clone());
-    let (worktree, base) = repair::prepare(&paths.root, dir)?;
+    let (worktree, base) = super::workspace::prepare(&paths.root, &report.incident.id)?;
     report.worktree = Some(worktree.clone());
     report.status = "diagnosing".into();
     write_report(paths, config, dir, report)?;
-    let diagnosis = repair::diagnose(&agent, &paths.root, &worktree, dir, &report.incident).await?;
+    let mut diagnosis = if let Some(cached) = report.diagnosis.clone() {
+        cached
+    } else {
+        repair::diagnose(&agent, &paths.root, &worktree, dir, &report.incident).await?
+    };
+    super::policy::enrich(
+        &mut diagnosis,
+        &report.incident,
+        chrono::Utc::now().timestamp(),
+    );
     report.detail = diagnosis.summary.clone();
     report.diagnosis = Some(diagnosis.clone());
     if diagnosis.requires_human || !diagnosis.repairable {
@@ -63,12 +73,15 @@ pub(super) async fn intervene(
     report.status = "integrating".into();
     report.detail = proof;
     write_report(paths, config, dir, report)?;
+    ensure_not_stopped(paths)?;
     report.commit = Some(repair::integrate(&paths.root, &worktree, &base)?);
     report.status = "requeuing".into();
     write_report(paths, config, dir, report)?;
+    ensure_not_stopped(paths)?;
     requeue(paths, canonical, &diagnosis.task_ids, &report.detail)?;
     report.status = "restarting".into();
     write_report(paths, config, dir, report)?;
+    ensure_not_stopped(paths)?;
     let pid = macc_core::service::coordinator::coordinator_restart_after_intervention(
         paths,
         canonical.automation.coordinator.as_ref(),
@@ -178,6 +191,15 @@ async fn stop_orphan_jobs(incident: &macc_core::supervisor::incident::Incident) 
                 }
             }
         }
+    }
+    Ok(())
+}
+
+fn ensure_not_stopped(paths: &ProjectPaths) -> Result<()> {
+    if super::shutdown::requested(paths)? {
+        return Err(MaccError::Validation(
+            "Operator stopped coordinator; intervention canceled without restart".into(),
+        ));
     }
     Ok(())
 }

@@ -496,7 +496,14 @@ pub fn find_reusable_worktree_native(
     let mut ranked_entries = entries
         .into_iter()
         .enumerate()
-        .filter(|(_, entry)| entry.path.starts_with(&pool_root))
+        .filter(|(_, entry)| {
+            entry.path.starts_with(&pool_root)
+                && !entry
+                    .path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("supervisor-"))
+        })
         .map(|(idx, entry)| {
             let warmth = score_worktree_session_warmth_from_state(
                 sessions_state.as_ref(),
@@ -732,6 +739,55 @@ mod tests {
     use serde_json::json;
     use std::collections::HashMap;
     use std::path::Path;
+
+    #[test]
+    fn supervisor_slots_are_not_recycled_or_removed_by_worker_pool_cleanup() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let git = |args: &[&str]| {
+            let output =
+                crate::git::run_git_output_mapped(root, args, "supervisor pool fixture").unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.name", "Test"]);
+        git(&["config", "user.email", "test@example.invalid"]);
+        std::fs::write(root.join("source.txt"), "base").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "base"]);
+        let slot = root.join(".macc/worktree/supervisor-01");
+        std::fs::create_dir_all(slot.parent().unwrap()).unwrap();
+        git(&[
+            "worktree",
+            "add",
+            "--detach",
+            slot.to_str().unwrap(),
+            "HEAD",
+        ]);
+        std::fs::write(slot.join("source.txt"), "unfinished repair").unwrap();
+        let (candidate, _) = super::find_reusable_worktree_native(
+            root,
+            &json!({"tasks":[]}),
+            "test-tool",
+            "main",
+            3600,
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert!(candidate.is_none());
+        assert_eq!(
+            crate::domain::worktree::remove_all_worktrees(root, false).unwrap(),
+            0
+        );
+        assert_eq!(
+            std::fs::read_to_string(slot.join("source.txt")).unwrap(),
+            "unfinished repair"
+        );
+    }
 
     #[test]
     fn warm_session_scored_when_within_ttl() {

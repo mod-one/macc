@@ -150,6 +150,36 @@ impl Agent {
             }
             let status = child.wait().await.map_err(|e| io(cwd, e))?;
             if !status.success() {
+                let stderr = std::fs::read_to_string(log_dir.join(format!("{phase}-stderr.log")))
+                    .unwrap_or_default();
+                let stdout = std::fs::read_to_string(log_dir.join(format!("{phase}-stdout.log")))
+                    .unwrap_or_default();
+                if let Some(error) =
+                    macc_core::coordinator::error_normalizer::NormalizerRegistry::from_inventory()
+                        .get(&self.id)
+                        .and_then(|normalizer| {
+                            normalizer.normalize(status.code().unwrap_or(1), &stderr, &stdout)
+                        })
+                {
+                    super::report::write_json(
+                        &log_dir.join("tool-error.json"),
+                        &serde_json::to_value(&error)
+                            .map_err(|e| MaccError::Validation(e.to_string()))?,
+                    )?;
+                    if error.retryable || matches!(error.error_code.as_str(), "E601" | "E602") {
+                        return Err(MaccError::Coordinator {
+                            code: macc_core::coordinator::error_normalizer::canonical_to_error_code(
+                                &error.canonical_class,
+                            ),
+                            message: format!(
+                                "Supervisor {} {phase} failed: {}; see {}",
+                                self.id,
+                                error.raw_message,
+                                log_dir.display()
+                            ),
+                        });
+                    }
+                }
                 return Err(MaccError::Validation(format!(
                     "Supervisor {} {phase} failed ({status}); see {}",
                     self.id,
@@ -160,11 +190,9 @@ impl Agent {
         };
         tokio::time::timeout(self.timeout, execution)
             .await
-            .map_err(|_| {
-                MaccError::Validation(format!(
-                    "Supervisor {phase} timed out; see {}",
-                    log_dir.display()
-                ))
+            .map_err(|_| MaccError::Coordinator {
+                code: "E101",
+                message: format!("Supervisor {phase} timed out; see {}", log_dir.display()),
             })?
     }
 }

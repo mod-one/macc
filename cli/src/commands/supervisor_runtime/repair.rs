@@ -3,12 +3,17 @@ use super::tool::Agent;
 use macc_core::supervisor::{incident::Incident, SupervisorConfig};
 use macc_core::{MaccError, Result};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Diagnosis {
+    /// Optional absolute provider reset time, copied into the durable wait policy.
+    #[serde(default)]
+    pub retry_at: Option<String>,
+    #[serde(default)]
+    pub unavailable_tool: Option<String>,
     pub summary: String,
     pub repairable: bool,
     #[serde(default)]
@@ -43,49 +48,6 @@ pub fn clean(root: &Path) -> Result<()> {
     }
     Ok(())
 }
-pub fn prepare(root: &Path, dir: &Path) -> Result<(PathBuf, String)> {
-    clean(root)?;
-    let base = git(root, &["rev-parse", "HEAD"])?;
-    let worktree = dir.join("worktree");
-    std::fs::create_dir_all(dir).map_err(|e| io(dir, e))?;
-    git(
-        root,
-        &[
-            "worktree",
-            "add",
-            "--detach",
-            worktree
-                .to_str()
-                .ok_or_else(|| MaccError::Validation("Invalid repair worktree path".into()))?,
-            &base,
-        ],
-    )?;
-    std::fs::create_dir_all(worktree.join(".macc")).map_err(|e| io(&worktree, e))?;
-    let config = root.join(".macc/macc.yaml");
-    if config.exists() {
-        std::fs::copy(config, worktree.join(".macc/macc.yaml")).map_err(|e| io(&worktree, e))?;
-    }
-    // Keep incident response files local and out of commits, even in projects with no MACC ignore entries.
-    let exclude = git(&worktree, &["rev-parse", "--git-path", "info/exclude"])?;
-    let exclude = PathBuf::from(exclude);
-    let exclude = if exclude.is_absolute() {
-        exclude
-    } else {
-        worktree.join(exclude)
-    };
-    if let Some(parent) = exclude.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| io(parent, e))?;
-    }
-    use std::io::Write;
-    std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&exclude)
-        .map_err(|e| io(&exclude, e))?
-        .write_all(b"\n.macc/\n")
-        .map_err(|e| io(&exclude, e))?;
-    Ok((worktree, base))
-}
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
     let text = std::fs::read_to_string(path).map_err(|e| io(path, e))?;
     serde_json::from_str(&text).map_err(|e| {
@@ -104,7 +66,8 @@ pub async fn diagnose(
 ) -> Result<Diagnosis> {
     let evidence =
         serde_json::to_string_pretty(incident).map_err(|e| MaccError::Validation(e.to_string()))?;
-    let prompt=format!("You are the MACC supervisor diagnosing a coordinator incident. Project: {}. Isolated analysis worktree: {}. Read the original coordinator and performer logs under {}/.macc/log, the task requirements and source. Identify root causes, distinguishing project defects, missing migrations, external conditions, and MACC defects. Prefer recorded unmet_preconditions/result_explanation over normalized error fragments. Do not edit source, reset files, invoke a coordinator, change task state, or approve human gates. Write exactly one JSON object to .macc/supervisor-diagnosis.json: {{\"summary\":\"evidence-based diagnosis\",\"repairable\":true,\"requires_human\":false,\"task_ids\":[\"root task ids verified by evidence\"],\"macc_findings\":[\"MACC dysfunction and concrete improvement suggestions\"]}}. A missing human decision, external credential or explicit operator gate requires_human=true. Source/schema fixes are repairable by this authorized supervisor even when outside the original task's writable scope. Diagnose first; do not repair in this phase.\nIncident:\n{evidence}",root.display(),worktree.display(),root.display());
+    let prompt=format!("You are the MACC supervisor diagnosing a coordinator incident. Project: {}. Isolated analysis worktree: {}. Read the original coordinator and performer logs under {}/.macc/log, the task requirements and source. Identify root causes, distinguishing project defects, missing migrations, external conditions, and MACC defects. Prefer recorded unmet_preconditions/result_explanation over normalized error fragments. Do not edit source, reset files, invoke a coordinator, change task state, or approve human gates. Write exactly one JSON object to .macc/supervisor-diagnosis.json: {{\"summary\":\"evidence-based diagnosis\",\"repairable\":true,\"requires_human\":false,\"task_ids\":[\"root task ids verified by evidence\"],\"macc_findings\":[\"MACC dysfunction and concrete improvement suggestions\"]}}. A missing human decision, external credential or explicit operator gate requires_human=true. Source/schema fixes are repairable by this authorized supervisor even when outside the original task's writable scope. For an external quota, also include retry_at as an absolute RFC3339 provider reset time and unavailable_tool as its tool ID when supported by evidence; omit them when unknown. Diagnose first; do not repair in this phase.\nIncident:\n{evidence}",root.display(),worktree.display(),root.display());
+    remove_response(&worktree.join(".macc/supervisor-diagnosis.json"))?;
     agent.run(worktree, &prompt, dir, "diagnosis").await?;
     let diagnosis: Diagnosis = read_json(&worktree.join(".macc/supervisor-diagnosis.json"))?;
     if diagnosis
@@ -198,7 +161,10 @@ pub async fn validate(
         let _group = super::tool::ProcessGroup(child.id());
         let result = tokio::time::timeout(Duration::from_secs(timeout.max(1)), child.wait()).await;
         let status = result
-            .map_err(|_| MaccError::Validation(format!("Validation timed out: {command}")))?
+            .map_err(|_| MaccError::Coordinator {
+                code: "E101",
+                message: format!("Validation timed out: {command}"),
+            })?
             .map_err(|e| io(worktree, e))?;
         if !status.success() {
             return Err(MaccError::Validation(format!(
@@ -218,13 +184,14 @@ pub async fn fix(
     commands: &[String],
     timeout: u64,
 ) -> Result<String> {
-    let prompt=format!("You are the authorized MACC supervisor repair agent in an isolated worktree. Repair these diagnosed root causes: {}. Source and database migration changes needed for these roots are authorized even outside the original performer scope. Preserve existing behavior and regression assertions; never bypass MFA or security, weaken tests, fabricate approval, change PRD/state/.macc metadata, or restart the coordinator. Add targeted regression tests. Install project dependencies if needed. Do not commit: the supervisor owns commits. Record intervention evidence and MACC improvement recommendations in .macc/repair-notes.md. Read original logs at {}. Validation commands are {:?}. Report missing external authority without guessing it.",diagnosis.summary,root.join(".macc/log").display(),commands);
+    let prompt=format!("You are the authorized MACC supervisor repair agent in an isolated worktree. Continue the existing repair in this same worktree. Inspect and preserve previous staged, unstaged and untracked work; do not reset or clean it. Repair these diagnosed root causes: {}. Source and database migration changes needed for these roots are authorized even outside the original performer scope. Preserve existing behavior and regression assertions; never bypass MFA or security, weaken tests, fabricate approval, change PRD/state/.macc metadata, or restart the coordinator. Add targeted regression tests. Install project dependencies if needed. Do not commit: the supervisor owns commits. Record intervention evidence and MACC improvement recommendations in .macc/repair-notes.md. Read original logs at {}. Validation commands are {:?}. Report missing external authority without guessing it.",diagnosis.summary,root.join(".macc/log").display(),commands);
     agent.run(worktree, &prompt, dir, "repair").await?;
     validate(worktree, commands, dir, timeout).await?;
     git(worktree, &["add", "--all"])?;
     let validated_tree = git(worktree, &["write-tree"])?;
     let validated_head = git(worktree, &["rev-parse", "HEAD"])?;
     let prompt=format!("Independently verify the supervisor repair. Diagnosis: {}. Examine source changes, existing and added regression tests and validation logs at {}. Do not edit files. Confirm the original root causes are corrected; no security checks, assertions, validation scripts or human gates were weakened or bypassed. Write .macc/supervisor-verification.json as {{\"verified\":true,\"explanation\":\"concrete evidence\"}}; use false for unresolved causes, unjustified test changes, or missing proof. Task ids: {:?}.",diagnosis.summary,dir.display(),diagnosis.task_ids);
+    remove_response(&worktree.join(".macc/supervisor-verification.json"))?;
     agent.run(worktree, &prompt, dir, "verification").await?;
     git(worktree, &["add", "--all"])?;
     if git(worktree, &["write-tree"])? != validated_tree
@@ -314,5 +281,13 @@ mod tests {
             validation_commands(d.path(), &SupervisorConfig::default()).unwrap(),
             vec!["cargo test --workspace --locked"]
         );
+    }
+}
+
+fn remove_response(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(io(path, e)),
     }
 }
