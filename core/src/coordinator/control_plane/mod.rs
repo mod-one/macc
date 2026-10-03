@@ -1,6 +1,7 @@
 mod base;
 mod dispatch;
 mod merge_gate;
+mod phase_handoff;
 mod phase_runner;
 #[cfg(test)]
 mod quota_tests;

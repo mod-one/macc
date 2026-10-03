@@ -273,9 +273,8 @@ pub(super) fn select_dispatch_candidate(
 
 /// Re-acquire the worktree a parked task already holds, preserving its commits.
 ///
-/// Returns `Ok(None)` when the worktree no longer exists or no longer holds the
-/// expected branch, so the caller can fall back to normal acquisition instead of
-/// failing the dispatch.
+/// Returns `Ok(None)` when the worktree or expected branch is unavailable.
+/// The caller must not reset another slot or silently restart the task.
 fn resume_attached_worktree(
     repo_root: &Path,
     task_id: &str,
@@ -290,7 +289,13 @@ fn resume_attached_worktree(
     if !ensure_expected_worktree_branch(&path, &resume.branch).unwrap_or(false) {
         return Ok(None);
     }
-    let last_commit = crate::git::head_commit(&path).unwrap_or_default();
+    if !coordinator_engine::is_worktree_healthy(&path) {
+        return Err(MaccError::Coordinator {
+            code: "resume_worktree_unavailable",
+            message: format!("Task {task_id} retains {} but Git has a lock or unfinished operation; existing work was preserved", path.display()),
+        });
+    }
+    let last_commit = crate::git::head_commit(&path)?;
     let active_session_id = read_session_id_from_state(repo_root, tool, &path);
 
     let msg = format!(
@@ -337,20 +342,14 @@ pub(super) async fn acquire_worktree_for_dispatch(
     // reporting `error_with_changes` live on that branch, and resetting to base
     // would strand them.
     if let Some(resume) = &task.resume_worktree {
-        match resume_attached_worktree(repo_root, &task.id, &task.tool, resume, logger)? {
-            Some(acquired) => return Ok(acquired),
-            None => {
-                // The worktree or branch is gone (pruned, deleted, or renamed).
-                // Fall through to normal acquisition so the task still runs
-                // rather than becoming unschedulable again.
-                if let Some(log) = logger {
-                    let _ = log.note(format!(
-                        "- Resume unavailable task={} path={} branch={} reason=worktree_or_branch_missing; acquiring a fresh slot",
-                        task.id, resume.path, resume.branch
-                    ));
-                }
-            }
-        }
+        return resume_attached_worktree(repo_root, &task.id, &task.tool, resume, logger)?
+            .ok_or_else(|| MaccError::Coordinator {
+                code: "resume_worktree_unavailable",
+                message: format!(
+                    "Task {} must resume in {} on branch {}; the worktree or branch is unavailable. Existing work was preserved; refusing a fresh slot.",
+                    task.id, resume.path, resume.branch
+                ),
+            });
     }
 
     let (reusable, _reuse_prepare_error) = find_reusable_worktree_native(
@@ -900,3 +899,7 @@ fn load_task_for_routing(
     let typed = crate::coordinator::model::TaskRegistry::from_value(&registry_value).ok()?;
     typed.tasks.into_iter().find(|t| t.id == task_id)
 }
+
+#[cfg(test)]
+#[path = "handoff_tests.rs"]
+mod handoff_tests;

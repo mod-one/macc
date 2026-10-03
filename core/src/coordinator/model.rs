@@ -861,8 +861,9 @@ impl TaskRegistry {
 
     pub fn can_reuse_worktree_slot(&self, worktree_path: &str) -> bool {
         // A slot can be reused unless a task in an active/blocking state is assigned to it.
-        // Blocking states: claimed, in_progress, pr_open, changes_requested, queued.
-        // Non-blocking (safe to reset): merged, failed, abandoned, todo.
+        // Blocking states: claimed, in_progress, pr_open, changes_requested, queued, blocked.
+        // Non-blocking: merged, failed, abandoned, and unassigned todo.
+        // A todo retry with an attached worktree keeps exclusive ownership.
         // Orphaned worktrees (no task references at all) are also safe to reuse —
         // their previous tasks either completed, failed, or had worktree metadata cleared.
         const BLOCKING: &[&str] = &[
@@ -871,6 +872,7 @@ impl TaskRegistry {
             "pr_open",
             "changes_requested",
             "queued",
+            "blocked",
         ];
         for task in &self.tasks {
             let Some(path) = task
@@ -883,7 +885,8 @@ impl TaskRegistry {
             if path != worktree_path {
                 continue;
             }
-            if BLOCKING.contains(&task.state.as_str()) {
+            // Parked retries own their edits even while the tool is cooling down.
+            if BLOCKING.contains(&task.state.as_str()) || task.is_awaiting_same_worktree_retry() {
                 return false;
             }
         }
@@ -1067,6 +1070,15 @@ impl Task {
             && self.runtime_status() == RuntimeStatus::Failed
             && self.branch().is_some()
             && self.worktree_path().is_some()
+    }
+
+    /// Availability limits do not consume the implementation retry budget.
+    pub fn is_awaiting_tool_availability_retry(&self) -> bool {
+        self.is_awaiting_same_worktree_retry()
+            && matches!(
+                self.task_runtime.last_error_code.as_deref(),
+                Some("E601" | "E602")
+            )
     }
 
     pub fn task_tool(&self) -> Option<&str> {

@@ -235,7 +235,7 @@ pub(super) fn resolve_retry_strategy(
             .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
             .unwrap_or_default();
         return RetryStrategy::Retry {
-            same_worktree: false,
+            same_worktree: task.has_worktree_attached(),
             reason: format!(
                 "rate-limited; backoff {}s, delayed until {}",
                 backoff, delayed_until
@@ -254,7 +254,9 @@ pub(super) fn resolve_retry_strategy(
         let retry_after = tool_error.as_ref().and_then(|te| te.retry_after_seconds);
         let cooldown = retry_after.unwrap_or(3600);
         return RetryStrategy::Retry {
-            same_worktree: classification.has_commits && is_healthy_worktree,
+            // A quota can interrupt edits before their first commit. Keep the
+            // assignment even if Git needs recovery; never free that slot.
+            same_worktree: task.has_worktree_attached(),
             reason: format!(
                 "quota exhausted; cooldown {}s, re-queued for tool fallback",
                 cooldown
@@ -310,7 +312,7 @@ pub(super) fn resolve_retry_strategy(
         retries_total,
     ) {
         return RetryStrategy::Retry {
-            same_worktree: false,
+            same_worktree: is_healthy_worktree,
             reason: format!("auto-retry scheduled for error code {}", error_details.code),
             outcome: RetryOutcome::AutoRetry {
                 error: error_details,

@@ -657,19 +657,20 @@ previous_result_explanation() {
   grep -E '^- Explanation:' "$path" | tail -n 1 | sed -E 's/^- Explanation:[[:space:]]*//'
 }
 
-# Summarise what the previous attempt already committed on this branch.
+# Summarise both committed and uncommitted work without changing the index.
 build_prior_work_summary() {
-  local base="$1"
-  [[ -n "$base" ]] || return 0
-  git rev-parse --verify "$base" >/dev/null 2>&1 || return 0
-
-  local commits stat
-  commits="$(git log --oneline "${base}..HEAD" 2>/dev/null || true)"
-  [[ -n "$commits" ]] || return 0
-  stat="$(git diff --stat "${base}..HEAD" 2>/dev/null | tail -n 40 || true)"
-
-  printf 'Commits already made on this branch (not yet merged into %s):\n\n%s\n\nFiles changed:\n\n%s\n' \
-    "$base" "$commits" "$stat"
+  local base="$1" commits="" stat="" dirty=""
+  if [[ -n "$base" ]] && git rev-parse --verify "$base" >/dev/null 2>&1; then
+    commits="$(git log --oneline "${base}..HEAD" 2>/dev/null || true)"
+    if [[ -n "$commits" ]]; then
+      stat="$(git diff --stat "${base}..HEAD" 2>/dev/null | tail -n 40 || true)"
+      printf 'Commits already made on this branch (not yet merged into %s):\n\n%s\n\nFiles changed:\n\n%s\n' "$base" "$commits" "$stat"
+    fi
+  fi
+  dirty="$(git status --short -- . ':!performer.sh' ':!worktree.prd.json' 2>/dev/null || true)"
+  if [[ -n "$dirty" ]]; then
+    printf '\nUncommitted work retained from the previous performer (staged, unstaged and untracked files):\n\n%s\n' "$dirty"
+  fi
 }
 
 build_continuation_section() {
@@ -683,32 +684,37 @@ build_continuation_section() {
 ## CONTINUATION — this task was already started
 
 This is attempt ${resume_attempt} of this task. A previous attempt implemented
-part of it, committed that work, and then reported that it could not finish.
-The commits below are already on this branch and are YOURS -- they are not
-someone else's work and they are not merged yet.
+part of it and stopped before finishing, possibly because its tool became
+unavailable. You are continuing the SAME task on the SAME branch and worktree.
+Prior commits, staged edits, unstaged edits and untracked files are retained.
+Inspect and preserve that work even if this is a different tool or session.
 
 Reason the previous attempt stopped:
 ${prior_exp:-(not recorded)}
 
-${prior_work:-(no commits found on this branch; treat the task as unstarted)}
+${prior_work:-(no commits or uncommitted changes found; treat the task as unstarted only after inspecting its current files)}
 
 Note: the base branch (${base_ref:-unknown}) may have advanced since those
 commits were made, so files you touched may look different from what you left.
 
 How to proceed:
-1) FIRST assess the current state: read the committed work above and check what
-   the task still requires. Do not re-derive the implementation from scratch.
-2) Then complete ONLY the remaining work. Do not revert, rewrite, or duplicate
-   what is already committed and correct.
+1) FIRST assess the current state: inspect git status, git diff, git diff --cached,
+   untracked files and the prior commits. Check what the task still requires.
+   Do not re-derive the implementation from scratch.
+2) Then complete ONLY the remaining work. Preserve correct prior implementation.
+   Do not reset, clean, revert or overwrite it to start over.
+   If retained uncommitted changes already satisfy the task after validation,
+   report MACC_TASK_RESULT: success_with_changes even if you made no further edits.
+   The runner must commit those changes before delivery.
 3) If the remaining gap is a pre-existing repository problem outside this
    task's scope (for example an unrelated failing test or build target), the
    task is DONE: report success and state the out-of-scope issue in your
    explanation. Do not report an error for problems this task did not cause.
-4) If the previously committed work is genuinely unusable and must be discarded,
+4) If the prior work is genuinely unusable and must be discarded,
    do NOT quietly rewrite it -- stop and report:
    MACC_TASK_RESULT_EXP: prior work unsalvageable: <reason>
    MACC_TASK_RESULT: error_without_changes
-   so the coordinator can reset the branch and restart the task cleanly.
+   Existing work must remain available for recovery; do not discard it yourself.
 CONT
 }
 

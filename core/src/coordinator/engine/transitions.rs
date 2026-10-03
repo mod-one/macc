@@ -205,7 +205,13 @@ pub(super) fn apply_state_transitions(
                 if let Ok(v) = serde_json::to_value(&throttle) {
                     runtime.extra.insert("throttle_state".to_string(), v);
                 }
-                runtime.delayed_until = Some(delayed_until.clone());
+                // Tool cooldown is persisted independently. An attached task
+                // can immediately continue with another available tool.
+                runtime.delayed_until = if *same_worktree {
+                    None
+                } else {
+                    Some(delayed_until.clone())
+                };
                 runtime.set_status(RuntimeStatus::Idle);
                 runtime.current_phase = Some("dev".to_string());
                 runtime.completion_kind = None;
@@ -217,8 +223,13 @@ pub(super) fn apply_state_transitions(
                 );
                 runtime.last_error = Some(format!("rate-limited; backoff {}s", backoff));
                 store_classified_error_in_extra(runtime, tool_error, *now_ts);
+                preserve_active_session_chain(task);
                 capture_last_assignment_before_clear(task);
-                task.worktree = None;
+                if *same_worktree {
+                    task.ensure_runtime().set_status(RuntimeStatus::Failed);
+                } else {
+                    task.worktree = None;
+                }
                 task.set_workflow_state(WorkflowState::Todo);
                 task.touch_state_changed(now);
                 JobCompletionResult {
@@ -292,11 +303,18 @@ pub(super) fn apply_state_transitions(
                 now_ts,
             } => {
                 task.set_workflow_state(WorkflowState::Todo);
+                preserve_active_session_chain(task);
                 capture_last_assignment_before_clear(task);
-                task.worktree = None;
+                if !same_worktree {
+                    task.worktree = None;
+                }
                 let runtime = task.ensure_runtime();
                 runtime.increment_retries();
-                runtime.set_status(RuntimeStatus::Idle);
+                runtime.set_status(if *same_worktree {
+                    RuntimeStatus::Failed
+                } else {
+                    RuntimeStatus::Idle
+                });
                 runtime.pid = None;
                 runtime.current_phase = Some("dev".to_string());
                 runtime.completion_kind = None;

@@ -31,7 +31,8 @@ pub struct TaskSelectorConfig {
     /// How many times a task parked by the same-worktree retry path may be
     /// re-dispatched into its existing worktree. Beyond this the task is left
     /// for `apply_stale_heartbeat_policy` / operator action rather than being
-    /// retried forever. `0` disables same-worktree resume entirely.
+    /// retried forever. `0` disables implementation-error resume. Availability
+    /// cooldowns always retain their worktree and do not consume this budget.
     pub max_same_worktree_retries: usize,
 }
 
@@ -232,10 +233,12 @@ pub fn select_next_ready_task_typed(
 /// `engine::transitions`), so a task that keeps failing stops being selected
 /// instead of cycling forever against the same broken state.
 fn resume_worktree_for(task: &Task, max_retries: usize) -> Option<ResumeWorktree> {
-    if max_retries == 0 || !task.is_awaiting_same_worktree_retry() {
+    if !task.is_awaiting_same_worktree_retry() {
         return None;
     }
-    if task.task_runtime.retries_count() > max_retries {
+    if !task.is_awaiting_tool_availability_retry()
+        && (max_retries == 0 || task.task_runtime.retries_count() > max_retries)
+    {
         return None;
     }
     Some(ResumeWorktree {
@@ -789,9 +792,8 @@ fn pick_tool(
     //
     // For review/fix phases the task is mid-flight and normally must not
     // switch tools (idempotency guard).  However, when the task's *own*
-    // tool is throttled (e.g. E602 quota exhaustion), the worktree has
-    // already been rolled back to pre-phase state by the caller, so a
-    // tool switch is safe and necessary to make progress.
+    // tool is throttled (e.g. E602 quota exhaustion), a replacement tool
+    // continues in the attached worktree with its existing edits intact.
     let in_mid_flight_phase = matches!(
         task.task_runtime.current_phase.as_deref(),
         Some("review") | Some("fix")

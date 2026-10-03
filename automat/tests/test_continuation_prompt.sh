@@ -141,6 +141,23 @@ else
   fail "no commits on the branch is stated explicitly" "got: $section"
 fi
 
+# Dirty-only work is a continuation even with no commits ahead of base.
+printf 'staged edit\n' > "$wt2/base.txt"
+git -C "$wt2" add base.txt
+printf 'unstaged edit\n' >> "$wt2/base.txt"
+printf 'new implementation\n' > "$wt2/new-feature.txt"
+before_status="$(git -C "$wt2" status --porcelain)"
+section="$(run_harness "$wt2" 1 main "build_continuation_section T2" 2>/dev/null)"
+check_contains "Uncommitted work retained" "dirty-only work is included in continuation context"
+check_contains "base.txt" "staged and unstaged paths are included"
+check_contains "new-feature.txt" "untracked implementation is included"
+check_contains "report MACC_TASK_RESULT: success_with_changes" "retained edits still require source delivery"
+if [[ "$section" != *"treat the task as unstarted"* && "$(git -C "$wt2" status --porcelain)" == "$before_status" ]]; then
+  pass "dirty-only continuation preserves the index and never claims an unstarted task"
+else
+  fail "dirty-only continuation preserves the index and never claims an unstarted task"
+fi
+
 # ── 3b. terminal error contract validation ──────────────────────────────────
 printf 'MACC_TASK_RESULT: error_with_changes\n' >"$out_file"
 if run_harness "$tmp_root" 0 "" "validate_terminal_result_contract '$out_file' 'error_with_changes'" 2>/dev/null; then

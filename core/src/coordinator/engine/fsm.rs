@@ -548,6 +548,7 @@ pub fn apply_phase_outcome_in_registry(
         *registry = typed.to_value()?;
         return Ok(());
     }
+    task.task_runtime.extra.remove("phase_tool_unavailable");
     if mode == "review" {
         let verdict = review_verdict.ok_or_else(|| {
             MaccError::Validation(format!(
@@ -682,6 +683,10 @@ pub fn apply_dispatch_pid(task: &mut Value, pid: Option<i64>) {
 }
 
 fn apply_dispatch_claim_typed(task: &mut Task, update: &DispatchClaimUpdate) {
+    let tool_changed = task
+        .task_tool()
+        .or(task.task_runtime.last_session_tool.as_deref())
+        .is_some_and(|previous| previous != update.tool);
     task.set_workflow_state(WorkflowState::Claimed);
     task.tool = Some(update.tool.clone());
     let worktree = task.ensure_worktree();
@@ -697,7 +702,10 @@ fn apply_dispatch_claim_typed(task: &mut Task, update: &DispatchClaimUpdate) {
     runtime.run_id = Some(update.run_id.clone());
     runtime.coordinator_epoch = Some(update.coordinator_epoch);
     runtime.claim_id = Some(update.session_id.clone());
-    if let Some(active_session_id) = update.active_session_id.as_ref() {
+    if tool_changed {
+        // Work is portable across tools; their conversation IDs are not.
+        runtime.active_session_id = update.active_session_id.clone();
+    } else if let Some(active_session_id) = update.active_session_id.as_ref() {
         runtime.active_session_id = Some(active_session_id.clone());
     }
     let log_prefix = format!(".macc/log/performer/{}/{}", update.task_id, update.run_id);

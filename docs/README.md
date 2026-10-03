@@ -20,6 +20,7 @@ This folder contains MACC technical documentation.
 - `COMPATIBILITY.md`: OS and Rust compatibility targets/policy.
 - `RELEASE.md`: SemVer, tags, and release checklist.
 - `ralph.md`: Ralph automation flow and integration with coordinator/worktrees.
+- `TOOL_HANDOFF.md`: preserve task branches and uncommitted work across tool fallback.
 - `COMPLETION_EVIDENCE.md`: durable no-change completion and startup Git reconciliation.
 - `COORDINATOR_REALTIME.md`: short design for strict state model + event-driven coordinator rollout.
 - `schemas/coordinator-event.v1.schema.json`: formal JSON Schema for coordinator/performer event envelope v1.

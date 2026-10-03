@@ -1176,7 +1176,7 @@ pub fn build_phase_prompt(mode: &str, task_id: &str, tool: &str, task: &Task) ->
         ));
     }
     Ok(format!(
-        "You are the assigned {} performer running inside a MACC worktree.\n\nMode: {}\nTask ID: {}\n\nTask registry entry (JSON):\n{}\n\nInstructions:\n1) Execute the {} phase only.\n2) Keep changes minimal and focused on this task.\n3) Update code/tests/docs as needed for this phase.\n4) Do not modify task registry state directly.\n",
+        "You are the assigned {} performer running inside a MACC worktree.\n\nMode: {}\nTask ID: {}\n\nTask registry entry (JSON):\n{}\n\nInstructions:\n1) Execute the {} phase only.\n2) Keep changes minimal and focused on this task. Inspect git status, staged/unstaged changes, untracked files and existing commits first. Retained work may come from an interrupted performer. Complete the remaining work without resetting, cleaning or overwriting correct prior implementation.\n3) Update code/tests/docs as needed for this phase.\n4) Do not modify task registry state directly.\n",
         tool, mode, task_id, task_payload, mode
     ))
 }
