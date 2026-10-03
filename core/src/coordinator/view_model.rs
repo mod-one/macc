@@ -139,6 +139,8 @@ pub struct LiveTaskRow {
     pub phase: TaskPhase,
     pub tool: String,
     pub model: String,
+    #[serde(default)]
+    pub effort: String,
     #[serde(with = "serde_duration_secs")]
     pub age: Duration,
     #[serde(with = "serde_opt_duration_secs")]
@@ -246,6 +248,7 @@ impl LiveTaskRow {
             phase,
             tool,
             model,
+            effort: String::new(),
             age,
             heartbeat_age,
             last_event_age,

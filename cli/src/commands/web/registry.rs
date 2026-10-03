@@ -25,18 +25,32 @@ pub(super) async fn list_registry_tasks_handler(
         .coordinator_state_snapshot(&state.paths.root, &BTreeMap::new())
         .map_err(ApiError::from)?;
     let events_by_task = collect_registry_events(&snapshot.events);
+    let canonical = state
+        .engine
+        .load_canonical_config(&state.paths)
+        .map_err(ApiError::from)?;
+    let specs = macc_core::tool::ToolSpecLoader::new(
+        macc_core::tool::ToolSpecLoader::default_search_paths(&state.paths.root),
+    )
+    .load_all_with_embedded()
+    .0;
     let tasks = snapshot
         .registry
         .tasks
         .iter()
         .map(|task| {
-            task_to_api(
+            let mut api = task_to_api(
                 task,
                 events_by_task
                     .get(task.id.as_str())
                     .map(Vec::as_slice)
                     .unwrap_or(&[]),
-            )
+            );
+            let (model, effort) =
+                macc_core::coordinator::execution_labels::resolve(task, &canonical, &specs);
+            api.model = Some(model);
+            api.effort = Some(effort);
+            api
         })
         .collect();
     Ok(Json(tasks))
@@ -218,6 +232,8 @@ pub(super) fn task_to_api(task: &Task, events: &[ApiRegistryEvent]) -> ApiRegist
         priority: task.priority.clone(),
         state: task.state.clone(),
         tool: task.tool.clone(),
+        model: None,
+        effort: None,
         attempts: task.task_runtime.attempt,
         heartbeat: task.task_runtime.last_heartbeat.clone(),
         delayed_until: task.task_runtime.delayed_until.clone(),

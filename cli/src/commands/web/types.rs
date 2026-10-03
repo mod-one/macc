@@ -755,6 +755,9 @@ pub(crate) struct ApiRegistryTask {
     pub state: String,
     /// Assigned tool ID.
     pub tool: Option<String>,
+    /// Resolved model and reasoning effort for live execution.
+    pub model: Option<String>,
+    pub effort: Option<String>,
     /// Current attempt count.
     pub attempts: Option<i64>,
     /// Most recent heartbeat timestamp.

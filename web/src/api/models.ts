@@ -588,6 +588,8 @@ export interface ApiRegistryEvent {
 }
 
 export interface ApiRegistryTask {
+  model?: string | null;
+  effort?: string | null;
   id: string;
   title: string | null;
   priority: string | null;

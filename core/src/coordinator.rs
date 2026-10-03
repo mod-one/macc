@@ -10,6 +10,7 @@ pub mod control_plane;
 pub mod delivery_evidence;
 pub mod engine;
 pub mod error_normalizer;
+pub mod execution_labels;
 pub mod helpers;
 pub mod integration;
 pub mod ipc;

@@ -268,7 +268,7 @@ fn resolve_runtime_placeholders(
 /// Read from the tool field whose id is the `effort_config.key` (the same
 /// setting the tool's config file uses), else a field with id `effort`, else
 /// `defaults.effort`. Tier routing overrides this value at run time.
-fn resolve_tool_effort(
+pub(crate) fn resolve_tool_effort(
     spec: &crate::tool::ToolSpec,
     canonical: &CanonicalConfig,
 ) -> Option<String> {
@@ -302,7 +302,10 @@ fn resolve_tool_effort(
         .and_then(json_scalar_to_string)
 }
 
-fn resolve_tool_model(spec: &crate::tool::ToolSpec, canonical: &CanonicalConfig) -> Option<String> {
+pub(crate) fn resolve_tool_model(
+    spec: &crate::tool::ToolSpec,
+    canonical: &CanonicalConfig,
+) -> Option<String> {
     let field = spec.fields.iter().find(|field| field.id == "model");
     if let Some(field) = field {
         if let Some(pointer) = field.pointer.as_deref() {

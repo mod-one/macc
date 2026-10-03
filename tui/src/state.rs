@@ -737,72 +737,12 @@ impl AppState {
         }
     }
 
+    #[cfg(test)]
     fn resolve_task_model(
         task: &macc_core::coordinator::model::Task,
         canonical: &CanonicalConfig,
     ) -> String {
-        let tool_id = task
-            .tool
-            .as_deref()
-            .or(task.coordinator_tool.as_deref())
-            .unwrap_or("");
-        if tool_id.is_empty() {
-            return "-".to_string();
-        }
-
-        // 1. Resolve model tier via routing engine
-        let routing_cfg = canonical.automation.model_routing.as_ref();
-        let phase = task
-            .task_runtime
-            .current_phase
-            .as_deref()
-            .unwrap_or("implementation");
-        let decision = macc_core::coordinator::model_routing::decide(task, phase, routing_cfg);
-        let tier_str = decision.tier.as_str();
-
-        // 2. Lookup in tools.config.<tool_id>
-        if let Some(tool_cfg) = canonical.tools.config.get(tool_id) {
-            // Try model_tiers[tier].model
-            if let Some(model_tiers) = tool_cfg.get("model_tiers").and_then(|t| t.as_object()) {
-                if let Some(tier_spec) = model_tiers.get(tier_str) {
-                    if let Some(model) = tier_spec.get("model").and_then(|m| m.as_str()) {
-                        if !model.is_empty() {
-                            return model.to_string();
-                        }
-                    }
-                }
-            }
-
-            // Try model
-            if let Some(model) = tool_cfg.get("model").and_then(|m| m.as_str()) {
-                if !model.is_empty() {
-                    return model.to_string();
-                }
-            }
-
-            // Try settings.model_name or settings.model
-            if let Some(settings) = tool_cfg.get("settings").and_then(|s| s.as_object()) {
-                if let Some(model) = settings
-                    .get("model_name")
-                    .or_else(|| settings.get("model"))
-                    .and_then(|m| m.as_str())
-                {
-                    if !model.is_empty() {
-                        return model.to_string();
-                    }
-                }
-            }
-        }
-
-        // 3. Fallback to default tool models
-        let fallback = match tool_id {
-            "claude" => "sonnet",         // macc:allow-tool-name
-            "agy" => "auto-gemini-3",     // macc:allow-tool-name
-            "gemini" => "gemini-1.5-pro", // macc:allow-tool-name
-            "codex" => "gpt-4o",          // macc:allow-tool-name
-            _ => tier_str,
-        };
-        fallback.to_string()
+        macc_core::coordinator::execution_labels::resolve(task, canonical, &[]).0
     }
 
     fn read_registry_snapshot(
@@ -819,6 +759,17 @@ impl AppState {
             throttled_tools: Vec::new(),
         };
         snapshot.throttled_tools = crate::tool_cooldowns::load(self.project_paths.as_ref())?;
+        let specs = self
+            .project_paths
+            .as_ref()
+            .map(|paths| {
+                macc_core::tool::ToolSpecLoader::new(
+                    macc_core::tool::ToolSpecLoader::default_search_paths(&paths.root),
+                )
+                .load_all_with_embedded()
+                .0
+            })
+            .unwrap_or_default();
         for task in &root.tasks {
             let state = if task.state.is_empty() {
                 "todo".to_string()
@@ -843,19 +794,21 @@ impl AppState {
                 | "changes_requested" | "queued"
                     if is_live_active =>
                 {
-                    let model = if let Some(ref canonical) = self.working_copy {
-                        Self::resolve_task_model(task, canonical)
-                    } else {
-                        "-".to_string()
-                    };
+                    let (model, effort) = self
+                        .working_copy
+                        .as_ref()
+                        .map(|config| {
+                            macc_core::coordinator::execution_labels::resolve(task, config, &specs)
+                        })
+                        .unwrap_or_else(|| ("-".into(), "-".into()));
                     snapshot.active += 1;
-                    snapshot.active_tasks.push(
-                        macc_core::coordinator::view_model::LiveTaskRow::from_task(
-                            task,
-                            Utc::now(),
-                            model,
-                        ),
+                    let mut row = macc_core::coordinator::view_model::LiveTaskRow::from_task(
+                        task,
+                        Utc::now(),
+                        model,
                     );
+                    row.effort = effort;
+                    snapshot.active_tasks.push(row);
                 }
                 "claimed" => {
                     // Claimed + phase_done can happen after coordinator restart before reconciliation.

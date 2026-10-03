@@ -224,6 +224,11 @@ const WorkerTile: React.FC<{
               {task.title ?? task.id}
             </p>
           )}
+          {task && (
+            <p className="text-[10px] text-[var(--text-muted)] break-words" aria-label="Model and effort">
+              Model: {task.model ?? '-'} · Effort: {task.effort ?? '-'}
+            </p>
+          )}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
           <span
@@ -381,6 +386,9 @@ const TaskRow: React.FC<{ task: ApiRegistryTask; isFeatured?: boolean }> = ({ ta
           {task.tool && (
             <span style={{ fontSize: '10px', color: 'var(--text-muted)' }}>· {task.tool}</span>
           )}
+          <span className="text-[10px] text-[var(--text-muted)]" aria-label="Model and effort">
+            · Model: {task.model ?? '-'} · Effort: {task.effort ?? '-'}
+          </span>
           {phase && (
             <span style={{ fontSize: '10px', color: 'var(--text-muted)' }}>· {phase}</span>
           )}
