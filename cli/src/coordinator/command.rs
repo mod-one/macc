@@ -66,6 +66,7 @@ pub struct CoordinatorCommandInput {
     /// Client to open after the coordinator starts.
     pub client_mode: CoordinatorClientMode,
     pub supervisor: bool,
+    pub no_supervisor: bool,
     pub drain: bool,
     pub graceful: bool,
     pub force: bool,
@@ -120,7 +121,7 @@ impl ProjectContext {
 pub fn handle(
     absolute_cwd: &Path,
     engine: &crate::services::engine_provider::SharedEngine,
-    input: CoordinatorCommandInput,
+    mut input: CoordinatorCommandInput,
 ) -> Result<()> {
     // Intercept "sessions" subcommand before normal coordinator dispatch.
     if input.command_name == "sessions" {
@@ -164,6 +165,18 @@ pub fn handle(
         input.remove_worktrees,
         input.remove_branches,
     )?;
+
+    let _direct_runtime_lock = if matches!(command, CoordinatorCommand::RunControlPlane)
+        && std::env::var("MACC_INTERNAL_INVOCATION").as_deref() != Ok("1")
+    {
+        Some(macc_core::fs_lock::AdvisoryLock::acquire(
+            &paths.root.join(".macc/state/supervisor-intervention.lock"),
+            std::time::Duration::ZERO,
+            "direct coordinator runtime during intervention",
+        )?)
+    } else {
+        None
+    };
 
     // Resolve delayed start if this is a 'run' command
     let schedule = if matches!(command, CoordinatorCommand::Run) {
@@ -219,6 +232,9 @@ Performers cannot commit without it. Fix this first:\n\
 
         // Launch review: summary, client choice, and confirmation — before any wait.
         let chosen_mode = resolve_client_mode(&input, coordinator_cfg, paths, schedule.as_ref());
+
+        input.supervisor =
+            crate::coordinator::supervisor_launch::choose(input.supervisor, input.no_supervisor)?;
 
         // Countdown wait (if a delayed start was requested).
         if let Some(ref sched) = schedule {
@@ -626,6 +642,26 @@ fn coordinator_process_handle(project_root: &Path) -> ProcessHandle {
 /// if it crashes. Because the supervisor itself uses `setsid()` it also
 /// survives SSH session close independently.
 fn spawn_attached_supervisor(project_root: &Path, coordinator_pid: u32) -> Result<()> {
+    let pid_file = project_root.join(SUPERVISOR_PID_REL_PATH);
+    if let Ok(raw) = std::fs::read_to_string(&pid_file) {
+        if let Ok(pid) = raw.trim().parse::<u32>() {
+            if pid_is_alive(pid) {
+                let marker =
+                    serde_json::json!({"coordinator_pid":coordinator_pid,"supervisor_pid":pid});
+                std::fs::write(
+                    project_root.join(COORDINATOR_SUPERVISOR_REL_PATH),
+                    format!("{marker}\n"),
+                )
+                .map_err(|source| MaccError::Io {
+                    path: pid_file.display().to_string(),
+                    action: "attach existing supervisor".into(),
+                    source,
+                })?;
+                println!("Supervisor attached (pid {pid}).");
+                return Ok(());
+            }
+        }
+    }
     let current_exe = std::env::current_exe().map_err(|e| MaccError::Io {
         path: project_root.to_string_lossy().into(),
         action: "resolve current executable for coordinator supervisor bootstrap".into(),
@@ -674,7 +710,9 @@ fn spawn_attached_supervisor(project_root: &Path, coordinator_pid: u32) -> Resul
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 
-    if let Some(spid) = supervisor_pid {
+    let spid = supervisor_pid
+        .ok_or_else(|| MaccError::Validation("Supervisor did not register its PID".into()))?;
+    {
         let marker = serde_json::json!({
             "coordinator_pid": coordinator_pid,
             "supervisor_pid": spid
@@ -683,7 +721,12 @@ fn spawn_attached_supervisor(project_root: &Path, coordinator_pid: u32) -> Resul
         if let Some(parent) = marker_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let _ = std::fs::write(&marker_path, format!("{}\n", marker));
+        std::fs::write(&marker_path, format!("{}\n", marker)).map_err(|source| MaccError::Io {
+            path: marker_path.display().to_string(),
+            action: "record supervisor attachment".into(),
+            source,
+        })?;
+        println!("Supervisor attached (pid {spid}).");
     }
 
     Ok(())
@@ -719,12 +762,16 @@ fn stop_attached_supervisor_if_present(project_root: &Path) {
     // Guard: only act if the coordinator that wrote this marker is currently
     // running.  A stale marker (coordinator already exited naturally) must not
     // cause an independently-started supervisor to be killed.
-    if !pid_is_alive(cpid) {
+    // Attachment remains valid even when the coordinator has already exited.
+    let registered = std::fs::read_to_string(project_root.join(SUPERVISOR_PID_REL_PATH))
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok());
+    if registered != Some(spid) {
         let _ = std::fs::remove_file(&marker_path);
         return;
     }
+    let _ = cpid;
 
-    // Send SIGTERM; give the supervisor up to 3 s to exit cleanly.
     let _ = ProcessCommand::new("kill")
         .arg("-TERM")
         .arg(spid.to_string())
@@ -1438,26 +1485,14 @@ fn launch_coordinator_with_client(
 
     match mode {
         CoordinatorClientMode::Tui => {
-            // TUI path: the TUI itself starts the coordinator daemon and
-            // connects to it. Once the TUI exits the coordinator keeps running
-            // in the background (coordinator child has setsid() — terminal-independent).
-            // If --supervisor was requested, start the supervisor AFTER the TUI
-            // has launched the coordinator so we have the real child PID.
-            let result = macc_tui::run_tui_with_launch(macc_tui::LaunchMode::CoordinatorRun {
+            let coord_pid = run_coordinator_daemon(paths, coordinator_cfg, &input.client_id)?;
+            if input.supervisor {
+                spawn_attached_supervisor(&paths.root, coord_pid as u32)?;
+            }
+            macc_tui::run_tui_with_launch(macc_tui::LaunchMode::CoordinatorAttach {
                 phase_overrides,
             })
-            .map_err(|e| MaccError::Io {
-                path: "tui".into(),
-                action: "run_tui coordinator live".into(),
-                source: std::io::Error::other(e.to_string()),
-            });
-            // Best-effort supervisor start after TUI (coordinator child already running).
-            if input.supervisor {
-                if let Ok(coord_pid) = coordinator_child_pid_from_registry(&paths.root) {
-                    let _ = spawn_attached_supervisor(&paths.root, coord_pid);
-                }
-            }
-            result
+            .map_err(|e| MaccError::Validation(format!("Coordinator TUI: {e}")))
         }
 
         CoordinatorClientMode::Web => {
@@ -1474,7 +1509,7 @@ fn launch_coordinator_with_client(
 
             // Start supervisor with coordinator child PID (not CLI PID).
             if input.supervisor {
-                let _ = spawn_attached_supervisor(&paths.root, coord_pid as u32);
+                spawn_attached_supervisor(&paths.root, coord_pid as u32)?;
             }
 
             // Launch web server as a background daemon so the CLI can return.
@@ -1506,7 +1541,7 @@ fn launch_coordinator_with_client(
             // Start coordinator as background daemon; return immediately.
             let coord_pid = run_coordinator_daemon(paths, coordinator_cfg, &input.client_id)?;
             if input.supervisor {
-                let _ = spawn_attached_supervisor(&paths.root, coord_pid as u32);
+                spawn_attached_supervisor(&paths.root, coord_pid as u32)?;
             }
             Ok(())
         }
@@ -1561,21 +1596,17 @@ fn run_coordinator_daemon(
         Some(client_id),
     )?;
 
+    macc_core::service::coordinator_readiness::wait(
+        paths,
+        pid,
+        std::time::Duration::from_secs(15),
+    )?;
     println!("Coordinator started (pid {}).", pid);
     println!("  Monitor : macc status");
     println!("  Live TUI: macc tui");
     println!("  Stop    : macc coordinator stop");
 
     Ok(pid)
-}
-
-/// Read the coordinator child PID from the managed command registry.
-fn coordinator_child_pid_from_registry(project_root: &Path) -> Result<u32> {
-    use macc_core::coordinator::managed_command_registry::get_managed_command;
-    let paths = macc_core::ProjectPaths::from_root(project_root);
-    get_managed_command(&paths, "run")?
-        .map(|r| r.pid as u32)
-        .ok_or_else(|| MaccError::Validation("coordinator is not running".into()))
 }
 
 /// Spawn the web server as a background daemon (setsid + null stdio).
@@ -1773,6 +1804,7 @@ mod tests {
             client_id: client_id.to_string(),
             client_mode: CoordinatorClientMode::None,
             supervisor: false,
+            no_supervisor: false,
             drain: false,
             graceful: false,
             force: false,

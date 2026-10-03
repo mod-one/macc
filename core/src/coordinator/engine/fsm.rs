@@ -2582,6 +2582,15 @@ pub(crate) async fn run_single_prd_control_plane(
         });
     }
 
+    if let Ok(ready_file) = std::env::var("MACC_COORDINATOR_READY_FILE") {
+        std::fs::write(&ready_file, format!("{}\n", std::process::id())).map_err(|source| {
+            MaccError::Io {
+                path: ready_file,
+                action: "publish coordinator readiness".into(),
+                source,
+            }
+        })?;
+    }
     let run_result = tokio::select! {
         res = run_control_plane(&mut backend, loop_cfg) => res,
         _ = shutdown_rx.changed() => {

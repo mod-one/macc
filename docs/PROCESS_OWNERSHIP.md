@@ -81,25 +81,20 @@ survives independently.
 
 ### Surviving parent shell disconnect
 
-To detach a coordinator from a terminal session so that closing the shell does
-not send `SIGHUP`:
+The coordinator launcher detaches its managed runtime with `setsid`, closes
+stdin, and redirects daemon output. The supervisor uses the same lifecycle.
+Closing the launching terminal or disconnecting SSH leaves both processes running.
 
 ```bash
-setsid macc coordinator run --no-tui </dev/null >macc-coord.log 2>&1 &
-```
-
-`setsid` places the process in a new session. With stdin closed and
-stdout/stderr redirected, the coordinator is fully decoupled from the parent
-shell. After detach, `macc process list` confirms the coordinator record is
-still present with `owner: null`.
-
-When starting with `--supervisor`, both records appear:
-
-```bash
-setsid macc coordinator run --no-tui --supervisor </dev/null >macc-coord.log 2>&1 &
-# Verify both Coordinator and Supervisor records exist with owner=null:
+macc coordinator run --no-client --supervisor
 macc process list
+macc supervisor status
 ```
+
+Without an explicit supervision flag, interactive launch asks whether to enable
+it. Unattended launch enables it by default. Use `--no-supervisor` to opt out.
+An explicit `macc coordinator stop` also stops its attached supervisor.
+See [Supervisor](SUPERVISOR.md) for recovery and intervention reports.
 
 ### Orphaned ownership entries are auto-evicted
 
@@ -141,6 +136,8 @@ tracked processes unregister.
 
 - **Service-layer unit tests** (fast, no binary required): `core/tests/daemon_ownership_integration.rs`
   covers scenarios (1)–(3) using fake timestamps to avoid real waits.
-- **E2E shell script** (requires built binary): `automat/tests/test_daemon_ownership.sh`
-  covers scenario (3) (setsid shell disconnect) and optionally scenario (2)
-  with `MACC_TEST_SLOW=1` (60-s TTL wait).
+- **CLI integration tests**: `cli/tests/supervisor_launch.rs` checks the startup
+  question for all three clients and detached coordinator/supervisor lifecycle.
+  `cli/tests/supervisor_intervention.rs` exercises diagnosis, repair, validation,
+  verification, integration, restart, timeout and interrupted intervention reports.
+- `automat/tests/test_daemon_ownership.sh` runs these Rust regression suites.

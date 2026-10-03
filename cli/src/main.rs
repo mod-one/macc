@@ -382,6 +382,9 @@ enum Commands {
         /// Start supervisor in daemon+attach mode before running coordinator
         #[arg(long)]
         supervisor: bool,
+        /// Explicitly disable autonomous supervision (also skips the startup question)
+        #[arg(long, conflicts_with = "supervisor")]
+        no_supervisor: bool,
         /// Drain stop (disable new dispatch, let active tasks finish)
         #[arg(long)]
         drain: bool,
@@ -1140,6 +1143,9 @@ pub enum SupervisorCommands {
         /// Explicit coordinator PID to write into the coordinator PID file before attach
         #[arg(long)]
         coordinator_pid: Option<u32>,
+        /// Reset the bounded intervention budget after correcting an external condition
+        #[arg(long)]
+        retry: bool,
     },
     /// Stop the supervisor watchdog
     Stop,
@@ -2052,6 +2058,7 @@ fn run_with_engine_provider(
             client,
             no_client,
             supervisor,
+            no_supervisor,
             drain,
             graceful,
             force,
@@ -2181,6 +2188,7 @@ fn run_with_engine_provider(
                         }
                     },
                     supervisor: *supervisor,
+                    no_supervisor: *no_supervisor,
                     drain: *drain,
                     graceful: *graceful,
                     force: *force,
@@ -3863,6 +3871,7 @@ fi
                     client: None,
                     no_client: true,
                     supervisor: false,
+                    no_supervisor: false,
                     drain: false,
                     graceful: true,
                     force: false,
@@ -5364,6 +5373,7 @@ fi
                     daemon,
                     attach,
                     coordinator_pid,
+                    ..
                 } => {
                     assert!(daemon);
                     assert!(attach);
@@ -5386,6 +5396,7 @@ fi
                     daemon,
                     attach,
                     coordinator_pid,
+                    ..
                 } => {
                     assert!(!daemon);
                     assert!(attach);

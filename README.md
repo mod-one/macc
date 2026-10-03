@@ -538,3 +538,5 @@ MACC is local-first.
 - Web UI binds to `localhost` by default.
 - Mutating Web API requests are audit-logged.
 - Secret scanning blocks unsafe generated output.
+
+See [Supervisor recovery](docs/SUPERVISOR.md) for automatic diagnosis, repair, reports and detached operation.

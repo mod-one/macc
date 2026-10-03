@@ -3,6 +3,7 @@ pub mod catalog;
 pub mod clear;
 pub mod context;
 pub mod coordinator;
+pub mod coordinator_readiness;
 pub mod coordinator_workflow;
 pub mod diagnostic;
 pub mod interaction;

@@ -42,7 +42,9 @@ pub fn classify_completion_error(
     // ── Per-adapter error normalization ──────────────────────────────
     // Run when the caller provides raw process output AND the job failed.
     // The normalizer output takes priority over the caller-supplied error code.
-    let tool_error: Option<ToolError> = if !input.success {
+    let tool_error: Option<ToolError> = if !input.success
+        && input.completion_kind != Some(PerformerCompletionKind::PreconditionUnmet)
+    {
         input.normalizer_input.as_ref().and_then(|ni| {
             normalizer.and_then(|n| {
                 n.normalize(ni.exit_code, &ni.stderr, &ni.stdout)
@@ -98,5 +100,52 @@ pub fn classify_completion_error(
         completion_authority: completion_resolution.authority,
         has_commits,
         tool_error,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::coordinator::engine::NormalizerInput;
+    struct MustNotNormalize;
+    impl ErrorNormalizer for MustNotNormalize {
+        fn normalize(&self, _: i32, _: &str, _: &str) -> Option<ToolError> {
+            panic!("structured preconditions must not be replaced by tool log matches")
+        }
+    }
+    #[test]
+    fn precondition_explanation_survives_misleading_auth_text_in_diff() {
+        let input = JobCompletionInput {
+            success: false,
+            attempt: 1,
+            max_attempts: 3,
+            timed_out: false,
+            phase_timeout_seconds: 3600,
+            elapsed_seconds: 1,
+            status_text: "precondition missing".into(),
+            completion_kind: Some(PerformerCompletionKind::PreconditionUnmet),
+            error_code: Some("E903".into()),
+            error_origin: Some("precondition".into()),
+            error_message: Some("authorized schema migration needed".into()),
+            result_explanation: Some("schema change required".into()),
+            unmet_preconditions: vec!["response snapshots".into()],
+            auto_retry_error_codes: vec![],
+            auto_retry_max: 0,
+            backoff_base_seconds: 30,
+            backoff_max_seconds: 300,
+            normalizer_input: Some(NormalizerInput {
+                exit_code: 1,
+                stderr: String::new(),
+                stdout: "diff --git: invalid_api_key permission_denied".into(),
+            }),
+        };
+        let result = classify_completion_error(&input, Some(&MustNotNormalize), false);
+        assert_eq!(result.error_code, "E903");
+        assert_eq!(result.error_message, "authorized schema migration needed");
+        assert_eq!(
+            result.completion_kind,
+            Some(PerformerCompletionKind::PreconditionUnmet)
+        );
+        assert!(result.tool_error.is_none());
     }
 }

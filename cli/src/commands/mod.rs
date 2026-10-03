@@ -31,6 +31,7 @@ pub mod skills_cmd;
 pub mod start;
 pub mod status;
 pub mod supervisor;
+mod supervisor_runtime;
 pub mod task;
 pub mod tool;
 pub mod trust;

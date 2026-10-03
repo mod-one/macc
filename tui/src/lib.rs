@@ -22,6 +22,7 @@ pub mod ownership;
 pub mod prd_queue;
 pub mod screen;
 pub mod state;
+mod supervisor;
 mod tool_cooldowns;
 pub mod ui;
 
@@ -38,6 +39,10 @@ pub enum LaunchMode {
     /// `phase_overrides` is a human-readable summary of active runtime phase overrides
     /// (e.g. `"[testing:off] [review:required]"`), or `None` when none are active.
     CoordinatorRun {
+        phase_overrides: Option<String>,
+    },
+    /// Attach to an already running and supervised coordinator.
+    CoordinatorAttach {
         phase_overrides: Option<String>,
     },
     /// Launch into the read-only observer/watch screen (`macc status --watch`).
@@ -90,6 +95,11 @@ pub fn run_tui_with_launch(mode: LaunchMode) -> Result<()> {
             state.start_coordinator_command(CoordinatorCommand::Run);
             state.coordinator_run_auto_quit = true;
             state.coordinator_phase_overrides = phase_overrides;
+        }
+        LaunchMode::CoordinatorAttach { phase_overrides } => {
+            state.goto_screen(Screen::CoordinatorLive);
+            state.coordinator_phase_overrides = phase_overrides;
+            state.coordinator_run_auto_quit = false;
         }
         LaunchMode::Watch {
             control,
@@ -740,9 +750,19 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
         } else {
             None
         };
-    let header_height = 5
-        + u16::from(trust_strip.is_some())
-        + u16::from(state.coordinator_phase_overrides.is_some());
+    let supervisor_strip = if current_screen == Screen::CoordinatorLive {
+        state
+            .project_paths
+            .as_ref()
+            .and_then(supervisor::status_strip)
+    } else {
+        None
+    };
+    let override_strip = match (&state.coordinator_phase_overrides, supervisor_strip) {
+        (Some(phases), Some(status)) => Some(format!("{phases} | {status}")),
+        (phases, status) => status.or_else(|| phases.clone()),
+    };
+    let header_height = 5 + u16::from(trust_strip.is_some()) + u16::from(override_strip.is_some());
     let footer_height = if current_screen == Screen::CoordinatorLive {
         4
     } else {
@@ -791,7 +811,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
         status: state.status_line(),
         width: header_area.width,
         trust_strip,
-        override_strip: state.coordinator_phase_overrides.clone(),
+        override_strip,
     };
     let title = Paragraph::new(header_lines(&header_ctx, &theme)).block(panel("MACC"));
     f.render_widget(title, header_area);

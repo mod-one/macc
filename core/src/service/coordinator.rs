@@ -116,6 +116,30 @@ pub fn coordinator_start_managed_command_process_with_pid(
     cfg: Option<&CoordinatorConfig>,
     client_id: Option<&str>,
 ) -> Result<i32> {
+    let _lock = crate::fs_lock::AdvisoryLock::acquire(
+        &paths.root.join(".macc/state/supervisor-intervention.lock"),
+        std::time::Duration::ZERO,
+        "coordinator launch during supervisor intervention",
+    )?;
+    start_managed_inner(paths, command, args, cfg, client_id)
+}
+
+/// Restart while the caller holds the exclusive intervention lock.
+pub fn coordinator_restart_after_intervention(
+    paths: &ProjectPaths,
+    cfg: Option<&CoordinatorConfig>,
+    _lock: &crate::fs_lock::AdvisoryLock,
+) -> Result<i32> {
+    start_managed_inner(paths, "run", &[], cfg, None)
+}
+
+fn start_managed_inner(
+    paths: &ProjectPaths,
+    command: &str,
+    args: &[String],
+    cfg: Option<&CoordinatorConfig>,
+    client_id: Option<&str>,
+) -> Result<i32> {
     let key = handle_key(paths, command);
     if let CoordinatorManagedCommandPoll::Running { command, .. } =
         coordinator_poll_managed_command_process(paths)?
@@ -370,10 +394,25 @@ fn coordinator_start_command_process_with_pid(
         cmd = wrap_command_with_exit_record(cmd, root, command)?;
     }
 
+    let log_dir = paths.root.join(".macc/log/coordinator");
+    std::fs::create_dir_all(&log_dir).map_err(|source| MaccError::Io {
+        path: log_dir.display().to_string(),
+        action: "create coordinator daemon logs".into(),
+        source,
+    })?;
+    let stderr = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_dir.join("daemon-stderr.log"))
+        .map_err(|source| MaccError::Io {
+            path: log_dir.display().to_string(),
+            action: "open coordinator daemon stderr".into(),
+            source,
+        })?;
     cmd.env("MACC_INTERNAL_INVOCATION", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::from(stderr));
 
     // Detach from the controlling terminal so the coordinator survives SSH
     // session close.  setsid(2) creates a new session with no controlling
@@ -390,7 +429,9 @@ fn coordinator_start_command_process_with_pid(
         // child always satisfies this.
         unsafe {
             cmd.pre_exec(|| {
-                libc::setsid();
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
                 Ok(())
             });
         }
@@ -461,7 +502,8 @@ fn wrap_command_with_exit_record(
         .env("MACC_MANAGED_COMMAND_KIND", safe_kind)
         .arg("-c")
         .arg(
-            r#""$@"
+            r#"export MACC_COORDINATOR_READY_FILE="$MACC_MANAGED_RESULT_DIR/$MACC_MANAGED_COMMAND_KIND-$$.ready"
+"$@"
 status=$?
 result_path="$MACC_MANAGED_RESULT_DIR/$MACC_MANAGED_COMMAND_KIND-$$.exit"
 tmp_path="$result_path.tmp"

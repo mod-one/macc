@@ -2441,6 +2441,11 @@ impl AppState {
                     command,
                     elapsed_secs,
                 }) => {
+                    // A supervised restart supersedes the previous terminal error popup.
+                    self.coordinator_pause_error = None;
+                    self.coordinator_pause_command = None;
+                    self.coordinator_pause_task_id = None;
+                    self.coordinator_pause_phase = None;
                     self.coordinator_running_command = Some(command);
                     self.coordinator_running_elapsed_secs = Some(elapsed_secs);
                     let should_refresh = self

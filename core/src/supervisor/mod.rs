@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 pub mod coordinator_supervisor;
+pub mod incident;
 pub mod mode_a;
 pub mod mode_b;
 pub mod mode_c;
@@ -33,6 +34,18 @@ pub mod mode_c;
 /// Configuration for the supervisor watchdog process.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SupervisorConfig {
+    /// Tool selection falls back to the coordinator tool, then the first enabled tool.
+    #[serde(default)]
+    pub tool: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+    #[serde(default = "default_intervention_timeout")]
+    pub intervention_timeout_seconds: u64,
+    /// Explicit validation commands; otherwise the project validation workflow is detected.
+    #[serde(default)]
+    pub validation_commands: Vec<String>,
     /// How often the supervisor checks coordinator health (seconds).
     #[serde(default = "default_watchdog_interval_seconds")]
     pub watchdog_interval_seconds: u64,
@@ -61,6 +74,9 @@ pub struct SupervisorConfig {
 fn default_watchdog_interval_seconds() -> u64 {
     30
 }
+fn default_intervention_timeout() -> u64 {
+    3600
+}
 fn default_max_restart_attempts() -> u32 {
     3
 }
@@ -80,6 +96,11 @@ fn default_events_log_path() -> PathBuf {
 impl Default for SupervisorConfig {
     fn default() -> Self {
         Self {
+            tool: None,
+            model: None,
+            effort: None,
+            intervention_timeout_seconds: default_intervention_timeout(),
+            validation_commands: Vec::new(),
             watchdog_interval_seconds: default_watchdog_interval_seconds(),
             max_restart_attempts: default_max_restart_attempts(),
             log_analysis_window_seconds: default_log_analysis_window_seconds(),
@@ -493,6 +514,7 @@ mod tests {
             crash_debounce_checks: 4,
             report_output_path: PathBuf::from("/tmp/report.json"),
             events_log_path: PathBuf::from("/tmp/events.jsonl"),
+            ..SupervisorConfig::default()
         }
     }
 
@@ -711,3 +733,5 @@ mod tests {
         assert_eq!(change, back);
     }
 }
+
+pub mod tool_settings;

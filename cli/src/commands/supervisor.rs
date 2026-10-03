@@ -2,11 +2,7 @@ use crate::commands::AppContext;
 use crate::commands::Command;
 use crate::SupervisorCommands;
 use macc_core::process_ownership::{ProcessHandle, ProcessKind};
-use macc_core::supervisor::mode_a::{
-    CoordinatorProcessManager, SupervisorHealthStatus, SupervisorWatchdog, WatchdogConfig,
-    WatchdogError,
-};
-use macc_core::supervisor::mode_c::{ModeCConfig, ModeCRecovery};
+
 use macc_core::supervisor::SupervisorReport;
 use macc_core::{MaccError, Result};
 use serde_json::Value;
@@ -39,7 +35,8 @@ impl<'a> Command for SupervisorCommand<'a> {
                 daemon,
                 attach,
                 coordinator_pid,
-            } => self.start(*daemon, *attach, *coordinator_pid),
+                retry,
+            } => self.start(*daemon, *attach, *coordinator_pid, *retry),
             SupervisorCommands::Stop => self.stop(),
             SupervisorCommands::Status => self.status(),
             SupervisorCommands::Report => self.report(),
@@ -48,30 +45,45 @@ impl<'a> Command for SupervisorCommand<'a> {
 }
 
 impl<'a> SupervisorCommand<'a> {
-    fn start(&self, daemon: bool, attach: bool, coordinator_pid: Option<u32>) -> Result<()> {
+    fn start(
+        &self,
+        daemon: bool,
+        attach: bool,
+        coordinator_pid: Option<u32>,
+        retry: bool,
+    ) -> Result<()> {
         let paths = self.app.ensure_initialized_paths()?;
         let canonical = self.app.canonical_config()?;
-        let supervisor_cfg = canonical.automation.supervisor.unwrap_or_default();
         let supervisor_pid_path = paths.root.join(SUPERVISOR_PID_REL_PATH);
-        let mut watchdog_cfg = WatchdogConfig {
-            watchdog_interval_seconds: supervisor_cfg.watchdog_interval_seconds.max(1),
-            stall_threshold_seconds: supervisor_cfg.log_analysis_window_seconds.max(1),
-            crash_debounce_checks: supervisor_cfg.crash_debounce_checks.max(1),
-            events_log_path: resolve_project_path(&paths.root, &supervisor_cfg.events_log_path),
-            max_restart_attempts: supervisor_cfg.max_restart_attempts,
-            ..WatchdogConfig::default()
-        };
-        watchdog_cfg.health_status_path = paths.root.join(SUPERVISOR_HEALTH_REL_PATH);
-        watchdog_cfg.pid_file_path = resolve_project_path(&paths.root, &watchdog_cfg.pid_file_path);
 
         if daemon {
             ensure_not_running(&supervisor_pid_path)?;
+            if paths.root.join(SUPERVISOR_HEALTH_REL_PATH).exists() {
+                fs::remove_file(paths.root.join(SUPERVISOR_HEALTH_REL_PATH)).map_err(|e| {
+                    MaccError::Validation(format!("Reset supervisor readiness: {e}"))
+                })?;
+            }
             let current_exe = std::env::current_exe().map_err(|e| MaccError::Io {
                 path: paths.root.to_string_lossy().into(),
                 action: "resolve current executable for supervisor daemon".into(),
                 source: e,
             })?;
 
+            let log_dir = paths.root.join(".macc/log/supervisor");
+            fs::create_dir_all(&log_dir).map_err(|e| MaccError::Io {
+                path: log_dir.display().to_string(),
+                action: "create supervisor log directory".into(),
+                source: e,
+            })?;
+            let daemon_log = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(log_dir.join("daemon.log"))
+                .map_err(|e| MaccError::Io {
+                    path: log_dir.display().to_string(),
+                    action: "open supervisor daemon log".into(),
+                    source: e,
+                })?;
             let mut daemon_cmd = ProcessCommand::new(current_exe);
             daemon_cmd
                 .current_dir(&paths.root)
@@ -80,6 +92,7 @@ impl<'a> SupervisorCommand<'a> {
                 .arg("supervisor")
                 .arg("start")
                 .args(attach.then_some("--attach"))
+                .args(retry.then_some("--retry"))
                 .args(
                     coordinator_pid
                         .map(|pid| vec!["--coordinator-pid".to_string(), pid.to_string()])
@@ -88,8 +101,14 @@ impl<'a> SupervisorCommand<'a> {
                 .env(SUPERVISOR_DAEMON_CHILD_ENV, "1")
                 .env("MACC_INTERNAL_INVOCATION", "1")
                 .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
+                .stdout(Stdio::from(daemon_log.try_clone().map_err(|e| {
+                    MaccError::Io {
+                        path: log_dir.display().to_string(),
+                        action: "clone supervisor log".into(),
+                        source: e,
+                    }
+                })?))
+                .stderr(Stdio::from(daemon_log));
 
             // UNIX daemonization: call setsid() in the child after fork but before
             // exec so the daemon gets its own session with no controlling terminal.
@@ -101,23 +120,58 @@ impl<'a> SupervisorCommand<'a> {
             // always true for a freshly forked child.
             unsafe {
                 daemon_cmd.pre_exec(|| {
-                    libc::setsid();
+                    if libc::setsid() == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
                     Ok(())
                 });
             }
 
-            let child = daemon_cmd.spawn().map_err(|e| MaccError::Io {
+            let mut child = daemon_cmd.spawn().map_err(|e| MaccError::Io {
                 path: paths.root.to_string_lossy().into(),
                 action: "spawn supervisor daemon".into(),
                 source: e,
             })?;
 
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                if read_pid_file(&supervisor_pid_path)? == Some(child.id())
+                    && paths.root.join(SUPERVISOR_HEALTH_REL_PATH).exists()
+                {
+                    break;
+                }
+                if !is_pid_running(child.id()) || Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(MaccError::Validation(format!("Supervisor did not become ready; inspect {}/.macc/log/supervisor/daemon.log", paths.root.display())));
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
             println!("Supervisor started in daemon mode (pid {}).", child.id());
             return Ok(());
         }
 
         ensure_not_running(&supervisor_pid_path)?;
 
+        let _instance_lock = macc_core::fs_lock::AdvisoryLock::acquire(
+            &paths.root.join(".macc/state/supervisor.lock"),
+            Duration::ZERO,
+            "supervisor",
+        )?;
+        if retry {
+            let ledger = paths.root.join(".macc/state/supervisor-interventions.json");
+            if ledger.exists() {
+                let backup = ledger.with_extension(format!(
+                    "{}.json",
+                    chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+                ));
+                fs::rename(&ledger, &backup).map_err(|source| MaccError::Io {
+                    path: ledger.display().to_string(),
+                    action: "archive supervisor intervention ledger for retry".into(),
+                    source,
+                })?;
+            }
+        }
         let process_id = std::process::id();
         write_pid_file(&supervisor_pid_path, process_id)?;
 
@@ -142,157 +196,36 @@ impl<'a> SupervisorCommand<'a> {
         };
 
         if let Some(pid) = coordinator_pid {
-            write_pid_file(&watchdog_cfg.pid_file_path, pid)?;
+            write_pid_file(&paths.root.join(".macc/state/coordinator.pid"), pid)?;
         }
-
-        let coordinator_start_cmd = vec![
-            std::env::current_exe()
-                .map_err(|e| MaccError::Io {
-                    path: paths.root.to_string_lossy().into(),
-                    action: "resolve current executable for supervisor".into(),
-                    source: e,
-                })?
-                .to_string_lossy()
-                .into_owned(),
-            "--cwd".to_string(),
-            paths.root.to_string_lossy().into_owned(),
-            "coordinator".to_string(),
-            "run".to_string(),
-            "--no-tui".to_string(),
-        ];
-
-        let process_manager = CoordinatorProcessManager::new(watchdog_cfg.pid_file_path.clone())
-            .with_start_command(coordinator_start_cmd);
-        let mut watchdog = SupervisorWatchdog::new(watchdog_cfg, process_manager.clone());
-
-        println!(
-            "Supervisor started (watchdog={}s, health={}).",
-            supervisor_cfg.watchdog_interval_seconds.max(1),
-            paths.root.join(SUPERVISOR_HEALTH_REL_PATH).display()
-        );
-
-        let runtime = tokio::runtime::Runtime::new().map_err(|e| {
-            MaccError::Validation(format!("build runtime for supervisor watchdog: {}", e))
-        })?;
-
+        let runtime = tokio::runtime::Runtime::new()
+            .map_err(|e| MaccError::Validation(format!("Supervisor runtime: {e}")))?;
         let result = runtime.block_on(async {
-            if attach {
-                let mut recovery = ModeCRecovery::new(ModeCConfig {
-                    events_log_path: resolve_project_path(
-                        &paths.root,
-                        &supervisor_cfg.events_log_path,
-                    ),
-                    max_restart_attempts: supervisor_cfg.max_restart_attempts,
-                    ..ModeCConfig::default()
-                });
-
-                loop {
-                    let status = watchdog.check_once().await.map_err(|err| {
-                        MaccError::Validation(format!("supervisor attach check failed: {}", err))
-                    })?;
-
-                    if matches!(
-                        status.health,
-                        macc_core::supervisor::HealthCheckResult::Healthy
-                    ) {
-                        recovery = ModeCRecovery::new(ModeCConfig {
-                            events_log_path: resolve_project_path(
-                                &paths.root,
-                                &supervisor_cfg.events_log_path,
-                            ),
-                            max_restart_attempts: supervisor_cfg.max_restart_attempts,
-                            ..ModeCConfig::default()
-                        });
-                    }
-
-                    if status.health.is_running() {
-                        if let Err(err) = watchdog.run_mode_b_if_needed().await {
-                            tracing::warn!("supervisor attach: Mode B analysis failed: {}", err);
-                        }
-                    }
-
-                    if let Some(pid) = status.coordinator_pid {
-                        if !is_pid_running(pid) {
-                            let result = read_last_coordinator_result(&resolve_project_path(
-                                &paths.root,
-                                &supervisor_cfg.events_log_path,
-                            ))?;
-                            // Clean exit: coordinator finished successfully.
-                            if matches!(result.as_deref(), Some("success")) {
-                                return Ok(());
-                            }
-                            // Only attempt recovery when there is an explicit failure result.
-                            // A None result means the coordinator exited without writing a
-                            // result event (e.g. the run completed before an event was flushed),
-                            // which is not a crash. Exit the supervisor cleanly in that case.
-                            if matches!(result.as_deref(), Some("failed")) {
-                                let exit_code = match status.health {
-                                    macc_core::supervisor::HealthCheckResult::Crashed {
-                                        exit_code,
-                                    } => exit_code,
-                                    _ => None,
-                                };
-                                recovery
-                                    .run_recovery(&process_manager, exit_code)
-                                    .await
-                                    .map_err(|err| {
-                                        MaccError::Validation(format!(
-                                            "supervisor attach recovery failed: {}",
-                                            err
-                                        ))
-                                    })?;
-                            } else {
-                                // result is None — coordinator PID is gone with no clear failure.
-                                // Exit the supervisor cleanly instead of looping or recovering.
-                                return Ok(());
-                            }
-                        }
-                    } else {
-                        let result = read_last_coordinator_result(&resolve_project_path(
-                            &paths.root,
-                            &supervisor_cfg.events_log_path,
-                        ))?;
-                        if matches!(result.as_deref(), Some("success")) {
-                            return Ok(());
-                        }
-                        if matches!(result.as_deref(), Some("failed")) {
-                            let exit_code = match status.health {
-                                macc_core::supervisor::HealthCheckResult::Crashed { exit_code } => {
-                                    exit_code
-                                }
-                                _ => None,
-                            };
-                            recovery
-                                .run_recovery(&process_manager, exit_code)
-                                .await
-                                .map_err(|err| {
-                                    MaccError::Validation(format!(
-                                        "supervisor attach recovery failed: {}",
-                                        err
-                                    ))
-                                })?;
-                        }
-                    }
-                    tokio::time::sleep(Duration::from_secs(
-                        supervisor_cfg.watchdog_interval_seconds.max(1),
-                    ))
-                    .await;
-                }
-            } else {
+            #[cfg(unix)]
+            {
+                let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .map_err(|e| MaccError::Validation(format!("Supervisor SIGTERM handler: {e}")))?;
                 tokio::select! {
-                    res = watchdog.run_forever() => map_watchdog_error(res),
-                    sig = tokio::signal::ctrl_c() => {
-                        sig.map_err(|e| MaccError::Io {
-                            path: "signal".into(),
-                            action: "wait for ctrl-c".into(),
-                            source: e,
-                        })?;
-                        Ok(())
-                    }
+                    result = super::supervisor_runtime::run(paths.clone(), canonical.clone()) => result,
+                    _ = term.recv() => Ok(()),
+                    result = tokio::signal::ctrl_c() => result.map_err(|e| MaccError::Validation(e.to_string())),
                 }
             }
+            #[cfg(not(unix))]
+            { tokio::select! {
+                result = super::supervisor_runtime::run(paths.clone(), canonical.clone()) => result,
+                result = tokio::signal::ctrl_c() => result.map_err(|e| MaccError::Validation(e.to_string())),
+            } }
         });
 
+        super::supervisor_runtime::record_shutdown(&paths)?;
+        if let Err(error) = &result {
+            super::supervisor_runtime::record_failure(
+                &paths,
+                &canonical.automation.supervisor.clone().unwrap_or_default(),
+                &error.to_string(),
+            )?;
+        }
         cleanup_pid_file_if_matches(&supervisor_pid_path, process_id)?;
 
         if std::env::var(SUPERVISOR_DAEMON_CHILD_ENV).is_ok() {
@@ -363,17 +296,38 @@ impl<'a> SupervisorCommand<'a> {
                 action: "read supervisor health file".into(),
                 source: e,
             })?;
-            let health: SupervisorHealthStatus = serde_json::from_str(&raw).map_err(|e| {
-                MaccError::Validation(format!(
-                    "parse supervisor health file {}: {}",
-                    supervisor_health_path.display(),
-                    e
-                ))
-            })?;
-            println!("  health: {:?}", health.health);
-            println!("  checked_at: {}", health.checked_at);
-            if let Some(last_event) = health.last_event_ts {
-                println!("  last_event_ts: {}", last_event);
+            let health: Value = serde_json::from_str(&raw)
+                .map_err(|e| MaccError::Validation(format!("Invalid supervisor health: {e}")))?;
+            println!(
+                "  health: {}",
+                health
+                    .pointer("/health/status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+            );
+            println!(
+                "  tool: {}",
+                health
+                    .get("tool")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unconfigured")
+            );
+            println!(
+                "  checked_at: {}",
+                health
+                    .get("checked_at")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown")
+            );
+            println!(
+                "  last_intervention: {}",
+                health
+                    .get("last_intervention")
+                    .and_then(Value::as_str)
+                    .unwrap_or("none")
+            );
+            if let Some(detail) = health.get("detail").and_then(Value::as_str) {
+                println!("  detail: {detail}");
             }
         } else {
             println!(
@@ -434,65 +388,18 @@ impl<'a> SupervisorCommand<'a> {
         println!("  findings: {}", report.findings.len());
         println!("  recommendations: {}", report.recommendations.len());
         println!("  actions_taken: {}", report.actions_taken.len());
+        let value: Value =
+            serde_json::from_str(&raw).map_err(|e| MaccError::Validation(e.to_string()))?;
+        if let Some(intervention) = value.get("intervention") {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(intervention)
+                    .map_err(|e| MaccError::Validation(e.to_string()))?
+            );
+        }
 
         Ok(())
     }
-}
-
-fn read_last_coordinator_result(path: &Path) -> Result<Option<String>> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    let raw = fs::read_to_string(path).map_err(|e| MaccError::Io {
-        path: path.to_string_lossy().into(),
-        action: "read coordinator events log".into(),
-        source: e,
-    })?;
-    for line in raw.lines().rev() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
-            // Prefer an explicit `result` field (forward-compatible path).
-            let explicit = value
-                .get("result")
-                .and_then(Value::as_str)
-                .or_else(|| {
-                    value
-                        .get("payload")
-                        .and_then(|payload| payload.get("result"))
-                        .and_then(Value::as_str)
-                })
-                .map(|v| v.to_ascii_lowercase());
-            if explicit.is_some() {
-                return Ok(explicit);
-            }
-
-            // Coordinator events use `"type"` + `"status"` rather than `"result"`.
-            // Map the coordinator's native termination events to success/failed.
-            let event_type = value
-                .get("type")
-                .or_else(|| value.get("event_type"))
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let status = value
-                .get("status")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-
-            match (event_type, status) {
-                // `command_end` with `status: done` is a clean coordinator finish.
-                ("command_end", "done") => return Ok(Some("success".to_string())),
-                // Any event with status `failed` or `error` is a failure.
-                (_, "failed" | "error") => return Ok(Some("failed".to_string())),
-                // `command_error` events always indicate failure.
-                ("command_error", _) => return Ok(Some("failed".to_string())),
-                _ => return Ok(None),
-            }
-        }
-    }
-    Ok(None)
 }
 
 fn resolve_project_path(root: &Path, path: &Path) -> PathBuf {
@@ -596,8 +503,4 @@ fn send_signal(pid: u32, signal: &str) -> Result<()> {
         "failed to send {} to supervisor pid {}",
         signal, pid
     )))
-}
-
-fn map_watchdog_error(result: std::result::Result<(), WatchdogError>) -> Result<()> {
-    result.map_err(|err| MaccError::Validation(format!("supervisor watchdog failed: {}", err)))
 }
