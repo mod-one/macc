@@ -608,9 +608,9 @@ pub(super) async fn launch_performer(
     // Compute model routing decision for this task (spec §8–§11).
     // Reads routing_hints from the task's extra fields; defaults to Standard if absent.
     let mut routing_env = compute_routing_env(repo_root, &claim.task_id, canonical);
+    routing_env.push(("MACC_BASE_REF", claim.base_branch.clone()));
     if claim.resume_attempt > 0 {
         routing_env.push(("MACC_RESUME_ATTEMPT", claim.resume_attempt.to_string()));
-        routing_env.push(("MACC_BASE_REF", claim.base_branch.clone()));
     }
 
     let pid = coordinator_runtime::spawn_performer_job(

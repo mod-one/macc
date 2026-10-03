@@ -2390,6 +2390,13 @@ pub(crate) async fn run_single_prd_control_plane(
     let storage_mode = resolve_storage_mode(env_cfg, coordinator)?;
     let storage_paths = crate::ProjectPaths::from_root(repo_root);
     sync_storage_with_startup_reconcile(&storage_paths, storage_mode, json_compat, logger)?;
+    crate::coordinator::delivery_evidence::reconcile_before_dispatch(
+        repo_root,
+        &prd_file,
+        coordinator,
+        env_cfg,
+        logger,
+    )?;
     let startup_cleaned = if let Some(log) = logger {
         let note = |line: String| {
             let _ = log.note(line);

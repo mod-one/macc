@@ -449,13 +449,13 @@ fn apply_user_model_tiers(
 
 pub fn ensure_performer(worktree_path: &Path) -> Result<PathBuf> {
     let target = worktree_path.join("performer.sh");
-    if target.exists() {
-        return Ok(target);
-    }
-
     let worktree_paths = ProjectPaths::from_root(worktree_path);
     let _ = crate::ensure_embedded_automation_scripts(&worktree_paths)?;
     let source = worktree_paths.automation_performer_path();
+
+    if target.exists() && std::fs::read(&target).ok() == std::fs::read(&source).ok() {
+        return Ok(target);
+    }
 
     std::fs::copy(&source, &target).map_err(|e| MaccError::Io {
         path: target.to_string_lossy().into(),
@@ -667,6 +667,24 @@ fn write_scope_file(path: &Path, scope: &str) -> Result<()> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn reused_worktree_refreshes_performer_and_installs_completion_contract() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("performer.sh");
+        std::fs::write(&target, "stale runner").unwrap();
+        ensure_performer(temp.path()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            include_str!("../../automat/performer.sh")
+        );
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join(".macc/automation/completion_evidence.sh"))
+                .unwrap(),
+            include_str!("../../automat/completion_evidence.sh")
+        );
+        ensure_performer(temp.path()).unwrap();
+    }
 
     #[test]
     fn parse_porcelain_output() {

@@ -7,6 +7,7 @@ pub mod approval;
 pub mod args;
 pub mod commit_reconciler;
 pub mod control_plane;
+pub mod delivery_evidence;
 pub mod engine;
 pub mod error_normalizer;
 pub mod helpers;

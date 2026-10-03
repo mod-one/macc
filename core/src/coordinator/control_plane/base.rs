@@ -1298,6 +1298,14 @@ pub async fn monitor_active_jobs_native(
                     &state.normalizer_registry,
                     &now_iso_coordinator(),
                 )?;
+                if evt.success {
+                    crate::coordinator::delivery_evidence::attach_reference_completion(
+                        &mut registry,
+                        &evt.task_id,
+                        repo_root,
+                        &job.base_branch,
+                    )?;
+                }
                 if let Some(verdict) = evt.gate_verdict {
                     coordinator_engine::set_task_gate_verdict_in_registry(
                         &mut registry,

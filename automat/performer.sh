@@ -122,6 +122,12 @@ fi
 
 cd "$worktree"
 
+evidence_helper="$(dirname "${BASH_SOURCE[0]}")/completion_evidence.sh"
+if [[ ! -f "$evidence_helper" ]]; then
+  evidence_helper="${worktree}/.macc/automation/completion_evidence.sh"
+fi
+source "$evidence_helper"
+
 tool_json="${worktree}/.macc/tool.json"
 worktree_meta="${worktree}/.macc/worktree.json"
 
@@ -139,6 +145,10 @@ if [[ ! -f "$worktree_meta" ]]; then
   LAST_ERROR_MESSAGE="worktree metadata not found"
   echo "Error: worktree metadata not found in worktree: $worktree_meta" >&2
   exit 1
+fi
+
+if [[ -z "$base_ref" ]]; then
+  base_ref="$(jq -r '.base_branch // ""' "$worktree_meta")"
 fi
 
 expected_branch="$(jq -r '.branch // ""' "$worktree_meta")"
@@ -740,7 +750,7 @@ Instructions:
    - MACC_TASK_RESULT: error_with_changes   (if you started work but cannot finish)
    - MACC_TASK_RESULT: error_without_changes (if you could not start or make any progress)
    - MACC_TASK_RESULT: precondition_unmet (if execution is correct but a required gate or external condition is not met; never retryable)
-11) Use already_satisfied only when you verified the task is already done and can cite the evidence briefly.
+11) Use already_satisfied only after verifying every acceptance criterion. Both already_satisfied and success_without_changes require MACC_TASK_RESULT_EXP: with concrete criteria evidence, commands executed and their results. The runner records or reuses a durable validation commit; do not commit yourself.
 12) Use error_with_changes or error_without_changes ONLY when THIS task could not be completed because execution malfunctioned (sandbox failures, environment issues, permission errors, etc.). Use precondition_unmet instead when stopping is the task's correct specified behavior. All three require a brief "MACC_TASK_RESULT_EXP:" line.
     With precondition_unmet, ALSO print one "MACC_TASK_PRECONDITION: <condition>" line per unsatisfied precondition, each on its own line, before the result marker. Name the concrete condition (the dependency verdict, approval, decision, data, or environment that is missing), not a generic summary. These lines are shown to the operator as the reason the task cannot be implemented yet.
 13) Pre-existing repository problems that this task did not cause and is not scoped to fix are NOT a reason to report an error. If a repo-wide check (test suite, build, lint) fails only in areas unrelated to this task, and this task's own work is complete and verified, report success and note the unrelated failures in your explanation. Judge this task by its own acceptance criteria, not by the health of the whole repository.
@@ -1034,8 +1044,25 @@ run_tool() {
     fi
     local result_exp=""
     result_exp="$(resolve_task_result_exp "$output_capture" "$result_kind")"
+    COMPLETION_COMMIT_SHA=""
+    COMPLETION_EVIDENCE_CREATED="false"
     local gate_verdict=""
     gate_verdict="$(extract_task_gate_verdict "$output_capture")"
+    local reported_result_kind="$result_kind"
+    if [[ "$result_kind" == "already_satisfied" || "$result_kind" == "success_without_changes" ]]; then
+      if ! record_completion_evidence "$task_id" "$next_title" "$result_kind" "$result_exp" "$next_task_json" false "$gate_verdict"; then
+        echo "Error: $LAST_ERROR_MESSAGE" >&2
+        log_task_line "- Completion evidence refused: $LAST_ERROR_MESSAGE"
+        rm -f "$output_capture"
+        return 1
+      fi
+      # A validation commit is real unpublished Git work. It must traverse the
+      # existing merge lane rather than the no-change fast path to merged.
+      if [[ "$COMPLETION_EVIDENCE_CREATED" == "true" ]]; then
+        result_kind="success_with_changes"
+        changed="true"
+      fi
+    fi
     if ! validate_terminal_result_contract "$output_capture" "$result_kind"; then
       emit_performer_event "contract_violation" "$CURRENT_PHASE" "warning" "$(jq -nc \
         --arg kind "$result_kind" \
@@ -1062,6 +1089,8 @@ run_tool() {
       --argjson changed "$changed" \
       --arg result_exp "$result_exp" \
       --arg gate_verdict "$gate_verdict" \
+      --arg completion_commit_sha "$COMPLETION_COMMIT_SHA" \
+      --arg reported_result_kind "$reported_result_kind" \
       '({
         attempt:($attempt|tonumber?),
         changed:$changed,
@@ -1074,7 +1103,8 @@ run_tool() {
       }
       + (if $result_kind != "" then {result_kind:$result_kind} else {} end)
       + (if $result_exp  != "" then {result_exp:$result_exp}  else {} end)
-      + (if $gate_verdict != "" then {gate_verdict:$gate_verdict} else {} end))')"; then
+      + (if $gate_verdict != "" then {gate_verdict:$gate_verdict} else {} end)
+      + (if $completion_commit_sha != "" then {completion_commit_sha:$completion_commit_sha,reported_result_kind:$reported_result_kind} else {} end))')"; then
       echo "Error: failed to persist terminal phase_result event (status=done); refusing to mark task passed" >&2
       log_task_line "- Exit status: ${status}"
       exit 1
@@ -1283,13 +1313,21 @@ heartbeat_start
 for ((i=1; i<=PERFORMER_MAX_ITERATIONS; i++)); do
   next_task_json="$(get_next_task_json)"
   if [[ -z "$next_task_json" ]]; then
-    commit_changes "$last_id" "$last_title"
+    # A passed PRD alone is ephemeral state. This shortcut requires an existing
+    # reference-branch delivery; it cannot manufacture an unverified success.
+    local_task_json="$(jq -c --arg id "$task_id" "${JQ_ITEMS} | map(select(.id == \$id)) | .[0] // {}" "$prd")"
+    if ! record_completion_evidence "$task_id" "Previously validated task" "already_satisfied" \
+        "Passed task matched a previously published MACC delivery commit" "$local_task_json" "true"; then
+      echo "Error: $LAST_ERROR_MESSAGE" >&2
+      exit 1
+    fi
     # Fatal on rejection (see the "done" path in run_tool() for the full
     # rationale): do not set TERMINAL_EVENT_EMITTED or exit 0 unless the
     # coordinator actually accepted this terminal event. Leaving
     # TERMINAL_EVENT_EMITTED unset on failure lets the on_exit trap's
     # synthetic "failed" event fire as a fallback signal.
-    if ! must_emit_performer_event "phase_result" "$CURRENT_PHASE" "done" "$(jq -nc '{
+    if ! must_emit_performer_event "phase_result" "$CURRENT_PHASE" "done" "$(jq -nc --arg sha "$COMPLETION_COMMIT_SHA" '{
+      completion_commit_sha:$sha,
       attempt: 0,
       result_kind: "already_satisfied",
       changed: false,
