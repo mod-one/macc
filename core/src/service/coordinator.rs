@@ -217,6 +217,20 @@ pub fn coordinator_poll_managed_command_process(
         let code = std::fs::read_to_string(&result_path)
             .ok()
             .and_then(|raw| raw.trim().parse::<i32>().ok());
+        // The exit may be observed hours later (a client opened afterwards):
+        // report how long the command ran, not how long ago it started.
+        let elapsed_secs = std::fs::metadata(&result_path)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .zip(chrono::DateTime::parse_from_rfc3339(&record.started_at).ok())
+            .and_then(|(finished, started)| {
+                chrono::DateTime::<chrono::Utc>::from(finished)
+                    .signed_duration_since(started)
+                    .to_std()
+                    .ok()
+            })
+            .map(|ran| ran.as_secs())
+            .unwrap_or(elapsed_secs);
         let _ = remove_managed_command(paths, &record.kind)?;
         let _ = std::fs::remove_file(result_path);
         Ok(CoordinatorManagedCommandPoll::Exited {

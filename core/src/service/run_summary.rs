@@ -185,7 +185,7 @@ fn headline_for(run: &CoordinatorRun, blocked: Option<&Task>, dependent_count: u
             .last_error_code
             .as_deref()
             .unwrap_or("unknown error");
-        if code == "E903" {
+        if code == "E903" || !task.task_runtime.unmet_preconditions.is_empty() {
             // Runs recorded before the structured list existed carry no
             // items: say "a precondition" rather than inventing a count.
             let count = task.task_runtime.unmet_preconditions.len();
@@ -218,7 +218,7 @@ fn headline_for(run: &CoordinatorRun, blocked: Option<&Task>, dependent_count: u
 
 fn next_action_for(run: &CoordinatorRun, blocked: Option<&Task>, code: Option<&str>) -> String {
     if let Some(task) = blocked {
-        if code == Some("E903") {
+        if code == Some("E903") || !task.task_runtime.unmet_preconditions.is_empty() {
             return format!(
                 "Satisfy the recorded precondition(s) (this is not a tool failure; retrying unchanged will stop again), then run `macc coordinator unblock-task --task {} --evidence \"<evidence>\"`.",
                 task.id

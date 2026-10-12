@@ -346,6 +346,16 @@ impl<'a> SupervisorCommand<'a> {
             );
         }
 
+        let latest = paths.root.join(".macc/log/supervisor/latest.json");
+        if let Some(value) = fs::read_to_string(&latest)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        {
+            for line in intervention_summary(&value) {
+                println!("  {line}");
+            }
+        }
+
         println!("Coordinator:");
         match self.app.engine.get_coordinator_status(&paths) {
             Ok(status) => {
@@ -400,6 +410,10 @@ impl<'a> SupervisorCommand<'a> {
         println!("  actions_taken: {}", report.actions_taken.len());
         let value: Value =
             serde_json::from_str(&raw).map_err(|e| MaccError::Validation(e.to_string()))?;
+        // Readable outcome first; the full record follows for tooling.
+        for line in intervention_summary(&value) {
+            println!("{line}");
+        }
         if let Some(intervention) = value.get("intervention") {
             println!(
                 "{}",
@@ -410,6 +424,60 @@ impl<'a> SupervisorCommand<'a> {
 
         Ok(())
     }
+}
+
+/// Operator-facing lines for the latest intervention: why it stopped, what to
+/// do next, and the MACC improvements the diagnosis recommended.
+fn intervention_summary(report: &Value) -> Vec<String> {
+    let Some(intervention) = report.get("intervention") else {
+        return Vec::new();
+    };
+    let text = |key: &str| {
+        intervention
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    };
+    let mut lines = vec![format!(
+        "intervention: {} (attempt {})",
+        text("status").unwrap_or("unknown"),
+        intervention
+            .get("attempt")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+    )];
+    if let Some(reason) = text("detail") {
+        lines.push(format!("reason: {reason}"));
+    }
+    if let Some(next) = text("next_action") {
+        lines.push(format!("next: {next}"));
+    }
+    if let Some(branch) = text("target_branch") {
+        lines.push(format!("target branch: {branch}"));
+    }
+    let list = |pointer: &str| -> Vec<&str> {
+        intervention
+            .pointer(pointer)
+            .and_then(Value::as_array)
+            .map(|items| items.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default()
+    };
+    let preexisting = list("/preexisting_failures");
+    if !preexisting.is_empty() {
+        lines.push(format!(
+            "already failing on the unmodified base (not a gate): {}",
+            preexisting.join(", ")
+        ));
+    }
+    let findings = list("/diagnosis/macc_findings");
+    if !findings.is_empty() {
+        lines.push(format!("MACC findings ({}):", findings.len()));
+        for (index, finding) in findings.iter().enumerate() {
+            lines.push(format!("  {}. {finding}", index + 1));
+        }
+    }
+    lines
 }
 
 fn resolve_project_path(root: &Path, path: &Path) -> PathBuf {

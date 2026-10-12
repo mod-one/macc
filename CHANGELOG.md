@@ -7,6 +7,17 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed — Supervisor recovery
+- Supervisor repairs are based on and published to the coordinator reference branch (shared `integration::publish_commit`), not the branch checked out in the project root. Unrelated local changes no longer block an intervention; overlapping ones defer integration and are preserved.
+- Validation is baseline-aware: a command that also fails on the unmodified base no longer blocks the repair. It is recorded in `preexisting_failures` with `baseline-N.log`, and the independent verification compares both logs.
+- An unrecovered intervention reports its reason and an exact `next_action` in `macc supervisor status`, `macc supervisor report` and the TUI Coordinator Live header, together with the diagnosis' MACC findings.
+- A missing Git identity escalates before any AI call.
+
+### Fixed
+- `macc supervisor start --retry` no longer fails with "Diagnosis modified source" when the slot still holds an unfinished repair.
+- Blocked-run stop reasons and dependency-chain messages use `unmet_preconditions`/`result_explanation` instead of a truncated performer log header; the TUI precondition overlay is selected whenever preconditions are recorded, whatever the error code.
+- A managed command observed after it exited reports how long it ran, not the time since it started.
+
 ### Added
 - Added delayed one-shot coordinator execution with `macc coordinator run --in <duration>` and `macc coordinator run --at <datetime>`.
 

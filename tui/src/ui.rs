@@ -123,6 +123,9 @@ pub struct HeaderContext<'a> {
     pub trust_strip: Option<String>,
     /// §18: Active runtime phase overrides, rendered as a warning banner line.
     pub override_strip: Option<String>,
+    /// Reason, next step and findings of an unrecovered supervisor
+    /// intervention; one header line each.
+    pub supervisor_detail: Vec<String>,
 }
 
 pub fn header_lines(ctx: &HeaderContext<'_>, t: &Theme) -> Vec<Line<'static>> {
@@ -230,6 +233,21 @@ pub fn header_lines(ctx: &HeaderContext<'_>, t: &Theme) -> Vec<Line<'static>> {
         lines.push(Line::from(vec![Span::styled(
             truncate_middle(&ops_parts.join(" | "), max),
             ops_style,
+        )]));
+    }
+
+    for detail in &ctx.supervisor_detail {
+        // The tail (paths, repeated wording) is the expendable part here.
+        let shown = if detail.chars().count() > max {
+            let mut cut: String = detail.chars().take(max.saturating_sub(1)).collect();
+            cut.push('…');
+            cut
+        } else {
+            detail.clone()
+        };
+        lines.push(Line::from(vec![Span::styled(
+            shown,
+            Style::default().fg(t.warn),
         )]));
     }
 

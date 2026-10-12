@@ -169,56 +169,7 @@ impl IntegrationWorktree {
     /// tree holds the base branch.
     pub fn publish(&self) -> Result<PublishOutcome> {
         let new_sha = git::head_commit(&self.path)?;
-        if new_sha == self.base_sha {
-            return Ok(PublishOutcome::UpToDate);
-        }
-
-        let holders = git::worktrees_for_branch(&self.repo_root, &self.base)?;
-        let Some(holder) = holders.into_iter().next() else {
-            // Nobody has the branch checked out: atomic compare-and-swap.
-            if git::update_branch_ref_checked(
-                &self.repo_root,
-                &self.base,
-                &new_sha,
-                &self.base_sha,
-            )? {
-                return Ok(PublishOutcome::Published { new_sha });
-            }
-            return Ok(PublishOutcome::BaseMoved {
-                expected_sha: self.base_sha.clone(),
-            });
-        };
-
-        // The branch is checked out somewhere. If it already moved past the tip
-        // we integrated from, our result is stale — retry rather than merge a
-        // divergent history into the operator's checkout.
-        let holder_head = git::head_commit(&holder)?;
-        if holder_head != self.base_sha {
-            return Ok(PublishOutcome::BaseMoved {
-                expected_sha: self.base_sha.clone(),
-            });
-        }
-
-        // Fast-forward the holding worktree. Git advances the ref and the files
-        // together, and refuses outright if that would clobber local changes.
-        let output = git::run_git_output_mapped(
-            &holder,
-            &["merge", "--ff-only", &new_sha],
-            "fast-forward base worktree to integrated commit",
-        )?;
-        if output.status.success() {
-            return Ok(PublishOutcome::Published { new_sha });
-        }
-        Ok(PublishOutcome::BlockedByCheckout {
-            worktree: holder,
-            git_output: format!(
-                "{}\n{}",
-                String::from_utf8_lossy(&output.stdout).trim(),
-                String::from_utf8_lossy(&output.stderr).trim()
-            )
-            .trim()
-            .to_string(),
-        })
+        publish_commit(&self.repo_root, &self.base, &new_sha, &self.base_sha)
     }
 
     /// Abort any in-progress merge and return the worktree to the base tip.
@@ -255,6 +206,66 @@ impl PublishOutcome {
             )),
         }
     }
+}
+
+/// Publish `new_sha` to branch `base`, which was at `base_sha` when the commit
+/// was built on top of it.
+///
+/// Shared by the coordinator's merges and the supervisor's repairs so both
+/// reach the reference branch the same way. See the module docs for why the
+/// mechanism depends on whether a working tree holds the base branch.
+pub fn publish_commit(
+    repo_root: &Path,
+    base: &str,
+    new_sha: &str,
+    base_sha: &str,
+) -> Result<PublishOutcome> {
+    if new_sha == base_sha {
+        return Ok(PublishOutcome::UpToDate);
+    }
+    let new_sha = new_sha.to_string();
+
+    let holders = git::worktrees_for_branch(repo_root, base)?;
+    let Some(holder) = holders.into_iter().next() else {
+        // Nobody has the branch checked out: atomic compare-and-swap.
+        if git::update_branch_ref_checked(repo_root, base, &new_sha, base_sha)? {
+            return Ok(PublishOutcome::Published { new_sha });
+        }
+        return Ok(PublishOutcome::BaseMoved {
+            expected_sha: base_sha.to_string(),
+        });
+    };
+
+    // The branch is checked out somewhere. If it already moved past the tip
+    // we integrated from, our result is stale — retry rather than merge a
+    // divergent history into the operator's checkout.
+    let holder_head = git::head_commit(&holder)?;
+    if holder_head != base_sha {
+        return Ok(PublishOutcome::BaseMoved {
+            expected_sha: base_sha.to_string(),
+        });
+    }
+
+    // Fast-forward the holding worktree. Git advances the ref and the files
+    // together, and refuses outright if that would clobber local changes.
+    let output = git::run_git_output_mapped(
+        &holder,
+        &["merge", "--ff-only", &new_sha],
+        "fast-forward base worktree to integrated commit",
+    )?;
+    if output.status.success() {
+        return Ok(PublishOutcome::Published { new_sha });
+    }
+    Ok(PublishOutcome::BlockedByCheckout {
+        worktree: holder,
+        git_output: format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+        .trim()
+        .to_string(),
+    })
 }
 
 #[cfg(test)]

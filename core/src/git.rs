@@ -777,6 +777,54 @@ fn parse_commit_info_line(line: &str) -> Option<CommitInfo> {
     })
 }
 
+/// Tree id of a worktree's full content (tracked, staged and untracked,
+/// honouring ignore rules), computed through a scratch index so the worktree's
+/// own index is left exactly as it was.
+pub fn worktree_content_tree(worktree: &Path) -> Result<String> {
+    let located = run_git_output(
+        worktree,
+        &["rev-parse", "--git-path", "index"],
+        "locate worktree index",
+    )?;
+    if !located.status.success() {
+        return Err(MaccError::Git {
+            operation: "worktree_content_tree".into(),
+            message: String::from_utf8_lossy(&located.stderr).trim().to_string(),
+        });
+    }
+    let index = std::path::PathBuf::from(String::from_utf8_lossy(&located.stdout).trim());
+    let index = if index.is_absolute() {
+        index
+    } else {
+        worktree.join(index)
+    };
+    let scratch = index.with_extension("content-snapshot");
+    let io = |source: std::io::Error| MaccError::Io {
+        path: scratch.display().to_string(),
+        action: "prepare scratch index".into(),
+        source,
+    };
+    if index.exists() {
+        // Seeding from the real index keeps its stat cache: unchanged files are not re-hashed.
+        std::fs::copy(&index, &scratch).map_err(io)?;
+    }
+    let scratch_text = scratch.to_string_lossy().into_owned();
+    let envs = [("GIT_INDEX_FILE", scratch_text.as_str())];
+    let run = |args: &[&str]| -> Result<String> {
+        let output = run_git_output_with_env(worktree, args, &envs, "snapshot worktree content")?;
+        if !output.status.success() {
+            return Err(MaccError::Git {
+                operation: "worktree_content_tree".into(),
+                message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            });
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    };
+    let tree = run(&["add", "--all"]).and_then(|_| run(&["write-tree"]));
+    let _ = std::fs::remove_file(&scratch);
+    tree
+}
+
 /// Returns the list of git identity fields that are not configured.
 /// Checks `user.email` and `user.name` via `git config` (respects global, local, and system).
 /// An empty vec means all required fields are set.

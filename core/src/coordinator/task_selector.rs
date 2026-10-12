@@ -341,10 +341,29 @@ fn blocked_task_reason(task: &Task) -> String {
         .as_deref()
         .filter(|value| !value.is_empty())
         .unwrap_or("unknown error");
+    // Structured evidence outranks the normalized error text, which is often
+    // just the truncated head of a performer log.
+    let preconditions: Vec<&str> = task
+        .task_runtime
+        .unmet_preconditions
+        .iter()
+        .map(|item| item.trim())
+        .filter(|item| !item.is_empty())
+        .collect();
+    if code != "E903" && !preconditions.is_empty() {
+        return format!(
+            "blocked ({code}): unmet precondition{}: {}",
+            if preconditions.len() == 1 { "" } else { "s" },
+            preconditions.join("; ")
+        );
+    }
     let message = task
         .task_runtime
-        .last_error_message
+        .result_explanation
         .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && code != "E903")
+        .or(task.task_runtime.last_error_message.as_deref())
         .or(task.task_runtime.last_error.as_deref())
         .filter(|value| !value.is_empty())
         .unwrap_or("no blocking explanation was recorded");
@@ -1774,6 +1793,40 @@ mod precondition_reason_tests {
     use super::blocked_task_reason;
     use crate::coordinator::model::TaskRegistry;
     use serde_json::json;
+
+    #[test]
+    fn structured_preconditions_replace_a_truncated_log_header_for_any_code() {
+        let registry = TaskRegistry::from_value(&json!({"tasks":[{
+            "id":"WEB-BFF-002","state":"blocked",
+            "task_runtime":{
+                "last_error_code":"E901",
+                "last_error_message":"# Performer log for task WEB-BFF-002",
+                "unmet_preconditions":["allowed_paths must include apps/web/src/config.ts"]
+            }
+        }]}))
+        .expect("registry");
+        assert_eq!(
+            blocked_task_reason(&registry.tasks[0]),
+            "blocked (E901): unmet precondition: allowed_paths must include apps/web/src/config.ts"
+        );
+    }
+
+    #[test]
+    fn result_explanation_outranks_the_normalized_error_text() {
+        let registry = TaskRegistry::from_value(&json!({"tasks":[{
+            "id":"T","state":"blocked",
+            "task_runtime":{
+                "last_error_code":"E901",
+                "last_error_message":"# Performer log for task T",
+                "result_explanation":"schema migration 0042 is missing"
+            }
+        }]}))
+        .expect("registry");
+        assert_eq!(
+            blocked_task_reason(&registry.tasks[0]),
+            "blocked (E901): schema migration 0042 is missing"
+        );
+    }
 
     #[test]
     fn e903_root_reason_keeps_the_cannot_be_implemented_text_intact() {

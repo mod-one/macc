@@ -70,8 +70,12 @@ pub fn context(
         "unmet_preconditions":task.task_runtime.unmet_preconditions,"result_explanation":task.task_runtime.result_explanation,
         "extra":task.extra,"blocked_on_external":task.blocked_on_external
     })).collect();
+    // Repairs publish to the reference branch: its movement is new evidence too.
+    let reference =
+        super::workspace::target(&paths.root, canonical.automation.coordinator.as_ref())?;
     Ok(
         json!({"tasks":tasks,"head":git(&paths.root,&["rev-parse","HEAD"])?,
+        "reference":{"branch":reference.branch,"tip":reference.base},
         "source_status":git(&paths.root,&["status","--porcelain"])?,
         "source_diff":git(&paths.root,&["diff","HEAD","--binary"])?,
         "tools":canonical.tools,"supervisor":canonical.automation.supervisor,
@@ -147,6 +151,57 @@ pub fn settle(
                 .map(|time| time.timestamp())
         };
     }
+}
+
+const RETRY: &str = "macc supervisor stop && macc supervisor start --daemon --retry";
+
+/// The exact step that moves a settled, unrecovered intervention forward.
+pub fn next_action(pending: &Pending, report: &Intervention, max_attempts: u32) -> Option<String> {
+    if report.status == "recovered" {
+        return None;
+    }
+    if pending.status == "retrying" && pending.attempts < max_attempts {
+        return Some(format!(
+            "No action needed: automatic retry {} of {} is scheduled.",
+            pending.attempts + 1,
+            max_attempts
+        ));
+    }
+    let kept = report
+        .worktree
+        .as_ref()
+        .filter(|path| path.exists())
+        .map(|path| format!(" Repair work is kept in {}.", path.display()))
+        .unwrap_or_default();
+    let human = report.diagnosis.as_ref().is_some_and(|d| d.requires_human);
+    let action = if human {
+        format!("Make the human decision named in the reason, then run `{RETRY}`.")
+    } else if let Some(time) = pending
+        .next_check
+        .and_then(|time| chrono::DateTime::from_timestamp(time, 0))
+    {
+        format!(
+            "No action needed: rechecks automatically at {}. To retry sooner run `{RETRY}`.",
+            time.to_rfc3339()
+        )
+    } else if report.detail.contains("Validation failed")
+        || report.detail.contains("Validation timed out")
+    {
+        format!("Fix the failing command or set automation.supervisor.validation_commands in .macc/macc.yaml (a config change is retried automatically), otherwise run `{RETRY}`.")
+    } else if report.detail.contains("Git identity is missing") {
+        format!("Run `macc doctor --fix --git-name \"Your Name\" --git-email \"you@example.com\"`, then `{RETRY}`.")
+    } else if report.detail.contains("Coordinator failed during startup")
+        || report.detail.contains("Coordinator readiness timed out")
+    {
+        format!("Fix the coordinator startup error in .macc/log/coordinator/daemon-stderr.log (`macc coordinator run --preflight-only` shows reference-branch problems), then run `{RETRY}`.")
+    } else if report.detail.contains("integration deferred") {
+        format!(
+            "Commit or stash the overlapping changes on the reference branch, then run `{RETRY}`."
+        )
+    } else {
+        format!("Resolve the reason above, then run `{RETRY}`.")
+    };
+    Some(format!("{action}{kept}"))
 }
 
 #[cfg(test)]

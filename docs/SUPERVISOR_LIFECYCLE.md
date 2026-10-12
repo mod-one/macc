@@ -7,7 +7,8 @@ verification or configuration problem waits for relevant evidence to change.
 The watchdog does not repeatedly ask an AI to diagnose unchanged evidence.
 
 Relevant changes include task error/precondition state, project HEAD/source
-changes, configured tools or supervisor settings, and persisted tool availability.
+changes, the reference branch tip, configured tools or supervisor settings, and
+persisted tool availability.
 A documented provider reset time permits one further diagnosis for unchanged
 incident evidence. Reset expiry permits rechecking; it does not prove that quota
 has been restored. Unknown deadlines and human decisions wait for new evidence
@@ -24,9 +25,10 @@ the latest report without another AI invocation.
 
 Supervisor worktrees live in `.macc/worktree/supervisor-01`, `supervisor-02`, etc.
 An ownership marker reserves a slot for its incident. Retries of that incident
-reuse it with its index, working files and untracked changes intact. A clean
-slot can be updated to a new project HEAD only when all its commits are already
-integrated. A changed base with unintegrated work requires operator recovery.
+reuse it with its index, working files and untracked changes intact, including
+after an explicit `--retry`: a new diagnosis must leave the slot content
+unchanged, not find it clean. A clean slot can be updated to a new reference
+branch tip only when all its commits are already integrated. A changed base with unintegrated work requires operator recovery.
 Coordinator worker dispatch and bulk worker cleanup exclude these slots.
 
 Each attempt keeps its prompt `.txt`, stdout/stderr `.log`, validation logs and
@@ -36,8 +38,9 @@ repair notes), generated `.txt`/`.log` files, Git status and binary diff into th
 attempt's archive. Git internals, dependency trees and symlink targets are
 excluded. Archiving failure prevents removal.
 
-A closed, clean slot is removed only if its HEAD is an ancestor of the current
-project HEAD. Dirty files or unintegrated commits retain the slot for recovery.
+A closed, clean slot is removed only if its HEAD is an ancestor of the branch it
+publishes to (the reference branch). When publishing is refused, the repair
+commit is undone with a soft reset so the verified work stays staged on its base. Dirty files or unintegrated commits retain the slot for recovery.
 A transient retry retains its slot until the next attempt or budget exhaustion.
 Logs remain after worktree removal. Existing worktrees created by older binaries
 under log directories are not automatically deleted or moved.

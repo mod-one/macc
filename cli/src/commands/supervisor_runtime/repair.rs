@@ -40,14 +40,6 @@ pub fn git(root: &Path, args: &[&str]) -> Result<String> {
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
-pub fn clean(root: &Path) -> Result<()> {
-    if !git(root, &["status", "--porcelain"])?.is_empty() {
-        return Err(MaccError::Validation(
-            "Supervisor integration requires a clean project; user changes are preserved".into(),
-        ));
-    }
-    Ok(())
-}
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
     let text = std::fs::read_to_string(path).map_err(|e| io(path, e))?;
     serde_json::from_str(&text).map_err(|e| {
@@ -68,6 +60,8 @@ pub async fn diagnose(
         serde_json::to_string_pretty(incident).map_err(|e| MaccError::Validation(e.to_string()))?;
     let prompt=format!("You are the MACC supervisor diagnosing a coordinator incident. Project: {}. Isolated analysis worktree: {}. Read the original coordinator and performer logs under {}/.macc/log, the task requirements and source. Identify root causes, distinguishing project defects, missing migrations, external conditions, and MACC defects. Prefer recorded unmet_preconditions/result_explanation over normalized error fragments. Do not edit source, reset files, invoke a coordinator, change task state, or approve human gates. Write exactly one JSON object to .macc/supervisor-diagnosis.json: {{\"summary\":\"evidence-based diagnosis\",\"repairable\":true,\"requires_human\":false,\"task_ids\":[\"root task ids verified by evidence\"],\"macc_findings\":[\"MACC dysfunction and concrete improvement suggestions\"]}}. A missing human decision, external credential or explicit operator gate requires_human=true. Source/schema fixes are repairable by this authorized supervisor even when outside the original task's writable scope. For an external quota, also include retry_at as an absolute RFC3339 provider reset time and unavailable_tool as its tool ID when supported by evidence; omit them when unknown. Diagnose first; do not repair in this phase.\nIncident:\n{evidence}",root.display(),worktree.display(),root.display());
     remove_response(&worktree.join(".macc/supervisor-diagnosis.json"))?;
+    // A retried incident diagnoses in a slot that already holds repair work.
+    let before = super::workspace::snapshot(worktree)?;
     agent.run(worktree, &prompt, dir, "diagnosis").await?;
     let diagnosis: Diagnosis = read_json(&worktree.join(".macc/supervisor-diagnosis.json"))?;
     if diagnosis
@@ -79,7 +73,7 @@ pub async fn diagnose(
             "AI diagnosis selected a task outside this incident".into(),
         ));
     }
-    if !git(worktree, &["status", "--porcelain"])?.is_empty() {
+    if super::workspace::snapshot(worktree)? != before {
         return Err(MaccError::Validation(
             "Diagnosis modified source; analysis worktree retained for inspection".into(),
         ));
@@ -135,45 +129,69 @@ pub fn validation_commands(root: &Path, config: &SupervisorConfig) -> Result<Vec
         "Supervisor requires validation_commands for this project".into(),
     ))
 }
+/// Outcome of one validation command, bounded by the intervention timeout.
+async fn run_validation(worktree: &Path, command: &str, log: &Path, timeout: u64) -> Result<bool> {
+    let file = std::fs::File::create(log).map_err(|e| io(log, e))?;
+    let mut cmd = tokio::process::Command::new("sh");
+    cmd.arg("-c")
+        .arg(command)
+        .current_dir(worktree)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(file.try_clone().map_err(|e| io(log, e))?))
+        .stderr(Stdio::from(file))
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.as_std_mut().process_group(0);
+    }
+    let mut child = cmd.spawn().map_err(|e| io(worktree, e))?;
+    let _group = super::tool::ProcessGroup(child.id());
+    let result = tokio::time::timeout(Duration::from_secs(timeout.max(1)), child.wait()).await;
+    let status = result
+        .map_err(|_| MaccError::Coordinator {
+            code: "E101",
+            message: format!("Validation timed out: {command}"),
+        })?
+        .map_err(|e| io(worktree, e))?;
+    Ok(status.success())
+}
+
+/// Run project validation against the repair. A failing command is re-run on
+/// the unmodified base in the same slot (same dependencies and environment):
+/// only a command that passes there and fails with the repair blocks
+/// integration. Commands already failing on the base are returned so the
+/// independent verification can compare both logs for added failures.
 pub async fn validate(
     worktree: &Path,
     commands: &[String],
     dir: &Path,
     timeout: u64,
-) -> Result<()> {
+) -> Result<Vec<String>> {
+    let mut preexisting = Vec::new();
     for (i, command) in commands.iter().enumerate() {
-        let file = std::fs::File::create(dir.join(format!("validation-{i}.log")))
-            .map_err(|e| io(dir, e))?;
-        let mut cmd = tokio::process::Command::new("sh");
-        cmd.arg("-c")
-            .arg(command)
-            .current_dir(worktree)
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(file.try_clone().map_err(|e| io(dir, e))?))
-            .stderr(Stdio::from(file))
-            .kill_on_drop(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            cmd.as_std_mut().process_group(0);
+        let log = dir.join(format!("validation-{i}.log"));
+        if run_validation(worktree, command, &log, timeout).await? {
+            continue;
         }
-        let mut child = cmd.spawn().map_err(|e| io(worktree, e))?;
-        let _group = super::tool::ProcessGroup(child.id());
-        let result = tokio::time::timeout(Duration::from_secs(timeout.max(1)), child.wait()).await;
-        let status = result
-            .map_err(|_| MaccError::Coordinator {
-                code: "E101",
-                message: format!("Validation timed out: {command}"),
-            })?
-            .map_err(|e| io(worktree, e))?;
-        if !status.success() {
+        super::workspace::enter_baseline(worktree)?;
+        let baseline = run_validation(
+            worktree,
+            command,
+            &dir.join(format!("baseline-{i}.log")),
+            timeout,
+        )
+        .await;
+        super::workspace::restore_repair(worktree)?;
+        if baseline? {
             return Err(MaccError::Validation(format!(
-                "Validation failed: {command}; see {}",
-                dir.display()
+                "Validation failed: {command} passes on the unmodified base and fails with the repair; see {}",
+                log.display()
             )));
         }
+        preexisting.push(command.clone());
     }
-    Ok(())
+    Ok(preexisting)
 }
 pub async fn fix(
     agent: &Agent,
@@ -181,16 +199,23 @@ pub async fn fix(
     worktree: &Path,
     dir: &Path,
     diagnosis: &Diagnosis,
-    commands: &[String],
     timeout: u64,
+    report: &mut super::report::Intervention,
 ) -> Result<String> {
-    let prompt=format!("You are the authorized MACC supervisor repair agent in an isolated worktree. Continue the existing repair in this same worktree. Inspect and preserve previous staged, unstaged and untracked work; do not reset or clean it. Repair these diagnosed root causes: {}. Source and database migration changes needed for these roots are authorized even outside the original performer scope. Preserve existing behavior and regression assertions; never bypass MFA or security, weaken tests, fabricate approval, change PRD/state/.macc metadata, or restart the coordinator. Add targeted regression tests. Install project dependencies if needed. Do not commit: the supervisor owns commits. Record intervention evidence and MACC improvement recommendations in .macc/repair-notes.md. Read original logs at {}. Validation commands are {:?}. Report missing external authority without guessing it.",diagnosis.summary,root.join(".macc/log").display(),commands);
+    let commands = report.validation.as_slice();
+    let prompt=format!("You are the authorized MACC supervisor repair agent in an isolated worktree. Continue the existing repair in this same worktree. Inspect and preserve previous staged, unstaged and untracked work; do not reset or clean it. Repair these diagnosed root causes: {}. Source and database migration changes needed for these roots are authorized even outside the original performer scope. Preserve existing behavior and regression assertions; never bypass MFA or security, weaken tests, fabricate approval, change PRD/state/.macc metadata, or restart the coordinator. Integration rejects any change to prd.json, *.prd.json, .macc/, .env or .env.* (including .env.example): document new settings elsewhere. Add targeted regression tests. Install project dependencies if needed. Do not commit: the supervisor owns commits. Record intervention evidence and MACC improvement recommendations in .macc/repair-notes.md. Read original logs at {}. Validation commands are {:?}; a command that already fails on the unmodified base does not block integration, but the repair must not add failures to it. Report missing external authority without guessing it.",diagnosis.summary,root.join(".macc/log").display(),commands);
     agent.run(worktree, &prompt, dir, "repair").await?;
-    validate(worktree, commands, dir, timeout).await?;
+    let preexisting = validate(worktree, commands, dir, timeout).await?;
+    report.preexisting_failures = preexisting.clone();
+    let baseline_note = if preexisting.is_empty() {
+        String::new()
+    } else {
+        format!(" These validation commands fail on the unmodified base too and were not used as a gate: {preexisting:?}. For each, compare validation-N.log (with the repair) against baseline-N.log (unmodified base) in that directory, N being the position in {commands:?} counted from 0; use false if the repair adds any failure absent from the baseline, or if the logs cannot establish that it does not.")
+    };
     git(worktree, &["add", "--all"])?;
     let validated_tree = git(worktree, &["write-tree"])?;
     let validated_head = git(worktree, &["rev-parse", "HEAD"])?;
-    let prompt=format!("Independently verify the supervisor repair. Diagnosis: {}. Examine source changes, existing and added regression tests and validation logs at {}. Do not edit files. Confirm the original root causes are corrected; no security checks, assertions, validation scripts or human gates were weakened or bypassed. Write .macc/supervisor-verification.json as {{\"verified\":true,\"explanation\":\"concrete evidence\"}}; use false for unresolved causes, unjustified test changes, or missing proof. Task ids: {:?}.",diagnosis.summary,dir.display(),diagnosis.task_ids);
+    let prompt=format!("Independently verify the supervisor repair. Diagnosis: {}. Examine source changes, existing and added regression tests and validation logs at {}. Do not edit files. Confirm the original root causes are corrected; no security checks, assertions, validation scripts or human gates were weakened or bypassed. Write .macc/supervisor-verification.json as {{\"verified\":true,\"explanation\":\"concrete evidence\"}}; use false for unresolved causes, unjustified test changes, or missing proof.{baseline_note} Task ids: {:?}.",diagnosis.summary,dir.display(),diagnosis.task_ids);
     remove_response(&worktree.join(".macc/supervisor-verification.json"))?;
     agent.run(worktree, &prompt, dir, "verification").await?;
     git(worktree, &["add", "--all"])?;
@@ -208,18 +233,20 @@ pub async fn fix(
             verified.explanation
         )));
     }
-    clean(root)?;
     // Caller checks exact base before integrating, and keeps failed worktrees for evidence.
     Ok(verified.explanation)
 }
-pub fn integrate(root: &Path, worktree: &Path, base: &str) -> Result<String> {
-    clean(root)?;
-    if git(root, &["rev-parse", "HEAD"])? != base {
-        return Err(MaccError::Validation(
-            "Project HEAD changed during intervention; repair retained, integration deferred"
-                .into(),
-        ));
-    }
+/// Commit the verified repair and publish it to the reference branch the way
+/// the coordinator publishes task merges. Operator checkouts are never
+/// required to be clean: Git refuses a fast-forward that would overwrite
+/// local changes, and nothing is modified in that case.
+pub fn integrate(
+    root: &Path,
+    worktree: &Path,
+    target: &super::workspace::Target,
+) -> Result<String> {
+    use macc_core::coordinator::integration::{publish_commit, PublishOutcome};
+    let base = target.base.as_str();
     if git(worktree, &["rev-parse", "HEAD"])? != base {
         return Err(MaccError::Validation(
             "Repair agent created commits outside the intervention transaction".into(),
@@ -250,7 +277,34 @@ pub fn integrate(root: &Path, worktree: &Path, base: &str) -> Result<String> {
         ],
     )?;
     let commit = git(worktree, &["rev-parse", "HEAD"])?;
-    git(root, &["merge", "--ff-only", &commit])?;
+    let refused = match &target.branch {
+        Some(branch) => match publish_commit(root, branch, &commit, base)? {
+            PublishOutcome::Published { .. } | PublishOutcome::UpToDate => None,
+            PublishOutcome::BaseMoved { .. } => Some(format!(
+                "Reference branch '{branch}' moved during intervention; repair retained, integration deferred"
+            )),
+            PublishOutcome::BlockedByCheckout {
+                worktree: holder,
+                git_output,
+            } => Some(format!(
+                "Reference branch '{branch}' is checked out in {} with local changes that overlap the repair; repair retained, integration deferred: {git_output}",
+                holder.display()
+            )),
+        },
+        // Detached project without a reference branch: advance its HEAD only.
+        None if git(root, &["rev-parse", "HEAD"])? != base => Some(
+            "Project HEAD changed during intervention; repair retained, integration deferred"
+                .into(),
+        ),
+        None => git(root, &["merge", "--ff-only", &commit])
+            .err()
+            .map(|error| error.to_string()),
+    };
+    if let Some(reason) = refused {
+        // Keep the repair staged on the base so a later attempt can resume it.
+        git(worktree, &["reset", "--soft", base])?;
+        return Err(MaccError::Validation(reason));
+    }
     Ok(commit)
 }
 fn io(path: &Path, source: std::io::Error) -> MaccError {

@@ -762,7 +762,19 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
         (Some(phases), Some(status)) => Some(format!("{phases} | {status}")),
         (phases, status) => status.or_else(|| phases.clone()),
     };
-    let header_height = 5 + u16::from(trust_strip.is_some()) + u16::from(override_strip.is_some());
+    let supervisor_detail = if current_screen == Screen::CoordinatorLive {
+        state
+            .project_paths
+            .as_ref()
+            .map(supervisor::detail_lines)
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let header_height = 5
+        + u16::from(trust_strip.is_some())
+        + u16::from(override_strip.is_some())
+        + supervisor_detail.len() as u16;
     let footer_height = if current_screen == Screen::CoordinatorLive {
         4
     } else {
@@ -812,6 +824,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
         width: header_area.width,
         trust_strip,
         override_strip,
+        supervisor_detail,
     };
     let title = Paragraph::new(header_lines(&header_ctx, &theme)).block(panel("MACC"));
     f.render_widget(title, header_area);
@@ -3829,6 +3842,7 @@ mod tests {
             width: 120,
             trust_strip: None,
             override_strip: None,
+            supervisor_detail: Vec::new(),
         };
 
         let lines = header_lines(&ctx, &theme);
@@ -3856,6 +3870,7 @@ mod tests {
             width: 120,
             trust_strip: Some("terminal allowed".to_string()),
             override_strip: None,
+            supervisor_detail: Vec::new(),
         };
 
         let lines = header_lines(&ctx, &theme);
@@ -4058,7 +4073,10 @@ fn pause_overlay_content(
     unmet_preconditions: &[String],
     next_action: Option<&str>,
 ) -> (&'static str, String, Color) {
-    let is_precondition_stop = error_code == Some("E903") || message.contains("[E903]");
+    // Recorded preconditions decide the overlay, whichever code the failure
+    // was normalized to: the retry menu would only repeat the same refusal.
+    let is_precondition_stop =
+        error_code == Some("E903") || message.contains("[E903]") || !unmet_preconditions.is_empty();
     if is_precondition_stop {
         let task = blocked_task_id.unwrap_or("The blocked task");
         let mut body = format!(
@@ -4334,6 +4352,23 @@ mod pause_overlay_content_tests {
         );
         assert_eq!(title, "Coordinator Blocked — Preconditions Not Satisfied");
         assert!(body.contains("gate rejected"), "{body}");
+    }
+
+    #[test]
+    fn recorded_preconditions_select_the_precondition_overlay_for_any_error_code() {
+        let unmet = vec!["allowed_paths must include apps/web/src/config.ts".to_string()];
+        let (title, body, _) = pause_overlay_content(
+            "Coordinator 'run' failed in 0:21:00.\n\nCause: # Performer log for task WEB-BFF-002",
+            "task=WEB-BFF-002 phase=dev",
+            "run",
+            Some("E901"),
+            Some("WEB-BFF-002"),
+            &unmet,
+            None,
+        );
+        assert_eq!(title, "Coordinator Blocked — Preconditions Not Satisfied");
+        assert!(body.contains("  - allowed_paths must include apps/web/src/config.ts\n"));
+        assert!(!body.contains("# Performer log"), "{body}");
     }
 
     #[test]

@@ -262,9 +262,11 @@ fn validation_failure_blocks_integration() {
     let temp = fixture(false);
     let root = temp.path();
     let config = root.join(".macc/macc.yaml");
-    let text = std::fs::read_to_string(&config)
-        .unwrap()
-        .replace("test $(cat defect.txt) = fixed", "false");
+    // Passes on the unmodified base and fails with the repair: a regression.
+    let text = std::fs::read_to_string(&config).unwrap().replace(
+        "test $(cat defect.txt) = fixed",
+        "test $(cat defect.txt) = broken",
+    );
     std::fs::write(config, text).unwrap();
     let supervisor = start(root);
     wait_for(|| {
@@ -282,6 +284,17 @@ fn validation_failure_blocks_integration() {
         std::fs::read_to_string(root.join("defect.txt")).unwrap(),
         "broken\n"
     );
+    // The baseline run must hand the slot back with the repair intact.
+    let slot = Path::new(r["intervention"]["worktree"].as_str().unwrap());
+    assert_eq!(
+        std::fs::read_to_string(slot.join("defect.txt")).unwrap(),
+        "fixed\n"
+    );
+    assert!(!slot.join(".macc/supervisor-restore-tree").exists());
+    assert!(r["intervention"]["next_action"]
+        .as_str()
+        .unwrap()
+        .contains("macc supervisor start --daemon --retry"));
     drop(supervisor);
 }
 #[test]
@@ -380,3 +393,6 @@ fn monitoring_error_is_reported_and_recovers_without_restarting_supervisor() {
 
 #[path = "support/supervisor_lifecycle.rs"]
 mod supervisor_lifecycle;
+
+#[path = "support/supervisor_integration.rs"]
+mod supervisor_integration;

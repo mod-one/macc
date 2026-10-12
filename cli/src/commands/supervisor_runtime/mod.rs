@@ -210,6 +210,9 @@ async fn monitor(paths: ProjectPaths) -> Result<()> {
                         commit: None,
                         restart_pid: None,
                         detail: String::new(),
+                        target_branch: None,
+                        preexisting_failures: Vec::new(),
+                        next_action: None,
                     };
                     write_report(&paths, &config, &dir, &report)?;
                     let intervention_error =
@@ -246,6 +249,12 @@ async fn monitor(paths: ProjectPaths) -> Result<()> {
                             }
                         }
                     }
+                    if report.status == "recovered" && !report.preexisting_failures.is_empty() {
+                        report.detail.push_str(&format!(
+                            "; already failing on the unmodified base (not a gate): {}",
+                            report.preexisting_failures.join(", ")
+                        ));
+                    }
                     ledger.last_status = report.status.clone();
                     if let Some(worktree) = report.worktree.as_ref().filter(|path| path.exists()) {
                         let close = pending.status != "retrying"
@@ -263,6 +272,9 @@ async fn monitor(paths: ProjectPaths) -> Result<()> {
                             )),
                         }
                     }
+                    // After cleanup, so the action never points at a removed slot.
+                    report.next_action =
+                        policy::next_action(pending, &report, config.max_restart_attempts);
                     write_report(&paths, &config, &dir, &report)?;
                     write_json(
                         &ledger_path,

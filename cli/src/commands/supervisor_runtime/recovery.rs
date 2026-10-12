@@ -28,9 +28,19 @@ pub(super) async fn intervene(
     }
     ensure_not_stopped(paths)?;
     stop_orphan_jobs(&report.incident).await?;
+    // The supervisor commits the repair itself: fail before spending AI calls.
+    let identity = macc_core::git::missing_git_identity_fields(&paths.root);
+    if !identity.is_empty() {
+        return Err(MaccError::Validation(format!(
+            "Git identity is missing ({}); the supervisor cannot commit a repair",
+            identity.join(", ")
+        )));
+    }
     let agent = tool::Agent::resolve(&paths.root, canonical, config)?;
     report.tool = Some(agent.id.clone());
-    let (worktree, base) = super::workspace::prepare(&paths.root, &report.incident.id)?;
+    let target = super::workspace::target(&paths.root, canonical.automation.coordinator.as_ref())?;
+    report.target_branch = target.branch.clone();
+    let worktree = super::workspace::prepare(&paths.root, &report.incident.id, &target)?;
     report.worktree = Some(worktree.clone());
     report.status = "diagnosing".into();
     write_report(paths, config, dir, report)?;
@@ -66,15 +76,15 @@ pub(super) async fn intervene(
         &worktree,
         dir,
         &diagnosis,
-        &report.validation,
         config.intervention_timeout_seconds,
+        report,
     )
     .await?;
     report.status = "integrating".into();
     report.detail = proof;
     write_report(paths, config, dir, report)?;
     ensure_not_stopped(paths)?;
-    report.commit = Some(repair::integrate(&paths.root, &worktree, &base)?);
+    report.commit = Some(repair::integrate(&paths.root, &worktree, &target)?);
     report.status = "requeuing".into();
     write_report(paths, config, dir, report)?;
     ensure_not_stopped(paths)?;

@@ -19,6 +19,15 @@ pub(super) struct Intervention {
     pub(super) commit: Option<String>,
     pub(super) restart_pid: Option<i32>,
     pub(super) detail: String,
+    /// Branch the repair is based on and published to.
+    #[serde(default)]
+    pub(super) target_branch: Option<String>,
+    /// Validation commands that fail on the unmodified base too (not a gate).
+    #[serde(default)]
+    pub(super) preexisting_failures: Vec<String>,
+    /// What unblocks a waiting intervention, as an exact operator step.
+    #[serde(default)]
+    pub(super) next_action: Option<String>,
 }
 pub(super) fn write_report(
     paths: &ProjectPaths,

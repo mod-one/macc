@@ -26,17 +26,25 @@ attached supervisor too. Standalone `macc supervisor start --daemon` is supporte
 2. Lock intervention against concurrent coordinator launches.
 3. Ask the selected AI tool to diagnose logs, task requirements, structured
    preconditions and source. Preserve its MACC dysfunction/improvement findings.
-4. Repair in an isolated Git worktree based on the exact project HEAD.
+4. Repair in an isolated Git worktree based on the tip of the coordinator
+   reference branch (`automation.coordinator.reference_branch`), whichever
+   branch the project root has checked out.
 5. Run project validation, then ask the AI tool for an independent verification.
-   Verification must leave the tested source unchanged.
-6. Commit and fast-forward the repair only if the project remains clean and its
-   HEAD unchanged. PRD, runtime metadata and environment secrets are protected.
+   Verification must leave the tested source unchanged. See
+   [Baseline-aware validation](#baseline-aware-validation).
+6. Commit the repair and publish it to the reference branch the same way the
+   coordinator publishes task merges: a compare-and-swap of the ref when no
+   worktree holds the branch, otherwise a fast-forward of the worktree that
+   does. Integration is deferred if the branch moved or if local changes in
+   that checkout overlap the repair; unrelated local changes do not block it.
+   PRD, runtime metadata and environment files (`.env`, `.env.*`) are protected.
 7. Requeue diagnosed roots through coordinator APIs, reconcile dependency blocks,
    restart the managed coordinator and wait for readiness.
 
 Human approvals, operator gates and missing external authority remain external.
-A dirty project, validation failure, rejected verification, timeout or unavailable
-tool produces an escalation report. Monitoring failures are recorded and retried;
+A missing Git identity (checked before any AI call), a validation failure
+introduced by the repair, rejected verification, deferred integration, timeout
+or unavailable tool produces an escalation report. Monitoring failures are recorded and retried;
 the daemon can resume after the underlying state problem is resolved.
 Failed worktrees and logs remain available.
 No reset or cleanup discards user changes. Existing task worktree attachments are
@@ -47,6 +55,33 @@ then the first enabled tool. ToolSpec command arguments, prompt transport,
 model/effort settings and configured permission flags (including Codex `--yolo`)
 are retained. Each tool invocation and validation command has a bounded timeout;
 stopping the supervisor terminates their process groups.
+
+## Baseline-aware validation
+
+A validation command that fails with the repair is run again in the same slot on
+the unmodified base, with the same installed dependencies and environment.
+
+- Passes on the base, fails with the repair: the repair introduced the failure;
+  the intervention escalates.
+- Fails on the base too (for example a browser test suite missing a system
+  library): it is not a gate. The command is recorded in
+  `preexisting_failures`, both logs are kept (`validation-N.log`,
+  `baseline-N.log`), and the independent verification must compare them and
+  reject the repair if it adds a failure absent from the baseline.
+
+A command-level comparison cannot see a new failure inside an already failing
+command; that judgment rests on the independent verification. Configure
+`validation_commands` with commands that pass on your machine to keep the gate
+deterministic. While the base is checked out, the repair is held as a Git tree
+named in `.macc/supervisor-restore-tree`; an interrupted baseline run is restored
+on the next attempt and such a slot is never removed.
+
+## When an intervention waits
+
+`macc supervisor status`, `macc supervisor report` and the Coordinator Live
+header of the TUI show the reason of an unrecovered intervention, the exact next
+step (`next_action` in the report), and the MACC improvements recommended by the
+diagnosis (`diagnosis.macc_findings`).
 
 ## Configuration
 
