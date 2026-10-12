@@ -1,6 +1,6 @@
 use super::io;
 use super::repair;
-use super::report::{write_json, write_report, Intervention};
+use super::report::{write_json, Intervention};
 use super::tool;
 use macc_core::config::CanonicalConfig;
 use macc_core::coordinator::types::CoordinatorEnvConfig;
@@ -42,8 +42,16 @@ pub(super) async fn intervene(
     report.target_branch = target.branch.clone();
     let worktree = super::workspace::prepare(&paths.root, &report.incident.id, &target)?;
     report.worktree = Some(worktree.clone());
-    report.status = "diagnosing".into();
-    write_report(paths, config, dir, report)?;
+    let progress = super::report::Progress { paths, config, dir };
+    let activity = if report.diagnosis.is_some() {
+        "Reusing the recorded diagnosis".to_string()
+    } else {
+        format!(
+            "AI diagnosis with {} (logs, task requirements, source)",
+            agent.id
+        )
+    };
+    progress.enter(report, "diagnosing", activity)?;
     let mut diagnosis = if let Some(cached) = report.diagnosis.clone() {
         cached
     } else {
@@ -68,29 +76,32 @@ pub(super) async fn intervene(
         ));
     }
     report.validation = repair::validation_commands(&paths.root, config)?;
-    report.status = "repairing".into();
-    write_report(paths, config, dir, report)?;
     let proof = repair::fix(
         &agent,
-        &paths.root,
+        &progress,
         &worktree,
-        dir,
         &diagnosis,
         config.intervention_timeout_seconds,
         report,
     )
     .await?;
-    report.status = "integrating".into();
     report.detail = proof;
-    write_report(paths, config, dir, report)?;
+    let destination = target.branch.as_deref().unwrap_or("the project HEAD");
+    progress.enter(
+        report,
+        "integrating",
+        format!("Committing the repair and publishing it to {destination}"),
+    )?;
     ensure_not_stopped(paths)?;
     report.commit = Some(repair::integrate(&paths.root, &worktree, &target)?);
-    report.status = "requeuing".into();
-    write_report(paths, config, dir, report)?;
+    progress.enter(
+        report,
+        "requeuing",
+        format!("Requeuing {}", diagnosis.task_ids.join(", ")),
+    )?;
     ensure_not_stopped(paths)?;
     requeue(paths, canonical, &diagnosis.task_ids, &report.detail)?;
-    report.status = "restarting".into();
-    write_report(paths, config, dir, report)?;
+    progress.enter(report, "restarting", "Restarting the coordinator")?;
     ensure_not_stopped(paths)?;
     let pid = macc_core::service::coordinator::coordinator_restart_after_intervention(
         paths,

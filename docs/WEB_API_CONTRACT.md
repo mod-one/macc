@@ -990,6 +990,8 @@ Purpose: return the full `RuntimeSnapshot` — the shared runtime model consumed
 
 Response 200: full `RuntimeSnapshot` JSON with fields: `generated_at`, `project`, `coordinator`, `queue`, `workers`, `tasks`, `throttled_tools`, `recent_events`, `git`, `diagnostics`.
 
+Optional field `supervisor` is present while a supervisor intervention is running, or is unrecovered and no coordinator is running. It is not a worker or a task and is never counted in `queue`. Shape: `{ running, active, status, attempt, incident_id, task_ids, tool, activity, started_at, phase_started_at, diagnosis, reason, next_action, target_branch, worktree, log_dir, findings }`. `status` is one of `detected`, `diagnosing`, `repairing`, `validating`, `verifying`, `integrating`, `requeuing`, `restarting` (with `active: true`), or `escalated` / `interrupted`.
+
 ### GET `/api/v1/search?q=<query>`
 
 Purpose: search across tasks, skills, worktrees, and error codes. Response 200: array of `{ kind, id, label, meta }`.

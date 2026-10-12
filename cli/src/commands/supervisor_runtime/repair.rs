@@ -1,4 +1,5 @@
 //! Isolated repair, independent verification, and integration against an exact base.
+use super::report::{Intervention, Progress};
 use super::tool::Agent;
 use macc_core::supervisor::{incident::Incident, SupervisorConfig};
 use macc_core::{MaccError, Result};
@@ -164,16 +165,24 @@ async fn run_validation(worktree: &Path, command: &str, log: &Path, timeout: u64
 /// independent verification can compare both logs for added failures.
 pub async fn validate(
     worktree: &Path,
-    commands: &[String],
-    dir: &Path,
     timeout: u64,
+    progress: &Progress<'_>,
+    report: &mut Intervention,
 ) -> Result<Vec<String>> {
+    let dir = progress.dir;
+    let commands = report.validation.clone();
     let mut preexisting = Vec::new();
     for (i, command) in commands.iter().enumerate() {
+        let position = format!("{}/{}", i + 1, commands.len());
+        progress.step(report, format!("Validation {position}: {command}"))?;
         let log = dir.join(format!("validation-{i}.log"));
         if run_validation(worktree, command, &log, timeout).await? {
             continue;
         }
+        progress.step(
+            report,
+            format!("Validation {position} failed; re-running on the unmodified base: {command}"),
+        )?;
         super::workspace::enter_baseline(worktree)?;
         let baseline = run_validation(
             worktree,
@@ -195,17 +204,23 @@ pub async fn validate(
 }
 pub async fn fix(
     agent: &Agent,
-    root: &Path,
+    progress: &Progress<'_>,
     worktree: &Path,
-    dir: &Path,
     diagnosis: &Diagnosis,
     timeout: u64,
-    report: &mut super::report::Intervention,
+    report: &mut Intervention,
 ) -> Result<String> {
-    let commands = report.validation.as_slice();
+    let (root, dir) = (progress.paths.root.as_path(), progress.dir);
+    let commands = report.validation.clone();
+    progress.enter(
+        report,
+        "repairing",
+        format!("AI repair with {} in the isolated worktree", agent.id),
+    )?;
     let prompt=format!("You are the authorized MACC supervisor repair agent in an isolated worktree. Continue the existing repair in this same worktree. Inspect and preserve previous staged, unstaged and untracked work; do not reset or clean it. Repair these diagnosed root causes: {}. Source and database migration changes needed for these roots are authorized even outside the original performer scope. Preserve existing behavior and regression assertions; never bypass MFA or security, weaken tests, fabricate approval, change PRD/state/.macc metadata, or restart the coordinator. Integration rejects any change to prd.json, *.prd.json, .macc/, .env or .env.* (including .env.example): document new settings elsewhere. Add targeted regression tests. Install project dependencies if needed. Do not commit: the supervisor owns commits. Record intervention evidence and MACC improvement recommendations in .macc/repair-notes.md. Read original logs at {}. Validation commands are {:?}; a command that already fails on the unmodified base does not block integration, but the repair must not add failures to it. Report missing external authority without guessing it.",diagnosis.summary,root.join(".macc/log").display(),commands);
     agent.run(worktree, &prompt, dir, "repair").await?;
-    let preexisting = validate(worktree, commands, dir, timeout).await?;
+    progress.enter(report, "validating", "Running project validation")?;
+    let preexisting = validate(worktree, timeout, progress, report).await?;
     report.preexisting_failures = preexisting.clone();
     let baseline_note = if preexisting.is_empty() {
         String::new()
@@ -217,6 +232,11 @@ pub async fn fix(
     let validated_head = git(worktree, &["rev-parse", "HEAD"])?;
     let prompt=format!("Independently verify the supervisor repair. Diagnosis: {}. Examine source changes, existing and added regression tests and validation logs at {}. Do not edit files. Confirm the original root causes are corrected; no security checks, assertions, validation scripts or human gates were weakened or bypassed. Write .macc/supervisor-verification.json as {{\"verified\":true,\"explanation\":\"concrete evidence\"}}; use false for unresolved causes, unjustified test changes, or missing proof.{baseline_note} Task ids: {:?}.",diagnosis.summary,dir.display(),diagnosis.task_ids);
     remove_response(&worktree.join(".macc/supervisor-verification.json"))?;
+    progress.enter(
+        report,
+        "verifying",
+        format!("Independent AI verification with {}", agent.id),
+    )?;
     agent.run(worktree, &prompt, dir, "verification").await?;
     git(worktree, &["add", "--all"])?;
     if git(worktree, &["write-tree"])? != validated_tree

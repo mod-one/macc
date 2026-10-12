@@ -10,7 +10,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 ### Changed — Supervisor recovery
 - Supervisor repairs are based on and published to the coordinator reference branch (shared `integration::publish_commit`), not the branch checked out in the project root. Unrelated local changes no longer block an intervention; overlapping ones defer integration and are preserved.
 - Validation is baseline-aware: a command that also fails on the unmodified base no longer blocks the repair. It is recorded in `preexisting_failures` with `baseline-N.log`, and the independent verification compares both logs.
-- An unrecovered intervention reports its reason and an exact `next_action` in `macc supervisor status`, `macc supervisor report` and the TUI Coordinator Live header, together with the diagnosis' MACC findings.
+- The supervisor's intervention is visible live: a pinned, distinctly styled `SUPERVISOR` row in the TUI LIVE TASKS panel with a SUPERVISOR TASK DETAIL pane, and a `Supervisor` entry on the web dashboard fed by the new optional `supervisor` object of `GET /api/v1/snapshot`. The report records the phase (now including `validating` and `verifying`), the step in progress and phase timestamps.
+- An unrecovered intervention reports its reason and an exact `next_action` in `macc supervisor status`, `macc supervisor report` and the supervisor row, together with the diagnosis' MACC findings.
 - A missing Git identity escalates before any AI call.
 
 ### Fixed

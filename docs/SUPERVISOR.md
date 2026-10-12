@@ -76,11 +76,30 @@ deterministic. While the base is checked out, the repair is held as a Git tree
 named in `.macc/supervisor-restore-tree`; an interrupted baseline run is restored
 on the next attempt and such a slot is never removed.
 
+## Live visibility
+
+The supervisor is not a coordinator task and is never counted in the task
+registry. Clients show its intervention as a separate, labelled entry:
+
+- **TUI, Coordinator Live:** a pinned `SUPERVISOR` row at the top of LIVE TASKS
+  (`◆ SUP` while working, `! SUP` when it needs attention), in its own colour,
+  with the repaired root task, phase, tool, total time and time in the phase.
+  With no coordinator task selected, the detail pane becomes SUPERVISOR TASK
+  DETAIL: current step, diagnosis, reason, next step, findings and log path.
+- **Web dashboard:** a `Supervisor` entry above the workers, from the optional
+  `supervisor` object of `GET /api/v1/snapshot` (also in `macc status --json`).
+
+Phases are `detected`, `diagnosing`, `repairing`, `validating`, `verifying`,
+`integrating`, `requeuing` and `restarting`; the report records the step in
+progress (`activity`, for example `Validation 3/5: pnpm run test`) and the phase
+start time. The entry disappears once the intervention recovers. An unrecovered
+one stays visible until a coordinator runs again.
+
 ## When an intervention waits
 
-`macc supervisor status`, `macc supervisor report` and the Coordinator Live
-header of the TUI show the reason of an unrecovered intervention, the exact next
-step (`next_action` in the report), and the MACC improvements recommended by the
+`macc supervisor status`, `macc supervisor report` and the supervisor entry
+above show the reason of an unrecovered intervention, the exact next step
+(`next_action` in the report), and the MACC improvements recommended by the
 diagnosis (`diagnosis.macc_findings`).
 
 ## Configuration

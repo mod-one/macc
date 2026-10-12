@@ -69,6 +69,9 @@ impl RuntimeSnapshotBuilder {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "project".to_string());
 
+        let supervisor =
+            crate::supervisor::live::load(paths).filter(|live| live.visible(coordinator.running));
+
         Ok(RuntimeSnapshot {
             generated_at: Utc::now().to_rfc3339(),
             project: ProjectSummary {
@@ -85,6 +88,7 @@ impl RuntimeSnapshotBuilder {
             recent_events,
             git,
             diagnostics: RuntimeDiagnostics::default(),
+            supervisor,
         })
     }
 }

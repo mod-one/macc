@@ -28,6 +28,43 @@ pub(super) struct Intervention {
     /// What unblocks a waiting intervention, as an exact operator step.
     #[serde(default)]
     pub(super) next_action: Option<String>,
+    /// When this attempt began (RFC 3339).
+    #[serde(default)]
+    pub(super) started_at: Option<String>,
+    /// When the current `status` phase began (RFC 3339).
+    #[serde(default)]
+    pub(super) phase_started_at: Option<String>,
+    /// The step in progress, in operator terms, for live clients.
+    #[serde(default)]
+    pub(super) activity: Option<String>,
+}
+
+/// Records each phase and step as it starts, so clients can show live progress.
+pub(super) struct Progress<'a> {
+    pub(super) paths: &'a ProjectPaths,
+    pub(super) config: &'a SupervisorConfig,
+    pub(super) dir: &'a Path,
+}
+impl Progress<'_> {
+    pub(super) fn enter(
+        &self,
+        report: &mut Intervention,
+        status: &str,
+        activity: impl Into<String>,
+    ) -> Result<()> {
+        report.status = status.into();
+        report.phase_started_at = Some(chrono::Utc::now().to_rfc3339());
+        self.step(report, activity)
+    }
+    /// A new step inside the current phase.
+    pub(super) fn step(
+        &self,
+        report: &mut Intervention,
+        activity: impl Into<String>,
+    ) -> Result<()> {
+        report.activity = Some(activity.into());
+        write_report(self.paths, self.config, self.dir, report)
+    }
 }
 pub(super) fn write_report(
     paths: &ProjectPaths,

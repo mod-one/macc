@@ -14,6 +14,7 @@ import type {
 import { Button } from '../components/Button';
 import { StatusBadge, type StatusTone } from '../components/StatusBadge';
 import { OwnershipBadge } from '../components/OwnershipBadge';
+import { SupervisorRow } from '../components/SupervisorRow';
 import { TakeoverNotificationToast } from '../components/TakeoverNotificationToast';
 import { AlertTriangleIcon, MinusIcon, RefreshIcon, XCircleIcon } from '../components/icons';
 import { cn } from '../components/styles';
@@ -617,6 +618,12 @@ const Dashboard: React.FC = () => {
               {hasSnapshotWorkers ? snapshot!.workers.length : worktreeMetrics.total} total
             </span>
           </div>
+
+          {snapshot?.supervisor && (
+            <ul className="border-b border-[var(--border)]">
+              <SupervisorRow supervisor={snapshot.supervisor} />
+            </ul>
+          )}
 
           {hasSnapshotWorkers ? (
             <ul className="divide-y divide-[var(--border-subtle)]">

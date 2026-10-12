@@ -14,6 +14,10 @@ pub struct RuntimeSnapshot {
     pub recent_events: Vec<RuntimeEvent>,
     pub git: GitRuntimeSummary,
     pub diagnostics: RuntimeDiagnostics,
+    /// The supervisor's intervention, when one is running or awaiting the
+    /// operator. Separate from `workers`/`tasks`: it is not a coordinator task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisor: Option<crate::supervisor::live::SupervisorLive>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

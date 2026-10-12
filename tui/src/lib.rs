@@ -762,19 +762,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
         (Some(phases), Some(status)) => Some(format!("{phases} | {status}")),
         (phases, status) => status.or_else(|| phases.clone()),
     };
-    let supervisor_detail = if current_screen == Screen::CoordinatorLive {
-        state
-            .project_paths
-            .as_ref()
-            .map(supervisor::detail_lines)
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-    let header_height = 5
-        + u16::from(trust_strip.is_some())
-        + u16::from(override_strip.is_some())
-        + supervisor_detail.len() as u16;
+    let header_height = 5 + u16::from(trust_strip.is_some()) + u16::from(override_strip.is_some());
     let footer_height = if current_screen == Screen::CoordinatorLive {
         4
     } else {
@@ -824,7 +812,6 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
         width: header_area.width,
         trust_strip,
         override_strip,
-        supervisor_detail,
     };
     let title = Paragraph::new(header_lines(&header_ctx, &theme)).block(panel("MACC"));
     f.render_widget(title, header_area);
@@ -1941,7 +1928,14 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 && !state.is_coordinator_paused()
                 && snapshot_total == 0
                 && filtered_tasks.is_empty();
-            if filtered_tasks.is_empty() {
+            // The supervisor is not a registry task: it gets its own pinned,
+            // differently styled row so it cannot be mistaken for one.
+            let supervisor_row = state
+                .project_paths
+                .as_ref()
+                .and_then(|paths| supervisor::live(paths, state.is_coordinator_running()));
+            let supervisor_now = chrono::Utc::now();
+            if filtered_tasks.is_empty() && supervisor_row.is_none() {
                 let empty_lines = coordinator_live_empty_lines(
                     coordinator_live_empty,
                     !state.search_query.is_empty(),
@@ -1953,6 +1947,19 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 f.render_widget(empty_para, body_chunks[0]);
             } else {
                 let mut rows = Vec::new();
+                if let Some(live) = supervisor_row.as_ref() {
+                    let style = Style::default()
+                        .fg(if live.active {
+                            Color::Magenta
+                        } else {
+                            theme.warn
+                        })
+                        .add_modifier(Modifier::BOLD);
+                    rows.push(
+                        Row::new(supervisor::row_cells(live, supervisor_now).map(Cell::from))
+                            .style(style),
+                    );
+                }
                 for task in &filtered_tasks {
                     let health_symbol = task.health.symbol();
 
@@ -2039,17 +2046,30 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                     Constraint::Length(8),
                     Constraint::Length(8),
                 ];
+                let live_title = match supervisor_row.as_ref() {
+                    Some(live) if live.active => "LIVE TASKS — supervisor intervention running",
+                    Some(_) => "LIVE TASKS — supervisor intervention needs attention",
+                    None => "LIVE TASKS",
+                };
                 let tasks_table = Table::new(rows, widths)
                     .header(headers)
-                    .block(panel("LIVE TASKS"))
+                    .block(panel(live_title))
                     .highlight_style(Style::default().bg(theme.highlight_bg))
                     .highlight_symbol("› ");
 
                 let mut table_state = TableState::default();
-                let clamped_idx = state
-                    .coordinator_selected_task_index
-                    .min(filtered_tasks.len() - 1);
-                table_state.select(Some(clamped_idx));
+                // Task selection skips the pinned supervisor row; with no task
+                // to select, the row itself is highlighted and detailed below.
+                let offset = usize::from(supervisor_row.is_some());
+                let selected_row = if filtered_tasks.is_empty() {
+                    0
+                } else {
+                    offset
+                        + state
+                            .coordinator_selected_task_index
+                            .min(filtered_tasks.len() - 1)
+                };
+                table_state.select(Some(selected_row));
                 f.render_stateful_widget(tasks_table, body_chunks[0], &mut table_state);
             }
 
@@ -2157,6 +2177,18 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                         Span::styled(format!(" {}", exp), Style::default().fg(theme.bad)),
                     ]));
                 }
+            } else if let Some(live) = supervisor_row.as_ref() {
+                for (label, text, kind) in supervisor::detail(live, supervisor_now) {
+                    let style = match kind {
+                        supervisor::DetailKind::Problem => Style::default().fg(theme.bad),
+                        supervisor::DetailKind::Action => Style::default().fg(theme.accent),
+                        supervisor::DetailKind::Info => Style::default(),
+                    };
+                    detail_lines.push(Line::from(vec![
+                        Span::styled(label, Style::default().fg(Color::Magenta)),
+                        Span::styled(text, style),
+                    ]));
+                }
             } else {
                 if coordinator_live_empty {
                     detail_lines.extend(coordinator_live_empty_lines(true, false, snapshot_total));
@@ -2170,8 +2202,13 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                     ));
                 }
             }
+            let detail_title = if selected_task.is_none() && supervisor_row.is_some() {
+                "SUPERVISOR TASK DETAIL"
+            } else {
+                "SELECTED TASK DETAIL"
+            };
             let detail_para = Paragraph::new(detail_lines)
-                .block(panel("SELECTED TASK DETAIL"))
+                .block(panel(detail_title))
                 .wrap(Wrap { trim: true });
             f.render_widget(detail_para, body_chunks[1]);
 
@@ -3842,7 +3879,6 @@ mod tests {
             width: 120,
             trust_strip: None,
             override_strip: None,
-            supervisor_detail: Vec::new(),
         };
 
         let lines = header_lines(&ctx, &theme);
@@ -3870,7 +3906,6 @@ mod tests {
             width: 120,
             trust_strip: Some("terminal allowed".to_string()),
             override_strip: None,
-            supervisor_detail: Vec::new(),
         };
 
         let lines = header_lines(&ctx, &theme);

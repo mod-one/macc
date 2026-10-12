@@ -213,6 +213,9 @@ async fn monitor(paths: ProjectPaths) -> Result<()> {
                         target_branch: None,
                         preexisting_failures: Vec::new(),
                         next_action: None,
+                        started_at: Some(chrono::Utc::now().to_rfc3339()),
+                        phase_started_at: Some(chrono::Utc::now().to_rfc3339()),
+                        activity: Some("Incident detected; preparing intervention".into()),
                     };
                     write_report(&paths, &config, &dir, &report)?;
                     let intervention_error =
@@ -272,6 +275,8 @@ async fn monitor(paths: ProjectPaths) -> Result<()> {
                             )),
                         }
                     }
+                    report.phase_started_at = Some(chrono::Utc::now().to_rfc3339());
+                    report.activity = None;
                     // After cleanup, so the action never points at a removed slot.
                     report.next_action =
                         policy::next_action(pending, &report, config.max_restart_attempts);

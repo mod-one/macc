@@ -778,6 +778,27 @@ export interface ApiRuntimeEvent {
   message: string | null;
 }
 
+/** The supervisor's intervention. Not a worker or a coordinator task. */
+export interface ApiSupervisorLive {
+  running: boolean;
+  active: boolean;
+  status: string;
+  attempt: number;
+  incident_id: string;
+  task_ids: string[];
+  tool: string | null;
+  activity: string | null;
+  started_at: string | null;
+  phase_started_at: string | null;
+  diagnosis: string | null;
+  reason: string | null;
+  next_action: string | null;
+  target_branch: string | null;
+  worktree: string | null;
+  log_dir: string | null;
+  findings: string[];
+}
+
 export interface ApiRuntimeSnapshot {
   generated_at: string;
   project: { name: string; root: string; config_version: string | null };
@@ -789,6 +810,7 @@ export interface ApiRuntimeSnapshot {
   git: { current_branch: string | null; clean: boolean; worktrees_count: number };
   diagnostics: { issues_count: number; warnings_count: number; critical_count: number };
   active_runs: Array<{ id: string; skill_id: string; status: string; started_at: string }>;
+  supervisor?: ApiSupervisorLive | null;
 }
 
 export interface ApiSkillItem {

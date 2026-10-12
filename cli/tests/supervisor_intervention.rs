@@ -308,6 +308,14 @@ fn stop_command_marks_an_in_flight_intervention_interrupted() {
             v.pointer("/intervention/status").and_then(Value::as_str) == Some("diagnosing")
         })
     });
+    // Live clients read the phase, its start and the step in progress.
+    let live = report(root).unwrap();
+    assert!(live["intervention"]["activity"]
+        .as_str()
+        .unwrap()
+        .starts_with("AI diagnosis with fake"));
+    assert!(live["intervention"]["phase_started_at"].is_string());
+    assert!(live["intervention"]["started_at"].is_string());
     let output = Command::new(env!("CARGO_BIN_EXE_macc"))
         .args(["--cwd", root.to_str().unwrap(), "supervisor", "stop"])
         .output()
