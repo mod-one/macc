@@ -72,6 +72,12 @@ impl RuntimeSnapshotBuilder {
         let supervisor =
             crate::supervisor::live::load(paths).filter(|live| live.visible(coordinator.running));
 
+        let prd = crate::load_canonical_config(&paths.config_path)
+            .ok()
+            .map(|config| {
+                crate::prd_queue::current(&paths.root, config.automation.coordinator.as_ref())
+            });
+
         Ok(RuntimeSnapshot {
             generated_at: Utc::now().to_rfc3339(),
             project: ProjectSummary {
@@ -89,6 +95,7 @@ impl RuntimeSnapshotBuilder {
             git,
             diagnostics: RuntimeDiagnostics::default(),
             supervisor,
+            prd,
         })
     }
 }

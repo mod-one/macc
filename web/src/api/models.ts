@@ -811,6 +811,16 @@ export interface ApiRuntimeSnapshot {
   diagnostics: { issues_count: number; warnings_count: number; critical_count: number };
   active_runs: Array<{ id: string; skill_id: string; status: string; started_at: string }>;
   supervisor?: ApiSupervisorLive | null;
+  /** PRD file the coordinator is working through, with its PRD queue position. */
+  prd?: ApiCurrentPrd | null;
+}
+
+export interface ApiCurrentPrd {
+  path: string;
+  name: string;
+  position: number;
+  total: number;
+  completed: boolean;
 }
 
 export interface ApiSkillItem {

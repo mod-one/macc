@@ -200,6 +200,55 @@ pub fn active_path(
     ))
 }
 
+/// The PRD the coordinator is working through, for live clients.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CurrentPrd {
+    /// Path as configured, relative to the project root.
+    pub path: String,
+    /// File name alone.
+    pub name: String,
+    /// 1-based position in the PRD queue (1 without a queue).
+    pub position: usize,
+    pub total: usize,
+    /// Every PRD of the queue has been executed; `path` is the last one.
+    pub completed: bool,
+}
+impl CurrentPrd {
+    /// `03-web.prd.json (2/26)`; the position is omitted for a single PRD.
+    pub fn label(&self) -> String {
+        match (self.total, self.completed) {
+            (0 | 1, _) => self.name.clone(),
+            (total, true) => format!("{} ({total}/{total} done)", self.name),
+            (total, false) => format!("{} ({}/{total})", self.name, self.position),
+        }
+    }
+}
+
+/// Display-only counterpart of [`active_path`]: never fails on a changed or
+/// completed queue, it reports what the recorded cursor points at.
+pub fn current(root: &Path, config: Option<&crate::config::CoordinatorConfig>) -> CurrentPrd {
+    let files = config.map(|c| c.prd_files.as_slice()).unwrap_or_default();
+    let (path, position, completed) = if files.is_empty() {
+        let single = config.and_then(|c| c.prd_file.as_deref());
+        (single.unwrap_or("prd.json").to_owned(), 1, false)
+    } else {
+        let next = load(root).map(|progress| progress.next).unwrap_or(0);
+        let index = next.min(files.len() - 1);
+        (files[index].clone(), index + 1, next >= files.len())
+    };
+    let name = Path::new(&path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.clone());
+    CurrentPrd {
+        path,
+        name,
+        position,
+        total: files.len().max(1),
+        completed,
+    }
+}
+
 pub fn load(root: &Path) -> Result<Progress> {
     let path = state_path(root);
     if !path.exists() {
@@ -440,6 +489,35 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn current_prd_follows_the_queue_cursor_and_falls_back_to_the_single_file() {
+        let root = tempfile::tempdir().unwrap();
+        let single = current(root.path(), None);
+        assert_eq!((single.path.as_str(), single.total), ("prd.json", 1));
+        assert_eq!(single.label(), "prd.json");
+        let config = crate::config::CoordinatorConfig {
+            prd_files: vec!["docs/prd/a.prd.json".into(), "docs/prd/b.prd.json".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            current(root.path(), Some(&config)).label(),
+            "a.prd.json (1/2)"
+        );
+        let mut progress = Progress {
+            next: 1,
+            ..Default::default()
+        };
+        save(root.path(), &progress).unwrap();
+        let second = current(root.path(), Some(&config));
+        assert_eq!(second.path, "docs/prd/b.prd.json");
+        assert_eq!(second.label(), "b.prd.json (2/2)");
+        progress.next = 2;
+        save(root.path(), &progress).unwrap();
+        let done = current(root.path(), Some(&config));
+        assert!(done.completed);
+        assert_eq!(done.label(), "b.prd.json (2/2 done)");
+    }
     #[test]
     fn cursor_survives_reload_and_explicit_prd_bypasses_queue() {
         let root = tempfile::tempdir().unwrap();

@@ -401,9 +401,10 @@ macc prd generate --from brief.md --promote           # generate + promote to pr
 macc prd generate --from brief.md --instructions-file planning-notes.md
 
 # Audit an existing PRD against delivered commits
-macc prd audit                                        # uses prd.json, prints prompt
-macc prd audit --tool claude                          # generate and invoke tool
+macc prd audit                                        # coordinator PRD queue (else prd_file, else prd.json), prints prompts
+macc prd audit --tool claude                          # generate and invoke tool, one PRD after the other
 macc prd audit --prd path/to/prd.json --diff-stat
+macc prd audit --prd docs/prd/                        # every PRD file of a directory, in name order
 
 # Promote, validate, inspect runs
 macc prd promote .macc/generated/prd/macc-prd-planner/<run-id>/prd.json

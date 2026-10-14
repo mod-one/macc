@@ -456,6 +456,13 @@ fn intervention_summary(report: &Value) -> Vec<String> {
     if let Some(branch) = text("target_branch") {
         lines.push(format!("target branch: {branch}"));
     }
+    let rounds = intervention
+        .get("repair_rounds")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if rounds > 1 {
+        lines.push(format!("repair rounds: {rounds}"));
+    }
     let list = |pointer: &str| -> Vec<&str> {
         intervention
             .pointer(pointer)

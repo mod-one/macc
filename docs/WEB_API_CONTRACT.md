@@ -992,6 +992,8 @@ Response 200: full `RuntimeSnapshot` JSON with fields: `generated_at`, `project`
 
 Optional field `supervisor` is present while a supervisor intervention is running, or is unrecovered and no coordinator is running. It is not a worker or a task and is never counted in `queue`. Shape: `{ running, active, status, attempt, incident_id, task_ids, tool, activity, started_at, phase_started_at, diagnosis, reason, next_action, target_branch, worktree, log_dir, findings }`. `status` is one of `detected`, `diagnosing`, `repairing`, `validating`, `verifying`, `integrating`, `requeuing`, `restarting` (with `active: true`), or `escalated` / `interrupted`.
 
+Optional field `prd` names the PRD file the coordinator is working through: `{ path, name, position, total, completed }`. `path` is the configured path, `name` its file name, `position`/`total` the 1-based place in the PRD queue (`1`/`1` without a queue), and `completed` is true once every queued PRD has been executed.
+
 ### GET `/api/v1/search?q=<query>`
 
 Purpose: search across tasks, skills, worktrees, and error codes. Response 200: array of `{ kind, id, label, meta }`.

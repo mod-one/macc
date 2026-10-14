@@ -1280,7 +1280,16 @@ pub trait Engine {
     /// This is the single authoritative point for tool invocation in the PRD
     /// generation / audit flow. CLI, TUI, and Web must go through this method;
     /// they must never call `service::context::invoke_tool_with_prompt` directly.
-    fn prd_invoke_tool(&self, paths: &ProjectPaths, tool_id: &str, prompt: &str) -> Result<()> {
+    ///
+    /// `model` is an explicit model (`--model-routing manual --model <id>`);
+    /// without one, the tool's configured model is used.
+    fn prd_invoke_tool(
+        &self,
+        paths: &ProjectPaths,
+        tool_id: &str,
+        prompt: &str,
+        model: Option<&str>,
+    ) -> Result<()> {
         use crate::tool::ToolSpecLoader;
         use crate::MaccError;
 
@@ -1306,7 +1315,9 @@ pub trait Engine {
             ))
         })?;
 
-        crate::service::context::invoke_tool_with_prompt(paths, performer, prompt, None)
+        let canonical = crate::load_canonical_config(&paths.config_path)?;
+        let run = crate::service::context::ToolRun::resolve(spec, &canonical, model);
+        crate::service::context::invoke_tool_with_prompt(paths, performer, &run, prompt, None)
     }
 
     /// Build the audit prompt and, when a tool is configured and `dry_run` is
@@ -1321,7 +1332,11 @@ pub trait Engine {
         // run_prd_audit is prompt-only; dispatch is handled here in the facade.
         if result.prompt_generated && !request.dry_run {
             if let (Some(ref tool_id), Some(ref prompt)) = (&request.tool, &result.prompt) {
-                self.prd_invoke_tool(paths, tool_id, prompt)?;
+                let model = request
+                    .model_selection
+                    .as_ref()
+                    .and_then(|selection| selection.model.as_deref());
+                self.prd_invoke_tool(paths, tool_id, prompt, model)?;
                 result.dispatched = true;
             }
         }

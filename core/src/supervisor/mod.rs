@@ -44,6 +44,10 @@ pub struct SupervisorConfig {
     pub effort: Option<String>,
     #[serde(default = "default_intervention_timeout")]
     pub intervention_timeout_seconds: u64,
+    /// Repair rounds per attempt: a rejected verification, or a validation
+    /// regression, is handed back to the repair agent until this is spent.
+    #[serde(default = "default_max_repair_rounds")]
+    pub max_repair_rounds: u32,
     /// Explicit validation commands; otherwise the project validation workflow is detected.
     #[serde(default)]
     pub validation_commands: Vec<String>,
@@ -81,6 +85,9 @@ fn default_intervention_timeout() -> u64 {
 fn default_max_restart_attempts() -> u32 {
     3
 }
+fn default_max_repair_rounds() -> u32 {
+    3
+}
 fn default_log_analysis_window_seconds() -> u64 {
     300
 }
@@ -101,6 +108,7 @@ impl Default for SupervisorConfig {
             model: None,
             effort: None,
             intervention_timeout_seconds: default_intervention_timeout(),
+            max_repair_rounds: default_max_repair_rounds(),
             validation_commands: Vec::new(),
             watchdog_interval_seconds: default_watchdog_interval_seconds(),
             max_restart_attempts: default_max_restart_attempts(),

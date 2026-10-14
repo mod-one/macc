@@ -215,27 +215,7 @@ fn io(path: &Path, source: std::io::Error) -> MaccError {
     }
 }
 pub fn render_args(args: &[String], model: &str, effort: &str) -> Result<Vec<String>> {
-    let mut rendered = Vec::new();
-    let mut i = 0;
-    while i < args.len() {
-        let a = &args[i];
-        if i + 1 < args.len()
-            && ((args[i + 1].contains("{model}") && model.is_empty())
-                || (args[i + 1].contains("{effort}") && effort.is_empty()))
-        {
-            i += 2;
-            continue;
-        }
-        let value = a.replace("{model}", model).replace("{effort}", effort);
-        if value.contains('{') && value.contains('}') {
-            return Err(MaccError::Validation(format!(
-                "Unresolved supervisor tool argument: {value}"
-            )));
-        }
-        rendered.push(value);
-        i += 1;
-    }
-    Ok(rendered)
+    macc_core::tool::render_performer_args(args, model, effort)
 }
 #[cfg(test)]
 mod tests {

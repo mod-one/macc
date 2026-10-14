@@ -95,6 +95,26 @@ progress (`activity`, for example `Validation 3/5: pnpm run test`) and the phase
 start time. The entry disappears once the intervention recovers. An unrecovered
 one stays visible until a coordinator runs again.
 
+## Repair rounds
+
+A repair the independent verification rejects is not abandoned at once. The
+verifier's explanation is handed back to the repair agent, which continues in
+the same worktree; validation and verification then run again. The same applies
+to a validation command that passes on the unmodified base and fails with the
+repair. `automation.supervisor.max_repair_rounds` (default 3, `1` disables the
+loop) bounds the rounds of one attempt, and each AI call or validation command
+stays bounded by `intervention_timeout_seconds`.
+
+- Logs of later rounds are named `repair-round-N-*` and `verification-round-N-*`;
+  the validation and baseline logs of a rejected round move to `round-N/`.
+- The report records `repair_rounds`.
+- The verifier can answer `requires_human: true` when accepting the repair needs
+  a product, security or access-policy decision. The loop then stops, the
+  intervention waits with the reason "Repair needs a human decision", and the
+  work stays in the worktree.
+- `macc supervisor start --retry` on a kept worktree hands the last rejection to
+  the repair agent as well.
+
 ## When an intervention waits
 
 `macc supervisor status`, `macc supervisor report` and the supervisor entry
@@ -112,6 +132,7 @@ automation:
     watchdog_interval_seconds: 30
     max_restart_attempts: 3
     intervention_timeout_seconds: 3600
+    max_repair_rounds: 3
     log_analysis_window_seconds: 300
     validation_commands:
       - npm run build

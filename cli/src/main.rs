@@ -750,9 +750,10 @@ pub enum PrdSubcommands {
     },
     /// Enrich an existing PRD from commit history and delivered code
     Audit {
-        /// PRD file to audit (default: prd.json)
-        #[arg(long = "prd", default_value = "prd.json")]
-        prd_path: String,
+        /// PRD file, or directory of PRD files, to audit (default: the
+        /// coordinator PRD queue, else its prd_file, else prd.json)
+        #[arg(long = "prd")]
+        prd_path: Option<String>,
         /// Tool to invoke (when omitted, prints the prompt only)
         #[arg(long)]
         tool: Option<String>,
@@ -2012,7 +2013,7 @@ fn run_with_engine_provider(
                         std::env::set_var("MACC_MODEL_ROUTING_MODE", "auto");
                     }
                     PrdSubcommand::Audit {
-                        prd_path: std::path::PathBuf::from(prd_path),
+                        prd_path: prd_path.as_deref().map(std::path::PathBuf::from),
                         tool: tool.clone(),
                         model_routing: model_routing.clone(),
                         model: model.clone(),

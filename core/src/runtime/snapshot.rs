@@ -18,6 +18,10 @@ pub struct RuntimeSnapshot {
     /// operator. Separate from `workers`/`tasks`: it is not a coordinator task.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supervisor: Option<crate::supervisor::live::SupervisorLive>,
+    /// The PRD file the coordinator is working through, with its position in
+    /// the PRD queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prd: Option<crate::prd_queue::CurrentPrd>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

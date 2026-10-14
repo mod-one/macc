@@ -404,3 +404,6 @@ mod supervisor_lifecycle;
 
 #[path = "support/supervisor_integration.rs"]
 mod supervisor_integration;
+
+#[path = "support/supervisor_feedback.rs"]
+mod supervisor_feedback;

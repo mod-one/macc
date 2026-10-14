@@ -25,6 +25,9 @@ pub(super) struct Intervention {
     /// Validation commands that fail on the unmodified base too (not a gate).
     #[serde(default)]
     pub(super) preexisting_failures: Vec<String>,
+    /// Repair rounds run in this attempt (a rejection starts another round).
+    #[serde(default)]
+    pub(super) repair_rounds: u32,
     /// What unblocks a waiting intervention, as an exact operator step.
     #[serde(default)]
     pub(super) next_action: Option<String>,

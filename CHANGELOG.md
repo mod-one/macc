@@ -13,8 +13,16 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - The supervisor's intervention is visible live: a pinned, distinctly styled `SUPERVISOR` row in the TUI LIVE TASKS panel with a SUPERVISOR TASK DETAIL pane, and a `Supervisor` entry on the web dashboard fed by the new optional `supervisor` object of `GET /api/v1/snapshot`. The report records the phase (now including `validating` and `verifying`), the step in progress and phase timestamps.
 - An unrecovered intervention reports its reason and an exact `next_action` in `macc supervisor status`, `macc supervisor report` and the supervisor row, together with the diagnosis' MACC findings.
 - A missing Git identity escalates before any AI call.
+- A rejected independent verification, or a validation regression introduced by the repair, is handed back to the repair agent for another round in the same worktree instead of waiting for an operator (`automation.supervisor.max_repair_rounds`, default 3). The verifier can refer the repair to a human decision with `requires_human`, which stops the loop. An explicit `--retry` on a kept worktree also passes the last rejection to the repair agent.
+
+### Added — Current PRD in live clients
+- The Coordinator Live summary line of the TUI names the PRD file being executed and its position in the PRD queue (`Coordinator: Idle | PRD: 03-web-bff-shell.prd.json (2/26) | Tasks: ...`). The web dashboard shows the same above the queue counters, from the new optional `prd` object of `GET /api/v1/snapshot`.
+
+### Changed — PRD audit
+- `macc prd audit --prd` accepts a directory as well as a file, and without `--prd` audits the coordinator PRD queue (`automation.coordinator.prd_files`), then `prd_file`, then `prd.json`. Several PRDs are audited in sequence; with `--json` the output is then `{"audits": [...], "failures": [...]}`.
 
 ### Fixed
+- `macc prd audit --tool`, `macc prd generate --tool` and AI context generation passed the ToolSpec argument template to the tool unrendered, so Claude Code was started with the literal model `{model}` and failed. The arguments are now rendered with the tool's configured model and effort, the `--model-tier` tier, or the `--model-routing manual --model` value.
 - `macc supervisor start --retry` no longer fails with "Diagnosis modified source" when the slot still holds an unfinished repair.
 - Blocked-run stop reasons and dependency-chain messages use `unmet_preconditions`/`result_explanation` instead of a truncated performer log header; the TUI precondition overlay is selected whenever preconditions are recorded, whatever the error code.
 - A managed command observed after it exited reports how long it ran, not the time since it started.

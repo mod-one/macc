@@ -212,6 +212,7 @@ async fn monitor(paths: ProjectPaths) -> Result<()> {
                         detail: String::new(),
                         target_branch: None,
                         preexisting_failures: Vec::new(),
+                        repair_rounds: 0,
                         next_action: None,
                         started_at: Some(chrono::Utc::now().to_rfc3339()),
                         phase_started_at: Some(chrono::Utc::now().to_rfc3339()),

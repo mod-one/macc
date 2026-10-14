@@ -173,7 +173,8 @@ pub fn next_action(pending: &Pending, report: &Intervention, max_attempts: u32) 
         .filter(|path| path.exists())
         .map(|path| format!(" Repair work is kept in {}.", path.display()))
         .unwrap_or_default();
-    let human = report.diagnosis.as_ref().is_some_and(|d| d.requires_human);
+    let human = report.diagnosis.as_ref().is_some_and(|d| d.requires_human)
+        || report.detail.contains(super::repair::HUMAN_DECISION);
     let action = if human {
         format!("Make the human decision named in the reason, then run `{RETRY}`.")
     } else if let Some(time) = pending
@@ -194,6 +195,8 @@ pub fn next_action(pending: &Pending, report: &Intervention, max_attempts: u32) 
         || report.detail.contains("Coordinator readiness timed out")
     {
         format!("Fix the coordinator startup error in .macc/log/coordinator/daemon-stderr.log (`macc coordinator run --preflight-only` shows reference-branch problems), then run `{RETRY}`.")
+    } else if report.detail.contains("Repair verification rejected") {
+        format!("The repair agent could not satisfy the independent verification in {} round(s). Finish the repair in the kept worktree as the reason describes (or raise automation.supervisor.max_repair_rounds), then run `{RETRY}`.", report.repair_rounds.max(1))
     } else if report.detail.contains("integration deferred") {
         format!(
             "Commit or stash the overlapping changes on the reference branch, then run `{RETRY}`."

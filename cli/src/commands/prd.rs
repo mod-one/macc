@@ -28,7 +28,7 @@ pub enum PrdSubcommand {
         json: bool,
     },
     Audit {
-        prd_path: PathBuf,
+        prd_path: Option<PathBuf>,
         tool: Option<String>,
         model_routing: Option<String>,
         model: Option<String>,
@@ -115,7 +115,7 @@ impl Command for PrdCommand {
                 json,
             } => run_audit(
                 &paths,
-                prd_path,
+                prd_path.as_deref(),
                 tool.as_deref(),
                 model_routing.as_deref(),
                 model.as_deref(),
@@ -283,7 +283,8 @@ fn run_generate(
             })?;
 
             // Invoke tool via the Engine facade (never call service layer directly).
-            engine.prd_invoke_tool(paths, &t, &prompt)?;
+            let manual_model = model.filter(|_| model_routing == Some("manual"));
+            engine.prd_invoke_tool(paths, &t, &prompt, manual_model)?;
 
             // Validate the generated output.
             let generated_prd = run_dir.join("prd.json");
@@ -348,7 +349,7 @@ fn run_generate(
 #[allow(clippy::too_many_arguments)]
 fn run_audit(
     paths: &macc_core::ProjectPaths,
-    prd_path: &std::path::Path,
+    prd_path: Option<&std::path::Path>,
     tool: Option<&str>,
     model_routing: Option<&str>,
     model: Option<&str>,
@@ -360,51 +361,89 @@ fn run_audit(
     json: bool,
     engine: &dyn macc_core::Engine,
 ) -> Result<()> {
-    // Resolve the PRD path (default: prd.json at project root).
-    let resolved_prd = if prd_path.as_os_str().is_empty() || prd_path == std::path::Path::new("") {
-        paths.root.join("prd.json")
-    } else if prd_path.is_absolute() {
-        prd_path.to_path_buf()
-    } else {
-        paths.root.join(prd_path)
-    };
+    let canonical = load_canonical_config(&paths.config_path)?;
+    let coordinator = canonical.automation.coordinator.as_ref();
+    // A file, a directory of PRDs, or by default the coordinator PRD queue.
+    let targets = macc_core::prd_generation::audit::resolve_audit_targets(
+        &paths.root,
+        prd_path.filter(|p| !p.as_os_str().is_empty()),
+        coordinator,
+    )?;
 
     // Resolve reference branch.
-    let canonical = load_canonical_config(&paths.config_path)?;
     let ref_branch = reference_branch
         .map(|s| s.to_string())
-        .or_else(|| {
-            canonical
-                .automation
-                .coordinator
-                .as_ref()
-                .and_then(|c| c.reference_branch.clone())
-        })
+        .or_else(|| coordinator.and_then(|c| c.reference_branch.clone()))
         .unwrap_or_else(|| "main".to_string());
 
-    let model_selection = build_model_selection(model_routing, model);
-
-    let request = PrdAuditRequest {
-        prd_path: resolved_prd,
-        tool: tool.map(|s| s.to_string()),
-        model_selection,
-        instructions: instructions.map(|s| s.to_string()),
-        instructions_file: instructions_file.map(|p| p.to_path_buf()),
-        reference_branch: ref_branch,
-        include_diff_stat: diff_stat,
-        dry_run,
-    };
-
-    let result = engine.prd_audit(paths, &request)?;
-
-    if json {
-        println!("{}", serde_json::to_string_pretty(&result).unwrap());
-        return Ok(());
+    let several = targets.len() > 1;
+    let mut reports = Vec::new();
+    let mut failures = Vec::new();
+    for (index, target) in targets.iter().enumerate() {
+        let name = target
+            .strip_prefix(&paths.root)
+            .unwrap_or(target)
+            .display()
+            .to_string();
+        if several && !json {
+            println!("[{}/{}] {name}", index + 1, targets.len());
+        }
+        let request = PrdAuditRequest {
+            prd_path: target.clone(),
+            tool: tool.map(|s| s.to_string()),
+            model_selection: build_model_selection(model_routing, model),
+            instructions: instructions.map(|s| s.to_string()),
+            instructions_file: instructions_file.map(|p| p.to_path_buf()),
+            reference_branch: ref_branch.clone(),
+            include_diff_stat: diff_stat,
+            dry_run,
+        };
+        let result = match engine.prd_audit(paths, &request) {
+            Ok(result) => result,
+            // One unreadable PRD must not hide the audit of the others.
+            Err(error) if several => {
+                if !json {
+                    println!("Audit failed: {error}");
+                }
+                failures.push(format!("{name}: {error}"));
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        if json {
+            reports.push(serde_json::json!({"prd": name, "result": result}));
+            continue;
+        }
+        print_audit_result(&result, tool, dry_run);
     }
 
+    if json {
+        // A single PRD keeps the original object shape.
+        let output = match reports.as_slice() {
+            [only] if !several => only["result"].clone(),
+            _ => serde_json::json!({"audits": reports, "failures": failures}),
+        };
+        println!("{}", serde_json::to_string_pretty(&output).unwrap());
+    }
+    if failures.is_empty() {
+        return Ok(());
+    }
+    Err(macc_core::MaccError::Validation(format!(
+        "PRD audit failed for {} of {} file(s): {}",
+        failures.len(),
+        targets.len(),
+        failures.join("; ")
+    )))
+}
+
+fn print_audit_result(
+    result: &macc_core::prd_generation::PrdAuditResult,
+    tool: Option<&str>,
+    dry_run: bool,
+) {
     if !result.prompt_generated {
         println!("No tasks to audit (no completed tasks with commit context or todo tasks).");
-        return Ok(());
+        return;
     }
 
     println!(
@@ -427,8 +466,6 @@ fn run_audit(
             tool.unwrap_or("(unknown)")
         );
     }
-
-    Ok(())
 }
 
 // ── Promote ───────────────────────────────────────────────────────────────────

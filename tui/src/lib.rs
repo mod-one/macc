@@ -1884,9 +1884,22 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             } else {
                 String::new()
             };
+            // Several PRD files can be queued: name the one being executed.
+            let prd_line = state
+                .project_paths
+                .as_ref()
+                .map(|paths| {
+                    let coordinator = state
+                        .working_copy
+                        .as_ref()
+                        .and_then(|config| config.automation.coordinator.as_ref());
+                    macc_core::prd_queue::current(&paths.root, coordinator).label()
+                })
+                .unwrap_or_else(|| "unavailable".to_string());
             let summary_para = Paragraph::new(format!(
-                "Coordinator: {} | Tasks: {}{}{}",
+                "Coordinator: {} | PRD: {} | Tasks: {}{}{}",
                 status_line,
+                prd_line,
                 snapshot_line,
                 search_line,
                 if state.coordinator_throttled_tools.is_empty() {

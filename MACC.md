@@ -296,7 +296,7 @@ The `macc prd` group manages the full PRD lifecycle. The internal generation too
 | `macc prd generate --from <brief.md> --update <prd.json>` | Update an existing PRD from a brief |
 | `macc prd generate --from <brief.md> --dry-run` | Preview the generation prompt without invoking the tool |
 | `macc prd generate --from <brief.md> --promote` | Generate and immediately promote to `prd.json` |
-| `macc prd audit [--prd prd.json] [--tool <id>]` | Enrich PRD from commit history; prints prompt when `--tool` is omitted |
+| `macc prd audit [--prd <file-or-directory>] [--tool <id>]` | Enrich PRD from commit history; prints prompt when `--tool` is omitted. `--prd` takes a PRD file or a directory (its `.json` files with a top-level `tasks` array, in name order); without it the coordinator PRD queue (`prd_files`) is audited, else `prd_file`, else `prd.json`. Several PRDs are audited one after the other; a failing one is reported at the end without stopping the others |
 | `macc prd audit --dry-run` | Preview the audit prompt without invoking a tool |
 | `macc prd promote <source.json> [--dest prd.json] [-y]` | Promote a generated PRD to the active `prd.json` |
 | `macc prd validate <prd.json>` | Validate PRD structure |

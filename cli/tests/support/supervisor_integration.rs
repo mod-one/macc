@@ -170,6 +170,12 @@ fn explicit_retry_rediagnoses_in_a_slot_that_still_holds_the_repair() {
     assert!(root
         .join(".macc/log/supervisor/run-fixture-1-attempt-2/diagnosis-prompt.txt")
         .exists());
+    // The rejection kept in the slot is handed to the retried repair.
+    assert!(std::fs::read_to_string(
+        root.join(".macc/log/supervisor/run-fixture-1-attempt-2/repair-prompt.txt")
+    )
+    .unwrap()
+    .contains("The previous state of this repair was rejected"));
     assert_eq!(
         std::fs::read_to_string(root.join("defect.txt")).unwrap(),
         "fixed\n"
@@ -227,9 +233,10 @@ fn report_command_prints_reason_next_step_and_macc_findings() {
             "{text}"
         );
         assert!(
-            text.contains("next: Resolve the reason above, then run `macc supervisor stop"),
+            text.contains("next: The repair agent could not satisfy the independent verification in 3 round(s)"),
             "{text}"
         );
+        assert!(text.contains("repair rounds: 3"), "{text}");
         assert!(text.contains("MACC findings (1):"), "{text}");
         assert!(
             text.contains("1. Normalized logs masked the precondition"),
