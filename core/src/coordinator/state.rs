@@ -237,8 +237,8 @@ pub fn coordinator_state_task_field(
 ) -> Result<()> {
     let task_id = required_arg(args, "task-id")?;
     let field_expr = required_arg(args, "field")?;
-    let snapshot = load_snapshot_view(repo_root, args)?;
-    if let Some(task) = snapshot.registry.find_task(&task_id) {
+    let registry = load_registry_view(repo_root, args)?;
+    if let Some(task) = registry.find_task(&task_id) {
         if let Some(value) = extract_task_field_value_typed(task, &field_expr) {
             println!("{}", value);
         }
@@ -251,8 +251,8 @@ pub fn coordinator_state_task_exists(
     args: &BTreeMap<String, String>,
 ) -> Result<()> {
     let task_id = required_arg(args, "task-id")?;
-    let snapshot = load_snapshot_view(repo_root, args)?;
-    let exists = snapshot.registry.find_task(&task_id).is_some();
+    let registry = load_registry_view(repo_root, args)?;
+    let exists = registry.find_task(&task_id).is_some();
     if exists {
         Ok(())
     } else {
@@ -264,8 +264,8 @@ pub fn coordinator_state_task_exists(
 }
 
 pub fn coordinator_state_counts(repo_root: &Path, args: &BTreeMap<String, String>) -> Result<()> {
-    let snapshot = load_snapshot_view(repo_root, args)?;
-    let (total, todo, active, blocked, merged) = snapshot.registry.counts();
+    let registry = load_registry_view(repo_root, args)?;
+    let (total, todo, active, blocked, merged) = registry.counts();
     println!("{}\t{}\t{}\t{}\t{}", total, todo, active, blocked, merged);
     Ok(())
 }
@@ -275,8 +275,8 @@ pub fn coordinator_state_locks(repo_root: &Path, args: &BTreeMap<String, String>
         .get("format")
         .cloned()
         .unwrap_or_else(|| "count".to_string());
-    let snapshot = load_snapshot_view(repo_root, args)?;
-    let locks = snapshot.registry.resource_locks;
+    let registry = load_registry_view(repo_root, args)?;
+    let locks = registry.resource_locks;
     match format.as_str() {
         "count" => println!("{}", locks.len()),
         "lines" => {
@@ -437,8 +437,8 @@ pub fn coordinator_state_slo_metric(
 ) -> Result<()> {
     let task_id = required_arg(args, "task-id")?;
     let metric = required_arg(args, "metric")?;
-    let snapshot = load_snapshot_view(repo_root, args)?;
-    let task = snapshot.registry.find_task(&task_id);
+    let registry = load_registry_view(repo_root, args)?;
+    let task = registry.find_task(&task_id);
     if let Some(task) = task {
         let value = task.task_runtime.metric_i64(&metric).unwrap_or(0);
         let warned = task.task_runtime.has_slo_warning(&metric);
@@ -453,7 +453,7 @@ pub fn coordinator_state_registry_load(
     repo_root: &Path,
     args: &BTreeMap<String, String>,
 ) -> Result<Value> {
-    load_snapshot_view(repo_root, args)?.registry.to_value()
+    load_registry_view(repo_root, args)?.to_value()
 }
 
 pub fn coordinator_state_registry_save(
@@ -467,8 +467,15 @@ pub fn coordinator_state_registry_save(
     let mut snapshot = match mode {
         CoordinatorStorageMode::Json => JsonStorage::new(store_paths.clone()).load_snapshot()?,
         CoordinatorStorageMode::DualWrite | CoordinatorStorageMode::Sqlite => {
-            if SqliteStorage::new(store_paths.clone()).has_snapshot_data()? {
-                SqliteStorage::new(store_paths.clone()).load_snapshot()?
+            let sqlite = SqliteStorage::new(store_paths.clone());
+            if sqlite.has_snapshot_data()? {
+                // The coordinator saves the registry many times per tick; only
+                // the JSON mirror needs the event log in hand.
+                if should_mirror_json(args) {
+                    sqlite.load_snapshot()?
+                } else {
+                    sqlite.load_snapshot_without_events()?
+                }
             } else if store_paths.registry_json_path.exists() {
                 JsonStorage::new(store_paths.clone()).load_snapshot()?
             } else {
@@ -638,6 +645,26 @@ fn load_snapshot_view(
                 Ok(snapshot) => Ok(snapshot),
                 Err(sql_err) if allow_legacy_json_fallback(args) => JsonStorage::new(store_paths)
                     .load_snapshot()
+                    .or(Err(sql_err)),
+                Err(sql_err) => Err(sql_err),
+            }
+        }
+    }
+}
+
+/// `load_snapshot_view` without the event log, for readers of the registry.
+fn load_registry_view(repo_root: &Path, args: &BTreeMap<String, String>) -> Result<TaskRegistry> {
+    let mode = resolve_storage_mode(args)?;
+    let project_paths = ProjectPaths::from_root(repo_root);
+    let store_paths = CoordinatorStoragePaths::from_project_paths(&project_paths);
+    match mode {
+        CoordinatorStorageMode::Json => Ok(JsonStorage::new(store_paths).load_snapshot()?.registry),
+        CoordinatorStorageMode::DualWrite | CoordinatorStorageMode::Sqlite => {
+            match SqliteStorage::new(store_paths.clone()).load_registry() {
+                Ok(registry) => Ok(registry),
+                Err(sql_err) if allow_legacy_json_fallback(args) => JsonStorage::new(store_paths)
+                    .load_snapshot()
+                    .map(|snapshot| snapshot.registry)
                     .or(Err(sql_err)),
                 Err(sql_err) => Err(sql_err),
             }

@@ -1,3 +1,4 @@
+use crate::coordinator::approval_prompt;
 use crate::coordinator::legacy_helpers::{
     stop_coordinator_process_groups, NativeCoordinatorLogger,
 };
@@ -156,6 +157,19 @@ pub fn handle(
     let paths = &context.paths;
     let canonical = &context.canonical;
     let coordinator_cfg = context.coordinator_cfg.as_ref();
+    if matches!(
+        input.command_name.as_str(),
+        "approvals" | "approve" | "reject" | "request-changes"
+    ) {
+        let (interactive, rest) = approval_prompt::split_interactive_flags(
+            &input.extra_args,
+            approval_prompt::stdio_is_terminal(),
+        );
+        input.extra_args = rest;
+        if interactive {
+            return handle_interactive_approval(engine, paths, canonical, coordinator_cfg, &input);
+        }
+    }
     let command = coordinator_command_from_name(
         &input.command_name,
         &input.extra_args,
@@ -562,6 +576,9 @@ pub(crate) fn print_pending_approvals(
                 .unwrap_or_default(),
             p.status
         );
+        if !p.question.is_empty() {
+            println!("    Question:  {}", p.question);
+        }
         println!(
             "    Subject:   {} at {}",
             p.subject_task,
@@ -609,6 +626,138 @@ pub(crate) fn print_pending_approvals(
             p.task_id
         );
     }
+    if pending.iter().any(|p| p.awaiting_decision) {
+        println!();
+        println!(
+            "Run `macc coordinator approvals` in a terminal to read each request in full and decide interactively."
+        );
+    }
+}
+
+/// `approvals` walks every gate awaiting a decision; `approve|reject|
+/// request-changes` prompt only for what the command line leaves out (and
+/// record directly when nothing is missing).
+fn handle_interactive_approval(
+    engine: &crate::services::engine_provider::SharedEngine,
+    paths: &macc_core::ProjectPaths,
+    canonical: &macc_core::config::CanonicalConfig,
+    coordinator_cfg: Option<&macc_core::config::CoordinatorConfig>,
+    input: &CoordinatorCommandInput,
+) -> Result<()> {
+    let execute = |command: CoordinatorCommand| {
+        engine.coordinator_execute_command(
+            paths,
+            command,
+            CoordinatorCommandRequest {
+                canonical: Some(canonical),
+                coordinator_cfg,
+                env_cfg: &input.env_cfg,
+                logger: None,
+            },
+        )
+    };
+    let load = || -> Result<Vec<macc_core::coordinator::approval::PendingApproval>> {
+        Ok(execute(CoordinatorCommand::ListApprovals)?
+            .pending_approvals
+            .unwrap_or_default())
+    };
+    let client_ctx = ClientContext {
+        client_id: input.client_id.clone(),
+        project_root: paths.root.clone(),
+    };
+    let record = |d: approval_prompt::CollectedDecision| -> Result<String> {
+        gate_owner_action(&client_ctx, &coordinator_process_handle(&paths.root))?;
+        let response = execute(CoordinatorCommand::GateDecision {
+            task_id: d.task_id,
+            decision: d.decision,
+            role: d.role,
+            actor: d.actor,
+            revision: d.revision,
+            evidence: d.evidence,
+            reason: d.reason,
+        })?;
+        Ok(response.gate_decision.unwrap_or_default())
+    };
+    let actor_label = {
+        let identity = macc_core::service::coordinator_workflow::operator_identity(&paths.root);
+        if identity.is_empty() {
+            "(no git identity: pass --as <name>)".to_string()
+        } else {
+            identity
+        }
+    };
+    let stdin = std::io::stdin();
+    let mut reader = stdin.lock();
+    let mut stdout = std::io::stdout();
+    let mut prompter = approval_prompt::Prompter::new(&mut reader, &mut stdout);
+
+    if input.command_name == "approvals" {
+        let prefill = approval_prompt::Prefill::parse("approvals", &input.extra_args)?;
+        prompter.walk(
+            &mut || load(),
+            &mut |d| record(d),
+            &actor_label,
+            prefill.actor.as_deref(),
+        )?;
+        return Ok(());
+    }
+
+    let prefill = approval_prompt::Prefill::parse(&input.command_name, &input.extra_args)?;
+    let pending = load()?;
+    let task_id = match prefill.task_id.clone() {
+        Some(id) => id,
+        None => {
+            let waiting: Vec<_> = pending.iter().filter(|p| p.awaiting_decision).collect();
+            match waiting.as_slice() {
+                [only] => only.task_id.clone(),
+                [] => {
+                    return Err(MaccError::Validation(
+                        "No approval gate is waiting for a decision.".into(),
+                    ))
+                }
+                _ => {
+                    return Err(MaccError::Validation(format!(
+                        "Several gates wait for a decision ({}): name one, or run `macc coordinator approvals`.",
+                        waiting
+                            .iter()
+                            .map(|p| p.task_id.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )))
+                }
+            }
+        }
+    };
+    let gate = pending.iter().find(|p| p.task_id == task_id);
+    let prefill = approval_prompt::Prefill {
+        task_id: Some(task_id.clone()),
+        ..prefill
+    };
+    if prefill.is_complete_for(gate) {
+        // Everything was given: record as the plain command would.
+        let line = record(approval_prompt::CollectedDecision {
+            task_id,
+            decision: prefill.decision.expect("complete prefill has a decision"),
+            role: prefill.role.unwrap_or_default(),
+            revision: prefill.revision,
+            evidence: prefill.evidence,
+            reason: prefill.reason,
+            actor: prefill.actor,
+        })?;
+        println!("{line}");
+        return Ok(());
+    }
+    let Some(gate) = gate else {
+        return Err(MaccError::Validation(format!(
+            "'{task_id}' is not a human approval gate waiting for a decision. Run `macc coordinator approvals` to see the open gates."
+        )));
+    };
+    prompter.show_brief(gate);
+    match prompter.collect(gate, &prefill, &actor_label) {
+        Ok(decision) => println!("{}", record(decision)?),
+        Err(_) => println!("No decision recorded."),
+    }
+    Ok(())
 }
 
 fn command_requires_owner_gate(command: &CoordinatorCommand) -> bool {

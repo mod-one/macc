@@ -20,6 +20,25 @@ pub struct Ledger {
     pub last_status: String,
     #[serde(default)]
     pub incidents: BTreeMap<String, Pending>,
+    /// Restart-only recoveries per crash fingerprint: the same stop recurring
+    /// after a restart escalates instead of looping.
+    #[serde(default)]
+    pub restarts: BTreeMap<String, u32>,
+}
+
+/// Restart-only recoveries allowed for one crash fingerprint.
+pub const MAX_RESTARTS_PER_FINGERPRINT: u32 = 1;
+
+/// Identifies "the same stop": its reason and the incident tasks with their
+/// states, independent of the run id and epoch that change on each restart.
+pub fn crash_fingerprint(incident: &Incident) -> String {
+    let mut tasks: Vec<String> = incident
+        .tasks
+        .iter()
+        .map(|t| format!("{}:{}", t.id, t.state))
+        .collect();
+    tasks.sort();
+    format!("{}|{}", incident.reason.trim(), tasks.join(","))
 }
 #[derive(Default, Serialize, Deserialize)]
 pub struct Pending {
@@ -68,6 +87,7 @@ pub fn context(
         "id":task.id,"state":task.state,"tool":task.tool,"worktree":task.worktree,
         "last_error":task.task_runtime.last_error,"last_error_code":task.task_runtime.last_error_code,
         "unmet_preconditions":task.task_runtime.unmet_preconditions,"result_explanation":task.task_runtime.result_explanation,
+        "out_of_scope_fix":task.task_runtime.extra.get(macc_core::coordinator::precondition_scope::OUT_OF_SCOPE_FIX_KEY),
         "extra":task.extra,"blocked_on_external":task.blocked_on_external
     })).collect();
     // Repairs publish to the reference branch: its movement is new evidence too.
@@ -210,6 +230,31 @@ pub fn next_action(pending: &Pending, report: &Intervention, max_attempts: u32) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_same_stop_after_a_restart_has_the_same_fingerprint() {
+        let incident = |run: &str, state: &str| Incident {
+            id: format!("{run}-1"),
+            run_id: run.into(),
+            epoch: 1,
+            reason: "Coordinator error [invalid_transition]: from=testing".into(),
+            tasks: vec![macc_core::coordinator::model::Task {
+                id: "L4L-BASELINE-001".into(),
+                state: state.into(),
+                ..Default::default()
+            }],
+            recent_events: Vec::new(),
+            run_status: Some("failed".into()),
+        };
+        assert_eq!(
+            crash_fingerprint(&incident("run-a", "testing")),
+            crash_fingerprint(&incident("run-b", "testing"))
+        );
+        assert_ne!(
+            crash_fingerprint(&incident("run-a", "testing")),
+            crash_fingerprint(&incident("run-a", "reviewing"))
+        );
+    }
     #[test]
     fn unchanged_diagnosis_waits_across_serialization_and_wakes_once_for_reset() {
         let ctx = json!({"head":"a","available":false});

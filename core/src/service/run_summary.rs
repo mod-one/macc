@@ -34,6 +34,10 @@ pub struct CoordinatorRunSummary {
     /// render these as a list under "cannot be implemented because…".
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unmet_preconditions: Vec<String>,
+    /// Paths a precondition names that the root task may not change: the fix
+    /// belongs to another module (supervisor repair or another task).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub out_of_scope_paths: Vec<String>,
 }
 
 pub fn load_latest_run_summary(
@@ -56,6 +60,7 @@ pub fn load_latest_run_summary(
     let unmet_preconditions = blocked_task
         .map(|task| task.task_runtime.unmet_preconditions.clone())
         .unwrap_or_default();
+    let out_of_scope_paths = blocked_task.map(out_of_scope_fix_paths).unwrap_or_default();
     let task_id = blocked_task.map(|task| task.id.clone());
     let severity = severity_for(latest, blocked_task.is_some(), registry);
     let headline = headline_for(latest, blocked_task, dependent_task_ids.len());
@@ -88,7 +93,25 @@ pub fn load_latest_run_summary(
             .map(CoordinatorRunHistoryItem::from)
             .collect(),
         unmet_preconditions,
+        out_of_scope_paths,
     }))
+}
+
+/// Paths recorded by a precondition stop whose fix lies outside the task's
+/// change scope.
+fn out_of_scope_fix_paths(task: &Task) -> Vec<String> {
+    task.task_runtime
+        .extra
+        .get(crate::coordinator::precondition_scope::OUT_OF_SCOPE_FIX_KEY)
+        .and_then(|v| v.get("paths"))
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn blocked_root_for_run<'a>(registry: &'a TaskRegistry, run: &CoordinatorRun) -> Option<&'a Task> {
@@ -218,6 +241,15 @@ fn headline_for(run: &CoordinatorRun, blocked: Option<&Task>, dependent_count: u
 
 fn next_action_for(run: &CoordinatorRun, blocked: Option<&Task>, code: Option<&str>) -> String {
     if let Some(task) = blocked {
+        let out_of_scope = out_of_scope_fix_paths(task);
+        if !out_of_scope.is_empty() {
+            return format!(
+                "The fix lies outside {}'s change scope ({}): let the supervisor repair it (`macc supervisor start`, or run with `--supervisor`), or add a PRD task that owns those paths; then run `macc coordinator unblock-task --task {} --evidence \"<commit>\"`.",
+                task.id,
+                out_of_scope.join(", "),
+                task.id
+            );
+        }
         if code == Some("E903") || !task.task_runtime.unmet_preconditions.is_empty() {
             return format!(
                 "Satisfy the recorded precondition(s) (this is not a tool failure; retrying unchanged will stop again), then run `macc coordinator unblock-task --task {} --evidence \"<evidence>\"`.",
@@ -408,6 +440,40 @@ mod tests {
             .contains("unblock-task --task SEC-API-003"));
         assert!(summary.next_action.contains("not a tool failure"));
         assert_eq!(summary.dependent_task_ids, vec!["SEC-API-004".to_string()]);
+    }
+
+    #[test]
+    fn an_out_of_scope_precondition_points_to_a_repair_not_a_retry() {
+        let root = tempfile::tempdir().expect("temp project");
+        let paths = ProjectPaths::from_root(root.path());
+        let sqlite = SqliteStorage::new(CoordinatorStoragePaths::from_project_paths(&paths));
+        sqlite
+            .upsert_coordinator_run(&run("run-1", "2026-09-21T09:48:00Z", "blocked", "blocked"))
+            .expect("run");
+        let registry = TaskRegistry::from_value(&json!({
+            "tasks": [{
+                "id": "WEB-UI-005",
+                "state": "blocked",
+                "task_runtime": {
+                    "run_id": "run-1",
+                    "last_error_code": "E903",
+                    "unmet_preconditions": ["apps/api/src/routes/session.ts must expose the web audience"],
+                    "out_of_scope_fix": {"paths": ["apps/api/src/routes/session.ts"]}
+                }
+            }]
+        }))
+        .expect("registry");
+        let summary = load_latest_run_summary(&sqlite, &registry)
+            .expect("summary")
+            .expect("latest run");
+        assert_eq!(
+            summary.out_of_scope_paths,
+            vec!["apps/api/src/routes/session.ts".to_string()]
+        );
+        assert!(summary
+            .next_action
+            .contains("outside WEB-UI-005's change scope"));
+        assert!(summary.next_action.contains("macc supervisor start"));
     }
 
     #[test]

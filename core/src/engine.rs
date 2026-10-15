@@ -875,14 +875,14 @@ pub trait Engine {
     ) -> Result<CoordinatorStatusSnapshot> {
         let paths = CoordinatorStoragePaths::from_project_paths(project_paths);
         let sqlite = SqliteStorage::new(paths.clone());
-        let snapshot: CoordinatorSnapshot = if sqlite.has_snapshot_data()? {
-            sqlite.load_snapshot()?
+        let registry = if sqlite.has_snapshot_data()? {
+            sqlite.load_registry()?
         } else {
-            JsonStorage::new(paths).load_snapshot()?
+            JsonStorage::new(paths).load_snapshot()?.registry
         };
 
         let mut counts = CoordinatorStatusSnapshot::default();
-        let (total, todo, active, blocked, merged) = snapshot.registry.counts();
+        let (total, todo, active, blocked, merged) = registry.counts();
         counts.total = total;
         counts.todo = todo;
         counts.active = active;
@@ -1811,7 +1811,7 @@ pub struct CoordinatorEvent {
 }
 
 impl CoordinatorEvent {
-    fn from_record(record: crate::coordinator::CoordinatorEventRecord) -> Self {
+    pub fn from_record(record: crate::coordinator::CoordinatorEventRecord) -> Self {
         let raw = serde_json::to_value(&record)
             .unwrap_or_else(|_| serde_json::json!({ "event_id": record.event_id }));
         Self {

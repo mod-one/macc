@@ -18,6 +18,8 @@ use ratatui::{
 };
 use std::{collections::BTreeMap, io, time::Duration};
 
+pub mod approval;
+mod coordinator_poll;
 pub mod ownership;
 pub mod prd_queue;
 pub mod screen;
@@ -179,6 +181,16 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
                 state.coordinator_task_explain_popup = None;
             }
             _ => {}
+        }
+        return;
+    }
+
+    if let Some(window) = state.approval_window.as_mut() {
+        match window.key(key) {
+            approval::Outcome::Continue => {}
+            approval::Outcome::Later => state.snooze_approval_window(),
+            approval::Outcome::Next => state.next_approval_window(),
+            approval::Outcome::Submit(decision) => state.submit_approval(decision),
         }
         return;
     }
@@ -493,6 +505,7 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
         KeyCode::Char(c) if current_screen == Screen::Apply && !matches!(c, 'q' | 'Q') => {
             state.append_apply_consent_char(c);
         }
+        KeyCode::Char('A') => state.open_approval_window(),
         // Navigation: Esc/q to quit (or pop if in a sub-screen)
         KeyCode::Esc | KeyCode::Char('q') => {
             if state.screen_stack.len() > 1 {
@@ -2091,9 +2104,8 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             let mut detail_lines = Vec::new();
             if let Some(ref t) = selected_task {
                 let full_task = state
-                    .load_coordinator_storage_snapshot()
-                    .ok()
-                    .and_then(|s| s.registry.tasks.into_iter().find(|rt| rt.id == t.task_id));
+                    .coordinator_registry_for_render()
+                    .and_then(|r| r.tasks.iter().find(|rt| rt.id == t.task_id).cloned());
                 let title = full_task
                     .as_ref()
                     .and_then(|rt| rt.title.clone())
@@ -2277,6 +2289,15 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                                 logs_lines.push(Line::from(format!("  - {}", item)));
                             }
                         }
+                        if !summary.out_of_scope_paths.is_empty() {
+                            logs_lines.push(Line::from(vec![
+                                Span::styled("Out of scope: ", Style::default().fg(theme.warn)),
+                                Span::raw(format!(
+                                    "the fix lies in {} (another module): a repair is needed, not a retry",
+                                    summary.out_of_scope_paths.join(", ")
+                                )),
+                            ]));
+                        }
                         if !summary.dependent_task_ids.is_empty() {
                             logs_lines.push(Line::from(vec![
                                 Span::styled("Affected: ", Style::default().fg(theme.muted)),
@@ -2324,9 +2345,8 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 } else if let Some(ref t) = selected_task {
                     panel_title = "LIVE LOGS";
                     let full_task = state
-                        .load_coordinator_storage_snapshot()
-                        .ok()
-                        .and_then(|s| s.registry.tasks.into_iter().find(|rt| rt.id == t.task_id));
+                        .coordinator_registry_for_render()
+                        .and_then(|r| r.tasks.iter().find(|rt| rt.id == t.task_id).cloned());
                     let mut read_success = false;
                     if let Some(ref ft) = full_task {
                         if let Some(ref stdout_rel) = ft.task_runtime.stdout_log {
@@ -2704,6 +2724,9 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
     }
     if state.help_open {
         render_help_overlay(f, state);
+    }
+    if let Some(window) = &state.approval_window {
+        window.draw(f);
     }
 }
 
@@ -4062,7 +4085,13 @@ fn approval_request_lines(
                 out.push((format!("  {line}"), false));
             }
         }
-        out.push((format!("  Decide:    {}", p.approve_command), false));
+        if p.awaiting_decision {
+            out.push((
+                "  Decide:    press A to read the full request and decide here".to_string(),
+                false,
+            ));
+        }
+        out.push((format!("  CLI:       {}", p.approve_command), false));
     }
     out
 }
@@ -4465,7 +4494,7 @@ mod approval_request_lines_tests {
         assert!(text.contains("Subject:   SEC-ADR-003 at abcdef1"));
         assert!(text.contains("Risk:      Irreversible recovery-code migration"));
         assert!(text.contains("Approvers: PRODUCT_OWNER 0/1, SECURITY_OWNER 0/1"));
-        assert!(text.contains("Decide:    macc coordinator approve SEC-APP-003"));
+        assert!(text.contains("CLI:       macc coordinator approve SEC-APP-003"));
     }
 
     #[test]

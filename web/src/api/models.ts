@@ -136,6 +136,10 @@ export interface ApiCoordinatorRunSummary {
   dependent_task_ids: string[];
   repeated_count: number;
   recent_runs: ApiCoordinatorRunHistoryItem[];
+  /** Preconditions the blocked root task reported as unsatisfied (E903). */
+  unmet_preconditions?: string[];
+  /** Paths named by a precondition that the root task may not change: the fix belongs to another module. */
+  out_of_scope_paths?: string[];
 }
 
 export interface ApiCoordinatorStatus {
@@ -158,6 +162,77 @@ export interface ApiCoordinatorStatus {
   last_run_stop_reason?: string;
   /** Durable, run-scoped result used by CLI, TUI and Web. */
   last_run_summary?: ApiCoordinatorRunSummary;
+  /** Human approval gates waiting (or rejected) with everything needed to decide. */
+  pending_approvals?: ApiPendingApproval[];
+}
+
+export type ApiApprovalDecision = 'approved' | 'rejected' | 'changes_requested';
+
+/** One recorded human decision on an approval gate. */
+export interface ApiApprovalRecord {
+  decision: ApiApprovalDecision;
+  role: string;
+  actor: string;
+  revision?: string;
+  evidence?: string;
+  reason?: string;
+  recorded_at: string;
+}
+
+/** A `human_approval` gate and the full explanation of the question it asks. */
+export interface ApiPendingApproval {
+  task_id: string;
+  title: string | null;
+  state: string;
+  status: string;
+  subject_task: string;
+  subject_revision: string | null;
+  description: string | null;
+  risks: string[];
+  approval_trigger: string | null;
+  governance_ref: string | null;
+  /** "ROLE 1/1, ROLE2 0/1" */
+  required: string;
+  missing_roles: string[];
+  evidence_type: string | null;
+  note: string | null;
+  diff_stat: string | null;
+  approve_command: string;
+  question: string;
+  /** True while the gate needs a decision now; the approval dialog opens for these. */
+  awaiting_decision: boolean;
+  subject_title: string | null;
+  subject_objective: string | null;
+  subject_description: string | null;
+  subject_result: string | null;
+  subject_acceptance_criteria: string[];
+  required_roles: string[];
+  quorum: string;
+  evidence_required: boolean;
+  expires_after_days: number | null;
+  invalidate_on_subject_change: boolean;
+  decisions: ApiApprovalRecord[];
+  unblocks: string[];
+}
+
+export interface ApiApprovalsResponse {
+  pending_approvals: ApiPendingApproval[];
+  /** Identity decisions are recorded under when none is given. */
+  default_actor: string;
+}
+
+export interface ApiGateDecisionRequest {
+  decision: ApiApprovalDecision;
+  role: string;
+  revision?: string;
+  evidence?: string;
+  reason?: string;
+  actor?: string;
+}
+
+export interface ApiGateDecisionResult {
+  gate_decision: string;
+  pending_approvals: ApiPendingApproval[];
 }
 
 export interface ApiSelectedTask {

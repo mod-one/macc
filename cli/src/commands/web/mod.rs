@@ -333,6 +333,14 @@ fn build_web_router(state: WebState) -> Router {
             post(coordinator::coordinator_preflight_create_branch_handler),
         )
         .route(
+            "/api/v1/coordinator/approvals",
+            get(coordinator::list_approvals_handler),
+        )
+        .route(
+            "/api/v1/coordinator/approvals/:id/decision",
+            post(coordinator::gate_decision_handler),
+        )
+        .route(
             "/api/v1/coordinator/tool-cooldown",
             get(coordinator::get_tool_cooldowns_handler)
                 .post(coordinator::set_tool_cooldown_handler),

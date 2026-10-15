@@ -198,7 +198,9 @@ pub fn build_audit_prompt(context: &AuditContext) -> String {
         "3. For **todo tasks** in `{}`, review if the integrated code changes have modified the intended architecture. If so, rewrite the task `description` and `steps` to reflect the new reality. **Never delete or rename task IDs.**\n",
         context.prd_path
     ));
-    prompt.push_str("4. Preserve all existing fields and structure. Only modify `notes` for completed tasks and `description`/`steps` for todo tasks whose context has changed.\n\n");
+    prompt.push_str("4. Preserve all existing fields and structure. Only modify `notes` for completed tasks and `description`/`steps` for todo tasks whose context has changed.\n");
+    prompt.push_str("5. Apply the cross-module contract check below to every todo task. When a consumed endpoint's audience or contract does not serve the task, record the mismatch and the contract change it needs (and in which module) in that task's `description`, and name the task that must deliver it.\n\n");
+    prompt.push_str(crate::prd_generation::prompt_builder::CROSS_MODULE_CONTRACT_CHECK);
 
     // PRD content
     prompt.push_str(&format!(
@@ -431,6 +433,8 @@ mod tests {
         assert!(prompt.contains("abc1234"));
         assert!(prompt.contains("`X-2`"));
         assert!(prompt.contains("tasks_done"));
+        assert!(prompt.contains("Cross-module contract check"));
+        assert!(prompt.contains("declared audience"));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use crate::coordinator::model::{PrdInput, TaskRegistry};
 use crate::coordinator::runtime as coordinator_runtime;
-use crate::coordinator_storage::{append_event_sqlite, CoordinatorStorage};
+use crate::coordinator_storage::append_event_sqlite;
 use crate::{MaccError, Result};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -250,8 +250,35 @@ fn write_worktree_metadata_file(
     })
 }
 
-pub fn build_non_task_worker_slug(worker_count: usize) -> String {
-    format!("worker-{:02}", worker_count + 1)
+pub fn build_non_task_worker_slug(worker_number: usize) -> String {
+    format!("worker-{:02}", worker_number)
+}
+
+/// The lowest `worker-NN` slot a new pool worktree can take: no directory at
+/// its path, no worktree registered there, and no `ai/<tool>/worker-NN`
+/// branch left over (`git worktree add -b` refuses an existing branch).
+///
+/// Numbering from the pool's size is not enough: once a slot is gone (a run
+/// that died mid-dispatch, a removed worktree), `size + 1` lands on a slot
+/// still in use.
+pub fn next_free_worker_slug(repo_root: &Path, tool: &str) -> Result<String> {
+    let pool_root = repo_root.join(".macc").join("worktree");
+    let registered: Vec<std::path::PathBuf> = crate::list_worktrees(repo_root)?
+        .into_iter()
+        .map(|entry| entry.path)
+        .collect();
+    let mut number = 1;
+    loop {
+        let slug = build_non_task_worker_slug(number);
+        let path = pool_root.join(&slug);
+        let taken = path.exists()
+            || registered.iter().any(|p| p == &path)
+            || crate::git::local_branch_exists(repo_root, &format!("ai/{tool}/{slug}"))?;
+        if !taken {
+            return Ok(slug);
+        }
+        number += 1;
+    }
 }
 
 fn build_reuse_branch_name(tool: &str, worktree_path: &Path) -> String {
@@ -741,6 +768,59 @@ mod tests {
     use std::path::Path;
 
     #[test]
+    fn a_new_worker_takes_the_lowest_free_slot() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let git = |args: &[&str]| {
+            let output =
+                crate::git::run_git_output_mapped(root, args, "worker slot fixture").unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.name", "Test"]);
+        git(&["config", "user.email", "test@example.invalid"]);
+        std::fs::write(root.join("source.txt"), "base").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "base"]);
+        let pool = root.join(".macc/worktree");
+        std::fs::create_dir_all(&pool).unwrap();
+        // Workers 01, 02 and 04 exist: three workers, but `worker-04` is taken.
+        for (slug, tool) in [
+            ("worker-01", "codex"),
+            ("worker-02", "claude"),
+            ("worker-04", "codex"),
+        ] {
+            let path = pool.join(slug);
+            git(&[
+                "worktree",
+                "add",
+                "-b",
+                &format!("ai/{tool}/{slug}"),
+                path.to_str().unwrap(),
+                "main",
+            ]);
+        }
+        assert_eq!(
+            super::next_free_worker_slug(root, "claude").unwrap(),
+            "worker-03"
+        );
+        // A branch left by an earlier `worker-03` blocks that slot for its tool.
+        git(&["branch", "ai/claude/worker-03", "main"]);
+        assert_eq!(
+            super::next_free_worker_slug(root, "claude").unwrap(),
+            "worker-05"
+        );
+        assert_eq!(
+            super::next_free_worker_slug(root, "codex").unwrap(),
+            "worker-03"
+        );
+    }
+
+    #[test]
     fn supervisor_slots_are_not_recycled_or_removed_by_worker_pool_cleanup() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
@@ -980,15 +1060,6 @@ mod tests {
         let parsed_task: serde_json::Value = serde_json::from_str(task_content.trim()).unwrap();
         assert_eq!(parsed_task["id"], "evt-test-123");
     }
-}
-
-pub fn count_pool_worktrees(repo_root: &Path) -> Result<usize> {
-    let pool_root = repo_root.join(".macc").join("worktree");
-    let entries = crate::list_worktrees(repo_root)?;
-    Ok(entries
-        .into_iter()
-        .filter(|e| e.path.starts_with(&pool_root))
-        .count())
 }
 
 pub fn append_coordinator_event(
@@ -1253,9 +1324,10 @@ pub fn append_structured_event_record(
     let mut tool = String::new();
     let mut run_id_val = run_id;
 
-    if let Ok(snap) = crate::coordinator_storage::SqliteStorage::new(storage_paths).load_snapshot()
+    if let Ok(registry) =
+        crate::coordinator_storage::SqliteStorage::new(storage_paths).load_registry()
     {
-        if let Some(task) = snap.registry.tasks.iter().find(|t| t.id == task_id) {
+        if let Some(task) = registry.tasks.iter().find(|t| t.id == task_id) {
             worker_id = task.task_runtime.worker_id.clone().unwrap_or_default();
             tool = task
                 .tool

@@ -113,6 +113,10 @@ enum CoordinatorPauseNextAction {
     ResumeRun,
 }
 
+/// How often the TUI re-reads human approval gates while no coordinator
+/// command refreshes them.
+const APPROVALS_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+
 fn requires_owner_gate(command: &CoordinatorCommand) -> bool {
     matches!(
         command,
@@ -120,6 +124,7 @@ fn requires_owner_gate(command: &CoordinatorCommand) -> bool {
             | CoordinatorCommand::Stop { .. }
             | CoordinatorCommand::ResumePausedRun
             | CoordinatorCommand::Unlock { .. }
+            | CoordinatorCommand::GateDecision { .. }
             | CoordinatorCommand::DispatchReadyTasks
             | CoordinatorCommand::AdvanceTasks
             | CoordinatorCommand::CleanupMaintenance
@@ -202,6 +207,12 @@ pub struct AppState {
     pub coordinator_run_summary: Option<CoordinatorRunSummary>,
     /// Human approval gates waiting for a decision (shown in Coordinator Live).
     pub coordinator_pending_approvals: Vec<macc_core::coordinator::approval::PendingApproval>,
+    /// The approval window, opened by itself when a gate awaits a decision.
+    pub approval_window: Option<crate::approval::Window>,
+    /// Gates (by id and subject revision) the operator put off with "Later";
+    /// they re-open when the revision changes or on demand (`A`).
+    pub approval_snoozed: std::collections::HashSet<(String, Option<String>)>,
+    pub approvals_last_refresh: Option<Instant>,
     pub coordinator_last_refresh: Option<Instant>,
     pub coordinator_running_command: Option<String>,
     pub coordinator_last_result: Option<String>,
@@ -220,7 +231,16 @@ pub struct AppState {
     pub coordinator_last_event_age: Option<Duration>,
     pub coordinator_paused: bool,
     pub coordinator_current_run_id: Option<String>,
-    coordinator_events_last_seen_count: usize,
+    /// `(seq, event_id)` of the newest essential event already counted in
+    /// `coordinator_events_per_sec`.
+    coordinator_events_last_seen: Option<(i64, String)>,
+    /// Background reads of the registry, events and status (see
+    /// `coordinator_poll`).
+    coordinator_poller: crate::coordinator_poll::CoordinatorPoller,
+    /// The registry from the latest refresh, for render paths.
+    coordinator_registry: Option<macc_core::coordinator::model::TaskRegistry>,
+    /// ToolSpecs only change with a new binary or tool files: load them once.
+    tool_specs: std::cell::OnceCell<Vec<macc_core::tool::ToolSpec>>,
     pub search_query: String,
     pub search_editing: bool,
     pub command_palette_open: bool,
@@ -275,6 +295,10 @@ pub struct AppState {
 impl AppState {
     const AUTOMATION_FIELD_COUNT: usize = 40;
     const COORDINATOR_EVENTS_EWMA_ALPHA: f64 = 0.30;
+    /// Events read per refresh of the event panel. The panel keeps the last
+    /// 120 essential lines; reading the whole log instead grows with every
+    /// heartbeat for as long as the project runs.
+    const COORDINATOR_EVENTS_WINDOW: usize = 1000;
     const COORDINATOR_PAUSE_REL_PATH: &'static str = ".macc/automation/task/coordinator.pause.json";
 
     pub fn automation_field_count(&self) -> usize {
@@ -352,6 +376,9 @@ impl AppState {
             coordinator_snapshot: None,
             coordinator_run_summary: None,
             coordinator_pending_approvals: Vec::new(),
+            approval_window: None,
+            approval_snoozed: std::collections::HashSet::new(),
+            approvals_last_refresh: None,
             coordinator_last_refresh: None,
             coordinator_running_command: None,
             coordinator_last_result: None,
@@ -367,7 +394,10 @@ impl AppState {
             coordinator_last_event_age: None,
             coordinator_paused: false,
             coordinator_current_run_id: None,
-            coordinator_events_last_seen_count: 0,
+            coordinator_events_last_seen: None,
+            coordinator_poller: Default::default(),
+            coordinator_registry: None,
+            tool_specs: std::cell::OnceCell::new(),
             search_query: String::new(),
             search_editing: false,
             command_palette_open: false,
@@ -714,6 +744,50 @@ impl AppState {
         )
     }
 
+    /// The newest `COORDINATOR_EVENTS_WINDOW` events, oldest first.
+    fn load_recent_coordinator_events(
+        &self,
+        paths: &ProjectPaths,
+    ) -> macc_core::Result<Vec<CoordinatorEvent>> {
+        let sqlite = SqliteStorage::new(CoordinatorStoragePaths::from_project_paths(paths));
+        if !sqlite.has_snapshot_data()? {
+            return self.engine.get_coordinator_events(paths);
+        }
+        Ok(sqlite
+            .load_recent_events(Self::COORDINATOR_EVENTS_WINDOW)?
+            .into_iter()
+            .map(CoordinatorEvent::from_record)
+            .collect())
+    }
+
+    /// The coordinator task registry without the event log. Render and
+    /// refresh paths only need tasks; the event log grows all run long.
+    pub fn load_coordinator_registry(
+        &self,
+    ) -> Result<macc_core::coordinator::model::TaskRegistry, String> {
+        let paths = self
+            .project_paths
+            .as_ref()
+            .ok_or_else(|| "No project loaded.".to_string())?;
+        let storage_paths = CoordinatorStoragePaths::from_project_paths(paths);
+        match SqliteStorage::new(storage_paths.clone()).load_registry() {
+            Ok(registry) => Ok(registry),
+            Err(err) if self.allow_legacy_json_fallback() => JsonStorage::new(storage_paths)
+                .load_snapshot()
+                .map(|snapshot| snapshot.registry)
+                .map_err(|json_err| {
+                    format!(
+                        "failed to load coordinator registry (sqlite={}, json={})",
+                        err, json_err
+                    )
+                }),
+            Err(err) => Err(format!(
+                "failed to load coordinator registry from sqlite: {}",
+                err
+            )),
+        }
+    }
+
     pub fn load_coordinator_storage_snapshot(&self) -> Result<CoordinatorSnapshot, String> {
         let paths = self
             .project_paths
@@ -759,17 +833,18 @@ impl AppState {
             throttled_tools: Vec::new(),
         };
         snapshot.throttled_tools = crate::tool_cooldowns::load(self.project_paths.as_ref())?;
-        let specs = self
-            .project_paths
-            .as_ref()
-            .map(|paths| {
-                macc_core::tool::ToolSpecLoader::new(
-                    macc_core::tool::ToolSpecLoader::default_search_paths(&paths.root),
-                )
-                .load_all_with_embedded()
-                .0
-            })
-            .unwrap_or_default();
+        let specs = self.tool_specs.get_or_init(|| {
+            self.project_paths
+                .as_ref()
+                .map(|paths| {
+                    macc_core::tool::ToolSpecLoader::new(
+                        macc_core::tool::ToolSpecLoader::default_search_paths(&paths.root),
+                    )
+                    .load_all_with_embedded()
+                    .0
+                })
+                .unwrap_or_default()
+        });
         for task in &root.tasks {
             let state = if task.state.is_empty() {
                 "todo".to_string()
@@ -798,7 +873,7 @@ impl AppState {
                         .working_copy
                         .as_ref()
                         .map(|config| {
-                            macc_core::coordinator::execution_labels::resolve(task, config, &specs)
+                            macc_core::coordinator::execution_labels::resolve(task, config, specs)
                         })
                         .unwrap_or_else(|| ("-".into(), "-".into()));
                     snapshot.active += 1;
@@ -824,23 +899,318 @@ impl AppState {
 
     pub fn refresh_coordinator_snapshot(&mut self) {
         self.refresh_coordinator_pause_state();
-        match self
-            .load_coordinator_storage_snapshot()
-            .and_then(|snapshot| self.read_registry_snapshot(&snapshot.registry))
-        {
-            Ok(snapshot) => {
+        let registry = self.load_coordinator_registry();
+        self.apply_coordinator_registry(registry);
+        if let Some(paths) = self.project_paths.as_ref() {
+            let status = self.engine.get_coordinator_status(paths);
+            self.apply_coordinator_status(status);
+        }
+        self.sync_approval_window();
+    }
+
+    fn apply_coordinator_registry(
+        &mut self,
+        registry: Result<macc_core::coordinator::model::TaskRegistry, String>,
+    ) {
+        match registry.and_then(|registry| {
+            let snapshot = self.read_registry_snapshot(&registry)?;
+            Ok((registry, snapshot))
+        }) {
+            Ok((registry, snapshot)) => {
                 self.coordinator_throttled_tools = snapshot.throttled_tools.clone();
                 self.coordinator_snapshot = Some(snapshot);
+                self.coordinator_registry = Some(registry);
                 self.coordinator_last_refresh = Some(Instant::now());
             }
             Err(err) => {
                 self.coordinator_last_result = Some(format_actionable_error(&err));
             }
         }
-        if let Some(paths) = self.project_paths.as_ref() {
-            if let Ok(status) = self.engine.get_coordinator_status(paths) {
-                self.coordinator_run_summary = status.last_run_summary;
-                self.coordinator_pending_approvals = status.pending_approvals;
+    }
+
+    fn apply_coordinator_status(
+        &mut self,
+        status: macc_core::Result<macc_core::service::coordinator_workflow::CoordinatorStatus>,
+    ) {
+        if let Ok(status) = status {
+            self.coordinator_run_summary = status.last_run_summary;
+            self.coordinator_pending_approvals = status.pending_approvals;
+            self.approvals_last_refresh = Some(Instant::now());
+        }
+    }
+
+    /// The registry for render paths: the one from the latest refresh, read
+    /// from storage only before the first refresh.
+    pub fn coordinator_registry_for_render(
+        &self,
+    ) -> Option<std::borrow::Cow<'_, macc_core::coordinator::model::TaskRegistry>> {
+        match self.coordinator_registry.as_ref() {
+            Some(registry) => Some(std::borrow::Cow::Borrowed(registry)),
+            None => self
+                .load_coordinator_registry()
+                .ok()
+                .map(std::borrow::Cow::Owned),
+        }
+    }
+
+    /// Start a background poll of the registry, events and (every
+    /// `STATUS_POLL_INTERVAL`) the status, unless one is running.
+    fn start_coordinator_poll(&mut self) {
+        let Some(paths) = self.project_paths.clone() else {
+            return;
+        };
+        if self.coordinator_poller.is_busy() {
+            return;
+        }
+        let include_status = self.coordinator_poller.status_due();
+        let request = crate::coordinator_poll::PollRequest {
+            paths,
+            legacy_json_fallback: self.allow_legacy_json_fallback(),
+            events_window: Self::COORDINATOR_EVENTS_WINDOW,
+            include_status,
+        };
+        self.coordinator_poller.start(request);
+    }
+
+    /// Apply a finished background poll.
+    fn apply_coordinator_poll_result(&mut self) {
+        let Some(result) = self.coordinator_poller.take_result() else {
+            return;
+        };
+        self.apply_coordinator_registry(result.registry);
+        if let Some(status) = result.status {
+            self.apply_coordinator_status(status);
+            self.sync_approval_window();
+        }
+        let events = match result.events {
+            Some(events) => events.map(|records| {
+                records
+                    .into_iter()
+                    .map(CoordinatorEvent::from_record)
+                    .collect()
+            }),
+            // No coordinator database: read through the engine.
+            None => match self.project_paths.clone() {
+                Some(paths) => self.engine.get_coordinator_events(&paths),
+                None => Ok(Vec::new()),
+            },
+        };
+        self.apply_coordinator_events(events);
+    }
+
+    /// Re-read the gates waiting for a decision, at most every few seconds,
+    /// so the approval window also opens while no coordinator command runs.
+    fn refresh_pending_approvals_if_due(&mut self) {
+        let due = self
+            .approvals_last_refresh
+            .map(|ts| ts.elapsed() >= APPROVALS_REFRESH_INTERVAL)
+            .unwrap_or(true);
+        if !due {
+            return;
+        }
+        self.approvals_last_refresh = Some(Instant::now());
+        let Some(paths) = self.project_paths.as_ref() else {
+            return;
+        };
+        // Never create coordinator storage just to look for gates.
+        let storage =
+            macc_core::coordinator_storage::CoordinatorStoragePaths::from_project_paths(paths);
+        if !storage.sqlite_path.exists() && !storage.registry_json_path.exists() {
+            return;
+        }
+        if let Ok(pending) = self.engine.coordinator_execute_command(
+            paths,
+            CoordinatorCommand::ListApprovals,
+            CoordinatorCommandRequest {
+                canonical: None,
+                coordinator_cfg: None,
+                env_cfg: &CoordinatorEnvConfig::default(),
+                logger: None,
+            },
+        ) {
+            self.coordinator_pending_approvals = pending.pending_approvals.unwrap_or_default();
+        }
+        self.sync_approval_window();
+    }
+
+    fn awaiting_approvals(&self) -> Vec<&macc_core::coordinator::approval::PendingApproval> {
+        self.coordinator_pending_approvals
+            .iter()
+            .filter(|p| p.awaiting_decision)
+            .collect()
+    }
+
+    /// Keep the approval window in step with the pending gates: refresh the
+    /// displayed gate, close it once decided elsewhere, and open it by itself
+    /// for a gate the operator has not put off.
+    pub fn sync_approval_window(&mut self) {
+        let waiting = self.awaiting_approvals().len();
+        if let Some(window) = self.approval_window.as_mut() {
+            let current = self
+                .coordinator_pending_approvals
+                .iter()
+                .find(|p| p.task_id == window.gate.task_id && p.awaiting_decision)
+                .cloned();
+            match current {
+                Some(gate) => {
+                    window.refresh(gate, waiting);
+                    return;
+                }
+                None if window.is_editing() => return,
+                None => self.approval_window = None,
+            }
+        }
+        if self.approval_window.is_some() || self.approval_input_busy() {
+            return;
+        }
+        let next = self
+            .awaiting_approvals()
+            .into_iter()
+            .find(|p| {
+                !self
+                    .approval_snoozed
+                    .contains(&crate::approval::Window::key_of(p))
+            })
+            .cloned();
+        if let Some(gate) = next {
+            self.approval_window = Some(crate::approval::Window::new(gate, waiting));
+        }
+    }
+
+    /// The operator is typing elsewhere: do not steal the keyboard.
+    fn approval_input_busy(&self) -> bool {
+        self.search_editing
+            || self.command_palette_open
+            || self.prd_queue_editor.is_some()
+            || self.coordinator_task_diff_popup.is_some()
+            || self.coordinator_task_explain_popup.is_some()
+    }
+
+    /// Open the approval window on demand (`A`), snoozed gates included.
+    pub fn open_approval_window(&mut self) {
+        let waiting = self.awaiting_approvals().len();
+        match self.awaiting_approvals().first().map(|p| (*p).clone()) {
+            Some(gate) => {
+                self.approval_snoozed
+                    .remove(&crate::approval::Window::key_of(&gate));
+                self.approval_window = Some(crate::approval::Window::new(gate, waiting));
+            }
+            None => self.set_status(
+                UiStatusLevel::Info,
+                "No approval gate is waiting for a decision.",
+                Some(Duration::from_secs(4)),
+            ),
+        }
+    }
+
+    /// Put the displayed gate off until its revision changes.
+    pub fn snooze_approval_window(&mut self) {
+        if let Some(window) = self.approval_window.take() {
+            self.approval_snoozed
+                .insert(crate::approval::Window::key_of(&window.gate));
+            self.set_status(
+                UiStatusLevel::Info,
+                format!(
+                    "{} still waits for approval. Press A to decide.",
+                    window.gate.task_id
+                ),
+                Some(Duration::from_secs(5)),
+            );
+        }
+    }
+
+    /// Show the next gate awaiting a decision after the displayed one.
+    pub fn next_approval_window(&mut self) {
+        let Some(window) = self.approval_window.as_ref() else {
+            return;
+        };
+        let waiting = self.awaiting_approvals();
+        let index = waiting
+            .iter()
+            .position(|p| p.task_id == window.gate.task_id)
+            .map(|i| (i + 1) % waiting.len().max(1))
+            .unwrap_or(0);
+        let total = waiting.len();
+        if let Some(gate) = waiting.get(index).map(|p| (*p).clone()) {
+            self.approval_window = Some(crate::approval::Window::new(gate, total));
+        }
+    }
+
+    /// Record a decision collected by the approval window.
+    pub fn submit_approval(&mut self, decision: crate::approval::Decision) {
+        let command = CoordinatorCommand::GateDecision {
+            task_id: decision.task_id.clone(),
+            decision: decision.decision,
+            role: decision.role,
+            actor: None,
+            revision: decision.revision,
+            evidence: decision.evidence,
+            reason: decision.reason,
+        };
+        let result = match self.gate_coordinator_action(&command) {
+            Err(err) => Err(err),
+            Ok(()) => match self.project_paths.as_ref() {
+                None => Err(MaccError::Validation("No project loaded.".into())),
+                Some(paths) => {
+                    let env_cfg = self.coordinator_env_cfg();
+                    let canonical = self.working_copy.as_ref();
+                    let coordinator_cfg = canonical.and_then(|c| c.automation.coordinator.as_ref());
+                    self.engine.coordinator_execute_command(
+                        paths,
+                        command,
+                        CoordinatorCommandRequest {
+                            canonical,
+                            coordinator_cfg,
+                            env_cfg: &env_cfg,
+                            logger: None,
+                        },
+                    )
+                }
+            },
+        };
+        match result {
+            Ok(response) => {
+                let line = response
+                    .gate_decision
+                    .unwrap_or_else(|| "Decision recorded.".into());
+                if let Some(pending) = response.pending_approvals {
+                    self.coordinator_pending_approvals = pending;
+                }
+                self.approvals_last_refresh = Some(Instant::now());
+                self.set_status(
+                    UiStatusLevel::Success,
+                    line.clone(),
+                    Some(Duration::from_secs(8)),
+                );
+                self.refresh_coordinator_events();
+                let still_waiting = self
+                    .coordinator_pending_approvals
+                    .iter()
+                    .find(|p| p.task_id == decision.task_id && p.awaiting_decision)
+                    .cloned();
+                let waiting = self.awaiting_approvals().len();
+                match (still_waiting, self.approval_window.as_mut()) {
+                    (Some(gate), Some(window)) => {
+                        let needed = gate.missing_roles.join(", ");
+                        window.refresh(gate, waiting);
+                        window.report(true, format!("{line} Still needed: {needed}."));
+                    }
+                    _ => {
+                        self.approval_window = None;
+                        self.sync_approval_window();
+                    }
+                }
+            }
+            Err(err) => {
+                if let Some(window) = self.approval_window.as_mut() {
+                    window.report(
+                        false,
+                        format!(
+                            "Not recorded: {}",
+                            format_actionable_error(&err.to_string())
+                        ),
+                    );
+                }
             }
         }
     }
@@ -939,22 +1309,27 @@ impl AppState {
     }
 
     pub fn refresh_coordinator_events(&mut self) {
-        let Some(paths) = self.project_paths.as_ref() else {
+        let Some(paths) = self.project_paths.clone() else {
             self.coordinator_events.clear();
             self.coordinator_events_per_sec = None;
             self.coordinator_last_event_age = None;
             self.coordinator_current_run_id = None;
-            self.coordinator_events_last_seen_count = 0;
+            self.coordinator_events_last_seen = None;
             return;
         };
-        let events = match self.engine.get_coordinator_events(paths) {
+        let events = self.load_recent_coordinator_events(&paths);
+        self.apply_coordinator_events(events);
+    }
+
+    fn apply_coordinator_events(&mut self, events: macc_core::Result<Vec<CoordinatorEvent>>) {
+        let events = match events {
             Ok(events) => events,
             Err(_) => {
                 self.coordinator_events.clear();
                 self.coordinator_events_per_sec = None;
                 self.coordinator_last_event_age = None;
                 self.coordinator_current_run_id = None;
-                self.coordinator_events_last_seen_count = 0;
+                self.coordinator_events_last_seen = None;
                 return;
             }
         };
@@ -1018,12 +1393,28 @@ impl AppState {
                 Some(rendered)
             })
             .collect();
-        let total_count = lines.len();
+        // Only a window of the log is read, so count what arrived since the
+        // newest event seen at the previous refresh, not the window's size.
+        let essential: Vec<&&CoordinatorEvent> = filtered
+            .iter()
+            .filter(|event| Self::is_essential_coordinator_event(&event.event_type))
+            .collect();
+        let newest_seen = essential
+            .last()
+            .map(|event| (event.seq, event.event_id.clone().unwrap_or_default()));
         if let Some(prev_refresh) = self.coordinator_events_last_refresh {
             let elapsed_secs = now.saturating_duration_since(prev_refresh).as_secs_f64();
             if elapsed_secs > 0.0 {
-                let delta_events =
-                    total_count.saturating_sub(self.coordinator_events_last_seen_count);
+                let delta_events = match self.coordinator_events_last_seen.as_ref() {
+                    Some((seq, id)) => essential
+                        .iter()
+                        .filter(|event| {
+                            (event.seq, event.event_id.as_deref().unwrap_or_default())
+                                > (*seq, id.as_str())
+                        })
+                        .count(),
+                    None => essential.len(),
+                };
                 let instant_rate = delta_events as f64 / elapsed_secs;
                 self.coordinator_events_per_sec = Some(match self.coordinator_events_per_sec {
                     Some(previous) => {
@@ -1055,7 +1446,9 @@ impl AppState {
         }
         self.coordinator_events = lines;
         self.coordinator_events_last_refresh = Some(now);
-        self.coordinator_events_last_seen_count = total_count;
+        if newest_seen.is_some() {
+            self.coordinator_events_last_seen = newest_seen;
+        }
         // RL-TUI-007: parse effective_max_parallel from the most recent concurrency_adjusted event.
         if let Some(msg) = filtered
             .iter()
@@ -2292,6 +2685,7 @@ impl AppState {
     pub fn tick(&mut self) {
         self.refresh_coordinator_pause_state();
         self.tick_ownership();
+        self.refresh_pending_approvals_if_due();
         // Advance spinner globally so live task animation also moves when
         // observing a coordinator process started outside this TUI instance.
         self.coordinator_spinner_tick = self.coordinator_spinner_tick.wrapping_add(1);
@@ -2406,8 +2800,7 @@ impl AppState {
                         .map(|ts| ts.elapsed() >= Duration::from_secs(1))
                         .unwrap_or(true);
                     if should_refresh {
-                        self.refresh_coordinator_snapshot();
-                        self.refresh_coordinator_events();
+                        self.start_coordinator_poll();
                     }
                 }
                 Ok(CoordinatorManagedCommandState::Idle) => {
@@ -2459,12 +2852,18 @@ impl AppState {
             }
         }
 
+        self.apply_coordinator_poll_result();
         let should_refresh_events = self
             .coordinator_events_last_refresh
             .map(|ts| ts.elapsed() >= Duration::from_secs(1))
             .unwrap_or(true);
         if should_refresh_events {
-            self.refresh_coordinator_events();
+            if self.coordinator_events_last_refresh.is_none() {
+                // First tick: show events right away.
+                self.refresh_coordinator_events();
+            } else {
+                self.start_coordinator_poll();
+            }
             self.scan_for_takeover_requests();
         }
 
@@ -5630,11 +6029,11 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
             Some(p) => p,
             None => return "No project loaded.".to_string(),
         };
-        let snap = match self.load_coordinator_storage_snapshot() {
-            Ok(s) => s,
+        let registry = match self.load_coordinator_registry() {
+            Ok(r) => r,
             Err(e) => return format!("Failed to load coordinator snapshot: {}", e),
         };
-        let reg_task = match snap.registry.tasks.iter().find(|t| t.id == task.task_id) {
+        let reg_task = match registry.tasks.iter().find(|t| t.id == task.task_id) {
             Some(t) => t,
             None => return format!("Task '{}' not found in registry.", task.task_id),
         };
@@ -5698,11 +6097,11 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
             Some(p) => p,
             None => return "No project loaded.".to_string(),
         };
-        let snap = match self.load_coordinator_storage_snapshot() {
-            Ok(s) => s,
+        let registry = match self.load_coordinator_registry() {
+            Ok(r) => r,
             Err(e) => return format!("Failed to load coordinator snapshot: {}", e),
         };
-        let reg_task = match snap.registry.tasks.iter().find(|t| t.id == task.task_id) {
+        let reg_task = match registry.tasks.iter().find(|t| t.id == task.task_id) {
             Some(t) => t,
             None => return format!("Task '{}' not found in registry.", task.task_id),
         };
@@ -7290,5 +7689,66 @@ mod tests {
         let row = LiveTaskRow::from_task(&task, now, "some-model".to_string());
         assert_eq!(row.worker_id, "worker-05");
         assert_eq!(row.model, "some-model");
+    }
+
+    fn waiting_gate(id: &str, revision: &str) -> macc_core::coordinator::approval::PendingApproval {
+        macc_core::coordinator::approval::PendingApproval {
+            task_id: id.into(),
+            subject_task: "SUBJ-1".into(),
+            subject_revision: Some(revision.into()),
+            awaiting_decision: true,
+            required_roles: vec!["PRODUCT_OWNER".into()],
+            missing_roles: vec!["PRODUCT_OWNER".into()],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn approval_window_opens_by_itself_and_later_snoozes_until_the_revision_moves() {
+        let mut state = AppState::with_engine(Arc::new(NoopEngine::default()));
+        state.coordinator_pending_approvals = vec![waiting_gate("APP-1", "aaaaaaa1")];
+        state.sync_approval_window();
+        assert_eq!(
+            state
+                .approval_window
+                .as_ref()
+                .map(|w| w.gate.task_id.as_str()),
+            Some("APP-1")
+        );
+
+        state.snooze_approval_window();
+        state.sync_approval_window();
+        assert!(state.approval_window.is_none(), "snoozed gate stays closed");
+
+        state.coordinator_pending_approvals = vec![waiting_gate("APP-1", "bbbbbbb2")];
+        state.sync_approval_window();
+        assert!(
+            state.approval_window.is_some(),
+            "a new revision re-opens it"
+        );
+
+        state.coordinator_pending_approvals = Vec::new();
+        state.sync_approval_window();
+        assert!(state.approval_window.is_none(), "decided elsewhere: closed");
+
+        state.coordinator_pending_approvals = vec![waiting_gate("APP-1", "bbbbbbb2")];
+        state.snooze_approval_window();
+        state
+            .approval_snoozed
+            .insert(("APP-1".into(), Some("bbbbbbb2".into())));
+        state.open_approval_window();
+        assert!(state.approval_window.is_some(), "A opens a snoozed gate");
+    }
+
+    #[test]
+    fn approval_window_does_not_steal_the_keyboard_while_typing() {
+        let mut state = AppState::with_engine(Arc::new(NoopEngine::default()));
+        state.search_editing = true;
+        state.coordinator_pending_approvals = vec![waiting_gate("APP-1", "aaaaaaa1")];
+        state.sync_approval_window();
+        assert!(state.approval_window.is_none());
+        state.search_editing = false;
+        state.sync_approval_window();
+        assert!(state.approval_window.is_some());
     }
 }

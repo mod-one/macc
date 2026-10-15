@@ -16,8 +16,7 @@ use crate::coordinator::{
     is_valid_runtime_transition, is_valid_workflow_transition, RuntimeStatus, WorkflowState,
 };
 use crate::coordinator_storage::{
-    CoordinatorSnapshot, CoordinatorStorage, CoordinatorStorageMode, CoordinatorStoragePaths,
-    JsonStorage, SqliteStorage,
+    CoordinatorStorage, CoordinatorStorageMode, CoordinatorStoragePaths, JsonStorage, SqliteStorage,
 };
 use crate::service::coordinator::{
     coordinator_poll_managed_command_process, coordinator_start_managed_command_process,
@@ -1197,8 +1196,8 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
 
             if drain {
                 let mut active_task_ids = Vec::new();
-                if let Ok(snapshot) = sqlite.load_snapshot() {
-                    for task in snapshot.registry.tasks {
+                if let Ok(registry) = sqlite.load_registry() {
+                    for task in registry.tasks {
                         if task.state == "claimed"
                             || task.state == "in_progress"
                             || task.state == "changes_requested"
@@ -1353,18 +1352,17 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
             let storage_paths =
                 crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(paths);
             let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
-            let snapshot = sqlite.load_snapshot()?;
+            let registry = sqlite.load_registry()?;
             let mut processes = Vec::new();
 
-            let db_pids: Vec<i64> = snapshot
-                .registry
+            let db_pids: Vec<i64> = registry
                 .tasks
                 .iter()
                 .filter_map(|t| t.runtime_pid())
                 .collect();
             let orphaned_pids = find_orphaned_pids_local(&paths.root, &db_pids)?;
 
-            for task in &snapshot.registry.tasks {
+            for task in &registry.tasks {
                 let pid_opt = task.runtime_pid();
                 let is_active = task.is_active();
                 if pid_opt.is_some() || is_active {
@@ -1619,14 +1617,18 @@ pub fn coordinator_stop(paths: &ProjectPaths, reason: &str) -> Result<()> {
 pub fn get_coordinator_status(paths: &ProjectPaths) -> Result<CoordinatorStatus> {
     let storage_paths = CoordinatorStoragePaths::from_project_paths(paths);
     let sqlite = SqliteStorage::new(storage_paths.clone());
-    let snapshot: CoordinatorSnapshot = if sqlite.has_snapshot_data()? {
-        sqlite.load_snapshot()?
+    let has_sqlite_data = sqlite.has_snapshot_data()?;
+    // Clients poll this every few seconds: read the registry and the one event
+    // it needs, never the whole event log.
+    let (registry, json_events) = if has_sqlite_data {
+        (sqlite.load_registry()?, Vec::new())
     } else {
-        JsonStorage::new(storage_paths).load_snapshot()?
+        let snapshot = JsonStorage::new(storage_paths).load_snapshot()?;
+        (snapshot.registry, snapshot.events)
     };
 
     let mut status = CoordinatorStatus::default();
-    let (total, todo, active, blocked, merged) = snapshot.registry.counts();
+    let (total, todo, active, blocked, merged) = registry.counts();
     status.total = total;
     status.todo = todo;
     status.active = active;
@@ -1644,8 +1646,14 @@ pub fn get_coordinator_status(paths: &ProjectPaths) -> Result<CoordinatorStatus>
     if let Some(report) = &status.failure_report {
         status.latest_error = Some(report.message.clone());
     } else {
-        let logs = crate::service::logs::read_log_content(paths, "coordinator", None, None)
-            .unwrap_or_default();
+        let logs = crate::service::logs::read_log_tail(
+            paths,
+            "coordinator",
+            None,
+            None,
+            crate::service::logs::STATUS_LOG_TAIL_BYTES,
+        )
+        .unwrap_or_default();
         status.latest_error = logs
             .lines()
             .rev()
@@ -1676,18 +1684,30 @@ pub fn get_coordinator_status(paths: &ProjectPaths) -> Result<CoordinatorStatus>
         status.last_run_stop_reason = run.stop_reason;
     }
     status.last_run_summary =
-        crate::service::run_summary::load_latest_run_summary(&sqlite, &snapshot.registry)?;
+        crate::service::run_summary::load_latest_run_summary(&sqlite, &registry)?;
     status.pending_approvals =
-        crate::coordinator::approval::pending_approvals(&snapshot.registry, &|rev| {
-            crate::coordinator::approval::revision_diff_stat(&paths.root, rev)
-        });
+        crate::coordinator::approval::current_pending_approvals(&paths.root, &registry);
 
     // RL-WEB-008: parse effective_max_parallel from the most recent concurrency_adjusted event.
-    status.effective_max_parallel = snapshot
-        .events
-        .iter()
-        .rev()
-        .find(|e| e.event_type == "concurrency_adjusted")
+    let concurrency_event = if has_sqlite_data {
+        let mut latest = None;
+        let query = crate::coordinator_storage::EventQuery {
+            event_type: Some("concurrency_adjusted"),
+            ..Default::default()
+        };
+        sqlite.scan_events_newest_first(query, |event| {
+            latest = Some(event);
+            std::ops::ControlFlow::Break(())
+        })?;
+        latest
+    } else {
+        json_events
+            .into_iter()
+            .rev()
+            .find(|e| e.event_type == "concurrency_adjusted")
+    };
+    status.effective_max_parallel = concurrency_event
+        .as_ref()
         .and_then(|e| e.message())
         .and_then(|msg| {
             msg.split_whitespace()
@@ -2265,6 +2285,9 @@ pub fn coordinator_unblock_task(
     runtime.last_error_code = None;
     runtime.last_error_origin = None;
     runtime.last_error_message = None;
+    runtime
+        .extra
+        .remove(crate::coordinator::precondition_scope::OUT_OF_SCOPE_FIX_KEY);
     let changed = crate::coordinator::task_selector::reconcile_task_blocks(
         &mut registry,
         &crate::coordinator::helpers::now_iso_coordinator(),
@@ -2419,9 +2442,9 @@ pub fn coordinator_list_approvals(
     let value =
         crate::coordinator::state::coordinator_state_registry_load(&paths.root, &state_args)?;
     let registry = crate::coordinator::model::TaskRegistry::from_value(&value)?;
-    Ok(crate::coordinator::approval::pending_approvals(
+    Ok(crate::coordinator::approval::current_pending_approvals(
+        &paths.root,
         &registry,
-        &|rev| crate::coordinator::approval::revision_diff_stat(&paths.root, rev),
     ))
 }
 
@@ -2444,15 +2467,15 @@ pub fn coordinator_cutover_gate(
         .unwrap_or(0.25);
     let storage_paths = CoordinatorStoragePaths::from_project_paths(paths);
     let sqlite = SqliteStorage::new(storage_paths.clone());
-    let snapshot: CoordinatorSnapshot = if sqlite.has_snapshot_data()? {
-        sqlite.load_snapshot()?
+    let events = if sqlite.has_snapshot_data()? {
+        sqlite.load_recent_events(window_events)?
     } else {
-        JsonStorage::new(storage_paths).load_snapshot()?
+        JsonStorage::new(storage_paths).load_snapshot()?.events
     };
     let mut task_events = 0usize;
     let mut blocked_events = 0usize;
     let mut stale_events = 0usize;
-    for event in snapshot.events.iter().rev().take(window_events) {
+    for event in events.iter().rev().take(window_events) {
         let event_type = event.event_type.as_str();
         if event.task_id.is_some() {
             task_events += 1;

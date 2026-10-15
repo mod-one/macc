@@ -42,9 +42,16 @@ pub fn classify_completion_error(
     // ── Per-adapter error normalization ──────────────────────────────
     // Run when the caller provides raw process output AND the job failed.
     // The normalizer output takes priority over the caller-supplied error code.
-    let tool_error: Option<ToolError> = if !input.success
-        && input.completion_kind != Some(PerformerCompletionKind::PreconditionUnmet)
-    {
+    // A structured precondition report is the tool's own account of why it
+    // stopped; matching its log against provider error patterns can only
+    // misclassify it (a summary mentioning "usage limit" is not a quota).
+    let reported_preconditions = input.completion_kind
+        == Some(PerformerCompletionKind::PreconditionUnmet)
+        || input
+            .unmet_preconditions
+            .iter()
+            .any(|p| !p.trim().is_empty());
+    let tool_error: Option<ToolError> = if !input.success && !reported_preconditions {
         input.normalizer_input.as_ref().and_then(|ni| {
             normalizer.and_then(|n| {
                 n.normalize(ni.exit_code, &ni.stderr, &ni.stdout)
@@ -64,9 +71,10 @@ pub fn classify_completion_error(
         .as_ref()
         .map(|te| te.error_code.clone())
         .unwrap_or(raw_error_code);
-    let error_message = tool_error
-        .as_ref()
-        .map(|te| te.raw_message.clone())
+    // The structured report outranks normalized log text, which is only an
+    // excerpt of the performer log.
+    let error_message = structured_error_message(input)
+        .or_else(|| tool_error.as_ref().map(|te| te.raw_message.clone()))
         .unwrap_or(raw_error_message);
     let canonical_class = tool_error
         .as_ref()
@@ -101,6 +109,35 @@ pub fn classify_completion_error(
         has_commits,
         tool_error,
     }
+}
+
+/// The tool's own account of a failure: its unmet preconditions, else its
+/// `MACC_TASK_RESULT_EXP` explanation.
+fn structured_error_message(input: &JobCompletionInput) -> Option<String> {
+    let preconditions: Vec<&str> = input
+        .unmet_preconditions
+        .iter()
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+        .collect();
+    let explanation = input
+        .result_explanation
+        .as_deref()
+        .map(str::trim)
+        .filter(|e| !e.is_empty());
+    if !preconditions.is_empty() {
+        let mut message = format!(
+            "unmet precondition{}: {}",
+            if preconditions.len() == 1 { "" } else { "s" },
+            preconditions.join("; ")
+        );
+        if let Some(explanation) = explanation {
+            message.push_str(" — ");
+            message.push_str(explanation);
+        }
+        return Some(message);
+    }
+    explanation.map(str::to_string)
 }
 
 #[cfg(test)]
@@ -141,11 +178,92 @@ mod tests {
         };
         let result = classify_completion_error(&input, Some(&MustNotNormalize), false);
         assert_eq!(result.error_code, "E903");
-        assert_eq!(result.error_message, "authorized schema migration needed");
+        assert_eq!(
+            result.error_message,
+            "unmet precondition: response snapshots — schema change required"
+        );
         assert_eq!(
             result.completion_kind,
             Some(PerformerCompletionKind::PreconditionUnmet)
         );
         assert!(result.tool_error.is_none());
+    }
+
+    struct QuotaFromLog;
+    impl ErrorNormalizer for QuotaFromLog {
+        fn normalize(&self, _: i32, _: &str, stdout: &str) -> Option<ToolError> {
+            Some(ToolError {
+                provider: "claude".into(),
+                canonical_class:
+                    crate::coordinator::error_normalizer::CanonicalClass::QuotaExhausted,
+                raw_message: stdout.chars().take(40).collect(),
+                error_code: "E602".into(),
+                retryable: true,
+                user_action_required: false,
+                retry_after_seconds: None,
+                request_id: None,
+                attempt: 0,
+                operation: String::new(),
+            })
+        }
+    }
+
+    fn failed_input(kind: Option<PerformerCompletionKind>) -> JobCompletionInput {
+        JobCompletionInput {
+            success: false,
+            attempt: 1,
+            max_attempts: 3,
+            timed_out: false,
+            phase_timeout_seconds: 3600,
+            elapsed_seconds: 1,
+            status_text: "performer failed".into(),
+            completion_kind: kind,
+            error_code: None,
+            error_origin: None,
+            error_message: None,
+            result_explanation: None,
+            unmet_preconditions: vec![],
+            auto_retry_error_codes: vec![],
+            auto_retry_max: 0,
+            backoff_base_seconds: 30,
+            backoff_max_seconds: 300,
+            normalizer_input: Some(NormalizerInput {
+                exit_code: 1,
+                stderr: String::new(),
+                stdout: "s does not serve without a page; usage limit mentioned in prose".into(),
+            }),
+        }
+    }
+
+    #[test]
+    fn listed_preconditions_are_never_reclassified_from_the_log() {
+        let mut input = failed_input(Some(PerformerCompletionKind::ErrorWithoutChanges));
+        input.unmet_preconditions = vec!["API audience must include web".into()];
+        input.result_explanation = Some("the BFF route is not exposed to the web audience".into());
+        let result = classify_completion_error(&input, Some(&QuotaFromLog), false);
+        assert!(result.tool_error.is_none());
+        assert_ne!(result.error_code, "E602");
+        assert_eq!(
+            result.error_message,
+            "unmet precondition: API audience must include web — the BFF route is not exposed to the web audience"
+        );
+    }
+
+    #[test]
+    fn the_tool_explanation_outranks_the_normalized_log_excerpt() {
+        let mut input = failed_input(Some(PerformerCompletionKind::ErrorWithoutChanges));
+        input.result_explanation = Some("build failed on missing contract".into());
+        let result = classify_completion_error(&input, Some(&QuotaFromLog), false);
+        // The class still comes from the normalizer; the message from the tool.
+        assert_eq!(result.error_code, "E602");
+        assert_eq!(result.error_message, "build failed on missing contract");
+    }
+
+    #[test]
+    fn without_a_structured_report_the_normalized_message_is_kept() {
+        let input = failed_input(None);
+        let result = classify_completion_error(&input, Some(&QuotaFromLog), false);
+        assert_eq!(result.error_code, "E602");
+        assert!(result.error_message.starts_with("s does not serve"));
     }
 }

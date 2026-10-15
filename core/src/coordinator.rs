@@ -19,6 +19,7 @@ pub mod managed_command_registry;
 pub mod model;
 pub mod model_routing;
 pub mod prd_auditor;
+pub mod precondition_scope;
 pub mod preflight;
 pub mod rate_limit;
 pub mod runtime;
@@ -355,6 +356,9 @@ pub fn is_valid_workflow_transition(from: WorkflowState, to: WorkflowState) -> b
             // Testing → InProgress (test fail → fix → retry; spec §15.2)
             | (WorkflowState::Testing, WorkflowState::InProgress)
             | (WorkflowState::Testing, WorkflowState::PrOpen)
+            // Testing → ChangesRequested (review verdict recorded before the
+            // task was advanced to Reviewing)
+            | (WorkflowState::Testing, WorkflowState::ChangesRequested)
             | (WorkflowState::Testing, WorkflowState::Blocked)
             | (WorkflowState::Testing, WorkflowState::Abandoned)
             // Reviewing → Merged (review passes; spec §17.1)

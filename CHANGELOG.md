@@ -7,6 +7,21 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Fixed — Coordinator restarts after an interrupted dispatch
+- A new pool worktree takes the lowest free `worker-NN` slot (no directory, no registered worktree, no leftover `ai/<tool>/worker-NN` branch). It used to take `worker-<pool size + 1>`, so once a slot was missing (`worker-01`, `worker-02`, `worker-04`) it picked an occupied one and the run failed on `git worktree add … already exists`.
+
+### Changed — Coordinator storage performance on long runs
+- Readers no longer load the whole event log: the registry is read alone (`SqliteStorage::load_registry`), recent events through a window (`load_recent_events`), and "latest event of a kind" lookups stop at the first match (`scan_events_newest_first`). This covers the coordinator loop's registry loads and saves, `get_coordinator_status`, failure analysis, supervisor incident detection, the runtime snapshot and the TUI.
+- New indexes `idx_events_seq` and `idx_events_type_seq`. The schema is stamped in `PRAGMA user_version`, so later connections skip the schema statements.
+- Only the last heartbeat of each task is kept: a new heartbeat replaces the older ones of the same task (never the event a replay cursor points at). Existing databases are pruned and vacuumed once on upgrade; on a 40-task project the database went from 8.2 MB and 10,377 events to 1.0 MB and 242.
+- `save_snapshot` rewrites only the tasks that changed and no longer copies the tasks into `registry_json`; a registry save no longer re-inserts every event.
+- The PRD sync of each coordinator cycle saves and logs the registry only when it changed. Resource locks still held by the same claim keep their original `locked_at`.
+- Performer heartbeats are no longer written to the coordinator run log, and the widened ghost grace is logged when it changes. Status and failure analysis read the last 256 KB of the log (`logs::read_log_tail`) instead of the whole file.
+- The web event streams (`/api/v1/events`, task events) read new events by sequence from the database on a blocking thread, instead of loading the whole log every 250 ms per open tab. A new connection receives the last 500 events; a resumed one continues from its last event.
+- The TUI polls the registry, recent events and (every 5 s) the run status on a background thread, renders from the last polled registry, and loads ToolSpecs once.
+- Storage connections are reused per thread (`SqliteStorage::open` returns a pooled connection), and are reopened when the database file is replaced.
+- Storage write transactions take the write lock when they begin (`BEGIN IMMEDIATE`). A transaction that read first could not upgrade once another process had committed, and the coordinator stopped with `E411 … database is locked`.
+
 ### Changed — Supervisor recovery
 - Supervisor repairs are based on and published to the coordinator reference branch (shared `integration::publish_commit`), not the branch checked out in the project root. Unrelated local changes no longer block an intervention; overlapping ones defer integration and are preserved.
 - Validation is baseline-aware: a command that also fails on the unmodified base no longer blocks the repair. It is recorded in `preexisting_failures` with `baseline-N.log`, and the independent verification compares both logs.
@@ -15,13 +30,31 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - A missing Git identity escalates before any AI call.
 - A rejected independent verification, or a validation regression introduced by the repair, is handed back to the repair agent for another round in the same worktree instead of waiting for an operator (`automation.supervisor.max_repair_rounds`, default 3). The verifier can refer the repair to a human decision with `requires_human`, which stops the loop. An explicit `--retry` on a kept worktree also passes the last rejection to the repair agent.
 
+### Added — Interactive human approval
+- `macc coordinator approvals` is interactive in a terminal: it walks every gate awaiting a decision, shows the full request and asks for the decision, the role, the evidence or reason, and a confirmation. `approve|reject|request-changes` prompt only for values missing from the command line. `--no-interactive` (or a non-terminal stdin/stdout) keeps the plain behaviour.
+- The TUI opens an approval window by itself, on any screen, when a gate awaits a decision. It explains the request in full and records the decision (`a`/`r`/`c`, role picker, evidence or reason, confirmation). `Esc` puts the gate off until its subject revision changes; `A` re-opens it.
+- The web UI opens an approval dialog by itself on every page, with an "N approvals waiting" pill in the top bar, backed by the new `GET /api/v1/coordinator/approvals` and `POST /api/v1/coordinator/approvals/{task_id}/decision` (owner-only, audit-logged).
+- Approval listings (`macc coordinator approvals`, `macc status`, `GET /api/v1/status`, the snapshot) evaluate gates against the decision ledger and the current subject revisions when read, so a new subject revision is shown without waiting for a coordinator cycle.
+- Pending approvals carry the full explanation shared by every client: `question`, `awaiting_decision`, the subject's title, objective, description, expected result and acceptance criteria, `required_roles`, the quorum rule in words, `evidence_required`, expiry and binding rules, the decisions already recorded, and the tasks the gate unblocks.
+
 ### Added — Current PRD in live clients
 - The Coordinator Live summary line of the TUI names the PRD file being executed and its position in the PRD queue (`Coordinator: Idle | PRD: 03-web-bff-shell.prd.json (2/26) | Tasks: ...`). The web dashboard shows the same above the queue counters, from the new optional `prd` object of `GET /api/v1/snapshot`.
 
 ### Changed — PRD audit
 - `macc prd audit --prd` accepts a directory as well as a file, and without `--prd` audits the coordinator PRD queue (`automation.coordinator.prd_files`), then `prd_file`, then `prd.json`. Several PRDs are audited in sequence; with `--json` the output is then `{"audits": [...], "failures": [...]}`.
 
+### Added — Out-of-scope preconditions
+- A `precondition_unmet` stop whose named paths lie outside the task's `change_scope` is flagged: the record says the fix belongs to another module, `task_runtime.out_of_scope_fix` keeps the paths, a `precondition_out_of_scope` event is emitted, the run summary gains `out_of_scope_paths` and a next action pointing to a supervisor repair or an owning task (TUI and web console show it), and the supervisor diagnosis receives the paths.
+- `macc prd generate` and `macc prd audit` prompts include a cross-module contract check: each endpoint a task consumes from another module must declare an audience and contract that serve the consumer (for example a Web task calling an API route), else a contract-resolution task is planned in the owning module.
+
+### Changed — Supervisor restarts the coordinator
+- When the engine fails or crashes while every incident task is between phases (`testing`, `reviewing`, `changes_requested`, `pr_open`, `queued`), the supervisor restarts the coordinator without diagnosis or repair; the tasks keep their state and the restarted run resumes their pending phase. The AI diagnosis can request the same recovery with `restart_only`. The same stop is restarted at most once, then escalated.
+- Tasks left between phases by a stopped engine are part of the supervisor incident, so a diagnosis naming them is no longer rejected as "a task outside this incident".
+
 ### Fixed
+- A review verdict of "changes requested" recorded while the task is still in `testing` moves it to `changes_requested` instead of aborting the run with `Invalid coordinator FSM transition: from=testing event=ReviewChangesRequested`. Any other phase outcome the state machine cannot apply now blocks only that task (`E910`, worktree kept, `phase_outcome_unapplicable` event) and the run continues.
+- A failed task's `last_error_message` is the performer's structured report (unmet preconditions, then `MACC_TASK_RESULT_EXP`) instead of an excerpt of the performer log. The log excerpt given to the error normalizer now starts at a full line (it started mid-word, e.g. "s does not serve without a page…"), a run that listed unmet preconditions is never reclassified from its log (a summary mentioning "usage limit" was read as a quota), and normalized messages are truncated on a UTF-8 character boundary.
+- A rate-limit or quota `throttle_state` (and the delay it set) is removed from the task when a later attempt ends with any other outcome, and the tool-level throttle is cleared when a job that started after it was recorded completes with a structured report, so a stale cooldown of up to a day no longer blocks redispatch.
 - `macc prd audit --tool`, `macc prd generate --tool` and AI context generation passed the ToolSpec argument template to the tool unrendered, so Claude Code was started with the literal model `{model}` and failed. The arguments are now rendered with the tool's configured model and effort, the `--model-tier` tier, or the `--model-routing manual --model` value.
 - `macc supervisor start --retry` no longer fails with "Diagnosis modified source" when the slot still holds an unfinished repair.
 - Blocked-run stop reasons and dependency-chain messages use `unmet_preconditions`/`result_explanation` instead of a truncated performer log header; the TUI precondition overlay is selected whenever preconditions are recorded, whatever the error code.

@@ -794,7 +794,9 @@ impl TaskRegistry {
     }
 
     pub fn recompute_resource_locks(&mut self, now_iso: &str) {
-        self.resource_locks.clear();
+        // A lock still held by the same claim keeps the time it was taken, so
+        // an unchanged registry stays equal to its stored copy.
+        let previous = std::mem::take(&mut self.resource_locks);
         for task in &self.tasks {
             if task.id.is_empty() {
                 continue;
@@ -822,13 +824,22 @@ impl TaskRegistry {
                 if resource.is_empty() {
                     continue;
                 }
+                let locked_at = previous
+                    .get(resource)
+                    .filter(|lock| {
+                        lock.task_id == task.id
+                            && lock.claim_id == claim_id
+                            && lock.worktree_path == worktree_path
+                    })
+                    .map(|lock| lock.locked_at.clone())
+                    .unwrap_or_else(|| now_iso.to_string());
                 self.resource_locks.insert(
                     resource.clone(),
                     ResourceLock {
                         task_id: task.id.clone(),
                         claim_id: claim_id.clone(),
                         worktree_path: worktree_path.clone(),
-                        locked_at: now_iso.to_string(),
+                        locked_at,
                         expires_at: expires_at.clone(),
                         extra: BTreeMap::new(),
                     },
@@ -1541,6 +1552,32 @@ mod human_gate_validation_tests {
             (todo, active, blocked, merged),
             (0, 0, 1, 1),
             "approved=merged, rejected=blocked, waiting uses no worker"
+        );
+    }
+
+    #[test]
+    fn a_lock_still_held_keeps_the_time_it_was_taken() {
+        let mut registry: TaskRegistry = serde_json::from_value(serde_json::json!({
+            "tasks": [{
+                "id": "T-1",
+                "state": "in_progress",
+                "exclusive_resources": ["db"],
+                "task_runtime": {"claim_id": "c-1"}
+            }]
+        }))
+        .unwrap();
+        registry.recompute_resource_locks("2026-10-14T10:00:00Z");
+        registry.recompute_resource_locks("2026-10-14T10:05:00Z");
+        assert_eq!(
+            registry.resource_locks["db"].locked_at,
+            "2026-10-14T10:00:00Z"
+        );
+
+        registry.tasks[0].task_runtime.claim_id = Some("c-2".into());
+        registry.recompute_resource_locks("2026-10-14T10:10:00Z");
+        assert_eq!(
+            registry.resource_locks["db"].locked_at,
+            "2026-10-14T10:10:00Z"
         );
     }
 }

@@ -407,3 +407,71 @@ mod supervisor_integration;
 
 #[path = "support/supervisor_feedback.rs"]
 mod supervisor_feedback;
+
+/// The engine stopped on an internal error while the root task was between
+/// phases (left in `testing` with its review verdict pending). Nothing needs
+/// repairing: the supervisor restarts the coordinator without any AI call (the
+/// fixture tool fails every call) and records the restart against the crash.
+#[test]
+fn an_engine_stop_between_phases_is_recovered_by_a_restart_without_repair() {
+    let temp = fixture(false);
+    let root = temp.path();
+    let paths = ProjectPaths::from_root(root);
+    let db = SqliteStorage::new(CoordinatorStoragePaths::from_project_paths(&paths));
+    let mut snapshot = CoordinatorSnapshot::empty();
+    snapshot.registry.tasks = vec![Task {
+        id: "L4L-BASELINE-001".into(),
+        state: "testing".into(),
+        ..Task::default()
+    }];
+    db.save_snapshot(&snapshot).unwrap();
+    db.upsert_coordinator_run(&CoordinatorRun {
+        run_id: "run-fixture".into(),
+        pid: 99999999,
+        hostname: "test".into(),
+        started_at: "2026-10-14T13:49:00Z".into(),
+        last_tick_at: None,
+        stopped_at: Some("2026-10-14T14:30:10Z".into()),
+        status: "failed".into(),
+        epoch: 1,
+        version: "test".into(),
+        stop_reason: Some(
+            "Coordinator error [invalid_transition]: Invalid coordinator FSM transition: from=testing event=ReviewChangesRequested".into(),
+        ),
+    })
+    .unwrap();
+    // Any AI call would fail: the restart path must not make one.
+    std::fs::write(root.join(".macc/fake-agent.sh"), "#!/bin/sh\nexit 9\n").unwrap();
+
+    let supervisor = start(root);
+    wait_for(|| {
+        report(root).is_some_and(|v| {
+            v.pointer("/intervention/status").and_then(Value::as_str) == Some("recovered")
+        })
+    });
+    let r = report(root).unwrap();
+    assert_eq!(r.pointer("/intervention/restart_only"), Some(&json!(true)));
+    assert!(r
+        .pointer("/intervention/diagnosis")
+        .is_none_or(Value::is_null));
+    assert!(r
+        .pointer("/intervention/restart_pid")
+        .and_then(Value::as_i64)
+        .is_some());
+    let detail = r
+        .pointer("/intervention/detail")
+        .and_then(Value::as_str)
+        .unwrap();
+    assert!(detail.contains("L4L-BASELINE-001 (testing)"), "{detail}");
+    drop(supervisor);
+    let ledger: Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join(".macc/state/supervisor-interventions.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        ledger["restarts"]
+            .as_object()
+            .map(|restarts| restarts.values().cloned().collect::<Vec<_>>()),
+        Some(vec![json!(1)])
+    );
+}

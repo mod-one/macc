@@ -1,7 +1,7 @@
 use crate::coordinator::state_runtime;
 use crate::coordinator::CoordinatorEventRecord;
 use crate::coordinator_storage::{
-    CoordinatorSnapshot, CoordinatorStorage, CoordinatorStoragePaths, JsonStorage, SqliteStorage,
+    CoordinatorStorage, CoordinatorStoragePaths, JsonStorage, SqliteStorage,
 };
 use crate::{ProjectPaths, Result};
 use chrono::{DateTime, Utc};
@@ -74,13 +74,28 @@ fn analyze_failure(
         }
     }
 
-    let snapshot: CoordinatorSnapshot = if sqlite.has_snapshot_data()? {
-        sqlite.load_snapshot()?
+    let report = if sqlite.has_snapshot_data()? {
+        // Newest first, stopping at the first blocking failure. Heartbeats
+        // are never failures and are most of the log.
+        let mut found = None;
+        let query = crate::coordinator_storage::EventQuery {
+            skip_heartbeats: true,
+            ..Default::default()
+        };
+        sqlite.scan_events_newest_first(query, |event| {
+            found = report_from_event(&event, since.as_ref());
+            if found.is_some() {
+                std::ops::ControlFlow::Break(())
+            } else {
+                std::ops::ControlFlow::Continue(())
+            }
+        })?;
+        found
     } else {
-        JsonStorage::new(storage_paths).load_snapshot()?
+        let snapshot = JsonStorage::new(storage_paths).load_snapshot()?;
+        report_from_events(&snapshot.events, since.as_ref())
     };
-
-    if let Some(report) = report_from_events(&snapshot.events, since.as_ref()) {
+    if let Some(report) = report {
         return Ok(Some(report));
     }
 
@@ -88,8 +103,14 @@ fn analyze_failure(
     // They remain a fallback only for unscoped legacy state; using them for a
     // managed command would reintroduce cross-run error attribution.
     if since.is_none() {
-        let logs = crate::service::logs::read_log_content(paths, "coordinator", None, None)
-            .unwrap_or_default();
+        let logs = crate::service::logs::read_log_tail(
+            paths,
+            "coordinator",
+            None,
+            None,
+            crate::service::logs::STATUS_LOG_TAIL_BYTES,
+        )
+        .unwrap_or_default();
         if let Some(report) = report_from_logs(&logs) {
             return Ok(Some(report));
         }
@@ -148,32 +169,39 @@ fn report_from_events(
     events: &[CoordinatorEventRecord],
     since: Option<&DateTime<Utc>>,
 ) -> Option<FailureReport> {
-    for raw in events.iter().rev() {
-        if !timestamp_is_in_scope(&raw.ts, since) {
-            continue;
-        }
-        let event_type = raw.event_type.as_str();
-        let status = raw.status.as_str();
-        let severity = raw.severity().unwrap_or_default();
-        if !is_blocking_failure_event(event_type, status, severity) {
-            continue;
-        }
-        let message = raw.message().unwrap_or(event_type).to_string();
-        let task_id = raw.task_id.clone();
-        let phase = raw
-            .phase
-            .clone()
-            .or_else(|| infer_phase_from_status(status));
-        return Some(build_failure_report(
-            message,
-            task_id,
-            phase,
-            "event",
-            true,
-            Some(event_type.to_string()),
-        ));
+    events
+        .iter()
+        .rev()
+        .find_map(|raw| report_from_event(raw, since))
+}
+
+fn report_from_event(
+    raw: &CoordinatorEventRecord,
+    since: Option<&DateTime<Utc>>,
+) -> Option<FailureReport> {
+    if !timestamp_is_in_scope(&raw.ts, since) {
+        return None;
     }
-    None
+    let event_type = raw.event_type.as_str();
+    let status = raw.status.as_str();
+    let severity = raw.severity().unwrap_or_default();
+    if !is_blocking_failure_event(event_type, status, severity) {
+        return None;
+    }
+    let message = raw.message().unwrap_or(event_type).to_string();
+    let task_id = raw.task_id.clone();
+    let phase = raw
+        .phase
+        .clone()
+        .or_else(|| infer_phase_from_status(status));
+    Some(build_failure_report(
+        message,
+        task_id,
+        phase,
+        "event",
+        true,
+        Some(event_type.to_string()),
+    ))
 }
 
 fn report_from_logs(logs: &str) -> Option<FailureReport> {

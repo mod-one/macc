@@ -12,7 +12,8 @@ impl RuntimeSnapshotBuilder {
         let storage_paths = CoordinatorStoragePaths::from_project_paths(paths);
         let sqlite = SqliteStorage::new(storage_paths.clone());
         let snapshot = if sqlite.has_snapshot_data().unwrap_or(false) {
-            sqlite.load_snapshot()
+            // Recent events come from the events log below, not from storage.
+            sqlite.load_snapshot_without_events()
         } else {
             JsonStorage::new(storage_paths.clone()).load_snapshot()
         };
@@ -53,10 +54,10 @@ impl RuntimeSnapshotBuilder {
             coordinator.last_run_summary =
                 crate::service::run_summary::load_latest_run_summary(&sqlite, &snapshot.registry)
                     .unwrap_or(None);
-            coordinator.pending_approvals =
-                crate::coordinator::approval::pending_approvals(&snapshot.registry, &|rev| {
-                    crate::coordinator::approval::revision_diff_stat(&paths.root, rev)
-                });
+            coordinator.pending_approvals = crate::coordinator::approval::current_pending_approvals(
+                &paths.root,
+                &snapshot.registry,
+            );
         }
 
         let recent_events = load_recent_events(paths);

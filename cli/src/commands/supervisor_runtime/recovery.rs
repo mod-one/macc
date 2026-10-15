@@ -16,6 +16,7 @@ pub(super) async fn intervene(
     report: &mut Intervention,
     dir: &Path,
     lock: &macc_core::fs_lock::AdvisoryLock,
+    restart_allowed: bool,
 ) -> Result<()> {
     let current = incident::inspect_with_config(paths, canonical.automation.coordinator.as_ref())?
         .ok_or_else(|| {
@@ -28,6 +29,27 @@ pub(super) async fn intervene(
     }
     ensure_not_stopped(paths)?;
     stop_orphan_jobs(&report.incident).await?;
+    let progress = super::report::Progress { paths, config, dir };
+    // The engine stopped while every incident task was between phases: no
+    // task failed and nothing needs repairing — the restarted run resumes
+    // their pending test, review, fix or merge. No AI call is needed.
+    if incident::resumable_by_restart(&report.incident) {
+        if restart_allowed {
+            let ids: Vec<String> = report.incident.tasks.iter().map(|t| t.id.clone()).collect();
+            report.detail = format!(
+                "The coordinator stopped ({}) while {} {} between phases; no task failed, so it was restarted to resume {}.",
+                report.incident.reason,
+                describe_tasks(&report.incident),
+                if ids.len() == 1 { "was" } else { "were" },
+                if ids.len() == 1 { "it" } else { "them" },
+            );
+            return restart_only(paths, canonical, report, lock, &progress, &ids).await;
+        }
+        report.detail = format!(
+            "The coordinator already stopped the same way after a supervisor restart ({}); diagnosing instead of restarting again.",
+            report.incident.reason
+        );
+    }
     // The supervisor commits the repair itself: fail before spending AI calls.
     let identity = macc_core::git::missing_git_identity_fields(&paths.root);
     if !identity.is_empty() {
@@ -42,7 +64,6 @@ pub(super) async fn intervene(
     report.target_branch = target.branch.clone();
     let worktree = super::workspace::prepare(&paths.root, &report.incident.id, &target)?;
     report.worktree = Some(worktree.clone());
-    let progress = super::report::Progress { paths, config, dir };
     let activity = if report.diagnosis.is_some() {
         "Reusing the recorded diagnosis".to_string()
     } else {
@@ -64,6 +85,20 @@ pub(super) async fn intervene(
     );
     report.detail = diagnosis.summary.clone();
     report.diagnosis = Some(diagnosis.clone());
+    if diagnosis.restart_only && !diagnosis.requires_human {
+        if !restart_allowed {
+            return Err(MaccError::Validation(format!(
+                "The coordinator already stopped the same way after a supervisor restart; not restarting again: {}",
+                diagnosis.summary
+            )));
+        }
+        let ids = if diagnosis.task_ids.is_empty() {
+            report.incident.tasks.iter().map(|t| t.id.clone()).collect()
+        } else {
+            diagnosis.task_ids.clone()
+        };
+        return restart_only(paths, canonical, report, lock, &progress, &ids).await;
+    }
     if diagnosis.requires_human || !diagnosis.repairable {
         return Err(MaccError::Validation(format!(
             "Intervention escalated: {}",
@@ -101,6 +136,48 @@ pub(super) async fn intervene(
     )?;
     ensure_not_stopped(paths)?;
     requeue(paths, canonical, &diagnosis.task_ids, &report.detail)?;
+    restart(paths, canonical, report, lock, &progress).await
+}
+
+/// Recovery without a source repair: requeue the incident's roots (tasks
+/// between phases keep their state) and restart the coordinator.
+async fn restart_only(
+    paths: &ProjectPaths,
+    canonical: &CanonicalConfig,
+    report: &mut Intervention,
+    lock: &macc_core::fs_lock::AdvisoryLock,
+    progress: &super::report::Progress<'_>,
+    ids: &[String],
+) -> Result<()> {
+    report.restart_only = true;
+    progress.enter(
+        report,
+        "requeuing",
+        format!("Resuming {} without a source repair", ids.join(", ")),
+    )?;
+    ensure_not_stopped(paths)?;
+    let proof = format!("supervisor restart: {}", report.incident.reason);
+    requeue(paths, canonical, ids, &proof)?;
+    restart(paths, canonical, report, lock, progress).await
+}
+
+fn describe_tasks(incident: &incident::Incident) -> String {
+    incident
+        .tasks
+        .iter()
+        .map(|t| format!("{} ({})", t.id, t.state))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Restart the managed coordinator and wait until it is ready.
+async fn restart(
+    paths: &ProjectPaths,
+    canonical: &CanonicalConfig,
+    report: &mut Intervention,
+    lock: &macc_core::fs_lock::AdvisoryLock,
+    progress: &super::report::Progress<'_>,
+) -> Result<()> {
     progress.enter(report, "restarting", "Restarting the coordinator")?;
     ensure_not_stopped(paths)?;
     let pid = macc_core::service::coordinator::coordinator_restart_after_intervention(
@@ -156,6 +233,19 @@ fn requeue(
         if task.state == "blocked" {
             macc_core::service::coordinator_workflow::coordinator_unblock_task(
                 paths, config, &env, id, proof,
+            )?;
+        } else if incident::in_flight_phase(task) {
+            // Between phases: the restarted run resumes the pending phase from
+            // this state. Resetting it to todo would discard the delivered
+            // work's progress (tests passed, review recorded). Only drop the
+            // dead process reference.
+            let mut registry = registry;
+            let task = registry.find_task_mut(id).unwrap();
+            task.ensure_runtime().pid = None;
+            macc_core::coordinator::state::coordinator_state_registry_save(
+                &paths.root,
+                &args,
+                &registry.to_value()?,
             )?;
         } else {
             // Crash recovery runs only with the coordinator stopped; preserve committed work for reconciliation.

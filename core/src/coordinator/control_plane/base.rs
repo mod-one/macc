@@ -438,6 +438,8 @@ pub fn sync_registry_from_prd_native(
     let registry_value =
         crate::coordinator::state::coordinator_state_registry_load(repo_root, &BTreeMap::new())?;
     let mut registry = TaskRegistry::from_value(&registry_value)?;
+    // Runs every cycle: only a registry that really changed is saved.
+    let stored = registry.clone();
     let queue = crate::prd_queue::load(repo_root)?;
     if let Some(current) = queue.entries.get(queue.next) {
         if prd_file.canonicalize().ok().is_some_and(|path| {
@@ -471,7 +473,8 @@ pub fn sync_registry_from_prd_native(
         if id.is_empty() {
             continue;
         }
-        let mut task = by_id.remove(&id).unwrap_or_else(|| Task {
+        let before = by_id.remove(&id);
+        let mut task = before.clone().unwrap_or_else(|| Task {
             id: id.clone(),
             state: "todo".to_string(),
             ..Task::default()
@@ -550,7 +553,9 @@ pub fn sync_registry_from_prd_native(
         if !has_external_block {
             runtime.external_block_resolution = None;
         }
-        task.updated_at = Some(now_iso_coordinator());
+        if before.as_ref() != Some(&task) {
+            task.updated_at = Some(now_iso_coordinator());
+        }
         merged.push(task);
     }
 
@@ -583,12 +588,15 @@ pub fn sync_registry_from_prd_native(
         &now_iso_coordinator(),
     );
     registry.recompute_resource_locks(&now_iso_coordinator());
-    registry.set_updated_at(now_iso_coordinator());
-    crate::coordinator::state::coordinator_state_registry_save(
-        repo_root,
-        &BTreeMap::new(),
-        &registry.to_value()?,
-    )?;
+    let changed = registry != stored;
+    if changed {
+        registry.set_updated_at(now_iso_coordinator());
+        crate::coordinator::state::coordinator_state_registry_save(
+            repo_root,
+            &BTreeMap::new(),
+            &registry.to_value()?,
+        )?;
+    }
 
     if let Some(log) = logger {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -882,6 +890,7 @@ pub async fn advance_tasks_native(
                         }
                     }
                 }
+                note_unapplicable_phase_outcome(repo_root, &registry, &task_id, mode, logger);
                 progressed = true;
             }
             coordinator_engine::AdvanceTaskAction::QueueMerge {
@@ -991,6 +1000,90 @@ pub async fn advance_tasks_native(
         progressed,
         blocked_merge,
     })
+}
+
+/// Announce a phase result the FSM could not apply: the task was blocked
+/// (E910) instead of aborting the run, and the operator must know why.
+fn note_unapplicable_phase_outcome(
+    repo_root: &Path,
+    registry: &serde_json::Value,
+    task_id: &str,
+    mode: &str,
+    logger: Option<&dyn CoordinatorLog>,
+) {
+    let Some(task) = TaskRegistry::from_value(registry)
+        .ok()
+        .and_then(|typed| typed.find_task(task_id).cloned())
+    else {
+        return;
+    };
+    if task.task_runtime.last_error_code.as_deref()
+        != Some(coordinator_engine::E910_PHASE_OUTCOME_UNAPPLICABLE)
+        || task.state != "blocked"
+    {
+        return;
+    }
+    let message = task
+        .task_runtime
+        .last_error_message
+        .clone()
+        .unwrap_or_default();
+    let _ = append_coordinator_event_with_severity(
+        repo_root,
+        "phase_outcome_unapplicable",
+        task_id,
+        mode,
+        "blocked",
+        &message,
+        "blocking",
+    );
+    if let Some(log) = logger {
+        let _ = log.note(format!("- {message}"));
+    }
+}
+
+/// Announce a precondition stop whose fix lies outside the task's change
+/// scope: it needs a repair in another module, which retrying or unblocking
+/// the task cannot provide.
+fn note_out_of_scope_precondition(
+    repo_root: &Path,
+    registry: &serde_json::Value,
+    task_id: &str,
+    logger: Option<&dyn CoordinatorLog>,
+) {
+    let Some(paths) = TaskRegistry::from_value(registry)
+        .ok()
+        .and_then(|typed| typed.find_task(task_id).cloned())
+        .and_then(|task| {
+            task.task_runtime
+                .extra
+                .get(crate::coordinator::precondition_scope::OUT_OF_SCOPE_FIX_KEY)
+                .and_then(|v| v.get("paths"))
+                .and_then(|v| v.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect::<Vec<_>>()
+                })
+        })
+        .filter(|paths| !paths.is_empty())
+    else {
+        return;
+    };
+    let message = crate::coordinator::precondition_scope::out_of_scope_note(task_id, &paths);
+    let _ = append_coordinator_event_with_severity(
+        repo_root,
+        "precondition_out_of_scope",
+        task_id,
+        "dev",
+        "out_of_scope",
+        &message,
+        "warning",
+    );
+    if let Some(log) = logger {
+        let _ = log.note(format!("- {message}"));
+    }
 }
 
 pub async fn monitor_active_jobs_native(
@@ -1218,6 +1311,9 @@ pub async fn monitor_active_jobs_native(
                     active_session_id.as_deref(),
                 );
                 aggregate_performer_logs_after_completion(repo_root, &evt.task_id, logger);
+                if completion.status_label == "precondition_unmet" {
+                    note_out_of_scope_precondition(repo_root, &registry, &evt.task_id, logger);
+                }
                 // RL-ROUTE-005 / RL-THROTTLE-006: maintain throttle registry and
                 // adjust effective concurrency based on rate-limit signals.
                 if matches!(
@@ -1266,20 +1362,19 @@ pub async fn monitor_active_jobs_native(
                             let _ = log.note(format!("- {}", msg));
                         }
                     }
-                } else if evt.success
-                    || matches!(
-                        completion.completion_kind,
-                        Some(
-                            crate::coordinator::PerformerCompletionKind::SuccessWithChanges
-                                | crate::coordinator::PerformerCompletionKind::SuccessWithoutChanges
-                                | crate::coordinator::PerformerCompletionKind::AlreadySatisfied
-                        )
-                    )
-                {
-                    // RL-ROUTE-005: clear throttle on success so the tool is
-                    // re-enabled for future tasks.
+                } else if evt.success || completion.completion_kind.is_some() {
+                    // RL-ROUTE-005: the tool ran and answered — with success or
+                    // with a structured report such as precondition_unmet — so
+                    // clear an expired throttle, or one recorded before this job
+                    // started (a stale cooldown must not block redispatch).
+                    let now_ts = chrono::Utc::now().timestamp().max(0) as u64;
+                    let job_started_at = now_ts.saturating_sub(job.started_at.elapsed().as_secs());
                     if state.throttle_registry.get(&job.tool).is_some_and(|entry| {
-                        entry.throttled_until <= chrono::Utc::now().timestamp() as u64
+                        crate::coordinator::rate_limit::job_clears_throttle(
+                            entry,
+                            job_started_at,
+                            now_ts,
+                        )
                     }) {
                         state.throttle_registry.remove(&job.tool);
                         persist_throttle_registry(repo_root, &state.throttle_registry, &job.tool)?;
@@ -1495,7 +1590,11 @@ pub fn apply_runtime_event_bus_updates(
     loop {
         match state.runtime_event_bus_rx.try_recv() {
             Ok(event) => {
-                if let Some(log) = logger {
+                // Heartbeats arrive every few seconds per performer and carry no news:
+                // they would make up most of the run log.
+                if let Some(log) = logger.filter(|_| {
+                    !matches!(event.kind, CoordinatorRuntimeEventKind::Heartbeat { .. })
+                }) {
                     let event_type = match &event.kind {
                         CoordinatorRuntimeEventKind::Heartbeat { .. } => "heartbeat",
                         CoordinatorRuntimeEventKind::TaskDispatched { .. } => "task_dispatched",
@@ -1829,7 +1928,7 @@ pub fn consume_runtime_events(
     }
 
     let mut stmt = if let (Some(_seq), Some(_id)) = (last_seq, &last_event_id) {
-        conn.prepare("SELECT raw_json, event_id FROM events WHERE seq > ?1 OR (seq = ?1 AND event_id > ?2) ORDER BY seq ASC, event_id ASC")
+        conn.prepare("SELECT raw_json, event_id FROM events WHERE (seq, event_id) > (?1, ?2) ORDER BY seq ASC, event_id ASC")
             .map_err(sql_err)?
     } else {
         conn.prepare("SELECT raw_json, event_id FROM events ORDER BY seq ASC, event_id ASC")
@@ -3059,8 +3158,9 @@ mod tests {
 
         let mut run_state = CoordinatorRunState::new();
 
+        // evt-2 superseded evt-1: only the last heartbeat of a task is stored.
         let replayed = super::consume_runtime_events(&repo, &mut run_state, None).unwrap();
-        assert_eq!(replayed, 2);
+        assert_eq!(replayed, 1);
 
         let last_event_id: String = conn
             .query_row(

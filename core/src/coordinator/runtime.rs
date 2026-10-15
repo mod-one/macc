@@ -3,7 +3,6 @@ use crate::coordinator::integration::{IntegrationWorktree, PublishOutcome};
 use crate::coordinator::model::Task;
 use crate::coordinator::rate_limit::ToolThrottleRegistry;
 use crate::coordinator::{CoordinatorEventRecord, PerformerCompletionKind};
-use crate::coordinator_storage::CoordinatorStorage;
 use crate::git;
 use crate::service::process_ownership::RegisteredProcessGuard;
 use crate::{MaccError, Result};
@@ -1485,38 +1484,36 @@ fn read_last_completion_details_once(
     let storage_paths =
         crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&project_paths);
     let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
-    let snapshot = match sqlite.load_snapshot() {
-        Ok(snap) => snap,
-        Err(err) => {
-            tracing::warn!(
-                task_id,
-                attempt,
-                "read_last_completion_details: load_snapshot failed: {}",
-                err
-            );
-            return None;
-        }
+    let query = crate::coordinator_storage::EventQuery {
+        task_id: Some(task_id),
+        event_type: Some("phase_result"),
+        skip_heartbeats: false,
     };
-    for event in snapshot.events.iter().rev() {
-        let Some(event_task_id) = event.task_id.as_deref() else {
-            continue;
-        };
-        if event_task_id != task_id {
-            continue;
-        }
+    let mut details = None;
+    let scanned = sqlite.scan_events_newest_first(query, |event| {
         if !event_source.is_empty() && event.source != event_source {
-            continue;
+            return std::ops::ControlFlow::Continue(());
         }
-        if event.event_type != "phase_result" {
-            continue;
-        }
-        return Some(CompletionDetails {
+        details = Some(CompletionDetails {
             result_kind: event.payload_result_kind(),
             message: event.message().map(|value| value.to_string()),
             result_explanation: event.payload_result_exp(),
             gate_verdict: event.payload_gate_verdict(),
             unmet_preconditions: event.payload_unmet_preconditions(),
         });
+        std::ops::ControlFlow::Break(())
+    });
+    if let Err(err) = scanned {
+        tracing::warn!(
+            task_id,
+            attempt,
+            "read_last_completion_details: event scan failed: {}",
+            err
+        );
+        return None;
+    }
+    if details.is_some() {
+        return details;
     }
     if attempt < 2 {
         tracing::debug!(
@@ -1640,7 +1637,15 @@ pub fn read_performer_log_tail(
         while !raw.is_char_boundary(start) {
             start += 1;
         }
-        Some(raw[start..].to_string())
+        // Start at the next full line: a cut through the middle of a line
+        // would hand the normalizer (and any message built from it) a
+        // fragment such as "s does not serve without a page".
+        let tail = &raw[start..];
+        let tail = match tail.find('\n') {
+            Some(newline) if newline + 1 < tail.len() => &tail[newline + 1..],
+            _ => tail,
+        };
+        Some(tail.to_string())
     }
 }
 
@@ -1653,50 +1658,44 @@ fn read_last_error_details_from_sqlite(
     let storage_paths =
         crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&project_paths);
     let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
-    let snapshot = match sqlite.load_snapshot() {
-        Ok(snap) => snap,
-        Err(err) => {
-            tracing::warn!(
-                task_id,
-                "read_last_error_details_from_sqlite: load_snapshot failed: {}",
-                err
-            );
-            return None;
-        }
+    // Heartbeats are neither failures nor terminal successes.
+    let query = crate::coordinator_storage::EventQuery {
+        task_id: Some(task_id),
+        event_type: None,
+        skip_heartbeats: true,
     };
     let mut failed_candidate: Option<ErrorDetails> = None;
     let mut saw_terminal_success_before_failed = false;
-    for event in snapshot.events.iter().rev() {
-        let Some(event_task_id) = event.task_id.as_deref() else {
-            continue;
-        };
-        if event_task_id != task_id {
-            continue;
-        }
+    let scanned = sqlite.scan_events_newest_first(query, |event| {
         let source = event.source.as_str();
         if !event_source.is_empty() && source != event_source {
-            continue;
+            return std::ops::ControlFlow::Continue(());
         }
         let event_type = event.event_type.as_str();
         let status = event.status.as_str();
-        let is_terminal_success = event.is_terminal_success();
-        if is_terminal_success && failed_candidate.is_some() {
+        if event.is_terminal_success() && failed_candidate.is_some() {
             saw_terminal_success_before_failed = true;
-            continue;
+            return std::ops::ControlFlow::Continue(());
         }
         if event_type != "failed" && !(event_type == "phase_result" && status == "failed") {
-            continue;
+            return std::ops::ControlFlow::Continue(());
         }
-        let error_code = event.payload_error_code();
-        let error_origin = event.payload_origin();
-        let error_message = event.message().map(|v| v.to_string());
         if failed_candidate.is_none() {
             failed_candidate = Some(ErrorDetails {
-                error_code,
-                error_origin,
-                error_message,
+                error_code: event.payload_error_code(),
+                error_origin: event.payload_origin(),
+                error_message: event.message().map(|v| v.to_string()),
             });
         }
+        std::ops::ControlFlow::Continue(())
+    });
+    if let Err(err) = scanned {
+        tracing::warn!(
+            task_id,
+            "read_last_error_details_from_sqlite: event scan failed: {}",
+            err
+        );
+        return None;
     }
     if saw_terminal_success_before_failed {
         return None;
@@ -2613,6 +2612,21 @@ mod precondition_log_fallback_tests {
             super::read_performer_log_tail(dir.path(), "SEC-API-004", 4).unwrap(),
             "\u{20ac}"
         );
+    }
+
+    #[test]
+    fn log_tail_starts_at_a_full_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = performer_task_log_path(dir.path(), "WEB-UI-005");
+        std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+        std::fs::write(
+            &log,
+            "The BFF route does not serve without a page.\nMACC_TASK_RESULT: precondition_unmet\n",
+        )
+        .unwrap();
+        // 45 bytes cut into the first line: the partial line is dropped.
+        let tail = super::read_performer_log_tail(dir.path(), "WEB-UI-005", 45).unwrap();
+        assert_eq!(tail, "MACC_TASK_RESULT: precondition_unmet\n");
     }
 
     #[test]

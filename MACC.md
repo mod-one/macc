@@ -837,6 +837,10 @@ For tools that use a config file for effort (e.g. Codex with `.codex/config.toml
 
 `blocked_on_external` is scheduler-visible and starts the task in `blocked`; do not encode “do not retry” only in prose. A task with `gate` must emit `MACC_TASK_GATE_VERDICT: accepted|rejected|pending`. Its implementation may merge successfully while a rejected verdict keeps dependants blocked. A correct runtime refusal uses `MACC_TASK_RESULT: precondition_unmet` and is never retried; it must also print one `MACC_TASK_PRECONDITION: <condition>` line per unsatisfied precondition, which MACC records on the task (`unmet_preconditions`) and shows verbatim as "Task X cannot be implemented because the following preconditions are not satisfied: …" in the run stop reason, `macc status`, the TUI overlay and the web run summary.
 
+When a precondition names a path outside the task's `change_scope` (not matched by `allowed_paths`, or inside `read_only_paths`/`forbidden_paths`), the fix belongs to another module: MACC appends "The fix lies outside X's change scope (…)" to the record, stores the paths in `task_runtime.out_of_scope_fix`, emits a `precondition_out_of_scope` event, adds `out_of_scope_paths` to the run summary with a next action pointing to a supervisor repair or a task owning those paths, and passes the paths to the supervisor diagnosis. `macc prd generate` and `macc prd audit` ask the planner to check, while planning, that each endpoint a task consumes from another module declares an audience and contract serving that consumer (for example a Web task calling an API route), and to plan the contract change in the owning module otherwise.
+
+A structured precondition report or `MACC_TASK_RESULT_EXP` explanation is what MACC records as the error message; the provider-error normalizer, which reads the end of the performer log, never reclassifies a run that listed preconditions, and its excerpt starts at a full line.
+
 ### Human approval gates
 
 A decision that only people may take — a normative change or ADR, an open product decision, a sensitive architecture or data model, security/identity/payment/privacy, an irreversible migration, a production activation — is declared as its own task with `gate.kind: human_approval`:
@@ -867,7 +871,7 @@ A decision that only people may take — a normative change or ADR, an open prod
 
 `subject_task` must be listed in `dependencies`. `quorum` is `all` (default), `any`, or a number of distinct approvals. The gate carries no executable work and no `change_scope`.
 
-The coordinator never dispatches a gate. Once its dependencies are delivered it moves to `waiting_approval`, bound to the subject's current revision (the latest commit carrying `[macc:task <subject>]` on the reference branch). It uses no worker, is never retried, and a run waiting on it stays alive instead of aborting for lack of progress. `macc status`, `macc coordinator approvals`, the TUI Coordinator Live pane and `GET /api/v1/coordinator/status` show the subject, revision, diff, risks, missing approvers and the exact command:
+The coordinator never dispatches a gate. Once its dependencies are delivered it moves to `waiting_approval`, bound to the subject's current revision (the latest commit carrying `[macc:task <subject>]` on the reference branch). It uses no worker, is never retried, and a run waiting on it stays alive instead of aborting for lack of progress. `macc status`, `macc coordinator approvals`, the TUI Coordinator Live pane, `GET /api/v1/coordinator/status` and `GET /api/v1/coordinator/approvals` show the subject, revision, diff, risks, missing approvers and the exact command:
 
 ```bash
 macc coordinator approvals
@@ -875,6 +879,16 @@ macc coordinator approve SEC-APP-003 --role PRODUCT_OWNER --revision <commit-sha
 macc coordinator reject SEC-APP-003 --role SECURITY_OWNER --reason "…"
 macc coordinator request-changes SEC-APP-003 --role SECURITY_OWNER --reason "…"
 ```
+
+#### Deciding interactively
+
+Each client presents the same full request: the question, the gate's decision and trigger, the subject's title, revision, objective, expected result, description and acceptance criteria, the revision's diff stat, the risks, the approvers' progress and quorum rule, the decisions already recorded, the evidence and binding rules, and what approving, rejecting or requesting changes does (including the tasks the gate unblocks).
+
+- **CLI.** In a terminal, `macc coordinator approvals` walks every gate awaiting a decision: it prints the request, then asks for the decision, the role (missing roles first), the evidence or the reason, and a confirmation. The revision is the subject's current one. After a decision it offers the gate's remaining roles. `approve|reject|request-changes <GATE>` prompt only for the values missing from the command line and record directly when nothing is missing; with no gate id, the only waiting gate is used. `--no-interactive`, or a non-terminal stdin/stdout, keeps the plain listing and requires every flag.
+- **TUI.** The approval window opens by itself, on any screen, when a gate awaits a decision (it does not interrupt typing in a field). `a`/`r`/`c` start a decision, then a role picker, an evidence or reason field and a confirmation; arrows and PgUp/PgDn scroll the request, `Tab` shows the next gate, `Esc` puts the gate off until its subject revision changes, and `A` re-opens it. Gates are re-read every 5 seconds even when no coordinator command runs.
+- **Web.** A dialog opens by itself on every page, and the top bar shows "N approvals waiting" to re-open it. The form takes the decision, role, optional identity override, evidence or reason, then a confirmation; the outcome is also kept in the notification center. It uses `GET /api/v1/coordinator/approvals` and `POST /api/v1/coordinator/approvals/:id/decision`, which require Web project ownership like other mutations and are audit-logged.
+
+Every client records through the same command, so the validation below is identical everywhere. Listings (`approvals`, `status`, the snapshot) evaluate gates against the ledger and the current subject revisions when they are read, without saving or emitting events, so a newly delivered subject or a new revision shows up even when no coordinator is running. Only gates whose approval status is `waiting_approval` or `expired` open a window; a rejected gate or one waiting for requested changes waits for a new subject revision.
 
 | State | Meaning | Dependants |
 |---|---|---|

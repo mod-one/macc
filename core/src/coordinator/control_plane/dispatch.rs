@@ -12,10 +12,9 @@ use super::sanitize::{
 };
 use crate::config::CoordinatorConfigResolved;
 use crate::coordinator::helpers::{
-    append_coordinator_event_with_severity, build_non_task_worker_slug, count_pool_worktrees,
-    find_reusable_worktree_native, is_worktree_activity_recent, now_iso_coordinator,
-    recompute_resource_locks_from_tasks, score_worktree_session_warmth, set_registry_updated_at,
-    write_worktree_prd_for_task,
+    append_coordinator_event_with_severity, find_reusable_worktree_native,
+    is_worktree_activity_recent, now_iso_coordinator, recompute_resource_locks_from_tasks,
+    score_worktree_session_warmth, set_registry_updated_at, write_worktree_prd_for_task,
 };
 use crate::coordinator::runtime::{CoordinatorJob, CoordinatorRunState};
 use crate::coordinator::types::CoordinatorEnvConfig;
@@ -423,9 +422,8 @@ pub(super) async fn acquire_worktree_for_dispatch(
         });
     }
 
-    let pool_count = count_pool_worktrees(repo_root)?;
     let create_spec = crate::WorktreeCreateSpec {
-        slug: build_non_task_worker_slug(pool_count),
+        slug: crate::coordinator::helpers::next_free_worker_slug(repo_root, &task.tool)?,
         tool: task.tool.clone(),
         count: 1,
         base: task.base_branch.clone(),

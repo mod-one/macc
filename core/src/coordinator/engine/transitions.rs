@@ -7,6 +7,7 @@ use crate::coordinator::error_normalizer::{
     E104_PERFORMER_PARTIAL_CHANGES, E105_PERFORMER_EXIT_NON_ZERO,
 };
 use crate::coordinator::model::Task;
+use crate::coordinator::precondition_scope;
 use crate::coordinator::rate_limit::{
     update_throttle_state, RateLimitInfo, ToolThrottleState, E601_RATE_LIMITED,
     E602_QUOTA_EXHAUSTED,
@@ -95,11 +96,38 @@ Tool summary: ",
     out
 }
 
+/// Whether `strategy` records a provider availability failure (rate limit or
+/// quota), the only outcomes that own the task's `throttle_state`.
+fn is_availability_outcome(strategy: &RetryStrategy) -> bool {
+    matches!(
+        strategy,
+        RetryStrategy::Retry {
+            outcome: RetryOutcome::RateLimitBackoff { .. }
+                | RetryOutcome::QuotaExhaustedRequeue { .. },
+            ..
+        }
+    )
+}
+
+/// Drop the throttle bookkeeping a previous rate-limit or quota outcome left on
+/// the task. Any other outcome means the tool ran and answered, so a stale
+/// `throttled_until` (a quota cooldown can be a day) must not survive into
+/// later decisions; the delay it imposed on the task goes with it.
+fn clear_stale_throttle(task: &mut Task) {
+    let runtime = task.ensure_runtime();
+    if runtime.extra.remove("throttle_state").is_some() {
+        runtime.delayed_until = None;
+    }
+}
+
 pub(super) fn apply_state_transitions(
     task: &mut Task,
     strategy: &RetryStrategy,
     now: &str,
 ) -> JobCompletionResult {
+    if !is_availability_outcome(strategy) {
+        clear_stale_throttle(task);
+    }
     match strategy {
         RetryStrategy::Retry {
             same_worktree,
@@ -437,12 +465,29 @@ pub(super) fn apply_state_transitions(
                 // A precondition stop is a correct outcome, not a tool error:
                 // record it as "cannot be implemented because …" with the
                 // conditions listed, never as "tool execution failed".
+                let mut out_of_scope = Vec::new();
                 let detail = if *completion_kind == PerformerCompletionKind::PreconditionUnmet {
-                    describe_unmet_preconditions(
+                    let mut texts: Vec<&str> = task
+                        .task_runtime
+                        .unmet_preconditions
+                        .iter()
+                        .map(String::as_str)
+                        .collect();
+                    texts.extend(task.task_runtime.result_explanation.as_deref());
+                    out_of_scope = precondition_scope::out_of_scope_paths(task, &texts);
+                    let mut detail = describe_unmet_preconditions(
                         &task.id,
                         &task.task_runtime.unmet_preconditions,
                         task.task_runtime.result_explanation.as_deref(),
-                    )
+                    );
+                    if !out_of_scope.is_empty() {
+                        detail.push('\n');
+                        detail.push_str(&precondition_scope::out_of_scope_note(
+                            &task.id,
+                            &out_of_scope,
+                        ));
+                    }
+                    detail
                 } else {
                     let described = describe_tool_error(task, reason);
                     let suffix = if *error_code == "E907" {
@@ -473,6 +518,16 @@ pub(super) fn apply_state_transitions(
                 runtime.pid = None;
                 runtime.set_last_error_details(*error_code, origin, detail.clone());
                 runtime.last_error = Some(detail.clone());
+                if out_of_scope.is_empty() {
+                    runtime
+                        .extra
+                        .remove(precondition_scope::OUT_OF_SCOPE_FIX_KEY);
+                } else {
+                    runtime.extra.insert(
+                        precondition_scope::OUT_OF_SCOPE_FIX_KEY.to_string(),
+                        serde_json::json!({ "paths": out_of_scope }),
+                    );
+                }
                 task.tool = None;
                 task.assignee = None;
                 task.touch_state_changed(now);

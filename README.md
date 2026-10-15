@@ -337,13 +337,15 @@ macc coordinator sync-prd           # reconcile tasks from PRD
 macc coordinator reconcile
 macc coordinator unlock
 macc coordinator cleanup
-macc coordinator approvals                   # human approval gates waiting for a decision
+macc coordinator approvals                   # read and decide waiting approval gates (interactive in a terminal)
 macc coordinator approve <GATE> --role <ROLE> --revision <sha> --evidence <url>
 macc coordinator reject <GATE> --role <ROLE> --reason "…"
 macc coordinator request-changes <GATE> --role <ROLE> --reason "…"
 macc coordinator stop [--graceful] [--remove-worktrees]
 macc prd audit --tool claude             # moved from coordinator audit-prd
 ```
+
+Human approval gates are also decided in the TUI and the Web UI: an approval window opens by itself when a gate waits, with the full request (subject, revision, diff, risks, approvers, consequences). In the TUI, `A` re-opens it.
 
 `macc coordinator run` in an interactive terminal shows a **Coordinator Launch Review** — a summary of project, execution settings, and reference branch — before asking which client to open.
 

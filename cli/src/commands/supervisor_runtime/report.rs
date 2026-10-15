@@ -40,6 +40,9 @@ pub(super) struct Intervention {
     /// The step in progress, in operator terms, for live clients.
     #[serde(default)]
     pub(super) activity: Option<String>,
+    /// The recovery restarted the coordinator without a source repair.
+    #[serde(default)]
+    pub(super) restart_only: bool,
 }
 
 /// Records each phase and step as it starts, so clients can show live progress.

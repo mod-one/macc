@@ -731,19 +731,18 @@ fn pid_is_alive(pid: i32) -> bool {
 /// a normal full-completion.
 fn read_dispatch_limit_reason(paths: &ProjectPaths, started_at: &str) -> Option<String> {
     use crate::coordinator_storage::{
-        CoordinatorSnapshot, CoordinatorStorage, CoordinatorStoragePaths, JsonStorage,
-        SqliteStorage,
+        CoordinatorStorage, CoordinatorStoragePaths, JsonStorage, SqliteStorage,
     };
     let storage_paths = CoordinatorStoragePaths::from_project_paths(paths);
     let sqlite = SqliteStorage::new(storage_paths.clone());
-    let snapshot: CoordinatorSnapshot = if sqlite.has_snapshot_data().unwrap_or(false) {
-        sqlite.load_snapshot().ok()?
+    let events = if sqlite.has_snapshot_data().unwrap_or(false) {
+        sqlite.load_recent_events(20).ok()?
     } else {
-        JsonStorage::new(storage_paths).load_snapshot().ok()?
+        JsonStorage::new(storage_paths).load_snapshot().ok()?.events
     };
     let started_at = chrono::DateTime::parse_from_rfc3339(started_at).ok()?;
     // Scan recent events from this command only for the dispatch-limit marker.
-    for event in snapshot.events.iter().rev().take(20) {
+    for event in events.iter().rev().take(20) {
         let in_scope = chrono::DateTime::parse_from_rfc3339(&event.ts)
             .ok()
             .is_some_and(|timestamp| timestamp >= started_at);

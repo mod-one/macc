@@ -4,6 +4,21 @@ use crate::prd_generation::{
 };
 use std::path::Path;
 
+/// Planning rule shared by PRD generation and audit: a task consuming another
+/// module's endpoint must be checked against that endpoint's declared audience
+/// and contract while planning. Found at run time instead, the mismatch stops
+/// the consumer with a precondition whose fix lies outside its change scope.
+pub const CROSS_MODULE_CONTRACT_CHECK: &str = "## Cross-module contract check\n\n\
+For every task that consumes an endpoint, route, event or shared contract owned by another module \
+(for example a Web/UI task calling a backend or BFF route):\n\
+- Find the endpoint in its contract source (OpenAPI, API catalogue, route declarations) and check that its \
+declared audience or consumers (for example `x-audience`, public/internal/BFF/web, required permission or role) \
+include the consuming surface, and that the method, path and payload the consumer needs exist.\n\
+- If the audience or the contract does not serve the consumer, plan a contract-resolution task in the owning \
+module, make the consuming task depend on it, and keep that fix out of the consumer's `change_scope`.\n\
+- Give each consuming task a `change_scope` limited to the module where its own work lives; a precondition \
+whose fix lies outside it blocks the task at run time.\n\n";
+
 /// Build the fixed macc-prd-planner generation prompt.
 ///
 /// Assembles the full prompt in the order specified by spec §19:
@@ -93,6 +108,8 @@ pub fn build_generate_prompt(
         "- Task IDs must be unique and stable (never rename or delete existing IDs).\n\n",
     );
 
+    prompt.push_str(CROSS_MODULE_CONTRACT_CHECK);
+
     prompt.push_str("## Output contract\n\n");
     prompt
         .push_str("Write `prd.json` (and optionally `prd.summary.md`) to the target directory.\n");
@@ -142,4 +159,17 @@ pub fn resolve_tool(
         return Some(t.to_string());
     }
     enabled_tools.first().cloned()
+}
+
+#[cfg(test)]
+mod contract_check_tests {
+    use super::*;
+
+    #[test]
+    fn generation_prompt_asks_to_check_consumed_endpoint_audiences() {
+        let prompt = build_generate_prompt("brief", Path::new("out"), None, None, None);
+        assert!(prompt.contains("## Cross-module contract check"));
+        assert!(prompt.contains("declared audience"));
+        assert!(prompt.contains("contract-resolution task in the owning module"));
+    }
 }

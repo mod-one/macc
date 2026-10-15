@@ -389,6 +389,22 @@ pub fn reconcile_human_gates_for_project(
     registry: &mut TaskRegistry,
     now: &str,
 ) -> Result<Vec<HumanGateTransition>> {
+    let transitions = evaluate_human_gates_for_project(repo_root, registry, now)?;
+    for t in &transitions {
+        let _ = crate::coordinator::helpers::append_coordinator_event_with_severity(
+            repo_root, t.event, &t.task_id, "approval", t.event, &t.detail, t.severity,
+        );
+    }
+    Ok(transitions)
+}
+
+/// Apply the ledger and git history to every human gate of `registry`,
+/// without emitting events. The caller decides whether to persist the result.
+fn evaluate_human_gates_for_project(
+    repo_root: &std::path::Path,
+    registry: &mut TaskRegistry,
+    now: &str,
+) -> Result<Vec<HumanGateTransition>> {
     if !registry.tasks.iter().any(|t| t.is_human_approval_gate()) {
         return Ok(Vec::new());
     }
@@ -398,18 +414,32 @@ pub fn reconcile_human_gates_for_project(
     );
     let ledger = storage.gate_decisions_by_task()?;
     let branch = reference_branch(repo_root);
-    let transitions = reconcile_human_gates(
+    Ok(reconcile_human_gates(
         registry,
         now,
         &|subject| subject_revision(repo_root, &branch, subject),
         &|task_id| ledger.get(task_id).cloned().unwrap_or_default(),
-    );
-    for t in &transitions {
-        let _ = crate::coordinator::helpers::append_coordinator_event_with_severity(
-            repo_root, t.event, &t.task_id, "approval", t.event, &t.detail, t.severity,
-        );
+    ))
+}
+
+/// Gates waiting for a decision as they stand right now: the ledger and the
+/// subject revisions are applied to a copy of `registry` (nothing is saved and
+/// no event is emitted), so clients see a newly delivered subject or a new
+/// subject revision without waiting for a coordinator cycle.
+pub fn current_pending_approvals(
+    repo_root: &std::path::Path,
+    registry: &TaskRegistry,
+) -> Vec<PendingApproval> {
+    let diff_stat = |rev: &str| revision_diff_stat(repo_root, rev);
+    if !registry.tasks.iter().any(|t| t.is_human_approval_gate()) {
+        return Vec::new();
     }
-    Ok(transitions)
+    let mut current = registry.clone();
+    let now = crate::coordinator::helpers::now_iso_coordinator();
+    if evaluate_human_gates_for_project(repo_root, &mut current, &now).is_err() {
+        return pending_approvals(registry, &diff_stat);
+    }
+    pending_approvals(&current, &diff_stat)
 }
 
 /// A decision as submitted by an operator, before validation.
@@ -558,7 +588,11 @@ pub fn validate_decision(
 }
 
 /// Everything an approver needs to decide, for status/TUI/web display.
+///
+/// The same record feeds the CLI walk-through, the TUI approval window and the
+/// web approval dialog, so every client explains the question identically.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct PendingApproval {
     pub task_id: String,
     pub title: Option<String>,
@@ -577,6 +611,82 @@ pub struct PendingApproval {
     /// `git show --stat` of the subject revision, when known.
     pub diff_stat: Option<String>,
     pub approve_command: String,
+    /// The question put to the approvers, in one sentence.
+    pub question: String,
+    /// True while the gate needs a decision now (waiting or expired, quorum
+    /// not met). Clients open their approval window for these gates only; a
+    /// rejected gate or one waiting for requested changes waits for a new
+    /// subject revision instead.
+    pub awaiting_decision: bool,
+    pub subject_title: Option<String>,
+    pub subject_objective: Option<String>,
+    pub subject_description: Option<String>,
+    /// What the subject task was asked to deliver (`result` in the PRD).
+    pub subject_result: Option<String>,
+    pub subject_acceptance_criteria: Vec<String>,
+    /// Every declared role, in PRD order.
+    pub required_roles: Vec<String>,
+    /// The quorum rule, in words.
+    pub quorum: String,
+    /// Whether an approval must carry `--evidence`.
+    pub evidence_required: bool,
+    pub expires_after_days: Option<u32>,
+    pub invalidate_on_subject_change: bool,
+    /// Decisions that currently count (bound to the subject revision).
+    pub decisions: Vec<ApprovalRecord>,
+    /// Tasks waiting on this gate, as `ID — title`.
+    pub unblocks: Vec<String>,
+}
+
+fn extra_text(task: &crate::coordinator::model::Task, key: &str) -> Option<String> {
+    task.extra
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+}
+
+fn extra_list(task: &crate::coordinator::model::Task, key: &str) -> Vec<String> {
+    task.extra
+        .get(key)
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The quorum rule of `gate`, in words.
+pub fn quorum_text(gate: &TaskGate) -> String {
+    use crate::coordinator::model::Quorum;
+    let counted = if gate.required_approvers.iter().any(|r| r.count > 1) {
+        " (each with its declared count)"
+    } else {
+        ""
+    };
+    match gate.quorum {
+        Quorum::All if gate.required_approvers.len() == 1 => {
+            format!(
+                "the {} role must approve{counted}",
+                gate.required_approvers[0].role
+            )
+        }
+        Quorum::All => format!("every listed role must approve{counted}: one decision per role"),
+        Quorum::Any => format!("one listed role approving is enough{counted}"),
+        Quorum::Count(n) => format!("{n} approval(s) from the listed roles are enough"),
+    }
+}
+
+/// First 12 characters of a revision, for display.
+pub fn short_revision(revision: &str) -> &str {
+    revision.get(..12).unwrap_or(revision)
 }
 
 /// Gates waiting for a human decision, with the command to decide them.
@@ -622,18 +732,46 @@ pub fn pending_approvals(
                 .subject_revision
                 .clone()
                 .unwrap_or_else(|| "<commit-sha>".to_string());
-            let evidence = gate
+            let evidence_required = gate
                 .evidence_type
                 .as_deref()
-                .filter(|kind| *kind != "manual")
-                .map(|_| " --evidence <url>".to_string())
-                .unwrap_or_default();
+                .is_some_and(|kind| kind != "manual");
+            let evidence = if evidence_required {
+                " --evidence <url>"
+            } else {
+                ""
+            };
+            let subject_id = gate.subject_task.clone().unwrap_or_default();
+            let subject = registry.tasks.iter().find(|t| t.id == subject_id);
+            let subject_title = subject.and_then(|t| t.title.clone());
+            let question = format!(
+                "Do you approve {}{} as delivered at revision {}?",
+                subject_id,
+                subject_title
+                    .as_deref()
+                    .map(|t| format!(" (\"{t}\")"))
+                    .unwrap_or_default(),
+                approval
+                    .subject_revision
+                    .as_deref()
+                    .map(short_revision)
+                    .unwrap_or("unknown")
+            );
+            let unblocks = registry
+                .tasks
+                .iter()
+                .filter(|t| t.dependencies.iter().any(|d| d == &task.id))
+                .map(|t| match t.title.as_deref() {
+                    Some(title) => format!("{} — {}", t.id, title),
+                    None => t.id.clone(),
+                })
+                .collect();
             Some(PendingApproval {
                 task_id: task.id.clone(),
                 title: task.title.clone(),
                 state: task.state.clone(),
                 status: approval.status.as_str().to_string(),
-                subject_task: gate.subject_task.clone().unwrap_or_default(),
+                subject_task: subject_id,
                 subject_revision: approval.subject_revision.clone(),
                 description: gate.description.clone(),
                 risks: gate.risks.clone(),
@@ -648,9 +786,175 @@ pub fn pending_approvals(
                     "macc coordinator approve {} --role {} --revision {}{}",
                     task.id, role, revision, evidence
                 ),
+                question,
+                awaiting_decision: task.is_awaiting_approval()
+                    && matches!(
+                        approval.status,
+                        ApprovalStatus::WaitingApproval | ApprovalStatus::Expired
+                    ),
+                subject_title,
+                subject_objective: subject.and_then(|t| extra_text(t, "objective")),
+                subject_description: subject.and_then(|t| extra_text(t, "description")),
+                subject_result: subject.and_then(|t| extra_text(t, "result")),
+                subject_acceptance_criteria: subject
+                    .map(|t| extra_list(t, "acceptance_criteria"))
+                    .unwrap_or_default(),
+                required_roles: gate.required_roles(),
+                quorum: quorum_text(gate),
+                evidence_required,
+                expires_after_days: gate.expires_after_days,
+                invalidate_on_subject_change: gate.invalidate_on_subject_change,
+                decisions: approval.effective.clone(),
+                unblocks,
             })
         })
         .collect()
+}
+
+/// One titled block of an approval explanation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BriefSection {
+    pub title: &'static str,
+    pub lines: Vec<String>,
+}
+
+/// The full explanation of an approval request, section by section, shared by
+/// the CLI walk-through and the TUI approval window.
+pub fn approval_brief(p: &PendingApproval) -> Vec<BriefSection> {
+    let mut sections = Vec::new();
+    let mut push = |title: &'static str, lines: Vec<String>| {
+        let lines: Vec<String> = lines.into_iter().filter(|l| !l.trim().is_empty()).collect();
+        if !lines.is_empty() {
+            sections.push(BriefSection { title, lines });
+        }
+    };
+    push("Question", vec![p.question.clone()]);
+    push(
+        "Decision",
+        p.description.iter().cloned().collect::<Vec<_>>(),
+    );
+    let mut why = Vec::new();
+    if let Some(trigger) = p.approval_trigger.as_deref() {
+        why.push(format!("Trigger: {trigger}"));
+    }
+    if let Some(governance) = p.governance_ref.as_deref() {
+        why.push(format!("Decision rights: {governance}"));
+    }
+    push("Why people decide", why);
+    let mut subject = vec![format!(
+        "{}{}",
+        p.subject_task,
+        p.subject_title
+            .as_deref()
+            .map(|t| format!(" — {t}"))
+            .unwrap_or_default()
+    )];
+    subject.push(format!(
+        "Revision: {}",
+        p.subject_revision
+            .as_deref()
+            .unwrap_or("unknown (no commit carries its [macc:task] trailer yet)")
+    ));
+    if let Some(objective) = p.subject_objective.as_deref() {
+        subject.push(format!("Objective: {objective}"));
+    }
+    if let Some(result) = p.subject_result.as_deref() {
+        subject.push(format!("Expected result: {result}"));
+    }
+    push("What is being approved", subject);
+    push(
+        "Subject description",
+        p.subject_description
+            .as_deref()
+            .map(|d| d.lines().map(str::to_string).collect())
+            .unwrap_or_default(),
+    );
+    push(
+        "Acceptance criteria",
+        p.subject_acceptance_criteria
+            .iter()
+            .map(|c| format!("- {c}"))
+            .collect(),
+    );
+    push(
+        "Changes in the revision",
+        p.diff_stat
+            .as_deref()
+            .map(|d| d.lines().map(str::to_string).collect())
+            .unwrap_or_default(),
+    );
+    push(
+        "Risks to weigh",
+        p.risks.iter().map(|r| format!("- {r}")).collect(),
+    );
+    let mut approvers = vec![
+        format!("Progress: {}", p.required),
+        format!("Rule: {}", p.quorum),
+    ];
+    if !p.missing_roles.is_empty() {
+        approvers.push(format!("Still needed: {}", p.missing_roles.join(", ")));
+    }
+    push("Approvers", approvers);
+    push(
+        "Decisions so far",
+        p.decisions
+            .iter()
+            .map(|d| {
+                format!(
+                    "- {} by {} ({}) at {}{}{}",
+                    d.decision.as_str(),
+                    d.actor,
+                    d.role,
+                    d.recorded_at,
+                    d.evidence
+                        .as_deref()
+                        .map(|e| format!(" — evidence: {e}"))
+                        .unwrap_or_default(),
+                    d.reason
+                        .as_deref()
+                        .map(|r| format!(" — reason: {r}"))
+                        .unwrap_or_default()
+                )
+            })
+            .collect(),
+    );
+    let mut rules = Vec::new();
+    rules.push(match (p.evidence_required, p.evidence_type.as_deref()) {
+        (true, Some(kind)) => format!("An approval must cite {kind} evidence (a link or path)."),
+        _ => "No evidence is required with an approval.".to_string(),
+    });
+    rules.push("A rejection or a change request must give a reason.".to_string());
+    if p.invalidate_on_subject_change {
+        rules.push(format!(
+            "Decisions are bound to this revision: a new revision of {} cancels them.",
+            p.subject_task
+        ));
+    }
+    if let Some(days) = p.expires_after_days {
+        rules.push(format!("Approvals expire after {days} day(s)."));
+    }
+    push("Rules", rules);
+    let unblocks = if p.unblocks.is_empty() {
+        "nothing else waits on this gate".to_string()
+    } else {
+        p.unblocks.join(", ")
+    };
+    push(
+        "Consequences",
+        vec![
+            format!("Approve: once the quorum is met, the run continues with {unblocks}."),
+            format!(
+                "Reject: the gate fails (E909) and its dependants stay blocked (E905) until {} is revised.",
+                p.subject_task
+            ),
+            format!(
+                "Request changes: the gate waits for a new revision of {}.",
+                p.subject_task
+            ),
+        ],
+    );
+    push("Status", p.note.iter().cloned().collect::<Vec<_>>());
+    sections
 }
 
 #[cfg(test)]
@@ -1055,5 +1359,85 @@ mod tests {
             format!("macc coordinator approve SEC-APP-003 --role PRODUCT_OWNER --revision {SHA} --evidence <url>")
         );
         assert!(pending[0].diff_stat.as_deref().unwrap().contains("003.md"));
+    }
+
+    #[test]
+    fn pending_view_explains_the_subject_rules_and_consequences() {
+        let mut reg = TaskRegistry::from_value(&json!({"tasks":[
+            {"id":"SEC-ADR-003","state":"merged","title":"Record the session ADR",
+             "objective":"Decide the session model.","result":"ADR 003 merged.",
+             "description":"Problem/Goal: sessions.\nKey actions: write ADR 003.",
+             "acceptance_criteria":["ADR 003 lists the options."]},
+            {"id":"SEC-APP-003","state":"todo","dependencies":["SEC-ADR-003"],
+             "gate":{"kind":"human_approval","subject_task":"SEC-ADR-003",
+                     "description":"Adopt ADR 003",
+                     "required_approvers":[{"role":"PRODUCT_OWNER","count":1},
+                                           {"role":"SECURITY_OWNER","count":1}],
+                     "evidence_type":"pull_request_review","expires_after_days":30,
+                     "risks":["Wrong session model."]}},
+            {"id":"SEC-DB-004","state":"todo","title":"Session table","dependencies":["SEC-APP-003"]}
+        ]}))
+        .unwrap();
+        reconcile_human_gates(&mut reg, NOW, &|_| Some(SHA.into()), &|_| {
+            vec![rec(
+                ApprovalDecision::Approved,
+                "PRODUCT_OWNER",
+                "ann",
+                SHA,
+                NOW,
+            )]
+        });
+        let p = &pending_approvals(&reg, &|_| None)[0];
+        assert!(p.awaiting_decision);
+        assert_eq!(
+            p.question,
+            "Do you approve SEC-ADR-003 (\"Record the session ADR\") as delivered at revision abcdef123456?"
+        );
+        assert_eq!(
+            p.subject_objective.as_deref(),
+            Some("Decide the session model.")
+        );
+        assert_eq!(
+            p.subject_acceptance_criteria,
+            vec!["ADR 003 lists the options."]
+        );
+        assert_eq!(p.required_roles, vec!["PRODUCT_OWNER", "SECURITY_OWNER"]);
+        assert_eq!(p.missing_roles, vec!["SECURITY_OWNER"]);
+        assert_eq!(p.decisions.len(), 1);
+        assert_eq!(p.unblocks, vec!["SEC-DB-004 — Session table"]);
+        assert!(p.evidence_required);
+        assert!(p.quorum.contains("every listed role"));
+
+        let brief = approval_brief(p);
+        let text = |title: &str| {
+            brief
+                .iter()
+                .find(|s| s.title == title)
+                .map(|s| s.lines.join("\n"))
+                .unwrap_or_default()
+        };
+        assert!(text("Decision").contains("Adopt ADR 003"));
+        assert!(text("Subject description").contains("Key actions: write ADR 003."));
+        assert!(text("Decisions so far").contains("approved by ann (PRODUCT_OWNER)"));
+        assert!(text("Rules").contains("expire after 30 day(s)"));
+        assert!(text("Consequences").contains("SEC-DB-004 — Session table"));
+        assert!(text("Approvers").contains("Still needed: SECURITY_OWNER"));
+    }
+
+    #[test]
+    fn a_rejected_gate_is_listed_but_not_awaiting_a_decision() {
+        let mut reg = registry("todo");
+        reconcile_human_gates(&mut reg, NOW, &|_| Some(SHA.into()), &|_| {
+            vec![rec(
+                ApprovalDecision::Rejected,
+                "PRODUCT_OWNER",
+                "ann",
+                SHA,
+                NOW,
+            )]
+        });
+        let pending = pending_approvals(&reg, &|_| None);
+        assert_eq!(pending.len(), 1);
+        assert!(!pending[0].awaiting_decision);
     }
 }

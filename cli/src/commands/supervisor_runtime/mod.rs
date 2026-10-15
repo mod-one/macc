@@ -217,22 +217,36 @@ async fn monitor(paths: ProjectPaths) -> Result<()> {
                         started_at: Some(chrono::Utc::now().to_rfc3339()),
                         phase_started_at: Some(chrono::Utc::now().to_rfc3339()),
                         activity: Some("Incident detected; preparing intervention".into()),
+                        restart_only: false,
                     };
+                    let fingerprint = policy::crash_fingerprint(&report.incident);
+                    let restart_allowed = ledger.restarts.get(&fingerprint).copied().unwrap_or(0)
+                        < policy::MAX_RESTARTS_PER_FINGERPRINT;
                     write_report(&paths, &config, &dir, &report)?;
-                    let intervention_error =
-                        match intervene(&paths, &canonical, &config, &mut report, &dir, &_lock)
-                            .await
-                        {
-                            Ok(()) => {
-                                ledger.completed.push(report.incident.id.clone());
-                                None
+                    let intervention_error = match intervene(
+                        &paths,
+                        &canonical,
+                        &config,
+                        &mut report,
+                        &dir,
+                        &_lock,
+                        restart_allowed,
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            ledger.completed.push(report.incident.id.clone());
+                            if report.restart_only {
+                                *ledger.restarts.entry(fingerprint.clone()).or_default() += 1;
                             }
-                            Err(error) => {
-                                report.status = "escalated".into();
-                                report.detail = error.to_string();
-                                Some(error)
-                            }
-                        };
+                            None
+                        }
+                        Err(error) => {
+                            report.status = "escalated".into();
+                            report.detail = error.to_string();
+                            Some(error)
+                        }
+                    };
                     let pending = ledger.incidents.get_mut(&report.incident.id).unwrap();
                     policy::settle(
                         pending,

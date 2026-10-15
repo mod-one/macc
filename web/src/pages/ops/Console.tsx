@@ -789,6 +789,11 @@ const Console: React.FC = () => {
               Affected: {status.last_run_summary.dependent_task_ids.join(', ')}
             </div>
           )}
+          {(status.last_run_summary.out_of_scope_paths?.length ?? 0) > 0 && (
+            <div style={{ marginTop: 4, color: 'var(--warning)' }}>
+              Out of scope: the fix lies in {status.last_run_summary.out_of_scope_paths!.join(', ')} (another module) — a repair is needed, not a retry.
+            </div>
+          )}
           <div style={{ marginTop: 4 }}>Next: {status.last_run_summary.next_action}</div>
           {status.last_run_summary.repeated_count > 1 && (
             <div style={{ marginTop: 4, color: 'var(--warning)' }}>

@@ -371,12 +371,21 @@ fn transition_workflow_state(
         (WorkflowState::Reviewing, WorkflowEvent::ReviewChangesRequested) => {
             WorkflowState::ChangesRequested
         }
+        // The review ran while the task was still recorded in `testing` (the
+        // review phase starts from `testing` and the state only moves to
+        // `reviewing` with the verdict). A successful review is already
+        // accepted from there; a changes-requested verdict must be too, or the
+        // whole run aborts on a legitimate review outcome.
+        (WorkflowState::Testing, WorkflowEvent::ReviewChangesRequested) => {
+            WorkflowState::ChangesRequested
+        }
 
         // --- Failure transitions ---
         (WorkflowState::InProgress, WorkflowEvent::PhaseFailed("dev")) => WorkflowState::Blocked,
         (WorkflowState::InProgress, WorkflowEvent::PhaseFailed("review")) => WorkflowState::Blocked,
         (WorkflowState::Testing, WorkflowEvent::PhaseFailed("test")) => WorkflowState::InProgress,
         (WorkflowState::Reviewing, WorkflowEvent::PhaseFailed("review")) => WorkflowState::Blocked,
+        (WorkflowState::Testing, WorkflowEvent::PhaseFailed("review")) => WorkflowState::Blocked,
         (WorkflowState::ChangesRequested, WorkflowEvent::PhaseFailed("fix")) => {
             WorkflowState::Blocked
         }
@@ -543,10 +552,59 @@ pub fn apply_phase_outcome_in_registry(
             code: "task_not_found",
             message: format!("Task '{}' not found in registry", task_id),
         })?;
+    let before = task.clone();
+    match apply_phase_outcome_typed(task, mode, transition, review_verdict, phase_error, now) {
+        Ok(()) => {}
+        // One task's outcome arriving in a state the FSM does not expect must
+        // not abort the run for every other task: block that task (work and
+        // worktree kept) with the explanation, and carry on.
+        Err(MaccError::Coordinator {
+            code: "invalid_transition",
+            message,
+        }) => {
+            *task = before;
+            block_unapplicable_phase_outcome(task, mode, &message, now);
+        }
+        Err(err) => return Err(err),
+    }
+    *registry = typed.to_value()?;
+    Ok(())
+}
+
+/// Error code for a phase outcome the FSM could not apply.
+pub const E910_PHASE_OUTCOME_UNAPPLICABLE: &str = "E910";
+
+fn block_unapplicable_phase_outcome(task: &mut Task, mode: &str, message: &str, now: &str) {
+    let from = task.state.clone();
+    let detail = format!(
+        "The {mode} phase result of {} could not be applied from state '{from}' ({message}). The task is blocked with its worktree and commits kept; inspect it, then run `macc coordinator unblock-task --task {} --evidence \"<evidence>\"` to resume.",
+        task.id, task.id
+    );
+    task.set_workflow_state(WorkflowState::Blocked);
+    let runtime = task.ensure_runtime();
+    runtime.set_status(RuntimeStatus::Failed);
+    runtime.current_phase = Some(mode.to_string());
+    runtime.pid = None;
+    runtime.set_last_error_details(
+        E910_PHASE_OUTCOME_UNAPPLICABLE,
+        "coordinator",
+        detail.clone(),
+    );
+    runtime.last_error = Some(detail);
+    task.touch_state_changed(now);
+}
+
+fn apply_phase_outcome_typed(
+    task: &mut Task,
+    mode: &'static str,
+    transition: PhaseTransition,
+    review_verdict: Option<ReviewVerdict>,
+    phase_error: Option<&str>,
+    now: &str,
+) -> Result<()> {
+    let task_id = task.id.clone();
     if let Some(reason) = phase_error {
-        apply_phase_failure_typed(task, mode, reason, now)?;
-        *registry = typed.to_value()?;
-        return Ok(());
+        return apply_phase_failure_typed(task, mode, reason, now);
     }
     task.task_runtime.extra.remove("phase_tool_unavailable");
     if mode == "review" {
@@ -561,7 +619,6 @@ pub fn apply_phase_outcome_in_registry(
             let branch = task.branch().unwrap_or("unknown");
             task.pr_url = Some(format!("local://{}", branch));
         }
-        *registry = typed.to_value()?;
         return Ok(());
     }
     apply_phase_success_typed(task, transition, now)?;
@@ -571,7 +628,6 @@ pub fn apply_phase_outcome_in_registry(
         let branch = task.branch().unwrap_or("unknown");
         task.pr_url = Some(format!("local://{}", branch));
     }
-    *registry = typed.to_value()?;
     Ok(())
 }
 
@@ -1937,7 +1993,11 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
             }),
         )?;
         let grace = self.effective_ghost_grace_seconds();
-        if grace > self.ghost_heartbeat_grace_seconds {
+        // Logged when the widened grace changes, not on every cycle.
+        static LAST_LOGGED_GRACE: std::sync::atomic::AtomicI64 =
+            std::sync::atomic::AtomicI64::new(0);
+        let previous_grace = LAST_LOGGED_GRACE.swap(grace, std::sync::atomic::Ordering::Relaxed);
+        if grace > self.ghost_heartbeat_grace_seconds && grace != previous_grace {
             if let Some(log) = self.logger {
                 let _ = log.note(format!(
                     "- Ghost grace widened to {}s (configured {}s + {}s spent in the previous cycle)",
@@ -2669,13 +2729,9 @@ pub(crate) async fn run_single_prd_control_plane(
     // event, so recover it here to persist a meaningful stop_reason for clients
     // (TUI Watch, Web) that read the run record rather than the live process.
     let normal_stop_reason = |sqlite: &crate::coordinator_storage::SqliteStorage| -> String {
-        use crate::coordinator_storage::CoordinatorStorage;
-        if let Ok(snapshot) = sqlite.load_snapshot() {
-            let dispatch_limited = snapshot
-                .events
+        if let Ok(events) = sqlite.load_recent_events(20) {
+            let dispatch_limited = events
                 .iter()
-                .rev()
-                .take(20)
                 .any(|e| e.event_type == "dispatch_limit_reached");
             if dispatch_limited {
                 return "dispatch limit reached".to_string();
@@ -4601,6 +4657,134 @@ mod tests {
         assert_eq!(task["task_runtime"]["last_error_code"], "E903");
         assert_eq!(task["task_runtime"]["retries"].as_i64().unwrap_or(0), 0);
         assert_eq!(out.status_label, "precondition_unmet");
+    }
+
+    /// The review phase starts while the task is still recorded in `testing`;
+    /// a changes-requested verdict from there must be applied, not abort the run.
+    #[test]
+    fn a_changes_requested_review_is_applied_from_testing() {
+        let mut registry = json!({"tasks":[{
+            "id":"L4L-BASELINE-001","state":"testing",
+            "task_runtime":{"status":"phase_done","current_phase":"test"}
+        }]});
+        apply_phase_outcome_in_registry(
+            &mut registry,
+            "L4L-BASELINE-001",
+            "review",
+            PhaseTransition {
+                mode: "review",
+                next_state: WorkflowState::Reviewing,
+                runtime_phase: "review",
+            },
+            Some(ReviewVerdict::ChangesRequested),
+            None,
+            "2026-10-14T14:30:10Z",
+        )
+        .expect("a legitimate review verdict never aborts the run");
+        let task = &registry["tasks"][0];
+        assert_eq!(task["state"], "changes_requested");
+        assert_eq!(task["task_runtime"]["review_cycles"], 1);
+    }
+
+    /// Any other outcome the FSM cannot apply blocks only that task (E910),
+    /// with an explanation, instead of failing the whole coordinator run.
+    #[test]
+    fn an_unapplicable_phase_outcome_blocks_the_task_instead_of_the_run() {
+        let mut registry = json!({"tasks":[{
+            "id":"T-1","state":"pr_open",
+            "worktree":{"worktree_path":"/tmp/wt","branch":"ai/codex/worker-01"},
+            "task_runtime":{"status":"phase_done"}
+        }]});
+        apply_phase_outcome_in_registry(
+            &mut registry,
+            "T-1",
+            "review",
+            PhaseTransition {
+                mode: "review",
+                next_state: WorkflowState::Reviewing,
+                runtime_phase: "review",
+            },
+            Some(ReviewVerdict::ChangesRequested),
+            None,
+            "2026-10-14T14:30:10Z",
+        )
+        .expect("the run continues");
+        let task = &registry["tasks"][0];
+        assert_eq!(task["state"], "blocked");
+        assert_eq!(task["task_runtime"]["last_error_code"], "E910");
+        assert_eq!(task["worktree"]["branch"], "ai/codex/worker-01");
+        let message = task["task_runtime"]["last_error_message"].as_str().unwrap();
+        assert!(
+            message.contains("could not be applied from state 'pr_open'"),
+            "{message}"
+        );
+        assert!(message.contains("unblock-task --task T-1"), "{message}");
+    }
+
+    /// A precondition whose fix is in another module's source is flagged as
+    /// out of scope, so the operator and the supervisor see a repair is
+    /// needed rather than a retry.
+    #[test]
+    fn a_precondition_fixed_outside_the_change_scope_is_flagged() {
+        let mut task = json!({
+            "id":"WEB-UI-005","state":"claimed","tool":"claude",
+            "change_scope":{"allowed_paths":["apps/web/**"]},
+            "task_runtime":{"status":"running","retries":0}
+        });
+        let mut input = make_error_completion_input(PerformerCompletionKind::PreconditionUnmet);
+        input.success = false;
+        input.unmet_preconditions =
+            vec!["apps/api/src/routes/session.ts must declare the web audience".to_string()];
+
+        let out = apply_job_completion(
+            &mut task,
+            &input,
+            &NormalizerRegistry::empty(),
+            "2026-08-30T10:00:00Z",
+        );
+
+        assert_eq!(
+            task["task_runtime"]["out_of_scope_fix"]["paths"],
+            json!(["apps/api/src/routes/session.ts"])
+        );
+        let message = task["task_runtime"]["last_error_message"].as_str().unwrap();
+        assert!(
+            message.starts_with("Task WEB-UI-005 cannot be implemented"),
+            "{message}"
+        );
+        assert!(
+            message.contains("outside WEB-UI-005's change scope"),
+            "{message}"
+        );
+        assert!(out.detail.contains("not a retry of WEB-UI-005"));
+    }
+
+    /// A quota cooldown recorded on an earlier attempt must not outlive a
+    /// later attempt where the tool ran and answered.
+    #[test]
+    fn a_non_quota_outcome_clears_the_stale_throttle_state() {
+        let mut task = json!({
+            "id":"WEB-UI-005","state":"claimed","tool":"claude",
+            "task_runtime":{
+                "status":"running","retries":0,
+                "delayed_until":"2026-08-31T10:00:00Z",
+                "throttle_state":{"tool_id":"claude","throttled_until":1788170400,"backoff_seconds":86400}
+            }
+        });
+        let mut input = make_error_completion_input(PerformerCompletionKind::PreconditionUnmet);
+        input.success = false;
+        input.unmet_preconditions = vec!["the API audience must include web".to_string()];
+
+        apply_job_completion(
+            &mut task,
+            &input,
+            &NormalizerRegistry::empty(),
+            "2026-08-30T10:00:00Z",
+        );
+
+        assert_eq!(task["state"], "blocked");
+        assert!(task["task_runtime"].get("throttle_state").is_none());
+        assert!(task["task_runtime"]["delayed_until"].is_null());
     }
 
     #[test]

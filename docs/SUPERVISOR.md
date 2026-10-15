@@ -26,6 +26,8 @@ attached supervisor too. Standalone `macc supervisor start --daemon` is supporte
 2. Lock intervention against concurrent coordinator launches.
 3. Ask the selected AI tool to diagnose logs, task requirements, structured
    preconditions and source. Preserve its MACC dysfunction/improvement findings.
+   A task flagged with `out_of_scope_fix` names the paths, owned by another
+   module, where its precondition must be fixed; the repair targets them.
 4. Repair in an isolated Git worktree based on the tip of the coordinator
    reference branch (`automation.coordinator.reference_branch`), whichever
    branch the project root has checked out.
@@ -40,6 +42,21 @@ attached supervisor too. Standalone `macc supervisor start --daemon` is supporte
    PRD, runtime metadata and environment files (`.env`, `.env.*`) are protected.
 7. Requeue diagnosed roots through coordinator APIs, reconcile dependency blocks,
    restart the managed coordinator and wait for readiness.
+
+Restart without repair: when the engine failed or crashed while every incident
+task was between phases (`testing`, `reviewing`, `changes_requested`, `pr_open`,
+`queued`), no task failed and nothing needs repairing. The supervisor then skips
+diagnosis and repair, keeps those tasks in their state and restarts the
+coordinator, which resumes their pending test, review, fix or merge (a
+changes-requested review is handled by the fix phase it schedules). The AI
+diagnosis can also choose this recovery with `restart_only: true` for another
+engine-side stop. Each distinct stop (its reason and the tasks with their
+states) is restarted at most once: if the same stop recurs after a restart, the
+supervisor diagnoses and escalates instead of looping. The report records
+`restart_only: true`; the ledger counts restarts under `restarts`.
+
+Tasks left between phases by a stopped engine are part of the incident (repair
+candidates), so a diagnosis naming them is accepted.
 
 Human approvals, operator gates and missing external authority remain external.
 A missing Git identity (checked before any AI call), a validation failure
