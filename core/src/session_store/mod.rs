@@ -1,7 +1,9 @@
 //! Canonical, provider-neutral session ownership. All mutations share an authority
 //! lock; SQLite lease transitions additionally use BEGIN IMMEDIATE and fencing.
+pub(crate) mod bundle;
 pub mod checkpoints;
 mod db;
+pub(crate) mod fingerprint;
 mod leases;
 mod migration;
 mod policy;
@@ -11,6 +13,7 @@ mod types;
 pub mod usage;
 pub use crate::config::transaction::revision as policy_revision;
 use crate::{MaccError, Result};
+pub use bundle::Snapshot as SessionStoreSnapshot;
 pub use leases::{acquire, bind, close, heartbeat, read_hint, recover, release};
 pub use migration::{migrate, rollback};
 pub use policy::{inspect, remove_policy_override, update_policy};

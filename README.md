@@ -455,6 +455,10 @@ macc config restore <name>
 macc config list
 ```
 
+Save bundles include JSON sessions or a consistent SQLite snapshot by default,
+including checkpoints and usage history. See [Save and Restore](docs/SAVE_RESTORE.md)
+for restore requirements and configuration-only options.
+
 </details>
 
 ---

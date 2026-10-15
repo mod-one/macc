@@ -1,10 +1,16 @@
 pub mod bundle;
 pub mod classifier;
+mod integrity;
 pub mod logs;
 pub mod manifest;
 pub mod repository_identity;
 pub mod restore;
 pub mod scanner;
+mod sessions;
+#[cfg(test)]
+mod sqlite_tests;
+mod state;
+pub use state::{get_unsaved_state_report, is_macc_state_unsaved};
 
 use crate::{MaccError, ProjectPaths, Result};
 use std::fs;
@@ -123,102 +129,10 @@ pub fn detect_matching_saves(
     Ok(matches)
 }
 
-pub fn is_macc_state_unsaved(paths: &ProjectPaths) -> Result<bool> {
-    if crate::session_store::is_sqlite(&paths.root)? {
-        return Ok(true);
-    }
-    if !paths.config_path.exists() {
-        return Ok(false);
-    }
-    let saves = detect_matching_saves(paths)?;
-    let saves: Vec<_> = saves
-        .into_iter()
-        .filter(|(_, strength)| *strength >= MatchStrength::Medium)
-        .collect();
-    if saves.is_empty() {
-        return Ok(true);
-    }
-
-    let config_sha = compute_file_sha256(&paths.config_path).ok();
-    let sessions_path = paths.macc_dir.join("state").join("tool-sessions.json");
-    let sessions_sha = if sessions_path.exists() {
-        compute_file_sha256(&sessions_path).ok()
-    } else {
-        None
-    };
-
-    for (m, _) in &saves {
-        let config_matches = match (&config_sha, &m.hashes.config) {
-            (Some(c), Some(m_c)) => c == m_c,
-            (None, None) => true,
-            _ => false,
-        };
-        let sessions_matches = match (&sessions_sha, &m.hashes.coordinator_sessions) {
-            (Some(s), Some(m_s)) => s == m_s,
-            (None, None) => true,
-            _ => false,
-        };
-        if config_matches && sessions_matches {
-            return Ok(false); // Found a match, so it's not unsaved
-        }
-    }
-
-    Ok(true)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UnsavedStateReport {
     pub config_changed: bool,
     pub sessions_changed: bool,
-}
-
-pub fn get_unsaved_state_report(paths: &ProjectPaths) -> Result<UnsavedStateReport> {
-    let mut report = UnsavedStateReport {
-        config_changed: false,
-        sessions_changed: crate::session_store::is_sqlite(&paths.root)?,
-    };
-    if !paths.config_path.exists() {
-        return Ok(report);
-    }
-
-    let config_sha = compute_file_sha256(&paths.config_path).ok();
-    let sessions_path = paths.macc_dir.join("state").join("tool-sessions.json");
-    let sessions_sha = if sessions_path.exists() {
-        compute_file_sha256(&sessions_path).ok()
-    } else {
-        None
-    };
-
-    let matches = detect_matching_saves(paths)?;
-    let matches: Vec<_> = matches
-        .into_iter()
-        .filter(|(_, strength)| *strength >= MatchStrength::Medium)
-        .collect();
-    if matches.is_empty() {
-        report.config_changed = true;
-        if sessions_path.exists() {
-            report.sessions_changed = true;
-        }
-        return Ok(report);
-    }
-
-    let best_match = &matches[0].0;
-    let config_matches = match (&config_sha, &best_match.hashes.config) {
-        (Some(c), Some(m_c)) => c == m_c,
-        (None, None) => true,
-        _ => false,
-    };
-    let sessions_matches = match (&sessions_sha, &best_match.hashes.coordinator_sessions) {
-        (Some(s), Some(m_s)) => s == m_s,
-        (None, None) => true,
-        _ => false,
-    };
-
-    report.config_changed = !config_matches;
-    report.sessions_changed = !sessions_matches;
-
-    report.sessions_changed |= crate::session_store::is_sqlite(&paths.root)?;
-    Ok(report)
 }
 
 #[cfg(test)]

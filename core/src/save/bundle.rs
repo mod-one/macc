@@ -1,5 +1,4 @@
 use chrono::Utc;
-use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -15,89 +14,30 @@ use super::scanner::redact_secrets_in_text;
 use super::SecretHandlingChoice;
 use crate::{MaccError, ProjectPaths, Result};
 
-pub fn compute_file_sha256(path: &Path) -> std::io::Result<String> {
-    let content = fs::read(path)?;
-    let mut hasher = Sha256::new();
-    hasher.update(&content);
-    Ok(format!("sha256:{:x}", hasher.finalize()))
-}
+use super::integrity::write_checksums_file;
+pub use super::integrity::{compute_file_sha256, compute_manifest_payload_hash};
 
-pub fn compute_manifest_payload_hash(content: &str) -> String {
-    let mut hasher = Sha256::new();
-    for line in content.lines() {
-        if line.contains("manifest_payload:") {
-            continue;
-        }
-        hasher.update(line.as_bytes());
-        hasher.update(b"\n");
+struct StagingDirectory(PathBuf);
+impl Drop for StagingDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
     }
-    format!("sha256:{:x}", hasher.finalize())
-}
-
-fn write_checksums_file(tmp_save_dir: &Path) -> Result<()> {
-    let checksums_dir = tmp_save_dir.join("checksums");
-    fs::create_dir_all(&checksums_dir).map_err(|e| MaccError::Io {
-        path: checksums_dir.to_string_lossy().into(),
-        action: "create checksums directory".into(),
-        source: e,
-    })?;
-
-    let mut files = Vec::new();
-
-    fn visit_dirs(dir: &Path, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
-        if dir.is_dir() {
-            for entry in fs::read_dir(dir)? {
-                let entry = entry?;
-                let path = entry.path();
-                if path.is_dir() {
-                    if path.file_name().map(|n| n == "checksums").unwrap_or(false) {
-                        continue;
-                    }
-                    visit_dirs(&path, files)?;
-                } else {
-                    files.push(path);
-                }
-            }
-        }
-        Ok(())
-    }
-
-    visit_dirs(tmp_save_dir, &mut files).map_err(|e| MaccError::Io {
-        path: tmp_save_dir.to_string_lossy().into(),
-        action: "traverse save bundle files for checksums".into(),
-        source: e,
-    })?;
-
-    files.sort();
-
-    let mut lines = Vec::new();
-    for file_path in files {
-        let sha = compute_file_sha256(&file_path).map_err(|e| MaccError::Io {
-            path: file_path.to_string_lossy().into(),
-            action: "calculate file hash for checksums".into(),
-            source: e,
-        })?;
-        let rel_path = file_path.strip_prefix(tmp_save_dir).unwrap();
-        let rel_path_str = rel_path.to_string_lossy().replace('\\', "/");
-        let clean_sha = sha.strip_prefix("sha256:").unwrap_or(&sha);
-        lines.push(format!("{}  {}", clean_sha, rel_path_str));
-    }
-
-    let checksums_file_path = checksums_dir.join("sha256sums.txt");
-    let checksums_content = lines.join("\n") + "\n";
-    fs::write(&checksums_file_path, checksums_content).map_err(|e| MaccError::Io {
-        path: checksums_file_path.to_string_lossy().into(),
-        action: "write sha256sums.txt file".into(),
-        source: e,
-    })?;
-
-    Ok(())
 }
 
 pub fn create_save_bundle(
     paths: &ProjectPaths,
     name: &str,
     opts: &super::SaveOptions,
+) -> Result<SaveBundleManifest> {
+    let saves_dir = super::user_saves_dir().ok_or(MaccError::HomeDirNotFound)?;
+    create_in(paths, name, opts, &saves_dir)
+}
+
+pub(super) fn create_in(
+    paths: &ProjectPaths,
+    name: &str,
+    opts: &super::SaveOptions,
+    saves_dir: &Path,
 ) -> Result<SaveBundleManifest> {
     if name.is_empty()
         || name
@@ -110,7 +50,6 @@ pub fn create_save_bundle(
         )));
     }
 
-    let saves_dir = super::user_saves_dir().ok_or(MaccError::HomeDirNotFound)?;
     let target_save_dir = saves_dir.join(name);
 
     if target_save_dir.exists() && !opts.overwrite {
@@ -141,9 +80,6 @@ pub fn create_save_bundle(
             .as_ref()
             .map(|s| s.contains("sessions"))
             .unwrap_or(true);
-    if include_sessions && crate::session_store::is_sqlite(&paths.root)? {
-        return Err(MaccError::Validation("SQLite session authority requires a consistent session-store backup; use --no-sessions for a configuration bundle".into()));
-    }
     let include_catalogs = only_sections
         .as_ref()
         .map(|s| s.contains("catalogs"))
@@ -172,6 +108,8 @@ pub fn create_save_bundle(
         action: "create temp save directory".into(),
         source: e,
     })?;
+
+    let _cleanup = StagingDirectory(tmp_save_dir.clone());
 
     let mut includes = SaveIncludes {
         config: false,
@@ -222,42 +160,19 @@ pub fn create_save_bundle(
         includes.config = true;
     }
 
-    // 2. Copy sessions
-    let session_guard = if include_sessions {
-        Some(crate::session_store::lock(&paths.root)?)
+    // 2. Capture sessions through the canonical authority service.
+    let mut session_store = if include_sessions {
+        super::sessions::capture(
+            paths,
+            &tmp_save_dir,
+            &mut includes,
+            &mut paths_meta,
+            &mut hashes,
+        )?
     } else {
         None
     };
-    if include_sessions && crate::session_store::is_sqlite(&paths.root)? {
-        return Err(MaccError::Validation(
-            "Session authority changed; use a consistent SQLite backup".into(),
-        ));
-    }
-    let sessions_src = paths.macc_dir.join("state").join("tool-sessions.json");
-    if include_sessions && sessions_src.exists() {
-        let state_dir = tmp_save_dir.join("state");
-        fs::create_dir_all(&state_dir).ok();
-        let dest = state_dir.join("tool-sessions.json");
-        fs::copy(&sessions_src, &dest).map_err(|e| MaccError::Io {
-            path: dest.to_string_lossy().into(),
-            action: "copy tool-sessions file".into(),
-            source: e,
-        })?;
-
-        let sessions_bytes = fs::read(&dest).unwrap();
-        let findings = crate::security::scan_bytes("state/tool-sessions.json", &sessions_bytes);
-        findings_count += findings
-            .iter()
-            .filter(|f| f.severity == crate::security::Severity::Error)
-            .count();
-
-        let sha = compute_file_sha256(&dest).unwrap();
-        hashes.coordinator_sessions = Some(sha);
-        paths_meta.coordinator_sessions = Some("state/tool-sessions.json".to_string());
-        includes.coordinator_sessions = true;
-    }
-
-    drop(session_guard);
+    findings_count += super::sessions::findings(&tmp_save_dir, session_store.is_some())?;
 
     // 3. Copy catalogs
     if include_catalogs && paths.project_catalog_dir().exists() {
@@ -348,7 +263,8 @@ pub fn create_save_bundle(
     if opts.dry_run {
         fs::remove_dir_all(&tmp_save_dir).ok();
         return Ok(SaveBundleManifest {
-            version: 1,
+            version: if session_store.is_some() { 2 } else { 1 },
+            session_store,
             kind: "macc.save_bundle".to_string(),
             name: name.to_string(),
             description: opts.description.clone(),
@@ -379,6 +295,10 @@ pub fn create_save_bundle(
     if findings_count > 0 {
         match opts.handle_secrets {
             Some(SecretHandlingChoice::Redact) => {
+                if session_store.is_some() && super::sessions::findings(&tmp_save_dir, true)? > 0 {
+                    fs::remove_dir_all(&tmp_save_dir).ok();
+                    return Err(MaccError::Validation("MACC-SAVE-1003: SQLite session secrets cannot be text-redacted; exclude sessions or use --no-sessions".into()));
+                }
                 let config_dest = tmp_save_dir.join("config").join("macc.yaml");
                 if config_dest.exists() {
                     if let Ok(content) = fs::read_to_string(&config_dest) {
@@ -389,7 +309,7 @@ pub fn create_save_bundle(
                     }
                 }
                 let sessions_dest = tmp_save_dir.join("state").join("tool-sessions.json");
-                if sessions_dest.exists() {
+                if sessions_dest.exists() && session_store.is_none() {
                     if let Ok(content) = fs::read_to_string(&sessions_dest) {
                         let redacted = redact_secrets_in_text(&content);
                         fs::write(&sessions_dest, &redacted).ok();
@@ -400,6 +320,14 @@ pub fn create_save_bundle(
                 findings_count = 0;
             }
             Some(SecretHandlingChoice::Exclude) => {
+                if session_store.is_some() && super::sessions::findings(&tmp_save_dir, true)? > 0 {
+                    fs::remove_dir_all(tmp_save_dir.join("state"))
+                        .map_err(|e| MaccError::Validation(e.to_string()))?;
+                    session_store = None;
+                    includes.coordinator_sessions = false;
+                    paths_meta.coordinator_sessions = None;
+                    hashes.coordinator_sessions = None;
+                }
                 let config_dest = tmp_save_dir.join("config").join("macc.yaml");
                 if config_dest.exists() {
                     if let Ok(bytes) = fs::read(&config_dest) {
@@ -416,7 +344,7 @@ pub fn create_save_bundle(
                     }
                 }
                 let sessions_dest = tmp_save_dir.join("state").join("tool-sessions.json");
-                if sessions_dest.exists() {
+                if sessions_dest.exists() && session_store.is_none() {
                     if let Ok(bytes) = fs::read(&sessions_dest) {
                         let findings =
                             crate::security::scan_bytes("state/tool-sessions.json", &bytes);
@@ -443,7 +371,8 @@ pub fn create_save_bundle(
     // Write manifest
     let manifest_path = tmp_save_dir.join("manifest.yaml");
     let mut manifest = SaveBundleManifest {
-        version: 1,
+        version: if session_store.is_some() { 2 } else { 1 },
+        session_store,
         kind: "macc.save_bundle".to_string(),
         name: name.to_string(),
         description: opts.description.clone(),
@@ -501,7 +430,7 @@ pub fn create_save_bundle(
         }
         fs::remove_dir_all(&backup_dir).ok();
     } else {
-        fs::create_dir_all(&saves_dir).ok();
+        fs::create_dir_all(saves_dir).ok();
         fs::rename(&tmp_save_dir, &target_save_dir).map_err(|e| MaccError::Io {
             path: target_save_dir.to_string_lossy().into(),
             action: "atomic create save directory".into(),

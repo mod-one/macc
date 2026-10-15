@@ -24,6 +24,8 @@ impl MatchStrength {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SaveBundleManifest {
     pub version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_store: Option<crate::session_store::SessionStoreSnapshot>,
     pub kind: String,
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]

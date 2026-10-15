@@ -100,7 +100,10 @@ unknown receipt rather than falsely accepting measurements.
   `GET/POST /api/v1/sessions/authority/usage-upgrade` ownership/review gates.
 - Internal `usage-begin` and `usage-end` accept bounded JSON on stdin, using the
   existing internal session-service transport and fenced lease keys.
-- Consistent SQLite backup includes receipts/watermarks. JSON rollback preserves
+- `macc save` includes the SQLite usage ledger by default; see
+  [Save and Restore](SAVE_RESTORE.md). Restores keep receipts and clear cumulative
+  watermarks while quarantining native transcripts. Standalone consistent SQLite
+  backup includes receipts/watermarks. JSON rollback preserves
   them in SQLite and its backup, but JSON runners do not update them.
 
 ## Adapter mappings and evidence

@@ -12,6 +12,24 @@ pub fn restore_save_bundle(
     opts: &super::RestoreOptions,
 ) -> Result<()> {
     let saves_dir = super::user_saves_dir().ok_or(MaccError::HomeDirNotFound)?;
+    restore_from(paths, name, opts, &saves_dir)
+}
+
+pub(super) fn restore_from(
+    paths: &ProjectPaths,
+    name: &str,
+    opts: &super::RestoreOptions,
+    saves_dir: &std::path::Path,
+) -> Result<()> {
+    if name.is_empty()
+        || name
+            .chars()
+            .any(|c| !c.is_alphanumeric() && c != '-' && c != '_')
+    {
+        return Err(MaccError::Validation(
+            "MACC-RESTORE-2000: Invalid save name".into(),
+        ));
+    }
     let target_save_dir = saves_dir.join(name);
 
     if !target_save_dir.exists() {
@@ -38,6 +56,25 @@ pub fn restore_save_bundle(
         ))
     })?;
 
+    if !matches!(manifest.version, 1 | 2)
+        || manifest.kind != "macc.save_bundle"
+        || ((manifest.version == 2) != manifest.session_store.is_some())
+        || (manifest.session_store.is_some() && !manifest.includes.coordinator_sessions)
+    {
+        return Err(MaccError::Validation(
+            "MACC-RESTORE-2001: Unsupported bundle format".into(),
+        ));
+    }
+    if let Some(meta) = &manifest.session_store {
+        let source = super::sessions::payload(&target_save_dir, &meta.database_path)?;
+        if compute_file_sha256(&source).map_err(|e| MaccError::Validation(e.to_string()))?
+            != meta.database_sha256
+        {
+            return Err(MaccError::Validation(
+                "MACC-RESTORE-2003: SQLite snapshot checksum mismatch".into(),
+            ));
+        }
+    }
     if computed_payload_hash != manifest.hashes.manifest_payload {
         return Err(MaccError::Validation(
             "MACC-RESTORE-2003: Checksum mismatch. Manifest payload integrity verification failed."
@@ -69,8 +106,7 @@ pub fn restore_save_bundle(
             let expected_sha = parts[0];
             let rel_path = parts[1];
 
-            let target_path =
-                target_save_dir.join(rel_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+            let target_path = super::sessions::payload(&target_save_dir, rel_path)?;
 
             if !target_path.exists() {
                 return Err(MaccError::Validation(format!(
@@ -104,7 +140,7 @@ pub fn restore_save_bundle(
 
     // Verify config file checksum if present
     if let Some(config_rel) = &manifest.paths.config {
-        let config_src = target_save_dir.join(config_rel);
+        let config_src = super::sessions::payload(&target_save_dir, config_rel)?;
         if config_src.exists() {
             let actual_sha = compute_file_sha256(&config_src).unwrap();
             if let Some(expected_sha) = &manifest.hashes.config {
@@ -117,7 +153,7 @@ pub fn restore_save_bundle(
 
     // Verify session file checksum if present
     if let Some(sessions_rel) = &manifest.paths.coordinator_sessions {
-        let sessions_src = target_save_dir.join(sessions_rel);
+        let sessions_src = super::sessions::payload(&target_save_dir, sessions_rel)?;
         if sessions_src.exists() {
             let actual_sha = compute_file_sha256(&sessions_src).unwrap();
             if let Some(expected_sha) = &manifest.hashes.coordinator_sessions {
@@ -131,23 +167,40 @@ pub fn restore_save_bundle(
         }
     }
 
-    let _session_guard =
-        if opts.sessions || (!opts.no_sessions && manifest.includes.coordinator_sessions) {
-            Some(crate::session_store::lock(&paths.root)?)
+    let config_only = opts.config_only || match_strength == MatchStrength::Weak;
+    let restore_sessions = !config_only
+        && !opts.no_sessions
+        && (opts.sessions || manifest.includes.coordinator_sessions);
+    let _session_guard = if restore_sessions {
+        Some(crate::session_store::lock(&paths.root)?)
+    } else {
+        None
+    };
+    let sqlite_source = if restore_sessions {
+        if let Some(meta) = &manifest.session_store {
+            let source = super::sessions::payload(&target_save_dir, &meta.database_path)?;
+            crate::session_store::bundle::validate_locked(&paths.root, &source, meta)?;
+            Some(source)
         } else {
+            if crate::session_store::is_sqlite(&paths.root)? {
+                return Err(MaccError::Validation("SQLite authority is active; legacy session restore requires an explicit rollback first, or --no-sessions".into()));
+            }
             None
-        };
-    if (opts.sessions || (!opts.no_sessions && manifest.includes.coordinator_sessions))
-        && crate::session_store::is_sqlite(&paths.root)?
-    {
-        return Err(MaccError::Validation("SQLite authority is active; legacy session restore requires an explicit rollback first, or --no-sessions".into()));
-    }
+        }
+    } else {
+        None
+    };
     if opts.dry_run {
         return Ok(());
     }
 
     // 1. Restore config
-    let config_only = opts.config_only || match_strength == MatchStrength::Weak;
+    // SQLite preflight above runs before any configuration is overwritten.
+    if let (Some(source), Some(meta)) = (&sqlite_source, &manifest.session_store) {
+        if !opts.dry_run {
+            crate::session_store::bundle::restore_locked(&paths.root, source, meta)?;
+        }
+    }
     if manifest.includes.config {
         if let Some(config_rel) = &manifest.paths.config {
             let config_src = target_save_dir.join(config_rel);
@@ -176,9 +229,7 @@ pub fn restore_save_bundle(
     }
 
     // 2. Restore sessions
-    let restore_sessions =
-        opts.sessions || (!opts.no_sessions && manifest.includes.coordinator_sessions);
-    if restore_sessions {
+    if restore_sessions && manifest.session_store.is_none() {
         if let Some(sessions_rel) = &manifest.paths.coordinator_sessions {
             let sessions_src = target_save_dir.join(sessions_rel);
             if sessions_src.exists() {

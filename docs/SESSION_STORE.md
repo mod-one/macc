@@ -81,12 +81,15 @@ snapshot using `VACUUM INTO`, then exports immutable ownership metadata to JSON.
 Re-enabling SQLite preserves existing logical generations and audit history.
 Snapshots, database files and JSON evidence use private Unix permissions.
 
-Legacy JSON session save/restore is blocked while SQLite is authoritative. Use
-**Sessions → Create consistent backup** or `macc session-store backup` for the SQL
-store. Existing configuration bundles remain available with `--no-sessions`;
-they must not silently claim to include SQLite sessions. Restoring a SQLite
-backup as an active store is not an automatic legacy JSON restore operation.
-Supervisor crash snapshots use the same consistent SQLite backup service.
+`macc save <name>` now includes a consistent SQLite session snapshot in a version 2
+bundle. Restore validates identity and checksums, requires stopped processes and
+no outstanding leases, backs up the destination, and quarantines restored native
+transcripts. It preserves checkpoints and usage history. See [Save and Restore](SAVE_RESTORE.md)
+for commands, compatibility, privacy and recovery boundaries. Version 1 JSON
+session payloads cannot overwrite active SQLite authority; configuration-only
+restore remains available with `--config-only` or `--no-sessions`.
+Supervisor crash snapshots and standalone `session-store backup` retain the same
+consistent SQLite backup service.
 
 ## Settings and clients
 
