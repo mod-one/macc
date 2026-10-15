@@ -8,6 +8,7 @@ mod policy;
 #[cfg(test)]
 mod tests;
 mod types;
+pub mod usage;
 pub use crate::config::transaction::revision as policy_revision;
 use crate::{MaccError, Result};
 pub use leases::{acquire, bind, close, heartbeat, read_hint, recover, release};

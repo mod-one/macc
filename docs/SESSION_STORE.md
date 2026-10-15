@@ -9,7 +9,8 @@ same Rust services. There is no provider-name dispatch in this subsystem.
 
 SQLite is an explicit rollout. Existing projects retain P0-A JSON behavior until
 an operator reviews and applies migration. P0-C task checkpoints and rotation build on this service; see
-[Task Checkpoints](TASK_CHECKPOINTS.md). P0-D token/usage accounting remains pending.
+[Task Checkpoints](TASK_CHECKPOINTS.md). P0-D adds normalized invocation usage through the same service; see
+[Usage Telemetry](USAGE_TELEMETRY.md).
 
 ## Authority and persistence
 

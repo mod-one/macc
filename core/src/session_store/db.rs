@@ -70,6 +70,7 @@ pub(super) fn open(root: &Path, initialize: bool) -> Result<Connection> {
     if initialize {
         sql(db.execute_batch(SCHEMA))?;
         sql(db.execute_batch(super::checkpoints::initial_schema()))?;
+        sql(db.execute_batch(super::usage::initial_schema()))?;
     }
     let version: Option<String> = sql(db
         .query_row(

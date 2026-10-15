@@ -158,5 +158,6 @@ operations. Web uses `GET /api/v1/sessions/checkpoints/{id}` and
 expose lease tokens. SQLite backups include checkpoints. JSON rollback retains
 them in SQLite and its consistent snapshot; JSON execution does not use them.
 
-P0-D usage accounting, adaptive token-pressure triggers, semantic memory promotion
-and native compaction capability probes remain separate work packages.
+P0-D [usage accounting](USAGE_TELEMETRY.md) now shares invocation ownership and
+checkpoint phase boundaries. Adaptive token-pressure triggers, semantic memory
+promotion and native compaction capability probes remain later work packages.

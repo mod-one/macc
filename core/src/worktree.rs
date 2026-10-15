@@ -870,6 +870,7 @@ mod tests {
             id: "codex".to_string(),
             display_name: "Codex".to_string(),
             performer: crate::tool::ToolPerformerSpec {
+                usage: None,
                 runner: "runner.sh".to_string(),
                 command: "codex".to_string(),
                 args: vec!["exec".to_string(), "-".to_string()],

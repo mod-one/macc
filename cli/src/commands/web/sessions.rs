@@ -86,6 +86,7 @@ pub(super) async fn migration(
         "migrate" => store::migrate,
         "rollback" => store::rollback,
         "upgrade" => store::checkpoints::upgrade,
+        "usage-upgrade" => store::usage::upgrade,
         _ => {
             return Err(ApiError::from(macc_core::MaccError::Validation(
                 "Unknown session migration".into(),
@@ -163,6 +164,7 @@ pub(super) async fn plan(
         "migrate" => store::migrate,
         "rollback" => store::rollback,
         "upgrade" => store::checkpoints::upgrade,
+        "usage-upgrade" => store::usage::upgrade,
         _ => {
             return Err(ApiError::from(macc_core::MaccError::Validation(
                 "Unknown session migration".into(),

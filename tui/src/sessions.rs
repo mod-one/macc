@@ -10,6 +10,7 @@ use serde_json::Value;
 use std::path::Path;
 #[derive(Default)]
 pub struct SessionsScreen {
+    usage: crate::session_usage::UsagePanel,
     checkpoints: crate::session_checkpoints::CheckpointPanel,
     pub view: Option<StoreView>,
     draft_revision: String,
@@ -41,7 +42,13 @@ impl SessionsScreen {
             .map(|t| t.elapsed().as_secs() >= 5)
             .unwrap_or(true)
         {
-            if let Err(e) = self.refresh(root) {
+            if let Err(e) = self.refresh(root).and_then(|_| {
+                if self.usage.open {
+                    self.usage.refresh(root)
+                } else {
+                    Ok(())
+                }
+            }) {
                 self.message = format!("Refresh failed; displayed data may be stale: {e}");
                 self.last_refresh = Some(std::time::Instant::now());
             }
@@ -61,12 +68,17 @@ impl SessionsScreen {
             .map(|s| s.id.clone())
     }
     pub fn is_mutation(&self, key: KeyCode) -> bool {
-        self.checkpoints.is_mutation(key)
+        self.usage.is_mutation(key)
+            || self.checkpoints.is_mutation(key)
             || self.editing.is_none() && matches!(key, KeyCode::Char('s' | 'a' | 'v' | 'b'))
     }
     pub fn key(&mut self, root: &Path, key: KeyCode) -> macc_core::Result<bool> {
         if self.view.is_none() && !matches!(key, KeyCode::Esc | KeyCode::Char('q')) {
             self.refresh(root)?;
+        }
+        if self.usage.open {
+            self.usage.key(root, key)?;
+            return Ok(false);
         }
         if self.checkpoints.open {
             if let Some(view) = self.view.as_ref() {
@@ -118,6 +130,10 @@ impl SessionsScreen {
                     return Ok(false);
                 }
                 return Ok(true);
+            }
+            KeyCode::Char('t') => {
+                self.usage.refresh(root)?;
+                self.usage.open = true;
             }
             KeyCode::Char('h') => self.checkpoints.open = true,
             KeyCode::PageDown => self.scroll = self.scroll.saturating_add(10),
@@ -253,11 +269,15 @@ impl SessionsScreen {
         Ok(false)
     }
     pub fn draw(&self, f: &mut Frame, area: Rect) {
+        if self.usage.open {
+            self.usage.draw(f, area);
+            return;
+        }
         if self.checkpoints.open {
             self.checkpoints.draw(f, area, self.view.as_ref());
             return;
         }
-        let mut lines=vec!["Sessions — h checkpoints | r refresh | ↑↓ select | Enter edit/events | p validate/preview | s apply policy".into(),
+        let mut lines=vec!["Sessions — t usage | h checkpoints | r refresh | ↑↓ select | Enter edit/events | p validate/preview | s apply policy".into(),
             "u inherit defaults | PgUp/PgDn scroll | m preview migration/rollback | a apply reviewed action | c close | v recover | b backup | d defaults | x discard | Esc back".into()];
         if let Some(v) = &self.view {
             lines.push(format!(

@@ -4,6 +4,7 @@ session_service() {
   "${MACC_SESSION_SERVICE_BIN:-macc}" --cwd "$repo" session-store "$@"
 }
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/checkpoint.sh"
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/usage.sh"
 sqlite_heartbeat_pid=""
 sqlite_lease_key=""
 sqlite_clean=false
@@ -37,6 +38,7 @@ cleanup_sqlite_session() {
   if [[ -n "$provider_tee_pid" ]]; then kill "$provider_tee_pid" 2>/dev/null || true; wait "$provider_tee_pid" 2>/dev/null || true; fi
   if [[ -n "$provider_capture_dir" ]]; then rm -f "$provider_capture_dir/output"; rmdir "$provider_capture_dir" 2>/dev/null || true; fi
   if [[ -n "$sqlite_lease_key" ]]; then
+    finish_usage interrupted
     finish_checkpoint interrupted false || true
     if ! jq -nc --argjson key "$sqlite_lease_key" --argjson clean "$sqlite_clean" '$key + {clean:$clean}' |
         session_service release >/dev/null; then
@@ -44,6 +46,7 @@ cleanup_sqlite_session() {
     fi
     sqlite_lease_key=""
   fi
+  if [[ -n "$usage_raw_capture" ]]; then rm -f -- "$usage_raw_capture"; fi
   if [[ -n "$checkpoint_prompt_file" ]]; then rm -f -- "$checkpoint_prompt_file"; fi
 }
 run_sqlite_session() {
@@ -61,6 +64,7 @@ run_sqlite_session() {
   sqlite_lease_key="$(jq -c '{session_id,lease_token,generation}' <<<"$grant")"
   sid="$(jq -r '.provider_session_id // empty' <<<"$grant")"
   sid_is_new="$(jq -r 'if .is_new then 1 else 0 end' <<<"$grant")"
+  prepare_usage
   interval="$(jq -r '.heartbeat_seconds' <<<"$grant")"
   log_session_event "$(jq -r 'if .is_new then "session_reserved" else "session_reused" end' <<<"$grant")" "${sid:-pending}" "$$" "SQLite logical session $(jq -r .session_id <<<"$grant") generation=$(jq -r .generation <<<"$grant")"
   local owner="$$"
@@ -85,6 +89,7 @@ run_sqlite_session() {
   else
     run_default_call || rc=$?
   fi
+  project_usage_output || return 1
   # No hidden resume fallback: an invocation may already have changed the worktree.
   new_sid="$(extract_session_id_from_output "$output_capture" "$session_extract_regex")"
   if [[ -n "$new_sid" ]]; then
@@ -108,6 +113,7 @@ run_sqlite_session() {
   if [[ "$rc" != 0 ]]; then result=failure; fi
   if grep -qiE "(hit your (usage|session) limit|MACC_TOOL_LIMIT:)" "$output_capture"; then result=quota; fi
   if grep -Eq '^MACC_TASK_RESULT: *precondition_unmet' "$output_capture"; then result=precondition_unmet; fi
+  finish_usage "$result"
   checkpoint_rc=0
   finish_checkpoint "$result" "$acknowledged" || checkpoint_rc=$?
   if [[ "$checkpoint_rc" == 2 ]]; then return 0; elif [[ "$checkpoint_rc" != 0 ]]; then return 1; fi

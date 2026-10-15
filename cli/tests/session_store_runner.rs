@@ -364,3 +364,44 @@ fn source_drift_reports_preconditions_before_another_ai_call() {
         1
     );
 }
+
+#[test]
+fn structured_usage_keeps_native_resume_and_completion_contracts() {
+    let (temp, lib) = setup();
+    let root = temp.path();
+    let path = root.join(".macc/tool.json");
+    let mut spec: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    spec["performer"]["usage"] = json!({"schema":"fake-result-v1","append_args":["--json"],"event_match":{"/type":"result"},"text":["/result"],"session_id":"/session_id","fields":{"input_uncached":"/usage/input","output":"/usage/output"}});
+    std::fs::write(path, spec.to_string()).unwrap();
+    std::fs::write(root.join("fake-ai.sh"),r#"#!/bin/bash
+printf '%s\t%s\n' "$1" "$2" >> "$CALL_LOG"
+[[ "$3" == --json ]] || exit 42
+ack="$(printf '%s\n' "${@: -1}" | sed -n '/^MACC_CHECKPOINT_ACK: /p')"
+jq -nc --arg sid "$2" --arg text "$ack" '{type:"result",session_id:$sid,result:($text+"\nMACC_TASK_RESULT: success_without_changes"),usage:{input:17,output:3}}'
+"#).unwrap();
+    let status = value(cli(root, &["status"], None));
+    let mut policy = status["policy"].clone();
+    policy["usage"]["capture_mode"] = json!(1);
+    value(cli(
+        root,
+        &["policy", "--revision", status["revision"].as_str().unwrap()],
+        Some(&policy),
+    ));
+    for _ in 0..2 {
+        let out = runner(root, &lib, "A", "performer").output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&out.stderr),
+            String::from_utf8_lossy(&out.stdout)
+        );
+        assert!(String::from_utf8_lossy(&out.stdout)
+            .contains("MACC_TASK_RESULT: success_without_changes"));
+    }
+    let usage = value(cli(root, &["usage"], None));
+    assert_eq!(usage["records"].as_array().unwrap().len(), 2);
+    assert_eq!(usage["totals"][0]["counters"]["input_uncached"], 34);
+    let calls = std::fs::read_to_string(root.join("calls.tsv")).unwrap();
+    assert!(calls.lines().next().unwrap().starts_with("create\t"));
+    assert!(calls.lines().nth(1).unwrap().starts_with("resume\t"));
+}

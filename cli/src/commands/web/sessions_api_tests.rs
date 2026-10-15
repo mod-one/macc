@@ -272,3 +272,39 @@ async fn checkpoints_api_inspects_and_reconciles_only_reviewed_current_sources()
     assert_eq!(code, StatusCode::OK);
     assert_eq!(result["applied"], true);
 }
+
+#[tokio::test]
+async fn usage_api_reports_readiness_without_migrating_on_read() {
+    let root = tempfile::tempdir().unwrap();
+    write_test_config(root.path());
+    let app = build_web_router(test_web_state(
+        root.path(),
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    ));
+    let (code, before) = call(
+        &app,
+        "GET",
+        "/api/v1/sessions/usage",
+        serde_json::Value::Null,
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(
+        before,
+        serde_json::json!({"ready":false,"records":[],"totals":[]})
+    );
+    assert!(!root.path().join(".macc/memory.db").exists());
+    let plan = macc_core::session_store::migrate(root.path(), false, None).unwrap();
+    macc_core::session_store::migrate(root.path(), true, Some(&plan.source_sha256)).unwrap();
+    let (code, after) = call(
+        &app,
+        "GET",
+        "/api/v1/sessions/usage",
+        serde_json::Value::Null,
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(after["ready"], true);
+    assert!(!after.to_string().contains("lease_token"));
+}

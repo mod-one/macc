@@ -22,6 +22,15 @@ pub enum SessionStoreCommands {
         #[arg(long)]
         expected_sha256: Option<String>,
     },
+    Usage,
+    UsageBegin,
+    UsageEnd,
+    UsageUpgrade {
+        #[arg(long)]
+        apply: bool,
+        #[arg(long)]
+        expected_sha256: Option<String>,
+    },
     CheckpointPrepare,
     CheckpointFinish,
     Checkpoint {
@@ -63,10 +72,10 @@ impl SessionStoreCommand {
 fn input<T: DeserializeOwned>() -> Result<T> {
     let mut bytes = Vec::new();
     std::io::stdin()
-        .take(1024 * 1024 + 1)
+        .take(32 * 1024 * 1024 + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| MaccError::Validation(e.to_string()))?;
-    if bytes.len() > 1024 * 1024 {
+    if bytes.len() > 32 * 1024 * 1024 {
         return Err(MaccError::Validation("Session request too large".into()));
     }
     serde_json::from_slice(&bytes)
@@ -95,6 +104,22 @@ impl Command for SessionStoreCommand {
     fn run(&self) -> Result<()> {
         let root = &self.app.project_paths()?.root;
         match &self.command {
+            SessionStoreCommands::Usage => emit(store::usage::inspect(root)?),
+            SessionStoreCommands::UsageBegin => emit(store::usage::begin(root, &input()?)?),
+            SessionStoreCommands::UsageEnd => emit(store::usage::end(root, &input()?)?),
+            SessionStoreCommands::UsageUpgrade {
+                apply,
+                expected_sha256,
+            } => {
+                if *apply {
+                    super::gate_cli_mutation(root)?;
+                }
+                emit(store::usage::upgrade(
+                    root,
+                    *apply,
+                    expected_sha256.as_deref(),
+                )?)
+            }
             SessionStoreCommands::Status => emit(store::inspect(root)?),
             SessionStoreCommands::Backup => {
                 super::gate_cli_mutation(root)?;

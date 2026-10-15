@@ -24,6 +24,7 @@ pub mod ownership;
 pub mod prd_queue;
 pub mod screen;
 mod session_checkpoints;
+mod session_usage;
 pub mod sessions;
 #[cfg(test)]
 mod sessions_tests;

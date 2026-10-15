@@ -10,6 +10,20 @@ performer:
   runner: adapters/gemini/gemini.performer.sh
   command: gemini
   args: ["--model", "{model}", "--sandbox", "false", "--approval-mode", "yolo"]
+  usage:
+    schema: gemini-stream-result-stats-v1
+    append_args: ["--output-format", "stream-json"]
+    event_match: {"/type": "result"}
+    text_match: {"/role": "assistant"}
+    text: ["/content"]
+    text_separator: ""
+    session_id: /session_id
+    token_scope: invocation
+    cost_scope: invocation
+    fields:
+      input_uncached: /stats/input
+      cached_read: /stats/cached
+      output: /stats/output_tokens
   prompt:
     mode: arg
     arg: "--prompt"

@@ -9,6 +9,23 @@ performer:
   runner: adapters/claude/claude.performer.sh
   command: claude
   args: ["--model", "{model}", "--output-format", "text", "--dangerously-skip-permissions"]
+  usage:
+    schema: claude-result-model-usage-v1
+    replace_values: {"--output-format": "json"}
+    event_match: {"/type": "result"}
+    text: ["/result"]
+    session_id: /session_id
+    model_map: /modelUsage
+    token_scope: session
+    cost_scope: session
+    cost_quality: estimated
+    currency: USD
+    fields:
+      input_uncached: /inputTokens
+      cached_read: /cacheReadInputTokens
+      cached_write: /cacheCreationInputTokens
+      output: /outputTokens
+      cost: /total_cost_usd
   prompt:
     mode: arg
     arg: "-p"

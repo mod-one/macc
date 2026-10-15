@@ -8,6 +8,7 @@ pub struct SessionPolicy {
     pub lease: LeasePolicy,
     pub lifecycle: LifecyclePolicy,
     pub checkpoints: CheckpointPolicy,
+    pub usage: UsagePolicy,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
@@ -47,16 +48,32 @@ impl Default for CheckpointPolicy {
         }
     }
 }
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct UsagePolicy {
+    pub capture_mode: u64,
+    pub max_output_bytes: u64,
+}
+impl Default for UsagePolicy {
+    fn default() -> Self {
+        Self {
+            capture_mode: 0,
+            max_output_bytes: 1048576,
+        }
+    }
+}
 impl SessionPolicy {
     pub fn validate(&self) -> crate::Result<()> {
-        if !(2048..=65536).contains(&self.checkpoints.max_content_bytes)
+        if self.usage.capture_mode > 1
+            || !(4096..=16777216).contains(&self.usage.max_output_bytes)
+            || !(2048..=65536).contains(&self.checkpoints.max_content_bytes)
             || !(1..=1000).contains(&self.checkpoints.rotate_after_uses)
             || !(10..=86400).contains(&self.lease.ttl_seconds)
             || self.lease.heartbeat_seconds == 0
             || self.lease.heartbeat_seconds > self.lease.ttl_seconds / 3
             || !(1..=720).contains(&self.lifecycle.max_idle_hours)
         {
-            return Err(super::error("Lease TTL must be 10..86400 seconds, heartbeat 1..TTL/3, idle age 1..720 hours, checkpoint size 2048..65536 bytes, and rotation 1..1000 uses"));
+            return Err(super::error("Lease TTL must be 10..86400 seconds, heartbeat 1..TTL/3, idle age 1..720 hours, checkpoint size 2048..65536 bytes, and rotation 1..1000 uses, usage capture mode 0..1 and usage output 4096..16777216 bytes"));
         }
         Ok(())
     }
@@ -183,6 +200,8 @@ pub fn fields() -> Vec<FieldDescriptor> {
             "invocations",
             "Start a fresh transcript from a validated checkpoint at an invocation boundary.",
         ),
+        ("usage.capture_mode","Usage capture mode",0,0,1,"mode","0 preserves existing output arguments; 1 requests adapter-declared machine output at the next invocation."),
+        ("usage.max_output_bytes","Usage parse limit",1048576,4096,16777216,"bytes","Oversized output is recorded as unknown, never parsed from a truncated suffix."),
     ]
     .into_iter()
     .map(

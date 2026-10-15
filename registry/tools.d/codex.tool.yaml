@@ -26,6 +26,21 @@ performer:
     path: ".codex/config.toml"
     format: toml
     key: model_reasoning_effort
+  usage:
+    schema: codex-turn-completed-v1
+    append_args: ["--json"]
+    event_match: {"/type": "turn.completed"}
+    text_match: {"/item/type": "agent_message"}
+    text: ["/item/text"]
+    session_id: /thread_id
+    token_scope: invocation
+    cost_scope: invocation
+    input_includes_cache_read: true
+    fields:
+      input_uncached: /usage/input_tokens
+      cached_read: /usage/cached_input_tokens
+      output: /usage/output_tokens
+      reasoning: /usage/reasoning_output_tokens
   prompt:
     mode: arg
     # No arg field — prompt is a bare positional, not an explicit flag.

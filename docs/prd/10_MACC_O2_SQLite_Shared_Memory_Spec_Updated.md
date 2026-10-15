@@ -3,7 +3,7 @@
 **Project:** MACC — Multi-Assistant Code Config  
 **Document:** Revised and unified specification of `10_MACC_O2_SQLite_Shared_Memory_Spec.md`  
 **Motifs:** O2 Cross-Agent Memory Ledger; Shared Context Store; Code Intelligence Providers; Multi-Tool Session Lifecycle; Adaptive Compaction  
-**Version:** 2.4 — specification with P0-A/P0-B/P0-C implementation progress and mandatory TUI/Web coverage, proposed (not evidence of shipped O2 functionality)
+**Version:** 2.5 — specification with P0-A/P0-B/P0-C/P0-D implementation progress and mandatory TUI/Web coverage, proposed (not evidence of shipped O2 functionality)
 **Date:** 2026-10-15  
 **Code baseline inspected:** `df95759` — `feat: implement review and correction cycle budget management`  
 **Language:** English  
@@ -966,7 +966,7 @@ These are **MACC policy experiments**, not CLI flag values. Native CLIs may impo
 
 ## 11. Provider-Specific Compaction and Headless Compatibility
 
-**Current MACC invocation baseline:** the installed CLI capabilities and the ToolSpec declarations are separate facts. Current registry definitions have no unified compaction/usage capability contract. Claude uses text output, generated IDs with create-only `--session-id`, and `-r` for continuation. Codex uses explicit model/effort overrides and `--yolo exec`, with `exec resume <id>` for continuation; it does not currently enable `--json` in its declared performer args. Gemini still has a `--list-sessions` discovery fallback. Vibe declares generated IDs with text output. The structured-output examples below are proposed adapter changes, not a description of the existing runner.
+**Current MACC invocation baseline:** the installed CLI capabilities and the ToolSpec declarations are separate facts. At that historical baseline, registry definitions had no unified compaction/usage capability contract; the P0-D implementation progress in §20.3 supersedes the usage portion. Claude uses text output, generated IDs with create-only `--session-id`, and `-r` for continuation. Codex uses explicit model/effort overrides and `--yolo exec`, with `exec resume <id>` for continuation; it does not currently enable `--json` in its declared performer args. Gemini still has a `--list-sessions` discovery fallback. Vibe declares generated IDs with text output. The structured-output examples below are proposed adapter changes, not a description of the existing runner.
 
 Any adapter change for telemetry/compaction must retain current invocation permissions, model/effort resolution, create/resume flags and retry behavior unless separately authorized. Do not silently remove `--yolo` or replace established args as a side effect of adding memory. A declared generated ID or regex is not proof that a provider accepted a new session under that ID.
 
@@ -1518,7 +1518,7 @@ Drain behavior must be tested across review, fix, testing, merge and provider-un
 
 ### 16.1 Metrics semantics
 
-**Current boundary:** output-summary metadata and `text.len() / 4`-style byte estimates do not establish provider input/output token counts, billed cost or model context utilization. Per-call telemetry remains proposed. Keep subscription quota/availability observations from the related usage-provider proposal distinct from per-task consumption and context pressure.
+**Current boundary:** output-summary metadata and `text.len() / 4`-style byte estimates do not establish provider input/output token counts, billed cost or model context utilization. P0-D now provides a normalized per-call baseline in SQLite; see §20.3 and [Usage Telemetry](../USAGE_TELEMETRY.md). Full context-item attribution remains proposed. Keep subscription quota/availability observations from the related usage-provider proposal distinct from per-task consumption and context pressure.
 
 Record per-invocation and per-task metrics separately:
 
@@ -1768,7 +1768,7 @@ Introduce `session_management_v2`, `memory_ledger_v2`, `context_engine`, `adapti
 
 The first implementation increment delivers **P0-A JSON session isolation hardening** through the common runner and native coordinator. See [Session Isolation](../SESSION_ISOLATION.md) for the versioned ownership contract, adapter behavior, recovery quarantine and regression commands. Task/role/project/configuration checks are mandatory and cannot be disabled. Existing TUI/Web log views expose the registered lifecycle events; this increment adds no editable policy switch.
 
-The inspected revision in §1.4 and §9.1 remains a historical baseline. The P0-A changes supersede its unsafe global session selection, unlocked shell fallback and unverified ID creation/discovery. For projects not migrated to P0-B, JSON remains the mutable authority: **P0-D normalized usage telemetry remains pending**, including their dedicated TUI/Web workflows. This increment does not claim full P0 completion or verified live-provider capability probes.
+The inspected revision in §1.4 and §9.1 remains a historical baseline. The P0-A changes supersede its unsafe global session selection, unlocked shell fallback and unverified ID creation/discovery. For projects not migrated to P0-B, JSON remains the mutable authority: P0-D normalized usage telemetry requires SQLite authority; its dedicated TUI/Web workflows are described below. This increment does not claim full P0 completion or verified live-provider capability probes.
 
 
 **P0-B is implemented as an explicit rollout**, on top of the P0-A baseline at `b316e2f`. The shared Rust ownership service adds durable project UUIDs, logical sessions, transactional leases, generation fencing, process birth verification, invocation replay protection, heartbeat/release, conservative recovery and a JSON migration/rollback path. See [Session Store](../SESSION_STORE.md) for the current schema, atomic authority switch, limitations and verification commands.
@@ -1781,7 +1781,12 @@ The single authority switch is now the `session_store` header in `.macc/state/to
 
 The two additional canonical controls are `session_management.checkpoints.max_content_bytes` (default 16384, bounds 2048–65536 bytes) and `session_management.checkpoints.rotate_after_uses` (default 20, bounds 1–1000 invocations). TUI **J → h** and the Web Sessions checkpoint section expose inventory, inspection, schema upgrade planning and reviewed reconciliation. Both clients edit all five delivered policy fields through the shared catalog. Checkpoint records are checksummed/redacted and SQLite-backed; oversized mandatory context fails rather than being truncated. Known limits include no semantic completed-step extraction from transcripts, bounded Git evidence, and conservative recovery after uncatchable process loss. JSON projects retain P0-A behavior until migrated.
 
-Drain requests and completion now share a complete phase definition, include parked continuations, and account for active performer/merge jobs. Only captured tasks can resume dispatch during drain. Existing review/correction budgets, WIP filtering and coordinator completion authority remain unchanged. P0-D telemetry and the later adaptive/native compaction packages are not implemented by this increment.
+Drain requests and completion now share a complete phase definition, include parked continuations, and account for active performer/merge jobs. Only captured tasks can resume dispatch during drain. Existing review/correction budgets, WIP filtering and coordinator completion authority remain unchanged. The later adaptive/native compaction packages are not implemented by this increment.
+
+
+**P0-D adds baseline invocation usage telemetry.** See [Usage Telemetry](../USAGE_TELEMETRY.md) for the architecture, adapter mappings, primary references, provenance, rollout and limits. The provider-neutral service records a pending invocation before launch and a fenced, replay-safe receipt afterward, with separate cached/uncached input, output, optional reasoning and costs. Durable session watermarks prevent repeated cumulative charges on resume. Missing fields/baselines, resets and pending gaps remain unknown; totals expose per-dimension coverage and separate cost quality/currency. No raw transcript is persisted in usage rows and no token-price estimate is fabricated.
+
+New SQLite migrations include usage schema v1. Existing stores require a reviewed `usage-upgrade` with a consistent backup. TUI **J → Sessions → t** and Web **Setup → Sessions** expose receipts, totals, provenance and upgrade workflows. Both clients edit `session_management.usage.capture_mode` and `session_management.usage.max_output_bytes` through the shared catalog, preview and revision-checked Apply. Passive mode is the default; explicit structured mode changes only output flags and preserves model/effort, permissions and native session routing. Codex, Claude and Gemini have declarative fixture-tested profiles; other tools, including Vibe, retain unknown measurements until a verified mapping exists. Installed provider version probing, adaptive pressure, pricing, context-item attribution and native compaction remain later work. This completes the P0 baseline packages within their explicit SQLite rollout; it does not claim the complete O2 specification or live-provider certification.
 
 ---
 

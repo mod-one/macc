@@ -36,6 +36,7 @@ mod terminal;
 #[cfg(test)]
 mod tests;
 mod types;
+mod usage;
 #[allow(clippy::result_large_err)]
 mod worktrees;
 
@@ -239,6 +240,7 @@ fn build_web_router(state: WebState) -> Router {
         .route("/api/v1/health", get(health_handler))
         .route("/api/v1/sessions/checkpoints/:id",get(sessions::checkpoint))
         .route("/api/v1/sessions/checkpoints/:id/reconcile",get(sessions::reconciliation_plan).post(sessions::reconciliation_apply))
+        .route("/api/v1/sessions/usage",get(usage::status))
         .route("/api/v1/sessions/store",get(sessions::status))
         .route("/api/v1/sessions/policy",put(sessions::policy))
         .route("/api/v1/sessions/policy/preview",post(sessions::preview))

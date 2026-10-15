@@ -265,6 +265,7 @@ run_resume_and_capture() {
     _tier_model_applied_via_args="$_r_prev_applied"
   fi
 
+  apply_usage_args final_args
   if [[ "$prompt_mode" == "arg" && -n "$prompt_arg" ]]; then
     run_and_capture "$output_file" "$invoke_command" "${final_args[@]}" "$prompt_arg" "$prompt"
   elif [[ "$prompt_mode" == arg ]]; then
@@ -467,6 +468,7 @@ run_default_call() {
   local a
 
   expand_config_args "$sid" final_call_args
+  apply_usage_args final_call_args
 
   if [[ "$prompt_mode" == "arg" ]]; then
     if [[ -n "$prompt_arg" ]]; then

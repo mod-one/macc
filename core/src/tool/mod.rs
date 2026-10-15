@@ -3,6 +3,7 @@ pub mod descriptor;
 pub mod loader;
 pub mod registry;
 pub mod spec;
+pub mod usage;
 
 pub use args::render_performer_args;
 pub use descriptor::{

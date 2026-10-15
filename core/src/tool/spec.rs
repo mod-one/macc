@@ -112,6 +112,8 @@ pub struct ModelTierSpec {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ToolPerformerSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<super::usage::UsageSpec>,
     pub runner: String,
     pub command: String,
     #[serde(default)]
@@ -340,6 +342,9 @@ impl ToolSpec {
     }
 
     pub fn validate(&self) -> crate::Result<()> {
+        if let Some(p) = self.performer.as_ref().and_then(|p| p.usage.as_ref()) {
+            p.validate()?;
+        }
         if self.api_version != "v1" {
             return Err(MaccError::Validation(format!(
                 "Unsupported api_version: {}. Supported: v1",
