@@ -2388,7 +2388,7 @@ pub async fn dispatch_ready_tasks_native(
     );
     let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
     if let Ok(Some(ctrl)) = sqlite.get_coordinator_control() {
-        if ctrl.mode != "running" {
+        if ctrl.mode != "running" && ctrl.mode != "draining" {
             if let Some(log) = logger {
                 let _ = log.note(format!(
                     "- Dispatch skipped: coordinator control mode is {}",

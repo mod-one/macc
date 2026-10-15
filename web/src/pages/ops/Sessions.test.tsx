@@ -3,14 +3,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import Sessions from './Sessions';
 import * as api from '../../api/sessions';
 import type { SessionStoreView, MigrationPlan } from '../../api/sessions';
-vi.mock('../../api/sessions', () => ({ getSessions: vi.fn(), savePolicy: vi.fn(), previewPolicy: vi.fn(), planAuthority: vi.fn(), applyAuthority: vi.fn(), sessionAction: vi.fn(), getSessionEvents: vi.fn() }));
+vi.mock('../../api/sessions', () => ({ getSessions: vi.fn(), savePolicy: vi.fn(), previewPolicy: vi.fn(), planAuthority: vi.fn(), applyAuthority: vi.fn(), sessionAction: vi.fn(), getSessionEvents: vi.fn(), getCheckpoint: vi.fn(), previewReconciliation: vi.fn(), applyReconciliation: vi.fn() }));
 const view: SessionStoreView = {
   project_root: '/test/project', backend: 'json', project_id: null, revision: 'original', policy_source: 'defaults',
-  policy: { lease: { ttl_seconds: 1800, heartbeat_seconds: 30 }, lifecycle: { max_idle_hours: 24 } }, sessions: [],
+  policy: { lease: { ttl_seconds: 1800, heartbeat_seconds: 30 }, lifecycle: { max_idle_hours: 24 }, checkpoints: { max_content_bytes: 16384, rotate_after_uses: 20 } }, sessions: [], checkpoints_ready: false, checkpoints: [],
   fields: [
     { path: 'lease.ttl_seconds', label: 'Lease TTL', default: 1800, min: 10, max: 86400, unit: 'seconds', help: 'Lease validity', activation: 'next claim' },
     { path: 'lease.heartbeat_seconds', label: 'Heartbeat interval', default: 30, min: 1, max: 28800, unit: 'seconds', help: 'At most TTL/3', activation: 'next claim' },
     { path: 'lifecycle.max_idle_hours', label: 'Maximum idle age', default: 24, min: 1, max: 720, unit: 'hours', help: 'Idle sessions', activation: 'next claim' },
+    { path: 'checkpoints.max_content_bytes', label: 'Checkpoint size limit', default: 16384, min: 2048, max: 65536, unit: 'bytes', help: 'Bounded context', activation: 'next claim' },
+    { path: 'checkpoints.rotate_after_uses', label: 'Rotate after invocations', default: 20, min: 1, max: 1000, unit: 'invocations', help: 'Fresh context', activation: 'next claim' },
   ],
 };
 beforeEach(() => {
@@ -25,11 +27,13 @@ describe('Session administration', () => {
     fireEvent.change(ttl, { target: { value: '60' } });
     fireEvent.change(screen.getByLabelText('Heartbeat interval (seconds)'), { target: { value: '10' } });
     fireEvent.change(screen.getByLabelText('Maximum idle age (hours)'), { target: { value: '48' } });
+    fireEvent.change(screen.getByLabelText('Checkpoint size limit (bytes)'), { target: { value: '8192' } });
+    fireEvent.change(screen.getByLabelText('Rotate after invocations (invocations)'), { target: { value: '5' } });
     expect(screen.getByRole('button', { name: 'Apply policy' })).toBeDisabled();
     fireEvent.click(screen.getByRole('button', { name: 'Validate and preview' }));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Apply policy' })).toBeEnabled());
     fireEvent.click(screen.getByRole('button', { name: 'Apply policy' }));
-    await waitFor(() => expect(api.savePolicy).toHaveBeenCalledWith('original', { lease: { ttl_seconds: 60, heartbeat_seconds: 10 }, lifecycle: { max_idle_hours: 48 } }));
+    await waitFor(() => expect(api.savePolicy).toHaveBeenCalledWith('original', { lease: { ttl_seconds: 60, heartbeat_seconds: 10 }, lifecycle: { max_idle_hours: 48 }, checkpoints: { max_content_bytes: 8192, rotate_after_uses: 5 } }));
   });
   it('preserves an edited draft when the server reports a revision conflict', async () => {
     vi.mocked(api.savePolicy).mockRejectedValue(new Error('Configuration revision conflict'));
@@ -69,4 +73,27 @@ describe('Session administration', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Apply policy' }));
     await waitFor(() => expect(api.savePolicy).toHaveBeenCalledWith('original', null));
   });
+});
+
+it('reviews checkpoint reconciliation before applying its current source hash', async () => {
+  const checkpoint = { id: 'cp-a', task_id: 'A', role: 'performer', tool_id: 'future-ai', phase: 'fix', reason: 'invocation_finished', validation_state: 'needs_reconciliation', created_at: 1, content_sha256: 'saved' };
+  vi.mocked(api.getSessions).mockResolvedValue({ ...view, backend: 'sqlite', checkpoints_ready: true, checkpoints: [checkpoint] });
+  vi.mocked(api.getCheckpoint).mockResolvedValue({ task_id: 'A', blocking_issues: ['Tests failed'] });
+  vi.mocked(api.previewReconciliation).mockResolvedValue({ previous: {}, current: { task_id: 'A' }, current_sha256: 'reviewed-current', applied: false });
+  render(<Sessions />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Inspect A checkpoint' }));
+  await screen.findByText(/Tests failed/);
+  fireEvent.click(screen.getByRole('button', { name: 'Preview reconciliation' }));
+  const apply = await screen.findByRole('button', { name: 'Apply reviewed reconciliation' });
+  expect(api.applyReconciliation).not.toHaveBeenCalled(); fireEvent.click(apply);
+  await waitFor(() => expect(api.applyReconciliation).toHaveBeenCalledWith('cp-a', 'reviewed-current'));
+});
+it('requires a reviewed upgrade before enabling checkpoints on existing SQLite', async () => {
+  vi.mocked(api.getSessions).mockResolvedValue({ ...view, backend: 'sqlite', checkpoints_ready: false });
+  const plan = { direction: 'sqlite_checkpoints', source_sha256: 'reviewed', imported: 0, quarantined: 0, backup: null, applied: false };
+  vi.mocked(api.planAuthority).mockResolvedValue(plan);
+  render(<Sessions />); fireEvent.click(await screen.findByRole('button', { name: 'Preview checkpoint upgrade' }));
+  const apply = await screen.findByRole('button', { name: 'Apply reviewed checkpoint upgrade' });
+  expect(api.applyAuthority).not.toHaveBeenCalled(); fireEvent.click(apply);
+  await waitFor(() => expect(api.applyAuthority).toHaveBeenCalledWith(plan));
 });

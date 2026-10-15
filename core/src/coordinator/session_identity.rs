@@ -46,6 +46,26 @@ pub fn identity(
     spec: &Value,
     routing: &SessionRouting,
 ) -> Option<Value> {
+    if spec
+        .pointer("/performer/session/enabled")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        return None;
+    }
+    execution_identity(repo, worktree, task, role, tool, spec, routing)
+}
+
+/// Execution ownership also covers adapters without native conversation resume.
+pub(crate) fn execution_identity(
+    repo: &Path,
+    worktree: &Path,
+    task: &str,
+    role: &str,
+    tool: &str,
+    spec: &Value,
+    routing: &SessionRouting,
+) -> Option<Value> {
     let scope = spec
         .pointer("/performer/session/scope")
         .and_then(Value::as_str)
@@ -54,10 +74,6 @@ pub fn identity(
         || role.is_empty()
         || spec.get("id")?.as_str()? != tool
         || !matches!(scope, "task_role_tool" | "task" | "worktree" | "project")
-        || spec
-            .pointer("/performer/session/enabled")
-            .and_then(Value::as_bool)
-            != Some(true)
     {
         return None;
     }

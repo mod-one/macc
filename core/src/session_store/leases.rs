@@ -65,7 +65,7 @@ pub(super) fn validate_import_identity(root: &Path, value: &Value) -> Result<()>
             .ok_or_else(|| error("Invalid routing mode"))?
             .into(),
     };
-    let expected = crate::coordinator::session_identity::identity(
+    let expected = crate::coordinator::session_identity::execution_identity(
         root,
         Path::new(get("execution_root")?),
         get("task_id")?,
@@ -188,14 +188,19 @@ pub fn acquire(root: &Path, request: &AcquireRequest) -> Result<LeaseGrant> {
             "This invocation request has already completed; use a new request ID",
         ));
     }
+    checkpoints::rotation_guard(&tx, &a, request, &policy)?;
     let v = &request.identity;
     let identity = v.to_string();
+    let resumable = v
+        .pointer("/execution_config/performer/session/enabled")
+        .and_then(Value::as_bool)
+        == Some(true);
     let picked:Option<(String,Option<String>,i64)>=sql(tx.query_row(
         "SELECT id,provider_session_id,generation FROM logical_sessions WHERE project_id=?1 AND identity_json=?2
-         AND status='available' AND provider_session_id IS NOT NULL AND updated_at>=?3
+         AND status='available' AND provider_session_id IS NOT NULL AND updated_at>=?3 AND ?5=1
          AND NOT EXISTS(SELECT 1 FROM session_leases WHERE logical_session_id=id)
          ORDER BY (provider_session_id=?4) DESC,updated_at DESC,id LIMIT 1",
-        params![a.project_id,identity,now()-(policy.lifecycle.max_idle_hours*3600) as i64,request.preferred_provider_id],
+        params![a.project_id,identity,now()-(policy.lifecycle.max_idle_hours*3600) as i64,request.preferred_provider_id,resumable],
         |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional())?;
     let is_new = picked.is_none();
     let (id, provider, prior) = if let Some(row) = picked {
@@ -258,7 +263,7 @@ pub fn acquire(root: &Path, request: &AcquireRequest) -> Result<LeaseGrant> {
         heartbeat_seconds: policy.lease.heartbeat_seconds,
     })
 }
-fn verify(db: &rusqlite::Connection, key: &LeaseKey) -> Result<()> {
+pub(super) fn verify(db: &rusqlite::Connection, key: &LeaseKey) -> Result<()> {
     let row:Option<(i64,String,i64)>=sql(db.query_row("SELECT owner_process_id,process_identity,expires_at FROM session_leases WHERE logical_session_id=?1 AND lease_token=?2 AND fencing_counter=?3",
         params![key.session_id,key.lease_token,key.generation],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional())?;
     match row {

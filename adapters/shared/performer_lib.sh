@@ -553,7 +553,7 @@ detect_tool_limit_exit() {
   echo 1
 }
 
-if [[ "$session_backend" == sqlite && "$session_enabled" == true && -n "$session_resume_command" ]]; then
+if [[ "$session_backend" == sqlite && -n "$task_id" ]]; then
   run_sqlite_session && exit 0 || exit $?
 fi
 

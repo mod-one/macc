@@ -8,8 +8,8 @@ use `macc session-store` as a local service transport; the coordinator uses the
 same Rust services. There is no provider-name dispatch in this subsystem.
 
 SQLite is an explicit rollout. Existing projects retain P0-A JSON behavior until
-an operator reviews and applies migration. This does not implement P0-C task
-checkpoints or P0-D token/usage accounting.
+an operator reviews and applies migration. P0-C task checkpoints and rotation build on this service; see
+[Task Checkpoints](TASK_CHECKPOINTS.md). P0-D token/usage accounting remains pending.
 
 ## Authority and persistence
 
@@ -107,7 +107,12 @@ session_management:
     heartbeat_seconds: 30
   lifecycle:
     max_idle_hours: 24
+  checkpoints:
+    max_content_bytes: 16384
+    rotate_after_uses: 20
 ```
+
+The checkpoint controls are documented in [Task Checkpoints](TASK_CHECKPOINTS.md).
 
 TTL must be 10–86400 seconds; heartbeat 1–TTL/3; idle age 1–720 hours. Changes apply
 to the next claim. Active heartbeats retain their original TTL. Removing the

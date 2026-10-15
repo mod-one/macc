@@ -377,6 +377,7 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                 )
                 .env("MACC_EVENT_TASK_ID", task_id)
                 .env("MACC_SESSION_ROLE", session_role)
+                .env("MACC_SESSION_PHASE", mode)
                 .arg("--prompt-file")
                 .arg(&prompt_path)
                 .arg("--tool-json")
@@ -429,6 +430,11 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                     out.status,
                 ),
             );
+            if let Some(reason) =
+                crate::session_store::checkpoints::precondition_reason(&combined_output)
+            {
+                return Ok(Err(reason));
+            }
             if out.status.success() {
                 // Auto-commit any uncommitted changes produced by the phase runner.
                 // The review phase explicitly must not commit; implement/dev commits

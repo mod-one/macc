@@ -10,6 +10,7 @@ use serde_json::Value;
 use std::path::Path;
 #[derive(Default)]
 pub struct SessionsScreen {
+    checkpoints: crate::session_checkpoints::CheckpointPanel,
     pub view: Option<StoreView>,
     draft_revision: String,
     inherit: bool,
@@ -60,11 +61,21 @@ impl SessionsScreen {
             .map(|s| s.id.clone())
     }
     pub fn is_mutation(&self, key: KeyCode) -> bool {
-        self.editing.is_none() && matches!(key, KeyCode::Char('s' | 'a' | 'v' | 'b'))
+        self.checkpoints.is_mutation(key)
+            || self.editing.is_none() && matches!(key, KeyCode::Char('s' | 'a' | 'v' | 'b'))
     }
     pub fn key(&mut self, root: &Path, key: KeyCode) -> macc_core::Result<bool> {
         if self.view.is_none() && !matches!(key, KeyCode::Esc | KeyCode::Char('q')) {
             self.refresh(root)?;
+        }
+        if self.checkpoints.open {
+            if let Some(view) = self.view.as_ref() {
+                self.checkpoints.key(root, key, view)?;
+            }
+            if key == KeyCode::Char('a') {
+                self.refresh(root)?;
+            }
+            return Ok(false);
         }
         if let Some(input) = self.editing.as_mut() {
             match key {
@@ -108,6 +119,7 @@ impl SessionsScreen {
                 }
                 return Ok(true);
             }
+            KeyCode::Char('h') => self.checkpoints.open = true,
             KeyCode::PageDown => self.scroll = self.scroll.saturating_add(10),
             KeyCode::PageUp => self.scroll = self.scroll.saturating_sub(10),
             KeyCode::Up => self.selected = self.selected.saturating_sub(1),
@@ -241,7 +253,11 @@ impl SessionsScreen {
         Ok(false)
     }
     pub fn draw(&self, f: &mut Frame, area: Rect) {
-        let mut lines=vec!["Sessions — r refresh | ↑↓ select | Enter edit/events | p validate/preview | s apply policy".into(),
+        if self.checkpoints.open {
+            self.checkpoints.draw(f, area, self.view.as_ref());
+            return;
+        }
+        let mut lines=vec!["Sessions — h checkpoints | r refresh | ↑↓ select | Enter edit/events | p validate/preview | s apply policy".into(),
             "u inherit defaults | PgUp/PgDn scroll | m preview migration/rollback | a apply reviewed action | c close | v recover | b backup | d defaults | x discard | Esc back".into()];
         if let Some(v) = &self.view {
             lines.push(format!(

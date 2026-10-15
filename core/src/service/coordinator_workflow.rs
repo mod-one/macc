@@ -1196,12 +1196,11 @@ pub fn coordinator_execute_command<E: crate::engine::Engine + ?Sized>(
 
             if drain {
                 let mut active_task_ids = Vec::new();
-                if let Ok(registry) = sqlite.load_registry() {
+                let registry = sqlite.load_registry()?;
+                {
                     for task in registry.tasks {
-                        if task.state == "claimed"
-                            || task.state == "in_progress"
-                            || task.state == "changes_requested"
-                            || task.state == "queued"
+                        if crate::coordinator::drain::is_pending(&task.state)
+                            || task.is_awaiting_same_worktree_retry()
                         {
                             active_task_ids.push(task.id);
                         }

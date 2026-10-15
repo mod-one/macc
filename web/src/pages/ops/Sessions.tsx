@@ -1,3 +1,4 @@
+import Checkpoints from './Checkpoints';
 import { useCallback, useEffect, useState, useRef } from 'react';
 import { getSessions, savePolicy, previewPolicy, planAuthority, applyAuthority, sessionAction, getSessionEvents } from '../../api/sessions';
 import type { SessionPolicy, SessionStoreView, MigrationPlan } from '../../api/sessions';
@@ -100,6 +101,7 @@ export default function Sessions() {
       <button disabled={busy || view?.backend !== 'sqlite'} onClick={() => { void run(async () => { setMessage(JSON.stringify(await sessionAction('backup'))); }); }}>Create consistent backup</button>{' '}
       <button disabled={busy || view?.backend !== 'sqlite'} onClick={() => { void run(async () => { setMessage(JSON.stringify(await sessionAction('recover'))); }); }}>Quarantine expired dead-owner leases</button>
     </section>
+    {view && <Checkpoints view={view} reload={async () => { setView(await getSessions()); }} />}
     <section aria-label="Session inventory">
       <h2>Latest sessions</h2>
       <label htmlFor="session-filter">Filter by task, role, tool or status</label>{' '}

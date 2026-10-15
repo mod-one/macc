@@ -2,7 +2,7 @@ use super::*;
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};
 use std::path::Path;
-fn stopped(root: &Path) -> Result<()> {
+pub(super) fn stopped(root: &Path) -> Result<()> {
     use crate::process_ownership::{OwnershipStore, ProcessKind};
     for record in OwnershipStore::load(root)?.records {
         if matches!(

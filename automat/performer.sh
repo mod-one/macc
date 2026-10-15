@@ -956,7 +956,7 @@ run_tool() {
   if [[ -n "$performer_session_id" ]]; then
     session_args=("--session-id" "$performer_session_id")
   fi
-  MACC_SESSION_ROLE=performer "$script" \
+  MACC_SESSION_PHASE="${CURRENT_PHASE:-dev}" MACC_SESSION_ROLE=performer "$script" \
     --prompt-file "$prompt_file" \
     --tool-json "$tool_json" \
     --repo "$repo" \
@@ -1398,7 +1398,7 @@ for ((i=1; i<=PERFORMER_MAX_ITERATIONS; i++)); do
       attempt_rc=$?
       echo "Tool failed for task ${next_id} (attempt ${attempt}/${PERFORMER_TOOL_MAX_ATTEMPTS})" >&2
       # Let the coordinator select another tool instead of spending another attempt.
-      if [[ "$LAST_ERROR_CODE" == "E602" || "$LAST_ERROR_CODE" == "E601" ]]; then
+      if [[ "$LAST_ERROR_CODE" == "E602" || "$LAST_ERROR_CODE" == "E601" || "$LAST_ERROR_CODE" == "E903" ]]; then
         break
       fi
     fi

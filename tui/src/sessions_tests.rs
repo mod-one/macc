@@ -50,3 +50,19 @@ fn every_catalog_field_can_be_edited_and_saved_from_tui() {
     screen.key(t.path(), KeyCode::Char('s')).unwrap();
     assert_eq!(store::inspect(t.path()).unwrap().policy_source, "defaults");
 }
+#[test]
+fn checkpoint_panel_does_not_apply_an_unreviewed_action() {
+    let t = root();
+    let root = t.path();
+    let plan = store::migrate(root, false, None).unwrap();
+    store::migrate(root, true, Some(&plan.source_sha256)).unwrap();
+    let mut screen = SessionsScreen::default();
+    screen.refresh(root).unwrap();
+    screen.key(root, KeyCode::Char('h')).unwrap();
+    assert!(screen.is_mutation(KeyCode::Char('a')));
+    screen.key(root, KeyCode::Char('a')).unwrap();
+    assert!(store::inspect(root).unwrap().checkpoints_ready);
+    assert!(store::inspect(root).unwrap().checkpoints.is_empty());
+    assert!(!screen.key(root, KeyCode::Esc).unwrap());
+    assert!(screen.key(root, KeyCode::Esc).unwrap());
+}

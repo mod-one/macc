@@ -27,6 +27,7 @@ fn request(root: &Path, task: &str, role: &str, tool: &str) -> AcquireRequest {
         owner_pid: std::process::id() as i64,
         preferred_provider_id: None,
         generate_provider_id: true,
+        checkpoint_id: None,
     }
 }
 fn activate(root: &Path) {

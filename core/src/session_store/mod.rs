@@ -1,5 +1,6 @@
 //! Canonical, provider-neutral session ownership. All mutations share an authority
 //! lock; SQLite lease transitions additionally use BEGIN IMMEDIATE and fencing.
+pub mod checkpoints;
 mod db;
 mod leases;
 mod migration;

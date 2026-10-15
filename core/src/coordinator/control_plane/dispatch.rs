@@ -707,7 +707,9 @@ pub(super) async fn run_dispatch_pipeline(
             coordinator,
             state,
         );
-        let Some(candidate) = select_dispatch_candidate(&registry, &config) else {
+        let selection_registry =
+            crate::coordinator::drain::selection_registry(repo_root, &registry)?;
+        let Some(candidate) = select_dispatch_candidate(&selection_registry, &config) else {
             break;
         };
         // Merge-gate: for retry tasks, check if the task branch is already

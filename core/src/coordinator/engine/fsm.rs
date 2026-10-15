@@ -856,6 +856,11 @@ pub(crate) fn apply_phase_failure_typed(
     runtime.set_status(RuntimeStatus::Failed);
     runtime.current_phase = Some(phase_mode.to_string());
     runtime.last_error = Some(reason.to_string());
+    if reason.starts_with("E903:") {
+        runtime.set_last_error_details("E903", "precondition", reason);
+        runtime.completion_kind = Some("precondition_unmet".into());
+        runtime.unmet_preconditions = vec![reason.to_string()];
+    }
     runtime.pid = None;
     task.touch_state_changed(now);
     Ok(())
@@ -1829,36 +1834,16 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
                     "force stopped by operator".to_string(),
                 ));
             } else if ctrl.mode == "draining" {
-                let mut active_draining_tasks_left = false;
-                if let Some(snapshot_raw) = &ctrl.drain_snapshot_json {
-                    if let Ok(task_ids) = serde_json::from_str::<Vec<String>>(snapshot_raw) {
-                        let registry = crate::coordinator::state::coordinator_state_registry_load(
-                            self.repo_root,
-                            &std::collections::BTreeMap::new(),
-                        )?;
-                        if let Some(tasks_arr) = registry.get("tasks").and_then(Value::as_array) {
-                            for task_val in tasks_arr {
-                                if let Some(tid) = task_val.get("id").and_then(Value::as_str) {
-                                    if task_ids.contains(&tid.to_string()) {
-                                        if let Some(state_str) =
-                                            task_val.get("state").and_then(Value::as_str)
-                                        {
-                                            if state_str == WorkflowState::Claimed.as_str()
-                                                || state_str == WorkflowState::InProgress.as_str()
-                                                || state_str
-                                                    == WorkflowState::ChangesRequested.as_str()
-                                                || state_str == WorkflowState::Queued.as_str()
-                                            {
-                                                active_draining_tasks_left = true;
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+                let registry = crate::coordinator::state::coordinator_state_registry_load(
+                    self.repo_root,
+                    &std::collections::BTreeMap::new(),
+                )?;
+                let active_draining_tasks_left = crate::coordinator::drain::has_pending(
+                    ctrl.drain_snapshot_json.as_deref(),
+                    &registry,
+                    !self.run_state.active_jobs.is_empty()
+                        || !self.run_state.active_merge_jobs.is_empty(),
+                )?;
                 if !active_draining_tasks_left {
                     if let Some(log) = self.logger {
                         let _ = log.note(

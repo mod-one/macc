@@ -237,6 +237,8 @@ fn build_web_router(state: WebState) -> Router {
     let audit_state = state.clone();
     Router::new()
         .route("/api/v1/health", get(health_handler))
+        .route("/api/v1/sessions/checkpoints/:id",get(sessions::checkpoint))
+        .route("/api/v1/sessions/checkpoints/:id/reconcile",get(sessions::reconciliation_plan).post(sessions::reconciliation_apply))
         .route("/api/v1/sessions/store",get(sessions::status))
         .route("/api/v1/sessions/policy",put(sessions::policy))
         .route("/api/v1/sessions/policy/preview",post(sessions::preview))

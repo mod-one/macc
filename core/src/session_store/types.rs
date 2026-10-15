@@ -1,3 +1,4 @@
+use super::checkpoints;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -6,6 +7,7 @@ use serde_json::Value;
 pub struct SessionPolicy {
     pub lease: LeasePolicy,
     pub lifecycle: LifecyclePolicy,
+    pub checkpoints: CheckpointPolicy,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
@@ -31,14 +33,30 @@ impl Default for LifecyclePolicy {
         Self { max_idle_hours: 24 }
     }
 }
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct CheckpointPolicy {
+    pub max_content_bytes: u64,
+    pub rotate_after_uses: u64,
+}
+impl Default for CheckpointPolicy {
+    fn default() -> Self {
+        Self {
+            max_content_bytes: 16384,
+            rotate_after_uses: 20,
+        }
+    }
+}
 impl SessionPolicy {
     pub fn validate(&self) -> crate::Result<()> {
-        if !(10..=86400).contains(&self.lease.ttl_seconds)
+        if !(2048..=65536).contains(&self.checkpoints.max_content_bytes)
+            || !(1..=1000).contains(&self.checkpoints.rotate_after_uses)
+            || !(10..=86400).contains(&self.lease.ttl_seconds)
             || self.lease.heartbeat_seconds == 0
             || self.lease.heartbeat_seconds > self.lease.ttl_seconds / 3
             || !(1..=720).contains(&self.lifecycle.max_idle_hours)
         {
-            return Err(super::error("Lease TTL must be 10..86400 seconds, heartbeat 1..TTL/3, and idle age 1..720 hours"));
+            return Err(super::error("Lease TTL must be 10..86400 seconds, heartbeat 1..TTL/3, idle age 1..720 hours, checkpoint size 2048..65536 bytes, and rotation 1..1000 uses"));
         }
         Ok(())
     }
@@ -60,6 +78,8 @@ pub struct AcquireRequest {
     pub preferred_provider_id: Option<String>,
     #[serde(default)]
     pub generate_provider_id: bool,
+    #[serde(default)]
+    pub checkpoint_id: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -102,6 +122,8 @@ pub struct StoreView {
     pub policy_source: String,
     pub fields: Vec<FieldDescriptor>,
     pub sessions: Vec<SessionView>,
+    pub checkpoints_ready: bool,
+    pub checkpoints: Vec<checkpoints::CheckpointView>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FieldDescriptor {
@@ -142,6 +164,24 @@ pub fn fields() -> Vec<FieldDescriptor> {
             720,
             "hours",
             "Older released transcripts start a fresh session.",
+        ),
+        (
+            "checkpoints.max_content_bytes",
+            "Checkpoint size limit",
+            16384,
+            2048,
+            65536,
+            "bytes",
+            "Never truncate mandatory task criteria; oversized checkpoints stop before invocation.",
+        ),
+        (
+            "checkpoints.rotate_after_uses",
+            "Rotate after invocations",
+            20,
+            1,
+            1000,
+            "invocations",
+            "Start a fresh transcript from a validated checkpoint at an invocation boundary.",
         ),
     ]
     .into_iter()

@@ -44,7 +44,10 @@ async fn session_policy_api_validates_cas_and_never_returns_lease_secrets() {
     )
     .await;
     assert_eq!(code, StatusCode::OK);
-    assert_eq!(initial["fields"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        initial["fields"].as_array().unwrap().len(),
+        macc_core::session_store::fields().len()
+    );
     assert!(initial.to_string().find("lease_token").is_none());
     let mut policy = initial["policy"].clone();
     policy["lease"]["ttl_seconds"] = serde_json::json!(60);
@@ -187,4 +190,85 @@ async fn session_mutations_reject_a_viewer_while_readers_can_inspect() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     assert!(!root.path().join(".macc/memory.db").exists());
+}
+#[tokio::test]
+async fn checkpoints_api_inspects_and_reconciles_only_reviewed_current_sources() {
+    let root = tempfile::tempdir().unwrap();
+    let r = root.path();
+    for args in [
+        vec!["init", "-b", "main"],
+        vec!["config", "user.name", "Test"],
+        vec!["config", "user.email", "test@example.invalid"],
+    ] {
+        assert!(macc_core::git::run_git_output_mapped(
+            r,
+            &args,
+            "initialize checkpoint API fixture"
+        )
+        .unwrap()
+        .status
+        .success());
+    }
+    std::fs::write(r.join(".gitignore"), ".macc/\nworktree.prd.json\n").unwrap();
+    for args in [vec!["add", "."], vec!["commit", "-m", "initial"]] {
+        assert!(macc_core::git::run_git_output_mapped(
+            r,
+            &args,
+            "initialize checkpoint API fixture"
+        )
+        .unwrap()
+        .status
+        .success());
+    }
+    std::fs::create_dir_all(r.join(".macc/state")).unwrap();
+    std::fs::write(
+        r.join("worktree.prd.json"),
+        r#"{"tasks":[{"id":"A","acceptance_criteria":["Test"]}]}"#,
+    )
+    .unwrap();
+    use macc_core::session_store as store;
+    let plan = store::migrate(r, false, None).unwrap();
+    store::migrate(r, true, Some(&plan.source_sha256)).unwrap();
+    let identity=macc_core::coordinator::session_identity::identity(r,r,"A","performer","future-ai",&serde_json::json!({"id":"future-ai","performer":{"command":"fake","session":{"enabled":true,"scope":"task_role_tool"}}}),&macc_core::coordinator::session_identity::SessionRouting{tier:"".into(),mode:"auto".into()}).unwrap();
+    let prepared = store::checkpoints::prepare(
+        r,
+        &store::checkpoints::ContextRequest {
+            identity,
+            phase: "dev".into(),
+        },
+    )
+    .unwrap();
+    let id = prepared.checkpoint_id.unwrap();
+    let app = build_web_router(test_web_state(
+        r,
+        Arc::new(TestEngine::with_fixtures()),
+        WebAssetsMode::Embedded,
+    ));
+    let path = format!("/api/v1/sessions/checkpoints/{id}");
+    let (code, checkpoint) = call(&app, "GET", &path, serde_json::Value::Null).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(checkpoint["task_id"], "A");
+    assert!(checkpoint.get("lease_token").is_none());
+    let path = format!("{path}/reconcile");
+    let (code, plan) = call(&app, "GET", &path, serde_json::Value::Null).await;
+    assert_eq!(code, StatusCode::OK);
+    std::fs::write(r.join("partial.txt"), "work").unwrap();
+    let (code, _) = call(
+        &app,
+        "POST",
+        &path,
+        serde_json::json!({"expected_sha256":plan["current_sha256"]}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+    let (_, plan) = call(&app, "GET", &path, serde_json::Value::Null).await;
+    let (code, result) = call(
+        &app,
+        "POST",
+        &path,
+        serde_json::json!({"expected_sha256":plan["current_sha256"]}),
+    )
+    .await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(result["applied"], true);
 }

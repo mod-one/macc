@@ -73,5 +73,17 @@ pub fn inspect(root: &Path) -> Result<StoreView> {
         policy_source,
         fields: fields(),
         sessions,
+        checkpoints_ready: if sqlite {
+            let (db, _) = db::active(root)?;
+            checkpoints::ready(&db)?
+        } else {
+            false
+        },
+        checkpoints: if sqlite {
+            let (db, _) = db::active(root)?;
+            checkpoints::list(&db)?
+        } else {
+            vec![]
+        },
     })
 }

@@ -79,3 +79,5 @@ work packages and must meet the specification's client coverage gates.
 
 Real-provider version probes, SQLite leases/fencing, structured checkpoints and
 normalized usage accounting are not delivered by P0-A.
+
+P0-C adds [Task Checkpoints](TASK_CHECKPOINTS.md), reviewed recovery and session rotation for activated SQLite projects.

@@ -22,6 +22,22 @@ pub enum SessionStoreCommands {
         #[arg(long)]
         expected_sha256: Option<String>,
     },
+    CheckpointPrepare,
+    CheckpointFinish,
+    Checkpoint {
+        id: String,
+    },
+    Reconcile {
+        id: String,
+        #[arg(long)]
+        expected_sha256: Option<String>,
+    },
+    Upgrade {
+        #[arg(long)]
+        apply: bool,
+        #[arg(long)]
+        expected_sha256: Option<String>,
+    },
     Acquire,
     Bind,
     Heartbeat,
@@ -102,6 +118,39 @@ impl Command for SessionStoreCommand {
                     super::gate_cli_mutation(root)?;
                 }
                 emit(store::rollback(root, *apply, expected_sha256.as_deref())?)
+            }
+            SessionStoreCommands::CheckpointPrepare => {
+                emit(store::checkpoints::prepare(root, &input()?)?)
+            }
+            SessionStoreCommands::CheckpointFinish => {
+                emit(store::checkpoints::finish(root, &input()?)?)
+            }
+            SessionStoreCommands::Checkpoint { id } => emit(store::checkpoints::get(root, id)?),
+            SessionStoreCommands::Reconcile {
+                id,
+                expected_sha256,
+            } => {
+                if expected_sha256.is_some() {
+                    super::gate_cli_mutation(root)?;
+                }
+                emit(store::checkpoints::reconcile(
+                    root,
+                    id,
+                    expected_sha256.as_deref(),
+                )?)
+            }
+            SessionStoreCommands::Upgrade {
+                apply,
+                expected_sha256,
+            } => {
+                if *apply {
+                    super::gate_cli_mutation(root)?;
+                }
+                emit(store::checkpoints::upgrade(
+                    root,
+                    *apply,
+                    expected_sha256.as_deref(),
+                )?)
             }
             SessionStoreCommands::Acquire => emit(store::acquire(root, &input()?)?),
             SessionStoreCommands::Bind => {

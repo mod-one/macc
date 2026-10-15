@@ -85,6 +85,7 @@ pub(super) async fn migration(
     let op = match direction.as_str() {
         "migrate" => store::migrate,
         "rollback" => store::rollback,
+        "upgrade" => store::checkpoints::upgrade,
         _ => {
             return Err(ApiError::from(macc_core::MaccError::Validation(
                 "Unknown session migration".into(),
@@ -161,6 +162,7 @@ pub(super) async fn plan(
     let op = match direction.as_str() {
         "migrate" => store::migrate,
         "rollback" => store::rollback,
+        "upgrade" => store::checkpoints::upgrade,
         _ => {
             return Err(ApiError::from(macc_core::MaccError::Validation(
                 "Unknown session migration".into(),
@@ -190,4 +192,37 @@ pub(super) async fn preview(
     Ok(Json(
         serde_json::json!({"before":view.policy,"after":policy.clone().unwrap_or_default(),"source":if policy.is_some(){"project"}else{"defaults"},"activation":"next session claim; active leases unchanged"}),
     ))
+}
+
+#[derive(Deserialize)]
+pub(super) struct ReconcileRequest {
+    expected_sha256: String,
+}
+pub(super) async fn checkpoint(
+    State(state): State<WebState>,
+    Path(id): Path<String>,
+) -> Result<Json<store::checkpoints::Checkpoint>, ApiError> {
+    store::checkpoints::get(&state.paths.root, &id)
+        .map(Json)
+        .map_err(ApiError::from)
+}
+pub(super) async fn reconciliation_plan(
+    State(state): State<WebState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    store::checkpoints::reconcile(&state.paths.root, &id, None)
+        .map(Json)
+        .map_err(ApiError::from)
+}
+pub(super) async fn reconciliation_apply(
+    State(state): State<WebState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    super::mutation_gate::require_project_owner(&state, &headers)?;
+    let r: ReconcileRequest = request(&body)?;
+    store::checkpoints::reconcile(&state.paths.root, &id, Some(&r.expected_sha256))
+        .map(Json)
+        .map_err(ApiError::from)
 }

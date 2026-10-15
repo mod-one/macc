@@ -3,6 +3,7 @@
 session_service() {
   "${MACC_SESSION_SERVICE_BIN:-macc}" --cwd "$repo" session-store "$@"
 }
+source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/checkpoint.sh"
 sqlite_heartbeat_pid=""
 sqlite_lease_key=""
 sqlite_clean=false
@@ -36,21 +37,26 @@ cleanup_sqlite_session() {
   if [[ -n "$provider_tee_pid" ]]; then kill "$provider_tee_pid" 2>/dev/null || true; wait "$provider_tee_pid" 2>/dev/null || true; fi
   if [[ -n "$provider_capture_dir" ]]; then rm -f "$provider_capture_dir/output"; rmdir "$provider_capture_dir" 2>/dev/null || true; fi
   if [[ -n "$sqlite_lease_key" ]]; then
+    finish_checkpoint interrupted false || true
     if ! jq -nc --argjson key "$sqlite_lease_key" --argjson clean "$sqlite_clean" '$key + {clean:$clean}' |
         session_service release >/dev/null; then
       echo 'Error: session lease could not be released; verified recovery is required' >&2
     fi
     sqlite_lease_key=""
   fi
+  if [[ -n "$checkpoint_prompt_file" ]]; then rm -f -- "$checkpoint_prompt_file"; fi
 }
 run_sqlite_session() {
   local generate=false request grant interval new_sid rc=0
-  if [[ "$session_id_strategy" == generated ]] && jq -e '.performer.session.create.command and .performer.session.create.args' "$tool_json" >/dev/null; then
+  local checkpoint_rc=0
+  prepare_checkpoint || checkpoint_rc=$?
+  if [[ "$checkpoint_rc" == 2 ]]; then return 0; elif [[ "$checkpoint_rc" != 0 ]]; then return 1; fi
+  if [[ "$session_enabled" == true && -n "$session_resume_command" && "$session_id_strategy" == generated ]] && jq -e '.performer.session.create.command and .performer.session.create.args' "$tool_json" >/dev/null; then
     generate=true
   fi
   request="$(jq -nc --argjson identity "$session_identity" --arg request "runner-$$-$(date +%s)-${RANDOM}" \
-    --argjson pid "$$" --arg preferred "$caller_session_id" --argjson generate "$generate" '
-    {identity:$identity,request_id:$request,owner_pid:$pid,preferred_provider_id:(if $preferred=="" then null else $preferred end),generate_provider_id:$generate}')"
+    --arg checkpoint "$checkpoint_id" --argjson pid "$$" --arg preferred "$caller_session_id" --argjson generate "$generate" '
+    {identity:$identity,request_id:$request,owner_pid:$pid,preferred_provider_id:(if $preferred=="" then null else $preferred end),generate_provider_id:$generate,checkpoint_id:(if $checkpoint=="" then null else $checkpoint end)}')"
   grant="$(printf '%s' "$request" | session_service acquire)" || return 1
   sqlite_lease_key="$(jq -c '{session_id,lease_token,generation}' <<<"$grant")"
   sid="$(jq -r '.provider_session_id // empty' <<<"$grant")"
@@ -74,7 +80,7 @@ run_sqlite_session() {
     done
   ) &
   sqlite_heartbeat_pid=$!
-  if [[ -n "$sid" ]]; then
+  if [[ -n "$sid" && "$session_enabled" == true && -n "$session_resume_command" ]]; then
     run_resume_and_capture "$output_capture" "$sid" "$prompt_text" || rc=$?
   else
     run_default_call || rc=$?
@@ -91,8 +97,22 @@ run_sqlite_session() {
   local invocation_rc="$rc"
   rc="$(override_rc_for_success_marker "$rc")"
   rc="$(detect_tool_limit_exit "$rc")"
+  local acknowledged=true result=success
+  if [[ "$checkpoint_enabled" == true && "$sid_is_new" == 1 ]] && ! checkpoint_acknowledged; then
+    acknowledged=false
+    if [[ "$rc" == 0 ]]; then
+      echo 'Error: fresh session did not acknowledge the current checkpoint task and phase' >&2
+      rc=1
+    fi
+  fi
+  if [[ "$rc" != 0 ]]; then result=failure; fi
+  if grep -qiE "(hit your (usage|session) limit|MACC_TOOL_LIMIT:)" "$output_capture"; then result=quota; fi
+  if grep -Eq '^MACC_TASK_RESULT: *precondition_unmet' "$output_capture"; then result=precondition_unmet; fi
+  checkpoint_rc=0
+  finish_checkpoint "$result" "$acknowledged" || checkpoint_rc=$?
+  if [[ "$checkpoint_rc" == 2 ]]; then return 0; elif [[ "$checkpoint_rc" != 0 ]]; then return 1; fi
   sqlite_clean=true
-  if [[ "$invocation_rc" -ne 0 || ( "$sid_is_new" == 1 && "$rc" -ne 0 ) ]]; then
+  if [[ "$session_enabled" != true || -z "$session_resume_command" || "$acknowledged" == false || "$invocation_rc" -ne 0 || ( "$sid_is_new" == 1 && "$rc" -ne 0 ) ]]; then
     sqlite_clean=false
   fi
   # Release explicitly so lease failure cannot be hidden behind a success marker.

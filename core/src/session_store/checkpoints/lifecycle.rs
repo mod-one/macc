@@ -1,0 +1,278 @@
+use super::*;
+use rusqlite::{params, TransactionBehavior};
+
+fn idle(db: &rusqlite::Connection, worktree: &str) -> Result<()> {
+    let active: i64 = sql(db.query_row(
+        "SELECT count(*) FROM session_leases WHERE owner_worktree_id=?1",
+        [worktree],
+        |r| r.get(0),
+    ))?;
+    if active != 0 {
+        return Err(error(
+            "Checkpoint requires an idle retained worktree; active lease exists",
+        ));
+    }
+    Ok(())
+}
+pub fn prepare(root: &Path, request: &ContextRequest) -> Result<PreparedContext> {
+    let _guard = lock(root)?;
+    let (mut db, a) = db::active(root)?;
+    if !ready(&db)? {
+        return Ok(PreparedContext {
+            enabled: false,
+            checkpoint_id: None,
+            prompt: String::new(),
+            acknowledgement: None,
+        });
+    }
+    let policy = policy::load(root)?;
+    let mut c = make(root, &a, request, "invocation_started")?;
+    c.validation["max_content_bytes"] = json!(policy.checkpoints.max_content_bytes);
+    let tx = sql(db.transaction_with_behavior(TransactionBehavior::Immediate))?;
+    idle(&tx, &c.worktree)?;
+    if let Some(previous) = latest(&tx, &a.project_id, &c.task_id, &c.role)? {
+        let prior_validation: String = sql(tx.query_row(
+            "SELECT validation_state FROM task_checkpoints WHERE id=?1",
+            [&previous.id],
+            |r| r.get(0),
+        ))?;
+        if prior_validation == "needs_reconciliation"
+            || !same_source(&previous, &c)
+            || !git_state::descends_from(Path::new(&c.worktree), &previous.source_revision)
+        {
+            sql(tx.execute(
+                "UPDATE task_checkpoints SET validation_state='needs_reconciliation' WHERE id=?1",
+                [&previous.id],
+            ))?;
+            sql(tx.commit())?;
+            return Err(error(format!("Checkpoint {} needs reconciliation: PRD, specification, branch or worktree changed; inspect before dispatch",previous.id)));
+        }
+        if previous.source_revision != c.source_revision
+            || previous.worktree_dirty_digest != c.worktree_dirty_digest
+        {
+            // No active provider owns the slot. Reconcile current Git evidence,
+            // preserve objections and require all criteria to be revalidated.
+            sql(tx.execute(
+                "UPDATE task_checkpoints SET validation_state='needs_reconciliation' WHERE id=?1",
+                [&previous.id],
+            ))?;
+            db::event(
+                &tx,
+                &previous.id,
+                "checkpoint_reconciled",
+                json!({"task":c.task_id,"reason":"retained worktree changed; current Git evidence recaptured; completion not inferred"}),
+            )?;
+            if previous.worktree_content_digest != c.worktree_content_digest {
+                sql(tx.execute("UPDATE logical_sessions SET status='rotated' WHERE project_id=?1 AND task_id=?2 AND role=?3 AND status='available'",params![a.project_id,c.task_id,c.role]))?;
+            }
+            c.blocking_issues.push("Retained Git state changed since prior checkpoint; revalidate all acceptance criteria and outstanding review findings".into());
+        }
+        if c.review_objections.is_null() {
+            c.review_objections = previous.review_objections;
+        }
+        c.blocking_issues.extend(previous.blocking_issues);
+    }
+    schema::insert(&tx, &c, policy.checkpoints.max_content_bytes)?;
+    sql(tx.commit())?;
+    let acknowledgement = format!(
+        "MACC_CHECKPOINT_ACK: {} task={} phase={}",
+        c.id, c.task_id, c.phase
+    );
+    let prompt=format!("\n## MACC task checkpoint (evidence; PRD remains authoritative)\n{}\nVerify task and phase first. On a fresh session, emit exactly this acknowledgement before work:\n{}\nDo not claim tests passed without running them. Checkpoints never authorize task completion or scope changes.\n",serde_json::to_string(&c).map_err(|e|error(e.to_string()))?,acknowledgement);
+    Ok(PreparedContext {
+        enabled: true,
+        checkpoint_id: Some(c.id),
+        prompt,
+        acknowledgement: Some(acknowledgement),
+    })
+}
+/// Invoked within the acquisition transaction. A context handle cannot be
+/// transplanted to another identity or reused after the working tree changes.
+pub fn rotation_guard(
+    db: &rusqlite::Connection,
+    a: &Authority,
+    request: &AcquireRequest,
+    policy: &SessionPolicy,
+) -> Result<()> {
+    let Some(id) = request.checkpoint_id.as_deref() else {
+        return Ok(());
+    };
+    if !ready(db)? {
+        return Err(error("Checkpoint schema upgrade required"));
+    }
+    let c = load(db, id)?;
+    let phase = c.phase.clone();
+    let current = make(
+        Path::new(&a.project_root),
+        a,
+        &ContextRequest {
+            identity: request.identity.clone(),
+            phase,
+        },
+        "acquire",
+    )?;
+    if c.role != current.role
+        || c.tool_id != current.tool_id
+        || fingerprint(&c) != fingerprint(&current)
+    {
+        return Err(error(
+            "Checkpoint changed before acquisition; reconcile and prepare again",
+        ));
+    }
+    let valid: String = sql(db.query_row(
+        "SELECT validation_state FROM task_checkpoints WHERE id=?1",
+        [id],
+        |r| r.get(0),
+    ))?;
+    if valid != "verified" {
+        return Err(error("Checkpoint requires reconciliation"));
+    }
+    idle(db, &c.worktree)?;
+    let last:Option<(String,String,i64)>=sql(db.query_row("SELECT tool_id,identity_json,use_count FROM logical_sessions WHERE project_id=?1 AND task_id=?2 AND role=?3 ORDER BY updated_at DESC,rowid DESC LIMIT 1",params![a.project_id,c.task_id,c.role],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional())?;
+    let expected_identity = request.identity.to_string();
+    if let Some((tool, identity, uses)) = last {
+        if tool != c.tool_id
+            || identity != expected_identity
+            || uses >= policy.checkpoints.rotate_after_uses as i64
+        {
+            sql(db.execute("UPDATE logical_sessions SET status='rotated' WHERE project_id=?1 AND task_id=?2 AND role=?3 AND status='available'",params![a.project_id,c.task_id,c.role]))?;
+            db::event(
+                db,
+                id,
+                "session_rotated",
+                json!({"task":c.task_id,"checkpoint":id,"reason":if tool!=c.tool_id {"tool_switch"} else if identity!=expected_identity{"incompatible_configuration"}else{"invocation_budget"}}),
+            )?;
+        }
+    }
+    Ok(())
+}
+pub fn finish(root: &Path, request: &FinishRequest) -> Result<Checkpoint> {
+    let _guard = lock(root)?;
+    let (mut db, a) = db::active(root)?;
+    let tx = sql(db.transaction_with_behavior(TransactionBehavior::Immediate))?;
+    super::super::leases::verify(&tx, &request.key)?;
+    let raw: String = sql(tx.query_row(
+        "SELECT identity_json FROM logical_sessions WHERE id=?1",
+        [&request.key.session_id],
+        |r| r.get(0),
+    ))?;
+    let result = match request.result.as_str() {
+        "success" | "failure" | "interrupted" | "quota" | "precondition_unmet"
+        | "changes_requested" => request.result.as_str(),
+        _ => return Err(error("Unknown checkpoint result")),
+    };
+    let mut c = make(
+        root,
+        &a,
+        &ContextRequest {
+            identity: json(raw.as_bytes())?,
+            phase: request.phase.clone(),
+        },
+        "invocation_finished",
+    )?;
+    c.blocking_issues.push(format!(
+        "Provider outcome: {result}; acceptance tests and delivery remain coordinator-owned"
+    ));
+    if !request.acknowledged {
+        c.blocking_issues
+            .push("Fresh-session checkpoint acknowledgement was not verified".into());
+    }
+    let mut sources_changed = false;
+    let mut content_limit = policy::load(root)?.checkpoints.max_content_bytes;
+    // Preserve all unresolved evidence, including failed attempts across retries.
+    if let Some(previous) = latest(&tx, &a.project_id, &c.task_id, &c.role)? {
+        sources_changed = !same_source(&previous, &c);
+        if let Some(limit) = previous.validation["max_content_bytes"].as_u64() {
+            content_limit = limit;
+        }
+        c.validation["max_content_bytes"] = json!(content_limit);
+        c.blocking_issues.extend(previous.blocking_issues);
+        if c.review_objections.is_null() {
+            c.review_objections = previous.review_objections;
+        }
+    }
+    c.blocking_issues.sort();
+    c.blocking_issues.dedup();
+    schema::insert(&tx, &c, content_limit)?;
+    db::event(
+        &tx,
+        &request.key.session_id,
+        "checkpoint_saved",
+        json!({"checkpoint":c.id,"task":c.task_id,"phase":c.phase,"outcome":result,"acknowledged":request.acknowledged}),
+    )?;
+    if sources_changed {
+        sql(tx.execute(
+            "UPDATE task_checkpoints SET validation_state='needs_reconciliation' WHERE id=?1",
+            [&c.id],
+        ))?;
+    }
+    sql(tx.commit())?;
+    if sources_changed {
+        return Err(error(format!("Checkpoint {} requires reconciliation: mandatory task sources changed during invocation",c.id)));
+    }
+    Ok(c)
+}
+/// Explicit operator reconciliation uses the reviewed current fingerprint.
+/// Preview and Apply both recompute evidence; stale plans cannot overwrite it.
+pub fn reconcile(root: &Path, id: &str, expected: Option<&str>) -> Result<Value> {
+    let _guard = lock(root)?;
+    let (mut db, a) = db::active(root)?;
+    let previous = load(&db, id)?;
+    if previous.project_id != a.project_id {
+        return Err(error("Foreign checkpoint"));
+    }
+    idle(&db, &previous.worktree)?;
+    git_state::verify_repository(root, Path::new(&previous.worktree))?;
+    let git = git_state::snapshot(Path::new(&previous.worktree))?;
+    let (task, hashes) = git_state::task_sources(Path::new(&previous.worktree), &previous.task_id)?;
+    let mut current = previous.clone();
+    current.id = uuid::Uuid::new_v4().to_string();
+    current.branch = git.branch;
+    current.source_revision = git.revision;
+    current.worktree_dirty_digest = git.digest;
+    current.worktree_content_digest = git.content_digest;
+    current.changed_files = git.changed;
+    current.mandatory_task = task;
+    current.source_hashes = hashes;
+    current.reason = "operator_reconciliation".into();
+    current.blocking_issues.push("Operator accepted current sources; all criteria and existing objections require revalidation".into());
+    current.acceptance_criteria_ids = current.mandatory_task["tasks"][0]["acceptance_criteria"]
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    c["id"]
+                        .as_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("AC-{:02}", i + 1))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut value = serde_json::to_value(&current).map_err(|e| error(e.to_string()))?;
+    redact(&mut value);
+    current = serde_json::from_value(value).map_err(|e| error(e.to_string()))?;
+    let sha = fingerprint(&current);
+    if expected.is_none() {
+        return Ok(
+            json!({"previous":previous,"current":current,"current_sha256":sha,"applied":false}),
+        );
+    }
+    if expected != Some(sha.as_str()) {
+        return Err(error("Reconciliation source changed; preview again"));
+    }
+    let tx = sql(db.transaction_with_behavior(TransactionBehavior::Immediate))?;
+    schema::insert(
+        &tx,
+        &current,
+        policy::load(root)?.checkpoints.max_content_bytes,
+    )?;
+    sql(tx.execute(
+        "UPDATE task_checkpoints SET validation_state='reconciled' WHERE id=?1",
+        [id],
+    ))?;
+    sql(tx.execute("UPDATE logical_sessions SET status='rotated' WHERE project_id=?1 AND task_id=?2 AND role=?3 AND status='available'",params![a.project_id,current.task_id,current.role]))?;
+    sql(tx.commit())?;
+    Ok(json!({"current_sha256":sha,"checkpoint":current.id,"applied":true}))
+}

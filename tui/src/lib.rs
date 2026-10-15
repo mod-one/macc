@@ -23,6 +23,7 @@ mod coordinator_poll;
 pub mod ownership;
 pub mod prd_queue;
 pub mod screen;
+mod session_checkpoints;
 pub mod sessions;
 #[cfg(test)]
 mod sessions_tests;
