@@ -10,6 +10,7 @@ use serde_json::Value;
 use std::path::Path;
 #[derive(Default)]
 pub struct SessionsScreen {
+    o2: crate::o2::Panel,
     usage: crate::session_usage::UsagePanel,
     checkpoints: crate::session_checkpoints::CheckpointPanel,
     pub view: Option<StoreView>,
@@ -68,6 +69,9 @@ impl SessionsScreen {
             .map(|s| s.id.clone())
     }
     pub fn is_mutation(&self, key: KeyCode) -> bool {
+        if self.o2.open {
+            return self.o2.mutation(key);
+        }
         self.usage.is_mutation(key)
             || self.checkpoints.is_mutation(key)
             || self.editing.is_none() && matches!(key, KeyCode::Char('s' | 'a' | 'v' | 'b'))
@@ -75,6 +79,10 @@ impl SessionsScreen {
     pub fn key(&mut self, root: &Path, key: KeyCode) -> macc_core::Result<bool> {
         if self.view.is_none() && !matches!(key, KeyCode::Esc | KeyCode::Char('q')) {
             self.refresh(root)?;
+        }
+        if self.o2.open {
+            self.o2.key(root, key)?;
+            return Ok(false);
         }
         if self.usage.open {
             self.usage.key(root, key)?;
@@ -130,6 +138,10 @@ impl SessionsScreen {
                     return Ok(false);
                 }
                 return Ok(true);
+            }
+            KeyCode::Char('o') => {
+                self.o2.refresh(root)?;
+                self.o2.open = true;
             }
             KeyCode::Char('t') => {
                 self.usage.refresh(root)?;
@@ -269,6 +281,10 @@ impl SessionsScreen {
         Ok(false)
     }
     pub fn draw(&self, f: &mut Frame, area: Rect) {
+        if self.o2.open {
+            self.o2.draw(f, area, &self.message);
+            return;
+        }
         if self.usage.open {
             self.usage.draw(f, area);
             return;
@@ -277,7 +293,7 @@ impl SessionsScreen {
             self.checkpoints.draw(f, area, self.view.as_ref());
             return;
         }
-        let mut lines=vec!["Sessions — t usage | h checkpoints | r refresh | ↑↓ select | Enter edit/events | p validate/preview | s apply policy".into(),
+        let mut lines=vec!["Sessions — o O2 | t usage | h checkpoints | r refresh | ↑↓ select | Enter edit/events | p validate/preview | s apply policy".into(),
             "u inherit defaults | PgUp/PgDn scroll | m preview migration/rollback | a apply reviewed action | c close | v recover | b backup | d defaults | x discard | Esc back".into()];
         if let Some(v) = &self.view {
             lines.push(format!(

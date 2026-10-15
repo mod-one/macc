@@ -382,6 +382,10 @@ mod tests {
             context: None,
             prd_generation: None,
             session_management: None,
+            memory: None,
+            context_engine: None,
+            adaptive_compaction: None,
+            code_intelligence: None,
         };
 
         let resolved = resolve(&canonical, &CliOverrides::default());
@@ -419,6 +423,10 @@ mod tests {
             context: None,
             prd_generation: None,
             session_management: None,
+            memory: None,
+            context_engine: None,
+            adaptive_compaction: None,
+            code_intelligence: None,
         };
 
         let resolved = resolve(&canonical, &CliOverrides::default());
@@ -444,6 +452,10 @@ mod tests {
             context: None,
             prd_generation: None,
             session_management: None,
+            memory: None,
+            context_engine: None,
+            adaptive_compaction: None,
+            code_intelligence: None,
         };
 
         let overrides = CliOverrides {
@@ -514,6 +526,10 @@ mod tests {
             context: None,
             prd_generation: None,
             session_management: None,
+            memory: None,
+            context_engine: None,
+            adaptive_compaction: None,
+            code_intelligence: None,
         };
 
         let canonical2 = CanonicalConfig {
@@ -532,6 +548,10 @@ mod tests {
             context: None,
             prd_generation: None,
             session_management: None,
+            memory: None,
+            context_engine: None,
+            adaptive_compaction: None,
+            code_intelligence: None,
         };
 
         let resolved1 = resolve(&canonical1, &CliOverrides::default());

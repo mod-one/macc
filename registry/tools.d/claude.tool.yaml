@@ -6,6 +6,15 @@ gitignore:
   - .claude/
   - CLAUDE.md
 performer:
+  compaction:
+    schema: native-auto-config-v1
+    version_pattern: '(?i)^[0-9]+\.[0-9]+\.[0-9]+.*Claude Code'
+    documentation: https://code.claude.com/docs/en/env-vars
+    native_auto:
+      format: env
+      key: CLAUDE_AUTOCOMPACT_PCT_OVERRIDE
+      unit: percent
+      disabled_env: [DISABLE_AUTO_COMPACT]
   runner: adapters/claude/claude.performer.sh
   command: claude
   args: ["--model", "{model}", "--output-format", "text", "--dangerously-skip-permissions"]

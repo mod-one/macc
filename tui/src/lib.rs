@@ -20,6 +20,7 @@ use std::{collections::BTreeMap, io, time::Duration};
 
 pub mod approval;
 mod coordinator_poll;
+mod o2;
 pub mod ownership;
 pub mod prd_queue;
 pub mod screen;
@@ -497,6 +498,22 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
             match result.and_then(|_| state.sessions.key(&paths.root, key)) {
                 Ok(true) => state.pop_screen(),
                 Ok(false) => {
+                    if matches!(key, KeyCode::Char('s' | 'a')) {
+                        if let Ok(saved) = macc_core::load_canonical_config(&paths.config_path) {
+                            if let Some(config) = &mut state.config {
+                                config.memory = saved.memory.clone();
+                                config.context_engine = saved.context_engine.clone();
+                                config.adaptive_compaction = saved.adaptive_compaction.clone();
+                                config.code_intelligence = saved.code_intelligence.clone();
+                            }
+                            if let Some(draft) = &mut state.working_copy {
+                                draft.memory = saved.memory;
+                                draft.context_engine = saved.context_engine;
+                                draft.adaptive_compaction = saved.adaptive_compaction;
+                                draft.code_intelligence = saved.code_intelligence;
+                            }
+                        }
+                    }
                     if key == KeyCode::Char('s') {
                         if let Some(view) = &state.sessions.view {
                             if let Some(config) = &mut state.config {

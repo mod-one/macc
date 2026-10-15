@@ -42,6 +42,7 @@ const NAV_SECTIONS: NavSection[] = [
       { path: '/config/standards',   label: 'Standards', icon: Icons.CheckSquare },
       { path: '/config/skills',      label: 'Skills',    icon: Icons.Brain       },
       { path: '/config/sessions', label: 'Sessions', icon: Icons.Settings },
+      { path: '/ops/memory', label: 'O2 Memory & Context', icon: Icons.Settings },
       { path: '/config/settings',    label: 'Settings',  icon: Icons.Settings    },
     ],
   },

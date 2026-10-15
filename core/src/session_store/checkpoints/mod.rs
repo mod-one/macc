@@ -96,11 +96,11 @@ pub(super) fn make(
         }
     }
     let mut value = serde_json::to_value(c).map_err(|e| error(e.to_string()))?;
-    redact(&mut value);
+    redact_evidence(&mut value);
     c = serde_json::from_value(value).map_err(|e| error(e.to_string()))?;
     Ok(c)
 }
-pub(super) fn redact(v: &mut Value) {
+pub(crate) fn redact_evidence(v: &mut Value) {
     match v {
         Value::String(text) => {
             let mut findings =
@@ -116,7 +116,7 @@ pub(super) fn redact(v: &mut Value) {
         }
         Value::Array(rows) => {
             for row in rows {
-                redact(row)
+                redact_evidence(row)
             }
         }
         Value::Object(object) => {
@@ -127,7 +127,7 @@ pub(super) fn redact(v: &mut Value) {
                 ) {
                     *value = Value::String("[REDACTED]".into());
                 } else {
-                    redact(value)
+                    redact_evidence(value)
                 }
             }
         }

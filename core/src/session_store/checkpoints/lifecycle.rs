@@ -72,6 +72,7 @@ pub fn prepare(root: &Path, request: &ContextRequest) -> Result<PreparedContext>
         }
         c.blocking_issues.extend(previous.blocking_issues);
     }
+    let optional_context = crate::o2::context::for_checkpoint(&tx, root, &c)?;
     schema::insert(&tx, &c, policy.checkpoints.max_content_bytes)?;
     sql(tx.commit())?;
     let acknowledgement = format!(
@@ -82,7 +83,7 @@ pub fn prepare(root: &Path, request: &ContextRequest) -> Result<PreparedContext>
     Ok(PreparedContext {
         enabled: true,
         checkpoint_id: Some(c.id),
-        prompt,
+        prompt: format!("{prompt}{optional_context}"),
         acknowledgement: Some(acknowledgement),
     })
 }
@@ -128,10 +129,31 @@ pub fn rotation_guard(
         return Err(error("Checkpoint requires reconciliation"));
     }
     idle(db, &c.worktree)?;
-    let last:Option<(String,String,i64)>=sql(db.query_row("SELECT tool_id,identity_json,use_count FROM logical_sessions WHERE project_id=?1 AND task_id=?2 AND role=?3 ORDER BY updated_at DESC,rowid DESC LIMIT 1",params![a.project_id,c.task_id,c.role],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional())?;
+    let last:Option<(String,String,i64,String)>=sql(db.query_row("SELECT tool_id,identity_json,use_count,id FROM logical_sessions WHERE project_id=?1 AND task_id=?2 AND role=?3 ORDER BY updated_at DESC,rowid DESC LIMIT 1",params![a.project_id,c.task_id,c.role],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional())?;
     let expected_identity = request.identity.to_string();
-    if let Some((tool, identity, uses)) = last {
-        if tool != c.tool_id
+    if let Some((tool, identity, uses, session_id)) = last {
+        let (adaptive, _) = crate::o2::compaction::evaluate_pressure(
+            db,
+            Path::new(&a.project_root),
+            &session_id,
+            uses.max(0) as u64,
+            policy.checkpoints.rotate_after_uses,
+        )?;
+        let adaptive_rotate = adaptive.action == "checkpoint_rotate";
+        if crate::o2::ready(db)?
+            && crate::o2::policy::load(Path::new(&a.project_root))?
+                .adaptive_compaction
+                .enabled
+        {
+            db::event(
+                db,
+                &session_id,
+                "compaction_decision",
+                serde_json::to_value(&adaptive).map_err(|e| error(e.to_string()))?,
+            )?;
+        }
+        if adaptive_rotate
+            || tool != c.tool_id
             || identity != expected_identity
             || uses >= policy.checkpoints.rotate_after_uses as i64
         {
@@ -140,7 +162,7 @@ pub fn rotation_guard(
                 db,
                 id,
                 "session_rotated",
-                json!({"task":c.task_id,"checkpoint":id,"reason":if tool!=c.tool_id {"tool_switch"} else if identity!=expected_identity{"incompatible_configuration"}else{"invocation_budget"}}),
+                json!({"task":c.task_id,"checkpoint":id,"reason":if tool!=c.tool_id {"tool_switch"} else if identity!=expected_identity{"incompatible_configuration"}else if adaptive_rotate{"adaptive_checkpoint_rotation"}else{"invocation_budget"}}),
             )?;
         }
     }
@@ -251,7 +273,7 @@ pub fn reconcile(root: &Path, id: &str, expected: Option<&str>) -> Result<Value>
         })
         .unwrap_or_default();
     let mut value = serde_json::to_value(&current).map_err(|e| error(e.to_string()))?;
-    redact(&mut value);
+    redact_evidence(&mut value);
     current = serde_json::from_value(value).map_err(|e| error(e.to_string()))?;
     let sha = fingerprint(&current);
     if expected.is_none() {

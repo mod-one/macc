@@ -249,7 +249,7 @@ pub fn acquire(root: &Path, request: &AcquireRequest) -> Result<LeaseGrant> {
         } else {
             "session_reused"
         },
-        json!({"generation":generation,"role":v["role"],"tool":v["tool_id"],"task":v["task_id"]}),
+        json!({"generation":generation,"role":v["role"],"tool":v["tool_id"],"task":v["task_id"],"checkpoint_id":request.checkpoint_id}),
     )?;
     sql(tx.commit())?;
     Ok(LeaseGrant {
@@ -263,7 +263,7 @@ pub fn acquire(root: &Path, request: &AcquireRequest) -> Result<LeaseGrant> {
         heartbeat_seconds: policy.lease.heartbeat_seconds,
     })
 }
-pub(super) fn verify(db: &rusqlite::Connection, key: &LeaseKey) -> Result<()> {
+pub(crate) fn verify(db: &rusqlite::Connection, key: &LeaseKey) -> Result<()> {
     let row:Option<(i64,String,i64)>=sql(db.query_row("SELECT owner_process_id,process_identity,expires_at FROM session_leases WHERE logical_session_id=?1 AND lease_token=?2 AND fencing_counter=?3",
         params![key.session_id,key.lease_token,key.generation],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional())?;
     match row {

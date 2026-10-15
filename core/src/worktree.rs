@@ -751,6 +751,10 @@ mod tests {
             context: None,
             prd_generation: None,
             session_management: None,
+            memory: None,
+            context_engine: None,
+            adaptive_compaction: None,
+            code_intelligence: None,
         };
 
         assert_eq!(
@@ -871,6 +875,7 @@ mod tests {
             display_name: "Codex".to_string(),
             performer: crate::tool::ToolPerformerSpec {
                 usage: None,
+                compaction: None,
                 runner: "runner.sh".to_string(),
                 command: "codex".to_string(),
                 args: vec!["exec".to_string(), "-".to_string()],

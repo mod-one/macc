@@ -76,6 +76,11 @@ enum SaveSubcommands {
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 enum Commands {
+    /// Memory, context, compaction and code intelligence operations
+    O2 {
+        #[command(subcommand)]
+        command: commands::o2::O2Command,
+    },
     /// Inspect and migrate canonical provider-neutral session ownership
     SessionStore {
         #[command(subcommand)]
@@ -1468,6 +1473,7 @@ fn run_with_engine_provider(
         std::env::current_exe().map_err(|e| MaccError::Validation(e.to_string()))?,
     );
     match &cli.command {
+        Some(Commands::O2 { command }) => commands::o2::O2::new(app.clone(), command.clone()).run(),
         Some(Commands::SessionStore { command }) => {
             commands::session_store::SessionStoreCommand::new(app.clone(), command.clone()).run()
         }

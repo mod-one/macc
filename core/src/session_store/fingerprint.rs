@@ -7,7 +7,7 @@ fn field(hash: &mut Sha256, tag: u8, bytes: &[u8]) {
     hash.update((bytes.len() as u64).to_le_bytes());
     hash.update(bytes);
 }
-pub(super) fn connection(db: &Connection) -> Result<String> {
+pub(crate) fn connection(db: &Connection) -> Result<String> {
     let mut schema = sql(db.prepare(
         "SELECT type,name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name",
     ))?;

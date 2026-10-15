@@ -1586,3 +1586,26 @@ mod tests {
         let _ = fs::remove_dir_all(&repo);
     }
 }
+
+/// Read tracked paths for the bounded native code intelligence index.
+pub fn tracked_source_files(root: &Path) -> Result<Vec<String>> {
+    let output = run_git_output(
+        root,
+        &["ls-files", "--cached", "-z"],
+        "list tracked source files",
+    )?;
+    if !output.status.success() {
+        return Err(MaccError::Validation(
+            "Unable to list tracked source files".into(),
+        ));
+    }
+    output
+        .stdout
+        .split(|b| *b == 0)
+        .filter(|p| !p.is_empty())
+        .map(|p| {
+            String::from_utf8(p.to_vec())
+                .map_err(|_| MaccError::Validation("Non-UTF8 tracked filename".into()))
+        })
+        .collect()
+}

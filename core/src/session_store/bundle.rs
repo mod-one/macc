@@ -53,6 +53,7 @@ fn read(path: &Path) -> Result<Connection> {
     }
     super::checkpoints::ready(&db)?;
     super::usage::ready(&db)?;
+    crate::o2::ready(&db)?;
     Ok(db)
 }
 pub(crate) fn validate_locked(root: &Path, source: &Path, meta: &Snapshot) -> Result<()> {

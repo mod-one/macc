@@ -1,3 +1,5 @@
+#[path = "o2_api_tests.rs"]
+mod o2_api_tests;
 #[path = "sessions_api_tests.rs"]
 mod sessions_api_tests;
 use super::*;

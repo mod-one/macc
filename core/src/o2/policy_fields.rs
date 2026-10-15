@@ -1,0 +1,177 @@
+//! Shared declarative client field catalog.
+use super::policy::*;
+pub fn fields() -> Vec<Field> {
+    let defaults = serde_json::to_value(Policy::default()).unwrap();
+    let specs = [
+        ("memory.enabled", "Memory Ledger", "bool", 0., 1.),
+        (
+            "memory.max_body_chars",
+            "Maximum memory characters",
+            "number",
+            120.,
+            12000.,
+        ),
+        (
+            "memory.search_limit",
+            "Memory result limit",
+            "number",
+            1.,
+            100.,
+        ),
+        (
+            "memory.min_confidence",
+            "Minimum automatic confidence",
+            "number",
+            0.,
+            1.,
+        ),
+        (
+            "memory.provider_note_ttl_days",
+            "Provider note lifetime (days)",
+            "number",
+            1.,
+            90.,
+        ),
+        ("context_engine.enabled", "Context Engine", "bool", 0., 1.),
+        (
+            "context_engine.push_memory_limit_tokens",
+            "Optional push token estimate limit",
+            "number",
+            0.,
+            4000.,
+        ),
+        (
+            "context_engine.pull_limit_tokens",
+            "Pull token estimate limit",
+            "number",
+            100.,
+            16000.,
+        ),
+        (
+            "context_engine.output_reduction",
+            "Output reduction",
+            "bool",
+            0.,
+            1.,
+        ),
+        (
+            "context_engine.max_output_bytes",
+            "Reduced output byte limit",
+            "number",
+            1024.,
+            1048576.,
+        ),
+        (
+            "adaptive_compaction.enabled",
+            "Adaptive compaction",
+            "bool",
+            0.,
+            1.,
+        ),
+        (
+            "adaptive_compaction.configure_native_auto",
+            "Opt in to documented native auto settings",
+            "bool",
+            0.,
+            1.,
+        ),
+        (
+            "adaptive_compaction.native_token_threshold",
+            "Absolute native token threshold (0 preserves default)",
+            "number",
+            0.,
+            2000000.,
+        ),
+        (
+            "adaptive_compaction.warning_ratio",
+            "Warning ratio",
+            "number",
+            0.1,
+            0.95,
+        ),
+        (
+            "adaptive_compaction.action_ratio",
+            "Action ratio",
+            "number",
+            0.1,
+            0.98,
+        ),
+        (
+            "adaptive_compaction.guard_ratio",
+            "Guard ratio",
+            "number",
+            0.1,
+            0.99,
+        ),
+        (
+            "adaptive_compaction.min_turns",
+            "Minimum turns before action",
+            "number",
+            1.,
+            100.,
+        ),
+        (
+            "adaptive_compaction.max_compactions_per_session",
+            "Maximum native compactions",
+            "number",
+            0.,
+            10.,
+        ),
+        (
+            "code_intelligence.enabled",
+            "Code Intelligence",
+            "bool",
+            0.,
+            1.,
+        ),
+        ("code_intelligence.routing", "Code routing", "enum", 0., 0.),
+        (
+            "code_intelligence.max_files",
+            "Index file limit",
+            "number",
+            1.,
+            100000.,
+        ),
+        (
+            "code_intelligence.max_file_bytes",
+            "Index file byte limit",
+            "number",
+            1024.,
+            1048576.,
+        ),
+        (
+            "code_intelligence.query_limit",
+            "Code result limit",
+            "number",
+            1.,
+            100.,
+        ),
+        (
+            "code_intelligence.output_tokens",
+            "Code query token estimate limit",
+            "number",
+            100.,
+            16000.,
+        ),
+    ];
+    specs
+        .into_iter()
+        .map(|(path, label, kind, min, max)| Field {
+            path: path.into(),
+            label: label.into(),
+            kind: kind.into(),
+            min: Some(min),
+            max: Some(max),
+            choices: if kind == "enum" {
+                vec!["native_only".into(), "adaptive".into()]
+            } else {
+                vec![]
+            },
+            default: defaults
+                .pointer(&format!("/{}", path.replace('.', "/")))
+                .unwrap()
+                .clone(),
+            activation: "next invocation/query; provider deployment is separate".into(),
+        })
+        .collect()
+}

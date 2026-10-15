@@ -3,7 +3,7 @@
 **Project:** MACC — Multi-Assistant Code Config  
 **Document:** Revised and unified specification of `10_MACC_O2_SQLite_Shared_Memory_Spec.md`  
 **Motifs:** O2 Cross-Agent Memory Ledger; Shared Context Store; Code Intelligence Providers; Multi-Tool Session Lifecycle; Adaptive Compaction  
-**Version:** 2.5 — specification with P0-A/P0-B/P0-C/P0-D implementation progress and mandatory TUI/Web coverage, proposed (not evidence of shipped O2 functionality)
+**Version:** 2.6 — P0 and P1 implementation progress, mandatory TUI/Web coverage; later stages remain proposed
 **Date:** 2026-10-15  
 **Code baseline inspected:** `df95759` — `feat: implement review and correction cycle budget management`  
 **Language:** English  
@@ -1789,6 +1789,48 @@ Drain requests and completion now share a complete phase definition, include par
 **P0-D adds baseline invocation usage telemetry.** See [Usage Telemetry](../USAGE_TELEMETRY.md) for the architecture, adapter mappings, primary references, provenance, rollout and limits. The provider-neutral service records a pending invocation before launch and a fenced, replay-safe receipt afterward, with separate cached/uncached input, output, optional reasoning and costs. Durable session watermarks prevent repeated cumulative charges on resume. Missing fields/baselines, resets and pending gaps remain unknown; totals expose per-dimension coverage and separate cost quality/currency. No raw transcript is persisted in usage rows and no token-price estimate is fabricated.
 
 New SQLite migrations include usage schema v1. Existing stores require a reviewed `usage-upgrade` with a consistent backup. TUI **J → Sessions → t** and Web **Setup → Sessions** expose receipts, totals, provenance and upgrade workflows. Both clients edit `session_management.usage.capture_mode` and `session_management.usage.max_output_bytes` through the shared catalog, preview and revision-checked Apply. Passive mode is the default; explicit structured mode changes only output flags and preserves model/effort, permissions and native session routing. Codex, Claude and Gemini have declarative fixture-tested profiles; other tools, including Vibe, retain unknown measurements until a verified mapping exists. Installed provider version probing, adaptive pressure, pricing, context-item attribution and native compaction remain later work. This completes the P0 baseline packages within their explicit SQLite rollout; it does not claim the complete O2 specification or live-provider certification.
+
+---
+
+### 20.4 P1 implementation progress and current boundaries
+
+The P1 increment implements the shared services in `core/src/o2/`, backed by the
+existing canonical session SQLite authority. See [O2 P1](../O2_P1.md) for the
+architecture decision, migration, canonical field catalog, client actions,
+adapter matrix, command examples and verification boundaries.
+
+- **P1-A:** checksummed Memory Ledger, source evidence, scoped FTS5 search,
+  explicit review/revalidation, conflict exclusion, freshness and known-secret
+  checks; reviewed additive migration with backup. Agent writes remain proposals.
+- **P1-B:** checkpoint-integrated retrieval, ranked/deduplicated optional memory,
+  separate mandatory PRD/pinned sources, versioned manifests, content-fingerprint
+  selection cache, exact invocation linkage to estimated context items, and
+  Unicode-safe explicit output reduction with raw artifact references.
+- **P1-C:** declarative adapter compaction profiles, bounded version/help probes,
+  opt-in native auto configuration, generation-fenced exact-pressure observations
+  where an adapter declares them, and existing safe checkpoint/rotation fallback.
+  Version/help is observed; actual native compression is not certified. Shipped
+  profiles provide no exact pressure pointers. Vibe native configuration and
+  explicit headless compact operations remain Unsupported rather than guessed.
+- **P1-D:** provider registration/traits, bundled current-file literal fallback,
+  reviewed lifecycle plans/receipts and rollback, owned-path removal, health/state
+  inspection and adaptive fallback routing. Native install downloads nothing.
+
+TUI **Sessions → o** and Web **Ops / Settings → Memory, Context, Compaction, Code
+Intelligence** expose policies, inspection and reviewed actions through the same
+application service. Edits use preview plus revision-checked apply, preserve
+policy drafts and honor existing process ownership. Four optional canonical
+sections (`memory`, `context_engine`, `adaptive_compaction`, `code_intelligence`)
+replace neither P0 invariants nor existing `context` output controls. Features
+are opt-in; existing SQLite projects need a reviewed O2 upgrade before enabling.
+`macc save` snapshots the new tables through the existing SQLite save path.
+
+The examples elsewhere in this specification remain target designs unless they
+match the delivered contract in O2 P1. External Graphify/Serena installers,
+parsed symbols/graphs, local MCP and universal provider-native tool-output
+interception are not delivered by P1. Full live-provider compression and token
+savings still require a separately controlled benchmark; mock headless regression
+coverage does not certify installed third-party binaries.
 
 ---
 

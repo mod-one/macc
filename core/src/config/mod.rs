@@ -30,6 +30,14 @@ pub struct CanonicalConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_management: Option<crate::session_store::SessionPolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory: Option<crate::o2::policy::MemoryPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_engine: Option<crate::o2::policy::ContextPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adaptive_compaction: Option<crate::o2::policy::CompactionPolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code_intelligence: Option<crate::o2::policy::CodePolicy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub prd_generation: Option<PrdGenerationConfig>,
 }
 
@@ -1080,6 +1088,7 @@ impl CanonicalConfig {
     }
 
     pub fn validate(&self) -> crate::Result<()> {
+        crate::o2::policy::from_config(self).validate()?;
         if let Some(policy) = &self.session_management {
             policy.validate()?;
         }
@@ -1142,6 +1151,10 @@ impl Default for CanonicalConfig {
             skills: None,
             context: None,
             session_management: None,
+            memory: None,
+            context_engine: None,
+            adaptive_compaction: None,
+            code_intelligence: None,
             prd_generation: None,
         }
     }
@@ -1843,6 +1856,10 @@ settings:
             skills: None,
             context: None,
             session_management: None,
+            memory: None,
+            context_engine: None,
+            adaptive_compaction: None,
+            code_intelligence: None,
             prd_generation: None,
         };
 

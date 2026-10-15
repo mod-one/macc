@@ -294,6 +294,7 @@ pub fn collect_all_findings(
     findings.extend(check_tool_login_states(paths));
     findings.extend(check_reference_branch(paths));
     findings.extend(check_coordinator_config(paths));
+    findings.extend(crate::o2::health::findings(&paths.root));
     findings
 }
 

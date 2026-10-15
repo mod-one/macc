@@ -1,4 +1,6 @@
 //! Exercise the actual adapter library and CLI session transport without AI calls.
+#[path = "support/o2_runner.rs"]
+mod o2_runner;
 use serde_json::{json, Value};
 use std::io::Write;
 use std::path::{Path, PathBuf};

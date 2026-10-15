@@ -24,6 +24,7 @@ pub enum SessionStoreCommands {
     },
     Usage,
     UsageBegin,
+    CompactionOptions,
     UsageEnd,
     UsageUpgrade {
         #[arg(long)]
@@ -105,6 +106,9 @@ impl Command for SessionStoreCommand {
         let root = &self.app.project_paths()?.root;
         match &self.command {
             SessionStoreCommands::Usage => emit(store::usage::inspect(root)?),
+            SessionStoreCommands::CompactionOptions => emit(
+                macc_core::o2::compaction::execution_options(root, &input()?)?,
+            ),
             SessionStoreCommands::UsageBegin => emit(store::usage::begin(root, &input()?)?),
             SessionStoreCommands::UsageEnd => emit(store::usage::end(root, &input()?)?),
             SessionStoreCommands::UsageUpgrade {

@@ -65,6 +65,14 @@ run_sqlite_session() {
   sid="$(jq -r '.provider_session_id // empty' <<<"$grant")"
   sid_is_new="$(jq -r 'if .is_new then 1 else 0 end' <<<"$grant")"
   prepare_usage
+  local native_options native_key native_value
+  if native_options="$(printf '%s' "$sqlite_lease_key" | session_service compaction-options)"; then
+    while IFS=$'\t' read -r native_key native_value; do
+      if [[ "$native_key" =~ ^[A-Z_]+$ ]]; then export "$native_key=$native_value"; fi
+    done < <(jq -r '.env | to_entries[]? | [.key,.value] | @tsv' <<<"$native_options")
+  else
+    echo 'Warning: native auto settings unavailable; existing configuration and checkpoint rotation retained' >&2
+  fi
   interval="$(jq -r '.heartbeat_seconds' <<<"$grant")"
   log_session_event "$(jq -r 'if .is_new then "session_reserved" else "session_reused" end' <<<"$grant")" "${sid:-pending}" "$$" "SQLite logical session $(jq -r .session_id <<<"$grant") generation=$(jq -r .generation <<<"$grant")"
   local owner="$$"

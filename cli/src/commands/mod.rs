@@ -19,6 +19,7 @@ pub mod lifecycle_support;
 pub mod lock;
 pub mod logs;
 pub mod migrate;
+pub mod o2;
 pub mod plan;
 pub mod prd;
 pub mod process;

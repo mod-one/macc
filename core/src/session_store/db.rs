@@ -71,6 +71,7 @@ pub(super) fn open(root: &Path, initialize: bool) -> Result<Connection> {
         sql(db.execute_batch(SCHEMA))?;
         sql(db.execute_batch(super::checkpoints::initial_schema()))?;
         sql(db.execute_batch(super::usage::initial_schema()))?;
+        sql(db.execute_batch(crate::o2::initial_schema()))?;
     }
     let version: Option<String> = sql(db
         .query_row(
@@ -91,7 +92,7 @@ pub(super) fn open(root: &Path, initialize: bool) -> Result<Connection> {
     Ok(db)
 }
 use rusqlite::OptionalExtension;
-pub(super) fn active(root: &Path) -> Result<(Connection, Authority)> {
+pub(crate) fn active(root: &Path) -> Result<(Connection, Authority)> {
     let a = authority(root)?
         .filter(|a| a.mode == "sqlite")
         .ok_or_else(|| error("SQLite authority is not active"))?;
@@ -147,7 +148,7 @@ pub(super) fn list(db: &Connection) -> Result<Vec<SessionView>> {
     }))?;
     rows.map(sql).collect()
 }
-pub(super) fn snapshot(db: &Connection, path: &Path) -> Result<()> {
+pub(crate) fn snapshot(db: &Connection, path: &Path) -> Result<()> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]

@@ -17,6 +17,7 @@ mod git;
 #[allow(clippy::result_large_err)]
 mod logs;
 mod mutation_gate;
+mod o2;
 mod ownership;
 mod plan;
 #[allow(clippy::result_large_err)]
@@ -240,6 +241,8 @@ fn build_web_router(state: WebState) -> Router {
         .route("/api/v1/health", get(health_handler))
         .route("/api/v1/sessions/checkpoints/:id",get(sessions::checkpoint))
         .route("/api/v1/sessions/checkpoints/:id/reconcile",get(sessions::reconciliation_plan).post(sessions::reconciliation_apply))
+        .route("/api/v1/o2", get(o2::status))
+        .route("/api/v1/o2/action", post(o2::action))
         .route("/api/v1/sessions/usage",get(usage::status))
         .route("/api/v1/sessions/store",get(sessions::status))
         .route("/api/v1/sessions/policy",put(sessions::policy))

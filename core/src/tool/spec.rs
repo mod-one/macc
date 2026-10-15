@@ -113,6 +113,8 @@ pub struct ModelTierSpec {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ToolPerformerSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<super::compaction::CompactionSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<super::usage::UsageSpec>,
     pub runner: String,
     pub command: String,
@@ -479,6 +481,9 @@ impl ToolSpec {
         }
 
         if let Some(performer) = &self.performer {
+            if let Some(profile) = &performer.compaction {
+                profile.validate()?;
+            }
             if performer.command.trim().is_empty() {
                 return Err(MaccError::Validation(format!(
                     "Performer command must be set for tool '{}'",

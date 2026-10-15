@@ -6,6 +6,11 @@ gitignore:
   - .vibe/
   - AGENTS.md
 performer:
+  compaction:
+    schema: native-auto-config-v1
+    version_pattern: '(?i)vibe.*[0-9]+\.[0-9]+'
+    documentation: https://docs.mistral.ai/vibe/code/cli/configuration
+    native_auto: null
   runner: adapters/vibe/vibe.performer.sh
   command: vibe
   args: ["--agent", "auto-approve", "--output", "text"]

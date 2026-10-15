@@ -66,6 +66,7 @@ pub fn begin(root: &Path, r: &BeginRequest) -> Result<CapturePlan> {
     };
     let record = UsageRecord {
         invocation_id: id(&r.key),
+        context_bundle_id: crate::o2::context_usage::bundle_for_invocation(&tx, &r.key)?,
         logical_session_id: r.key.session_id.clone(),
         generation: r.key.generation,
         task_id: identity["task_id"].as_str().unwrap_or_default().into(),
@@ -87,6 +88,7 @@ pub fn begin(root: &Path, r: &BeginRequest) -> Result<CapturePlan> {
         elapsed_ms: None,
     };
     sql(tx.execute("INSERT INTO invocation_usage(invocation_id,session_id,generation,lease_hash,plan_json,record_json,status,started_at,task_id,tool_id,phase,cost_quality) VALUES(?1,?2,?3,?4,?5,?6,'pending',?7,?8,?9,?10,'unknown')",params![record.invocation_id,r.key.session_id,r.key.generation,key_hash(&r.key),encoded(&plan)?,encoded(&record)?,now(),record.task_id,record.tool_id,record.phase]))?;
+    crate::o2::context_usage::record_items(&tx, &record)?;
     db::event(
         &tx,
         &r.key.session_id,
@@ -146,6 +148,12 @@ pub fn end(root: &Path, r: &EndRequest) -> Result<UsageRecord> {
     if observation.session.is_some() && observation.session != provider {
         observation.counters = Counters::default();
         observation.notes.push("provider_session_mismatch".into());
+    }
+    if !r.omitted
+        && r.raw.len() as u64 <= plan.max_output_bytes
+        && (observation.session.is_none() || observation.session == provider)
+    {
+        crate::o2::compaction::observe_pressure(&tx, root, &r.key, &r.raw)?;
     }
     record.reported = observation.counters;
     record.notes = observation.notes;

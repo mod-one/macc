@@ -217,3 +217,12 @@ Pointers used in ToolSpecs that do not start with one of these roots will be rej
 Note:
 
 - Exact root `/tools/config/<id>` (without trailing slash) is also valid.
+
+## O2 P1 policies
+
+The optional top-level sections `memory`, `context_engine`,
+`adaptive_compaction` and `code_intelligence` use a shared typed field catalog
+and revision-checked preview/apply in TUI and Web. Features default to disabled;
+Context Engine depends on Memory Ledger. Native compaction configuration requires
+a separate opt-in and matching adapter version/help probe. See [O2 P1](O2_P1.md)
+for defaults, SQLite upgrade, client routes, commands and capability boundaries.

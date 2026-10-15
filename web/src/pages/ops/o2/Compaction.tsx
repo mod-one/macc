@@ -1,0 +1,22 @@
+import { useState } from 'react';
+import { o2Action } from '../../../api/o2';
+import { getSessions, type LogicalSession } from '../../../api/sessions';
+interface Probe { tool_id: string; state: string; version: string | null; native_auto: string; explicit_headless: string; diagnostics: string[] }
+export default function Compaction() {
+  const [rows, setRows] = useState<Probe[]>([]); const [sessions, setSessions] = useState<LogicalSession[]>([]); const [details, setDetails] = useState<unknown>(null); const [error, setError] = useState(''); const [busy, setBusy] = useState(false); const [uses, setUses] = useState(3); const [budget, setBudget] = useState(20); const [tokens, setTokens] = useState(''); const [window, setWindow] = useState(''); const [rotating, setRotating] = useState<string | null>(null);
+  const run = async (action: () => Promise<void>) => { setBusy(true); setError(''); try { await action(); } catch (e) { setError(String(e)); } finally { setBusy(false); } };
+  return <section aria-label="Compaction"><h2>Compaction and rotation</h2><p>Version/help observations describe the installed binary, not successful compression. Native settings are opt-in in Policies. Unknown context pressure stays unknown. Checkpoint rotation remains the fallback.</p>
+    <button disabled={busy} onClick={() => { void run(async () => { setRows(await o2Action<Probe[]>('compaction_list')); setSessions((await getSessions()).sessions); }); }}>Refresh compaction capabilities</button>
+    {rows.map(p => <article key={p.tool_id}><h3>{p.tool_id} · {p.state}</h3><p>{p.version ?? 'Version unknown'}</p><p>Native auto: {p.native_auto}</p><p>Explicit headless: {p.explicit_headless}</p><p>{p.diagnostics.join('; ')}</p><button disabled={busy} onClick={() => { void run(async () => { setDetails(await o2Action('compaction_probe', { tool_id: p.tool_id })); setRows(await o2Action<Probe[]>('compaction_list')); }); }}>Probe {p.tool_id} version/help</button></article>)}
+    <button disabled={busy} onClick={() => { void run(async () => { setDetails(await o2Action('compaction_state')); }); }}>Inspect runtime pressure and decisions</button>
+    <h3>Decision simulation</h3><p>These manually entered values are hypothetical. They do not change runtime metrics or execute compaction.</p>
+    <label>Simulated session uses<input type="number" min={0} value={uses} onChange={e => setUses(Number(e.target.value))} /></label>
+    <label>Invocation fallback budget<input type="number" min={1} value={budget} onChange={e => setBudget(Number(e.target.value))} /></label>
+    <label>Observed context tokens (blank means unknown)<input type="number" min={0} value={tokens} onChange={e => setTokens(e.target.value)} /></label>
+    <label>Effective window (blank means unknown)<input type="number" min={1} value={window} onChange={e => setWindow(e.target.value)} /></label>
+    <button disabled={busy} onClick={() => { void run(async () => { setDetails(await o2Action('compaction_preview', { uses, budget, context_tokens: tokens === '' ? null : Number(tokens), window: window === '' ? null : Number(window), in_flight: false })); }); }}>Preview compaction decision</button>
+    <h3>Scoped manual rotation</h3><ul>{sessions.map(s => <li key={s.id}>{s.task_id} · {s.role} · {s.tool_id} · {s.status}<button disabled={busy} onClick={() => { void run(async () => { setDetails(await o2Action('checkpoint_create', { id: s.id })); }); }}>Create checkpoint for {s.task_id}</button><button disabled={busy} onClick={() => setRotating(s.id)}>Review rotation of {s.task_id}</button></li>)}</ul>
+    {rotating && <><p>Close logical session {rotating}? The next invocation starts a fresh transcript from the task checkpoint. Git work stays in place. Active leases prevent closure.</p><button disabled={busy} onClick={() => { void run(async () => { setDetails(await o2Action('rotate', { id: rotating, confirmed: true })); setRotating(null); setSessions((await getSessions()).sessions); }); }}>Confirm scoped rotation</button><button onClick={() => setRotating(null)}>Cancel rotation</button></>}
+    {details !== null && <pre style={{ whiteSpace: 'pre-wrap' }}>{JSON.stringify(details, null, 2)}</pre>}{error && <p role="alert">{error}</p>}
+  </section>;
+}

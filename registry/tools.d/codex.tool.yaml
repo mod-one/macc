@@ -6,6 +6,15 @@ gitignore:
   - .codex/
   - AGENTS.md
 performer:
+  compaction:
+    schema: native-auto-config-v1
+    version_pattern: '(?m)^codex-cli [0-9]+\.[0-9]+'
+    documentation: https://developers.openai.com/codex/config-reference/
+    native_auto:
+      format: toml
+      path: .codex/config.toml
+      key: model_auto_compact_token_limit
+      unit: tokens
   runner: adapters/codex/codex.performer.sh
   command: codex
   # Codex accepts instructions as a bare positional argument: `codex exec "<instructions>"`.

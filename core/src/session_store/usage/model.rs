@@ -34,6 +34,8 @@ impl Counters {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageRecord {
     pub invocation_id: String,
+    #[serde(default)]
+    pub context_bundle_id: Option<String>,
     pub logical_session_id: String,
     pub generation: i64,
     pub task_id: String,

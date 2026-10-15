@@ -11,6 +11,7 @@ pub mod domain;
 pub mod engine;
 pub mod fs_lock;
 pub mod git;
+pub mod o2;
 pub mod session_store;
 pub use config::migrate;
 pub mod mcp_json;
@@ -580,6 +581,10 @@ pub fn init(paths: &ProjectPaths, force: bool) -> Result<()> {
             context: None,
             prd_generation: None,
             session_management: None,
+            memory: None,
+            context_engine: None,
+            adaptive_compaction: None,
+            code_intelligence: None,
         };
         let yaml = default_config.to_yaml().map_err(|e| {
             MaccError::Validation(format!("Failed to serialize default config: {}", e))

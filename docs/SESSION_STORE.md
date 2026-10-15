@@ -10,7 +10,7 @@ same Rust services. There is no provider-name dispatch in this subsystem.
 SQLite is an explicit rollout. Existing projects retain P0-A JSON behavior until
 an operator reviews and applies migration. P0-C task checkpoints and rotation build on this service; see
 [Task Checkpoints](TASK_CHECKPOINTS.md). P0-D adds normalized invocation usage through the same service; see
-[Usage Telemetry](USAGE_TELEMETRY.md).
+[Usage Telemetry](USAGE_TELEMETRY.md). P1 extends the same database with reviewed memory, context and provider state; see [O2 P1](O2_P1.md).
 
 ## Authority and persistence
 

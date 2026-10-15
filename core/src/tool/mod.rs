@@ -1,4 +1,5 @@
 pub mod args;
+pub mod compaction;
 pub mod descriptor;
 pub mod loader;
 pub mod registry;

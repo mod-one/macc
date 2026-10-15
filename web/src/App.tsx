@@ -10,6 +10,7 @@ const Dashboard = lazy(() => import('./pages/Dashboard'));
 const Tools = lazy(() => import('./pages/config/Tools'));
 const Standards = lazy(() => import('./pages/config/Standards'));
 const Skills = lazy(() => import('./pages/config/Skills'));
+const O2 = lazy(() => import('./pages/ops/O2'));
 const Sessions = lazy(() => import('./pages/ops/Sessions'));
 const Settings = lazy(() => import('./pages/config/Settings'));
 const Prd = lazy(() => import('./pages/Prd'));
@@ -52,6 +53,7 @@ const App: React.FC = () => {
             <Route path="skills" element={<Skills />} />
             <Route path="settings" element={<Settings />} />
             <Route path="sessions" element={<Sessions />} />
+            {['memory', 'context', 'compaction', 'code-intelligence', 'o2'].map(path => <Route key={path} path={path} element={<O2 />} />)}
           </Route>
 
           {/* Workflow stages */}
@@ -69,6 +71,7 @@ const App: React.FC = () => {
             <Route path="worker/:id" element={<WorkerDetail />} />
             <Route path="live" element={<Live />} />
             <Route path="sessions" element={<Sessions />} />
+            {['memory', 'context', 'compaction', 'code-intelligence', 'o2'].map(path => <Route key={path} path={path} element={<O2 />} />)}
             <Route path="locks" element={<Locks />} />
             <Route path="diagnostics" element={<Diagnostics />} />
             <Route path="logs" element={<Logs />} />
