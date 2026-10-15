@@ -14,8 +14,7 @@ performer:
     arg: "-p"
   session:
     enabled: true
-    scope: worktree
-    init_prompt: "Bonjour"
+    scope: task_role_tool
     id_strategy: generated
     # `-r <uuid>` CONTINUES an existing conversation. `--session-id <uuid>`
     # OPENS one under that id and fails with "Session ID <uuid> is already in

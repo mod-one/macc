@@ -32,9 +32,8 @@ performer:
     # performer_lib.sh appends it as the last argument when prompt_arg is absent.
   session:
     enabled: true
-    scope: worktree
-    init_prompt: "Bonjour"
-    extract_regex: "session[[:space:]]+id:[[:space:]]*([[:alnum:]-]+)"
+    scope: task_role_tool
+    extract_regex: "^session[[:space:]]+id:[[:space:]]*([[:alnum:]-]+)[[:space:]]*$"
     resume:
       command: codex
       args: ["--model", "{model}", "-c", 'model_reasoning_effort="{effort}"', "--yolo", "exec", "resume", "{session_id}"]

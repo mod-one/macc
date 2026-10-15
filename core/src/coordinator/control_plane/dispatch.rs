@@ -295,7 +295,8 @@ fn resume_attached_worktree(
         });
     }
     let last_commit = crate::git::head_commit(&path)?;
-    let active_session_id = read_session_id_from_state(repo_root, tool, &path);
+    let active_session_id =
+        read_session_id_from_state(repo_root, tool, &path, task_id, "performer");
 
     let msg = format!(
         "resume_same_worktree task={} path={} branch={} head={}",
@@ -413,7 +414,8 @@ pub(super) async fn acquire_worktree_for_dispatch(
                 skipped_reset
             ));
         }
-        let active_session_id = read_session_id_from_state(repo_root, &task.tool, &path);
+        let active_session_id =
+            read_session_id_from_state(repo_root, &task.tool, &path, &task.id, "performer");
         return Ok(AcquiredWorktree {
             path,
             branch,
@@ -462,7 +464,8 @@ pub(super) async fn acquire_worktree_for_dispatch(
     let last_commit = crate::git::head_commit_async(&created.path)
         .await
         .unwrap_or_default();
-    let active_session_id = read_session_id_from_state(repo_root, &task.tool, &created.path);
+    let active_session_id =
+        read_session_id_from_state(repo_root, &task.tool, &created.path, &task.id, "performer");
     Ok(AcquiredWorktree {
         path: created.path,
         branch: created.branch,

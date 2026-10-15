@@ -189,9 +189,9 @@ else
 fi
 
 # ── 4. session lock is flock-based and self-healing ─────────────────────────
-LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/adapters/shared/performer_lib.sh"
+LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/adapters/shared/session_store.sh"
 if grep -q 'mkdir "\$session_lock_dir"' "$LIB"; then
-  fail "session lock no longer uses mkdir" "performer_lib.sh still mkdir-locks the session file"
+  fail "session lock no longer uses mkdir" "session_store.sh still mkdir-locks the session file"
 else
   pass "session lock no longer uses mkdir"
 fi

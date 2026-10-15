@@ -6,6 +6,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+#[cfg(test)]
+#[path = "session_recovery_tests.rs"]
+mod recovery_tests;
+
 const TOOL_SESSIONS_REL_PATH: &str = ".macc/state/tool-sessions.json";
 
 fn persist_sessions_file(path: &Path, value: &Value) -> Result<()> {
@@ -313,7 +317,7 @@ pub fn restore_sessions(repo_root: &Path, name: &str, dry_run: bool) -> Result<S
 
             // Merge sessions: snapshot entries fill in gaps (don't overwrite existing).
             // New-format entries (keyed by session_id, carrying a "status" field) are
-            // reset to "available" on restore so performers can claim them immediately.
+            // restored without granting automatic reuse to unclean active leases.
             // Old-format entries (keyed by worktree path, with a nested "session_id"
             // sub-field) are copied as-is for backward compatibility but will be ignored
             // by the pool lookup in the performers.
@@ -332,13 +336,15 @@ pub fn restore_sessions(repo_root: &Path, name: &str, dry_run: bool) -> Result<S
                 for (key, val) in snap_sessions {
                     if !current_sessions.contains_key(key) {
                         let mut session_val = val.clone();
-                        // Reset new-format sessions to available; clear owner fields.
+                        // Quarantine unclean sessions; preserve immutable history identity.
                         if val.get("session_id").is_none() {
                             if let Some(obj) = session_val.as_object_mut() {
-                                obj.insert(
-                                    "status".to_string(),
-                                    Value::String("available".to_string()),
-                                );
+                                if obj.get("status").and_then(Value::as_str) == Some("active") {
+                                    obj.insert(
+                                        "status".to_string(),
+                                        Value::String("abandoned".to_string()),
+                                    );
+                                }
                                 obj.remove("owner_worktree");
                                 obj.remove("owner_task_id");
                                 obj.remove("owner_pid");
@@ -434,9 +440,10 @@ pub struct ReleasedSession {
     pub task_id: Option<String>,
 }
 
-/// Release any active session lease associated with a finished job (by tool, worktree, or task_id).
-/// This ensures sessions do not remain stuck "active" when performers exit unexpectedly
-/// without executing their EXIT trap.
+/// Quarantine unclean leases associated with a finished job. Every supplied
+/// ownership constraint must match and the owner must be dead. Successful
+/// runners release their own leases; an orphaned provider may outlive its runner
+/// and must not be resumed automatically.
 pub fn release_job_sessions(
     repo_root: &Path,
     tool_id: Option<&str>,
@@ -464,7 +471,6 @@ pub fn release_job_sessions(
         })?;
         let mut released = Vec::new();
         let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-        let wt_str = worktree.map(|p| p.to_string_lossy().to_string());
         if let Some(tools) = root.get_mut("tools").and_then(Value::as_object_mut) {
             for (curr_tool_id, tool_val) in tools.iter_mut() {
                 if let Some(target_tool) = tool_id {
@@ -489,37 +495,16 @@ pub fn release_job_sessions(
                             .get("owner_task_id")
                             .and_then(Value::as_str)
                             .map(|s| s.to_string());
-                        let owner_wt = entry
-                            .get("owner_worktree")
-                            .and_then(Value::as_str)
-                            .map(|s| s.to_string());
-                        let pid = entry.get("owner_pid").and_then(|v| {
-                            if let Some(n) = v.as_i64() {
-                                Some(n)
-                            } else if let Some(s) = v.as_str() {
-                                s.parse::<i64>().ok()
-                            } else {
-                                None
-                            }
-                        });
-
-                        let matches = match (task_id, &wt_str) {
-                            (Some(tid), Some(wt)) => {
-                                owner_tid.as_deref() == Some(tid)
-                                    || owner_wt.as_deref() == Some(wt.as_str())
-                            }
-                            (Some(tid), None) => owner_tid.as_deref() == Some(tid),
-                            (None, Some(wt)) => owner_wt.as_deref() == Some(wt.as_str()),
-                            (None, None) => true,
-                        };
-
-                        if matches {
+                        let pid = crate::coordinator::session_identity::owner_pid(entry);
+                        if crate::coordinator::session_identity::finished_job_can_release(
+                            entry, worktree, task_id,
+                        ) {
                             let tid_to_record =
                                 task_id.map(|s| s.to_string()).or(owner_tid.clone());
                             if let Some(obj) = entry.as_object_mut() {
                                 obj.insert(
                                     "status".to_string(),
-                                    Value::String("available".to_string()),
+                                    Value::String("abandoned".to_string()),
                                 );
                                 obj.insert(
                                     "heartbeat_epoch".to_string(),
@@ -558,10 +543,11 @@ pub fn release_job_sessions(
 /// At coordinator startup or during recovery, reset sessions that are stuck "active"
 /// because the performer exited without running its EXIT trap (e.g. SIGKILL, OOM),
 /// or whose owner process is no longer alive.
-/// Any session whose heartbeat_epoch is 0, older than `lease_ttl_seconds`, or whose
-/// owner_pid is dead is transitioned to "available" with owner fields cleared.
+/// Only sessions with a verified dead owner are quarantined as abandoned. A dead
+/// runner cannot prove its provider child exited. Neither an expired heartbeat
+/// nor a missing owner permits automatic transcript reuse.
 /// Returns the number of sessions that were reset.
-pub fn reset_stale_active_sessions(repo_root: &Path, lease_ttl_seconds: u64) -> Result<usize> {
+pub fn reset_stale_active_sessions(repo_root: &Path, _lease_ttl_seconds: u64) -> Result<usize> {
     let sessions_path = repo_root.join(TOOL_SESSIONS_REL_PATH);
     if !sessions_path.exists() {
         return Ok(0);
@@ -581,7 +567,6 @@ pub fn reset_stale_active_sessions(repo_root: &Path, lease_ttl_seconds: u64) -> 
                 e
             ))
         })?;
-        let now = chrono::Utc::now().timestamp();
         let mut reset_count = 0usize;
         let mut recovered_records = Vec::new();
         let recovered_at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
@@ -601,26 +586,12 @@ pub fn reset_stale_active_sessions(repo_root: &Path, lease_ttl_seconds: u64) -> 
                         if status != "active" {
                             continue;
                         }
-                        let hb = entry
-                            .get("heartbeat_epoch")
-                            .and_then(Value::as_i64)
-                            .unwrap_or(0);
-                        let age = now - hb;
-
-                        let pid = entry.get("owner_pid").and_then(|v| {
-                            if let Some(n) = v.as_i64() {
-                                Some(n)
-                            } else if let Some(s) = v.as_str() {
-                                s.parse::<i64>().ok()
-                            } else {
-                                None
-                            }
-                        });
+                        let pid = crate::coordinator::session_identity::owner_pid(entry);
                         let pid_dead = pid
                             .map(|p| !crate::coordinator::helpers::is_pid_running(p))
                             .unwrap_or(false);
 
-                        if hb == 0 || age > lease_ttl_seconds as i64 || pid_dead {
+                        if pid_dead {
                             let task_id = entry
                                 .get("owner_task_id")
                                 .and_then(Value::as_str)
@@ -628,7 +599,7 @@ pub fn reset_stale_active_sessions(repo_root: &Path, lease_ttl_seconds: u64) -> 
                             if let Some(obj) = entry.as_object_mut() {
                                 obj.insert(
                                     "status".to_string(),
-                                    Value::String("available".to_string()),
+                                    Value::String("abandoned".to_string()),
                                 );
                                 obj.remove("owner_worktree");
                                 obj.remove("owner_task_id");
@@ -642,13 +613,7 @@ pub fn reset_stale_active_sessions(repo_root: &Path, lease_ttl_seconds: u64) -> 
                                     Value::String(recovered_at.clone()),
                                 );
                             }
-                            let reason = if pid_dead {
-                                "owner PID is not running"
-                            } else if hb == 0 {
-                                "heartbeat epoch is 0"
-                            } else {
-                                "lease heartbeat expired"
-                            };
+                            let reason = "owner PID is not running; transcript quarantined until verified recovery";
                             recovered_records.push((
                                 tool_id.clone(),
                                 sid.clone(),
@@ -1018,6 +983,14 @@ mod tests {
     fn restore_sessions_resets_lease_status() {
         let root = temp_dir("macc_sess_restore_lease");
         seed_sessions_file(&root);
+        let path = root.join(TOOL_SESSIONS_REL_PATH);
+        let mut live: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        live["tools"]["claude"]["sessions"]["claude-s1"]["status"] = json!("active");
+        live["tools"]["claude"]["sessions"]["claude-s1"]["owner_pid"] = json!(std::process::id());
+        live["tools"]["claude"]["sessions"]["claude-s1"]["session_identity"] =
+            json!({"task_id":"A", "role":"reviewer"});
+        live["tools"]["claude"]["sessions"]["claude-s2"]["status"] = json!("closed");
+        persist_sessions_file(&path, &live).unwrap();
         save_sessions(&root, Some("snap")).expect("save");
 
         // Remove sessions file to force a clean restore
@@ -1028,11 +1001,23 @@ mod tests {
 
         let restored: Value =
             serde_json::from_str(&fs::read_to_string(&sessions_path).unwrap()).unwrap();
-        // Restored sessions should have status "available" and a restored_at timestamp.
+        assert_eq!(
+            restored["tools"]["claude"]["sessions"]["claude-s2"]["status"],
+            "closed"
+        );
+        assert_eq!(
+            restored["tools"]["codex"]["sessions"]["codex-s1"]["status"],
+            "available"
+        );
+        assert_eq!(
+            restored["tools"]["claude"]["sessions"]["claude-s1"]["session_identity"],
+            live["tools"]["claude"]["sessions"]["claude-s1"]["session_identity"]
+        );
+        // An active snapshot cannot prove provider exit; never auto-resume it.
         assert_eq!(
             restored["tools"]["claude"]["sessions"]["claude-s1"]["status"].as_str(),
-            Some("available"),
-            "restored session should be 'available'"
+            Some("abandoned"),
+            "unclean restored session must be quarantined"
         );
         assert!(
             restored["tools"]["claude"]["sessions"]["claude-s1"]["restored_at"]
@@ -1107,8 +1092,8 @@ mod tests {
 
         let reset = reset_stale_active_sessions(&root, 1800).expect("reset");
         assert_eq!(
-            reset, 3,
-            "stale-sid, zero-hb-sid, and dead-pid-sid should be reset"
+            reset, 1,
+            "only verified dead owners can be reset; a live owner keeps its lease"
         );
 
         let after: Value =
@@ -1119,16 +1104,14 @@ mod tests {
         assert_eq!(codex["fresh-sid"]["status"].as_str(), Some("active"));
         assert_eq!(codex["fresh-sid"]["owner_task_id"].as_str(), Some("TASK-A"));
 
-        // Stale sessions reset.
-        assert_eq!(codex["stale-sid"]["status"].as_str(), Some("available"));
-        assert!(codex["stale-sid"]["owner_task_id"].is_null());
-        assert_eq!(codex["stale-sid"]["heartbeat_epoch"].as_i64(), Some(0));
-        assert!(codex["stale-sid"]["recovered_at"].as_str().is_some());
+        // Heartbeat expiry (including zero) must not evict a live owner.
+        for sid in ["stale-sid", "zero-hb-sid"] {
+            assert_eq!(codex[sid]["status"].as_str(), Some("active"));
+            assert_eq!(codex[sid]["owner_pid"].as_str(), Some(current_pid.as_str()));
+            assert!(codex[sid]["recovered_at"].is_null());
+        }
 
-        assert_eq!(codex["zero-hb-sid"]["status"].as_str(), Some("available"));
-        assert!(codex["zero-hb-sid"]["owner_pid"].is_null());
-
-        assert_eq!(codex["dead-pid-sid"]["status"].as_str(), Some("available"));
+        assert_eq!(codex["dead-pid-sid"]["status"].as_str(), Some("abandoned"));
         assert!(codex["dead-pid-sid"]["owner_pid"].is_null());
 
         // Already-available session untouched.
@@ -1156,7 +1139,7 @@ mod tests {
                             "heartbeat_epoch": 123456,
                             "owner_task_id": "TASK-100",
                             "owner_worktree": "/path/to/worker-01",
-                            "owner_pid": "5555"
+                            "owner_pid": "99999999"
                         },
                         "job-sid-2": {
                             "status": "active",
@@ -1181,13 +1164,13 @@ mod tests {
         .expect("release");
         assert_eq!(released.len(), 1);
         assert_eq!(released[0].session_id, "job-sid-1");
-        assert_eq!(released[0].owner_pid, Some(5555));
+        assert_eq!(released[0].owner_pid, Some(99999999));
 
         let after: Value =
             serde_json::from_str(&fs::read_to_string(&sessions_path).unwrap()).unwrap();
         let claude = &after["tools"]["claude"]["sessions"];
 
-        assert_eq!(claude["job-sid-1"]["status"].as_str(), Some("available"));
+        assert_eq!(claude["job-sid-1"]["status"].as_str(), Some("abandoned"));
         assert_eq!(claude["job-sid-1"]["heartbeat_epoch"].as_i64(), Some(0));
         assert!(claude["job-sid-1"]["owner_worktree"].is_null());
         assert!(claude["job-sid-1"]["owner_pid"].is_null());

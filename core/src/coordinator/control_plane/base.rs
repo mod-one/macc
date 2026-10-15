@@ -2777,14 +2777,29 @@ mod tests {
         let state_dir = repo.join(".macc/state");
         fs::create_dir_all(&state_dir).expect("create state directory");
 
+        fs::create_dir_all(worktree.join(".macc")).unwrap();
+        let spec = serde_json::json!({"id":"codex", "performer":{"session":{
+            "enabled":true, "scope":"task_role_tool"}}});
+        fs::write(worktree.join(".macc/tool.json"), spec.to_string()).unwrap();
+        let identity = crate::coordinator::session_identity::identity(
+            &repo,
+            &worktree,
+            "L4-SES-002",
+            "performer",
+            "codex",
+            &spec,
+            &crate::coordinator::session_identity::SessionRouting::from_environment(),
+        )
+        .unwrap();
         let state_payload = serde_json::json!({
             "tools": {
                 "codex": {
                     "sessions": {
                         "codex-session-new": {
+                            "session_identity": identity,
                             "status": "available",
                             "created_at": "2026-04-01T00:00:00Z",
-                            "updated_at": "2026-04-01T00:00:00Z"
+                            "updated_at": chrono::Utc::now().to_rfc3339()
                         }
                     }
                 }

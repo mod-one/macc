@@ -43,9 +43,12 @@ STUB
 chmod +x "$WORK/bin/codex"
 export PATH="$WORK/bin:$PATH"
 
+source "$REPO_ROOT/automat/tests/session_fixture.sh"
+
 SID=01a0c3f1-c956-7ab2-a9d9-78a7e85ccdc1
 for attempt in 1 2; do
   for scenario in transport quota completed task_error; do
+    seed_owned_session "$WORK/repo" "$WORK/repo/.macc/tool.json" codex T-1 "$SID"
     log="$WORK/$attempt-$scenario.log"
     calls="$WORK/$attempt-$scenario.calls"
     rc=0

@@ -77,6 +77,7 @@ shell_snapshot = false
 model_reasoning_effort = "low"
 TOML
 cp "$WORK/repo/.codex/config.toml" "$WORK/expected.toml"
+rm -f "$WORK/repo/.macc/state/tool-sessions.json"
 L="$WORK/b.log"; MACC_MODEL_TIER=heavy MACC_MODEL_ROUTING_MODE=auto run "$L" --attempt 1 --max-attempts 1
 pair "--model" "gpt-5.5" "$L" && pass "tier model applied" || fail "tier model; argv: $(argv "$L")"
 pair "-c" 'model_reasoning_effort="high"' "$L" \

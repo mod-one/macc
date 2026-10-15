@@ -89,50 +89,7 @@ fn tool_session_enabled(tool_json_path: &Path) -> bool {
         .unwrap_or(true)
 }
 
-pub(super) fn read_session_id_from_state(
-    repo_root: &Path,
-    tool_id: &str,
-    _worktree_path: &Path,
-) -> Option<String> {
-    let path = repo_root.join(".macc/state/tool-sessions.json");
-    let raw = std::fs::read_to_string(&path).ok()?;
-    let root: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    let sessions = root
-        .get("tools")?
-        .get(tool_id)?
-        .get("sessions")?
-        .as_object()?;
-    // Pool model: sessions are keyed by session_id; find the first available one.
-    // Old-format entries (keyed by worktree path) carry a nested "session_id"
-    // sub-field and are skipped — they belong to the previous per-worktree scheme.
-    for (session_id, entry) in sessions {
-        if entry.get("session_id").is_some() {
-            continue;
-        }
-        let status = entry
-            .get("status")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("available");
-        if status != "active" {
-            return Some(session_id.clone());
-        }
-        let pid = entry.get("owner_pid").and_then(|v| {
-            if let Some(n) = v.as_i64() {
-                Some(n)
-            } else if let Some(s) = v.as_str() {
-                s.parse::<i64>().ok()
-            } else {
-                None
-            }
-        });
-        if let Some(p) = pid {
-            if !crate::coordinator::helpers::is_pid_running(p) {
-                return Some(session_id.clone());
-            }
-        }
-    }
-    None
-}
+pub(super) use crate::coordinator::session_identity::read_session_id as read_session_id_from_state;
 
 pub(super) fn task_active_session_id_from_registry(
     registry: &serde_json::Value,
@@ -154,7 +111,9 @@ pub(super) fn refresh_task_active_session_id_in_registry(
     tool_id: &str,
     worktree_path: &Path,
 ) -> Result<Option<String>> {
-    let Some(session_id) = read_session_id_from_state(repo_root, tool_id, worktree_path) else {
+    let Some(session_id) =
+        read_session_id_from_state(repo_root, tool_id, worktree_path, task_id, "performer")
+    else {
         return Ok(None);
     };
     let mut typed = TaskRegistry::from_value(registry)?;
@@ -383,22 +342,15 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
         // Read existing session ID from tool-sessions.json so we can inject it
         // into the tool runner command, just like the performer.sh wrapper does.
         // Skip entirely when the tool has session.enabled = false.
+        let session_role = crate::coordinator::session_identity::role_for_phase(mode);
         let mut session_id = if tool_session_enabled(&tool_json) {
-            let mut sid = read_session_id_from_state(self.repo_root, &phase_tool, &worktree);
-            // Fallback: if no session in state file, use the preserved session from
-            // the prior run (saved in task_runtime on error_with_changes / error_without_changes)
-            // so retries resume with cached context rather than cold-starting.
-            if sid.is_none() {
-                let rt = &task.task_runtime;
-                if rt.last_session_tool.as_deref() == Some(phase_tool.as_str()) {
-                    if let Some(ref s) = rt.last_session_id {
-                        if !s.is_empty() {
-                            sid = Some(s.clone());
-                        }
-                    }
-                }
-            }
-            sid
+            read_session_id_from_state(
+                self.repo_root,
+                &phase_tool,
+                &worktree,
+                task_id,
+                session_role,
+            )
         } else {
             None
         };
@@ -424,6 +376,7 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                     ),
                 )
                 .env("MACC_EVENT_TASK_ID", task_id)
+                .env("MACC_SESSION_ROLE", session_role)
                 .arg("--prompt-file")
                 .arg(&prompt_path)
                 .arg("--tool-json")
@@ -572,7 +525,13 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                 ),
             );
             // Refresh session ID so the next attempt can resume.
-            session_id = read_session_id_from_state(self.repo_root, &phase_tool, &worktree);
+            session_id = read_session_id_from_state(
+                self.repo_root,
+                &phase_tool,
+                &worktree,
+                task_id,
+                session_role,
+            );
         }
         let elapsed = chrono::Utc::now()
             .signed_duration_since(phase_started_at)

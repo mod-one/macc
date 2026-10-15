@@ -24,6 +24,7 @@ test-tool-runner:
 	bash automat/tests/test_codex_effort_args.sh
 	bash automat/tests/test_codex_resume_failure.sh
 	bash automat/tests/test_session_resume_flags.sh
+	python3 automat/tests/test_session_isolation.py
 
 test-contract:
 	cargo test -p macc-registry --test contract --locked

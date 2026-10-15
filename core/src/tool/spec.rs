@@ -51,8 +51,8 @@ pub struct ToolPerformerSessionSpec {
     pub resume: Option<ToolPerformerCommand>,
     /// Command that *opens* a session under a caller-chosen id, used on the
     /// first use of a freshly reserved id under `id_strategy: generated`.
-    /// Optional: when absent the runner falls back to `resume`, which is
-    /// correct for tools whose resume flag also creates on miss.
+    /// Without an explicit create contract the shared runner starts a normal
+    /// fresh invocation; it never guesses that a resume flag creates on miss.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub create: Option<ToolPerformerCommand>,
     /// Flags that ask this tool to OPEN a session under a given id rather than
@@ -507,9 +507,12 @@ impl ToolSpec {
             }
             if let Some(session) = &performer.session {
                 if let Some(scope) = &session.scope {
-                    if scope != "project" && scope != "worktree" {
+                    if !matches!(
+                        scope.as_str(),
+                        "project" | "worktree" | "task" | "task_role_tool"
+                    ) {
                         return Err(MaccError::Validation(format!(
-                            "Performer session scope must be 'project' or 'worktree' for tool '{}'",
+                            "Performer session scope must be 'task_role_tool', 'task', 'project' or 'worktree' for tool '{}'",
                             self.id
                         )));
                     }

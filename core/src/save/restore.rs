@@ -259,7 +259,7 @@ fn normalize_session_json(value: &mut serde_json::Value, project_root: &std::pat
             if let Some(status_val) = map.get_mut("status") {
                 if let Some(status_str) = status_val.as_str() {
                     if status_str == "active" {
-                        *status_val = serde_json::Value::String("available".to_string());
+                        *status_val = serde_json::Value::String("abandoned".to_string());
                     }
                 }
             }
@@ -357,7 +357,7 @@ mod tests {
                             "updated_at": "2026-01-01T00:00:00Z"
                         },
                         "session-new": {
-                            "status": "available",
+                            "status": "abandoned",
                             "created_at": "2026-01-01T00:00:00Z",
                             "heartbeat_epoch": 0
                         }

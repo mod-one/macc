@@ -102,13 +102,9 @@ run_performer() {
 # otherwise be parsed by grep as its own options.
 argv_has() { grep -qxF -- "$1" "$2"; }
 
+source "$REPO_ROOT/automat/tests/session_fixture.sh"
 seed_existing_session() {
-    cat > "$WORK/repo/.macc/state/tool-sessions.json" <<JSON
-{"tools":{"claude":{"sessions":{"$EXISTING_SID":{"created_at":"2026-08-28T11:05:11Z",
-"creation_reason":"generated","heartbeat_epoch":0,"last_task_id":"T-0",
-"last_used_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","status":"available",
-"updated_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","use_count":25}}}}}
-JSON
+    seed_owned_session "$WORK/repo" "$WORK/repo/.macc/tool.json" claude T-1 "$EXISTING_SID"
 }
 
 # ── 1. Reusing an existing session id ─────────────────────────────────────────

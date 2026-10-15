@@ -23,6 +23,7 @@ pub mod precondition_scope;
 pub mod preflight;
 pub mod rate_limit;
 pub mod runtime;
+pub mod session_identity;
 pub mod session_manager;
 pub mod state;
 pub mod state_runtime;
@@ -56,6 +57,11 @@ pub const COORDINATOR_EVENT_TYPES_V1: &[&str] = &[
     "task_runtime_stale",
     "phase_retry",
     "phase_skipped",
+    "session_reserved",
+    "session_reused",
+    "session_released",
+    "session_resume_rejected",
+    "session_recovered_stale",
     "events_rotated",
     "events_compacted",
     "storage_sync",

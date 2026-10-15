@@ -15,12 +15,9 @@ performer:
     arg: "--prompt"
   session:
     enabled: true
-    scope: worktree
-    init_prompt: "Hello"
-    extract_regex: "([0-9a-fA-F]{8}-[0-9a-fA-F-]{27})"
-    discover:
-      command: bash
-      args: ["-lc", "gemini --list-sessions 2>/dev/null | grep '\\[.*\\]' | tail -n 1 | sed 's/.*\\[\\(.*\\)\\].*/\\1/'"]
+    scope: task_role_tool
+    # Only accept explicit metadata emitted by the current invocation.
+    extract_regex: "^session[[:space:]]+id:[[:space:]]*([[:alnum:]-]+)[[:space:]]*$"
     resume:
       command: gemini
       args: ["--model", "{model}", "--resume", "{session_id}", "--sandbox", "false", "--approval-mode", "yolo"]

@@ -18,9 +18,8 @@ performer:
     arg: "--prompt"
   session:
     enabled: true
-    scope: worktree
-    init_prompt: "Hello"
-    id_strategy: generated
+    scope: task_role_tool
+    id_strategy: discovered
     resume:
       command: vibe
       args: ["--resume", "{session_id}", "--agent", "auto-approve", "--output", "text"]

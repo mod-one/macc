@@ -1763,6 +1763,13 @@ flowchart LR
 
 Introduce `session_management_v2`, `memory_ledger_v2`, `context_engine`, `adaptive_compaction`, `code_intelligence` and individual provider enabled flags. P0 session isolation hotfix must not be bypassed by turning off newer memory features. Ship a migration dry run, observability-only period, then staged enablement with quick rollback. Defaults should not auto-install Graphify/Serena or force unknown compaction commands.
 
+
+### 20.3 Initial P0 implementation progress
+
+The first implementation increment delivers **P0-A JSON session isolation hardening** through the common runner and native coordinator. See [Session Isolation](../SESSION_ISOLATION.md) for the versioned ownership contract, adapter behavior, recovery quarantine and regression commands. Task/role/project/configuration checks are mandatory and cannot be disabled. Existing TUI/Web log views expose the registered lifecycle events; this increment adds no editable policy switch.
+
+The inspected revision in §1.4 and §9.1 remains a historical baseline. The P0-A changes supersede its unsafe global session selection, unlocked shell fallback and unverified ID creation/discovery. The JSON store remains the mutable authority: **P0-B SQLite ownership/fencing, P0-C structured checkpoints/rotation and P0-D normalized usage telemetry remain pending**, including their dedicated TUI/Web workflows. This increment does not claim full P0 completion or verified live-provider capability probes.
+
 ---
 
 ## 21. Implementation Modules and Proposed File Tree

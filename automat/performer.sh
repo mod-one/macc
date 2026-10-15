@@ -956,7 +956,7 @@ run_tool() {
   if [[ -n "$performer_session_id" ]]; then
     session_args=("--session-id" "$performer_session_id")
   fi
-  "$script" \
+  MACC_SESSION_ROLE=performer "$script" \
     --prompt-file "$prompt_file" \
     --tool-json "$tool_json" \
     --repo "$repo" \
