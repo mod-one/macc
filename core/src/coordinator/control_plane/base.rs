@@ -962,6 +962,22 @@ pub async fn advance_tasks_native(
                 }
                 progressed = true;
             }
+            coordinator_engine::AdvanceTaskAction::BlockReviewBudget { task_id } => {
+                coordinator_engine::apply_phase_outcome_in_registry(
+                    &mut registry, &task_id, "fix",
+                    coordinator_engine::PhaseTransition { mode: "fix", next_state: crate::coordinator::WorkflowState::InProgress, runtime_phase: "fix" },
+                    None, Some("review budget exhausted with unresolved changes requested; work preserved and merge refused"), &now,
+                )?;
+                append_coordinator_event(
+                    repo_root,
+                    "task_blocked",
+                    &task_id,
+                    "review",
+                    "blocked",
+                    "Review budget exhausted with unresolved changes requested; merge refused",
+                )?;
+                progressed = true;
+            }
             coordinator_engine::AdvanceTaskAction::BlockNoBranch { task_id } => {
                 // Task reached merge-ready state but has no branch (worktree
                 // cleared by ghost cleanup before the completion was applied).

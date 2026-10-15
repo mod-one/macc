@@ -375,6 +375,8 @@ pub fn is_valid_workflow_transition(from: WorkflowState, to: WorkflowState) -> b
             | (WorkflowState::PrOpen, WorkflowState::Blocked)
             | (WorkflowState::PrOpen, WorkflowState::Abandoned)
             | (WorkflowState::ChangesRequested, WorkflowState::PrOpen)
+            // A successful correction re-enters configured validation before delivery.
+            | (WorkflowState::ChangesRequested, WorkflowState::InProgress)
             // ChangesRequested → Testing (re-test after fix)
             | (WorkflowState::ChangesRequested, WorkflowState::Testing)
             // ChangesRequested → Reviewing (re-review after fix)

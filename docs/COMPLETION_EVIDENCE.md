@@ -52,3 +52,18 @@ Reused worktrees receive the updated embedded performer and completion helper at
 launch. Existing running processes continue using the code they started with.
 Previously uncommitted no-change successes have no Git evidence to recover;
 a future run verifies them and creates their validation commits.
+
+## Checkpoints are not delivery
+
+WIP, draft, partial, checkpoint, fixup, squash and revert commit subjects do not
+complete tasks, even when they carry a task trailer. Explicit non-success result
+or failed-validation trailers also disqualify completion. Arbitrary mentions of
+a task ID are not proof. Supported legacy delivery subjects and MACC trailers
+remain accepted when no unfinished-work marker contradicts them.
+
+Startup reconciliation and cross-lot dependency discovery use this same rule.
+Branch sync also refuses a whole-branch merge when its newest commit for any
+mentioned task remains unfinished. A later delivery for that task can supersede
+its earlier checkpoints. Skipped branches retain all their commits and files.
+Previously persisted `merged` states are not automatically rolled back; existing
+incorrect historical states require explicit review and recovery.

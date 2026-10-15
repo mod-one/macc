@@ -191,7 +191,7 @@ pub fn discover_committed_task_ids(repo_root: &Path, head_ref: &str) -> Result<H
     let commits = read_commit_range(repo_root, None, head_ref)?;
     let mut ids = HashSet::new();
     for commit in &commits {
-        if let Some(task_id) = commit_message::parse(&commit.full_message).task_id {
+        if let Some(task_id) = crate::commit_completion::task_id(&commit.full_message) {
             ids.insert(task_id);
         }
     }
@@ -204,8 +204,7 @@ pub fn discover_committed_task_ids(repo_root: &Path, head_ref: &str) -> Result<H
 fn extract_task_ids_from_commits(commits: &[GitCommitInfo]) -> BTreeMap<String, (String, String)> {
     let mut found: BTreeMap<String, (String, String)> = BTreeMap::new();
     for commit in commits {
-        let parsed = commit_message::parse(&commit.full_message);
-        if let Some(task_id) = parsed.task_id {
+        if let Some(task_id) = crate::commit_completion::task_id(&commit.full_message) {
             found
                 .entry(task_id)
                 .or_insert_with(|| (commit.sha.clone(), commit.subject.clone()));
@@ -228,7 +227,10 @@ pub fn reconcile(registry: &TaskRegistry, commits: &[GitCommitInfo]) -> Reconcil
 
     for commit in commits {
         let parsed = commit_message::parse(&commit.full_message);
-        if let (Some(id), Some(verdict)) = (parsed.task_id, parsed.tags.get("gate_verdict")) {
+        if let (Some(id), Some(verdict)) = (
+            crate::commit_completion::task_id(&commit.full_message),
+            parsed.tags.get("gate_verdict"),
+        ) {
             if let Ok(verdict) = verdict.parse::<GateVerdict>() {
                 report.completion_verdicts.entry(id).or_insert(verdict);
             }
@@ -415,6 +417,23 @@ pub fn sync_unmerged_branches(
         let commits = read_commit_range(repo_root, Some(base_branch), branch)?;
         let task_commits = extract_task_ids_from_commits(&commits);
         let discovered_task_ids: Vec<String> = task_commits.keys().cloned().collect();
+        let unfinished = crate::commit_completion::unfinished_task_ids(
+            commits.iter().map(|commit| commit.full_message.as_str()),
+        );
+        if !unfinished.is_empty() {
+            out.push(SyncBranchResult {
+                branch: branch.clone(),
+                discovered_task_ids,
+                merged_task_ids: Vec::new(),
+                status: SyncBranchStatus::SkippedTaskState,
+                detail: Some(format!(
+                    "unfinished task commits without a later delivery: {}",
+                    unfinished.join(", ")
+                )),
+            });
+            continue;
+        }
+
         if discovered_task_ids.is_empty() {
             // Report only branches MACC created: a MACC-managed branch with no
             // trailers is a real signal (something committed without tagging).
@@ -1034,3 +1053,7 @@ mod tests {
         assert_eq!(registry.tasks[0].state, "todo");
     }
 }
+
+#[cfg(test)]
+#[path = "commit_reconciler_completion_tests.rs"]
+mod completion_tests;

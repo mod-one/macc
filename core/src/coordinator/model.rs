@@ -602,7 +602,7 @@ pub struct TaskRuntime {
     /// Cleared on successful dispatch or when the timestamp is in the past.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delayed_until: Option<String>,
-    /// Number of review cycles completed for this task.
+    /// Number of completed reviews; each rejected review still owns its correction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_cycles: Option<usize>,
     /// Active AI tool session ID currently associated with this task lifecycle.

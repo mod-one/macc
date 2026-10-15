@@ -1,5 +1,6 @@
 pub mod automation;
 pub mod catalog;
+pub mod commit_completion;
 pub mod commit_message;
 pub mod config;
 pub mod context;

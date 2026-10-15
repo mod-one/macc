@@ -96,3 +96,100 @@ fn sync_then_startup_reconciles_next_prd_and_survives_state_clear() {
         task.task_runtime.extra["completion_commit_sha"]
     );
 }
+
+#[test]
+fn published_wip_is_not_delivery_after_sync_startup_or_state_clear() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    std::fs::create_dir(root.join(".macc")).unwrap();
+    std::fs::write(
+        root.join(".gitignore"),
+        ".macc/\nperformer.sh\nworktree.prd.json\n",
+    )
+    .unwrap();
+    std::fs::write(root.join(".macc/macc.yaml"),"tools:\n  enabled: [codex]\nautomation:\n  coordinator:\n    reference_branch: main\n    sync_unmerged_branches: false\n    prd_file: task.json\n").unwrap();
+    std::fs::write(
+        root.join("task.json"),
+        r#"{"tasks":[{"id":"TASK-001","title":"Finish implementation","priority":"1"}]}"#,
+    )
+    .unwrap();
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["config", "user.name", "MACC Test"]);
+    git(root, &["config", "user.email", "test@example.invalid"]);
+    git(root, &["add", "."]);
+    git(root, &["commit", "-qm", "Initialize fixture"]);
+    git(
+        root,
+        &[
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "wip: TASK-001 implementation\n\n[macc:task TASK-001]",
+        ],
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_macc"))
+        .args(["--cwd", root.to_str().unwrap(), "coordinator", "sync"])
+        .env("MACC_INTERNAL_INVOCATION", "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let paths = ProjectPaths::from_root(root);
+    let db = SqliteStorage::new(CoordinatorStoragePaths::from_project_paths(&paths));
+    assert!(!db
+        .load_snapshot()
+        .unwrap()
+        .registry
+        .find_task("TASK-001")
+        .unwrap()
+        .is_merged());
+    let config = macc_core::load_canonical_config(&paths.config_path).unwrap();
+    let env = macc_core::coordinator::types::CoordinatorEnvConfig::default();
+    for clear in [false, true] {
+        if clear {
+            std::fs::remove_file(paths.root.join(".macc/state/coordinator.sqlite")).unwrap();
+        }
+        macc_core::coordinator::delivery_evidence::reconcile_before_dispatch(
+            root,
+            &root.join("task.json"),
+            config.automation.coordinator.as_ref(),
+            &env,
+            None,
+        )
+        .unwrap();
+        assert!(!db
+            .load_snapshot()
+            .unwrap()
+            .registry
+            .find_task("TASK-001")
+            .unwrap()
+            .is_merged());
+    }
+    git(
+        root,
+        &[
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "feat: TASK-001 - Complete implementation\n\n[macc:task TASK-001]",
+        ],
+    );
+    macc_core::coordinator::delivery_evidence::reconcile_before_dispatch(
+        root,
+        &root.join("task.json"),
+        config.automation.coordinator.as_ref(),
+        &env,
+        None,
+    )
+    .unwrap();
+    assert!(db
+        .load_snapshot()
+        .unwrap()
+        .registry
+        .find_task("TASK-001")
+        .unwrap()
+        .is_merged());
+}

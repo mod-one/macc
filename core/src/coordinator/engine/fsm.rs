@@ -46,6 +46,7 @@ pub struct PhaseTransition {
 pub enum AdvancePlan {
     RunPhase(PhaseTransition),
     Merge,
+    ReviewBudgetExhausted,
     Noop,
 }
 
@@ -176,7 +177,12 @@ pub enum AdvanceTaskAction {
     /// Task is in a merge-ready state but has no branch recorded (e.g. the
     /// worktree was cleared by ghost cleanup before the job-exit was applied).
     /// Block it so the coordinator can make progress instead of spinning.
-    BlockNoBranch { task_id: String },
+    BlockNoBranch {
+        task_id: String,
+    },
+    BlockReviewBudget {
+        task_id: String,
+    },
 }
 
 /// Task metadata passed to the merge-fix hook so it can resolve conflicts
@@ -267,76 +273,7 @@ pub trait ControlPlaneBackend {
     }
 }
 
-/// Plan the next advance action for a task.
-///
-/// `max_review_cycles` controls the review→fix loop budget:
-///   - `None`  → unlimited loops (default)
-///   - `Some(0)` → skip review entirely; go straight to merge
-///   - `Some(1)` → one review + one fix if changes requested, no loopback
-///   - `Some(n)` → up to n review→fix→review loops
-///
-/// `review_cycles` is the number of review cycles already completed for
-/// this task (stored in `task_runtime.review_cycles`).
-pub fn plan_advance(
-    state: WorkflowState,
-    max_review_cycles: Option<usize>,
-    review_cycles: usize,
-    phases: &crate::config::PhasesConfig,
-) -> AdvancePlan {
-    match state {
-        WorkflowState::InProgress => {
-            if phases.testing.enabled {
-                AdvancePlan::RunPhase(PhaseTransition {
-                    mode: "test",
-                    next_state: WorkflowState::Testing,
-                    runtime_phase: "test",
-                })
-            } else if phases.review.enabled && max_review_cycles != Some(0) {
-                AdvancePlan::RunPhase(PhaseTransition {
-                    mode: "review",
-                    next_state: WorkflowState::Reviewing,
-                    runtime_phase: "review",
-                })
-            } else {
-                AdvancePlan::Merge
-            }
-        }
-        WorkflowState::Testing => {
-            if phases.review.enabled && max_review_cycles != Some(0) {
-                AdvancePlan::RunPhase(PhaseTransition {
-                    mode: "review",
-                    next_state: WorkflowState::Reviewing,
-                    runtime_phase: "review",
-                })
-            } else {
-                AdvancePlan::Merge
-            }
-        }
-        WorkflowState::Reviewing => AdvancePlan::Merge,
-        WorkflowState::PrOpen => AdvancePlan::Merge,
-        WorkflowState::ChangesRequested => {
-            // If we've exhausted the review cycle budget, skip fix and go to merge.
-            if let Some(max) = max_review_cycles {
-                if review_cycles >= max {
-                    return AdvancePlan::Merge;
-                }
-            }
-            AdvancePlan::RunPhase(PhaseTransition {
-                mode: "fix",
-                next_state: if phases.testing.enabled {
-                    WorkflowState::Testing
-                } else if phases.review.enabled {
-                    WorkflowState::Reviewing
-                } else {
-                    WorkflowState::PrOpen // fallback
-                },
-                runtime_phase: "fix",
-            })
-        }
-        WorkflowState::Queued => AdvancePlan::Merge,
-        _ => AdvancePlan::Noop,
-    }
-}
+pub use super::advance_plan::plan_advance;
 
 fn transition_workflow_state(
     from: WorkflowState,
@@ -355,10 +292,10 @@ fn transition_workflow_state(
             next_state.unwrap_or(WorkflowState::Reviewing)
         }
         (WorkflowState::Testing, WorkflowEvent::PhaseSucceeded("review")) => {
-            WorkflowState::Reviewing
+            next_state.unwrap_or(WorkflowState::Reviewing)
         }
         (WorkflowState::Reviewing, WorkflowEvent::PhaseSucceeded("review")) => {
-            WorkflowState::Merged
+            next_state.unwrap_or(WorkflowState::PrOpen)
         }
         (WorkflowState::ChangesRequested, WorkflowEvent::PhaseSucceeded("fix")) => {
             next_state.unwrap_or(WorkflowState::PrOpen)
@@ -529,6 +466,9 @@ pub fn build_advance_actions(
                     base,
                     merge_context,
                 });
+            }
+            AdvancePlan::ReviewBudgetExhausted => {
+                actions.push(AdvanceTaskAction::BlockReviewBudget { task_id });
             }
             AdvancePlan::Noop => {}
         }
@@ -882,7 +822,7 @@ pub(crate) fn apply_review_phase_success_typed(
         ReviewVerdict::Ok => transition_workflow_state(
             from,
             WorkflowEvent::PhaseSucceeded("review"),
-            Some(WorkflowState::Merged),
+            Some(WorkflowState::PrOpen),
         )?,
         ReviewVerdict::ChangesRequested => transition_workflow_state(
             from,
@@ -896,7 +836,7 @@ pub(crate) fn apply_review_phase_success_typed(
     runtime.current_phase = Some("review".to_string());
     runtime.pid = None;
     runtime.delayed_until = None;
-    // Track the number of completed review cycles for max_review_cycles enforcement.
+    // Count completed reviews; a rejection at the limit still owns one correction.
     let cycles = runtime.review_cycles.unwrap_or(0) + 1;
     runtime.review_cycles = Some(cycles);
     task.touch_state_changed(now);
@@ -3054,12 +2994,12 @@ mod tests {
             })
         ));
 
-        // ChangesRequested should transition to RunPhase("fix") with next_state: WorkflowState::Testing
+        // Corrections re-enter validation, including enabled tests.
         assert!(matches!(
             plan_advance(WorkflowState::ChangesRequested, None, 0, &phases_enabled),
             AdvancePlan::RunPhase(PhaseTransition {
                 mode: "fix",
-                next_state: WorkflowState::Testing,
+                next_state: WorkflowState::InProgress,
                 ..
             })
         ));
@@ -3075,12 +3015,12 @@ mod tests {
             })
         ));
 
-        // ChangesRequested should transition to RunPhase("fix") with next_state: WorkflowState::Reviewing
+        // Corrections re-enter validation; review remains subject to its cycle budget.
         assert!(matches!(
             plan_advance(WorkflowState::ChangesRequested, None, 0, &phases_disabled),
             AdvancePlan::RunPhase(PhaseTransition {
                 mode: "fix",
-                next_state: WorkflowState::Reviewing,
+                next_state: WorkflowState::InProgress,
                 ..
             })
         ));
@@ -3138,10 +3078,10 @@ mod tests {
             plan_advance(WorkflowState::InProgress, Some(0), 0, &phases),
             AdvancePlan::Merge
         ));
-        // ChangesRequested with 0 cycles used but max=0 → merge directly
+        // An existing rejected review cannot be bypassed by disabling future reviews.
         assert!(matches!(
             plan_advance(WorkflowState::ChangesRequested, Some(0), 0, &phases),
-            AdvancePlan::Merge
+            AdvancePlan::ReviewBudgetExhausted
         ));
     }
 
@@ -3162,10 +3102,10 @@ mod tests {
             plan_advance(WorkflowState::ChangesRequested, Some(1), 0, &phases),
             AdvancePlan::RunPhase(PhaseTransition { mode: "fix", .. })
         ));
-        // max=1, 1 cycle done → exhausted, merge directly
+        // The first completed review still owns its requested correction.
         assert!(matches!(
             plan_advance(WorkflowState::ChangesRequested, Some(1), 1, &phases),
-            AdvancePlan::Merge
+            AdvancePlan::RunPhase(PhaseTransition { mode: "fix", .. })
         ));
     }
 
@@ -3186,15 +3126,15 @@ mod tests {
             plan_advance(WorkflowState::ChangesRequested, Some(3), 2, &phases),
             AdvancePlan::RunPhase(PhaseTransition { mode: "fix", .. })
         ));
-        // max=3, 3 done → exhausted, merge
+        // The third completed review still owns its correction.
         assert!(matches!(
             plan_advance(WorkflowState::ChangesRequested, Some(3), 3, &phases),
-            AdvancePlan::Merge
+            AdvancePlan::RunPhase(PhaseTransition { mode: "fix", .. })
         ));
-        // max=3, 5 done → way past, merge
+        // Older/inconsistent counters above the budget must block, never merge.
         assert!(matches!(
             plan_advance(WorkflowState::ChangesRequested, Some(3), 5, &phases),
-            AdvancePlan::Merge
+            AdvancePlan::ReviewBudgetExhausted
         ));
     }
 
