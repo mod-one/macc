@@ -21,7 +21,7 @@ pub fn wait(paths: &ProjectPaths, pid: i32, timeout: Duration) -> Result<()> {
                 .trim()
                 .parse::<i64>()
                 .ok()
-                .is_some_and(|child| crate::coordinator::helpers::is_pid_running(child))
+                .is_some_and(crate::coordinator::helpers::is_pid_running)
             {
                 return Ok(());
             }

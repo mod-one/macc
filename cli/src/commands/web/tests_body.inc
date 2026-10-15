@@ -1691,6 +1691,7 @@ async fn status_endpoint_maps_engine_errors() {
 async fn registry_tasks_endpoint_returns_registry_metadata() {
     let root = temp_root("registry-list");
     fs::create_dir_all(&root).expect("create root");
+    write_test_config(&root);
 
     let mut task = registry_task("WEB2-BE-REG-001", "Registry task", "blocked", Some("codex"));
     task.task_runtime.status = Some(RuntimeStatus::Failed.as_str().to_string());

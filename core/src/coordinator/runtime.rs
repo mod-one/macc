@@ -1700,15 +1700,10 @@ fn read_last_error_details_from_sqlite(
     if saw_terminal_success_before_failed {
         return None;
     }
-    failed_candidate.and_then(|details| {
-        if details.error_code.is_some()
+    failed_candidate.filter(|details| {
+        details.error_code.is_some()
             || details.error_origin.is_some()
             || details.error_message.is_some()
-        {
-            Some(details)
-        } else {
-            None
-        }
     })
 }
 

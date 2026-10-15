@@ -1440,7 +1440,7 @@ fn collect_launch_warnings(
         "rev-list count",
     )
     .ok()
-    .and_then(|o| if o.status.success() { Some(o) } else { None })
+    .filter(|o| o.status.success())
     .and_then(|o| String::from_utf8(o.stdout).ok())
     .and_then(|s| s.trim().parse::<u64>().ok())
     .unwrap_or(0);

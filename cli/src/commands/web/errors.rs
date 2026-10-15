@@ -52,7 +52,7 @@ pub(super) const WEB_ERR_TERMINAL_CONFLICT: &str = "MACC-WEB-3003";
 #[derive(Debug)]
 pub(super) struct ApiError {
     status: StatusCode,
-    body: ApiErrorEnvelope,
+    body: Box<ApiErrorEnvelope>,
 }
 
 impl ApiError {
@@ -69,7 +69,7 @@ impl ApiError {
     ) -> Self {
         Self {
             status,
-            body: ApiErrorEnvelope {
+            body: Box::new(ApiErrorEnvelope {
                 error: ApiErrorBody {
                     code: code.to_string(),
                     category: category.to_string(),
@@ -79,7 +79,7 @@ impl ApiError {
                     context,
                     cause,
                 },
-            },
+            }),
         }
     }
 
