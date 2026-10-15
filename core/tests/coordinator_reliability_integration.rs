@@ -302,7 +302,8 @@ fn coordinator_reliability_chain_integration() {
         json!({
             "id": "codex",
             "performer": {
-                "runner": runner_path.to_string_lossy().to_string()
+                "runner": runner_path.to_string_lossy().to_string(),
+                "session": {"enabled":true,"scope":"task_role_tool"}
             }
         })
         .to_string(),
@@ -315,6 +316,22 @@ fn coordinator_reliability_chain_integration() {
     )
     .expect("write coordinator ipc addr");
 
+    // Runtime last_session_id is a hint; P0 requires independent ownership evidence.
+    let spec: serde_json::Value =
+        serde_json::from_slice(&fs::read(worktree_a.join(".macc/tool.json")).unwrap()).unwrap();
+    let identity = macc_core::coordinator::session_identity::identity(
+        &repo_a,
+        &worktree_a,
+        task_id_a,
+        "performer",
+        "codex",
+        &spec,
+        &macc_core::coordinator::session_identity::SessionRouting::from_environment(),
+    )
+    .unwrap();
+    fs::write(repo_a.join(".macc/state/tool-sessions.json"),json!({"tools":{"codex":{"sessions":{"sid-chain":{
+        "status":"available","session_identity":identity,"updated_at":chrono::Utc::now().to_rfc3339()
+    }}}}}).to_string()).unwrap();
     let run_out = run_phase_for_task_native(&repo_a, retry_task, "dev", Some("codex"), 1, None)
         .expect("phase run should execute");
     assert!(run_out.is_ok(), "phase should succeed: {run_out:?}");

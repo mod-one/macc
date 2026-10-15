@@ -141,6 +141,9 @@ pub fn create_save_bundle(
             .as_ref()
             .map(|s| s.contains("sessions"))
             .unwrap_or(true);
+    if include_sessions && crate::session_store::is_sqlite(&paths.root)? {
+        return Err(MaccError::Validation("SQLite session authority requires a consistent session-store backup; use --no-sessions for a configuration bundle".into()));
+    }
     let include_catalogs = only_sections
         .as_ref()
         .map(|s| s.contains("catalogs"))
@@ -220,6 +223,16 @@ pub fn create_save_bundle(
     }
 
     // 2. Copy sessions
+    let session_guard = if include_sessions {
+        Some(crate::session_store::lock(&paths.root)?)
+    } else {
+        None
+    };
+    if include_sessions && crate::session_store::is_sqlite(&paths.root)? {
+        return Err(MaccError::Validation(
+            "Session authority changed; use a consistent SQLite backup".into(),
+        ));
+    }
     let sessions_src = paths.macc_dir.join("state").join("tool-sessions.json");
     if include_sessions && sessions_src.exists() {
         let state_dir = tmp_save_dir.join("state");
@@ -243,6 +256,8 @@ pub fn create_save_bundle(
         paths_meta.coordinator_sessions = Some("state/tool-sessions.json".to_string());
         includes.coordinator_sessions = true;
     }
+
+    drop(session_guard);
 
     // 3. Copy catalogs
     if include_catalogs && paths.project_catalog_dir().exists() {

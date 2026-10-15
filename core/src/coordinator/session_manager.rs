@@ -122,6 +122,10 @@ struct SessionSnapshot {
 ///
 /// If `name` is None, a timestamp-based name is generated.
 pub fn save_sessions(repo_root: &Path, name: Option<&str>) -> Result<SavedSessionMeta> {
+    if crate::session_store::is_sqlite(repo_root)? {
+        return Err(MaccError::Validation("SQLite session authority is active; use session-store rollback before restoring legacy JSON snapshots".into()));
+    }
+
     let sessions_path = repo_root.join(TOOL_SESSIONS_REL_PATH);
     if !sessions_path.exists() {
         return Err(MaccError::Validation(
@@ -132,6 +136,11 @@ pub fn save_sessions(repo_root: &Path, name: Option<&str>) -> Result<SavedSessio
     let lock_path = sessions_path.with_extension("json.lock");
     let raw = {
         let _guard = acquire_session_lock(&lock_path)?;
+        if crate::session_store::is_sqlite(repo_root)? {
+            return Err(MaccError::Validation(
+                "Session authority changed; retry through SQLite".into(),
+            ));
+        }
         fs::read_to_string(&sessions_path).map_err(|e| MaccError::Io {
             path: sessions_path.to_string_lossy().into(),
             action: "read tool sessions for save".into(),
@@ -213,6 +222,10 @@ pub fn save_sessions(repo_root: &Path, name: Option<&str>) -> Result<SavedSessio
 /// entries do not overwrite them). This allows new coordinator runs to pick up
 /// saved sessions for tools/worktrees that don't already have one.
 pub fn restore_sessions(repo_root: &Path, name: &str, dry_run: bool) -> Result<SavedSessionMeta> {
+    if crate::session_store::is_sqlite(repo_root)? {
+        return Err(MaccError::Validation("SQLite session authority is active; use session-store rollback before restoring legacy JSON snapshots".into()));
+    }
+
     let src = snapshot_path(repo_root, name)?;
     if !src.exists() {
         return Err(MaccError::Validation(format!(
@@ -264,6 +277,11 @@ pub fn restore_sessions(repo_root: &Path, name: &str, dry_run: bool) -> Result<S
     let sessions_path = repo_root.join(TOOL_SESSIONS_REL_PATH);
     let lock_path = sessions_path.with_extension("json.lock");
     let _guard = acquire_session_lock(&lock_path)?;
+    if crate::session_store::is_sqlite(repo_root)? {
+        return Err(MaccError::Validation(
+            "Session authority changed; retry through SQLite".into(),
+        ));
+    }
 
     let result = (|| {
         // Load or initialize current sessions file
@@ -450,12 +468,21 @@ pub fn release_job_sessions(
     worktree: Option<&Path>,
     task_id: Option<&str>,
 ) -> Result<Vec<ReleasedSession>> {
+    if crate::session_store::is_sqlite(repo_root)? {
+        return Ok(Vec::new());
+    }
+
     let sessions_path = repo_root.join(TOOL_SESSIONS_REL_PATH);
     if !sessions_path.exists() {
         return Ok(Vec::new());
     }
     let lock_path = sessions_path.with_extension("json.lock");
     let _guard = acquire_session_lock(&lock_path)?;
+    if crate::session_store::is_sqlite(repo_root)? {
+        return Err(MaccError::Validation(
+            "Session authority changed; retry through SQLite".into(),
+        ));
+    }
     let result = (|| {
         let raw = fs::read_to_string(&sessions_path).map_err(|e| MaccError::Io {
             path: sessions_path.to_string_lossy().into(),
@@ -548,12 +575,21 @@ pub fn release_job_sessions(
 /// nor a missing owner permits automatic transcript reuse.
 /// Returns the number of sessions that were reset.
 pub fn reset_stale_active_sessions(repo_root: &Path, _lease_ttl_seconds: u64) -> Result<usize> {
+    if crate::session_store::is_sqlite(repo_root)? {
+        return crate::session_store::recover(repo_root);
+    }
+
     let sessions_path = repo_root.join(TOOL_SESSIONS_REL_PATH);
     if !sessions_path.exists() {
         return Ok(0);
     }
     let lock_path = sessions_path.with_extension("json.lock");
     let _guard = acquire_session_lock(&lock_path)?;
+    if crate::session_store::is_sqlite(repo_root)? {
+        return Err(MaccError::Validation(
+            "Session authority changed; retry through SQLite".into(),
+        ));
+    }
     let result = (|| {
         let raw = fs::read_to_string(&sessions_path).map_err(|e| MaccError::Io {
             path: sessions_path.to_string_lossy().into(),

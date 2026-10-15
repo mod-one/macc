@@ -270,6 +270,15 @@ pub fn save_session_snapshot(
     snapshot_dir: &Path,
     snapshot_name: &str,
 ) -> Result<Option<String>, std::io::Error> {
+    if let Some(root) = tool_sessions_path.ancestors().nth(3) {
+        if tool_sessions_path.ends_with(".macc/state/tool-sessions.json")
+            && crate::session_store::is_sqlite(root).map_err(std::io::Error::other)?
+        {
+            return crate::session_store::backup(root)
+                .map(Some)
+                .map_err(std::io::Error::other);
+        }
+    }
     if !tool_sessions_path.exists() {
         tracing::info!("mode_c: no tool-sessions.json found; skipping session snapshot");
         return Ok(None);

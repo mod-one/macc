@@ -23,6 +23,9 @@ mod coordinator_poll;
 pub mod ownership;
 pub mod prd_queue;
 pub mod screen;
+pub mod sessions;
+#[cfg(test)]
+mod sessions_tests;
 pub mod state;
 mod supervisor;
 mod tool_cooldowns;
@@ -482,6 +485,49 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
         return;
     }
 
+    if current_screen == Screen::Sessions {
+        if let Some(paths) = state.project_paths.clone() {
+            let result = if state.sessions.is_mutation(key) {
+                state.gate_project_mutation()
+            } else {
+                Ok(())
+            };
+            match result.and_then(|_| state.sessions.key(&paths.root, key)) {
+                Ok(true) => state.pop_screen(),
+                Ok(false) => {
+                    if key == KeyCode::Char('s') {
+                        if let Some(view) = &state.sessions.view {
+                            if let Some(config) = &mut state.config {
+                                config.session_management = if view.policy_source == "defaults" {
+                                    None
+                                } else {
+                                    Some(view.policy.clone())
+                                };
+                            }
+                            if let Some(draft) = &mut state.working_copy {
+                                draft.session_management = if view.policy_source == "defaults" {
+                                    None
+                                } else {
+                                    Some(view.policy.clone())
+                                };
+                            }
+                        }
+                    }
+                }
+                Err(e) => state.sessions.message = e.to_string(),
+            }
+        }
+        return;
+    }
+    if key == KeyCode::Char('J') {
+        if let Some(paths) = state.project_paths.clone() {
+            if let Err(e) = state.sessions.refresh(&paths.root) {
+                state.sessions.message = e.to_string();
+            }
+            state.push_screen(Screen::Sessions);
+        }
+        return;
+    }
     match key {
         KeyCode::Char('?') => {
             state.toggle_help();
@@ -1564,6 +1610,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             let steps_para = wrapped_paragraph(readiness_text, "Readiness");
             f.render_widget(steps_para, body_chunks[1]);
         }
+        Screen::Sessions => state.sessions.draw(f, body_area),
         Screen::Settings => {
             // Settings has been merged into Coordinator Settings (Screen::Automation).
             // This screen is no longer the primary destination — it acts as a redirect notice.
@@ -3636,6 +3683,7 @@ fn screen_action_bindings(screen: Screen) -> Vec<(&'static str, &'static str)> {
     match screen {
         Screen::Home => vec![
             ("r", "Start coordinator"),
+            ("J", "Sessions"),
             ("d", "Doctor"),
             ("p", "Preview"),
         ],
@@ -3703,6 +3751,12 @@ fn screen_action_bindings(screen: Screen) -> Vec<(&'static str, &'static str)> {
             ("f", "Logs"),
             ("e/w/a", "Filter"),
             ("r/l", "Refresh"),
+        ],
+        Screen::Sessions => vec![
+            ("↑↓", "Select"),
+            ("Enter", "Edit / events"),
+            ("p/s", "Preview / apply policy"),
+            ("m/a", "Migration"),
         ],
         Screen::About => vec![("Esc/q", "Back")],
         Screen::CoordinatorLive => Vec::new(),
@@ -3963,7 +4017,8 @@ mod tests {
         );
         let text = line.to_string();
 
-        assert!(text.contains("Actions: r Start coordinator | d Doctor | p Preview | ? Help"));
+        assert!(text
+            .contains("Actions: r Start coordinator | J Sessions | d Doctor | p Preview | ? Help"));
         assert!(!text.contains("cache:missing"));
     }
 

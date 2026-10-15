@@ -1,5 +1,8 @@
 # P0-A: provider session isolation
 
+P0-B now adds an explicit [SQLite ownership service](SESSION_STORE.md). The JSON
+contract below remains the compatibility backend until migration is applied.
+
 ## Decision and scope
 
 The first O2 delivery hardens the existing JSON session store before SQLite

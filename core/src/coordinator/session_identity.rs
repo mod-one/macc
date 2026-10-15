@@ -94,6 +94,11 @@ pub fn read_session_id(
         &spec,
         &SessionRouting::from_environment(),
     )?;
+    if crate::session_store::is_sqlite(repo).ok()? {
+        return crate::session_store::read_hint(repo, &expected)
+            .ok()
+            .flatten();
+    }
     let state: Value =
         serde_json::from_slice(&std::fs::read(repo.join(".macc/state/tool-sessions.json")).ok()?)
             .ok()?;
@@ -158,7 +163,7 @@ pub(super) fn finished_job_can_release(
             .unwrap_or(false)
 }
 
-pub(super) fn owner_pid(entry: &Value) -> Option<i64> {
+pub(crate) fn owner_pid(entry: &Value) -> Option<i64> {
     let pid = entry.get("owner_pid")?;
     pid.as_i64()
         .or_else(|| pid.as_str()?.parse().ok())

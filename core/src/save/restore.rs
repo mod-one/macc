@@ -131,6 +131,17 @@ pub fn restore_save_bundle(
         }
     }
 
+    let _session_guard =
+        if opts.sessions || (!opts.no_sessions && manifest.includes.coordinator_sessions) {
+            Some(crate::session_store::lock(&paths.root)?)
+        } else {
+            None
+        };
+    if (opts.sessions || (!opts.no_sessions && manifest.includes.coordinator_sessions))
+        && crate::session_store::is_sqlite(&paths.root)?
+    {
+        return Err(MaccError::Validation("SQLite authority is active; legacy session restore requires an explicit rollback first, or --no-sessions".into()));
+    }
     if opts.dry_run {
         return Ok(());
     }

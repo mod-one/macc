@@ -25,6 +25,8 @@ mod prd_generation;
 #[allow(clippy::result_large_err)]
 mod registry;
 mod search;
+#[allow(clippy::result_large_err)]
+mod sessions;
 mod skill_runs;
 mod snapshot;
 mod sse;
@@ -235,6 +237,12 @@ fn build_web_router(state: WebState) -> Router {
     let audit_state = state.clone();
     Router::new()
         .route("/api/v1/health", get(health_handler))
+        .route("/api/v1/sessions/store",get(sessions::status))
+        .route("/api/v1/sessions/policy",put(sessions::policy))
+        .route("/api/v1/sessions/policy/preview",post(sessions::preview))
+        .route("/api/v1/sessions/authority/:direction",get(sessions::plan).post(sessions::migration))
+        .route("/api/v1/sessions/action",post(sessions::action))
+        .route("/api/v1/sessions/:id/events",get(sessions::events))
         .route("/api/v1/trust", get(trust_handler))
         .route("/api/v1/doctor", get(doctor::get_doctor_handler))
         .route("/api/v1/doctor/fix", post(doctor::run_doctor_fix_handler))

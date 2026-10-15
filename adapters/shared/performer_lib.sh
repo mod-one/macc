@@ -99,8 +99,19 @@ mkdir -p "$(dirname "$session_state_file")"
 # Session policy is shared across all adapter runners; provider syntax stays in tool.json.
 source "$(dirname -- "${BASH_SOURCE[0]}")/session_identity.sh"
 source "$(dirname -- "${BASH_SOURCE[0]}")/session_store.sh"
+source "$(dirname -- "${BASH_SOURCE[0]}")/session_sqlite.sh"
+session_backend=json
+if [[ -f "$session_state_file" ]]; then
+  session_backend="$(jq -er --arg root "$(cd -- "$repo" && pwd -P)" '
+    if .session_store == null then "json"
+    else .session_store | select(.version == 1 and .project_root == $root) | .mode | select(. == "json" or . == "sqlite") end
+  ' "$session_state_file")" || { echo 'Error: invalid session store or authority; refusing fallback' >&2; exit 1; }
+elif [[ -f "${repo}/.macc/memory.db" ]]; then
+  echo 'Error: session authority marker is missing; refusing JSON fallback' >&2
+  exit 1
+fi
 initialize_session_identity
-if [[ "$session_enabled" == "true" ]] && ! session_lock_available; then
+if [[ "$session_backend" == json && "$session_enabled" == "true" ]] && ! session_lock_available; then
   # Fresh invocation is safe; pooled reads/writes without a shared lock are not.
   session_enabled=false
 fi
@@ -129,8 +140,36 @@ run_and_capture() {
   shift
   local rc=0
   [[ "${MACC_DEBUG:-0}" == "1" ]] && printf '[MACC] invoke (%s 1): %s\n' "${TOOL_LOG_PREFIX}" "$*" >&2
-  "$@" 2>&1 | tee "$output_file"
-  rc=${PIPESTATUS[0]}
+  if [[ "$session_backend" == sqlite ]]; then
+    local fifo tee_pid
+    local capture_dir
+    capture_dir="$(mktemp -d "${output_file}.pipe.XXXXXX")"
+    provider_capture_dir="$capture_dir"
+    fifo="$capture_dir/output"
+    mkfifo "$fifo" || { rmdir "$capture_dir"; return 1; }
+    tee "$output_file" <"$fifo" &
+    tee_pid=$!
+    provider_tee_pid="$tee_pid"
+    if command -v setsid >/dev/null 2>&1; then
+      setsid "$@" >"$fifo" 2>&1 &
+      provider_group=true
+    else
+      "$@" >"$fifo" 2>&1 &
+      provider_group=false
+    fi
+    provider_pid=$!
+    wait "$provider_pid" || rc=$?
+    if [[ "$provider_group" == true ]]; then kill -KILL -- "-$provider_pid" 2>/dev/null || true; fi
+    provider_pid=""
+    wait "$tee_pid" || true
+    provider_tee_pid=""
+    rm -f "$fifo"
+    rmdir "$capture_dir"
+    provider_capture_dir=""
+  else
+    "$@" 2>&1 | tee "$output_file"
+    rc=${PIPESTATUS[0]}
+  fi
   return "$rc"
 }
 
@@ -228,8 +267,10 @@ run_resume_and_capture() {
 
   if [[ "$prompt_mode" == "arg" && -n "$prompt_arg" ]]; then
     run_and_capture "$output_file" "$invoke_command" "${final_args[@]}" "$prompt_arg" "$prompt"
-  else
+  elif [[ "$prompt_mode" == arg ]]; then
     run_and_capture "$output_file" "$invoke_command" "${final_args[@]}" "$prompt"
+  else
+    run_and_capture "$output_file" "$invoke_command" "${final_args[@]}" <"$prompt_file"
   fi
 }
 
@@ -406,6 +447,9 @@ sid_is_new=0
 sid=""
 
 cleanup_runner() {
+  if [[ "$session_backend" == sqlite ]]; then
+    cleanup_sqlite_session
+  fi
   if [[ -n "$active_session_id" ]]; then
     if acquire_session_lock; then
       mark_lease_status "$active_session_id" "available" || true
@@ -415,6 +459,8 @@ cleanup_runner() {
   rm -f "$output_capture"
 }
 trap cleanup_runner EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
 
 run_default_call() {
   local final_call_args=()
@@ -438,8 +484,7 @@ run_default_call() {
       printf ' %q' "${final_call_args[@]}" >&2
       printf '\n' >&2
     fi
-    printf "%s" "$prompt_text" | "$command" "${final_call_args[@]}" 2>&1 | tee "$output_capture"
-    rc=${PIPESTATUS[1]}
+    run_and_capture "$output_capture" "$command" "${final_call_args[@]}" <"$prompt_file" || rc=$?
     return "$rc"
   fi
 }
@@ -507,6 +552,10 @@ detect_tool_limit_exit() {
 
   echo 1
 }
+
+if [[ "$session_backend" == sqlite && "$session_enabled" == true && -n "$session_resume_command" ]]; then
+  run_sqlite_session && exit 0 || exit $?
+fi
 
 if [[ "$session_enabled" == "true" && -n "$session_resume_command" ]]; then
   sid=""

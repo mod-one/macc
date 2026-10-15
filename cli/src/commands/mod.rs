@@ -26,6 +26,7 @@ pub mod quickstart;
 pub mod restore;
 pub mod run;
 pub mod save;
+pub mod session_store;
 pub mod settings;
 pub mod skills_cmd;
 pub mod start;

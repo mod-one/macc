@@ -48,17 +48,13 @@ pub(super) async fn update_config_handler(
             err
         )))
     })?;
-    let mut canonical = state
-        .engine
-        .load_canonical_config(&state.paths)
-        .map_err(ApiError::from)?;
     let mandatory_skills =
         macc_core::catalog::mandatory_skill_ids(&state.paths).map_err(ApiError::from)?;
-    apply_update(&mut canonical, &request, &mandatory_skills);
-    state
-        .engine
-        .save_canonical_config(&state.paths, &canonical)
-        .map_err(ApiError::from)?;
+    let canonical = macc_core::config::transaction::update(&state.paths, None, |canonical| {
+        apply_update(canonical, &request, &mandatory_skills);
+        Ok(())
+    })
+    .map_err(ApiError::from)?;
     Ok(Json(response_from_canonical(canonical, mandatory_skills)))
 }
 

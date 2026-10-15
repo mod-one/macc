@@ -132,6 +132,7 @@ fn requires_owner_gate(command: &CoordinatorCommand) -> bool {
 }
 
 pub struct AppState {
+    pub sessions: crate::sessions::SessionsScreen,
     pub prd_queue_editor: Option<crate::prd_queue::Editor>,
     pub engine: Arc<dyn Engine>,
     pub project_paths: Option<ProjectPaths>,
@@ -314,6 +315,7 @@ impl AppState {
     pub fn with_engine(engine: Arc<dyn Engine>) -> Self {
         let client_identity = Self::new_client_identity();
         let mut state = Self {
+            sessions: crate::sessions::SessionsScreen::default(),
             engine,
             project_paths: None,
             config: None,
@@ -1958,7 +1960,7 @@ impl AppState {
         gate_owner_action(&self.client_context, &handle)
     }
 
-    fn gate_project_mutation(&self) -> macc_core::Result<()> {
+    pub(crate) fn gate_project_mutation(&self) -> macc_core::Result<()> {
         let Some(handle) = self.project_handle() else {
             return Ok(());
         };
@@ -2683,6 +2685,11 @@ impl AppState {
     }
 
     pub fn tick(&mut self) {
+        if self.current_screen() == Screen::Sessions {
+            if let Some(paths) = &self.project_paths {
+                self.sessions.tick(&paths.root);
+            }
+        }
         self.refresh_coordinator_pause_state();
         self.tick_ownership();
         self.refresh_pending_approvals_if_due();
@@ -5396,27 +5403,29 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
 
         self.apply_tool_defaults();
         self.ensure_mandatory_skills_selected();
-        let yaml = match self
+        let draft = self
             .working_copy
             .as_ref()
             .expect("working_copy checked above")
-            .to_yaml()
-        {
-            Ok(y) => y,
-            Err(e) => {
-                self.errors
-                    .push(format!("Failed to serialize config: {}", e));
-                return;
-            }
-        };
-
-        match macc_core::write_if_changed(
-            &paths,
-            paths.config_path.to_string_lossy().as_ref(),
-            &paths.config_path,
-            yaml.as_bytes(),
-            |_| Ok(()),
-        ) {
+            .clone();
+        let save_result = (|| -> macc_core::Result<macc_core::plan::ActionStatus> {
+            let revision = self
+                .config
+                .as_ref()
+                .map(macc_core::config::transaction::revision)
+                .transpose()?;
+            let unchanged = self.config.as_ref() == Some(&draft);
+            macc_core::config::transaction::update(&paths, revision.as_deref(), |config| {
+                *config = draft;
+                Ok(())
+            })?;
+            Ok(if unchanged {
+                macc_core::plan::ActionStatus::Unchanged
+            } else {
+                macc_core::plan::ActionStatus::Updated
+            })
+        })();
+        match save_result {
             Ok(status) => {
                 self.config = self.working_copy.clone();
                 if status == macc_core::plan::ActionStatus::Unchanged {

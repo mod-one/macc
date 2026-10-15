@@ -1,4 +1,5 @@
 pub mod migrate;
+pub mod transaction;
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
@@ -26,6 +27,8 @@ pub struct CanonicalConfig {
     pub skills: Option<SkillsConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context: Option<ContextConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_management: Option<crate::session_store::SessionPolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prd_generation: Option<PrdGenerationConfig>,
 }
@@ -1077,6 +1080,9 @@ impl CanonicalConfig {
     }
 
     pub fn validate(&self) -> crate::Result<()> {
+        if let Some(policy) = &self.session_management {
+            policy.validate()?;
+        }
         let mut seen_ids = HashSet::new();
 
         for template in &self.mcp_templates {
@@ -1135,6 +1141,7 @@ impl Default for CanonicalConfig {
             mcp_templates: default_mcp_templates(),
             skills: None,
             context: None,
+            session_management: None,
             prd_generation: None,
         }
     }
@@ -1835,6 +1842,7 @@ settings:
             mcp_templates: Vec::new(),
             skills: None,
             context: None,
+            session_management: None,
             prd_generation: None,
         };
 

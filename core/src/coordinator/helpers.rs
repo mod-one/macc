@@ -87,6 +87,10 @@ impl SlotActivityRecency {
 }
 
 fn load_tool_sessions_state(repo_root: &Path) -> Option<serde_json::Value> {
+    // Legacy pool warmth is not evidence of an eligible SQLite transcript.
+    if crate::session_store::is_sqlite(repo_root).ok()? {
+        return None;
+    }
     let path = repo_root.join(".macc/state/tool-sessions.json");
     let raw = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&raw).ok()

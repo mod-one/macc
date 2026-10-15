@@ -366,6 +366,7 @@ fn extract_sections(source: &CanonicalConfig, sections: &[ProfileSection]) -> Ca
         },
         skills: source.skills.clone(),
         context: source.context.clone(),
+        session_management: source.session_management.clone(),
         prd_generation: source.prd_generation.clone(),
     }
 }
@@ -469,6 +470,7 @@ mod tests {
             skills: None,
             context: None,
             prd_generation: None,
+            session_management: None,
         }
     }
 

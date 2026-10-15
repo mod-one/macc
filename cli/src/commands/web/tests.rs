@@ -1,3 +1,5 @@
+#[path = "sessions_api_tests.rs"]
+mod sessions_api_tests;
 use super::*;
 use crate::commands::AppContext;
 use crate::test_support::{run_git_ok, run_git_ok_with_env};

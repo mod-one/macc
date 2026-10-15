@@ -12,6 +12,7 @@ pub enum Screen {
     Preview,
     Apply,
     Settings,
+    Sessions,
     About,
     Watch,
 }
@@ -31,6 +32,7 @@ impl Screen {
             Screen::Preview => "Preview",
             Screen::Apply => "Apply Changes",
             Screen::Settings => "Global Settings",
+            Screen::Sessions => "Session Ownership",
             Screen::About => "About",
             Screen::Watch => "Observer",
         }
@@ -48,6 +50,7 @@ impl Screen {
             ("m", "Go to MCP"),
             ("g", "Go to Logs"),
             ("e", "Go to Settings"),
+            ("J", "Session ownership"),
             ("p", "Go to Preview"),
             ("x", "Go to Apply"),
             ("s", "Save Config"),
@@ -69,6 +72,11 @@ impl Screen {
                 ("Enter", "Configure Tool"),
                 ("d", "Refresh Tool Checks"),
                 ("f", "Generate Tool Context"),
+            ],
+            Screen::Sessions => vec![
+                ("r", "Refresh"),
+                ("m/a", "Preview / apply migration"),
+                ("p/s", "Preview / save policy"),
             ],
             Screen::Automation => {
                 vec![("↑↓", "Navigate Settings"), ("Space/Enter", "Edit / Cycle")]

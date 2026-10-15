@@ -124,6 +124,9 @@ pub fn detect_matching_saves(
 }
 
 pub fn is_macc_state_unsaved(paths: &ProjectPaths) -> Result<bool> {
+    if crate::session_store::is_sqlite(&paths.root)? {
+        return Ok(true);
+    }
     if !paths.config_path.exists() {
         return Ok(false);
     }
@@ -172,7 +175,7 @@ pub struct UnsavedStateReport {
 pub fn get_unsaved_state_report(paths: &ProjectPaths) -> Result<UnsavedStateReport> {
     let mut report = UnsavedStateReport {
         config_changed: false,
-        sessions_changed: false,
+        sessions_changed: crate::session_store::is_sqlite(&paths.root)?,
     };
     if !paths.config_path.exists() {
         return Ok(report);
@@ -214,6 +217,7 @@ pub fn get_unsaved_state_report(paths: &ProjectPaths) -> Result<UnsavedStateRepo
     report.config_changed = !config_matches;
     report.sessions_changed = !sessions_matches;
 
+    report.sessions_changed |= crate::session_store::is_sqlite(&paths.root)?;
     Ok(report)
 }
 

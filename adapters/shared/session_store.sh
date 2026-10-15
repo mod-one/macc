@@ -53,6 +53,17 @@ acquire_session_lock() {
     eval "exec ${session_lock_fd}>&-" 2>/dev/null || true
     return 1
   fi
+  if [[ -f "$session_state_file" ]] &&
+      ! jq -e '(.session_store.mode // "json") == "json"' "$session_state_file" >/dev/null; then
+    echo 'Error: session authority changed; retry through the canonical session service' >&2
+    release_session_lock
+    return 1
+  fi
+  if [[ ! -f "$session_state_file" && -f "${repo}/.macc/memory.db" ]]; then
+    echo 'Error: session authority missing; refusing JSON write' >&2
+    release_session_lock
+    return 1
+  fi
   if [[ -f "$session_state_file" ]] && ! jq -e --arg tool "$tool_id" '
       type == "object" and ((.tools // {}) | type == "object") and
       ((.tools[$tool] // {}) | type == "object") and

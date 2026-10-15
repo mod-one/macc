@@ -76,6 +76,11 @@ enum SaveSubcommands {
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 enum Commands {
+    /// Inspect and migrate canonical provider-neutral session ownership
+    SessionStore {
+        #[command(subcommand)]
+        command: commands::session_store::SessionStoreCommands,
+    },
     /// Initialize MACC in a project
     Init {
         /// Force initialization even if already initialized
@@ -1458,7 +1463,14 @@ fn run_with_engine_provider(
         },
     );
 
+    std::env::set_var(
+        "MACC_SESSION_SERVICE_BIN",
+        std::env::current_exe().map_err(|e| MaccError::Validation(e.to_string()))?,
+    );
     match &cli.command {
+        Some(Commands::SessionStore { command }) => {
+            commands::session_store::SessionStoreCommand::new(app.clone(), command.clone()).run()
+        }
         Some(Commands::Init {
             force,
             wizard,

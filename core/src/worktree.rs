@@ -750,6 +750,7 @@ mod tests {
             skills: None,
             context: None,
             prd_generation: None,
+            session_management: None,
         };
 
         assert_eq!(

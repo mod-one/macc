@@ -381,6 +381,7 @@ mod tests {
             skills: None,
             context: None,
             prd_generation: None,
+            session_management: None,
         };
 
         let resolved = resolve(&canonical, &CliOverrides::default());
@@ -417,6 +418,7 @@ mod tests {
             skills: None,
             context: None,
             prd_generation: None,
+            session_management: None,
         };
 
         let resolved = resolve(&canonical, &CliOverrides::default());
@@ -441,6 +443,7 @@ mod tests {
             skills: None,
             context: None,
             prd_generation: None,
+            session_management: None,
         };
 
         let overrides = CliOverrides {
@@ -510,6 +513,7 @@ mod tests {
             skills: None,
             context: None,
             prd_generation: None,
+            session_management: None,
         };
 
         let canonical2 = CanonicalConfig {
@@ -527,6 +531,7 @@ mod tests {
             skills: None,
             context: None,
             prd_generation: None,
+            session_management: None,
         };
 
         let resolved1 = resolve(&canonical1, &CliOverrides::default());

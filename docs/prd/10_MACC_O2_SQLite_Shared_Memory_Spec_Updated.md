@@ -3,7 +3,7 @@
 **Project:** MACC — Multi-Assistant Code Config  
 **Document:** Revised and unified specification of `10_MACC_O2_SQLite_Shared_Memory_Spec.md`  
 **Motifs:** O2 Cross-Agent Memory Ledger; Shared Context Store; Code Intelligence Providers; Multi-Tool Session Lifecycle; Adaptive Compaction  
-**Version:** 2.2 — code-aligned specification with mandatory interactive TUI/Web coverage, proposed (not evidence of shipped O2 functionality)
+**Version:** 2.3 — specification with P0-A/P0-B implementation progress and mandatory TUI/Web coverage, proposed (not evidence of shipped O2 functionality)
 **Date:** 2026-10-15  
 **Code baseline inspected:** `df95759` — `feat: implement review and correction cycle budget management`  
 **Language:** English  
@@ -1768,7 +1768,14 @@ Introduce `session_management_v2`, `memory_ledger_v2`, `context_engine`, `adapti
 
 The first implementation increment delivers **P0-A JSON session isolation hardening** through the common runner and native coordinator. See [Session Isolation](../SESSION_ISOLATION.md) for the versioned ownership contract, adapter behavior, recovery quarantine and regression commands. Task/role/project/configuration checks are mandatory and cannot be disabled. Existing TUI/Web log views expose the registered lifecycle events; this increment adds no editable policy switch.
 
-The inspected revision in §1.4 and §9.1 remains a historical baseline. The P0-A changes supersede its unsafe global session selection, unlocked shell fallback and unverified ID creation/discovery. The JSON store remains the mutable authority: **P0-B SQLite ownership/fencing, P0-C structured checkpoints/rotation and P0-D normalized usage telemetry remain pending**, including their dedicated TUI/Web workflows. This increment does not claim full P0 completion or verified live-provider capability probes.
+The inspected revision in §1.4 and §9.1 remains a historical baseline. The P0-A changes supersede its unsafe global session selection, unlocked shell fallback and unverified ID creation/discovery. For projects not migrated to P0-B, JSON remains the mutable authority: **P0-C structured checkpoints/rotation and P0-D normalized usage telemetry remain pending**, including their dedicated TUI/Web workflows. This increment does not claim full P0 completion or verified live-provider capability probes.
+
+
+**P0-B is implemented as an explicit rollout**, on top of the P0-A baseline at `b316e2f`. The shared Rust ownership service adds durable project UUIDs, logical sessions, transactional leases, generation fencing, process birth verification, invocation replay protection, heartbeat/release, conservative recovery and a JSON migration/rollback path. See [Session Store](../SESSION_STORE.md) for the current schema, atomic authority switch, limitations and verification commands.
+
+TUI **J → Session Ownership** and Web **Setup → Sessions** (`/config/sessions`, also `/ops/sessions`) expose the three delivered canonical settings: `session_management.lease.ttl_seconds`, `session_management.lease.heartbeat_seconds` and `session_management.lifecycle.max_idle_hours`. Both clients use the same field catalog and validation, show the effective source, preserve drafts and reject stale revisions. They provide migration/rollback previews and Apply, session events/closure, recovery and consistent backups. The remaining §12 example keys are still proposed; isolation and lease identities are enforced invariants rather than editable bypasses.
+
+The single authority switch is now the `session_store` header in `.macc/state/tool-sessions.json`. SQLite mode replaces the legacy pool with a frozen envelope whose `tools` array prevents P0-A JSON writers from creating a parallel pool. Only SQLite stores mutable sessions after cutover. Rollback atomically replaces the envelope with exported JSON and a JSON-mode header. Original JSON evidence is archived with its SHA-256; SQLite backups include committed WAL data. Legacy JSON session bundle/restore paths are blocked in SQLite mode; operators use the consistent session-store backup operation or explicitly roll back, and may still save configuration bundles with `--no-sessions`.
 
 ---
 
