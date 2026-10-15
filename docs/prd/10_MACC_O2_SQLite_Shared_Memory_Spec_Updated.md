@@ -3,14 +3,14 @@
 **Project:** MACC — Multi-Assistant Code Config  
 **Document:** Revised and unified specification of `10_MACC_O2_SQLite_Shared_Memory_Spec.md`  
 **Motifs:** O2 Cross-Agent Memory Ledger; Shared Context Store; Code Intelligence Providers; Multi-Tool Session Lifecycle; Adaptive Compaction  
-**Version:** 2.1 — code-aligned implementation specification, proposed (not evidence of shipped O2 functionality)  
+**Version:** 2.2 — code-aligned specification with mandatory interactive TUI/Web coverage, proposed (not evidence of shipped O2 functionality)
 **Date:** 2026-10-15  
 **Code baseline inspected:** `df95759` — `feat: implement review and correction cycle budget management`  
 **Language:** English  
 **Applies to:** Rust core, native coordinator, performer runners, tool adapters, SQLite, local MCP, TUI, local Web UI  
 **Target tools:** Claude Code, Codex CLI, Gemini CLI, Mistral Vibe CLI; extensible to future tools
 
-> **Status and scope.** This document is a design target, not a declaration that all features already exist in MACC. It supersedes conflicting recommendations in the original O2 document, retains its evidence-backed SQLite memory concept, and incorporates the session-management, compaction and code-intelligence priorities discussed in October 2026. The commands shown under **Proposed MACC CLI** and the configuration keys under **Proposed configuration** require implementation. Third-party CLI support must be re-detected against the installed version rather than assumed from documentation alone. Version 2.1 aligns the implementation baseline and integration requirements with the local source at the revision above; it does not certify installed binaries or revalidate third-party releases.
+> **Status and scope.** This document is a design target, not a declaration that all features already exist in MACC. It supersedes conflicting recommendations in the original O2 document, retains its evidence-backed SQLite memory concept, and incorporates the session-management, compaction and code-intelligence priorities discussed in October 2026. The commands shown under **Proposed MACC CLI** and the configuration keys under **Proposed configuration** require implementation. Third-party CLI support must be re-detected against the installed version rather than assumed from documentation alone. Version 2.1 aligns the implementation baseline and integration requirements with the local source at the revision above; it does not certify installed binaries or revalidate third-party releases. Version 2.2 adds mandatory interactive configuration and operational coverage in both TUI and Web; these requirements remain proposed until implemented and verified.
 
 ---
 
@@ -38,6 +38,8 @@ MACC already separates its native Rust coordinator from isolated agent worktrees
 8. **No unverified headless compaction.** An adapter can report `supported`, `unsupported` or `unverified`; `unverified` never automatically executes undocumented commands.
 9. **Checkpoints precede destructive/irreversible session changes.** Persist and validate useful task state before compression or rotation.
 10. **Measured benefit.** Optimize combined token spend, time, task success and fidelity—not only prompt length or claimed reductions.
+
+11. **Complete TUI/Web coverage.** Every new feature, operator action and user-configurable variable introduced by this specification must be accessible in both clients when that feature ships. Advanced settings and provider overrides are included. Runtime-derived values and mandatory safety invariants remain inspectable, read-only, with a reason (§12.1, §17).
 
 ### 1.2 Preserve from the original O2 specification
 
@@ -1281,6 +1283,31 @@ observability:
 
 **Config migration contract:** older O2 `memory.max_context_tokens` maps to `context_engine.retrieval.memory_absolute_limit_tokens`. `memory.retention.stale_after_days` becomes a kind-specific time-sensitive TTL only, not mandatory project-wide staleness. Old session `scope: worktree` must migrate to safe task-scoped logical sessions, rather than continuing with previous semantics. Unknown options must fail schema validation clearly or remain in explicitly supported extension namespaces.
 
+### 12.1 Configuration coverage and shared field contract
+
+The YAML above is illustrative, not a ceiling on client coverage. **Every user-configurable field added by O2, including future extensions, must have a typed editor in both TUI and Web.** This includes feature/rollout flags, nested objects, lists, maps, per-tool/model/provider overrides, maintenance policies and advanced performance settings. Routine configuration must not require editing YAML, using a CLI, or setting an undocumented environment variable. A raw configuration editor may supplement typed controls but cannot replace them.
+
+Extend the existing canonical Rust configuration and validation services. Both clients consume one versioned field catalog derived from the canonical schema, with presentation metadata where needed; do not maintain independent frontend defaults or validation rules. Each descriptor includes:
+
+- Canonical field path, stable identifier, domain, label, help and searchable terms.
+- Type, units, default, enum choices, bounds, nullable/unset semantics and cross-field constraints.
+- Supported scope and override precedence; current persisted value, effective value and its source.
+- Dependencies, applicable tools/models/providers, detected capability and disabled-state explanation.
+- Editability, sensitivity, ownership requirements and activation timing: immediate, next dispatch/session/index build, or restart required.
+- Corresponding typed TUI/Web control and validation error path; dynamic map entries use the same descriptor contract.
+
+Classify every new field explicitly as **editable**, **derived read-only**, **secret reference**, or **mandatory invariant**. Installed versions, usage counters, native session IDs, lease owners/fencing tokens and detected capabilities are inspectable runtime state, not arbitrary inputs. Mandatory isolation, provenance and security constraints cannot be disabled through an advanced editor even where the illustrative YAML shows their required values. Secret inputs use the established secure credential mechanism and show masked status or references; never echo secret values into configuration previews, exports or logs. Capability restrictions must remain visible with a reason.
+
+CI must compare the canonical schema/catalog with both client editor registries, including nested/provider-specific fields. Any uncovered configurable field blocks delivery. New provider descriptors must supply editor metadata with their schema; unsupported fields cannot silently disappear.
+
+### 12.2 Persistence, validation and activation
+
+Use one canonical configuration transaction for CLI, TUI and Web. A client edits a draft based on a configuration revision; the shared core validates types, dependencies, permissions and safety invariants, computes the effective diff and activation impact, then atomically persists an explicit Apply. Retain existing `macc apply` planning for generated tool configuration; distinguish **saved**, **deployment pending** and **effective at runtime**. A save must not imply that tool files were regenerated or a running session was reconfigured.
+
+Reject stale writes from either client or external file changes with a structured revision conflict. Preserve the user's draft and offer reload/rebase with a reviewed diff; never silently overwrite newer settings. Failed validation or persistence leaves the last valid configuration active. Preserve unrelated fields and supported extension namespaces. Reset to default and remove override are separate operations with previews of the resulting effective values.
+
+Changes affecting a running task must declare their activation boundary. Do not restart workers, discard worktrees, rotate sessions or install packages as an implicit side effect of saving settings. Where immediate application is supported, show the impacted scope; otherwise display pending activation and provide the relevant explicit action. Preview operations are read-only and must not invoke paid AI calls, mutate indexes or perform network installation without a separate operation.
+
 ---
 
 ## 13. MACC CLI Design (Proposed)
@@ -1534,6 +1561,8 @@ Subscription usage and API charges may be non-comparable; report both transparen
 
 MACC already has a local Ops-oriented Web UI and Ratatui screens. Live-task presentation resolves model and effort through shared Rust execution labels; retain these beside any new session/pressure indicators. Existing registry, cooldown and supervisor views are not the proposed O2 Memory/Context/Code Intelligence pages. New features must use shared Rust APIs, not parallel frontend business logic. Keep the interface compact, self-explanatory and action-oriented.
 
+**Delivery requirement:** feature and configuration parity is mandatory across TUI and Web. Layouts may differ, but capabilities, defaults, validation, permissions and activation semantics must match. All pages and routes added below are proposed; the existing Settings/Automation and Web `/config` navigation are integration points, not evidence that O2 editors already exist.
+
 ### 17.1 TUI
 
 Add:
@@ -1558,6 +1587,8 @@ Keyboard actions must be discoverable and safe: inspect, preview, rebuild index,
 | `/ops/code-intelligence` | Provider selection, lifecycle and installation plans |
 | `/ops/code-intelligence/:providerId` | Version, health, deployment, indexes and diagnostics |
 
+Add proposed configuration routes under the existing `/config` group: `/config/memory`, `/config/context`, `/config/sessions`, `/config/compaction` and `/config/code-intelligence`. Extend `/config/settings` with an O2 Observability tab. Each page links to the matching Ops view and back, preserving selected task/provider and filters. TUI exposes equivalent sections in its existing configuration navigation, with direct access from Ops detail views.
+
 ### 17.3 Provider Manager UX
 
 Each provider card shows name, purpose, capability coverage, package/version, installation ownership, scope, privacy/network implications, index freshness, estimated resources and one primary next action. State-specific actions:
@@ -1581,14 +1612,53 @@ Display **context pressure** only with measurement quality. Separate `estimated`
 
 Memory Inbox shows title, type, status, confidence, project/feature scope, source task, evidence count, last verified revision and conflict flags. Diff-aware panels show relevant approved facts. The memory graph may visualize links among **memories, tasks, files, commits, tags**, while code-intelligence graphs remain a separate view/source clearly labelled as derived index data. Provide keyboard-accessible filtering and non-destructive review.
 
+### 17.6 Complete configuration navigation and controls
+
+| Domain / field coverage | TUI configuration section | Proposed Web page / tabs | Interactive controls and feedback |
+|---|---|---|---|
+| Feature enablement, staged rollout, local/offline/network policy and source selection | Settings → O2 overview; links to each domain | Settings → O2 overview; domain pages | Toggles, dependency summary, capability badges, pending activation; mandatory sources locked with explanation |
+| `memory.*`: storage, database, MCP, write policy, freshness, privacy and future retention/backup controls | Memory → General / Storage / MCP / Policies | `/config/memory`, matching tabs | Path validation, enum/select controls, typed numeric limits, TTL units, scope/permission summary; migration/backup plan links |
+| `context_engine.*` and existing `context.token_budget` / `context.summarization` | Context → Sources / Budgets / Retrieval / Output reduction | `/config/context`, matching tabs | Budget composition chart plus numeric table; ordered source/bundle lists, confidence limits, per-skill/tool overrides and sample bundle preview |
+| `session_management.*`: identity, reuse, isolation, leases, lifecycle and checkpoints | Sessions → Policies / Leases / Checkpoints | `/config/sessions`, matching tabs | Timing inputs, heartbeat/TTL validation, scope explanations, read-only owners and checkpoint/rotation impact preview |
+| `adaptive_compaction.*`: policy, thresholds, safeguards and per-provider/model options | Compaction → Policy / Thresholds / Tool overrides | `/config/compaction`, matching tabs | Coupled threshold controls with exact numeric entry, provider/model selectors, detected support, fallback and estimated decision preview |
+| `code_intelligence.*`: routing, fallback order, paths, lifecycle, indexing, query and provider-specific fields | Code Intelligence → Routing / Indexing / Providers / Advanced | `/config/code-intelligence`, matching tabs | Provider cards, reorderable fallback list with keyboard equivalent, schema-driven provider forms, version/health state, install/deploy/update plans |
+| `observability.*`, telemetry quality, event recording, privacy and future sampling/retention settings | Settings → O2 Observability | `/config/settings`, O2 Observability tab | Toggles, interval/retention inputs where configurable, metric provenance, sensitive-field masking status and live sample |
+| All additional advanced keys and supported extension namespaces introduced by O2 | Searchable Advanced fields within each section | Advanced tab within each domain | Typed object/map/list editors, field search, inherited/effective values, contextual help; no hidden YAML-only settings |
+
+A domain-level search must find fields by label and canonical path and open the relevant editor. Basic and Advanced views are progressive disclosure, not separate coverage levels. Presets such as conservative/adaptive may set several fields but must show the exact diff, preserve unrelated overrides and never silently loosen privacy or isolation. Do not offer a control for an operation the backend cannot perform; keep its capability and explanation visible.
+
+### 17.7 Interactive editing and explainable previews
+
+- Use toggles for booleans, selects for enums, explicit unset/inherit controls, path inputs with validation, and editable lists/maps for nested configuration. Numeric steppers or sliders must also permit exact entry and show units and allowed bounds.
+- Show inline validation and a summary linking to invalid fields. Debounce previews, cancel obsolete requests and keep editing responsive during refresh. Cross-field errors explain the relationship, for example `warning < action < guard` and heartbeat shorter than lease TTL.
+- Provide **Validate**, **Preview changes**, **Apply**, **Discard draft**, **Reset to default** and **Remove override** where applicable. Applying an ordinary configuration diff is the explicit save action; typing, navigating or read-only inspection needs no confirmation dialog. Preserve unsaved drafts during live updates and warn before discarding them on navigation.
+- Preview the configuration diff, effective values, scope, affected tools and activation timing. Context previews explain selected/excluded evidence and budget allocation; compaction previews explain a hypothetical decision and its signal quality. Clearly distinguish estimates, simulations and actual runtime measurements.
+- Link errors to field help and relevant diagnostics. Show actionable empty states, unavailable providers and offline behavior. Unsupported native compaction must expose the checkpoint/rotation fallback without guessing a command.
+- Show successful persistence separately from deployment and runtime activation. Maintain visible dirty/pending/error states; a later Web refresh or TUI tick must not erase the draft or present pending configuration as effective.
+
+### 17.8 Operational actions, live feedback and accessibility
+
+Both clients must support every operator workflow in this specification: memory proposal/evidence inspection and lifecycle actions; context search/preview; session/checkpoint inspection, guarded checkpoint/compaction/rotation/recovery; provider discovery, health checks, installation, deployment, indexing, update, rollback and removal; and available backup/migration/export workflows. Use the same core actions and permission/risk policies as the CLI. State-specific actions must explain why they are unavailable, including task ownership, unsupported platforms and active leases. Recovery must respect fencing and live ownership.
+
+Use filterable, sortable, paginated lists with detail panels, timelines, contextual actions and deep links. Display operation progress, sanitized logs, result evidence and retry/cancel controls only where the backend supports them. An interrupted client connection must not duplicate an operation or falsely imply cancellation. Persist operation IDs for reattachment and idempotent requests. Retry must respect quota cooldowns and transient-error classification; retain the diagnostic until a relevant state change.
+
+Stream updates through the existing event infrastructure with reconnect, gap recovery and explicit stale/last-updated indicators. Keep model and effort visible in live tasks beside session/context pressure. Refresh preserves selection, filters, focus and unsaved configuration. Separate **current effective policy**, **pending changes**, **detected capability** and **actual operation state** visually and textually.
+
+All workflows must be keyboard accessible in both clients, with discoverable TUI shortcuts, predictable focus order, accessible Web labels and validation announcements. Use text/icons alongside color, readable contrast, responsive detail views and a numeric/table equivalent for every chart. Reuse existing components and configuration navigation; split domain editors into focused modules rather than expanding a single application/state file without bounds.
+
 ---
 
 ## 18. Proposed Web API Contracts
 
-These endpoints are not guaranteed existing routes; wire them through the current Axum `/api/v1` security and audit conventions:
+The current Web client already uses `GET /api/v1/config` and `PUT /api/v1/config`. Extend that canonical service rather than creating a second O2 settings store. Proposed additions below require implementation through the current Axum `/api/v1` security and audit conventions; TUI calls the same Rust domain services directly.
 
 | Method / path | Description |
 |---|---|
+| `GET /api/v1/config/schema` | Proposed shared field catalog, schema version and presentation metadata for §12.1 |
+| `GET /api/v1/config` (extend existing) | Persisted configuration/revision plus effective values, provenance, capability and pending activation metadata; redact secrets |
+| `POST /api/v1/config/validate` | Proposed side-effect-free draft validation with field-addressed errors and cross-field constraints |
+| `POST /api/v1/config/preview` | Proposed revision-bound effective diff, activation impact and deployment requirements |
+| `PUT /api/v1/config` (extend existing) | Apply validated draft atomically with expected revision; return conflict without overwriting newer settings |
 | `GET /api/v1/memory` | Paginated memory search/filter |
 | `POST /api/v1/memory/proposals` | Create proposed memory; restricted origin |
 | `POST /api/v1/memory/{id}/promote` | Privileged evidence-gated promotion |
@@ -1606,6 +1676,8 @@ These endpoints are not guaranteed existing routes; wire them through the curren
 | `POST /api/v1/code-intelligence/index` | Build/update index request |
 | `GET /api/v1/code-intelligence/health` | Provider/index health |
 | `GET /api/v1/metrics/context` | Token/session/context telemetry |
+
+Configuration responses use a shared structured error contract for invalid fields, revision conflicts, unsupported capabilities, permission denial and restart/deployment requirements. Runtime state remains read-only; active-job configuration changes follow §12.2. Long operations return a durable operation ID and status/events for both clients. Additional action endpoints for lifecycle, backup and recovery must be defined alongside their owning feature before client delivery; the table is not a UI scope limitation.
 
 Maintain explicit risk classes: read-only safe, project write requires confirmation, network/third-party install requires reviewed consent, destructive user-level uninstall requires enhanced confirmation. All plans have short expiry, idempotency keys and source/target fingerprint validation. Output is sanitized and secrets redacted. Existing SSE event service should stream provider/session/memory lifecycle events with gap recovery.
 
@@ -1658,11 +1730,13 @@ The order below deliberately prioritizes correcting known session-scope hazards 
 | **P2-A** | Graphify integration | Managed isolated install, code-only index, revision freshness, bounded CLI query | A/B test vs native index |
 | **P2-B** | Serena integration | Optional LSP/symbol lookup, runtime dependency diagnosis, policy-based query routing | Symbol accuracy tests |
 | **P2-C** | Memory extraction & MCP | Agent proposals, phase-derived lesson candidates, restrictive MCP tools | No unreviewed active memory |
-| **P2-D** | TUI/Web Ops UX | Memory Inbox, provider manager, session view, context budget/health panels | Accessible review workflows |
+| **P2-D** | TUI/Web integration and UX refinement | Cross-domain workflows, consolidated dashboards and usability improvements on already delivered domain editors/actions | End-to-end parity and accessibility checks |
 | **P3-A** | Advanced freshness & quality | Symbol-aware invalidation, contradiction workflow, provider-note version TTL, ranking tuning | Evidence-based staleness tests |
 | **P3-B** | Optional native map expansion | Tree-sitter selected grammars, incremental symbol/signature index | Comparable accuracy at low cost |
 | **P3-C** | Optional semantic search | Local embeddings only if benchmarks justify | Quality/cost/security gate |
 | **P3-D** | Adaptive self-tuning | Policy tuning using task quality and actual cost; no silent policy changes | Statistically meaningful trials |
+
+**Client coverage is part of every work package:** each P0/P1/P2/P3 package must deliver its applicable TUI and Web configuration editors, inspectable state, operator actions and contract tests at the same time as its backend. Establish the shared field catalog and configuration transaction contract with the first package introducing configurable fields. P2-D refines cross-domain UX; it must not postpone earlier features' client access. Feature flags and staged-rollout controls are included in coverage and cannot disable P0 safety invariants.
 
 ### 20.1 Dependency graph
 
@@ -1680,7 +1754,7 @@ flowchart LR
   E --> I
   E --> K[P2-C MCP/extraction]
   F --> K
-  G --> L[P2-D Ops UX]
+  G --> L[P2-D Cross-domain UX refinement]
   I --> L
   K --> L
 ```
@@ -1827,6 +1901,21 @@ These checkboxes are target release criteria, not a statement that corresponding
 - [ ] Memory/context budget reductions do not worsen acceptance pass rates beyond agreed thresholds.
 - [ ] Compare task completion, rework, cost, latency and hallucination risk across 4 benchmark arms.
 - [ ] Baseline/optimized test results are reproducible with pinned tasks, models, provider versions and project revisions.
+
+### 22.7 TUI/Web configuration and operational parity acceptance
+
+- [ ] Every O2 configurable schema field, including advanced/nested/provider/model/rollout options, has a discoverable typed editor in both clients; automated catalog coverage fails for omissions.
+- [ ] Derived state, mandatory invariants and secret references are classified consistently, visible with explanations and protected against arbitrary writes through all entry points.
+- [ ] Every operator workflow in §17.8 is executable in both clients or explicitly unavailable for the same backend capability/permission reason; routine workflows require no YAML/CLI workaround.
+- [ ] Editing in TUI then reopening in Web, and vice versa, round-trips values, unset/inheritance semantics, maps/lists, overrides and unrelated configuration without loss.
+- [ ] Shared validation rejects invalid thresholds, lease timing, unsafe paths and policy violations with matching field-addressed errors; failed applies preserve the last valid configuration.
+- [ ] Concurrent TUI/Web or external-file edits produce revision conflicts; drafts survive refresh/reconnect and can be rebased without silent overwrites.
+- [ ] Previews perform no writes, paid calls, installation or indexing; preset/reset/remove-override actions expose their effective diff before Apply.
+- [ ] Saved, deployment-pending, next-dispatch and restart-required states are distinguishable; configuration changes cannot implicitly interrupt active workers or lose uncommitted work.
+- [ ] Provider install/update/rollback/uninstall and session/checkpoint actions share existing ownership, reviewed-plan and audit policies across clients; reconnect/retry does not duplicate execution.
+- [ ] Live progress, sanitized logs, cooldowns, stale data and errors remain visible; model and effort are preserved in live tasks.
+- [ ] Keyboard-only TUI/Web journeys cover search, edit, validation, preview, apply and operational recovery; Web accessibility and narrow-terminal/small-screen behavior are verified.
+- [ ] Regression checks cover feature-off, missing/unsupported providers, offline mode, redacted secret handling and domain-page navigation from Ops details.
 
 ---
 
@@ -1987,3 +2076,5 @@ MACC should **build and own** a minimal, robust Rust+SQLite Shared Context Engin
 **Delivery order matters:** fix cross-task session reuse (P0), implement checkpoints and trustworthy metrics (P0), deliver O2/context retrieval (P1), then provider-neutral compaction and managed code-intelligence lifecycle (P1), and only afterward measure Graphify/Serena benefits (P2). Never accept token savings that degrade correctness, test results, security boundaries or adherence to pinned PRD/design-system requirements.
 
 **A release is complete only when:** a Claude/Codex/Gemini/Vibe worker can stop or rotate safely mid-task, another worker can start an unrelated task in the same worktree without inheriting its conversation, both can retrieve evidence-backed common project lessons under a bounded context budget, and code-intelligence providers can be installed, deployed, updated, rolled back and removed without compromising MACC-managed data or the user's environment.
+
+**Client completion gate:** every delivered feature satisfies §12.1–§12.2, §17 and §22.7 in both TUI and Web. Complete field coverage, interactive validation/previews, explicit activation timing and operational parity are acceptance requirements for each work package, not optional follow-up work.
