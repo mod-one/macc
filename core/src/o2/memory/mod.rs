@@ -198,3 +198,6 @@ pub(super) fn freshness(worktree: &Path, m: &Memory, ttl: u64) -> Result<()> {
     }
     Ok(())
 }
+
+mod pull;
+pub use pull::{pull, read, PullPage, ReadPage};

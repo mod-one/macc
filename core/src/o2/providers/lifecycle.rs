@@ -164,10 +164,20 @@ pub fn apply(root: &Path, id: &str, expected: &str) -> Result<Receipt> {
             return Err(error("Stop runners before provider removal"));
         }
     }
-    let result = match adapter.execute_lifecycle(root, &plan, &previous, &p.code_intelligence)? {
-        Capability::Supported(receipt) => receipt,
-        Capability::Unsupported { reason, .. } => return Err(error(reason)),
-    };
+    let mut result =
+        match adapter.execute_lifecycle(root, &plan, &previous, &p.code_intelligence)? {
+            Capability::Supported(receipt) => receipt,
+            Capability::Unsupported { reason, .. } => return Err(error(reason)),
+        };
+    if ["index", "update"].contains(&plan.action.as_str()) {
+        let after = native::snapshot(root, &p.code_intelligence)?;
+        if after.digest != index.digest || after.revision != index.revision {
+            return Err(error(
+                "Source changed during indexing; preview again; cache is not activated",
+            ));
+        }
+        result.snapshot_digest = Some(index.digest.clone());
+    }
     if result.provider_id != plan.provider_id {
         return Err(error("Provider returned a foreign receipt"));
     }

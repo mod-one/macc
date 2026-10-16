@@ -31,11 +31,31 @@ pub enum O2Command {
         worktree: Option<String>,
         #[arg(long)]
         all: bool,
+        #[arg(long)]
+        full: bool,
+        #[arg(long, default_value_t = 0)]
+        cursor: usize,
+        #[arg(long)]
+        feature: Option<String>,
+        #[arg(long)]
+        user: Option<String>,
     },
     MemoryPropose,
     MemoryReview,
     MemoryGet {
         id: String,
+        #[arg(long)]
+        full: bool,
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+        #[arg(long)]
+        feature: Option<String>,
+        #[arg(long)]
+        tool: Option<String>,
+        #[arg(long)]
+        worktree: Option<String>,
+        #[arg(long)]
+        user: Option<String>,
         #[arg(long)]
         task: Option<String>,
     },
@@ -125,18 +145,31 @@ impl Command for O2 {
                 tool,
                 worktree,
                 all,
-            } => Action::MemorySearch {
-                search: memory::Search {
+                full,
+                cursor,
+                feature,
+                user,
+            } => {
+                let search = memory::Search {
                     query: query.clone(),
                     access: memory::Access {
                         task_id: task.clone(),
                         tool_id: tool.clone(),
                         worktree: worktree.clone(),
-                        ..Default::default()
+                        feature: feature.clone(),
+                        user_id: user.clone(),
                     },
                     include_inactive: *all,
-                },
-            },
+                };
+                if *full {
+                    Action::MemorySearch { search }
+                } else {
+                    Action::MemoryPull {
+                        search,
+                        cursor: *cursor,
+                    }
+                }
+            }
             O2Command::MemoryPropose => Action::MemoryPropose {
                 proposal: serde_json::from_str(&stdin()?)
                     .map_err(|e| MaccError::Validation(e.to_string()))?,
@@ -145,13 +178,36 @@ impl Command for O2 {
                 review: serde_json::from_str(&stdin()?)
                     .map_err(|e| MaccError::Validation(e.to_string()))?,
             },
-            O2Command::MemoryGet { id, task } => Action::MemoryGet {
-                id: id.clone(),
-                access: memory::Access {
+            O2Command::MemoryGet {
+                id,
+                task,
+                full,
+                offset,
+                feature,
+                tool,
+                worktree,
+                user,
+            } => {
+                let access = memory::Access {
                     task_id: task.clone(),
-                    ..Default::default()
-                },
-            },
+                    tool_id: tool.clone(),
+                    worktree: worktree.clone(),
+                    feature: feature.clone(),
+                    user_id: user.clone(),
+                };
+                if *full {
+                    Action::MemoryGet {
+                        id: id.clone(),
+                        access,
+                    }
+                } else {
+                    Action::MemoryRead {
+                        id: id.clone(),
+                        access,
+                        offset: *offset,
+                    }
+                }
+            }
             O2Command::MemoryEvidence { path, worktree } => Action::MemoryEvidence {
                 path: path.clone(),
                 worktree: worktree.clone(),

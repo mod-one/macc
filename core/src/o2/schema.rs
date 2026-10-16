@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS provider_plans(id TEXT PRIMARY KEY,plan_json TEXT NOT
 CREATE TABLE IF NOT EXISTS context_usage_items(invocation_id TEXT NOT NULL REFERENCES invocation_usage(invocation_id),source_kind TEXT NOT NULL,source_ref TEXT NOT NULL,estimated_tokens INTEGER NOT NULL,PRIMARY KEY(invocation_id,source_kind,source_ref));
 CREATE TABLE IF NOT EXISTS compaction_pressure(session_id TEXT PRIMARY KEY,generation INTEGER NOT NULL,context_tokens INTEGER,window INTEGER,compactions INTEGER);
 CREATE TABLE IF NOT EXISTS compaction_probes(tool_id TEXT PRIMARY KEY,probe_json TEXT NOT NULL);
-INSERT OR IGNORE INTO session_meta VALUES('o2_schema_version','1');";
+CREATE TABLE IF NOT EXISTS native_setting_ownership(worktree TEXT NOT NULL,path TEXT NOT NULL,setting_key TEXT NOT NULL,value_json TEXT NOT NULL,PRIMARY KEY(worktree,path,setting_key));
+INSERT OR IGNORE INTO session_meta VALUES('o2_schema_version','2');";
 pub fn ready(db: &rusqlite::Connection) -> Result<bool> {
     let v: Option<String> = sql(db
         .query_row(
@@ -30,7 +31,8 @@ pub fn ready(db: &rusqlite::Connection) -> Result<bool> {
         .optional())?;
     match v.as_deref() {
         None => Ok(false),
-        Some("1") => Ok(true),
+        Some("1") => Ok(false),
+        Some("2") => Ok(true),
         _ => Err(error("Unsupported O2 schema version")),
     }
 }
@@ -67,11 +69,15 @@ pub fn upgrade(root: &Path, apply: bool, expected: Option<&str>) -> Result<store
     store::snapshot_database(&db, &backup)?;
     let tx = sql(db.transaction())?;
     sql(tx.execute_batch(SCHEMA))?;
+    sql(tx.execute(
+        "UPDATE session_meta SET value='2' WHERE key='o2_schema_version'",
+        [],
+    ))?;
     audit(
         &tx,
         "o2_schema_upgraded",
         &a.project_id,
-        serde_json::json!({"version":1}),
+        serde_json::json!({"version":2}),
     )?;
     sql(tx.commit())?;
     report.applied = true;

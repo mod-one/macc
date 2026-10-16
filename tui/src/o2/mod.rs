@@ -34,6 +34,7 @@ pub struct Panel {
     pending: Option<Action>,
     access: Value,
     query: String,
+    conflicts: bool,
 }
 impl Panel {
     pub fn mutation(&self, key: KeyCode) -> bool {
@@ -58,6 +59,7 @@ impl Panel {
         let ready = self.view.as_ref().is_some_and(|v| v.ready);
         if ready {
             let action = match self.tab {
+                0 if self.conflicts => Some(Action::MemoryConflicts),
                 0 => Some(Action::MemorySearch {
                     search: serde_json::from_value(
                         json!({"query":self.query,"access":self.access,"include_inactive":true}),
@@ -107,20 +109,28 @@ impl Panel {
         match key {
             KeyCode::Esc|KeyCode::Char('o')=>{if self.view.as_ref().is_some_and(|v|self.inherit||serde_json::to_value(&v.policy).ok().as_ref()!=Some(&self.draft)){self.message="Unsaved policy draft. Use 5 → x to discard, or p then s to apply.".into();}else{self.open=false;}},
             KeyCode::Char('r')=>self.refresh(root)?,KeyCode::Up=>self.selected=self.selected.saturating_sub(1),KeyCode::Down=>self.selected=(self.selected+1).min(self.rows.len().saturating_sub(1)),KeyCode::PageDown=>self.scroll=self.scroll.saturating_add(10),KeyCode::PageUp=>self.scroll=self.scroll.saturating_sub(10),
-            KeyCode::Enter=>{let mut row=self.selected()?.clone();if self.tab==0 {row=execute(root,Action::MemoryGet{id:row["memory"]["id"].as_str().unwrap_or_default().into(),access:serde_json::from_value(self.access.clone()).map_err(|e|MaccError::Validation(e.to_string()))?})?;self.rows[self.selected]=row.clone();}self.result(row);},
+            KeyCode::Enter=>{let mut row=self.selected()?.clone();if self.tab==0 && !self.conflicts {row=execute(root,Action::MemoryGet{id:row["memory"]["id"].as_str().unwrap_or_default().into(),access:serde_json::from_value(self.access.clone()).map_err(|e|MaccError::Validation(e.to_string()))?})?;self.rows[self.selected]=row.clone();}self.result(row);},
             KeyCode::Char('d') if self.tab==2=>{let data=execute(root,Action::CompactionState)?;self.result(data);},
+            KeyCode::Char('m') if self.tab==2=>self.start("adopt_native",true,&["Idle logical session ID whose existing native setting should become MACC-managed"]),
             KeyCode::Char('c') if self.tab==2=>self.start("checkpoint",true,&["Idle logical session ID for checkpoint"]),
             KeyCode::Char('u')=>{let plan=execute(root,Action::UpgradePlan)?;self.pending=Some(Action::UpgradeApply{source_sha256:plan["source_sha256"].as_str().unwrap_or_default().into()});self.result(plan);self.message="Inspect the upgrade and backup conditions. Press a to apply this exact reviewed source hash.".into();},
-            KeyCode::Char('a')=>{if let Some(action)=self.pending.take(){let result=execute(root,action)?;self.result(result);self.refresh(root)?;self.message="Reviewed operation applied.".into();}},
+            KeyCode::Char('a')=>{if let Some(action)=self.pending.as_ref(){let result=execute(root,action.clone())?;self.pending=None;self.result(result);self.refresh(root)?;self.message="Reviewed operation applied.".into();}},
             KeyCode::Char('n') if self.tab==0=>self.start("propose",true,&["Kind (discovery, constraint, decision…)","Title","Body (concise sourced fact)","Scope (project, task, feature, worktree, tool, user)","Scope reference (blank for project)","Evidence source path","Confidence (0..1)"]),
-            KeyCode::Char('p') if self.tab==0=>{self.selected()?;self.start("review",true,&["Transition (active, rejected, stale, invalidated)","Review reason","Replacement evidence path (blank preserves existing evidence)"]);},
-            KeyCode::Char('c') if self.tab==0=>{self.selected()?;self.start("conflict",true,&["Conflicting memory ID","Reason after inspecting both claims"]);},
+            KeyCode::Char('p') if self.tab==0 && !self.conflicts=>{self.selected()?;self.start("review",true,&["Transition (active, rejected, stale, invalidated)","Review reason","Replacement evidence path (blank preserves existing evidence)"]);},
+            KeyCode::Char('c') if self.tab==0 && !self.conflicts=>{self.selected()?;self.start("conflict",true,&["Conflicting memory ID","Reason after inspecting both claims"]);},
             KeyCode::Char('p') if self.tab==3=>self.start("provider",true,&["Provider ID (native)","Operation (install, deploy, index, update, rollback, disable, undeploy, uninstall)"]),
             KeyCode::Char('p') if self.tab==2=>{let tool=self.selected()?["tool_id"].as_str().unwrap_or_default().to_string();let data=execute(root,Action::CompactionProbe{tool_id:tool})?;self.result(data);self.refresh(root)?;},
             KeyCode::Char('v') if self.tab==2=>self.start("rotate",true,&["Exact logical session ID to close (inspect Sessions first)"]),
             KeyCode::Char('/')=>match self.tab{0=>self.start("search",false,&["Search text (blank lists inbox)","Task scope (blank for project facts)","Tool scope","Worktree scope","Feature scope","User scope"]),2=>self.start("decision",false,&["Simulated uses","Invocation budget","Observed context tokens (blank unknown)","Effective window (blank unknown)"]),3=>self.start("code",false,&["Literal code query","Query kind (file_search or references)","Worktree (blank for project)"]),_=>{}},
             KeyCode::Char('b') if self.tab==0=>{let result=execute(root,Action::FtsRebuild)?;self.result(result);},
-            KeyCode::Char('f') if self.tab==0=>{let result=execute(root,Action::MemoryConflicts)?;self.result(result);},
+            KeyCode::Char('f') if self.tab == 0 => {
+                self.conflicts = !self.conflicts;
+                self.selected = 0;
+                self.refresh(root)?;
+            }
+            KeyCode::Char('v') if self.tab==0 && self.conflicts=>{self.selected()?;self.start("resolve_conflict",true,&["Reason after reviewing both conflicting claims"]);},
+            KeyCode::Char('l') if self.tab==0=>self.start("pull",false,&["Agent search cursor (0 for first page)"]),
+            KeyCode::Char('g') if self.tab==0 && !self.conflicts=>{self.selected()?;self.start("read",false,&["Agent record offset (0 for first fragment)"]);},
             KeyCode::Char('j')=>self.start("advanced",false,&["Advanced typed operation JSON (all shared O2 actions)"]),
             KeyCode::Char('b') if self.tab==1=>self.start("reduce",true,&["Reduction bundle (test, lint, trace, diff, log)","Raw output (JSON escapes supported through advanced j)"]),
             _=>{}
@@ -133,9 +143,11 @@ impl Panel {
         if self.tab == 4 {
             self.draw_settings(&mut lines);
         } else {
-            lines.push(match self.tab{0=>"n propose | p review → a confirm | c conflict | f inspect conflicts | b rebuild FTS. Only reviewed active current facts enter prompts.",1=>"Context manifests keep PRD/criteria and pinned source hashes separate from optional estimated memory. b reduce output and preserve raw artifact.",2=>"p probe version/help | d runtime decisions | c create checkpoint | v review scoped rotation. Native settings are opt-in under Policies. Compression execution remains unobserved unless an adapter reports it.",_=>"p preview lifecycle → a confirm. Native ships with MACC; external adapters are optional. / literal current-code query."}.into());
+            lines.push(match self.tab{0=>"n propose | p review → a confirm | c conflict | f toggle conflict list | v resolve selected conflict | l agent search page | g agent record fragment | b rebuild FTS. Only reviewed active current facts enter prompts.",1=>"Context manifests keep PRD/criteria and pinned source hashes separate from optional estimated memory. b reduce output and preserve raw artifact.",2=>"p probe version/help | d runtime decisions | c create checkpoint | m preview native setting adoption | v review scoped rotation. Native settings are opt-in under Policies. Compression execution remains unobserved unless an adapter reports it.",_=>"p preview lifecycle → a confirm. Native ships with MACC; external adapters are optional. / literal current-code query."}.into());
             for (i, row) in self.rows.iter().enumerate() {
-                let label = if self.tab == 0 {
+                let label = if self.tab == 0 && self.conflicts {
+                    format!("{} | {} | {}", row["id"], row["status"], row["reason"])
+                } else if self.tab == 0 {
                     format!(
                         "{} | {} | {} | confidence {} | {} evidence",
                         row["memory"]["proposal"]["title"],

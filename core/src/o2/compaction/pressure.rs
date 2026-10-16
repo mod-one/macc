@@ -65,16 +65,29 @@ pub(crate) fn evaluate(
     budget: u64,
 ) -> Result<(Decision, Option<u64>)> {
     let p = super::super::policy::load(root)?;
+    let in_flight: bool = sql(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM session_leases WHERE logical_session_id=?1)",
+        [id],
+        |r| r.get(0),
+    ))?;
     if !super::super::ready(db)? {
         return Ok((
-            decision(&p.adaptive_compaction, uses, budget, None, None, false),
+            decision(&p.adaptive_compaction, uses, budget, None, None, in_flight),
             None,
         ));
     }
     let observed:Option<(Option<u64>,Option<u64>,Option<u64>)>=sql(db.query_row("SELECT context_tokens,window,compactions FROM compaction_pressure p JOIN logical_sessions s ON s.id=p.session_id AND s.generation=p.generation WHERE p.session_id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional())?;
     let (tokens, window, count) = observed.unwrap_or_default();
-    let mut outcome = decision(&p.adaptive_compaction, uses, budget, tokens, window, false);
-    if p.adaptive_compaction.enabled
+    let mut outcome = decision(
+        &p.adaptive_compaction,
+        uses,
+        budget,
+        tokens,
+        window,
+        in_flight,
+    );
+    if !in_flight
+        && p.adaptive_compaction.enabled
         && count.is_some_and(|n| n >= p.adaptive_compaction.max_compactions_per_session)
     {
         outcome.action = "checkpoint_rotate".into();

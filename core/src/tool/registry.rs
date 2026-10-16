@@ -58,6 +58,15 @@ pub trait ToolAdapter: Send + Sync {
         None
     }
 
+    /// Return a verified adapter transform, or None to use coordinator output reduction.
+    /// This applies to captured tool output, never provider completion/usage streams.
+    fn transform_tool_output(
+        &self,
+        _output: &crate::context::pipeline::ToolOutput<'_>,
+    ) -> crate::Result<Option<String>> {
+        Ok(None)
+    }
+
     // ── Spec §3.6: Skill execution capabilities ──────────────────────────────
 
     /// Whether this adapter can directly run a named skill (Strategy A).

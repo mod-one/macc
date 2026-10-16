@@ -219,3 +219,7 @@ pub(crate) fn probe_spec(
     sql(tx.commit())?;
     Ok(record)
 }
+
+mod native_settings;
+
+pub mod adoption;

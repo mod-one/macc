@@ -38,3 +38,11 @@ mod policy_fields;
 mod integration_tests;
 
 pub(crate) mod health;
+
+pub mod output;
+
+#[cfg(test)]
+mod regression_tests;
+
+#[cfg(test)]
+mod pipeline_tests;

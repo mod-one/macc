@@ -20,7 +20,19 @@ pub fn test_output_failures_only(input: &str) -> String {
         }
     }
     if lines.is_empty() {
-        "No test failures detected.".to_string()
+        let counts = input
+            .lines()
+            .filter(|line| {
+                line.to_ascii_lowercase().contains("passed")
+                    && line.chars().any(|c| c.is_ascii_digit())
+            })
+            .take(10)
+            .collect::<Vec<_>>();
+        if counts.is_empty() {
+            "No test failures detected.".to_string()
+        } else {
+            counts.join("\n")
+        }
     } else {
         lines.join("\n")
     }
@@ -34,7 +46,10 @@ pub fn lint_errors_only(input: &str) -> String {
             let lower = line.to_lowercase();
             lower.contains("error")
                 || lower.contains("err[")
-                || lower.contains(" E")
+                || line.split_whitespace().any(|s| {
+                    s.as_bytes().first() == Some(&b'E')
+                        && s.as_bytes().get(1).is_some_and(u8::is_ascii_digit)
+                })
                 || lower.contains("✗")
         })
         .collect();
@@ -122,6 +137,7 @@ pub fn git_diff_stat_before_full(input: &str, budget: usize) -> String {
         full_diff_lines.push(line);
     }
 
+    stat_lines.extend(input.lines().filter(|line| line.starts_with("diff --git ")));
     let stat = stat_lines.join("\n");
     let full = full_diff_lines.join("\n");
 

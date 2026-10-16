@@ -23,6 +23,8 @@ pub struct Receipt {
     pub index: Option<String>,
     pub index_sha256: Option<String>,
     pub source_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_digest: Option<String>,
     pub owned_paths: Vec<String>,
     pub previous: Option<Box<Receipt>>,
 }

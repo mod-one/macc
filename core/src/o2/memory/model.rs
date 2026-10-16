@@ -44,7 +44,7 @@ pub struct Memory {
     pub reviewed_by: Option<String>,
     pub staleness_reason: Option<String>,
 }
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Search {
     #[serde(default)]
@@ -54,7 +54,7 @@ pub struct Search {
     #[serde(default)]
     pub include_inactive: bool,
 }
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Review {
     pub id: String,
@@ -65,7 +65,7 @@ pub struct Review {
     #[serde(default)]
     pub evidence: Option<Vec<Evidence>>,
 }
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Hit {
     pub memory: Memory,
     pub checksum: String,

@@ -133,11 +133,19 @@ fn only_declared_context_gauges_drive_runtime_rotation() {
     .unwrap();
     let (decision, count) =
         compaction::evaluate_pressure(&db, r, &lease.key.session_id, 4, 20).unwrap();
-    assert_eq!(decision.action, "checkpoint_rotate");
+    assert_eq!(decision.action, "defer");
     assert_eq!(decision.pressure, Some(0.9));
     assert_eq!(count, Some(1));
     drop(db);
     store::release(r, &lease.key, true).unwrap();
+    let (db, _) = database(r).unwrap();
+    assert_eq!(
+        compaction::evaluate_pressure(&db, r, &lease.key.session_id, 4, 20)
+            .unwrap()
+            .0
+            .action,
+        "checkpoint_rotate"
+    );
 }
 #[test]
 fn shipped_adapter_matrix_validates_without_claiming_native_execution() {
@@ -152,4 +160,138 @@ fn shipped_adapter_matrix_validates_without_claiming_native_execution() {
         let profile = spec.performer.unwrap().compaction.unwrap();
         profile.validate().unwrap();
     }
+}
+
+#[test]
+#[cfg(unix)]
+fn owned_native_settings_follow_policy_changes_disable_and_preserve_user_edits() {
+    for format in ["toml", "json"] {
+        let temp = tests::root();
+        let root = temp.path();
+        enable(root);
+        let p = spec(root, format);
+        let lease = grant(root, &p);
+        compaction::probe_spec(root, "future-tool", &p).unwrap();
+        assert!(
+            compaction::execution_options(root, &lease.key)
+                .unwrap()
+                .applied
+        );
+        let view = policy::inspect(root).unwrap();
+        let mut policy = view.policy;
+        policy.adaptive_compaction.native_token_threshold = 9000;
+        policy.adaptive_compaction.action_ratio = 0.65;
+        super::policy::update(root, &view.revision, Some(policy.clone())).unwrap();
+        assert!(
+            compaction::execution_options(root, &lease.key)
+                .unwrap()
+                .applied
+        );
+        let path = root.join(format!(".native/settings.{format}"));
+        let read = || -> serde_json::Value {
+            let text = std::fs::read_to_string(&path).unwrap();
+            if format == "toml" {
+                serde_json::to_value(toml::from_str::<toml::Value>(&text).unwrap()).unwrap()
+            } else {
+                serde_json::from_str(&text).unwrap()
+            }
+        };
+        if format == "toml" {
+            assert_eq!(read()["native_compact_tokens"], 9000);
+        } else {
+            assert_eq!(read()["model"]["compactionThreshold"], 0.65);
+        }
+        let view = super::policy::inspect(root).unwrap();
+        policy.adaptive_compaction.enabled = false;
+        super::policy::update(root, &view.revision, Some(policy.clone())).unwrap();
+        assert!(
+            compaction::execution_options(root, &lease.key)
+                .unwrap()
+                .applied
+        );
+        assert!(if format == "toml" {
+            read().get("native_compact_tokens").is_none()
+        } else {
+            read()["model"].get("compactionThreshold").is_none()
+        });
+        let view = super::policy::inspect(root).unwrap();
+        policy.adaptive_compaction.enabled = true;
+        super::policy::update(root, &view.revision, Some(policy.clone())).unwrap();
+        assert!(
+            compaction::execution_options(root, &lease.key)
+                .unwrap()
+                .applied
+        );
+        let raw = if format == "toml" {
+            "native_compact_tokens = 42\nmodel = 'preserve'\n"
+        } else {
+            r#"{"model":{"compactionThreshold":0.42,"name":"preserve"}}"#
+        };
+        std::fs::write(&path, raw).unwrap();
+        let view = super::policy::inspect(root).unwrap();
+        policy.adaptive_compaction.enabled = false;
+        super::policy::update(root, &view.revision, Some(policy)).unwrap();
+        assert!(
+            !compaction::execution_options(root, &lease.key)
+                .unwrap()
+                .applied
+        );
+        assert_eq!(std::fs::read_to_string(path).unwrap(), raw);
+        store::release(root, &lease.key, true).unwrap();
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn legacy_native_override_needs_reviewed_idle_adoption_and_keeps_toml_types() {
+    let temp = tests::root();
+    let root = temp.path();
+    enable(root);
+    let p = spec(root, "toml");
+    let lease = grant(root, &p);
+    compaction::probe_spec(root, "future-tool", &p).unwrap();
+    let path = root.join(".native/settings.toml");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &path,
+        "native_compact_tokens = 42\nmodel = 'kept'\nwhen = 1979-05-27T07:32:00Z\n",
+    )
+    .unwrap();
+    assert!(
+        !compaction::execution_options(root, &lease.key)
+            .unwrap()
+            .applied
+    );
+    assert!(compaction::adoption::preview(root, &lease.key.session_id).is_err());
+    store::release(root, &lease.key, true).unwrap();
+    let reviewed = compaction::adoption::preview(root, &lease.key.session_id).unwrap();
+    std::fs::write(
+        &path,
+        "native_compact_tokens = 43\nmodel = 'kept'\nwhen = 1979-05-27T07:32:00Z\n",
+    )
+    .unwrap();
+    assert!(compaction::adoption::apply(
+        root,
+        &lease.key.session_id,
+        reviewed["checksum"].as_str().unwrap()
+    )
+    .is_err());
+    let reviewed = compaction::adoption::preview(root, &lease.key.session_id).unwrap();
+    compaction::adoption::apply(
+        root,
+        &lease.key.session_id,
+        reviewed["checksum"].as_str().unwrap(),
+    )
+    .unwrap();
+    let next = grant(root, &p);
+    assert!(
+        compaction::execution_options(root, &next.key)
+            .unwrap()
+            .applied
+    );
+    let actual: toml::Value = toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(actual["native_compact_tokens"].as_integer(), Some(5000));
+    assert_eq!(actual["model"].as_str(), Some("kept"));
+    assert!(actual["when"].is_datetime());
+    store::release(root, &next.key, true).unwrap();
 }

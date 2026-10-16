@@ -3,6 +3,7 @@ mod lifecycle;
 mod model;
 mod native;
 mod native_lifecycle;
+mod routing;
 use super::*;
 pub use lifecycle::{apply, inspect, plan};
 pub use model::*;
@@ -115,6 +116,22 @@ pub fn query(root: &Path, q: &Query) -> Result<Capability<QueryResult>> {
         if descriptor.id != "native" && !state.is_some_and(|r| r.state == "healthy") {
             diagnostics.push(format!("{} not deployed/healthy", descriptor.id));
             continue;
+        }
+        if descriptor.id != "native" {
+            let target = native::worktree(root, q.worktree.as_deref())?;
+            if !routing::cached_compatible(
+                root,
+                &target,
+                &descriptor,
+                state.unwrap(),
+                &p.code_intelligence,
+            )? {
+                diagnostics.push(format!(
+                    "{} receipt/index is stale or incompatible; fallback retained",
+                    descriptor.id
+                ));
+                continue;
+            }
         }
         if !adapter.detect(root).is_ok_and(|d| d.status == "healthy") {
             diagnostics.push(format!("{} unavailable; fallback retained", descriptor.id));

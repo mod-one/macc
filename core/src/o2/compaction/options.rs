@@ -8,14 +8,25 @@ pub struct ExecutionOptions {
 }
 pub fn execution_options(root: &Path, key: &store::LeaseKey) -> Result<ExecutionOptions> {
     let policy = super::super::policy::load(root)?;
-    if !policy.adaptive_compaction.enabled || !policy.adaptive_compaction.configure_native_auto {
+    if !store::is_sqlite(root)? {
         return Ok(ExecutionOptions {
             reason: "Native auto configuration left to existing provider settings".into(),
             ..Default::default()
         });
     }
     let _guard = store::lock(root)?;
-    let (mut db, _) = database(root)?;
+    let (mut db, _) = store::active_database(root)?;
+    if !super::super::ready(&db)? {
+        if policy.adaptive_compaction.enabled {
+            return Err(error(
+                "O2 schema upgrade required before native configuration",
+            ));
+        }
+        return Ok(ExecutionOptions {
+            reason: "O2 inactive; existing provider configuration retained".into(),
+            ..Default::default()
+        });
+    }
     let tx = sql(db.transaction())?;
     store::verify_lease(&tx, key)?;
     let raw: String = sql(tx.query_row(
@@ -24,12 +35,12 @@ pub fn execution_options(root: &Path, key: &store::LeaseKey) -> Result<Execution
         |r| r.get(0),
     ))?;
     let identity: serde_json::Value = store::json(raw.as_bytes())?;
-    let p: crate::tool::ToolPerformerSpec =
-        serde_json::from_value(identity["execution_config"]["performer"].clone())
+    let profile: Option<crate::tool::compaction::CompactionSpec> =
+        serde_json::from_value(identity["execution_config"]["performer"]["compaction"].clone())
             .map_err(|e| error(e.to_string()))?;
-    let Some(profile) = p.compaction.as_ref() else {
+    let Some(profile) = profile else {
         return Ok(ExecutionOptions {
-            reason: "Adapter has no native auto configuration; checkpoint rotation retained".into(),
+            reason: "Adapter has no native configuration; checkpoint rotation retained".into(),
             ..Default::default()
         });
     };
@@ -37,6 +48,39 @@ pub fn execution_options(root: &Path, key: &store::LeaseKey) -> Result<Execution
     let tool = identity["tool_id"]
         .as_str()
         .ok_or_else(|| error("Missing tool identity"))?;
+    let Some(native) = &profile.native_auto else {
+        return Ok(ExecutionOptions {
+            reason: "Native setting unsupported; checkpoint rotation retained".into(),
+            ..Default::default()
+        });
+    };
+    let disabled = !policy.adaptive_compaction.enabled
+        || !policy.adaptive_compaction.configure_native_auto
+        || native
+            .disabled_env
+            .iter()
+            .any(|k| std::env::var_os(k).is_some_and(|v| v != "0" && v != "false"))
+        || native.unit == "tokens" && policy.adaptive_compaction.native_token_threshold == 0;
+    if disabled {
+        let result = if native.format == "env" {
+            ExecutionOptions {
+                reason: "Native environment override disabled for this invocation".into(),
+                ..Default::default()
+            }
+        } else {
+            native_settings::manage(
+                &tx,
+                root,
+                identity["execution_root"]
+                    .as_str()
+                    .ok_or_else(|| error("Missing worktree"))?,
+                native,
+                None,
+            )?
+        };
+        sql(tx.commit())?;
+        return Ok(result);
+    }
     let observed: Option<String> = sql(tx
         .query_row(
             "SELECT probe_json FROM compaction_probes WHERE tool_id=?1",
@@ -51,31 +95,19 @@ pub fn execution_options(root: &Path, key: &store::LeaseKey) -> Result<Execution
         });
     };
     let observed: Probe = store::json(observed.as_bytes())?;
-    let executable = probe::executable(&p.command)?;
+    let executable = probe::executable(
+        identity["execution_config"]["performer"]["command"]
+            .as_str()
+            .ok_or_else(|| error("Missing executable"))?,
+    )?;
     if observed.state != "version_help_observed"
         || observed.executable_sha256 != Some(probe::binary_hash(&executable)?)
         || observed.profile_sha256
             != Some(digest(
-                &serde_json::to_vec(profile).map_err(|e| error(e.to_string()))?,
+                &serde_json::to_vec(&profile).map_err(|e| error(e.to_string()))?,
             ))
     {
         return Ok(ExecutionOptions{reason:"Native capability observation stale/unavailable; re-probe; checkpoint fallback remains active".into(),..Default::default()});
-    }
-    let Some(native) = &profile.native_auto else {
-        return Ok(ExecutionOptions {
-            reason: "Native setting unsupported for this adapter".into(),
-            ..Default::default()
-        });
-    };
-    if native
-        .disabled_env
-        .iter()
-        .any(|k| std::env::var_os(k).is_some_and(|v| v != "0" && v != "false"))
-    {
-        return Ok(ExecutionOptions {
-            reason: "An explicit native compaction disable is present; preserved".into(),
-            ..Default::default()
-        });
     }
     let value = match native.unit.as_str() {
         "tokens" => {
@@ -97,68 +129,23 @@ pub fn execution_options(root: &Path, key: &store::LeaseKey) -> Result<Execution
         }
         result.env.insert(native.key.clone(), value.to_string());
     } else {
-        let wt = identity["execution_root"]
-            .as_str()
-            .ok_or_else(|| error("Missing worktree"))?;
-        super::super::providers::native_worktree(root, Some(wt))?;
-        let relative = native.path.as_ref().unwrap();
-        let mut path = Path::new(wt).to_path_buf();
-        for part in Path::new(relative).components() {
-            path.push(part);
-            if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
-                return Err(error("Native configuration path symlink rejected"));
-            }
-        }
-        let existing = if path.exists() {
-            let size = std::fs::metadata(&path)
-                .map_err(|e| error(e.to_string()))?
-                .len();
-            if size > 1048576 {
-                return Err(error("Native config too large"));
-            }
-            std::fs::read_to_string(&path).map_err(|e| error(e.to_string()))?
-        } else {
-            String::new()
-        };
-        let mut document = if native.format == "toml" {
-            if existing.is_empty() {
-                serde_json::json!({})
-            } else {
-                serde_json::to_value(
-                    toml::from_str::<toml::Value>(&existing).map_err(|e| error(e.to_string()))?,
-                )
-                .map_err(|e| error(e.to_string()))?
-            }
-        } else if existing.is_empty() {
-            serde_json::json!({})
-        } else {
-            serde_json::from_str(&existing).map_err(|e| error(e.to_string()))?
-        };
-        let keys = native.key.split('.').collect::<Vec<_>>();
-        let mut node = &mut document;
-        for k in &keys[..keys.len() - 1] {
-            let o = node
-                .as_object_mut()
-                .ok_or_else(|| error("Native config object expected"))?;
-            node = o.entry(*k).or_insert(serde_json::json!({}));
-        }
-        let object = node
-            .as_object_mut()
-            .ok_or_else(|| error("Native config object expected"))?;
-        let key = keys[keys.len() - 1];
-        if object.contains_key(key) {
-            return Ok(ExecutionOptions {
-                reason: "Existing explicit native setting preserved".into(),
-                ..Default::default()
-            });
-        }
-        object.insert(key.into(), value);
-        let raw = if native.format == "toml" {
-            toml::to_string_pretty(&document).map_err(|e| error(e.to_string()))?
-        } else {
-            serde_json::to_string_pretty(&document).map_err(|e| error(e.to_string()))?
-        };
-        store::write(root, &path, raw.as_bytes())?;
+        result = native_settings::manage(
+            &tx,
+            root,
+            identity["execution_root"]
+                .as_str()
+                .ok_or_else(|| error("Missing worktree"))?,
+            native,
+            Some(value),
+        )?;
+        super::super::schema::audit(
+            &tx,
+            "native_auto_configuration",
+            tool,
+            serde_json::json!({"session":key.session_id,"applied":result.applied,"reason":result.reason}),
+        )?;
+        sql(tx.commit())?;
+        return Ok(result);
     }
     result.applied = true;
     result.reason="Documented native auto setting configured; compression execution remains unobserved; checkpoint rotation retained".into();

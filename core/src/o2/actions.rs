@@ -2,7 +2,7 @@
 use super::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Action {
     Status,
@@ -20,6 +20,17 @@ pub enum Action {
     },
     MemorySearch {
         search: memory::Search,
+    },
+    MemoryPull {
+        search: memory::Search,
+        #[serde(default)]
+        cursor: usize,
+    },
+    MemoryRead {
+        id: String,
+        access: memory::Access,
+        #[serde(default)]
+        offset: usize,
     },
     MemoryGet {
         id: String,
@@ -69,6 +80,13 @@ pub enum Action {
         query: providers::Query,
     },
     CompactionList,
+    NativeSettingPreview {
+        id: String,
+    },
+    NativeSettingAdopt {
+        id: String,
+        checksum: String,
+    },
     CompactionState,
     CheckpointCreate {
         id: String,
@@ -98,12 +116,15 @@ impl Action {
                 | Self::UpgradePlan
                 | Self::MemorySearch { .. }
                 | Self::MemoryGet { .. }
+                | Self::MemoryPull { .. }
+                | Self::MemoryRead { .. }
                 | Self::MemoryEvidence { .. }
                 | Self::MemoryConflicts
                 | Self::ContextList
                 | Self::ContextGet { .. }
                 | Self::Providers
                 | Self::CodeQuery { .. }
+                | Self::NativeSettingPreview { .. }
                 | Self::CompactionList
                 | Self::CompactionState
                 | Self::CompactionPreview { .. }
@@ -132,6 +153,10 @@ pub fn execute(root: &Path, action: Action) -> Result<Value> {
         Action::UpgradePlan => value(upgrade(root, false, None)?),
         Action::UpgradeApply { source_sha256 } => value(upgrade(root, true, Some(&source_sha256))?),
         Action::MemorySearch { search } => value(memory::search(root, &search)?),
+        Action::MemoryPull { search, cursor } => value(memory::pull(root, &search, cursor)?),
+        Action::MemoryRead { id, access, offset } => {
+            value(memory::read(root, &id, &access, offset)?)
+        }
         Action::MemoryGet { id, access } => value(memory::get(root, &id, &access)?),
         Action::MemoryPropose { proposal } => value(memory::propose(root, &proposal)?),
         Action::MemoryReview { review } => {
@@ -238,6 +263,10 @@ pub fn execute(root: &Path, action: Action) -> Result<Value> {
                 store::checkpoints::ContextRequest { identity, phase }
             };
             value(store::checkpoints::prepare(root, &request)?)
+        }
+        Action::NativeSettingPreview { id } => compaction::adoption::preview(root, &id),
+        Action::NativeSettingAdopt { id, checksum } => {
+            compaction::adoption::apply(root, &id, &checksum)
         }
         Action::CompactionList => value(compaction::inspect(root)?),
         Action::CompactionProbe { tool_id } => value(compaction::probe(root, &tool_id)?),

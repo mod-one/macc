@@ -92,3 +92,8 @@ Regression cases cover WAL-only writes, active-lease refusal before config write
 checkpoint/usage/config round trips, fresh authority recovery, old JSON bundles,
 config-only and dry-run modes, corruption, project isolation, secret handling,
 path validation and logical saved-state comparison.
+
+O2 P1 schema version 2 adds `native_setting_ownership` to the same snapshot.
+Restoring older SQLite snapshots preserves their schema and evidence; use the
+reviewed O2 upgrade before enabling version 2 services. A receipt authorizes only
+the exact recorded setting value; changed native files remain user-owned.

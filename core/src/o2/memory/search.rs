@@ -6,7 +6,7 @@ pub fn search(root: &Path, r: &Search) -> Result<Vec<Hit>> {
     let target = super::super::providers::native_worktree(root, r.access.worktree.as_deref())?;
     let results = search_in(&tx, &a.project_id, root, &target, r, false)?;
     sql(tx.commit())?;
-    Ok(results)
+    Ok(results.hits)
 }
 pub(crate) fn search_in(
     db: &rusqlite::Connection,
@@ -15,7 +15,7 @@ pub(crate) fn search_in(
     worktree: &Path,
     r: &Search,
     persist_staleness: bool,
-) -> Result<Vec<Hit>> {
+) -> Result<Retrieval> {
     if r.query.len() > 512 {
         return Err(error("Memory query exceeds 512 bytes"));
     }
@@ -46,6 +46,7 @@ pub(crate) fn search_in(
         r.access.user_id.clone().into(),
     ])))?;
     let mut hits = Vec::new();
+    let mut exclusions = Vec::new();
     while let Some(row) = sql(rows.next())? {
         let id: String = sql(row.get(0))?;
         let mut m = load(db, &id, project)?;
@@ -57,10 +58,15 @@ pub(crate) fn search_in(
         }
         if m.status == "active" {
             if let Err(e) = freshness(worktree, &m, policy.memory.provider_note_ttl_days) {
+                exclusions.push(format!("{id}: snapshot_mismatch: {e}"));
                 m.status = "stale".into();
                 m.staleness_reason = Some(e.to_string());
                 m.updated_at = now();
-                if persist_staleness {
+                // A branch-local mismatch is not evidence that the canonical
+                // project fact became invalid for every other worktree.
+                let authoritative_target = m.proposal.scope == "worktree"
+                    && m.proposal.scope_ref.as_deref() == worktree.to_str();
+                if persist_staleness && authoritative_target {
                     save(db, &m)?;
                     super::super::schema::audit(
                         db,
@@ -77,6 +83,9 @@ pub(crate) fn search_in(
         if !r.include_inactive {
             let conflict:bool=sql(db.query_row("SELECT EXISTS(SELECT 1 FROM memory_conflicts WHERE status='open' AND (left_id=?1 OR right_id=?1))",[&id],|r|r.get(0)))?;
             if conflict || m.proposal.confidence < policy.memory.min_confidence {
+                exclusions.push(format!(
+                    "{id}: unresolved conflict or confidence below policy minimum"
+                ));
                 continue;
             }
         }
@@ -94,7 +103,7 @@ pub(crate) fn search_in(
     }
     hits.sort_by(|a, b| b.score.cmp(&a.score).then(a.memory.id.cmp(&b.memory.id)));
     hits.truncate(policy.memory.search_limit as usize);
-    Ok(hits)
+    Ok(Retrieval { hits, exclusions })
 }
 pub fn fts_rebuild(root: &Path) -> Result<()> {
     let _guard = store::lock(root)?;
@@ -124,4 +133,9 @@ pub fn fts_rebuild(root: &Path) -> Result<()> {
     super::super::schema::audit(&tx, "memory_fts_rebuilt", "", serde_json::json!({}))?;
     sql(tx.commit())?;
     Ok(())
+}
+
+pub(crate) struct Retrieval {
+    pub hits: Vec<Hit>,
+    pub exclusions: Vec<String>,
 }

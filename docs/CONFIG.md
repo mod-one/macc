@@ -226,3 +226,13 @@ and revision-checked preview/apply in TUI and Web. Features default to disabled;
 Context Engine depends on Memory Ledger. Native compaction configuration requires
 a separate opt-in and matching adapter version/help probe. See [O2 P1](O2_P1.md)
 for defaults, SQLite upgrade, client routes, commands and capability boundaries.
+
+### O2 activation and ownership
+
+O2 P1 schema version 2 records native-setting ownership. Existing SQLite stores,
+including P1 version 1, require `macc o2 upgrade` preview, stopped owners and the
+checksum-confirmed apply with backup. Fresh SQLite migrations include version 2.
+Owned native overrides follow the next invocation’s policy; independently edited
+settings remain user-owned. Legacy overrides can be explicitly adopted through
+Compaction preview/confirmation in TUI/Web. Web previews bind an exact draft and
+revision; edits during a save remain pending. See [O2 P1](O2_P1.md).

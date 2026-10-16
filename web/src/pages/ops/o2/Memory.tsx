@@ -5,6 +5,7 @@ export default function Memory() {
   const [feature, setFeature] = useState(''); const [user, setUser] = useState('');
   const [selected, setSelected] = useState<MemoryHit | null>(null); const [error, setError] = useState(''); const [busy, setBusy] = useState(false); const [notice, setNotice] = useState('');
   const [title, setTitle] = useState(''); const [body, setBody] = useState(''); const [source, setSource] = useState(''); const [kind, setKind] = useState('discovery'); const [scope, setScope] = useState('project'); const [scopeRef, setScopeRef] = useState(''); const [confidence, setConfidence] = useState(0.8);
+  const [pull, setPull] = useState<{ next_cursor?: number | null; next_offset?: number | null; id?: string } | null>(null);
   const [replacement, setReplacement] = useState('');
   const [reason, setReason] = useState(''); const [verdict, setVerdict] = useState('active'); const [confirmed, setConfirmed] = useState(false); const [right, setRight] = useState(''); const [conflicts, setConflicts] = useState<Array<{ id: string; reason: string; status: string }>>([]);
   const access = { task_id: task || null, tool_id: tool || null, worktree: worktree || null, feature: feature || null, user_id: user || null };
@@ -20,7 +21,11 @@ export default function Memory() {
     <label>User scope<input value={user} onChange={e => setUser(e.target.value)} /></label>{' '}
     <button disabled={busy} onClick={() => { void run(search); }}>Search memory inbox</button>{' '}
     <button disabled={busy} onClick={() => { void run(async () => { await o2Action('fts_rebuild'); setNotice('Search projection rebuilt and checked.'); }); }}>Rebuild memory search</button>
-    <p>Project facts are always in scope. Enter matching task, tool or worktree identifiers to access restricted facts.</p>
+    <button disabled={busy} onClick={() => { void run(async () => { setPull(await o2Action('memory_pull', { search: { query, access }, cursor: 0 })); }); }}>Preview bounded agent search</button>
+    {pull?.next_cursor != null && <button disabled={busy} onClick={() => { void run(async () => { setPull(await o2Action('memory_pull', { search: { query, access }, cursor: pull.next_cursor })); }); }}>Next agent search page</button>}
+    {pull?.next_offset != null && pull.id && <button disabled={busy} onClick={() => { void run(async () => { setPull(await o2Action('memory_read', { id: pull.id, access, offset: pull.next_offset })); }); }}>Next agent record fragment</button>}
+    {pull && <pre style={{ whiteSpace: 'pre-wrap' }}>{JSON.stringify(pull, null, 2)}</pre>}
+    <p>Project facts are always in scope. Feature scopes use task feature_id (or feature). User-scoped memories require explicit operator lookup; they are not automatically injected. Enter matching scope identifiers to inspect restricted facts.</p>
     <ul>{rows.map(hit => <li key={hit.memory.id}><button onClick={() => { void run(async () => { setSelected(await o2Action<MemoryHit>('memory_get', { id: hit.memory.id, access })); setConfirmed(false); }); }}>{hit.memory.proposal.title} · {hit.memory.status} · {hit.memory.proposal.kind} · {hit.memory.proposal.scope} · confidence {hit.memory.proposal.confidence} · {hit.memory.proposal.evidence.length} evidence</button>{hit.memory.staleness_reason && <p>{hit.memory.staleness_reason}</p>}</li>)}</ul>
     <details><summary>Propose a sourced memory</summary>
       <label>Memory title<input value={title} onChange={e => setTitle(e.target.value)} /></label>
@@ -33,6 +38,7 @@ export default function Memory() {
       <button disabled={busy} onClick={() => { void run(async () => { const evidence = await o2Action<Evidence>('memory_evidence', { path: source, worktree: scope === 'worktree' ? scopeRef : null }); await o2Action('memory_propose', { proposal: { kind, title, body, scope, scope_ref: scope === 'project' ? null : scopeRef, confidence, evidence: [evidence], tags: [], source_task: task || null, source_revision: evidence.revision } }); setNotice('Memory proposed. Inspect and review it before activation.'); await search(); }); }}>Submit memory proposal</button>
     </details>
     {selected && <section aria-label="Memory review"><h3>{selected.memory.proposal.title}</h3><pre style={{ whiteSpace: 'pre-wrap' }}>{JSON.stringify(selected, null, 2)}</pre>
+      <button disabled={busy} onClick={() => { void run(async () => { setPull(await o2Action('memory_read', { id: selected.memory.id, access, offset: 0 })); }); }}>Preview bounded agent record</button>
       <label>Review verdict<select value={verdict} onChange={e => { setVerdict(e.target.value); setConfirmed(false); }}>{['active', 'rejected', 'stale', 'invalidated'].map(v => <option key={v}>{v}</option>)}</select></label>
       <label>Replacement evidence path (optional revalidation)<input value={replacement} onChange={e => { setReplacement(e.target.value); setConfirmed(false); }} /></label>
       <label>Review reason<input value={reason} onChange={e => { setReason(e.target.value); setConfirmed(false); }} /></label>

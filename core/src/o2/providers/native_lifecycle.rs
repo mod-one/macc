@@ -15,6 +15,7 @@ pub(super) fn execute(
         index: None,
         index_sha256: None,
         source_revision: None,
+        snapshot_digest: None,
         owned_paths: vec![],
         previous: None,
     });

@@ -97,6 +97,7 @@ impl Panel {
                 return Ok(());
             }
             "search" => {
+                self.conflicts = false;
                 self.query = v[0].clone();
                 self.access = json!({"task_id":empty(&v[1]),"tool_id":empty(&v[2]),"worktree":empty(&v[3]),"feature":empty(&v[4]),"user_id":empty(&v[5])});
                 let search = serde_json::from_value(
@@ -164,6 +165,28 @@ impl Panel {
                     reason: v[1].clone(),
                 }
             }
+            "resolve_conflict" => {
+                pending = true;
+                Action::MemoryResolveConflict {
+                    id: self.selected()?["id"].as_str().unwrap_or_default().into(),
+                    reason: v[0].clone(),
+                    confirmed: true,
+                }
+            }
+            "pull" => Action::MemoryPull {
+                search: serde_json::from_value(json!({"query":self.query,"access":self.access}))
+                    .map_err(|e| MaccError::Validation(e.to_string()))?,
+                cursor: parse(&v[0])? as usize,
+            },
+            "read" => Action::MemoryRead {
+                id: self.selected()?["memory"]["id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .into(),
+                access: serde_json::from_value(self.access.clone())
+                    .map_err(|e| MaccError::Validation(e.to_string()))?,
+                offset: parse(&v[0])? as usize,
+            },
             "provider" => {
                 let data = execute(
                     root,
@@ -183,6 +206,16 @@ impl Panel {
                     self.message="Review paths, origin, network and operation. Press a to apply this exact plan.".into();
                 }
                 self.result(data);
+                return Ok(());
+            }
+            "adopt_native" => {
+                let plan = execute(root, Action::NativeSettingPreview { id: v[0].clone() })?;
+                self.pending = Some(Action::NativeSettingAdopt {
+                    id: v[0].clone(),
+                    checksum: plan["checksum"].as_str().unwrap_or_default().into(),
+                });
+                self.result(plan);
+                self.message="Review the exact value, path and policy before a to adopt ownership. No native file is changed by adoption.".into();
                 return Ok(());
             }
             "checkpoint" => Action::CheckpointCreate { id: v[0].clone() },

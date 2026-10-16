@@ -15,7 +15,7 @@ pub(crate) fn select(
     limit: u64,
 ) -> Result<(String, bool, SelectionCache)> {
     let fingerprint = digest(serde_json::to_vec(&serde_json::json!({
-        "schema":1,"project":checkpoint.project_id,"task":checkpoint.mandatory_task,
+        "schema":2,"project":checkpoint.project_id,"task":checkpoint.mandatory_task,
         "phase":checkpoint.phase,"role":checkpoint.role,"tool":checkpoint.tool_id,
         "revision":checkpoint.source_revision,"worktree":checkpoint.worktree_content_digest,
         "sources":checkpoint.source_hashes,"limit":limit,

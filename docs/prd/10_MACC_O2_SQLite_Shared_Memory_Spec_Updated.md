@@ -3,7 +3,7 @@
 **Project:** MACC — Multi-Assistant Code Config  
 **Document:** Revised and unified specification of `10_MACC_O2_SQLite_Shared_Memory_Spec.md`  
 **Motifs:** O2 Cross-Agent Memory Ledger; Shared Context Store; Code Intelligence Providers; Multi-Tool Session Lifecycle; Adaptive Compaction  
-**Version:** 2.6 — P0 and P1 implementation progress, mandatory TUI/Web coverage; later stages remain proposed
+**Version:** 2.7 — P0 and P1 implementation progress, mandatory TUI/Web coverage; later stages remain proposed
 **Date:** 2026-10-15  
 **Code baseline inspected:** `df95759` — `feat: implement review and correction cycle budget management`  
 **Language:** English  
@@ -1805,16 +1805,20 @@ adapter matrix, command examples and verification boundaries.
 - **P1-B:** checkpoint-integrated retrieval, ranked/deduplicated optional memory,
   separate mandatory PRD/pinned sources, versioned manifests, content-fingerprint
   selection cache, exact invocation linkage to estimated context items, and
-  Unicode-safe explicit output reduction with raw artifact references.
+  Unicode-safe output reduction in the shared skill execution pipeline, optional
+  adapter transformations with coordinator fallback, bounded pull/read pagination
+  and private raw artifact references. Opaque protocol/watch streams pass through.
 - **P1-C:** declarative adapter compaction profiles, bounded version/help probes,
-  opt-in native auto configuration, generation-fenced exact-pressure observations
+  opt-in native auto configuration with per-setting ownership/update/removal and
+  reviewed adoption of legacy overrides, generation-fenced exact-pressure observations
   where an adapter declares them, and existing safe checkpoint/rotation fallback.
   Version/help is observed; actual native compression is not certified. Shipped
   profiles provide no exact pressure pointers. Vibe native configuration and
   explicit headless compact operations remain Unsupported rather than guessed.
 - **P1-D:** provider registration/traits, bundled current-file literal fallback,
   reviewed lifecycle plans/receipts and rollback, owned-path removal, health/state
-  inspection and adaptive fallback routing. Native install downloads nothing.
+  inspection and receipt/version/source-validated adaptive fallback routing.
+  Native install downloads nothing.
 
 TUI **Sessions → o** and Web **Ops / Settings → Memory, Context, Compaction, Code
 Intelligence** expose policies, inspection and reviewed actions through the same
@@ -1824,6 +1828,15 @@ sections (`memory`, `context_engine`, `adaptive_compaction`, `code_intelligence`
 replace neither P0 invariants nor existing `context` output controls. Features
 are opt-in; existing SQLite projects need a reviewed O2 upgrade before enabling.
 `macc save` snapshots the new tables through the existing SQLite save path.
+O2 schema version 2 adds native-setting ownership; version 1 P1 stores require the
+same reviewed upgrade/backup workflow. New SQLite migrations include version 2.
+
+The audit corrections preserve project facts across divergent worktrees, expose
+snapshot exclusions, derive feature scope from task metadata, and keep user scope
+explicit pull-only. Pressure inspection defers actual active leases. TUI conflict
+resolution uses a typed confirmation form. Web policy previews are tied to the
+exact draft/revision and preserve edits made during saves. See the canonical
+implementation audit for evidence and remaining certification boundaries.
 
 The examples elsewhere in this specification remain target designs unless they
 match the delivered contract in O2 P1. External Graphify/Serena installers,
