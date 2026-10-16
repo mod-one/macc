@@ -22,7 +22,13 @@ pub(super) async fn action(
     if action.is_mutation() {
         super::mutation_gate::require_project_owner(&state, &headers)?;
     }
-    execute(&state.paths.root, action)
+    tokio::task::spawn_blocking(move || execute(&state.paths.root, action))
+        .await
+        .map_err(|e| {
+            ApiError::from(macc_core::MaccError::Validation(format!(
+                "O2 operation worker failed: {e}"
+            )))
+        })?
         .map(Json)
         .map_err(ApiError::from)
 }

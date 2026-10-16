@@ -1,17 +1,53 @@
 //! Code intelligence port and owned, reviewed lifecycle; external adapters register here.
+mod compare;
+mod graphify;
 mod lifecycle;
 mod model;
 mod native;
 mod native_lifecycle;
+mod operations;
+mod process;
 mod response;
 mod routing;
+mod snapshot;
 use super::*;
-pub use lifecycle::{apply, inspect, plan};
+pub use compare::compare;
+pub use lifecycle::{inspect, plan};
+pub use operations::operation;
+pub use snapshot::{source_snapshot, SourceSnapshot};
+mod apply;
+pub use apply::apply;
 pub use model::*;
 pub(crate) use native::worktree as native_worktree;
 use rusqlite::OptionalExtension;
 pub trait CodeIntelligenceProvider: Send + Sync {
     fn descriptor(&self) -> Descriptor;
+    fn network_operation(&self, _action: &str) -> bool {
+        !self.descriptor().local_only
+    }
+    fn plan_details(
+        &self,
+        _root: &Path,
+        _action: &str,
+        _policy: &super::policy::CodePolicy,
+    ) -> Result<serde_json::Value> {
+        Ok(serde_json::json!({}))
+    }
+    fn priority(&self, query: &Query) -> u32 {
+        if query.kind == "file_search" {
+            100
+        } else {
+            10
+        }
+    }
+    fn health(
+        &self,
+        root: &Path,
+        _receipt: Option<&Receipt>,
+        _policy: &super::policy::CodePolicy,
+    ) -> Result<Detection> {
+        self.detect(root)
+    }
     fn plan_paths(
         &self,
         action: &str,
@@ -81,6 +117,13 @@ fn provider(id: &str) -> Result<Box<dyn CodeIntelligenceProvider>> {
         })
 }
 pub fn query(root: &Path, q: &Query) -> Result<Capability<QueryResult>> {
+    query_selected(root, q, None)
+}
+fn query_selected(
+    root: &Path,
+    q: &Query,
+    selection: Option<&str>,
+) -> Result<Capability<QueryResult>> {
     let p = super::policy::load(root)?;
     if !p.code_intelligence.enabled {
         return Err(error("Code Intelligence disabled"));
@@ -89,27 +132,41 @@ pub fn query(root: &Path, q: &Query) -> Result<Capability<QueryResult>> {
     if q.text.trim().is_empty() || q.text.len() > 256 {
         return Err(error("Bounded nonempty literal query required"));
     }
-    let receipts = {
-        let _guard = store::lock(root)?;
-        let (db, _) = database(root)?;
-        registry()?
-            .iter()
-            .map(|adapter| {
-                let id = adapter.descriptor().id;
-                Ok((id.clone(), receipt(&db, &id)?))
-            })
-            .collect::<Result<std::collections::BTreeMap<_, _>>>()?
-    };
-    let mut adapters = if p.code_intelligence.routing == "adaptive" {
+    let mut adapters = if let Some(id) = selection {
+        vec![provider(id)?]
+    } else if p.code_intelligence.routing == "adaptive" {
         registry()?
     } else {
         vec![provider("native")?]
     };
-    adapters.sort_by_key(|p| p.descriptor().id == "native");
+    adapters.sort_by_key(|p| (p.priority(q), p.descriptor().id));
     let mut diagnostics = Vec::new();
     for adapter in adapters {
         let descriptor = adapter.descriptor();
-        let state = receipts.get(&descriptor.id).and_then(|r| r.as_ref());
+        let lock_path = lifecycle::owned_path(
+            root,
+            &descriptor.id,
+            &format!(".macc/code-intelligence/{}/operation.lock", descriptor.id),
+        )?;
+        std::fs::create_dir_all(
+            lock_path
+                .parent()
+                .ok_or_else(|| error("Missing provider lock directory"))?,
+        )
+        .map_err(|e| error(e.to_string()))?;
+        let Some(_operation) =
+            crate::fs_lock::AdvisoryLock::try_acquire(&lock_path, "code provider")?
+        else {
+            diagnostics.push(format!("{} busy; native fallback retained", descriptor.id));
+            continue;
+        };
+        // Read after acquiring the provider lock: lifecycle may have completed
+        // since the query began (including disable/uninstall).
+        let current = {
+            let (db, _) = database(root)?;
+            receipt(&db, &descriptor.id)?
+        };
+        let state = current.as_ref();
         if state.is_some_and(|r| r.state == "disabled") {
             diagnostics.push(format!("{} disabled by operator", descriptor.id));
             continue;
@@ -134,9 +191,26 @@ pub fn query(root: &Path, q: &Query) -> Result<Capability<QueryResult>> {
                 continue;
             }
         }
-        if !adapter.detect(root).is_ok_and(|d| d.status == "healthy") {
-            diagnostics.push(format!("{} unavailable; fallback retained", descriptor.id));
-            continue;
+        // Eligibility is cheap; the adapter validates its runtime before execution.
+        // Full health inspection belongs to the explicit providers view.
+        match adapter.detect(root) {
+            Ok(d) if d.status == "healthy" => {}
+            Ok(d) => {
+                diagnostics.push(format!(
+                    "{} {}: {}; native fallback retained",
+                    descriptor.id,
+                    d.status,
+                    d.diagnostics.join("; ")
+                ));
+                continue;
+            }
+            Err(e) => {
+                diagnostics.push(format!(
+                    "{} health check failed: {e}; native fallback retained",
+                    descriptor.id
+                ));
+                continue;
+            }
         }
         match adapter.query(root, q, &p.code_intelligence) {
             Ok(Capability::Supported(mut result)) => {

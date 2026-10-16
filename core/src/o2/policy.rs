@@ -49,6 +49,14 @@ pub struct CodePolicy {
     pub max_file_bytes: u64,
     pub query_limit: u64,
     pub output_tokens: u64,
+    pub graphify_enabled: bool,
+    pub graphify_python: String,
+    pub graphify_uv: String,
+    pub graphify_timeout_seconds: u64,
+    pub graphify_install_timeout_seconds: u64,
+    pub graphify_memory_mb: u64,
+    pub graphify_index_max_bytes: u64,
+    pub graphify_corpus_max_bytes: u64,
 }
 impl Default for MemoryPolicy {
     fn default() -> Self {
@@ -95,6 +103,14 @@ impl Default for CodePolicy {
             max_file_bytes: 262144,
             query_limit: 20,
             output_tokens: 2000,
+            graphify_enabled: false,
+            graphify_python: "python3".into(),
+            graphify_uv: "uv".into(),
+            graphify_timeout_seconds: 120,
+            graphify_install_timeout_seconds: 600,
+            graphify_memory_mb: 2048,
+            graphify_index_max_bytes: 33554432,
+            graphify_corpus_max_bytes: 268435456,
         }
     }
 }
@@ -134,6 +150,12 @@ impl Policy {
             }
             if f.kind == "enum" && !f.choices.iter().any(|s| Some(s.as_str()) == v.as_str()) {
                 return Err(error(format!("Invalid {}", f.path)));
+            }
+            if f.kind == "string"
+                && v.as_str()
+                    .is_none_or(|s| s.trim().is_empty() || s.len() > 512 || s.contains('\0'))
+            {
+                return Err(error(format!("Invalid bounded executable path {}", f.path)));
             }
         }
         let c = &self.adaptive_compaction;

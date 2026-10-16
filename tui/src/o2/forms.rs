@@ -81,6 +81,22 @@ impl Panel {
                 }
                 return Ok(());
             }
+            "text_field" => {
+                let f = &self.view.as_ref().unwrap().fields[self.selected];
+                let pointer = format!("/{}", f.path.replace('.', "/"));
+                *self.draft.pointer_mut(&pointer).unwrap() = json!(v[0]);
+                self.preview = false;
+                self.inherit = false;
+                return Ok(());
+            }
+            "compare" => Action::CodeCompare {
+                provider: v[0].clone(),
+                query: serde_json::from_value(
+                    json!({"text":v[1],"kind":v[2],"worktree":empty(&v[3])}),
+                )
+                .unwrap(),
+            },
+            "operation" => Action::ProviderOperation { id: v[0].clone() },
             "field" => {
                 let f = &self.view.as_ref().unwrap().fields[self.selected];
                 let pointer = format!("/{}", f.path.replace('.', "/"));
@@ -269,6 +285,12 @@ impl Panel {
                 "Prepared operation; no mutation applied. Press a to confirm after inspection."
                     .into();
         } else {
+            if matches!(
+                action,
+                Action::CodeQuery { .. } | Action::CodeCompare { .. }
+            ) {
+                return self.launch(root, action);
+            }
             let value = execute(root, action)?;
             self.result(value);
             self.refresh(root)?;

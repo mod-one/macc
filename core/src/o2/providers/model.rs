@@ -27,6 +27,8 @@ pub struct Receipt {
     pub snapshot_digest: Option<String>,
     pub owned_paths: Vec<String>,
     pub previous: Option<Box<Receipt>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Plan {
@@ -42,6 +44,8 @@ pub struct Plan {
     pub package_origin: String,
     pub provider_version: String,
     pub diagnostics: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -81,4 +85,16 @@ pub struct View {
     pub providers: Vec<Detection>,
     pub receipts: Vec<Receipt>,
     pub plans: Vec<Plan>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn optional_adapter_metadata_preserves_legacy_receipt_checksums() {
+        let legacy = serde_json::json!({"provider_id":"native","version":"1","state":"installed","index":null,"index_sha256":null,"source_revision":null,"owned_paths":[],"previous":null});
+        let r: Receipt = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(r.metadata.is_none());
+        assert_eq!(serde_json::to_value(r).unwrap(), legacy);
+    }
 }

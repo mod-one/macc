@@ -104,3 +104,62 @@ fn typed_conflict_resolution_previews_then_confirms_the_shared_action() {
     assert_eq!(after[0]["status"], "resolved");
     assert!(panel.pending.is_none());
 }
+
+#[test]
+fn graphify_executable_editor_keeps_typed_paths_and_requires_a_new_preview() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path();
+    let mut panel = Panel::default();
+    panel.refresh(root).unwrap();
+    panel.key(root, KeyCode::Char('5')).unwrap();
+    panel.selected = panel
+        .view
+        .as_ref()
+        .unwrap()
+        .fields
+        .iter()
+        .position(|f| f.path == "code_intelligence.graphify_python")
+        .unwrap();
+    panel.key(root, KeyCode::Enter).unwrap();
+    assert_eq!(panel.form.as_ref().unwrap().name, "text_field");
+    for c in "/usr/bin/python3".chars() {
+        panel.key(root, KeyCode::Char(c)).unwrap();
+    }
+    panel.key(root, KeyCode::Enter).unwrap();
+    assert_eq!(
+        panel.draft["code_intelligence"]["graphify_python"],
+        "/usr/bin/python3"
+    );
+    assert!(!panel.preview);
+    assert!(panel.key(root, KeyCode::Char('s')).is_err());
+    panel.key(root, KeyCode::Char('p')).unwrap();
+    panel.key(root, KeyCode::Char('s')).unwrap();
+    assert_eq!(
+        policy::load(root)
+            .unwrap()
+            .code_intelligence
+            .graphify_python,
+        "/usr/bin/python3"
+    );
+}
+
+#[test]
+fn read_only_background_completion_preserves_a_pending_reviewed_action() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path();
+    let mut panel = Panel {
+        pending: Some(Action::ProviderApply {
+            plan_id: "reviewed-plan".into(),
+            checksum: "reviewed-sha".into(),
+        }),
+        ..Default::default()
+    };
+    panel.launch(root, Action::Status).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while panel.job.is_some() && std::time::Instant::now() < deadline {
+        panel.poll(root);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(panel.job.is_none());
+    assert!(panel.pending.is_some());
+}

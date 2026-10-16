@@ -243,3 +243,12 @@ explicit bundles for classified output. Unclassified output is bounded raw, and
 nonzero exits preserve raw diagnostics. Native configuration validates the current
 read-only version before applying; a stale capability requires an explicit re-probe.
 These refinements use existing fields and need no additional SQLite migration.
+
+### Managed Graphify (P2-A)
+
+The eight `code_intelligence.graphify_*` settings are exposed in both policy
+editors, including typed Python/uv executable paths. Enabling the provider does
+not install it. Use the Code Intelligence manager's reviewed install, deploy and
+index plans. Only explicit install/update can use the network; offline mode blocks
+them. See [Managed Graphify](O2_P2_GRAPHIFY.md) for the pinned release, defaults,
+platform support, progress, A/B comparison and ownership/recovery boundaries.

@@ -1,8 +1,14 @@
+pub(super) use super::snapshot::{source_snapshot as snapshot, SourceSnapshot as Index};
 use super::*;
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 pub(super) struct Native;
 impl CodeIntelligenceProvider for Native {
+    fn priority(&self, q: &Query) -> u32 {
+        if q.kind == "file_search" {
+            0
+        } else {
+            1000
+        }
+    }
     fn descriptor(&self) -> Descriptor {
         Descriptor {
             schema_version: 1,
@@ -126,16 +132,6 @@ impl CodeIntelligenceProvider for Native {
         response::bound(Capability::Supported(QueryResult{provider_id:"native".into(),hits,snapshot_mismatch,diagnostics:vec!["Read-only current tracked files; binary, secret, generated and symlink sources excluded".into()],estimated_tokens:0}), p)
     }
 }
-#[derive(Debug, Serialize, Deserialize)]
-pub(super) struct Index {
-    pub version: u32,
-    pub project_root: String,
-    pub revision: String,
-    pub files: BTreeMap<String, String>,
-    pub digest: String,
-    pub excluded: usize,
-    pub truncated: bool,
-}
 pub(crate) fn worktree(root: &Path, requested: Option<&str>) -> Result<std::path::PathBuf> {
     let wt = Path::new(requested.unwrap_or(root.to_str().ok_or_else(|| error("Non-UTF8 root"))?))
         .canonicalize()
@@ -150,42 +146,4 @@ pub(crate) fn worktree(root: &Path, requested: Option<&str>) -> Result<std::path
         return Err(error("Foreign worktree"));
     }
     Ok(wt)
-}
-pub(super) fn snapshot(root: &Path, p: &super::super::policy::CodePolicy) -> Result<Index> {
-    let mut files = BTreeMap::new();
-    let mut excluded = 0;
-    let names = crate::git::tracked_source_files(root)?;
-    let truncated = names.len() > p.max_files as usize;
-    for name in names.into_iter().take(p.max_files as usize) {
-        match paths::source(root, &name, p.max_file_bytes) {
-            Ok((_, data)) => {
-                if std::str::from_utf8(&data).is_ok()
-                    && paths::safe_text(std::str::from_utf8(&data).unwrap()).is_ok()
-                {
-                    files.insert(name, digest(&data));
-                } else {
-                    excluded += 1;
-                }
-            }
-            Err(_) => excluded += 1,
-        }
-    }
-    let digest = digest(
-        serde_json::to_string(&files)
-            .map_err(|e| error(e.to_string()))?
-            .as_bytes(),
-    );
-    Ok(Index {
-        version: 1,
-        project_root: root
-            .canonicalize()
-            .map_err(|e| error(e.to_string()))?
-            .display()
-            .to_string(),
-        revision: crate::git::head_commit(root)?,
-        files,
-        digest,
-        excluded,
-        truncated,
-    })
 }

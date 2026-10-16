@@ -44,6 +44,12 @@ impl Panel {
                         json!(f.choices[(pos + 1) % f.choices.len()]);
                     self.preview = false;
                     self.inherit = false;
+                } else if f.kind == "string" {
+                    self.start(
+                        "text_field",
+                        false,
+                        &["Executable (absolute path or PATH basename)"],
+                    );
                 } else {
                     self.start(
                         "field",

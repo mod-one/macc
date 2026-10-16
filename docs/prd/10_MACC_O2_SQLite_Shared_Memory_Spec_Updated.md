@@ -3,8 +3,8 @@
 **Project:** MACC — Multi-Assistant Code Config  
 **Document:** Revised and unified specification of `10_MACC_O2_SQLite_Shared_Memory_Spec.md`  
 **Motifs:** O2 Cross-Agent Memory Ledger; Shared Context Store; Code Intelligence Providers; Multi-Tool Session Lifecycle; Adaptive Compaction  
-**Version:** 2.8 — P0 and P1 implementation progress, mandatory TUI/Web coverage; later stages remain proposed
-**Date:** 2026-10-15  
+**Version:** 2.9 — P0/P1 and P2-A managed Graphify implementation progress; later stages remain proposed
+**Date:** 2026-10-16
 **Code baseline inspected:** `df95759` — `feat: implement review and correction cycle budget management`  
 **Language:** English  
 **Applies to:** Rust core, native coordinator, performer runners, tool adapters, SQLite, local MCP, TUI, local Web UI  
@@ -1854,6 +1854,31 @@ parsed symbols/graphs, local MCP and universal provider-native tool-output
 interception are not delivered by P1. Full live-provider compression and token
 savings still require a separately controlled benchmark; mock headless regression
 coverage does not certify installed third-party binaries.
+
+---
+
+### 20.5 P2-A implementation progress
+
+P2-A adds a registered Graphify adapter through the shared provider abstraction.
+See [Managed Graphify](../O2_P2_GRAPHIFY.md) for exact commands, all eight canonical
+settings, supported platform, provenance, recovery and validation boundaries.
+The pinned `graphifyy==0.9.92` wheel-only runtime uses an isolated project venv
+and hash-locked dependencies. Installation/update require a network-bearing
+reviewed plan; canonical offline mode rejects them. Deployment and restricted
+code-only indexing remain explicit. Health requires local extraction/query
+smokes, manifest/runtime checks and source/ignore freshness. Native literal
+search stays first for file search and is retained on graph failure or drift.
+
+TUI and Web expose typed settings, reviewed lifecycle operations, operation UUID
+progress, bounded code queries and native/provider A/B comparison. External work
+runs outside the session authority transaction and client event loop. Side-by-side
+generations support validated rollback; owned-file removal preserves modified or
+added user files. Receipts stay SQLite-backed; no O2 schema migration is needed
+for the optional JSON metadata. Failed/interrupted unactivated stages are retained
+for explicit operator inspection. Automatic merge-triggered/incremental indexing,
+release discovery, shared-user installations, Serena and MCP remain later work.
+P2-A supports Linux x86_64 / Python 3.12; other platforms retain native fallback.
+Fixture A/B results do not establish production quality or token savings.
 
 ---
 

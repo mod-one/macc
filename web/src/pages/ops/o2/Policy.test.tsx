@@ -66,3 +66,12 @@ it('applies the reviewed snapshot and retains edits made while saving', async ()
   fireEvent.click(screen.getByRole('button', { name: 'Validate and preview O2 policy' }));
   await waitFor(() => expect(o2Action).toHaveBeenCalledWith('policy_preview', { revision: 'saved', policy: { memory: { enabled: false, max_body_chars: 1800 } } }));
 });
+
+it('edits executable paths as text in the shared policy catalog', async () => {
+  vi.mocked(o2Action).mockResolvedValue({ validated: true });
+  const config: O2View = { ...view, policy: { code_intelligence: { graphify_python: 'python3' } }, fields: [{ path: 'code_intelligence.graphify_python', label: 'Graphify Python executable', kind: 'string', min: 0, max: 0, choices: [], default: 'python3', activation: 'next query' }] };
+  render(<Policy view={config} saved={vi.fn()} />);
+  fireEvent.change(screen.getByLabelText('Graphify Python executable'), { target: { value: '/usr/bin/python3' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Validate and preview O2 policy' }));
+  await waitFor(() => expect(o2Action).toHaveBeenCalledWith('policy_preview', { revision: 'original', policy: { code_intelligence: { graphify_python: '/usr/bin/python3' } } }));
+});

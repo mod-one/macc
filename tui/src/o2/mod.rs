@@ -1,5 +1,6 @@
 //! Interactive O2 clients call the same application service as CLI and Web.
 mod forms;
+mod jobs;
 mod settings;
 use crossterm::event::KeyCode;
 use macc_core::{
@@ -35,6 +36,7 @@ pub struct Panel {
     access: Value,
     query: String,
     conflicts: bool,
+    job: Option<jobs::Job>,
 }
 impl Panel {
     pub fn mutation(&self, key: KeyCode) -> bool {
@@ -114,14 +116,16 @@ impl Panel {
             KeyCode::Char('m') if self.tab==2=>self.start("adopt_native",true,&["Idle logical session ID whose existing native setting should become MACC-managed"]),
             KeyCode::Char('c') if self.tab==2=>self.start("checkpoint",true,&["Idle logical session ID for checkpoint"]),
             KeyCode::Char('u')=>{let plan=execute(root,Action::UpgradePlan)?;self.pending=Some(Action::UpgradeApply{source_sha256:plan["source_sha256"].as_str().unwrap_or_default().into()});self.result(plan);self.message="Inspect the upgrade and backup conditions. Press a to apply this exact reviewed source hash.".into();},
-            KeyCode::Char('a')=>{if let Some(action)=self.pending.as_ref(){let result=execute(root,action.clone())?;self.pending=None;self.result(result);self.refresh(root)?;self.message="Reviewed operation applied.".into();}},
+            KeyCode::Char('a')=>{if let Some(action)=self.pending.as_ref(){if matches!(action,Action::ProviderApply{..}){self.launch(root,action.clone())?;return Ok(());}let result=execute(root,action.clone())?;self.pending=None;self.result(result);self.refresh(root)?;self.message="Reviewed operation applied.".into();}},
             KeyCode::Char('n') if self.tab==0=>self.start("propose",true,&["Kind (discovery, constraint, decision…)","Title","Body (concise sourced fact)","Scope (project, task, feature, worktree, tool, user)","Scope reference (blank for project)","Evidence source path","Confidence (0..1)"]),
             KeyCode::Char('p') if self.tab==0 && !self.conflicts=>{self.selected()?;self.start("review",true,&["Transition (active, rejected, stale, invalidated)","Review reason","Replacement evidence path (blank preserves existing evidence)"]);},
             KeyCode::Char('c') if self.tab==0 && !self.conflicts=>{self.selected()?;self.start("conflict",true,&["Conflicting memory ID","Reason after inspecting both claims"]);},
-            KeyCode::Char('p') if self.tab==3=>self.start("provider",true,&["Provider ID (native)","Operation (install, deploy, index, update, rollback, disable, undeploy, uninstall)"]),
+            KeyCode::Char('p') if self.tab==3=>self.start("provider",true,&["Provider ID (native or graphify)","Operation (install, deploy, index, update, rollback, disable, undeploy, uninstall)"]),
             KeyCode::Char('p') if self.tab==2=>{let tool=self.selected()?["tool_id"].as_str().unwrap_or_default().to_string();let data=execute(root,Action::CompactionProbe{tool_id:tool})?;self.result(data);self.refresh(root)?;},
+            KeyCode::Char('v') if self.tab==3=>self.start("compare",false,&["Candidate provider ID (graphify)","Query text","Kind (file_search, references, architecture_summary)","Worktree (blank for project)"]),
+            KeyCode::Char('d') if self.tab==3=>self.start("operation",false,&["Provider plan/operation UUID"]),
             KeyCode::Char('v') if self.tab==2=>self.start("rotate",true,&["Exact logical session ID to close (inspect Sessions first)"]),
-            KeyCode::Char('/')=>match self.tab{0=>self.start("search",false,&["Search text (blank lists inbox)","Task scope (blank for project facts)","Tool scope","Worktree scope","Feature scope","User scope"]),2=>self.start("decision",false,&["Simulated uses","Invocation budget","Observed context tokens (blank unknown)","Effective window (blank unknown)"]),3=>self.start("code",false,&["Literal code query","Query kind (file_search or references)","Worktree (blank for project)"]),_=>{}},
+            KeyCode::Char('/')=>match self.tab{0=>self.start("search",false,&["Search text (blank lists inbox)","Task scope (blank for project facts)","Tool scope","Worktree scope","Feature scope","User scope"]),2=>self.start("decision",false,&["Simulated uses","Invocation budget","Observed context tokens (blank unknown)","Effective window (blank unknown)"]),3=>self.start("code",false,&["Literal code query","Query kind (file_search, references, architecture_summary)","Worktree (blank for project)"]),_=>{}},
             KeyCode::Char('b') if self.tab==0=>{let result=execute(root,Action::FtsRebuild)?;self.result(result);},
             KeyCode::Char('f') if self.tab == 0 => {
                 self.conflicts = !self.conflicts;
@@ -143,7 +147,7 @@ impl Panel {
         if self.tab == 4 {
             self.draw_settings(&mut lines);
         } else {
-            lines.push(match self.tab{0=>"n propose | p review → a confirm | c conflict | f toggle conflict list | v resolve selected conflict | l agent search page | g agent record fragment | b rebuild FTS. Only reviewed active current facts enter prompts.",1=>"Context manifests keep PRD/criteria and pinned source hashes separate from optional estimated memory. b reduce output and preserve raw artifact.",2=>"p probe version/help | d runtime decisions | c create checkpoint | m preview native setting adoption | v review scoped rotation. Native settings are opt-in under Policies. Compression execution remains unobserved unless an adapter reports it.",_=>"p preview lifecycle → a confirm. Native ships with MACC; external adapters are optional. / literal current-code query."}.into());
+            lines.push(match self.tab{0=>"n propose | p review → a confirm | c conflict | f toggle conflict list | v resolve selected conflict | l agent search page | g agent record fragment | b rebuild FTS. Only reviewed active current facts enter prompts.",1=>"Context manifests keep PRD/criteria and pinned source hashes separate from optional estimated memory. b reduce output and preserve raw artifact.",2=>"p probe version/help | d runtime decisions | c create checkpoint | m preview native setting adoption | v review scoped rotation. Native settings are opt-in under Policies. Compression execution remains unobserved unless an adapter reports it.",_=>"p preview lifecycle → a confirm. Native ships with MACC; external adapters are optional. / current-code query | v compare with native | d inspect operation UUID."}.into());
             for (i, row) in self.rows.iter().enumerate() {
                 let label = if self.tab == 0 && self.conflicts {
                     format!("{} | {} | {}", row["id"], row["status"], row["reason"])

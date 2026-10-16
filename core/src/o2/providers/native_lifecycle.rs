@@ -18,6 +18,7 @@ pub(super) fn execute(
         snapshot_digest: None,
         owned_paths: vec![],
         previous: None,
+        metadata: None,
     });
     match plan.action.as_str() {
         "install" => result.state = "installed".into(),

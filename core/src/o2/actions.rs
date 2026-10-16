@@ -79,6 +79,13 @@ pub enum Action {
     CodeQuery {
         query: providers::Query,
     },
+    ProviderOperation {
+        id: String,
+    },
+    CodeCompare {
+        provider: String,
+        query: providers::Query,
+    },
     CompactionList,
     NativeSettingPreview {
         id: String,
@@ -124,6 +131,8 @@ impl Action {
                 | Self::ContextGet { .. }
                 | Self::Providers
                 | Self::CodeQuery { .. }
+                | Self::CodeCompare { .. }
+                | Self::ProviderOperation { .. }
                 | Self::NativeSettingPreview { .. }
                 | Self::CompactionList
                 | Self::CompactionState
@@ -248,6 +257,8 @@ pub fn execute(root: &Path, action: Action) -> Result<Value> {
             value(providers::apply(root, &plan_id, &checksum)?)
         }
         Action::CodeQuery { query } => value(providers::query(root, &query)?),
+        Action::ProviderOperation { id } => providers::operation(root, &id),
+        Action::CodeCompare { provider, query } => providers::compare(root, &provider, &query),
         Action::CompactionState => value(compaction::states(root)?),
         Action::CheckpointCreate { id } => {
             let request = {

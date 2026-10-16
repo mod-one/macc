@@ -38,6 +38,7 @@ impl SessionsScreen {
         Ok(())
     }
     pub fn tick(&mut self, root: &Path) {
+        self.o2.poll(root);
         if self
             .last_refresh
             .map(|t| t.elapsed().as_secs() >= 5)
