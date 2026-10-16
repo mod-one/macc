@@ -45,3 +45,13 @@ it('keeps the reviewed operation visible while its worker is running', async () 
   finish({ state: 'healthy' });
   await waitFor(() => expect(screen.getByRole('button', { name: 'Refresh provider health' })).toBeEnabled());
 });
+
+it('sends a scoped symbol query through the shared provider action', async () => {
+  vi.mocked(o2Action).mockReset(); vi.mocked(o2Action).mockResolvedValue({ outcome: 'supported', data: { provider_id: 'serena', hits: [] } });
+  render(<Providers />);
+  fireEvent.change(screen.getByLabelText('Literal code query'), { target: { value: 'Other/target' } });
+  fireEvent.change(screen.getByLabelText('Code query type'), { target: { value: 'symbol_definition' } });
+  fireEvent.change(screen.getByLabelText('Definition file path (required for Serena)'), { target: { value: 'src/sample.py' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Search code' }));
+  await waitFor(() => expect(o2Action).toHaveBeenCalledWith('code_query', { query: { text: 'Other/target', kind: 'symbol_definition', worktree: null, path: 'src/sample.py' } }));
+});

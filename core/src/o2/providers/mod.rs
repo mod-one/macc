@@ -1,5 +1,6 @@
 //! Code intelligence port and owned, reviewed lifecycle; external adapters register here.
 mod compare;
+mod generation;
 mod graphify;
 mod lifecycle;
 mod model;
@@ -9,6 +10,7 @@ mod operations;
 mod process;
 mod response;
 mod routing;
+mod serena;
 mod snapshot;
 use super::*;
 pub use compare::compare;
@@ -22,6 +24,10 @@ pub(crate) use native::worktree as native_worktree;
 use rusqlite::OptionalExtension;
 pub trait CodeIntelligenceProvider: Send + Sync {
     fn descriptor(&self) -> Descriptor;
+    /// Live LSP providers validate an exported current snapshot per query.
+    fn requires_cached_snapshot(&self) -> bool {
+        true
+    }
     fn network_operation(&self, _action: &str) -> bool {
         !self.descriptor().local_only
     }
@@ -129,6 +135,13 @@ fn query_selected(
         return Err(error("Code Intelligence disabled"));
     }
     paths::safe_text(&q.text)?;
+    if let Some(path) = &q.path {
+        if path.len() > 4096 {
+            return Err(error("Code query path exceeds bound"));
+        }
+        let target = native_worktree(root, q.worktree.as_deref())?;
+        paths::source(&target, path, p.code_intelligence.max_file_bytes)?;
+    }
     if q.text.trim().is_empty() || q.text.len() > 256 {
         return Err(error("Bounded nonempty literal query required"));
     }
@@ -177,13 +190,16 @@ fn query_selected(
         }
         if descriptor.id != "native" {
             let target = native::worktree(root, q.worktree.as_deref())?;
-            if !routing::cached_compatible(
-                root,
-                &target,
-                &descriptor,
-                state.unwrap(),
-                &p.code_intelligence,
-            )? {
+            if state.unwrap().version != descriptor.version
+                || (adapter.requires_cached_snapshot()
+                    && !routing::cached_compatible(
+                        root,
+                        &target,
+                        &descriptor,
+                        state.unwrap(),
+                        &p.code_intelligence,
+                    )?)
+            {
                 diagnostics.push(format!(
                     "{} receipt/index is stale or incompatible; fallback retained",
                     descriptor.id

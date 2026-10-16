@@ -51,6 +51,9 @@ pub struct Plan {
 #[serde(deny_unknown_fields)]
 pub struct Query {
     pub text: String,
+    /// Optional definition-file scope for ambiguous LSP symbol names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     pub worktree: Option<String>,
     #[serde(default = "default_kind")]
     pub kind: String,

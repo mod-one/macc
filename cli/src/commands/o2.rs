@@ -88,6 +88,8 @@ pub enum O2Command {
         kind: String,
         #[arg(long)]
         worktree: Option<String>,
+        #[arg(long)]
+        path: Option<String>,
     },
     ProviderOperation {
         id: String,
@@ -99,6 +101,8 @@ pub enum O2Command {
         kind: String,
         #[arg(long)]
         worktree: Option<String>,
+        #[arg(long)]
+        path: Option<String>,
     },
     CompactionList,
     CompactionProbe {
@@ -246,8 +250,10 @@ impl Command for O2 {
                 text,
                 kind,
                 worktree,
+                path,
             } => Action::CodeQuery {
                 query: macc_core::o2::providers::Query {
+                    path: path.clone(),
                     text: text.clone(),
                     kind: kind.clone(),
                     worktree: worktree.clone(),
@@ -259,9 +265,11 @@ impl Command for O2 {
                 text,
                 kind,
                 worktree,
+                path,
             } => Action::CodeCompare {
                 provider: provider.clone(),
                 query: macc_core::o2::providers::Query {
+                    path: path.clone(),
                     text: text.clone(),
                     kind: kind.clone(),
                     worktree: worktree.clone(),

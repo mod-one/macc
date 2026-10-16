@@ -5,6 +5,13 @@ pub(super) fn query(
     q: &Query,
     p: &super::super::super::policy::CodePolicy,
 ) -> Result<Capability<QueryResult>> {
+    if q.path.is_some() {
+        return Ok(Capability::Unsupported {
+            capability: q.kind.clone(),
+            reason: "Graphify does not support a definition-file scope; native fallback retained"
+                .into(),
+        });
+    }
     if !["references", "architecture_summary", "file_search"].contains(&q.kind.as_str()) {
         return Ok(Capability::Unsupported{capability:q.kind.clone(),reason:"Graphify adapter exposes bounded graph traversal; precise LSP/path/impact operations remain unsupported".into()});
     }

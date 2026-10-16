@@ -74,6 +74,12 @@ impl Panel {
                 _ => None,
             };
             if let Some(action) = action {
+                if matches!(&action, Action::Providers) {
+                    if self.job.is_none() {
+                        self.launch(root, action)?;
+                    }
+                    return Ok(());
+                }
                 let data = execute(root, action)?;
                 self.rows = if self.tab == 3 {
                     data["providers"].as_array().cloned().unwrap_or_default()
@@ -82,7 +88,15 @@ impl Panel {
                 };
             }
         }
-        self.selected = self.selected.min(self.rows.len().saturating_sub(1));
+        let count = if self.tab == 4 {
+            self.view
+                .as_ref()
+                .map(|v| v.fields.len())
+                .unwrap_or_default()
+        } else {
+            self.rows.len()
+        };
+        self.selected = self.selected.min(count.saturating_sub(1));
         Ok(())
     }
     fn result(&mut self, value: Value) {
@@ -99,6 +113,7 @@ impl Panel {
             return self.form_key(root, key);
         }
         if let KeyCode::Char(c @ '1'..='5') = key {
+            self.rows.clear();
             self.tab = c as usize - '1' as usize;
             self.selected = 0;
             self.scroll = 0;
@@ -120,12 +135,12 @@ impl Panel {
             KeyCode::Char('n') if self.tab==0=>self.start("propose",true,&["Kind (discovery, constraint, decision…)","Title","Body (concise sourced fact)","Scope (project, task, feature, worktree, tool, user)","Scope reference (blank for project)","Evidence source path","Confidence (0..1)"]),
             KeyCode::Char('p') if self.tab==0 && !self.conflicts=>{self.selected()?;self.start("review",true,&["Transition (active, rejected, stale, invalidated)","Review reason","Replacement evidence path (blank preserves existing evidence)"]);},
             KeyCode::Char('c') if self.tab==0 && !self.conflicts=>{self.selected()?;self.start("conflict",true,&["Conflicting memory ID","Reason after inspecting both claims"]);},
-            KeyCode::Char('p') if self.tab==3=>self.start("provider",true,&["Provider ID (native or graphify)","Operation (install, deploy, index, update, rollback, disable, undeploy, uninstall)"]),
+            KeyCode::Char('p') if self.tab==3=>self.start("provider",true,&["Provider ID (native, graphify, serena)","Operation (install, deploy, index, update, rollback, disable, undeploy, uninstall)"]),
             KeyCode::Char('p') if self.tab==2=>{let tool=self.selected()?["tool_id"].as_str().unwrap_or_default().to_string();let data=execute(root,Action::CompactionProbe{tool_id:tool})?;self.result(data);self.refresh(root)?;},
-            KeyCode::Char('v') if self.tab==3=>self.start("compare",false,&["Candidate provider ID (graphify)","Query text","Kind (file_search, references, architecture_summary)","Worktree (blank for project)"]),
+            KeyCode::Char('v') if self.tab==3=>self.start("compare",false,&["Candidate provider ID (graphify or serena)","Query text","Kind (file_search, references, symbol_definition, architecture_summary)","Worktree (blank for project)","Definition file path (required for Serena)"]),
             KeyCode::Char('d') if self.tab==3=>self.start("operation",false,&["Provider plan/operation UUID"]),
             KeyCode::Char('v') if self.tab==2=>self.start("rotate",true,&["Exact logical session ID to close (inspect Sessions first)"]),
-            KeyCode::Char('/')=>match self.tab{0=>self.start("search",false,&["Search text (blank lists inbox)","Task scope (blank for project facts)","Tool scope","Worktree scope","Feature scope","User scope"]),2=>self.start("decision",false,&["Simulated uses","Invocation budget","Observed context tokens (blank unknown)","Effective window (blank unknown)"]),3=>self.start("code",false,&["Literal code query","Query kind (file_search, references, architecture_summary)","Worktree (blank for project)"]),_=>{}},
+            KeyCode::Char('/')=>match self.tab{0=>self.start("search",false,&["Search text (blank lists inbox)","Task scope (blank for project facts)","Tool scope","Worktree scope","Feature scope","User scope"]),2=>self.start("decision",false,&["Simulated uses","Invocation budget","Observed context tokens (blank unknown)","Effective window (blank unknown)"]),3=>self.start("code",false,&["Literal code query","Query kind (file_search, references, symbol_definition, architecture_summary)","Worktree (blank for project)","Definition file path (required for Serena)"]),_=>{}},
             KeyCode::Char('b') if self.tab==0=>{let result=execute(root,Action::FtsRebuild)?;self.result(result);},
             KeyCode::Char('f') if self.tab == 0 => {
                 self.conflicts = !self.conflicts;

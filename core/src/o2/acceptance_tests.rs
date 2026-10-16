@@ -73,6 +73,7 @@ fn code_queries_bound_the_full_envelope_and_preserve_complete_hit_provenance() {
         let result = providers::query(
             root,
             &providers::Query {
+                path: None,
                 text: "needle".into(),
                 kind: "file_search".into(),
                 worktree: None,

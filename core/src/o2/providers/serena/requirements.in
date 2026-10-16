@@ -1,0 +1,17 @@
+# Direct dependencies for the Serena SolidLSP read-side subset.
+# The Serena wheel pin/hash is appended to requirements.lock separately;
+# resolving its full application metadata would pull unused UI/AI/MCP packages.
+jedi-language-server==0.46.0
+requests==2.33.0
+overrides==7.7.0
+python-dotenv==1.2.2
+sensai-utils==1.5.0
+pyyaml==6.0.2
+ruamel.yaml==0.18.14
+pathspec==0.12.1
+psutil==7.0.0
+joblib==1.5.1
+tqdm==4.67.1
+beautifulsoup4==4.14.2
+pydantic==2.12.5
+oslex==2.0.0

@@ -94,6 +94,9 @@ impl CodeIntelligenceProvider for Native {
         let mut hits = Vec::new();
         let mut snapshot_mismatch = false;
         for (path, hash) in &snapshot.files {
+            if q.path.as_ref().is_some_and(|scope| scope != path) {
+                continue;
+            }
             let Ok((_, data)) = paths::source(&wt, path, p.max_file_bytes) else {
                 snapshot_mismatch = true;
                 continue;

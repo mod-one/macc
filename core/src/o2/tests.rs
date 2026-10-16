@@ -250,6 +250,7 @@ fn native_queries_are_literal_bounded_and_report_unsupported_semantics() {
     let t = root();
     let r = t.path();
     let q = providers::Query {
+        path: None,
         text: "preserve_contract".into(),
         worktree: None,
         kind: "file_search".into(),

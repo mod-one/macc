@@ -53,3 +53,52 @@ pub fn source_snapshot(
         truncated,
     })
 }
+
+pub(super) fn ignored_paths(
+    root: &Path,
+    names: &[String],
+    custom_name: Option<&str>,
+) -> Result<std::collections::BTreeSet<String>> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let custom = custom_name
+        .map(|name| root.join(name))
+        .filter(|p| p.exists());
+    if let Some(name) = custom_name.filter(|_| custom.is_some()) {
+        paths::source(root, name, 1048576)?;
+    }
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(root);
+    if let Some(custom) = custom {
+        cmd.arg("-c")
+            .arg(format!("core.excludesFile={}", custom.display()));
+    }
+    let mut child = cmd
+        .args(["check-ignore", "--no-index", "-z", "--stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| error(e.to_string()))?;
+    let input = names.join("\0") + "\0";
+    // Write concurrently: a large ignore result can fill the stdout pipe.
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| error("Missing git stdin"))?;
+    let writer = std::thread::spawn(move || stdin.write_all(input.as_bytes()));
+    let output = child.wait_with_output().map_err(|e| error(e.to_string()))?;
+    writer
+        .join()
+        .map_err(|_| error("Git ignore writer failed"))?
+        .map_err(|e| error(e.to_string()))?;
+    if !output.status.success() && output.status.code() != Some(1) {
+        return Err(error("Git ignore validation failed"));
+    }
+    Ok(String::from_utf8(output.stdout)
+        .map_err(|e| error(e.to_string()))?
+        .split('\0')
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect())
+}

@@ -3,6 +3,7 @@ use super::*;
 pub(super) struct Job {
     receiver: std::sync::mpsc::Receiver<Result<Value>>,
     operation: Option<String>,
+    providers: bool,
     refreshed: std::time::Instant,
 }
 impl Panel {
@@ -17,6 +18,7 @@ impl Panel {
         } else {
             None
         };
+        let providers = matches!(&action, Action::Providers);
         let root = root.to_path_buf();
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -25,6 +27,7 @@ impl Panel {
         self.job = Some(Job {
             receiver,
             operation,
+            providers,
             refreshed: std::time::Instant::now(),
         });
         self.message="Provider operation running. The terminal remains interactive; closing this panel does not cancel it.".into();
@@ -37,14 +40,24 @@ impl Panel {
         match job.receiver.try_recv() {
             Ok(result) => {
                 let operation = job.operation.clone();
+                let providers = job.providers;
                 self.job = None;
                 match result {
+                    Ok(value) if providers => {
+                        if self.tab == 3 {
+                            self.rows = value["providers"].as_array().cloned().unwrap_or_default();
+                            self.selected = self.selected.min(self.rows.len().saturating_sub(1));
+                            self.message = "Provider health refresh complete.".into();
+                        }
+                    }
                     Ok(value) => {
                         if self.pending.as_ref().is_some_and(|a| matches!(a,Action::ProviderApply{plan_id,..} if Some(plan_id)==operation.as_ref())) {self.pending=None;}
                         self.result(value);
                         self.message = "Provider operation complete.".into();
-                        if let Err(e) = self.refresh(root) {
-                            self.message = format!("Operation complete; refresh failed: {e}");
+                        if operation.is_some() {
+                            if let Err(e) = self.refresh(root) {
+                                self.message = format!("Operation complete; refresh failed: {e}");
+                            }
                         }
                     }
                     Err(e) => {

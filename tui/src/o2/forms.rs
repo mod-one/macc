@@ -92,7 +92,7 @@ impl Panel {
             "compare" => Action::CodeCompare {
                 provider: v[0].clone(),
                 query: serde_json::from_value(
-                    json!({"text":v[1],"kind":v[2],"worktree":empty(&v[3])}),
+                    json!({"text":v[1],"kind":v[2],"worktree":empty(&v[3]),"path":v.get(4).map(|s|empty(s))}),
                 )
                 .unwrap(),
             },
@@ -259,7 +259,7 @@ impl Panel {
             },
             "code" => Action::CodeQuery {
                 query: serde_json::from_value(
-                    json!({"text":v[0],"kind":v[1],"worktree":empty(&v[2])}),
+                    json!({"text":v[0],"kind":v[1],"worktree":empty(&v[2]),"path":v.get(3).map(|s|empty(s))}),
                 )
                 .unwrap(),
             },

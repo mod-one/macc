@@ -252,3 +252,14 @@ not install it. Use the Code Intelligence manager's reviewed install, deploy and
 index plans. Only explicit install/update can use the network; offline mode blocks
 them. See [Managed Graphify](O2_P2_GRAPHIFY.md) for the pinned release, defaults,
 platform support, progress, A/B comparison and ownership/recovery boundaries.
+
+### Managed Serena (P2-B)
+
+The seven `code_intelligence.serena_*` settings are available in both policy
+editors. The optional provider uses an isolated, pinned Serena SolidLSP subset
+and Python/Jedi server. Enable it, select adaptive routing, then review and apply
+separate install/deploy plans. Query and comparison forms accept a definition
+file path, required by Serena to avoid incomplete mixed-language results.
+Other languages remain explicitly unsupported and use the available fallback.
+See [Managed Serena](O2_P2_SERENA.md) for exact defaults, lifecycle operations,
+platform/dependency diagnosis, source restrictions and validation.

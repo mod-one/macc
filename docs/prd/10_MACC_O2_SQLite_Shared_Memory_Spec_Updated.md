@@ -3,7 +3,7 @@
 **Project:** MACC — Multi-Assistant Code Config  
 **Document:** Revised and unified specification of `10_MACC_O2_SQLite_Shared_Memory_Spec.md`  
 **Motifs:** O2 Cross-Agent Memory Ledger; Shared Context Store; Code Intelligence Providers; Multi-Tool Session Lifecycle; Adaptive Compaction  
-**Version:** 2.9 — P0/P1 and P2-A managed Graphify implementation progress; later stages remain proposed
+**Version:** 2.10 — P0/P1, P2-A Graphify and P2-B Python/Jedi Serena implementation progress; later stages remain proposed
 **Date:** 2026-10-16
 **Code baseline inspected:** `df95759` — `feat: implement review and correction cycle budget management`  
 **Language:** English  
@@ -1876,9 +1876,42 @@ generations support validated rollback; owned-file removal preserves modified or
 added user files. Receipts stay SQLite-backed; no O2 schema migration is needed
 for the optional JSON metadata. Failed/interrupted unactivated stages are retained
 for explicit operator inspection. Automatic merge-triggered/incremental indexing,
-release discovery, shared-user installations, Serena and MCP remain later work.
+release discovery, shared-user installations and MCP remain later work.
+P2-B adds the separately scoped Serena implementation described below.
 P2-A supports Linux x86_64 / Python 3.12; other platforms retain native fallback.
 Fixture A/B results do not establish production quality or token savings.
+
+
+### 20.6 P2-B implementation progress
+
+P2-B registers an optional `serena` adapter using the existing provider abstraction,
+SQLite receipts, reviewed plans, operation progress and bounded query responses.
+See [Managed Serena](../O2_P2_SERENA.md) for exact behavior and boundaries.
+The pinned runtime uses the Serena 2.0.0 SolidLSP read-side subset and
+jedi-language-server 0.46.0, installed from 35 explicitly hash-locked wheel packages.
+It requires Linux x86_64 / Python 3.12. Only Python/Jedi is enabled; all other
+language backends remain explicitly unsupported until independently verified.
+
+Serena performs current-source LSP definitions and references rather than building
+a durable graph index. The provider port distinguishes live-source queries from
+cached-snapshot queries; Graphify retains its existing freshness checks. Adaptive
+routing prefers eligible Serena for scoped symbols/references and keeps native
+first for file search. A Python definition-file path is required to prevent partial
+cross-language answers. Names support `Class/method` and `/top_level`; ambiguous
+references produce diagnostic fallback. Every citation is checked against exported
+source hashes, and in-flight source changes reject the LSP result.
+
+All seven `serena_*` settings and query file scope are exposed through the shared
+CLI/TUI/Web actions and typed policy editors. Install/deploy/update remain explicit;
+flags stay disabled by default. The reviewed installation includes the pinned Jedi
+dependency; queries never install language servers or access the network. Shared
+ownership proofs preserve user-added/modified files on removal. No new SQLite
+schema migration is required. The AI tool adapter/session path is unchanged.
+
+Deterministic lifecycle/routing/freshness/security tests and an opt-in real-package
+symbol accuracy fixture cover the supported backend. Full upstream language
+coverage, editing tools, MCP exposure, persistent LSP workers, release discovery,
+and production performance/token-savings claims are outside this milestone.
 
 ---
 

@@ -141,6 +141,10 @@ fn graphify_executable_editor_keeps_typed_paths_and_requires_a_new_preview() {
             .graphify_python,
         "/usr/bin/python3"
     );
+    assert_eq!(
+        panel.view.as_ref().unwrap().fields[panel.selected].path,
+        "code_intelligence.graphify_python"
+    );
 }
 
 #[test]
@@ -162,4 +166,33 @@ fn read_only_background_completion_preserves_a_pending_reviewed_action() {
     }
     assert!(panel.job.is_none());
     assert!(panel.pending.is_some());
+}
+
+#[test]
+fn provider_health_refresh_is_background_and_preserves_pending_review() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(temp.path().join(".macc/state")).unwrap();
+    let migration = macc_core::session_store::migrate(temp.path(), false, None).unwrap();
+    macc_core::session_store::migrate(temp.path(), true, Some(&migration.source_sha256)).unwrap();
+    let mut panel = Panel {
+        tab: 3,
+        pending: Some(Action::ProviderApply {
+            plan_id: "reviewed-plan".into(),
+            checksum: "reviewed-hash".into(),
+        }),
+        ..Default::default()
+    };
+    panel.refresh(temp.path()).unwrap();
+    assert!(panel.job.is_some());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while panel.job.is_some() && std::time::Instant::now() < deadline {
+        panel.poll(temp.path());
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(
+        panel.job.is_none(),
+        "Health refresh must not schedule itself again"
+    );
+    assert!(panel.rows.iter().any(|r| r["provider"]["id"] == "serena"));
+    assert!(matches!(panel.pending, Some(Action::ProviderApply { .. })));
 }

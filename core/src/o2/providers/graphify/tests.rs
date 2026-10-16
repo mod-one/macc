@@ -64,6 +64,7 @@ fn apply(root: &Path, action: &str) -> Receipt {
 }
 fn query() -> Query {
     Query {
+        path: None,
         text: "macc_smoke".into(),
         kind: "references".into(),
         worktree: None,
@@ -149,6 +150,7 @@ fn managed_lifecycle_query_budget_drift_rollback_and_owned_removal() {
     let found = super::super::query(
         root,
         &Query {
+            path: None,
             kind: "file_search".into(),
             text: "dirty source".into(),
             worktree: None,
@@ -237,6 +239,7 @@ fn real_pinned_graphify_code_only_smoke() {
     apply(root, "deploy");
     let receipt = apply(root, "index");
     let q = Query {
+        path: None,
         text: "preserve_contract".into(),
         kind: "references".into(),
         worktree: None,
@@ -254,6 +257,7 @@ fn real_pinned_graphify_code_only_smoke() {
         .iter()
         .any(|h| h.text.contains("--calls [EXTRACTED")));
     let missing = Query {
+        path: None,
         text: "macc_symbol_not_present_4821".into(),
         kind: "references".into(),
         worktree: None,
