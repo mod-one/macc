@@ -1,7 +1,7 @@
 use super::*;
 use serde_json::json;
 use std::process::Command;
-fn request(root: &Path, wt: &Path, task: &str) -> store::checkpoints::ContextRequest {
+pub(super) fn request(root: &Path, wt: &Path, task: &str) -> store::checkpoints::ContextRequest {
     let identity=crate::coordinator::session_identity::identity(root,wt,task,"performer","future-tool",&json!({"id":"future-tool","performer":{"runner":"fake.sh","command":"fake","session":{"enabled":true,"scope":"task_role_tool","create":{"command":"fake","args":["new","{session_id}"]}}}}),&crate::coordinator::session_identity::SessionRouting{tier:"".into(),mode:"auto".into()}).unwrap();
     store::checkpoints::ContextRequest {
         identity,

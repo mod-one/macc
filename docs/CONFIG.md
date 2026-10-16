@@ -236,3 +236,10 @@ Owned native overrides follow the next invocation’s policy; independently edit
 settings remain user-owned. Legacy overrides can be explicitly adopted through
 Compaction preview/confirmation in TUI/Web. Web previews bind an exact draft and
 revision; edits during a save remain pending. See [O2 P1](O2_P1.md).
+
+O2 budgets measure the complete canonical compact agent payload, including its
+newline; optional push also includes explanation/manifest framing. Reducers require
+explicit bundles for classified output. Unclassified output is bounded raw, and
+nonzero exits preserve raw diagnostics. Native configuration validates the current
+read-only version before applying; a stale capability requires an explicit re-probe.
+These refinements use existing fields and need no additional SQLite migration.

@@ -144,3 +144,58 @@ fn disabling_output_reduction_preserves_existing_execution_behavior() {
     assert_eq!(result.stdout, "unchanged plain output");
     assert!(result.summary.is_none());
 }
+
+#[test]
+fn unclassified_data_and_failed_diagnostics_survive_default_and_explicit_reducers() {
+    let temp = tests::root();
+    let root = temp.path();
+    let engine = MaccEngine::new(ToolRegistry::new());
+    let paths = crate::ProjectPaths::from_root(root);
+    let result = engine
+        .run_skill(
+            &paths,
+            &skill("printf 'contract version: 42'"),
+            &request(root, None),
+        )
+        .unwrap();
+    assert!(result.stdout.contains("contract version: 42"));
+    assert!(!result.stdout.contains("No errors"));
+    let mut config = crate::load_canonical_config(&paths.config_path).unwrap();
+    config.context = Some(
+        serde_json::from_value(
+            json!({"summarization":{"enabled":true,"default_bundles":["log-grep-error-first"]}}),
+        )
+        .unwrap(),
+    );
+    std::fs::write(&paths.config_path, serde_yaml::to_string(&config).unwrap()).unwrap();
+    for diagnostic in [
+        "permission denied accessing contract.rs",
+        "connection refused",
+        "command not found",
+    ] {
+        let command = format!("printf '{diagnostic}' >&2; exit 7");
+        let result = engine
+            .run_skill(&paths, &skill(&command), &request(root, None))
+            .unwrap();
+        assert_eq!(result.exit_code, Some(7));
+        assert_eq!(result.status, "failed");
+        assert!(result.stderr.contains(diagnostic), "{}", result.stderr);
+        assert!(!result.stderr.contains("No errors"));
+        assert!(result
+            .summary
+            .unwrap()
+            .bundles_applied
+            .contains(&"failure_output_preserved".into()));
+    }
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(Hook));
+    let result = MaccEngine::new(registry)
+        .run_skill(
+            &paths,
+            &skill("printf 'permission denied' >&2; exit 7"),
+            &request(root, Some("future-fixture")),
+        )
+        .unwrap();
+    assert!(result.stderr.contains("permission denied"));
+    assert!(!result.stderr.contains("adapter transform"));
+}

@@ -15,7 +15,7 @@ pub(crate) fn select(
     limit: u64,
 ) -> Result<(String, bool, SelectionCache)> {
     let fingerprint = digest(serde_json::to_vec(&serde_json::json!({
-        "schema":2,"project":checkpoint.project_id,"task":checkpoint.mandatory_task,
+        "schema":3,"project":checkpoint.project_id,"task":checkpoint.mandatory_task,
         "phase":checkpoint.phase,"role":checkpoint.role,"tool":checkpoint.tool_id,
         "revision":checkpoint.source_revision,"worktree":checkpoint.worktree_content_digest,
         "sources":checkpoint.source_hashes,"limit":limit,
@@ -42,29 +42,35 @@ pub(crate) fn select(
     let mut seen = std::collections::BTreeSet::new();
     for h in hits {
         let p = &h.memory.proposal;
-        let size = (p.title.chars().count() + p.body.chars().count() + 3) as u64 / 4 + 40;
         if !seen.insert(digest(p.body.as_bytes())) {
             result
                 .exclusions
                 .push(format!("{}: duplicate body", h.memory.id));
             continue;
         }
-        if result.used + size > limit {
-            result
-                .exclusions
-                .push(format!("{}: optional memory budget", h.memory.id));
-            continue;
-        }
-        result.used += size;
-        result.selected.push(context::Selection {
+        let mut candidate = context::Selection {
             id: h.memory.id,
             checksum: h.checksum,
             source_refs: p.evidence.iter().map(|e| e.reference.clone()).collect(),
             reason: h.rank_reason,
-            estimated_tokens: size,
+            estimated_tokens: 0,
             title: p.title.clone(),
             body: p.body.clone(),
-        });
+        };
+        for _ in 0..4 {
+            candidate.estimated_tokens = crate::context::payload::json_tokens(&candidate)? as u64;
+        }
+        let id = candidate.id.clone();
+        result.selected.push(candidate);
+        let used = super::context_prompt::tokens(&result.selected)?;
+        if used > limit {
+            result.selected.pop();
+            result.exclusions.push(format!(
+                "{id}: optional memory budget including references and framing"
+            ));
+            continue;
+        }
+        result.used = used;
     }
     let raw = serde_json::to_string(&result).map_err(|e| error(e.to_string()))?;
     sql(db.execute("INSERT INTO context_content_cache VALUES(?1,?2,?3) ON CONFLICT(fingerprint) DO UPDATE SET content_json=excluded.content_json,checksum=excluded.checksum",params![fingerprint,raw,digest(raw.as_bytes())]))?;

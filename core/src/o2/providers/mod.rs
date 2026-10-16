@@ -3,6 +3,7 @@ mod lifecycle;
 mod model;
 mod native;
 mod native_lifecycle;
+mod response;
 mod routing;
 use super::*;
 pub use lifecycle::{apply, inspect, plan};
@@ -139,8 +140,12 @@ pub fn query(root: &Path, q: &Query) -> Result<Capability<QueryResult>> {
         }
         match adapter.query(root, q, &p.code_intelligence) {
             Ok(Capability::Supported(mut result)) => {
+                if result.provider_id != descriptor.id {
+                    diagnostics.push(format!("{} returned a foreign provider ID", descriptor.id));
+                    continue;
+                }
                 result.diagnostics.extend(diagnostics);
-                return Ok(Capability::Supported(result));
+                return response::bound(Capability::Supported(result), &p.code_intelligence);
             }
             Ok(Capability::Unsupported { reason, .. }) => diagnostics.push(reason),
             Err(e) if descriptor.id != "native" => {
@@ -149,10 +154,13 @@ pub fn query(root: &Path, q: &Query) -> Result<Capability<QueryResult>> {
             Err(e) => return Err(e),
         }
     }
-    Ok(Capability::Unsupported {
-        capability: q.kind.clone(),
-        reason: diagnostics.join("; "),
-    })
+    response::bound(
+        Capability::Unsupported {
+            capability: q.kind.clone(),
+            reason: diagnostics.join("; "),
+        },
+        &p.code_intelligence,
+    )
 }
 pub(super) fn receipt(db: &rusqlite::Connection, id: &str) -> Result<Option<Receipt>> {
     let raw: Option<String> = sql(db

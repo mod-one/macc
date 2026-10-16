@@ -31,6 +31,7 @@ pub(crate) fn database(root: &Path) -> Result<(rusqlite::Connection, store::Auth
 pub(crate) mod context_usage;
 
 mod context_cache;
+mod context_prompt;
 
 mod policy_fields;
 
@@ -44,5 +45,7 @@ pub mod output;
 #[cfg(test)]
 mod regression_tests;
 
+#[cfg(test)]
+mod acceptance_tests;
 #[cfg(test)]
 mod pipeline_tests;

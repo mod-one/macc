@@ -1,7 +1,7 @@
 use super::*;
 use serde_json::json;
 #[cfg(unix)]
-fn spec(root: &Path, format: &str) -> crate::tool::ToolPerformerSpec {
+pub(super) fn spec(root: &Path, format: &str) -> crate::tool::ToolPerformerSpec {
     use std::os::unix::fs::PermissionsExt;
     let executable = root.join(".fake-tool");
     std::fs::write(&executable,"#!/bin/sh\ncase \"$1\" in --version) echo 'future-cli 1.0.0';; --help) echo 'versioned help';; *) exit 42;; esac\n").unwrap();
@@ -9,7 +9,7 @@ fn spec(root: &Path, format: &str) -> crate::tool::ToolPerformerSpec {
     serde_json::from_value(json!({"runner":"fake.sh","command":executable,"args":["--model","keep-model","--effort","high","--yolo"],"compaction":{"schema":"fake-native-v1","documentation":"https://example.invalid/verified-fixture","version_pattern":"^future-cli 1\\.0\\.0","native_auto":{"format":format,"path":if format=="env"{None}else{Some(format!(".native/settings.{format}"))},"key":if format=="env"{"FUTURE_COMPACT_PERCENT"}else if format=="json"{"model.compactionThreshold"}else{"native_compact_tokens"},"unit":if format=="env"{"percent"}else if format=="json"{"ratio"}else{"tokens"},"disabled_env":[]}},"session":{"enabled":true,"scope":"task_role_tool","create":{"command":"fake","args":["new","{session_id}"]}}})).unwrap()
 }
 #[cfg(unix)]
-fn grant(root: &Path, p: &crate::tool::ToolPerformerSpec) -> store::LeaseGrant {
+pub(super) fn grant(root: &Path, p: &crate::tool::ToolPerformerSpec) -> store::LeaseGrant {
     let spec = json!({"id":"future-tool","performer":p});
     let identity = crate::coordinator::session_identity::identity(
         root,
@@ -38,7 +38,7 @@ fn grant(root: &Path, p: &crate::tool::ToolPerformerSpec) -> store::LeaseGrant {
     .unwrap()
 }
 #[cfg(unix)]
-fn enable(root: &Path) {
+pub(super) fn enable(root: &Path) {
     let view = policy::inspect(root).unwrap();
     let mut policy = view.policy;
     policy.adaptive_compaction.enabled = true;

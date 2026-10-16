@@ -252,11 +252,7 @@ impl Command for O2 {
             super::gate_cli_mutation(&paths.root)?;
         }
         let result = execute(&paths.root, action)?;
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&result)
-                .map_err(|e| MaccError::Validation(e.to_string()))?
-        );
+        print!("{}", macc_core::context::payload::json_line(&result)?);
         Ok(())
     }
 }

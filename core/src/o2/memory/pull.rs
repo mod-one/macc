@@ -21,9 +21,7 @@ pub struct ReadPage {
     pub limit_tokens: usize,
 }
 fn measure<T: Serialize>(page: &T) -> Result<usize> {
-    Ok(crate::context::estimate_tokens(
-        &serde_json::to_string(page).map_err(|e| error(e.to_string()))?,
-    ))
+    crate::context::payload::json_tokens(page)
 }
 impl PullPage {
     fn size(&mut self) -> Result<usize> {

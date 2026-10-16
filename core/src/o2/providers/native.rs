@@ -86,9 +86,7 @@ impl CodeIntelligenceProvider for Native {
         let wt = worktree(root, q.worktree.as_deref())?;
         let snapshot = snapshot(&wt, p)?;
         let mut hits = Vec::new();
-        let mut used = 0;
         let mut snapshot_mismatch = false;
-        let budget = p.output_tokens * 4;
         for (path, hash) in &snapshot.files {
             let Ok((_, data)) = paths::source(&wt, path, p.max_file_bytes) else {
                 snapshot_mismatch = true;
@@ -107,11 +105,9 @@ impl CodeIntelligenceProvider for Native {
                         continue;
                     }
                     let excerpt = value.chars().take(300).collect::<String>();
-                    let size = excerpt.chars().count() as u64 + path.len() as u64 + 80;
-                    if used + size > budget || hits.len() >= p.query_limit as usize {
+                    if hits.len() >= p.query_limit as usize {
                         break;
                     }
-                    used += size;
                     hits.push(CodeHit {
                         path: path.clone(),
                         line: line as u64 + 1,
@@ -127,7 +123,7 @@ impl CodeIntelligenceProvider for Native {
                 break;
             }
         }
-        Ok(Capability::Supported(QueryResult{provider_id:"native".into(),hits,snapshot_mismatch,diagnostics:vec!["Read-only current tracked files; binary, secret, generated and symlink sources excluded".into()],estimated_tokens:used.div_ceil(4)}))
+        response::bound(Capability::Supported(QueryResult{provider_id:"native".into(),hits,snapshot_mismatch,diagnostics:vec!["Read-only current tracked files; binary, secret, generated and symlink sources excluded".into()],estimated_tokens:0}), p)
     }
 }
 #[derive(Debug, Serialize, Deserialize)]

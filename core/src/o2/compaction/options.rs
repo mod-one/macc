@@ -94,20 +94,37 @@ pub fn execution_options(root: &Path, key: &store::LeaseKey) -> Result<Execution
             ..Default::default()
         });
     };
-    let observed: Probe = store::json(observed.as_bytes())?;
-    let executable = probe::executable(
-        identity["execution_config"]["performer"]["command"]
-            .as_str()
-            .ok_or_else(|| error("Missing executable"))?,
-    )?;
-    if observed.state != "version_help_observed"
-        || observed.executable_sha256 != Some(probe::binary_hash(&executable)?)
-        || observed.profile_sha256
-            != Some(digest(
-                &serde_json::to_vec(&profile).map_err(|e| error(e.to_string()))?,
-            ))
-    {
-        return Ok(ExecutionOptions{reason:"Native capability observation stale/unavailable; re-probe; checkpoint fallback remains active".into(),..Default::default()});
+    let mut observed: Probe = store::json(observed.as_bytes())?;
+    let command = identity["execution_config"]["performer"]["command"]
+        .as_str()
+        .ok_or_else(|| error("Missing executable"))?;
+    if let Err(e) = freshness::validate(root, command, &profile, &observed) {
+        let reason =
+            format!("Native capability stale/unavailable: {e}; checkpoint fallback remains active");
+        // An older leased profile must not invalidate a newer operator observation.
+        if observed.state == "version_help_observed"
+            && freshness::same_identity(command, &profile, &observed)?
+        {
+            freshness::stale(&mut observed, &reason);
+            sql(tx.execute(
+                "UPDATE compaction_probes SET probe_json=?2 WHERE tool_id=?1",
+                params![
+                    tool,
+                    serde_json::to_string(&observed).map_err(|e| error(e.to_string()))?
+                ],
+            ))?;
+            super::super::schema::audit(
+                &tx,
+                "compaction_capability_stale",
+                tool,
+                serde_json::json!({"reason":reason}),
+            )?;
+        }
+        sql(tx.commit())?;
+        return Ok(ExecutionOptions {
+            reason,
+            ..Default::default()
+        });
     }
     let value = match native.unit.as_str() {
         "tokens" => {

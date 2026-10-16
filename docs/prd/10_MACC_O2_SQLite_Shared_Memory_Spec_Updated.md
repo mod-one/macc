@@ -3,7 +3,7 @@
 **Project:** MACC — Multi-Assistant Code Config  
 **Document:** Revised and unified specification of `10_MACC_O2_SQLite_Shared_Memory_Spec.md`  
 **Motifs:** O2 Cross-Agent Memory Ledger; Shared Context Store; Code Intelligence Providers; Multi-Tool Session Lifecycle; Adaptive Compaction  
-**Version:** 2.7 — P0 and P1 implementation progress, mandatory TUI/Web coverage; later stages remain proposed
+**Version:** 2.8 — P0 and P1 implementation progress, mandatory TUI/Web coverage; later stages remain proposed
 **Date:** 2026-10-15  
 **Code baseline inspected:** `df95759` — `feat: implement review and correction cycle budget management`  
 **Language:** English  
@@ -1837,6 +1837,16 @@ explicit pull-only. Pressure inspection defers actual active leases. TUI conflic
 resolution uses a typed confirmation form. Web policy previews are tied to the
 exact draft/revision and preserve edits made during saves. See the canonical
 implementation audit for evidence and remaining certification boundaries.
+
+The P1 verification corrections budget the complete optional push prompt and the
+canonical compact agent JSON response, including references and framing. Cache
+fingerprint version 3 replaces undercounted selections without a database upgrade.
+Unclassified successful output is bounded raw; failed commands preserve raw
+diagnostics and bypass semantic reducers. Current bounded version checks invalidate
+capabilities after runtime upgrades behind unchanged launchers. All registered code
+providers share complete-envelope response budgeting with explicit partial results.
+These corrections introduce no new user policy fields; TUI/Web continue to use the
+existing shared catalog, budgets and compaction inspection/probe actions.
 
 The examples elsewhere in this specification remain target designs unless they
 match the delivered contract in O2 P1. External Graphify/Serena installers,

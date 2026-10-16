@@ -3,6 +3,7 @@ mod options;
 mod pressure;
 pub use pressure::states;
 pub(crate) use pressure::{evaluate as evaluate_pressure, observe as observe_pressure};
+mod freshness;
 mod probe;
 use super::*;
 pub use options::{execution_options, ExecutionOptions};
@@ -15,6 +16,8 @@ pub struct Probe {
     pub executable_sha256: Option<String>,
     pub profile_sha256: Option<String>,
     pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version_sha256: Option<String>,
     pub help_sha256: Option<String>,
     pub state: String,
     pub native_auto: String,
@@ -107,6 +110,7 @@ pub fn inspect(root: &Path) -> Result<Vec<Probe>> {
                     executable_sha256: None,
                     profile_sha256: None,
                     version: None,
+                    version_sha256: None,
                     help_sha256: None,
                     state: "unverified".into(),
                     native_auto: if p
@@ -123,17 +127,17 @@ pub fn inspect(root: &Path) -> Result<Vec<Probe>> {
                     verified_at: 0,
                     diagnostics: vec![],
                 });
-            let current = p
-                .compaction
-                .as_ref()
-                .map(|s| serde_json::to_vec(s).map(|b| digest(&b)))
-                .transpose()
-                .map_err(|e| error(e.to_string()))?;
-            if observation.profile_sha256.is_some() && observation.profile_sha256 != current {
-                observation.state = "stale".into();
-                observation
-                    .diagnostics
-                    .push("Adapter declaration changed; probe again".into());
+            if observation.state == "version_help_observed" {
+                let current = p
+                    .compaction
+                    .as_ref()
+                    .ok_or_else(|| error("Adapter declaration removed"))
+                    .and_then(|profile| {
+                        freshness::validate(root, &p.command, profile, &observation)
+                    });
+                if let Err(e) = current {
+                    freshness::stale(&mut observation, &e.to_string());
+                }
             }
             result.push(observation);
         }
@@ -161,6 +165,7 @@ pub(crate) fn probe_spec(
         executable_sha256: None,
         profile_sha256: None,
         version: None,
+        version_sha256: None,
         help_sha256: None,
         state: "unverified".into(),
         native_auto: "unsupported; checkpoint rotation".into(),
@@ -191,6 +196,7 @@ pub(crate) fn probe_spec(
             ));
         }
         record.version = Some(version.trim().chars().take(160).collect());
+        record.version_sha256 = Some(digest(version.trim().as_bytes()));
         record.help_sha256 = Some(digest(help.as_bytes()));
         record.state = "version_help_observed".into();
         record.native_auto = if profile.native_auto.is_some() {

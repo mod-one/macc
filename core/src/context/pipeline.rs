@@ -64,8 +64,10 @@ pub fn apply(
                 .unwrap_or_else(|| s.default_bundles.clone())
         })
         .unwrap_or_default();
-    if o2_active && bundles.is_empty() {
-        bundles.push("log-grep-error-first".into());
+    // Reducers require an explicit output contract. Unknown output is bounded raw.
+    let failed = result.status == "failed" || result.exit_code.is_some_and(|code| code != 0);
+    if failed {
+        bundles.clear();
     }
     let legacy_limit = tool
         .and_then(|t| t.token_budget)
@@ -113,7 +115,9 @@ pub fn apply(
         if raw.is_empty() {
             continue;
         }
-        let hook = if let Some(adapter) = adapter.filter(|_| raw.len() <= 8 * 1024 * 1024) {
+        let hook = if let Some(adapter) =
+            adapter.filter(|_| !failed && raw.len() <= 8 * 1024 * 1024)
+        {
             match adapter.transform_tool_output(&ToolOutput {
                 root: &paths.root,
                 skill,
@@ -150,6 +154,9 @@ pub fn apply(
     }
     if hook_used {
         bundles.push("adapter_output_hook".into());
+    }
+    if failed {
+        bundles.push("failure_output_preserved".into());
     }
     result.summary = Some(SummaryMetadata {
         raw_size_chars: raw_size,
