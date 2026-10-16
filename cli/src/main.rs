@@ -4298,9 +4298,14 @@ fi
 
     #[test]
     fn test_install_skill_cli() -> macc_core::Result<()> {
+        let _guard = env_test_lock();
         let temp_base =
             std::env::temp_dir().join(format!("macc_install_skill_test_{}", uuid_v4_like()));
         std::fs::create_dir_all(&temp_base).unwrap();
+        let temp_home = temp_base.join("home");
+        std::fs::create_dir_all(&temp_home).unwrap();
+        let old_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &temp_home);
         let ids = fixture_ids();
         let tool_one = ids[0].clone();
 
@@ -4406,15 +4411,25 @@ fi
         );
 
         // Cleanup
+        if let Some(old) = old_home {
+            std::env::set_var("HOME", old);
+        } else {
+            std::env::remove_var("HOME");
+        }
         std::fs::remove_dir_all(&temp_base).ok();
         Ok(())
     }
 
     #[test]
     fn test_install_mcp_cli() -> macc_core::Result<()> {
+        let _guard = env_test_lock();
         let temp_base =
             std::env::temp_dir().join(format!("macc_install_mcp_test_{}", uuid_v4_like()));
         std::fs::create_dir_all(&temp_base).unwrap();
+        let temp_home = temp_base.join("home");
+        std::fs::create_dir_all(&temp_home).unwrap();
+        let old_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &temp_home);
 
         // 1. Init
         run_with_engine(
@@ -4522,6 +4537,11 @@ fi
         );
 
         // Cleanup
+        if let Some(old) = old_home {
+            std::env::set_var("HOME", old);
+        } else {
+            std::env::remove_var("HOME");
+        }
         std::fs::remove_dir_all(&temp_base).ok();
         Ok(())
     }
@@ -4735,6 +4755,7 @@ fi
         use std::io::{BufRead, BufReader, Write};
         use std::thread;
 
+        let _guard = env_test_lock();
         let ids = fixture_ids();
         let tool_one = ids[0].clone();
 
@@ -4817,6 +4838,10 @@ fi
         let temp_base =
             std::env::temp_dir().join(format!("macc_install_multi_zip_test_{}", uuid_v4_like()));
         std::fs::create_dir_all(&temp_base).unwrap();
+        let temp_home = temp_base.join("home");
+        std::fs::create_dir_all(&temp_home).unwrap();
+        let old_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &temp_home);
 
         // 3. Init
         run_with_engine(
@@ -4897,6 +4922,11 @@ fi
             .join(format!(".{}/skills/skill-a/skills", tool_one))
             .exists());
 
+        if let Some(old) = old_home {
+            std::env::set_var("HOME", old);
+        } else {
+            std::env::remove_var("HOME");
+        }
         std::fs::remove_dir_all(&temp_base).ok();
         Ok(())
     }
@@ -5136,6 +5166,7 @@ fi
         use std::io::{BufRead, BufReader, Write};
         use std::thread;
 
+        let _guard = env_test_lock();
         let ids = fixture_ids();
         let tool_one = ids[0].clone();
 
@@ -5200,6 +5231,10 @@ fi
         let temp_base =
             std::env::temp_dir().join(format!("macc_install_symlink_test_{}", uuid_v4_like()));
         std::fs::create_dir_all(&temp_base).unwrap();
+        let temp_home = temp_base.join("home");
+        std::fs::create_dir_all(&temp_home).unwrap();
+        let old_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &temp_home);
 
         run_with_engine(
             Cli {
@@ -5274,6 +5309,11 @@ fi
             err_msg
         );
 
+        if let Some(old) = old_home {
+            std::env::set_var("HOME", old);
+        } else {
+            std::env::remove_var("HOME");
+        }
         std::fs::remove_dir_all(&temp_base).ok();
         Ok(())
     }

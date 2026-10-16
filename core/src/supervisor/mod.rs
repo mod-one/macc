@@ -445,6 +445,7 @@ impl SupervisorReport {
 /// Interface for managing and probing the coordinator OS process.
 ///
 /// Implementations may be real (spawning via tokio::process) or test doubles.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait ProcessManager: Send + Sync {
     /// Spawn the coordinator process. Returns `Ok(())` if start was requested;
@@ -487,6 +488,7 @@ pub enum ProcessManagerError {
 ///
 /// The canonical event log format is newline-delimited JSON at
 /// `.macc/log/coordinator/events.jsonl`.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait EventConsumer: Send + Sync {
     /// Return event lines from the log within the given time window.

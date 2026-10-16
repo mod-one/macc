@@ -452,6 +452,7 @@ pub enum DispatchError {
 ///
 /// Implementations may invoke a local CLI tool, call an API, or use a test
 /// double that returns a canned response.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait AiAnalysisDispatcher: Send + Sync {
     /// Send `prompt` to the AI tool. Returns the raw response string.

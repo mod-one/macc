@@ -230,6 +230,7 @@ pub struct CoordinatorRunController {
     previous_counts: Option<CoordinatorCounts>,
 }
 
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait ControlPlaneBackend {
     async fn on_cycle_start(&mut self, cycle: usize) -> Result<()>;
