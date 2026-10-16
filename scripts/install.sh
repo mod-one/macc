@@ -166,6 +166,7 @@ if [[ "$BUILD_PROFILE" == "release" ]]; then
     echo "Building web assets..."
     (
       cd "$PROJECT_ROOT/web"
+      npm install --include=dev
       npm run build
       cd "$PROJECT_ROOT"
     )
