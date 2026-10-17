@@ -1092,6 +1092,9 @@ impl CanonicalConfig {
         if let Some(policy) = &self.session_management {
             policy.validate()?;
         }
+        if let Some(supervisor) = &self.automation.supervisor {
+            supervisor.validate()?;
+        }
         let mut seen_ids = HashSet::new();
 
         for template in &self.mcp_templates {

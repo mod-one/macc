@@ -1,3 +1,5 @@
+#[path = "supervisor_config.rs"]
+mod supervisor_config;
 use super::errors::ApiError;
 use super::types::{
     ApiConfigResponse, ApiConfigUpdateRequest, ApiStandardsPreviewCard, ApiStandardsPreviewRequest,
@@ -19,9 +21,11 @@ pub(super) async fn get_config_handler(
         .engine
         .load_canonical_config(&state.paths)
         .map_err(ApiError::from)?;
-    config_response_with_mandatory(&state.paths, canonical)
-        .map(Json)
-        .map_err(ApiError::from)
+    let mut response =
+        config_response_with_mandatory(&state.paths, canonical).map_err(ApiError::from)?;
+    response.supervisor_readiness =
+        supervisor_config::readiness(&state.paths, &response.supervisor);
+    Ok(Json(response))
 }
 
 pub(super) async fn get_tool_descriptors_handler(
@@ -51,11 +55,14 @@ pub(super) async fn update_config_handler(
     let mandatory_skills =
         macc_core::catalog::mandatory_skill_ids(&state.paths).map_err(ApiError::from)?;
     let canonical = macc_core::config::transaction::update(&state.paths, None, |canonical| {
-        apply_update(canonical, &request, &mandatory_skills);
+        apply_update(canonical, &request, &mandatory_skills)?;
         Ok(())
     })
     .map_err(ApiError::from)?;
-    Ok(Json(response_from_canonical(canonical, mandatory_skills)))
+    let mut response = response_from_canonical(canonical, mandatory_skills);
+    response.supervisor_readiness =
+        supervisor_config::readiness(&state.paths, &response.supervisor);
+    Ok(Json(response))
 }
 
 pub(super) async fn standards_preview_handler(
@@ -147,6 +154,12 @@ impl From<CanonicalConfig> for ApiConfigResponse {
         let ralph = config.automation.ralph;
         let coordinator = config.automation.coordinator;
         Self {
+            supervisor: config.automation.supervisor.clone().unwrap_or_default(),
+            supervisor_fields: macc_core::supervisor::settings::FIELDS
+                .iter()
+                .map(|f| serde_json::to_value(f).expect("serializable field"))
+                .collect(),
+            supervisor_readiness: Vec::new(),
             version: config.version,
             enabled_tools: config.tools.enabled,
             tool_config: config.tools.config,
@@ -298,7 +311,14 @@ fn apply_update(
     config: &mut CanonicalConfig,
     request: &ApiConfigUpdateRequest,
     mandatory_skills: &[String],
-) {
+) -> macc_core::Result<()> {
+    if let Some(supervisor) = &request.supervisor {
+        let settings = config
+            .automation
+            .supervisor
+            .get_or_insert_with(Default::default);
+        macc_core::supervisor::settings::merge(settings, supervisor)?;
+    }
     if let Some(version) = &request.version {
         config.version = Some(version.clone());
     }
@@ -321,6 +341,7 @@ fn apply_update(
     apply_settings_update(config, request);
     apply_ralph_update(config, request);
     apply_coordinator_update(config, request);
+    Ok(())
 }
 
 fn apply_selection_update(

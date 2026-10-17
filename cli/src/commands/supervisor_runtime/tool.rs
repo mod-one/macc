@@ -40,19 +40,29 @@ impl Agent {
         let spec = specs.into_iter().find(|s| s.id == id).ok_or_else(|| {
             MaccError::Validation(format!("Supervisor tool '{id}' has no ToolSpec"))
         })?;
-        let setting = |key: &str| -> Option<String> {
-            canonical
-                .tools
-                .config
-                .get(&id)
-                .and_then(|v| v.get(key))
+        let canonical_value =
+            serde_json::to_value(canonical).map_err(|e| MaccError::Validation(e.to_string()))?;
+        let setting = |field: Option<&macc_core::tool::spec::FieldSpec>| -> Option<String> {
+            let field = field?;
+            field
+                .pointer
+                .as_deref()
+                .and_then(|p| canonical_value.pointer(p))
                 .and_then(|v| v.as_str())
                 .map(str::to_owned)
                 .or_else(|| {
-                    spec.fields
-                        .iter()
-                        .find(|f| f.id == key)
-                        .and_then(|f| f.default.as_ref())
+                    canonical
+                        .tools
+                        .config
+                        .get(&id)
+                        .and_then(|v| v.get(&field.id))
+                        .and_then(|v| v.as_str())
+                        .map(str::to_owned)
+                })
+                .or_else(|| {
+                    field
+                        .default
+                        .as_ref()
                         .and_then(|v| v.as_str())
                         .map(str::to_owned)
                 })
@@ -60,13 +70,24 @@ impl Agent {
         let model = config
             .model
             .clone()
-            .or_else(|| setting("model"))
+            .or_else(|| setting(spec.fields.iter().find(|f| f.id == "model")))
             .unwrap_or_default();
+        let effort_key = spec
+            .performer
+            .as_ref()
+            .and_then(|p| p.effort_config.as_ref())
+            .map(|c| c.key.as_str());
+        let effort_field = effort_key
+            .and_then(|key| spec.fields.iter().find(|f| f.id == key))
+            .or_else(|| {
+                spec.fields
+                    .iter()
+                    .find(|f| f.id.to_ascii_lowercase().contains("effort"))
+            });
         let effort = config
             .effort
             .clone()
-            .or_else(|| setting("model_reasoning_effort"))
-            .or_else(|| setting("effort"))
+            .or_else(|| setting(effort_field))
             .unwrap_or_default();
         let performer = spec.performer.ok_or_else(|| {
             MaccError::Validation(format!("Supervisor tool '{id}' has no performer"))
@@ -220,6 +241,53 @@ pub fn render_args(args: &[String], model: &str, effort: &str) -> Result<Vec<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn nested_model_and_effort_pointers_are_inherited_and_overridden() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join(".macc/tools.d");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("fake.tool.yaml"),
+            r#"api_version: v1
+id: fake
+display_name: Fake
+fields:
+  - id: model
+    label: Model
+    kind: {type: text}
+    pointer: /tools/config/fake/model/name
+    default: fallback
+  - id: effortLevel
+    label: Effort
+    kind: {type: text}
+    pointer: /tools/config/fake/effortLevel
+    default: medium
+performer:
+  command: unused
+  runner: unused
+  args: []
+  prompt: {mode: arg}
+"#,
+        )
+        .unwrap();
+        let mut canonical = CanonicalConfig::default();
+        canonical.tools.enabled = vec!["fake".into()];
+        canonical.tools.config.insert(
+            "fake".into(),
+            serde_json::json!({"model":{"name":"nested-model"},"effortLevel":"high"}),
+        );
+        let mut config = SupervisorConfig::default();
+        let agent = Agent::resolve(temp.path(), &canonical, &config).unwrap();
+        assert_eq!(agent.model, "nested-model");
+        assert_eq!(agent.effort, "high");
+        config.model = Some("override".into());
+        config.effort = Some("low".into());
+        let agent = Agent::resolve(temp.path(), &canonical, &config).unwrap();
+        assert_eq!(
+            (agent.model.as_str(), agent.effort.as_str()),
+            ("override", "low")
+        );
+    }
     #[test]
     fn codex_arguments_preserve_exec_yolo_and_effort() {
         let args = [

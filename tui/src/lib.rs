@@ -349,7 +349,7 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
     // ── Field 0: Coordinator Tool — left/right cycle while focused ──────────
     if current_screen == Screen::Automation
         && !state.is_automation_field_editing()
-        && state.automation_field_index == 0
+        && state.current_config_field() == Some((1, 0))
     {
         match key {
             KeyCode::Left => {
@@ -362,6 +362,12 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
             }
             _ => {}
         }
+    }
+    if matches!(current_screen, Screen::Automation | Screen::Settings)
+        && state.supervisor_commands_active()
+    {
+        state.supervisor_commands_key(key);
+        return;
     }
     // Unified config text-editing handler (covers both global and coordinator fields).
     if (current_screen == Screen::Automation || current_screen == Screen::Settings)
@@ -381,6 +387,22 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
         && !state.is_config_editing()
     {
         match key {
+            KeyCode::Left | KeyCode::Right
+                if matches!(state.current_config_field(), Some((2, _))) =>
+            {
+                if let Some((2, index)) = state.current_config_field() {
+                    state.adjust_supervisor_field(index, key == KeyCode::Right);
+                }
+                return;
+            }
+            KeyCode::Char('e') if matches!(state.current_config_field(), Some((2, _))) => {
+                state.begin_current_config_edit();
+                return;
+            }
+            KeyCode::Char('7') => {
+                state.jump_config_tab(6);
+                return;
+            }
             KeyCode::Tab => {
                 state.next_config_tab();
                 return;
@@ -1875,6 +1897,13 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 text.push_str("\n\n");
                 text.push_str(&lines.join("\n"));
                 wrapped_paragraph(text, "Field Info")
+            } else if let Some((2, index)) = state.current_config_field() {
+                wrapped_paragraph(
+                    state
+                        .supervisor_commands_info()
+                        .unwrap_or_else(|| state.supervisor_field_info(index)),
+                    "Supervisor settings",
+                )
             } else {
                 // Default: show field description and current value.
                 let detail_text = if let Some((source, field_idx)) = state.current_config_field() {
@@ -3715,7 +3744,7 @@ fn screen_action_bindings(screen: Screen) -> Vec<(&'static str, &'static str)> {
             ("f", "Context"),
         ],
         Screen::Automation | Screen::Settings => vec![
-            ("Tab/1-6", "Tabs"),
+            ("Tab/1-7", "Tabs"),
             ("↑↓", "Move"),
             ("Space/Enter", "Edit"),
             ("s", "Save"),

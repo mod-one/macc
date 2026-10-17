@@ -985,20 +985,20 @@ run_tool() {
   spinner_stop "Runner finished (${tool})"
   set -e
 
-  if [[ "$status" -eq 0 ]]; then
+  # A structured terminal precondition remains authoritative even when the
+  # adapter propagates a non-zero exit. Never turn it into a quota/retry error.
+  if [[ "$status" -eq 0 ]] || [[ "$(extract_task_result_marker "$output_capture")" == "precondition_unmet" ]]; then
     local result_kind=""
     local changed="false"
     result_kind="$(detect_success_result_kind "$output_capture")"
     if [[ "$result_kind" == error_* || "$result_kind" == "precondition_unmet" ]]; then
-      # The tool process exited 0, but emitted an explicit error result marker
+      # The tool emitted an explicit error or precondition result marker
       # This is a failure or an intentional terminal block, not a successful
       # completion. It must NOT be marked passed.
-      if [[ -z "$LAST_ERROR_CODE" ]]; then
-        if [[ "$result_kind" == "precondition_unmet" ]]; then
-          set_last_error "E903" "precondition" "task precondition is not met"
-        else
-          set_last_error "E101" "runner" "tool reported ${result_kind}"
-        fi
+      if [[ "$result_kind" == "precondition_unmet" ]]; then
+        set_last_error "E903" "precondition" "task precondition is not met"
+      elif [[ -z "$LAST_ERROR_CODE" ]]; then
+        set_last_error "E101" "runner" "tool reported ${result_kind}"
       fi
       local result_exp=""
       result_exp="$(resolve_task_result_exp "$output_capture" "$result_kind")"
@@ -1015,6 +1015,7 @@ run_tool() {
       must_emit_performer_event "phase_result" "$CURRENT_PHASE" "failed" "$(jq -nc \
         --arg attempt "$attempt" \
         --arg result_kind "$result_kind" \
+        --arg exit_status "$status" \
         --arg code "$LAST_ERROR_CODE" \
         --arg origin "$LAST_ERROR_ORIGIN" \
         --arg message "$LAST_ERROR_MESSAGE" \
@@ -1023,7 +1024,7 @@ run_tool() {
         '({
           attempt:($attempt|tonumber?),
           result_kind:$result_kind,
-          exit_status:0
+          exit_status:($exit_status|tonumber)
         }
         + (if $code       != "" then {error_code:$code}       else {} end)
         + (if $origin     != "" then {origin:$origin}         else {} end)
@@ -1040,7 +1041,7 @@ run_tool() {
         done < <(extract_task_preconditions "$output_capture")
       fi
       log_task_line ""
-      log_task_line "- Exit status: 0 (failed due to ${result_kind})"
+      log_task_line "- Exit status: ${status} (failed due to ${result_kind})"
       log_task_line ""
       rm -f "$output_capture"
       return 1

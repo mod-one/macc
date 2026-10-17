@@ -1,3 +1,7 @@
+#[path = "supervisor_commands.rs"]
+mod supervisor_commands;
+#[path = "supervisor_settings.rs"]
+mod supervisor_settings;
 use crate::screen::Screen;
 use chrono::{DateTime, Utc};
 use macc_adapter_shared::fetch::materialize_fetch_units;
@@ -170,6 +174,7 @@ pub struct AppState {
     /// When true, ↑/↓ moves the tool; when false, ↑/↓ only navigates the cursor.
     pub tool_priority_editor_grabbed: bool,
     pub settings_field_index: usize,
+    supervisor_commands_editor: Option<supervisor_commands::CommandEditor>,
     pub settings_field_editing: bool,
     pub settings_field_input: String,
     /// Unified config screen: active tab (0=General 1=Coordinator 2=Tools 3=Phases 4=Reliability 5=Admin)
@@ -343,6 +348,7 @@ impl AppState {
             tool_parallel_editor_active: false,
             tool_parallel_editor_index: 0,
             settings_field_index: 0,
+            supervisor_commands_editor: None,
             settings_field_editing: false,
             settings_field_input: String::new(),
             config_tab_index: 0,
@@ -3372,6 +3378,7 @@ impl AppState {
         "Phases",
         "Reliability",
         "Admin",
+        "Supervisor",
     ];
 
     /// Returns the field list for the given tab as `(source, field_index)` pairs.
@@ -3430,6 +3437,25 @@ impl AppState {
                 (1, 16),
                 (1, 22),
                 (1, 25),
+            ],
+            6 => &[
+                (2, 0),
+                (2, 1),
+                (2, 2),
+                (2, 3),
+                (2, 4),
+                (2, 5),
+                (2, 6),
+                (2, 7),
+                (2, 8),
+                (2, 9),
+                (2, 10),
+                (2, 11),
+                (2, 12),
+                (2, 13),
+                (2, 14),
+                (2, 15),
+                (2, 16),
             ],
             _ => &[],
         }
@@ -3494,6 +3520,9 @@ impl AppState {
 
     /// Returns the display label for a config field, with the `[Category] ` prefix stripped.
     pub fn config_field_label(&self, source: u8, idx: usize) -> &'static str {
+        if source == 2 {
+            return macc_core::supervisor::settings::FIELDS[idx].label;
+        }
         let raw = if source == 0 {
             self.settings_field_label(idx)
         } else {
@@ -3510,6 +3539,9 @@ impl AppState {
 
     /// Returns the current display value for a config field.
     pub fn config_field_value(&self, source: u8, idx: usize) -> String {
+        if source == 2 {
+            return self.supervisor_field_value(idx);
+        }
         if source == 0 {
             self.settings_field_display_value(idx)
         } else {
@@ -3519,6 +3551,9 @@ impl AppState {
 
     /// Returns the help text for a config field.
     pub fn config_field_help(&self, source: u8, idx: usize) -> &'static str {
+        if source == 2 {
+            return macc_core::supervisor::settings::FIELDS[idx].help;
+        }
         if source == 0 {
             self.settings_field_help(idx)
         } else {
@@ -3528,7 +3563,8 @@ impl AppState {
 
     /// Whether any config field is currently in text-editing mode.
     pub fn is_config_editing(&self) -> bool {
-        self.automation_field_editing
+        self.supervisor_commands_active()
+            || self.automation_field_editing
             || self.tool_priority_editor_active
             || self.tool_parallel_editor_active
             || self.settings_field_editing
@@ -3537,6 +3573,10 @@ impl AppState {
     /// Toggle or begin editing for whichever config field is currently selected.
     pub fn toggle_current_config_field(&mut self) {
         if let Some((source, idx)) = self.current_config_field() {
+            if source == 2 {
+                self.edit_supervisor_field(idx, true);
+                return;
+            }
             if source == 0 {
                 self.settings_field_index = idx;
                 self.toggle_settings_field();
@@ -3550,6 +3590,10 @@ impl AppState {
     /// Begin text editing for the currently selected config field.
     pub fn begin_current_config_edit(&mut self) {
         if let Some((source, idx)) = self.current_config_field() {
+            if source == 2 {
+                self.edit_supervisor_field(idx, false);
+                return;
+            }
             if source == 0 {
                 self.settings_field_index = idx;
                 self.begin_settings_field_edit();
@@ -3580,6 +3624,12 @@ impl AppState {
 
     /// Commit whichever config field edit is active.
     pub fn commit_config_edit(&mut self) {
+        if let Some((2, idx)) = self.current_config_field() {
+            if self.settings_field_editing {
+                self.commit_supervisor_edit(idx);
+            }
+            return;
+        }
         if self.automation_field_editing {
             self.commit_automation_field_edit();
         } else if self.settings_field_editing {

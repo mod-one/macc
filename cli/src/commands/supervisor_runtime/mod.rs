@@ -9,6 +9,13 @@ use recovery::intervene;
 pub use report::{record_failure, record_shutdown};
 use report::{slug, write_json, write_report, Intervention};
 pub use shutdown::request_stop;
+pub(super) fn configured_tool(
+    root: &Path,
+    canonical: &CanonicalConfig,
+    config: &macc_core::supervisor::SupervisorConfig,
+) -> Result<String> {
+    Ok(tool::Agent::resolve(root, canonical, config)?.id)
+}
 pub fn request_retry(paths: &ProjectPaths) -> Result<()> {
     write_json(
         &paths.root.join(".macc/state/supervisor-retry-request.json"),

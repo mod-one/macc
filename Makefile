@@ -19,6 +19,7 @@ test:
 test-tool-runner:
 	bash automat/tests/test_usage_projection.sh
 	bash automat/tests/test_completion_evidence.sh
+	bash automat/tests/test_terminal_payload_construction.sh
 	bash automat/tests/test_precondition_markers.sh
 	bash automat/tests/test_quota_classification.sh
 	bash automat/tests/test_continuation_prompt.sh

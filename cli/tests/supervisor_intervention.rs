@@ -28,6 +28,23 @@ fn wait_for(mut predicate: impl FnMut() -> bool) {
     }
     panic!("supervisor condition timed out");
 }
+fn wait_for_recovered(root: &Path) {
+    let result = std::panic::catch_unwind(|| {
+        wait_for(|| report(root).is_some_and(|v| v["intervention"]["status"] == "recovered"))
+    });
+    if let Err(error) = result {
+        if let Some(report) = report(root) {
+            eprintln!("Latest intervention: {}", report["intervention"]);
+        }
+        for name in ["daemon-stderr.log", "daemon-stdout.log"] {
+            if let Ok(text) = std::fs::read_to_string(root.join(".macc/log/coordinator").join(name))
+            {
+                eprintln!("{name}: {text}");
+            }
+        }
+        std::panic::resume_unwind(error);
+    }
+}
 fn fixture(reject: bool) -> tempfile::TempDir {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
@@ -127,11 +144,7 @@ fn sqlite_incident_is_diagnosed_repaired_validated_integrated_and_restarted() {
     let temp = fixture(false);
     let root = temp.path();
     let supervisor = start(root);
-    wait_for(|| {
-        report(root).is_some_and(|v| {
-            v.pointer("/intervention/status").and_then(Value::as_str) == Some("recovered")
-        })
-    });
+    wait_for_recovered(root);
     let r = report(root).unwrap();
     assert_eq!(
         std::fs::read_to_string(root.join("defect.txt")).unwrap(),
@@ -387,11 +400,7 @@ fn monitoring_error_is_reported_and_recovers_without_restarting_supervisor() {
         supervisor.0.id() as i64
     ));
     std::fs::remove_file(ledger).unwrap();
-    wait_for(|| {
-        report(root).is_some_and(|v| {
-            v.pointer("/intervention/status").and_then(Value::as_str) == Some("recovered")
-        })
-    });
+    wait_for_recovered(root);
     assert_eq!(
         std::fs::read_to_string(root.join("defect.txt")).unwrap(),
         "fixed\n"
@@ -444,11 +453,7 @@ fn an_engine_stop_between_phases_is_recovered_by_a_restart_without_repair() {
     std::fs::write(root.join(".macc/fake-agent.sh"), "#!/bin/sh\nexit 9\n").unwrap();
 
     let supervisor = start(root);
-    wait_for(|| {
-        report(root).is_some_and(|v| {
-            v.pointer("/intervention/status").and_then(Value::as_str) == Some("recovered")
-        })
-    });
+    wait_for_recovered(root);
     let r = report(root).unwrap();
     assert_eq!(r.pointer("/intervention/restart_only"), Some(&json!(true)));
     assert!(r

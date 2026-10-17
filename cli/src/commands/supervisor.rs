@@ -31,6 +31,9 @@ impl<'a> SupervisorCommand<'a> {
 impl<'a> Command for SupervisorCommand<'a> {
     fn run(&self) -> Result<()> {
         match self.command {
+            SupervisorCommands::Config { command } => {
+                super::supervisor_settings::run(&self.app, command)
+            }
             SupervisorCommands::Start {
                 daemon,
                 attach,
@@ -54,6 +57,14 @@ impl<'a> SupervisorCommand<'a> {
     ) -> Result<()> {
         let paths = self.app.ensure_initialized_paths()?;
         let canonical = self.app.canonical_config()?;
+        let settings = canonical.automation.supervisor.clone().unwrap_or_default();
+        settings.validate()?;
+        if settings.repair_enabled {
+            if let Err(error) = macc_core::supervisor::validation::commands(&paths.root, &settings)
+            {
+                eprintln!("Supervisor can diagnose but cannot repair yet: {error}. Configure `macc supervisor config set validation_commands '<JSON array>'`, then `macc supervisor config check`.");
+            }
+        }
         let supervisor_pid_path = paths.root.join(SUPERVISOR_PID_REL_PATH);
 
         if daemon {

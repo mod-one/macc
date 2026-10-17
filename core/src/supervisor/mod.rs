@@ -29,6 +29,8 @@ pub mod live;
 pub mod mode_a;
 pub mod mode_b;
 pub mod mode_c;
+pub mod settings;
+pub mod validation;
 
 // ── Configuration ────────────────────────────────────────────────────────────
 
@@ -48,6 +50,21 @@ pub struct SupervisorConfig {
     /// regression, is handed back to the repair agent until this is spent.
     #[serde(default = "default_max_repair_rounds")]
     pub max_repair_rounds: u32,
+    /// Run source repairs; false keeps diagnosis and escalates without editing.
+    #[serde(default = "default_enabled")]
+    pub repair_enabled: bool,
+    /// Run project tests/checks before integration.
+    #[serde(default = "default_enabled")]
+    pub tests_enabled: bool,
+    /// Review the repair with a separate AI invocation before integration.
+    #[serde(default = "default_enabled")]
+    pub ai_verification_enabled: bool,
+    /// Restart the coordinator after integrating a verified repair.
+    #[serde(default = "default_enabled")]
+    pub auto_restart: bool,
+    /// Maximum duration of each validation command, separately from AI calls.
+    #[serde(default = "default_intervention_timeout")]
+    pub validation_timeout_seconds: u64,
     /// Explicit validation commands; otherwise the project validation workflow is detected.
     #[serde(default)]
     pub validation_commands: Vec<String>,
@@ -76,6 +93,9 @@ pub struct SupervisorConfig {
     pub events_log_path: PathBuf,
 }
 
+fn default_enabled() -> bool {
+    true
+}
 fn default_watchdog_interval_seconds() -> u64 {
     30
 }
@@ -109,6 +129,11 @@ impl Default for SupervisorConfig {
             effort: None,
             intervention_timeout_seconds: default_intervention_timeout(),
             max_repair_rounds: default_max_repair_rounds(),
+            repair_enabled: true,
+            tests_enabled: true,
+            ai_verification_enabled: true,
+            auto_restart: true,
+            validation_timeout_seconds: default_intervention_timeout(),
             validation_commands: Vec::new(),
             watchdog_interval_seconds: default_watchdog_interval_seconds(),
             max_restart_attempts: default_max_restart_attempts(),

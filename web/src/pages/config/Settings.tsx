@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 import { getConfig, updateConfig, ApiClientError } from '../../api/client';
 import type { ApiConfigResponse, ApiConfigUpdateRequest } from '../../api/models';
+import SupervisorSettings from './SupervisorSettings';
+import { supervisorErrors } from './supervisorValidation';
 import { ErrorBanner, LoadingSpinner, Toast } from '../../components';
 
 /* ── Types ───────────────────────────────────────────────────── */
@@ -12,7 +14,7 @@ interface ToastState {
   variant: 'success' | 'error' | 'warning';
 }
 
-type SettingsSection = 'basic' | 'advanced' | 'admin' | 'raw';
+type SettingsSection = 'basic' | 'advanced' | 'admin' | 'supervisor' | 'raw';
 
 /* ── Helpers ─────────────────────────────────────────────────── */
 function formatError(error: unknown): string {
@@ -876,6 +878,7 @@ function DiscardBtn({ onClick }: { onClick: () => void }) {
 
 /* ── Navigation items ────────────────────────────────────────── */
 const NAV: { key: SettingsSection; label: string; sub: string }[] = [
+  { key: 'supervisor', label: 'Supervisor', sub: 'AI, repair & checks' },
   { key: 'basic',    label: 'Basic',    sub: 'Coordinator & general' },
   { key: 'advanced', label: 'Advanced', sub: 'Scheduling & routing' },
   { key: 'admin',    label: 'Admin',    sub: 'Storage & compat.' },
@@ -887,6 +890,7 @@ const ADVANCED_KEYS = ['prdFile','toolPriority','maxParallelPerTool','toolSpecia
 const ADMIN_KEYS = ['storageMode','taskRegistryFile','logFlushLines','logFlushMs','mirrorJsonDebounceMs','jsonCompat','legacyJsonFallback','cutoverGateWindowEvents','cutoverGateMaxBlockedRatio','cutoverGateMaxStaleRatio'];
 
 function sectionForKey(key: string): SettingsSection {
+  if (key.startsWith('supervisor')) return 'supervisor';
   if (BASIC_KEYS.some((k) => key.startsWith(k))) return 'basic';
   if (ADVANCED_KEYS.some((k) => key.startsWith(k))) return 'advanced';
   if (ADMIN_KEYS.some((k) => key.startsWith(k))) return 'admin';
@@ -937,6 +941,11 @@ const Settings: React.FC = () => {
 
   const handleSave = useCallback(async () => {
     if (!draft) return;
+    const problems = supervisorErrors(draft.supervisor);
+    if (problems.length) {
+      setToast({ open: true, title: 'Invalid supervisor settings', description: problems.join('; '), variant: 'error' });
+      return;
+    }
     setSaving(true);
     try {
       const updated = normalizeConfigResponse(await updateConfig(draft as ApiConfigUpdateRequest));
@@ -972,7 +981,7 @@ const Settings: React.FC = () => {
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           {isDirty && <DiscardBtn onClick={handleDiscard} />}
-          <SaveBtn onClick={handleSave} disabled={!isDirty || saving} loading={saving} />
+          <SaveBtn onClick={handleSave} disabled={!isDirty || saving || supervisorErrors(draft.supervisor).length > 0} loading={saving} />
         </div>
       </div>
 
@@ -1026,6 +1035,7 @@ const Settings: React.FC = () => {
           {activeSection === 'basic'    && <BasicTab    draft={draft} update={updateDraft} />}
           {activeSection === 'advanced' && <AdvancedTab draft={draft} update={updateDraft} />}
           {activeSection === 'admin'    && <AdminTab    draft={draft} update={updateDraft} />}
+          {activeSection === 'supervisor' && <SupervisorSettings draft={draft} update={updateDraft} />}
           {activeSection === 'raw'      && <RawTab config={draft} onApplyRaw={handleApplyRaw} />}
         </div>
       </div>

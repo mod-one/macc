@@ -310,7 +310,36 @@ export type ApiCheckSeverity = 'error' | 'warning';
 
 export type ApiDoctorCheckKind = 'which' | 'path_exists' | 'custom';
 
+export interface SupervisorConfig {
+  tool: string | null;
+  model: string | null;
+  effort: string | null;
+  repair_enabled: boolean;
+  tests_enabled: boolean;
+  ai_verification_enabled: boolean;
+  auto_restart: boolean;
+  validation_commands: string[];
+  intervention_timeout_seconds: number;
+  validation_timeout_seconds: number;
+  max_repair_rounds: number;
+  max_restart_attempts: number;
+  watchdog_interval_seconds: number;
+  log_analysis_window_seconds: number;
+  report_output_path: string;
+  crash_debounce_checks: number;
+  events_log_path: string;
+}
+export interface SupervisorField {
+  key: keyof SupervisorConfig;
+  label: string;
+  kind: 'optional' | 'number' | 'bool' | 'commands' | 'path';
+  help: string;
+}
+
 export interface ApiConfigResponse {
+  supervisor?: SupervisorConfig;
+  supervisorFields?: SupervisorField[];
+  supervisorReadiness?: string[];
   version: string | null;
   enabledTools: string[];
   toolConfig: Record<string, JsonValue>;
@@ -374,6 +403,7 @@ export interface ApiConfigResponse {
 }
 
 export interface ApiConfigUpdateRequest {
+  supervisor?: SupervisorConfig;
   version?: string | null;
   enabledTools?: string[];
   toolConfig?: Record<string, JsonValue>;

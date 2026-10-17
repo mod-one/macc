@@ -1143,6 +1143,11 @@ pub enum CatalogSubCommands {
 
 #[derive(Subcommand)]
 pub enum SupervisorCommands {
+    /// Configure supervisor phases, AI tool and validation commands
+    Config {
+        #[command(subcommand)]
+        command: commands::supervisor_settings::ConfigCommand,
+    },
     /// Start the supervisor watchdog
     Start {
         /// Run in background as a daemon process

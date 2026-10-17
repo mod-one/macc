@@ -94,7 +94,7 @@ pub(super) fn write_report(
         })
         .unwrap_or_default();
     let value = json!({"timestamp":chrono::Utc::now().to_rfc3339(),"analysis_window_seconds":config.log_analysis_window_seconds,
-        "health":{"status":if report.status == "recovered" {"healthy"} else {"degraded"},"reasons":[report.status.clone()]},"findings":[],"recommendations":[],"actions_taken":[],"suggested_code_changes":[],"improvement_hints":hints,"intervention":report});
+        "health":{"status":if report.status == "recovered" {"healthy"} else {"degraded"},"reasons":[report.status.clone()]},"findings":[],"recommendations":[],"actions_taken":[],"suggested_code_changes":[],"improvement_hints":hints,"phase_policy":{"repair_enabled":config.repair_enabled,"tests_enabled":config.tests_enabled,"ai_verification_enabled":config.ai_verification_enabled,"auto_restart":config.auto_restart},"intervention":report});
     write_json(&dir.join("report.json"), &value)?;
     let report_path = if config.report_output_path.is_absolute() {
         config.report_output_path.clone()

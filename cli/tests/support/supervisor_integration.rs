@@ -245,3 +245,6 @@ fn report_command_prints_reason_next_step_and_macc_findings() {
     }
     drop(supervisor);
 }
+
+#[path = "supervisor_settings.rs"]
+mod settings;

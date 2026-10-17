@@ -14,7 +14,7 @@ git add .
 git commit -qm init
 base_ref=main
 tool=fake
-set_last_error() { LAST_ERROR_CODE="$1"; LAST_ERROR_MESSAGE="$3"; }
+set_last_error() { LAST_ERROR_CODE="$1"; LAST_ERROR_ORIGIN="$2"; LAST_ERROR_MESSAGE="$3"; }
 soft_emit_performer_event() { :; }
 spec='{"id":"T-1","acceptance_criteria":["existing implementation tested"]}'
 # Missing evidence cannot become a durable success.
@@ -74,7 +74,7 @@ git log -1 --format=%B | grep -Fq '[macc:gate_verdict accepted]'
 # Exercise the real runner success transaction with a deterministic tool stub.
 # Terminal success must follow commit creation and select the merge lane.
 eval "$(sed -n '/^run_tool()/,/^}/p' "$AUTOMAT/performer.sh")"
-for fn in extract_task_result_marker extract_task_result_exp extract_task_gate_verdict resolve_task_result_exp validate_terminal_result_contract detect_success_result_kind; do
+for fn in extract_task_result_marker extract_task_result_exp extract_task_gate_verdict resolve_task_result_exp validate_terminal_result_contract detect_success_result_kind extract_task_preconditions task_preconditions_json; do
   eval "$(sed -n "/^${fn}()/,/^}/p" "$AUTOMAT/performer.sh")"
 done
 mkdir -p .macc
@@ -128,3 +128,19 @@ next_task_json='{"id":"MISSING"}'
 if run_tool .macc/prompt 1 1; then exit 1; fi
 [[ "$LAST_ERROR_CODE" == E904 && ! -e .macc/terminal-payload ]]
 printf 'Completion evidence tests passed.\n'  
+
+# Non-zero adapter exits must retain structured unmet preconditions, including
+# when an earlier attempt left a quota code. Exercise the actual run_tool.
+cat > .macc/fake-tool <<'RUNNER'
+#!/usr/bin/env bash
+printf 'MACC_TASK_PRECONDITION: dependency API missing\nMACC_TASK_RESULT_EXP: API outside allowed paths\nMACC_TASK_RESULT: precondition_unmet\n'
+exit 1
+RUNNER
+must_emit_performer_event() {
+  [[ "$1" == phase_result && "$3" == failed ]]
+  printf '%s' "$4" > .macc/precondition-payload
+}
+LAST_ERROR_CODE=E601
+if run_tool .macc/prompt 1 1; then exit 1; fi
+jq -e '.result_kind == "precondition_unmet" and .error_code == "E903" and .exit_status == 1 and .unmet_preconditions == ["dependency API missing"]' .macc/precondition-payload >/dev/null
+printf 'Non-zero structured precondition test passed.\n'

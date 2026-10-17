@@ -195,3 +195,93 @@ available for compatibility; the CLI uses the complete incident recovery loop.
 Regression tests use actual CLI processes, temporary Git projects and a
 deterministic AI tool double. They do not call paid AI services. Run
 `bash automat/tests/test_daemon_ownership.sh` or `make check`.
+
+## Configure from CLI, TUI or Web
+
+All clients persist the same `automation.supervisor` contract in `.macc/macc.yaml`.
+Existing configurations keep automatic repair, tests, AI verification and restart
+**enabled**. These settings are independent from coordinator phase overrides.
+
+- **CLI:** `macc supervisor config show` lists effective values and field help.
+  `macc supervisor config set <field> <value>` updates one field transactionally;
+  unknown fields and invalid values are rejected without changing the file.
+  `macc supervisor config check` checks the configuration, resolves its ToolSpec
+  and discovers validation commands without executing tests or calling AI.
+- **TUI:** Configuration → **Supervisor** (tab **7**). Enter/Space toggles
+  booleans and cycles enabled tools. Left/Right adjusts positive numeric values.
+  Use `e` for exact text entry, confirm with Enter, cancel with Esc. Optional overrides
+  can be cleared to inherit. Validation commands open a row editor: `a` adds,
+  Enter edits, `d` removes, Left/Right reorders, `s` accepts, Esc cancels. Then save
+  the project configuration. Exact text entry also accepts `;;` or a JSON array.
+  Invalid edits stay open for correction; ordinary save and undo apply.
+- **Web:** Settings → **Supervisor**. Tool selection, independent phase toggles,
+  numeric bounds, model/effort suggestions from tool descriptors, and command
+  rows with add/remove/reorder avoid editing YAML. Empty command rows prevent
+  saving. The last saved readiness lists detected checks or missing configuration.
+
+```bash
+macc supervisor config set tool codex
+macc supervisor config set model ''
+macc supervisor config set effort ''
+macc supervisor config set validation_commands '["cd apps/web && npm test", "cargo test --manifest-path services/native/Cargo.toml --locked"]'
+macc supervisor config check
+```
+
+The paths and commands above are examples: use the actual manifests, package
+manager and scripts in your repository. Commands run sequentially with `sh -c`
+from the **isolated repair worktree root**, not the operator checkout. Use
+relative paths to subprojects; an absolute path to the operator checkout would
+validate different source. Dependencies and external test services must be
+available in the repair environment. An empty command list requests root-only
+discovery; the supervisor does not recursively guess monorepo test workflows.
+
+### Repair policy switches
+
+| Setting | Default | Effect when disabled |
+| --- | --- | --- |
+| `repair_enabled` | `true` | Diagnose and wait without editing or integrating source. Restart-only recovery is governed separately by `auto_restart`. |
+| `tests_enabled` | `true` | Skip validation discovery and execution; configured commands remain saved. |
+| `ai_verification_enabled` | `true` | Skip the separate AI verification invocation. |
+| `auto_restart` | `true` | A successful repair is committed, integrated and requeued, but the coordinator stays stopped; restart-only recovery waits. |
+
+Disabling both checks explicitly allows automatic integration without tests or
+AI review. The intervention report records the disabled checks. Git publication
+checks, protected-file restrictions and operator stop requests remain enforced.
+No human diff approval is introduced. A human decision reported by the AI always
+blocks integration, even if the response also says `verified: true`.
+
+`tool`, `model` and `effort` apply through the tool abstraction layer. Empty
+model/effort overrides inherit the selected tool configuration. `tool` falls back
+to the coordinator tool and then the first enabled tool. No provider command is
+hardcoded in the supervisor editor. Each AI call uses
+`intervention_timeout_seconds`; each shell check uses the separate
+`validation_timeout_seconds` (default 3600). Budgets and intervals must be positive.
+Report/event paths can be relative to the project or absolute, as in earlier versions; relative paths make configurations portable. `crash_debounce_checks`
+and `events_log_path` remain exposed for compatibility; the canonical incident
+loop does not use them.
+
+Changes apply on the next intervention; an already running intervention uses its
+captured settings. A settings-only change wakes a waiting incident and reuses its
+repairable diagnosis. External conditions and human decisions are diagnosed again
+when their context changes. Source, reference, incident or tool-availability changes
+invalidate that diagnosis. Missing commands now produce an actionable next step
+and an early startup warning instead of suggesting a generic retry.
+
+For an older running binary, install/restart with the updated MACC first. To
+explicitly retry after configuration:
+
+```bash
+macc supervisor stop
+macc supervisor start --daemon --retry
+```
+
+### Configuration implementation boundaries
+
+The core supervisor settings catalogue owns field names, types, help and bounds;
+CLI and TUI editors use it directly, and the Web API publishes the same metadata.
+Validation discovery also lives in core so readiness and runtime agree. The Web
+API accepts a partial `supervisor` object and merges it transactionally; unrelated
+coordinator settings and omitted supervisor fields are preserved. Runtime phase
+policy stays in the supervisor recovery module; AI execution continues to use
+ToolSpec adapters. No PRD schema or provider-specific runner interface changes
+are required.

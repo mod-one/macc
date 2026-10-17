@@ -30,10 +30,14 @@ pub(super) async fn intervene(
     ensure_not_stopped(paths)?;
     stop_orphan_jobs(&report.incident).await?;
     let progress = super::report::Progress { paths, config, dir };
+    config.validate()?;
     // The engine stopped while every incident task was between phases: no
     // task failed and nothing needs repairing — the restarted run resumes
     // their pending test, review, fix or merge. No AI call is needed.
     if incident::resumable_by_restart(&report.incident) {
+        if !config.auto_restart {
+            return Err(MaccError::Validation("Automatic restart is disabled; coordinator phases are intact and can be resumed manually".into()));
+        }
         if restart_allowed {
             let ids: Vec<String> = report.incident.tasks.iter().map(|t| t.id.clone()).collect();
             report.detail = format!(
@@ -52,7 +56,7 @@ pub(super) async fn intervene(
     }
     // The supervisor commits the repair itself: fail before spending AI calls.
     let identity = macc_core::git::missing_git_identity_fields(&paths.root);
-    if !identity.is_empty() {
+    if config.repair_enabled && !identity.is_empty() {
         return Err(MaccError::Validation(format!(
             "Git identity is missing ({}); the supervisor cannot commit a repair",
             identity.join(", ")
@@ -86,6 +90,11 @@ pub(super) async fn intervene(
     report.detail = diagnosis.summary.clone();
     report.diagnosis = Some(diagnosis.clone());
     if diagnosis.restart_only && !diagnosis.requires_human {
+        if !config.auto_restart {
+            return Err(MaccError::Validation(
+                "Automatic restart is disabled; start the coordinator manually when ready".into(),
+            ));
+        }
         if !restart_allowed {
             return Err(MaccError::Validation(format!(
                 "The coordinator already stopped the same way after a supervisor restart; not restarting again: {}",
@@ -110,6 +119,12 @@ pub(super) async fn intervene(
             "Diagnosis did not identify repaired root tasks".into(),
         ));
     }
+    if !config.repair_enabled {
+        return Err(MaccError::Validation(
+            "Automatic repair is disabled; diagnosis retained. Enable repair_enabled to continue"
+                .into(),
+        ));
+    }
     report.validation = repair::validation_commands(&paths.root, config)?;
     let proof = repair::fix(
         &agent,
@@ -120,7 +135,19 @@ pub(super) async fn intervene(
         report,
     )
     .await?;
-    report.detail = proof;
+    report.detail = format!(
+        "{proof}; tests={}; AI verification={}",
+        if config.tests_enabled {
+            "enabled"
+        } else {
+            "skipped by configuration"
+        },
+        if config.ai_verification_enabled {
+            "enabled"
+        } else {
+            "skipped by configuration"
+        }
+    );
     let destination = target.branch.as_deref().unwrap_or("the project HEAD");
     progress.enter(
         report,
@@ -136,6 +163,15 @@ pub(super) async fn intervene(
     )?;
     ensure_not_stopped(paths)?;
     requeue(paths, canonical, &diagnosis.task_ids, &report.detail)?;
+    if !config.auto_restart {
+        report.status = "recovered".into();
+        report.detail = format!("{}; repair integrated and tasks requeued; automatic restart disabled, coordinator remains stopped", report.detail);
+        progress.step(
+            report,
+            "Repair integrated; start the coordinator manually when ready",
+        )?;
+        return Ok(());
+    }
     restart(paths, canonical, report, lock, &progress).await
 }
 

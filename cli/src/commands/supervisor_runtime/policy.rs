@@ -105,8 +105,27 @@ pub fn context(
 
 pub fn ready(pending: &mut Pending, context: Value, now: i64, max_attempts: u32) -> bool {
     if pending.context != context {
+        // A settings-only change supplies missing checks or enables a phase;
+        // it does not invalidate the source diagnosis or spend another AI call.
+        let mut previous_evidence = pending.context.clone();
+        let mut next_evidence = context.clone();
+        if let Some(v) = previous_evidence.as_object_mut() {
+            v.remove("supervisor");
+        }
+        if let Some(v) = next_evidence.as_object_mut() {
+            v.remove("supervisor");
+        }
+        let diagnosis = if previous_evidence == next_evidence {
+            pending
+                .diagnosis
+                .clone()
+                .filter(|d| d.repairable && !d.requires_human && !d.restart_only)
+        } else {
+            None
+        };
         let sequence = pending.sequence;
         *pending = Pending {
+            diagnosis,
             context,
             sequence,
             ..Default::default()
@@ -205,6 +224,16 @@ pub fn next_action(pending: &Pending, report: &Intervention, max_attempts: u32) 
             "No action needed: rechecks automatically at {}. To retry sooner run `{RETRY}`.",
             time.to_rfc3339()
         )
+    } else if report.detail.contains("requires validation_commands")
+        || report.detail.contains("No project validation scripts")
+        || report.detail.contains("requires a test command")
+    {
+        "Configure automation.supervisor.validation_commands (relative subproject test commands), or explicitly disable tests_enabled. The recorded diagnosis is reused after a supervisor configuration change. Run `macc supervisor config check` to inspect readiness.".into()
+    } else if report.detail.contains("Automatic repair is disabled") {
+        "Enable automation.supervisor.repair_enabled to continue with the recorded diagnosis."
+            .into()
+    } else if report.detail.contains("Automatic restart is disabled") {
+        "Start the coordinator manually, or enable automation.supervisor.auto_restart.".into()
     } else if report.detail.contains("Validation failed")
         || report.detail.contains("Validation timed out")
     {
@@ -231,6 +260,32 @@ pub fn next_action(pending: &Pending, report: &Intervention, max_attempts: u32) 
 mod tests {
     use super::*;
 
+    #[test]
+    fn settings_only_changes_reuse_diagnosis_but_source_changes_invalidate_it() {
+        let diagnosis: Diagnosis =
+            serde_json::from_value(json!({"summary":"missing API", "repairable":true})).unwrap();
+        let mut p = Pending {
+            context: json!({"head":"a", "supervisor":{"tests_enabled":true}}),
+            diagnosis: Some(diagnosis),
+            status: "waiting".into(),
+            attempts: 3,
+            ..Default::default()
+        };
+        assert!(ready(
+            &mut p,
+            json!({"head":"a", "supervisor":{"tests_enabled":false}}),
+            10,
+            3
+        ));
+        assert_eq!(p.diagnosis.as_ref().unwrap().summary, "missing API");
+        assert!(ready(
+            &mut p,
+            json!({"head":"b", "supervisor":{"tests_enabled":false}}),
+            10,
+            3
+        ));
+        assert!(p.diagnosis.is_none());
+    }
     #[test]
     fn the_same_stop_after_a_restart_has_the_same_fingerprint() {
         let incident = |run: &str, state: &str| Incident {
