@@ -15,6 +15,8 @@ use policy::MemoryPolicy;
 pub(crate) use retrieval::{augment, current, expand, prepare_pool};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+/// Changes to measured retrieval semantics invalidate all earlier approvals.
+const BENCHMARK_RECIPE: &str = "semantic-benchmark-v2:runtime-result-cap";
 #[derive(Default)]
 pub(crate) struct Selection {
     pub scores: BTreeMap<String, f64>,
@@ -31,7 +33,7 @@ pub(crate) fn settings(p: &MemoryPolicy) -> Result<String> {
     // A benchmark can be reviewed while retrieval is still disabled.
     config.semantic_enabled = false;
     Ok(digest(
-        &serde_json::to_vec(&config).map_err(|e| error(e.to_string()))?,
+        &serde_json::to_vec(&(BENCHMARK_RECIPE, &config)).map_err(|e| error(e.to_string()))?,
     ))
 }
 fn corpus(records: &[Memory], access: &Access) -> Result<String> {

@@ -1,0 +1,141 @@
+{
+  "checksum": "101e755e09e61531f72c7fc4a8c13e73951c5fdd1b7120592b820b984f434c10",
+  "report": {
+    "access": {
+      "feature": null,
+      "task_id": null,
+      "tool_id": null,
+      "user_id": null,
+      "worktree": null
+    },
+    "backend": {
+      "description": "Local corpus TF-IDF/LSA; no pretrained weights, network, subprocess or downloads",
+      "id": "local_lsa",
+      "local_only": true,
+      "recipe": "tfidf-lsa-power12-v1"
+    },
+    "canonical": "cb17b970d69c42e5b74fe18140c5b63ca194af3c0cbf5ea6f0190dd1145a98a8",
+    "corpus": "cb17b970d69c42e5b74fe18140c5b63ca194af3c0cbf5ea6f0190dd1145a98a8",
+    "documents": 9,
+    "fts_mrr": 1.0,
+    "fts_recall": 0.3333333333333333,
+    "hybrid_mrr": 1.0,
+    "hybrid_recall": 1.0,
+    "id": "694b7e8e-6df3-40b3-98f5-505f457243e7",
+    "max_query_ms": 3,
+    "model_bytes": 1528,
+    "notice": "Corpus-local LSA evidence only; labels and representative coverage require operator review. No model API cost, network or installation. Corpus/settings changes require a new benchmark.",
+    "passed": true,
+    "preflight_ms": 36,
+    "project": "993026cd-5035-4b58-91f2-cfd79bdeaf22",
+    "regressions": 0,
+    "results": [
+      {
+        "fts_ids": [
+          "8da6d137-e9bf-471f-86c7-743f5ab0786e"
+        ],
+        "fts_mrr": 1.0,
+        "fts_recall": 0.3333333333333333,
+        "hybrid_ids": [
+          "2da889d4-ce4d-43c7-b340-1e4f8fc5ffd0",
+          "8da6d137-e9bf-471f-86c7-743f5ab0786e",
+          "d3e830d5-fb1d-4bb9-ae53-83afcc80d1ae"
+        ],
+        "hybrid_mrr": 1.0,
+        "hybrid_recall": 1.0,
+        "query": "password"
+      },
+      {
+        "fts_ids": [
+          "2da889d4-ce4d-43c7-b340-1e4f8fc5ffd0"
+        ],
+        "fts_mrr": 1.0,
+        "fts_recall": 0.3333333333333333,
+        "hybrid_ids": [
+          "2da889d4-ce4d-43c7-b340-1e4f8fc5ffd0",
+          "8da6d137-e9bf-471f-86c7-743f5ab0786e",
+          "d3e830d5-fb1d-4bb9-ae53-83afcc80d1ae"
+        ],
+        "hybrid_mrr": 1.0,
+        "hybrid_recall": 1.0,
+        "query": "signon"
+      },
+      {
+        "fts_ids": [
+          "8bc63893-47ad-4527-ba6b-910b18303f48"
+        ],
+        "fts_mrr": 1.0,
+        "fts_recall": 0.3333333333333333,
+        "hybrid_ids": [
+          "0ea8a214-9343-419c-a26c-5e95ba6f8348",
+          "8bc63893-47ad-4527-ba6b-910b18303f48",
+          "c91583ad-74c3-45a4-b382-fa034b7a1d2b"
+        ],
+        "hybrid_mrr": 1.0,
+        "hybrid_recall": 1.0,
+        "query": "retrieval"
+      },
+      {
+        "fts_ids": [
+          "b8731733-a725-4dce-919e-ce585120be33"
+        ],
+        "fts_mrr": 1.0,
+        "fts_recall": 0.3333333333333333,
+        "hybrid_ids": [
+          "7b96e1d5-7a20-44df-91cc-c1085b1f5fcb",
+          "ad65dcb3-ff08-49be-bc0e-6914fc195905",
+          "b8731733-a725-4dce-919e-ce585120be33"
+        ],
+        "hybrid_mrr": 1.0,
+        "hybrid_recall": 1.0,
+        "query": "execution"
+      }
+    ],
+    "settings": "ac44a915da424a4e134f768a29e7461e401e68cc56a6ac84cd4f1c1ee541926b",
+    "suite": {
+      "access": {
+        "feature": null,
+        "task_id": null,
+        "tool_id": null,
+        "user_id": null,
+        "worktree": null
+      },
+      "cases": [
+        {
+          "query": "password",
+          "relevant_ids": [
+            "8da6d137-e9bf-471f-86c7-743f5ab0786e",
+            "2da889d4-ce4d-43c7-b340-1e4f8fc5ffd0",
+            "d3e830d5-fb1d-4bb9-ae53-83afcc80d1ae"
+          ]
+        },
+        {
+          "query": "signon",
+          "relevant_ids": [
+            "8da6d137-e9bf-471f-86c7-743f5ab0786e",
+            "2da889d4-ce4d-43c7-b340-1e4f8fc5ffd0",
+            "d3e830d5-fb1d-4bb9-ae53-83afcc80d1ae"
+          ]
+        },
+        {
+          "query": "retrieval",
+          "relevant_ids": [
+            "0ea8a214-9343-419c-a26c-5e95ba6f8348",
+            "8bc63893-47ad-4527-ba6b-910b18303f48",
+            "c91583ad-74c3-45a4-b382-fa034b7a1d2b"
+          ]
+        },
+        {
+          "query": "execution",
+          "relevant_ids": [
+            "7b96e1d5-7a20-44df-91cc-c1085b1f5fcb",
+            "b8731733-a725-4dce-919e-ce585120be33",
+            "ad65dcb3-ff08-49be-bc0e-6914fc195905"
+          ]
+        }
+      ],
+      "top_k": 3
+    },
+    "train_ms": 2
+  }
+}

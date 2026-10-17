@@ -72,6 +72,7 @@ pub fn apply_gate(
     let descriptor = backend::backend(&p.semantic_backend)?.descriptor();
     if enable
         && (!report.passed
+            || report.benchmark_recipe != BENCHMARK_RECIPE
             || report.settings != settings(&p)?
             || report.backend.recipe != descriptor.recipe
             || report.backend.id != descriptor.id)
@@ -138,7 +139,14 @@ pub fn status(root: &Path, access: &Access) -> Result<serde_json::Value> {
         if r.project == pool.project
             && serde_json::to_value(&r.access).ok() == serde_json::to_value(access).ok()
         {
-            reports.push(serde_json::json!({"checksum":benchmark::checksum(&r)?,"report":r}));
+            let approvable = r.passed
+                && r.benchmark_recipe == BENCHMARK_RECIPE
+                && r.settings == settings(&p)?
+                && r.backend.recipe == descriptor.recipe
+                && r.backend.id == descriptor.id
+                && r.corpus == corpus(&pool.records, access)?
+                && r.canonical == pool.canonical;
+            reports.push(serde_json::json!({"approvable":approvable,"checksum":benchmark::checksum(&r)?,"report":r}));
         }
     }
     Ok(

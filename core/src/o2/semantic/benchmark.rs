@@ -25,6 +25,9 @@ pub struct CaseResult {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Report {
+    // Omitted for legacy reports so their original review checksums remain readable.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub benchmark_recipe: String,
     pub id: String,
     pub project: String,
     pub access: Access,
@@ -184,7 +187,7 @@ pub fn benchmark(root: &Path, suite: Suite) -> Result<serde_json::Value> {
         && values[3] + 1e-9 >= values[2]
         && preflight_ms + train_ms + max_query_ms <= p.semantic_max_ms as u128
         && model.bytes() <= p.semantic_max_bytes as usize;
-    let report=Report{results,regressions,preflight_ms,id:uuid::Uuid::new_v4().to_string(),project:pool.project,access:suite.access.clone(),corpus:corpus(&pool.records,&suite.access)?,canonical:pool.canonical,settings:settings(&p)?,backend,suite,documents:pool.records.len(),model_bytes:model.bytes(),train_ms,max_query_ms,fts_recall:values[0],hybrid_recall:values[1],fts_mrr:values[2],hybrid_mrr:values[3],passed,notice:"Corpus-local LSA evidence only; labels and representative coverage require operator review. No model API cost, network or installation. Corpus/settings changes require a new benchmark.".into()};
+    let report=Report{benchmark_recipe:BENCHMARK_RECIPE.into(),results,regressions,preflight_ms,id:uuid::Uuid::new_v4().to_string(),project:pool.project,access:suite.access.clone(),corpus:corpus(&pool.records,&suite.access)?,canonical:pool.canonical,settings:settings(&p)?,backend,suite,documents:pool.records.len(),model_bytes:model.bytes(),train_ms,max_query_ms,fts_recall:values[0],hybrid_recall:values[1],fts_mrr:values[2],hybrid_mrr:values[3],passed,notice:format!("Corpus-local LSA evidence only; metrics include the runtime search_limit={}. Labels and representative coverage require operator review. No model API cost, network or installation. Corpus/settings/benchmark recipe changes require a new benchmark.",p.search_limit)};
     // Revalidate every input before recording evidence; no inference under the authority lock.
     let _guard = store::lock(root)?;
     let (mut db, a) = database(root)?;
@@ -205,5 +208,7 @@ pub fn benchmark(root: &Path, suite: Suite) -> Result<serde_json::Value> {
         serde_json::to_value(&report).map_err(|e| error(e.to_string()))?,
     )?;
     sql(tx.commit())?;
-    Ok(serde_json::json!({"checksum":checksum(&report)?,"report":report}))
+    Ok(
+        serde_json::json!({"approvable":report.passed,"checksum":checksum(&report)?,"report":report}),
+    )
 }

@@ -184,5 +184,6 @@ pub(super) fn ranked(
     if let Some(scores) = scores {
         augment(&mut hits, scores, p);
     }
+    memory::search::limit(&mut hits, p);
     Ok(hits)
 }

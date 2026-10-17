@@ -27,6 +27,14 @@ eligible records or their verified content requires a matching new benchmark.
 Approval does not change any memory's status, evidence or review. A benchmark
 never approves itself and cannot be approved by a runner/agent session.
 
+Benchmark method `semantic-benchmark-v2:runtime-result-cap` binds reports and gate
+settings to runtime result limits. Earlier reports and review checksums remain
+inspectable and revocable, but cannot enable retrieval. Earlier approvals no
+longer match current gate keys. Re-run the labelled benchmark and explicitly
+review it; no database migration or automatic reapproval occurs. Status returns
+an `approvable` flag for current passing reports, and clients disable approval
+of retired or changed evidence.
+
 Without both conditions, search retains FTS. Corpus, time, memory, malformed vector
 or backend failures also retain FTS with a diagnostic in retrieval exclusions.
 A corpus exceeding the document cap, or reaching the shared bounded source
@@ -43,6 +51,10 @@ The system cannot prove that user-supplied relevance labels are representative.
 Both arms use the same fresh authorized records and existing deterministic rank
 factors. The baseline admits only FTS matches. The hybrid admits FTS matches plus
 positive local cosine matches, then adds the configured cosine score weight.
+Both arms apply the same canonical `memory.search_limit` as runtime search before
+computing metrics or reporting IDs. The measured window is at most
+`min(top_k, search_limit)`; increasing `top_k` cannot fabricate a gain from results
+that the configured search would omit. Reports state the applied runtime cap.
 
 A report passes only when:
 
@@ -107,8 +119,11 @@ require a new corresponding benchmark, rather than reusing a broader model.
 **TUI → O2 → Memory**:
 
 - `S`: inspect status/reports for the current access scope.
-- `B`: enter four guided query/ID pairs and `top_k`; inspect the prepared action,
-  then `a` to run the benchmark. Larger suites can use CLI/shared typed actions.
+- `B`: choose 4–100 queries (blank selects four), then enter the repeated guided
+  query/ID pairs and `top_k`; inspect the complete prepared action, then `a` to run
+  the benchmark. Shift+Tab returns to the previous field; invalid counts or `top_k`
+  retain the inputs for correction. Esc cancels the form. Larger suites need no
+  JSON editing. Active forms stay above report details in small terminals.
 - `G`: prepare approval of the inspected latest passing report; inspect it and
   press `a` to confirm. `X` prepares revocation in the same way.
 - `Q`: search approved facts with FTS plus eligible local semantics.

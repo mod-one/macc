@@ -1,4 +1,6 @@
 use super::*;
+#[path = "audit_tests.rs"]
+mod audit_tests;
 fn root() -> (tempfile::TempDir, Vec<Memory>) {
     let t = crate::o2::tests::root();
     let r = t.path();

@@ -97,3 +97,12 @@ O2 P1 schema version 2 adds `native_setting_ownership` to the same snapshot.
 Restoring older SQLite snapshots preserves their schema and evidence; use the
 reviewed O2 upgrade before enabling version 2 services. A receipt authorizes only
 the exact recorded setting value; changed native files remain user-owned.
+
+P3 introduces no additional schema version. The same consistent SQLite snapshot
+contains symbol-bound memory evidence and conflicts, native provider receipts,
+semantic benchmark/approval history and reviewed policy trials/reports. Canonical
+configuration travels with the bundle. A populated P3 round-trip regression
+checks restored audit rows/checksums, active semantic retrieval, conflicts, trial
+inspection and native symbol queries. Derived native cache artifacts remain
+expendable; a receipt does not make a missing cache authoritative. Binary downgrade
+still requires a configuration/evidence snapshot supported by that older binary.

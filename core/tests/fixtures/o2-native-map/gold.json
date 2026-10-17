@@ -1,0 +1,14 @@
+[
+  {"path":"service.rs","selector":"User","line":1,"signature":"pub struct User"},
+  {"path":"service.rs","selector":"Service/lookup","line":6,"signature":"pub fn lookup(&self, id: u64) -> Option<User>"},
+  {"path":"service.rs","selector":"api/sync","line":11,"signature":"pub fn sync() -> bool"},
+  {"path":"service.py","selector":"User","line":1,"signature":"class User:"},
+  {"path":"service.py","selector":"Repository/lookup","line":5,"signature":"def lookup(self, identifier: int) -> User | None:"},
+  {"path":"service.py","selector":"sync","line":12,"signature":"def sync() -> bool:"},
+  {"path":"service.ts","selector":"User","line":1,"signature":"interface User"},
+  {"path":"service.ts","selector":"Repository/lookup","line":5,"signature":"lookup(id: number): Result<T>"},
+  {"path":"service.ts","selector":"sync","line":10,"signature":"sync = async (): Promise<boolean> =>"},
+  {"path":"view.tsx","selector":"Props","line":1,"signature":"type Props = { name: string; onSelect: (name: string) => void };"},
+  {"path":"view.tsx","selector":"Card","line":3,"signature":"Card = (props: Props) =>"},
+  {"path":"view.tsx","selector":"View","line":7,"signature":"function View(props: Props)"}
+]

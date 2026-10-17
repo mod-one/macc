@@ -1,4 +1,6 @@
 //! Expendable immutable symbol artifacts; canonical provider receipts own publication.
+#[cfg(test)]
+mod benchmark_tests;
 mod build;
 mod parse;
 mod query;

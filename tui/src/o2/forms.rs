@@ -9,6 +9,7 @@ pub(super) struct Form {
 }
 impl Panel {
     pub(super) fn start(&mut self, name: &str, mutation: bool, labels: &[&str]) {
+        self.scroll = 0;
         self.form = Some(Form {
             name: name.into(),
             labels: labels.iter().map(|s| s.to_string()).collect(),
@@ -56,6 +57,9 @@ impl Panel {
         Ok(())
     }
     fn submit(&mut self, root: &Path, name: &str, v: Vec<String>) -> Result<()> {
+        if self.semantic_form(name, &v)? {
+            return Ok(());
+        }
         if self.tuning_form(root, name, &v)? {
             return Ok(());
         }
@@ -66,11 +70,6 @@ impl Panel {
         };
         let mut pending = false;
         let action = match name {
-            "semantic_benchmark" => {pending=true; Action::SemanticBenchmark {suite:macc_core::o2::semantic::Suite {
-                access:serde_json::from_value(self.access.clone()).map_err(|e|MaccError::Validation(e.to_string()))?,
-                top_k:parse(&v[8])? as usize,
-                cases:(0..4).map(|i|macc_core::o2::semantic::Case{query:v[i*2].clone(),relevant_ids:v[i*2+1].split(',').map(str::trim).filter(|s|!s.is_empty()).map(str::to_string).collect()}).collect(),
-            }}},
             "semantic_search" => {self.query=v[0].clone();self.conflicts=false;Action::MemorySearch {search:serde_json::from_value(json!({"query":self.query,"access":self.access,"include_inactive":false})).map_err(|e|MaccError::Validation(e.to_string()))?}},
             "find_field" => {
                 let needle = v[0].to_ascii_lowercase();

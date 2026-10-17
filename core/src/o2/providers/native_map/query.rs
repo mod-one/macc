@@ -40,11 +40,12 @@ pub(in crate::o2::providers) fn query(
             continue;
         }
         for symbol in &file.symbols {
+            // Preserve one extra match for the shared output-bound diagnostic.
             if (if qualified {
                 symbol.qualified == selector
             } else {
                 symbol.name == selector
-            }) && hits.len() < p.query_limit as usize
+            }) && hits.len() <= p.query_limit as usize
             {
                 hits.push(CodeHit{path:path.clone(),line:symbol.line,text:format!("{}: {}",symbol.qualified,symbol.signature),file_sha256:file.sha256.clone(),provenance:format!("native:tree-sitter:{}:EXTRACTED:{}; syntactic declaration, no type/graph inference",file.language,symbol.kind)});
             }
@@ -56,7 +57,7 @@ pub(in crate::o2::providers) fn query(
         hits.clear();
         diagnostics.push("Source changed during query; symbol results discarded, retry".into());
     }
-    diagnostics.push(format!("Native map: parsed={}, reused={}, removed={}, unsupported={}, failed={}, corpus_bytes={}, elapsed_ms={}, truncated={}; read-only current-worktree overlay",map.stats.parsed_files,map.stats.reused_files,map.stats.removed_files,map.stats.unsupported_files,map.stats.failed_files,map.stats.corpus_bytes,map.stats.elapsed_ms,map.symbols_truncated));
+    diagnostics.push(format!("Native map: parsed={}, reused={}, removed={}, unsupported={}, failed={}, corpus_bytes={}, elapsed_ms={}, map_truncated={}; read-only current-worktree overlay",map.stats.parsed_files,map.stats.reused_files,map.stats.removed_files,map.stats.unsupported_files,map.stats.failed_files,map.stats.corpus_bytes,map.stats.elapsed_ms,map.symbols_truncated));
     response::bound(
         Capability::Supported(QueryResult {
             provider_id: "native".into(),

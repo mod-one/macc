@@ -14,6 +14,13 @@ upgrade is introduced: plans, invocation provenance, sealed observations, report
 and adoption receipts reuse canonical `o2_audit` and are included in SQLite
 snapshots saved by `macc save`.
 
+Release and acceptance descriptions should call this **reviewed, supervised
+policy tuning**. Operators select candidates, control representative independent
+tasks, keep contracts identical and attest quality. Shipping this workflow does
+not demonstrate an autonomous optimizer or an achieved project saving. Projects
+whose adapters cannot report exact monetary cost cannot adopt a trial through
+this gate; estimated token pricing and subscription quotas do not replace it.
+
 ## Contracts and boundaries
 
 `core/src/o2/tuning/` separates typed contracts, pre-registration/inspection,

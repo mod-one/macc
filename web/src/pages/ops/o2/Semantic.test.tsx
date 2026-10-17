@@ -6,6 +6,15 @@ vi.mock('../../../api/o2', () => ({ o2Action: vi.fn() }));
 beforeEach(() => vi.resetAllMocks());
 const access = { task_id: 'A', tool_id: null, worktree: null, feature: null, user_id: null };
 const report = { checksum: 'reviewed-report-sha', report: { id: 'report-A', passed: true, fts_recall: 0.3, hybrid_recall: 1 } };
+it('keeps retired passing reports inspectable and revocable but requires a new benchmark for approval', async () => {
+  vi.mocked(o2Action).mockResolvedValue({ reports: [{ ...report, approvable: false }] });
+  render(<Semantic identity="A" access={access} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Inspect semantic benchmark status' }));
+  fireEvent.click(await screen.findByLabelText('I reviewed the exact corpus, representative labels, quality and resource measurements'));
+  expect(screen.getByText(/Run a new benchmark for the current corpus/)).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Approve passing semantic benchmark' })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Revoke semantic gate for this corpus' })).toBeEnabled();
+});
 it('requires inspection and confirmation of a passing benchmark before approving its exact checksum', async () => {
   vi.mocked(o2Action).mockImplementation(async action => action === 'semantic_status' ? { reports: [report] } : { enabled: true });
   render(<Semantic identity="A" access={access} />);

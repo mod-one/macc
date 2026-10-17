@@ -111,8 +111,12 @@ pub(crate) fn search_in(
     if semantic {
         crate::o2::semantic::augment(&mut hits, &prepared.semantic.scores, &policy.memory);
     }
-    hits.truncate(policy.memory.search_limit as usize);
+    limit(&mut hits, &policy.memory);
     Ok(Retrieval { hits, exclusions })
+}
+/// Benchmark and runtime retrieval must expose the same configured result window.
+pub(crate) fn limit(hits: &mut Vec<Hit>, policy: &super::super::policy::MemoryPolicy) {
+    hits.truncate(policy.search_limit as usize);
 }
 pub fn fts_rebuild(root: &Path) -> Result<()> {
     let _guard = store::lock(root)?;

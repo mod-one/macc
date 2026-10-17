@@ -3,6 +3,7 @@ mod forms;
 mod jobs;
 mod overview;
 mod semantic;
+mod semantic_forms;
 #[cfg(test)]
 mod semantic_tests;
 mod settings;
@@ -270,7 +271,17 @@ impl Panel {
     pub fn draw(&self, f: &mut Frame, area: Rect, outer_message: &str) {
         let mut lines=vec!["1 Memory | 2 Context | 3 Compaction | 4 Code Intelligence | 5 Policies | 6 Overview | 7 Policy trials | r refresh | u preview schema upgrade | a apply reviewed action | j advanced action | o/Esc back".into(),"↑↓ select | Enter inspect | PgUp/PgDn scroll | / scoped search or decision simulation".into(),format!("SQLite: {} | O2 ready: {}",self.view.as_ref().is_some_and(|v|v.sqlite),self.view.as_ref().is_some_and(|v|v.ready)),self.message.clone()];
         lines.push(outer_message.into());
-        if self.tab == 4 {
+        if let Some(form) = &self.form {
+            lines.push(format!(
+                "{} ({}/{}): {}",
+                form.name,
+                form.values.len() + 1,
+                form.labels.len(),
+                form.labels[form.values.len()]
+            ));
+            lines.push(format!("> {}", form.input));
+            lines.push("Enter next/prepare | Shift+Tab previous | Esc cancel. Writes require separate a confirmation.".into());
+        } else if self.tab == 4 {
             self.draw_settings(&mut lines);
         } else if self.tab == 6 {
             lines.push(format!(
@@ -319,18 +330,9 @@ impl Panel {
                 ));
             }
         }
-        if let Some(form) = &self.form {
-            lines.push(format!(
-                "{} ({}/{}): {}",
-                form.name,
-                form.values.len() + 1,
-                form.labels.len(),
-                form.labels[form.values.len()]
-            ));
-            lines.push(format!("> {}", form.input));
-            lines.push("Enter next/prepare | Esc cancel. Reviewed writes require a separate a confirmation.".into());
+        if self.form.is_none() {
+            lines.push(self.details.clone());
         }
-        lines.push(self.details.clone());
         f.render_widget(
             Paragraph::new(lines.join("\n"))
                 .block(

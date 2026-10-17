@@ -63,21 +63,14 @@ impl Panel {
                 false,
                 &["Approved fact query (FTS plus benchmark-gated local semantics)"],
             ),
-            KeyCode::Char('B') => self.start(
-                "semantic_benchmark",
-                true,
-                &[
-                    "Representative query 1",
-                    "Relevant reviewed memory IDs 1 (comma-separated)",
-                    "Representative query 2",
-                    "Relevant reviewed memory IDs 2",
-                    "Representative query 3",
-                    "Relevant reviewed memory IDs 3",
-                    "Representative query 4",
-                    "Relevant reviewed memory IDs 4",
-                    "Top k (1–10)",
-                ],
-            ),
+            KeyCode::Char('B') => {
+                self.pending = None;
+                self.start(
+                    "semantic_size",
+                    true,
+                    &["Number of representative queries (4–100; blank selects 4)"],
+                )
+            }
             KeyCode::Char(mode @ ('G' | 'X')) => {
                 let r = self
                     .semantic_report
@@ -88,9 +81,9 @@ impl Panel {
                             "Run B or inspect S for a benchmark in this scope first".into(),
                         )
                     })?;
-                if mode == 'G' && r["report"]["passed"] != true {
+                if mode == 'G' && (r["report"]["passed"] != true || r["approvable"] == false) {
                     return Err(MaccError::Validation(
-                        "Only a passing benchmark can be approved".into(),
+                        "Run a passing benchmark for the current corpus, settings and recipe before approval".into(),
                     ));
                 }
                 let action = Action::SemanticGate {

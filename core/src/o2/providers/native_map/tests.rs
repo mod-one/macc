@@ -1,4 +1,33 @@
 use super::*;
+#[test]
+fn capped_symbol_queries_disclose_omitted_alternatives_without_false_warnings() {
+    let t = root();
+    let r = t.path();
+    let view = crate::o2::policy::inspect(r).unwrap();
+    let mut p = view.policy;
+    p.code_intelligence.query_limit = 1;
+    crate::o2::policy::update(r, &view.revision, Some(p)).unwrap();
+    let result = query_at(r, "send", None);
+    assert_eq!(result.hits.len(), 1);
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|d| d.contains("Output bounded")));
+    assert!(result
+        .diagnostics
+        .iter()
+        .any(|d| d.contains("map_truncated=false")));
+    let unique = query_at(r, "send", Some("sample.py"));
+    assert_eq!(unique.hits.len(), 1);
+    assert!(!unique
+        .diagnostics
+        .iter()
+        .any(|d| d.contains("Output bounded")));
+    assert!(!query_at(r, "missing", None)
+        .diagnostics
+        .iter()
+        .any(|d| d.contains("Output bounded")));
+}
 fn root() -> tempfile::TempDir {
     let t = crate::o2::tests::root();
     for (path, source) in [

@@ -121,6 +121,12 @@ source hashing. File hashing remains necessary to prove reuse; incremental
 indexing reduces parsing work rather than eliminating source I/O. Grammar parsing
 has a separate timeout, and traversal has a fixed nesting limit.
 
+`map_truncated` describes index coverage. Query traversal preserves one extra
+matching definition so the shared response wrapper can emit **Output bounded**
+when `query_limit` omits alternatives. A fully parsed map can still yield a
+bounded query response. Exactly one match at a limit of one produces no false
+truncation warning; multiple matching definitions do.
+
 The recipe pins Tree-sitter 0.25.10, Rust grammar 0.24.0, Python grammar 0.25.0 and
 TypeScript/TSX grammar 0.23.2. Dependencies are locked in both workspace lockfiles.
 The upstream [Rust API](https://docs.rs/tree-sitter/0.25.10/tree_sitter/) and
@@ -138,6 +144,26 @@ all expected definition locations and compares full versus incremental records;
 the unchanged pass must parse zero files and reuse every eligible file. Tests
 assert work counters and record structured timing events, without imposing a machine-dependent speed threshold
 or claiming a production accuracy/cost benchmark.
+
+The fixed `core/tests/fixtures/o2-native-map` service/UI corpus adds independently
+listed locations and signature expectations in Rust, Python, TypeScript and TSX.
+Its 12 queries compare parsed declarations with ordinary literal search, including
+comments, calls and string false positives. It records precision/recall, complete
+query timings, full/incremental build timings, artifact/corpus bytes and parsed/
+reused file counts. Incremental results must equal full results and perform zero
+unchanged-file parses. Generate an inspectable local report with:
+
+```sh
+MACC_O2_BENCHMARK_REPORT=/tmp/macc-native-map-benchmark.json \
+  cargo test -p macc-core --locked \
+  representative_multilanguage_accuracy_and_resource_comparison --lib
+```
+
+The baseline is literal lookup, which also returns references; its precision is
+measured against definition-only labels. These are local fixture comparisons,
+not evidence of superiority over an external semantic provider, process RSS
+limits or paid task savings. Parsing may cost more than literal search; retain
+the optional flag and inspect the project's tradeoff before enabling it.
 
 There is no SQLite migration. Legacy native file indexes remain valid for literal
 search and are rebuilt for the new map recipe. New policy defaults are compatible

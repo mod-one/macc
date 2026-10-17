@@ -1,5 +1,7 @@
 //! End-to-end bundles use explicit temporary save roots, never the user's HOME.
 use super::*;
+#[path = "p3_roundtrip_tests.rs"]
+mod p3_roundtrip_tests;
 use crate::session_store as store;
 use serde_json::json;
 use std::path::Path;
