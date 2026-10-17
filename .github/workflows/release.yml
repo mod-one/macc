@@ -32,7 +32,7 @@ jobs:
       - name: Cache Rust artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: Verify release tag matches cli and tui versions
+      - name: Verify release tag matches workspace, web, and changelog versions
         shell: bash
         run: |
           tag_version="${GITHUB_REF_NAME#v}"
@@ -45,30 +45,44 @@ import tomllib
 manifest = Path(sys.argv[1])
 with manifest.open('rb') as fh:
     data = tomllib.load(fh)
-version = data['package']['version']
-if isinstance(version, dict) and version.get('workspace') is True:
-    with Path('Cargo.toml').open('rb') as wfh:
-        wdata = tomllib.load(wfh)
-    version = wdata['workspace']['package']['version']
+if 'package' in data:
+    version = data['package']['version']
+    if isinstance(version, dict) and version.get('workspace') is True:
+        with Path('Cargo.toml').open('rb') as wfh:
+            wdata = tomllib.load(wfh)
+        version = wdata['workspace']['package']['version']
+else:
+    version = data['workspace']['package']['version']
 print(version)
 PY2
           }
 
+          ws_version=$(read_manifest_version Cargo.toml)
+          adapters_ws_version=$(read_manifest_version adapters/Cargo.toml)
+          core_version=$(read_manifest_version core/Cargo.toml)
           cli_version=$(read_manifest_version cli/Cargo.toml)
           tui_version=$(read_manifest_version tui/Cargo.toml)
+          registry_version=$(read_manifest_version registry/Cargo.toml)
+          web_version=$(python3 -c "import json; print(json.load(open('web/package.json'))['version'])")
 
-          if [[ "$tag_version" != "$cli_version" ]]; then
-            echo "release tag version ($tag_version) does not match cli/Cargo.toml version ($cli_version)" >&2
-            exit 1
-          fi
+          for pair in \
+            "Cargo.toml:$ws_version" \
+            "adapters/Cargo.toml:$adapters_ws_version" \
+            "core/Cargo.toml:$core_version" \
+            "cli/Cargo.toml:$cli_version" \
+            "tui/Cargo.toml:$tui_version" \
+            "registry/Cargo.toml:$registry_version" \
+            "web/package.json:$web_version"; do
+            name="${pair%%:*}"
+            ver="${pair#*:}"
+            if [[ "$tag_version" != "$ver" ]]; then
+              echo "release tag version ($tag_version) does not match $name version ($ver)" >&2
+              exit 1
+            fi
+          done
 
-          if [[ "$tag_version" != "$tui_version" ]]; then
-            echo "release tag version ($tag_version) does not match tui/Cargo.toml version ($tui_version)" >&2
-            exit 1
-          fi
-
-          if [[ "$cli_version" != "$tui_version" ]]; then
-            echo "cli/Cargo.toml version ($cli_version) does not match tui/Cargo.toml version ($tui_version)" >&2
+          if ! grep -Eq "^## \[${tag_version//./\\.}\]" CHANGELOG.md; then
+            echo "CHANGELOG.md is missing a '## [$tag_version]' section" >&2
             exit 1
           fi
 
@@ -81,8 +95,8 @@ PY2
       - name: Test
         run: make test
 
-      #- name: Web quality
-      #  run: make web-ci
+      - name: Web quality
+        run: make web-ci
 
       - name: Tool-agnostic guardrail
         run: make check-generic

@@ -1774,6 +1774,15 @@ mod tests {
                 rel
             );
         }
+        let web_pkg_content = fs::read_to_string(repo_root.join("web/package.json"))
+            .expect("web/package.json readable");
+        let web_pkg: serde_json::Value =
+            serde_json::from_str(&web_pkg_content).expect("valid JSON in web/package.json");
+        assert_eq!(
+            web_pkg.get("version").and_then(|v| v.as_str()),
+            Some(version()),
+            "web/package.json version must match macc_core::version()"
+        );
     }
 
     #[test]
