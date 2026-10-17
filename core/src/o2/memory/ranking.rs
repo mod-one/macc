@@ -1,7 +1,7 @@
 //! Deterministic quality factors, recorded in the context manifest via rank_reason.
 use super::*;
 use std::collections::BTreeSet;
-pub(super) fn rank(
+pub(crate) fn rank(
     hits: &mut [Hit],
     access: &Access,
     query: &str,

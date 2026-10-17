@@ -1,4 +1,5 @@
 use super::*;
+pub(crate) const CANDIDATE_LIMIT: usize = 500;
 pub fn search(root: &Path, r: &Search) -> Result<Vec<Hit>> {
     let prepared = super::prepare_search(root, r)?;
     let _guard = store::lock(root)?;
@@ -30,9 +31,39 @@ pub(crate) fn search_in(
     }
     let mut hits = Vec::new();
     let mut exclusions = Vec::new();
+    let semantic = match crate::o2::semantic::current(
+        db,
+        project,
+        root,
+        worktree,
+        r,
+        prepared,
+        &policy.memory,
+    ) {
+        Ok(valid) => valid,
+        Err(e) => {
+            exclusions.push(format!("Semantic proof changed: {e}; FTS retained"));
+            false
+        }
+    };
+    if !semantic && !prepared.semantic.key.is_empty() {
+        exclusions.push("Semantic proof/gate changed; FTS retained".into());
+    }
+    if !prepared.semantic.diagnostic.is_empty() {
+        exclusions.push(prepared.semantic.diagnostic.clone());
+    }
+    let mut records = candidates(db, project, r)?;
+    if semantic {
+        for id in prepared.semantic.scores.keys() {
+            if !records.iter().any(|m| m.id == *id) {
+                records.push(load(db, id, project)?);
+            }
+        }
+    }
+
     let mut verifier =
         super::preflight::Verifier::new(root, worktree, db, &policy.memory, prepared);
-    for mut m in candidates(db, project, r)? {
+    for mut m in records {
         let id = m.id.clone();
         if !r.include_inactive && m.status != "active" {
             continue;
@@ -77,6 +108,9 @@ pub(crate) fn search_in(
         hits.push(hit(m, 0, "eligible for deterministic ranking")?);
     }
     super::ranking::rank(&mut hits, &r.access, &r.query, &policy.memory);
+    if semantic {
+        crate::o2::semantic::augment(&mut hits, &prepared.semantic.scores, &policy.memory);
+    }
     hits.truncate(policy.memory.search_limit as usize);
     Ok(Retrieval { hits, exclusions })
 }
@@ -115,7 +149,7 @@ pub(crate) struct Retrieval {
     pub exclusions: Vec<String>,
 }
 
-pub(super) fn candidates(
+pub(crate) fn candidates(
     db: &rusqlite::Connection,
     project: &str,
     r: &Search,
@@ -135,7 +169,7 @@ pub(super) fn candidates(
     } else {
         " AND m.id IN (SELECT p.memory_id FROM memory_fts JOIN memory_search_projection p ON p.id=memory_fts.rowid WHERE memory_fts MATCH ?7)"
     };
-    let statement=format!("SELECT m.id FROM memories m WHERE project_id=?1 AND (?2 OR status='active') AND (scope='project' OR (scope='task' AND scope_ref=?3) OR (scope='worktree' AND scope_ref=?4) OR (scope='tool' AND scope_ref=?5) OR (scope='feature' AND scope_ref=?6) OR (scope='user' AND scope_ref=?8)) {clause} ORDER BY updated_at DESC,id LIMIT 500");
+    let statement=format!("SELECT m.id FROM memories m WHERE project_id=?1 AND (?2 OR status='active') AND (scope='project' OR (scope='task' AND scope_ref=?3) OR (scope='worktree' AND scope_ref=?4) OR (scope='tool' AND scope_ref=?5) OR (scope='feature' AND scope_ref=?6) OR (scope='user' AND scope_ref=?8)) {clause} ORDER BY updated_at DESC,id LIMIT {CANDIDATE_LIMIT}");
     let mut q = sql(db.prepare(&statement))?;
     // Always bind every index by retaining no-op references when FTS is absent.
     let mut rows = sql(q.query(rusqlite::params_from_iter(vec![

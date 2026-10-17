@@ -34,7 +34,10 @@ impl Panel {
             .then(|| json!({"query":self.query,"access":self.access}));
         let details_scope = matches!(
             &action,
-            Action::MemoryToolEvidence { .. }
+            Action::SemanticStatus { .. }
+                | Action::SemanticBenchmark { .. }
+                | Action::SemanticGate { .. }
+                | Action::MemoryToolEvidence { .. }
                 | Action::MemorySymbolEvidence { .. }
                 | Action::MemoryPull { .. }
                 | Action::MemoryReview { .. }
@@ -43,7 +46,9 @@ impl Panel {
         .then(|| self.access.clone());
         let applied_memory = matches!(
             &action,
-            Action::MemoryReview { .. }
+            Action::SemanticBenchmark { .. }
+                | Action::SemanticGate { .. }
+                | Action::MemoryReview { .. }
                 | Action::MemoryResolveConflict { .. }
                 | Action::MemoryToolEvidence { .. }
         );

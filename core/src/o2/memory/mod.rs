@@ -4,7 +4,7 @@ mod freshness;
 mod model;
 pub(crate) mod preflight;
 pub(crate) use preflight::{prepare_record_at, prepare_records, prepare_search, PreparedFreshness};
-mod ranking;
+pub(crate) mod ranking;
 pub use conflicts::{conflicts, resolve_conflict};
 pub(crate) use freshness::Checker;
 pub use freshness::{symbol_evidence, tool_evidence};
@@ -180,7 +180,7 @@ pub(super) fn in_scope(p: &Proposal, a: &Access) -> bool {
         _ => false,
     }
 }
-pub(super) fn hit(m: Memory, score: i64, reason: &str) -> Result<Hit> {
+pub(crate) fn hit(m: Memory, score: i64, reason: &str) -> Result<Hit> {
     let checksum = digest(
         serde_json::to_string(&m)
             .map_err(|e| error(e.to_string()))?

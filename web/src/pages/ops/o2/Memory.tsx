@@ -3,6 +3,7 @@ import { useScopedAction } from './useScopedAction';
 import AgentMemory from './AgentMemory';
 import EvidenceCapture from './EvidenceCapture';
 import Conflicts from './Conflicts';
+import Semantic from './Semantic';
 import { o2Action, type Evidence, type MemoryHit } from '../../../api/o2';
 export default function Memory({ taskScope = '' }: { taskScope?: string }) {
   const [rows, setRows] = useState<MemoryHit[]>([]); const [query, setQuery] = useState(''); const [task, setTask] = useState(taskScope); const [tool, setTool] = useState(''); const [worktree, setWorktree] = useState('');
@@ -68,6 +69,7 @@ export default function Memory({ taskScope = '' }: { taskScope?: string }) {
       <label>Conflicting memory ID<input value={right} onChange={e => setRight(e.target.value)} /></label>
       <button disabled={busy || !confirmed} onClick={() => { void run(async request => { await request('memory_conflict', { left: selected.memory.id, right, reason }); setNotice('Conflict recorded; both claims are excluded from automatic context.'); }); }}>Record reviewed conflict</button>
     </section>}
+    <Semantic identity={identity} access={access} />
     <Conflicts identity={identity} access={access} />
     {notice && <p role="status">{notice}</p>}{error && <p role="alert">{error}</p>}
   </section>;

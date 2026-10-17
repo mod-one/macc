@@ -46,3 +46,5 @@ When in doubt, prioritize:
 - [O2 P3-A: evidence freshness and retrieval quality](O2_P3_FRESHNESS_QUALITY.md) — symbol evidence, version TTL, reviewed conflicts and shared ranking controls.
 
 - [O2 P3-B native symbol map](O2_P3_NATIVE_MAP.md): optional pinned grammars, incremental file reuse and shared client controls.
+
+- [O2 P3-C local semantic search](O2_P3_SEMANTIC_SEARCH.md): corpus-local LSA, reviewed quality/resource gates and shared client workflows.

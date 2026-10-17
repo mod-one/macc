@@ -80,6 +80,18 @@ pub enum Action {
         confirmed: bool,
     },
     MemoryConflicts,
+    SemanticStatus {
+        access: memory::Access,
+    },
+    SemanticBenchmark {
+        suite: semantic::Suite,
+    },
+    SemanticGate {
+        report_id: String,
+        checksum: String,
+        enabled: bool,
+        confirmed: bool,
+    },
     FtsRebuild,
     ContextList,
     ContextGet {
@@ -141,6 +153,7 @@ impl Action {
         !matches!(
             self,
             Self::Status
+                | Self::SemanticStatus { .. }
                 | Self::Overview { .. }
                 | Self::AgentStatus
                 | Self::PolicyPreview { .. }
@@ -172,6 +185,14 @@ fn value<T: Serialize>(v: T) -> Result<Value> {
 pub fn execute(root: &Path, action: Action) -> Result<Value> {
     match action {
         Action::Status => value(policy::inspect(root)?),
+        Action::SemanticStatus { access } => semantic::status(root, &access),
+        Action::SemanticBenchmark { suite } => semantic::benchmark(root, suite),
+        Action::SemanticGate {
+            report_id,
+            checksum,
+            enabled,
+            confirmed,
+        } => semantic::apply_gate(root, &report_id, &checksum, enabled, confirmed),
         Action::Overview { query } => value(overview::inspect(root, &query)?),
         Action::AgentStatus => agent::status(root),
         Action::MemoryExtract { checkpoint_id } => {

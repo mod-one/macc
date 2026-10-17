@@ -4,6 +4,76 @@ pub fn fields() -> Vec<Field> {
     let defaults = serde_json::to_value(Policy::default()).unwrap();
     let specs = [
         (
+            "memory.semantic_enabled",
+            "Enable benchmark-gated local semantic memory search",
+            "bool",
+            0.0,
+            1.0,
+        ),
+        (
+            "memory.semantic_backend",
+            "Local embedding backend",
+            "enum",
+            0.0,
+            0.0,
+        ),
+        (
+            "memory.semantic_dimensions",
+            "Local embedding dimensions",
+            "number",
+            2.0,
+            32.0,
+        ),
+        (
+            "memory.semantic_candidates",
+            "Maximum eligible semantic documents",
+            "number",
+            3.0,
+            256.0,
+        ),
+        (
+            "memory.semantic_vocabulary",
+            "Local embedding vocabulary terms",
+            "number",
+            32.0,
+            512.0,
+        ),
+        (
+            "memory.semantic_weight",
+            "Semantic ranking weight",
+            "number",
+            0.0,
+            1000.0,
+        ),
+        (
+            "memory.semantic_min_similarity",
+            "Minimum semantic cosine similarity",
+            "number",
+            0.01,
+            1.0,
+        ),
+        (
+            "memory.semantic_max_ms",
+            "Local embedding runtime budget (ms)",
+            "number",
+            10.0,
+            10000.0,
+        ),
+        (
+            "memory.semantic_max_bytes",
+            "Local embedding input/model byte budget",
+            "number",
+            32768.0,
+            33554432.0,
+        ),
+        (
+            "memory.semantic_min_recall_gain",
+            "Required benchmark recall gain",
+            "number",
+            0.01,
+            1.0,
+        ),
+        (
             "code_intelligence.native_build_timeout_ms",
             "Native parse/reuse loop budget (ms)",
             "number",
@@ -449,7 +519,9 @@ pub fn fields() -> Vec<Field> {
             kind: kind.into(),
             min: Some(min),
             max: Some(max),
-            choices: if kind == "enum" {
+            choices: if path == "memory.semantic_backend" {
+                vec!["local_lsa".into()]
+            } else if kind == "enum" {
                 vec!["native_only".into(), "adaptive".into()]
             } else {
                 vec![]

@@ -2,6 +2,9 @@
 mod forms;
 mod jobs;
 mod overview;
+mod semantic;
+#[cfg(test)]
+mod semantic_tests;
 mod settings;
 use crossterm::event::KeyCode;
 use macc_core::{
@@ -39,6 +42,8 @@ pub struct Panel {
     access: Value,
     query: String,
     conflicts: bool,
+    semantic_report: Option<Value>,
+    semantic_scope: Value,
     captured_evidence: Option<Value>,
     captured_scope: Value,
     job: Option<jobs::Job>,
@@ -61,6 +66,9 @@ impl Panel {
         }
         if self.captured_scope != self.access {
             self.captured_evidence = None;
+        }
+        if self.semantic_scope != self.access {
+            self.semantic_report = None;
         }
         let view = policy::inspect(root)?;
         if self.view.is_none() {
@@ -126,6 +134,7 @@ impl Panel {
         Ok(())
     }
     fn result(&mut self, value: Value) {
+        self.semantic_result(&value);
         if value["binding"].is_object()
             && (value["kind"] == "symbol" || value["kind"] == "provider")
         {
@@ -174,6 +183,9 @@ impl Panel {
         if self.overview_key(root, key)? {
             return Ok(());
         }
+        if self.semantic_key(root, key)? {
+            return Ok(());
+        }
         if self.tab == 4 && self.setting_key(root, key)? {
             return Ok(());
         }
@@ -185,7 +197,7 @@ impl Panel {
             KeyCode::Char('m') if self.tab==2=>self.start("adopt_native",true,&["Idle logical session ID whose existing native setting should become MACC-managed"]),
             KeyCode::Char('c') if self.tab==2=>self.start("checkpoint",true,&["Idle logical session ID for checkpoint"]),
             KeyCode::Char('u')=>{let plan=execute(root,Action::UpgradePlan)?;self.pending=Some(Action::UpgradeApply{source_sha256:plan["source_sha256"].as_str().unwrap_or_default().into()});self.result(plan);self.message="Inspect the upgrade and backup conditions. Press a to apply this exact reviewed source hash.".into();},
-            KeyCode::Char('a')=>{if let Some(action)=self.pending.as_ref(){if matches!(action,Action::ProviderApply{..}|Action::MemoryReview{..}|Action::MemoryResolveConflict{..}|Action::MemoryToolEvidence{..}){self.launch(root,action.clone())?;return Ok(());}let result=execute(root,action.clone())?;self.pending=None;self.result(result);self.refresh(root)?;self.message="Reviewed operation applied.".into();}},
+            KeyCode::Char('a')=>{if let Some(action)=self.pending.as_ref(){if matches!(action,Action::ProviderApply{..}|Action::SemanticBenchmark{..}|Action::SemanticGate{..}|Action::MemoryReview{..}|Action::MemoryResolveConflict{..}|Action::MemoryToolEvidence{..}){self.launch(root,action.clone())?;return Ok(());}let result=execute(root,action.clone())?;self.pending=None;self.result(result);self.refresh(root)?;self.message="Reviewed operation applied.".into();}},
             KeyCode::Char('h') if self.tab==0=>{let data=execute(root,Action::AgentStatus)?;self.result(data);},
             KeyCode::Char('e') if self.tab==0=>self.start("extract",true,&["Verified finished checkpoint ID to extract proposals (no memory activation)"]),
             KeyCode::Char('y') if self.tab==0=>self.start("capture_symbol",false,&["Tracked Rust source path","Qualified symbol (module/Type/method)","Provider ID (native)","Worktree (blank for project)"]),
@@ -223,7 +235,7 @@ impl Panel {
         } else if self.tab == 5 {
             self.overview_lines(&mut lines);
         } else {
-            lines.push(match self.tab{0=>"y capture symbol | Y capture tool version | R review with captured evidence | h scoped MCP setup | e extract checkpoint → a confirm | n propose | p review → a confirm | c conflict | f toggle conflict list | v resolve selected conflict | l agent search page | g agent record fragment | b rebuild FTS. Only reviewed active current facts enter prompts.",1=>"Context manifests keep PRD/criteria and pinned source hashes separate from optional estimated memory. b reduce output and preserve raw artifact.",2=>"p probe version/help | d runtime decisions | c create checkpoint | m preview native setting adoption | v review scoped rotation. Native settings are opt-in under Policies. Compression execution remains unobserved unless an adapter reports it.",_=>"p preview lifecycle → a confirm. Native ships with MACC; external adapters are optional. / current-code query | v compare with native | d inspect operation UUID."}.into());
+            lines.push(match self.tab{0=>"Q approved search | S semantic status | B labelled benchmark | G approve / X revoke → a confirm | y capture symbol | Y capture tool version | R review with captured evidence | h scoped MCP setup | e extract checkpoint → a confirm | n propose | p review → a confirm | c conflict | f toggle conflict list | v resolve selected conflict | l agent search page | g agent record fragment | b rebuild FTS. Only reviewed active current facts enter prompts.",1=>"Context manifests keep PRD/criteria and pinned source hashes separate from optional estimated memory. b reduce output and preserve raw artifact.",2=>"p probe version/help | d runtime decisions | c create checkpoint | m preview native setting adoption | v review scoped rotation. Native settings are opt-in under Policies. Compression execution remains unobserved unless an adapter reports it.",_=>"p preview lifecycle → a confirm. Native ships with MACC; external adapters are optional. / current-code query | v compare with native | d inspect operation UUID."}.into());
             for (i, row) in self.rows.iter().enumerate() {
                 let label = if self.tab == 0 && self.conflicts {
                     format!("{} | {} | {}", row["id"], row["status"], row["reason"])

@@ -15,6 +15,27 @@ pub enum O2Command {
     /// Serve scoped O2 MCP over stdio using runner-provided capability environment.
     Mcp,
     AgentStatus,
+    SemanticStatus {
+        #[arg(long)]
+        task: Option<String>,
+        #[arg(long)]
+        tool: Option<String>,
+        #[arg(long)]
+        worktree: Option<String>,
+        #[arg(long)]
+        feature: Option<String>,
+        #[arg(long)]
+        user: Option<String>,
+    },
+    SemanticBenchmark,
+    SemanticGate {
+        report_id: String,
+        checksum: String,
+        #[arg(long)]
+        revoke: bool,
+        #[arg(long)]
+        confirm: bool,
+    },
     MemoryExtract {
         checkpoint_id: String,
     },
@@ -169,6 +190,36 @@ impl Command for O2 {
         let action = match &self.command {
             O2Command::Mcp => unreachable!(),
             O2Command::AgentStatus => Action::AgentStatus,
+            O2Command::SemanticStatus {
+                task,
+                tool,
+                worktree,
+                feature,
+                user,
+            } => Action::SemanticStatus {
+                access: memory::Access {
+                    task_id: task.clone(),
+                    tool_id: tool.clone(),
+                    worktree: worktree.clone(),
+                    feature: feature.clone(),
+                    user_id: user.clone(),
+                },
+            },
+            O2Command::SemanticBenchmark => Action::SemanticBenchmark {
+                suite: serde_json::from_str(&stdin()?)
+                    .map_err(|e| MaccError::Validation(e.to_string()))?,
+            },
+            O2Command::SemanticGate {
+                report_id,
+                checksum,
+                revoke,
+                confirm,
+            } => Action::SemanticGate {
+                report_id: report_id.clone(),
+                checksum: checksum.clone(),
+                enabled: !*revoke,
+                confirmed: *confirm,
+            },
             O2Command::MemoryExtract { checkpoint_id } => Action::MemoryExtract {
                 checkpoint_id: checkpoint_id.clone(),
             },

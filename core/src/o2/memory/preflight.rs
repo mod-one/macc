@@ -42,6 +42,7 @@ pub(crate) struct PreparedFreshness {
     policy: String,
     at: Option<Instant>,
     entries: BTreeMap<String, Entry>,
+    pub(crate) semantic: crate::o2::semantic::Selection,
 }
 fn policy_hash(p: &impl serde::Serialize) -> Result<String> {
     Ok(digest(
@@ -80,7 +81,7 @@ fn executables(
     }
     Ok(values)
 }
-fn prepare(
+pub(crate) fn prepare(
     root: &Path,
     target: &Path,
     db: &rusqlite::Connection,
@@ -94,6 +95,7 @@ fn prepare(
         policy: policy_hash(&p)?,
         at: Some(Instant::now()),
         entries: BTreeMap::new(),
+        semantic: Default::default(),
     };
     let mut checker = Checker::new(root, target, db, &p.memory);
     for m in records {
@@ -121,18 +123,35 @@ fn prepare(
     }
     Ok(result)
 }
+impl PreparedFreshness {
+    pub(crate) fn verified(&self, id: &str) -> bool {
+        self.entries.get(id).is_some_and(|e| e.result.is_ok())
+    }
+}
 pub(crate) fn prepare_search(root: &Path, r: &Search) -> Result<PreparedFreshness> {
     let p = super::super::policy::load(root)?;
     let (db, a) = super::super::readonly_database(root)?;
     if !p.memory.enabled && !r.include_inactive {
         return Ok(Default::default());
     }
+    let semantic = if p.memory.semantic_enabled && !r.include_inactive && !r.query.trim().is_empty()
+    {
+        match crate::o2::semantic::expand(root, r) {
+            Ok(Some(prepared)) => return Ok(prepared),
+            Ok(None) => "Local semantics has no matching approved benchmark; FTS retained".into(),
+            Err(e) => format!("Local semantics unavailable: {e}; FTS retained"),
+        }
+    } else {
+        String::new()
+    };
     let target = super::super::providers::native_worktree(root, r.access.worktree.as_deref())?;
     let records = super::search::candidates(&db, &a.project_id, r)?
         .into_iter()
         .filter(|m| m.status == "active")
         .collect();
-    prepare(root, &target, &db, &a.project_id, records)
+    let mut prepared = prepare(root, &target, &db, &a.project_id, records)?;
+    prepared.semantic.diagnostic = semantic;
+    Ok(prepared)
 }
 pub(crate) fn prepare_records(root: &Path, ids: &[String]) -> Result<PreparedFreshness> {
     let (db, a) = super::super::readonly_database(root)?;

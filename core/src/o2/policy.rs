@@ -13,6 +13,16 @@ pub struct Policy {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct MemoryPolicy {
+    pub semantic_enabled: bool,
+    pub semantic_backend: String,
+    pub semantic_dimensions: u64,
+    pub semantic_candidates: u64,
+    pub semantic_vocabulary: u64,
+    pub semantic_weight: u64,
+    pub semantic_min_similarity: f64,
+    pub semantic_max_ms: u64,
+    pub semantic_max_bytes: u64,
+    pub semantic_min_recall_gain: f64,
     pub enabled: bool,
     pub phase_extraction_enabled: bool,
     pub mcp_enabled: bool,
@@ -94,6 +104,16 @@ pub struct CodePolicy {
 impl Default for MemoryPolicy {
     fn default() -> Self {
         Self {
+            semantic_enabled: false,
+            semantic_backend: "local_lsa".into(),
+            semantic_dimensions: 8,
+            semantic_candidates: 128,
+            semantic_vocabulary: 256,
+            semantic_weight: 100,
+            semantic_min_similarity: 0.15,
+            semantic_max_ms: 1000,
+            semantic_max_bytes: 8388608,
+            semantic_min_recall_gain: 0.05,
             enabled: false,
             phase_extraction_enabled: false,
             mcp_enabled: false,

@@ -13,6 +13,7 @@ pub mod policy;
 mod probe_tests;
 pub mod providers;
 mod schema;
+pub mod semantic;
 #[cfg(test)]
 mod tests;
 pub use schema::{ready, upgrade};

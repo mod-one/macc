@@ -195,3 +195,7 @@ Tests use a temporary registered future-tool fixture, never a paid AI service.
 [P3-B native map](O2_P3_NATIVE_MAP.md) adds optional Tree-sitter navigation and
 incremental declaration/signature artifacts for Rust, Python, TypeScript and TSX.
 It preserves the Rust memory-fingerprint recipe and explicit evidence review.
+
+[P3-C semantic retrieval](O2_P3_SEMANTIC_SEARCH.md) can supplement FTS after an
+explicitly reviewed local benchmark. It preserves all freshness/scope/lifecycle
+filters and never promotes a memory.
