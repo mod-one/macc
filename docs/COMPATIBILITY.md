@@ -21,7 +21,7 @@ This document defines runtime and contributor compatibility targets for MACC.
 
 ## Rust Version
 
-- Minimum Supported Rust Version (MSRV): **1.78.0**
+- Minimum Supported Rust Version (MSRV): **1.88.0**
 - Target channel in CI: stable
 
 Contributors should avoid introducing features that require a newer compiler without explicitly updating this policy and CI.

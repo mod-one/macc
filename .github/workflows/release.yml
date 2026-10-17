@@ -42,9 +42,15 @@ jobs:
 from pathlib import Path
 import sys
 import tomllib
-with Path(sys.argv[1]).open('rb') as fh:
+manifest = Path(sys.argv[1])
+with manifest.open('rb') as fh:
     data = tomllib.load(fh)
-print(data['package']['version'])
+version = data['package']['version']
+if isinstance(version, dict) and version.get('workspace') is True:
+    with Path('Cargo.toml').open('rb') as wfh:
+        wdata = tomllib.load(wfh)
+    version = wdata['workspace']['package']['version']
+print(version)
 PY2
           }
 

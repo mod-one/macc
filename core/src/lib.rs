@@ -1754,6 +1754,26 @@ mod tests {
     #[test]
     fn test_version() {
         assert!(!version().is_empty());
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("core crate inside repo root");
+        for rel in ["Cargo.toml", "adapters/Cargo.toml"] {
+            let content =
+                fs::read_to_string(repo_root.join(rel)).expect("workspace manifest readable");
+            let parsed: toml::Value = toml::from_str(&content).expect("valid TOML");
+            let ws_version = parsed
+                .get("workspace")
+                .and_then(|w| w.get("package"))
+                .and_then(|p| p.get("version"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_else(|| panic!("missing [workspace.package].version in {}", rel));
+            assert_eq!(
+                ws_version,
+                version(),
+                "[workspace.package].version in {} must match macc_core::version()",
+                rel
+            );
+        }
     }
 
     #[test]

@@ -4,5 +4,17 @@ members = [
     "cli",
     "tui",
     "registry",
+    "adapters/shared",
+    "adapters/gemini",
+    "adapters/claude",
+    "adapters/codex",
+    "adapters/vibe",
+    "adapters/agy",
 ]
 resolver = "2"
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.88.0"
+
