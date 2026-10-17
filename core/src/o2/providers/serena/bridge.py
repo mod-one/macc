@@ -25,15 +25,11 @@ def audit(event, args):
     if event == "subprocess.Popen":
         if list(args[1]) != ["/bin/sh", "-c", shlex.join(server_argv)] or args[0] != "/bin/sh" or is_server:
             raise PermissionError("MACC Serena: only the pinned Jedi stdio child is allowed")
-    if event == "open":
-        path, mode, flags = args
-        writing = (mode and any(c in mode for c in "wax+")) or (
-            flags and flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC))
-        if writing and isinstance(path, (str, bytes, os.PathLike)):
-            if not Path(os.fsdecode(path)).resolve().is_relative_to(work):
-                raise PermissionError("MACC Serena: write outside owned scratch")
+    filesystem_audit(work, event, args)  # Shared guard prepended by runtime.rs.
 
 
+
+install_filesystem_guard(work)
 logging.basicConfig(level=logging.WARNING)
 sys.addaudithook(audit)
 if is_server:

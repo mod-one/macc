@@ -132,7 +132,13 @@ replacing a pending reviewed operation or scheduling an endless refresh loop.
 
 Both Python processes use the managed bridge. Python audit hooks reject network
 connection/bind/name resolution, arbitrary child commands and file writes outside
-scratch. The one allowed subprocess is the fixed managed Jedi launch command;
+scratch. The same shared filesystem guard as Graphify checks unlink, directory
+creation/removal, both rename/link paths, metadata/truncation and symlink escapes.
+Creating symlinks and descriptor-relative mutations/open calls are disabled;
+writable descriptors must resolve to scratch. The full bridge digest includes
+this guard, so an older installation requires a reviewed **install**/**update**
+before reuse. A query never silently patches the installed bridge.
+The one allowed subprocess is the fixed managed Jedi launch command;
 no query text or PRD string enters that command. Upstream's launcher uses a shell
 for this fixed, quoted command. Jedi uses a same-process inference environment with
 unsafe interpreter execution disabled, preventing its unguarded helper interpreter.

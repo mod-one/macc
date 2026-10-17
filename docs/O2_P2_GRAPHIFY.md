@@ -89,7 +89,12 @@ wall-clock/output bounds, CPU/address-space limits, serialized package downloads
 installation and one AST worker. Linux
 parent-death signals and process-group cleanup terminate failed/overdue commands.
 The Python launcher rejects network sockets, subprocesses, exec/fork and writes
-outside the operation workspace. MACC pins `PYTHONHASHSEED=0` before invoking
+outside the operation workspace. A shared Python guard also checks directory
+creation/removal, unlink, both sides of rename/hard-link operations, metadata
+changes, truncation and paths through symlinks. Creating symlinks is disabled.
+Descriptor-relative mutations/open calls are rejected; writable file descriptors
+must resolve to an owned scratch path. Byte paths obey the same checks.
+MACC pins `PYTHONHASHSEED=0` before invoking
 Graphify, preventing its upstream hash-seed re-exec from discarding `-I`, `-B`
 and the audit hook. Bytecode caches are disabled and their prefix is confined
 to scratch storage. These are defense-in-depth controls around trusted pinned
@@ -158,6 +163,18 @@ preconditions and stages a fresh attempt; a completed plan replays its receipt.
 Failed/interrupted attempts and their logs are retained for inspection, outside
 active ownership receipts. They are never automatically adopted or recursively
 deleted; operator cleanup must inspect them first. No daemon is added.
+
+## Launcher compatibility after a MACC update
+
+Runtime receipts and index compatibility include the SHA-256 of the complete
+launcher, including the shared filesystem guard. A missing/different digest in an
+older receipt makes that runtime ineligible for query/deploy/index/rollback;
+queries retain native fallback and health explains the mismatch. No SQLite schema
+migration or silent launcher overwrite occurs. Recreate pending plans, then
+preview/apply **update** for a deployed runtime, or **install** followed by
+**deploy** and **index** for an installed/disabled runtime. Existing ownership
+proofs still govern cleanup and preserve user changes. Rollback to a generation
+with an obsolete launcher is rejected; retain it for inspection or reviewed removal.
 
 ## Validation and upstream references
 

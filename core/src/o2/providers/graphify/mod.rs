@@ -55,7 +55,7 @@ impl CodeIntelligenceProvider for Graphify {
             return Err(error("Enable managed Graphify in Code Intelligence policies before planning this operation"));
         }
         Ok(
-            json!({"package":"graphifyy","version":runtime::VERSION,"requirements_sha256":digest(runtime::LOCK.as_bytes()),"download_bytes_upper_bound":34153890,"dependency_count":30,"python":"3.12","scope":"project-isolated","mode":"code-only; no cloud/API keys; no assistant registration","query_and_index_timeout_seconds":p.graphify_timeout_seconds,"memory_limit_mib":p.graphify_memory_mb,"tools":if self.network_operation(action){runtime::tools(root,p)?}else{Value::Null}}),
+            json!({"package":"graphifyy","version":runtime::VERSION,"requirements_sha256":digest(runtime::LOCK.as_bytes()),"launcher_sha256":digest(runtime::LAUNCHER.as_bytes()),"download_bytes_upper_bound":34153890,"dependency_count":30,"python":"3.12","scope":"project-isolated","mode":"code-only; no cloud/API keys; no assistant registration","query_and_index_timeout_seconds":p.graphify_timeout_seconds,"memory_limit_mib":p.graphify_memory_mb,"tools":if self.network_operation(action){runtime::tools(root,p)?}else{Value::Null}}),
         )
     }
     fn detect(&self, root: &Path) -> Result<Detection> {

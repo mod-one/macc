@@ -1,5 +1,7 @@
 //! Code intelligence port and owned, reviewed lifecycle; external adapters register here.
 mod compare;
+#[cfg(test)]
+mod filesystem_guard_tests;
 mod generation;
 mod graphify;
 mod lifecycle;

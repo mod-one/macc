@@ -281,10 +281,8 @@ fn updates_rollback_dependency_failure_and_gitignore_are_explicit() {
 #[test]
 fn bridge_rejects_network_arbitrary_children_and_external_writes() {
     let t = tempfile::tempdir().unwrap();
-    let prefix = include_str!("bridge.py")
-        .split("logging.basicConfig")
-        .next()
-        .unwrap();
+    let prefix = runtime::BRIDGE.split("logging.basicConfig").next().unwrap();
+    super::super::filesystem_guard_tests::mutations(prefix);
     let code = format!(
         "__file__='/managed/bridge.py'\n{prefix}\n{}",
         r#"

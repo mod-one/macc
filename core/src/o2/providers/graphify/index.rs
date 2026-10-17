@@ -36,7 +36,7 @@ pub(super) fn settings(root: &Path, p: &super::super::super::policy::CodePolicy)
     }
     let names = crate::git::tracked_source_files(root)?;
     let ignored = ignored(root, &names)?;
-    Ok(digest(&serde_json::to_vec(&json!({"policy":{"max_files":p.max_files,"max_file_bytes":p.max_file_bytes,"corpus_max_bytes":p.graphify_corpus_max_bytes},"ignores":ignores,"ignored_paths":ignored,"lock":digest(runtime::LOCK.as_bytes())})).map_err(|e|error(e.to_string()))?))
+    Ok(digest(&serde_json::to_vec(&json!({"policy":{"max_files":p.max_files,"max_file_bytes":p.max_file_bytes,"corpus_max_bytes":p.graphify_corpus_max_bytes},"ignores":ignores,"ignored_paths":ignored,"lock":digest(runtime::LOCK.as_bytes()),"launcher":digest(runtime::LAUNCHER.as_bytes())})).map_err(|e|error(e.to_string()))?))
 }
 fn ignored(root: &Path, names: &[String]) -> Result<std::collections::BTreeSet<String>> {
     super::super::snapshot::ignored_paths(root, names, Some(".graphifyignore"))

@@ -355,6 +355,7 @@ fn offline_launcher_blocks_exec_fork_network_and_external_writes() {
         .split("sys.addaudithook(audit)")
         .next()
         .unwrap();
+    super::super::filesystem_guard_tests::mutations(prefix);
     let code = format!(
         r#"{prefix}
 sys.addaudithook(audit)
@@ -379,4 +380,51 @@ print('audit-boundary-ok')
     )
     .unwrap();
     assert!(text.contains("audit-boundary-ok"));
+}
+
+#[test]
+fn old_launcher_receipts_require_reviewed_update_and_keep_native_fallback() {
+    let t = setup(true);
+    let root = t.path();
+    apply(root, "install");
+    apply(root, "deploy");
+    let receipt = apply(root, "index");
+    let meta = receipt.metadata.clone().unwrap();
+    assert_eq!(
+        meta["launcher_sha256"],
+        digest(runtime::LAUNCHER.as_bytes())
+    );
+    for old in [Some("previous-launcher"), None] {
+        let mut legacy = receipt.clone();
+        let fields = legacy.metadata.as_mut().unwrap().as_object_mut().unwrap();
+        if let Some(hash) = old {
+            fields.insert("launcher_sha256".into(), json!(hash));
+        } else {
+            fields.remove("launcher_sha256");
+        }
+        assert!(runtime::verify(root, legacy.metadata.as_ref().unwrap()).is_err());
+        let (db, _) = database(root).unwrap();
+        db.execute(
+            "UPDATE provider_receipts SET receipt_json=?1 WHERE provider_id='graphify'",
+            [serde_json::to_string(&legacy).unwrap()],
+        )
+        .unwrap();
+        drop(db);
+        assert!(
+            matches!(super::super::query(root, &query()).unwrap(), Capability::Supported(QueryResult { provider_id, .. }) if provider_id == "native")
+        );
+    }
+    // Upgrade creates a new generation; the old immutable launcher is preserved.
+    let old_runtime = storage::owned(root, meta["runtime"].as_str().unwrap()).unwrap();
+    let old_launcher = std::fs::read(old_runtime.join("offline.py")).unwrap();
+    let updated = apply(root, "update");
+    assert_ne!(
+        updated.metadata.as_ref().unwrap()["runtime"],
+        meta["runtime"]
+    );
+    assert_eq!(
+        std::fs::read(old_runtime.join("offline.py")).unwrap(),
+        old_launcher
+    );
+    runtime::verify(root, updated.metadata.as_ref().unwrap()).unwrap();
 }

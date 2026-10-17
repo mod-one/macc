@@ -28,7 +28,13 @@ browser cannot guarantee restoration after unmount/reload.
 
 Task scope uses `?task=TASK`. Context and checkpoint detail links use a domain-local
 `id`; changing domain clears it to prevent treating one record type as another.
-Provider links use `?provider=ID`. These extend existing routes rather than adding
+Provider links use `?provider=ID`. Context and Memory inspectors clear displayed
+evidence, fragments and review confirmation when task/detail or access scope
+changes, including manual filter edits. Late search/detail/error responses are
+ignored, even after switching away and back. A scope change between evidence
+loading and a follow-up review write prevents that write from being submitted;
+an already accepted backend action is not rolled back or automatically retried.
+Proposal and raw-output drafts are retained separately from inspected evidence. These extend existing routes rather than adding
 separate backend state stores. Memory/source searches still require their existing
 explicit search action. The session screen applies exact task scope alongside its existing text filter;
 **Clear session task scope** returns to all tasks. It opens the linked checkpoint through the existing checksummed inspection service.

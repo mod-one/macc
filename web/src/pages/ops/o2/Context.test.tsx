@@ -1,0 +1,45 @@
+import { act, fireEvent, render, screen } from '@testing-library/react';
+import { beforeEach, expect, it, vi } from 'vitest';
+import Context from './Context';
+import { o2Action } from '../../../api/o2';
+vi.mock('../../../api/o2', () => ({ o2Action: vi.fn() }));
+beforeEach(() => vi.resetAllMocks());
+it('clears linked details when task or record identity changes, preserving the output draft', async () => {
+  vi.mocked(o2Action).mockResolvedValue({ task_id: 'A', evidence: 'context-A-only' });
+  const view = render(<Context taskScope="A" selectedId="context-A" />);
+  expect(await screen.findByText(/context-A-only/)).toBeVisible();
+  fireEvent.change(screen.getByLabelText('Raw output'), { target: { value: 'keep draft' } });
+  view.rerender(<Context taskScope="B" />);
+  expect(screen.getByLabelText('Filter context by task')).toHaveValue('B');
+  expect(screen.queryByText(/context-A-only/)).not.toBeInTheDocument();
+  expect(screen.getByLabelText('Raw output')).toHaveValue('keep draft');
+});
+it('rejects late detail responses and errors after manual scope edits or cleared IDs', async () => {
+  let resolve!: (value: unknown) => void;
+  vi.mocked(o2Action).mockImplementation(() => new Promise(r => { resolve = r; }));
+  const view = render(<Context taskScope="A" selectedId="context-A" />);
+  fireEvent.change(screen.getByLabelText('Filter context by task'), { target: { value: 'B' } });
+  await act(async () => { resolve({ evidence: 'obsolete-A' }); });
+  expect(screen.queryByText(/obsolete-A/)).not.toBeInTheDocument();
+  let reject!: (error: Error) => void;
+  vi.mocked(o2Action).mockImplementation(() => new Promise((_, r) => { reject = r; }));
+  view.rerender(<Context taskScope="B" selectedId="context-B" />);
+  view.rerender(<Context taskScope="B" />);
+  await act(async () => { reject(new Error('obsolete failure')); });
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Refresh context bundles' })).toBeEnabled();
+});
+it('ignores old list/reduction results after A to B to A and after unmount', async () => {
+  let resolve!: (value: unknown) => void;
+  vi.mocked(o2Action).mockImplementation(() => new Promise(r => { resolve = r; }));
+  const view = render(<Context taskScope="A" />);
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh context bundles' }));
+  view.rerender(<Context taskScope="B" />);
+  view.rerender(<Context taskScope="A" />);
+  await act(async () => { resolve([{ id: 'old', task_id: 'A', phase: 'old-list', optional_estimated_tokens: 1 }]); });
+  expect(screen.queryByText(/old-list/)).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Reduce and preserve raw evidence' })).toBeEnabled();
+  fireEvent.click(screen.getByRole('button', { name: 'Reduce and preserve raw evidence' }));
+  view.unmount();
+  await act(async () => { resolve({ evidence: 'unmounted' }); });
+});

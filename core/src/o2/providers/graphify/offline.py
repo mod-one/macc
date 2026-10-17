@@ -16,17 +16,11 @@ def audit(event, args):
         raise PermissionError("MACC code-only provider: network/command disabled")
     if event == "subprocess.Popen":
         raise PermissionError("MACC code-only provider: subprocess disabled")
-    if event == "open":
-        path, mode, flags = args
-        writing = (mode and any(c in mode for c in "wax+")) or (
-            flags and flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC)
-        )
-        if writing and isinstance(path, (str, bytes, os.PathLike)):
-            resolved = Path(os.fsdecode(path)).resolve()
-            if not resolved.is_relative_to(root):
-                raise PermissionError("MACC provider write outside owned workspace")
+    filesystem_audit(root, event, args)  # Shared guard prepended by runtime.rs.
 
 
+
+install_filesystem_guard(root)
 sys.addaudithook(audit)
 sys.argv = ["graphify", *sys.argv[1:]]
 runpy.run_module("graphify", run_name="__main__")

@@ -2,7 +2,13 @@
 use super::*;
 pub(super) const VERSION: &str = "0.9.92";
 pub(super) const LOCK: &str = include_str!("requirements.lock");
-pub(super) const LAUNCHER: &str = include_str!("offline.py");
+pub(super) static LAUNCHER: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!(
+        "{}\n{}",
+        include_str!("../filesystem_guard.py"),
+        include_str!("offline.py")
+    )
+});
 pub(super) fn tools(root: &Path, p: &super::super::super::policy::CodePolicy) -> Result<Value> {
     let python = super::super::process::executable(&p.graphify_python)?;
     let uv = super::super::process::executable(&p.graphify_uv)?;
@@ -45,9 +51,11 @@ pub(super) fn python(root: &Path, meta: &Value) -> Result<std::path::PathBuf> {
     Ok(base.join("venv/bin/python"))
 }
 pub(super) fn verify(root: &Path, meta: &Value) -> Result<()> {
-    if meta["lock_sha256"] != digest(LOCK.as_bytes()) {
+    if meta["lock_sha256"] != digest(LOCK.as_bytes())
+        || meta["launcher_sha256"] != digest(LAUNCHER.as_bytes())
+    {
         return Err(error(
-            "Graphify dependency lock changed; review an update before reuse",
+            "Graphify lock or launcher changed; review a new installation/update before reuse",
         ));
     }
     storage::verify(
@@ -156,7 +164,7 @@ pub(super) fn install(
             .to_string_lossy()
             .into_owned(),
     ])?;
-    let mut meta = json!({"runtime":generation,"base_python":python,"base_python_sha256":expected["python_sha256"],"lock_sha256":digest(LOCK.as_bytes())});
+    let mut meta = json!({"runtime":generation,"base_python":python,"base_python_sha256":expected["python_sha256"],"lock_sha256":digest(LOCK.as_bytes()),"launcher_sha256":digest(LAUNCHER.as_bytes())});
     let version = command(root, &meta, &["--version".into()], &work, p)?;
     if version.split_whitespace().last() != Some(VERSION) {
         return Err(error(

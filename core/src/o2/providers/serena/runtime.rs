@@ -2,7 +2,13 @@
 use super::*;
 pub(super) const VERSION: &str = "2.0.0";
 pub(super) const LOCK: &str = include_str!("requirements.lock");
-pub(super) const BRIDGE: &str = include_str!("bridge.py");
+pub(super) static BRIDGE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!(
+        "{}\n{}",
+        include_str!("../filesystem_guard.py"),
+        include_str!("bridge.py")
+    )
+});
 pub(super) fn owned(root: &Path, path: &str) -> Result<std::path::PathBuf> {
     super::super::generation::owned(root, "serena", path)
 }
