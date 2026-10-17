@@ -1,8 +1,8 @@
 import React from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
-import { FitAddon } from 'xterm-addon-fit';
-import { Terminal } from 'xterm';
-import 'xterm/css/xterm.css';
+import { FitAddon } from '@xterm/addon-fit';
+import { Terminal } from '@xterm/xterm';
+import '@xterm/xterm/css/xterm.css';
 import { buildWebSocketUrl, createTerminalSession } from '../api/client';
 import type { ApiTerminalCreateRequest } from '../api/models';
 import { Button } from './Button';

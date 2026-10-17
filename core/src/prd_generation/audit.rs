@@ -34,6 +34,59 @@ pub struct PrdAuditResult {
     pub dispatched: bool,
 }
 
+/// PRD files an audit run covers, in audit order.
+///
+/// `explicit` is a PRD file, or a directory whose `*.json` files holding a
+/// top-level `tasks` array are audited in name order. Without it, the
+/// coordinator PRD queue (`prd_files`) is used, then `prd_file`, then `prd.json`.
+pub fn resolve_audit_targets(
+    repo_root: &Path,
+    explicit: Option<&Path>,
+    coordinator: Option<&crate::config::CoordinatorConfig>,
+) -> crate::Result<Vec<PathBuf>> {
+    use crate::MaccError;
+    let Some(path) = explicit else {
+        if let Some(config) = coordinator.filter(|c| !c.prd_files.is_empty()) {
+            return Ok(config.prd_files.iter().map(|p| repo_root.join(p)).collect());
+        }
+        return Ok(vec![repo_root.join(
+            coordinator
+                .and_then(|c| c.prd_file.as_deref())
+                .unwrap_or("prd.json"),
+        )]);
+    };
+    let path = repo_root.join(path);
+    if !path.is_dir() {
+        return Ok(vec![path]);
+    }
+    let io = |e| MaccError::Io {
+        path: path.to_string_lossy().into(),
+        action: "read PRD directory".into(),
+        source: e,
+    };
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(&path).map_err(io)? {
+        let file = entry.map_err(io)?.path();
+        let is_prd = file.extension().is_some_and(|e| e == "json")
+            && file.is_file()
+            && std::fs::read_to_string(&file)
+                .ok()
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                .is_some_and(|value| value.get("tasks").is_some_and(|t| t.is_array()));
+        if is_prd {
+            files.push(file);
+        }
+    }
+    if files.is_empty() {
+        return Err(MaccError::Validation(format!(
+            "PRD-GEN-INPUT-MISSING: directory '{}' contains no PRD file (a .json file with a top-level tasks array)",
+            path.display()
+        )));
+    }
+    files.sort();
+    Ok(files)
+}
+
 /// Build the PRD audit prompt from commit history.
 ///
 /// Always returns `dispatched: false` — this module never invokes a tool.
@@ -158,4 +211,56 @@ fn parse_task_registry(
         tasks: shape.tasks.unwrap_or_default(),
         ..Default::default()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn coordinator(yaml: &str) -> crate::config::CoordinatorConfig {
+        serde_yaml::from_str(yaml).unwrap()
+    }
+
+    #[test]
+    fn targets_default_to_the_prd_queue_then_prd_file_then_prd_json() {
+        let root = Path::new("/project");
+        let queue = coordinator("prd_file: legacy.json\nprd_files: [docs/b.json, docs/a.json]");
+        assert_eq!(
+            resolve_audit_targets(root, None, Some(&queue)).unwrap(),
+            vec![root.join("docs/b.json"), root.join("docs/a.json")]
+        );
+        let single = coordinator("prd_file: plan/prd.json");
+        assert_eq!(
+            resolve_audit_targets(root, None, Some(&single)).unwrap(),
+            vec![root.join("plan/prd.json")]
+        );
+        assert_eq!(
+            resolve_audit_targets(root, None, None).unwrap(),
+            vec![root.join("prd.json")]
+        );
+    }
+
+    #[test]
+    fn explicit_target_is_a_file_or_the_prd_files_of_a_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let dir = root.join("docs/prd");
+        std::fs::create_dir_all(dir.join("nested.json")).unwrap();
+        std::fs::write(dir.join("02-b.prd.json"), r#"{"tasks":[]}"#).unwrap();
+        std::fs::write(dir.join("01-a.prd.json"), r#"{"tasks":[]}"#).unwrap();
+        std::fs::write(dir.join("schema.json"), r#"{"type":"object"}"#).unwrap();
+        std::fs::write(dir.join("notes.md"), "tasks").unwrap();
+        let queue = coordinator("prd_files: [other.json]");
+        assert_eq!(
+            resolve_audit_targets(root, Some(Path::new("docs/prd")), Some(&queue)).unwrap(),
+            vec![dir.join("01-a.prd.json"), dir.join("02-b.prd.json")]
+        );
+        assert_eq!(
+            resolve_audit_targets(root, Some(Path::new("docs/prd/01-a.prd.json")), None).unwrap(),
+            vec![dir.join("01-a.prd.json")]
+        );
+        std::fs::create_dir_all(root.join("empty")).unwrap();
+        let error = resolve_audit_targets(root, Some(Path::new("empty")), None).unwrap_err();
+        assert!(error.to_string().contains("PRD-GEN-INPUT-MISSING"));
+    }
 }

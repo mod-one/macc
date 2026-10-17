@@ -875,14 +875,14 @@ pub trait Engine {
     ) -> Result<CoordinatorStatusSnapshot> {
         let paths = CoordinatorStoragePaths::from_project_paths(project_paths);
         let sqlite = SqliteStorage::new(paths.clone());
-        let snapshot: CoordinatorSnapshot = if sqlite.has_snapshot_data()? {
-            sqlite.load_snapshot()?
+        let registry = if sqlite.has_snapshot_data()? {
+            sqlite.load_registry()?
         } else {
-            JsonStorage::new(paths).load_snapshot()?
+            JsonStorage::new(paths).load_snapshot()?.registry
         };
 
         let mut counts = CoordinatorStatusSnapshot::default();
-        let (total, todo, active, blocked, merged) = snapshot.registry.counts();
+        let (total, todo, active, blocked, merged) = registry.counts();
         counts.total = total;
         counts.todo = todo;
         counts.active = active;
@@ -1280,7 +1280,16 @@ pub trait Engine {
     /// This is the single authoritative point for tool invocation in the PRD
     /// generation / audit flow. CLI, TUI, and Web must go through this method;
     /// they must never call `service::context::invoke_tool_with_prompt` directly.
-    fn prd_invoke_tool(&self, paths: &ProjectPaths, tool_id: &str, prompt: &str) -> Result<()> {
+    ///
+    /// `model` is an explicit model (`--model-routing manual --model <id>`);
+    /// without one, the tool's configured model is used.
+    fn prd_invoke_tool(
+        &self,
+        paths: &ProjectPaths,
+        tool_id: &str,
+        prompt: &str,
+        model: Option<&str>,
+    ) -> Result<()> {
         use crate::tool::ToolSpecLoader;
         use crate::MaccError;
 
@@ -1306,7 +1315,9 @@ pub trait Engine {
             ))
         })?;
 
-        crate::service::context::invoke_tool_with_prompt(paths, performer, prompt, None)
+        let canonical = crate::load_canonical_config(&paths.config_path)?;
+        let run = crate::service::context::ToolRun::resolve(spec, &canonical, model);
+        crate::service::context::invoke_tool_with_prompt(paths, performer, &run, prompt, None)
     }
 
     /// Build the audit prompt and, when a tool is configured and `dry_run` is
@@ -1321,7 +1332,11 @@ pub trait Engine {
         // run_prd_audit is prompt-only; dispatch is handled here in the facade.
         if result.prompt_generated && !request.dry_run {
             if let (Some(ref tool_id), Some(ref prompt)) = (&request.tool, &result.prompt) {
-                self.prd_invoke_tool(paths, tool_id, prompt)?;
+                let model = request
+                    .model_selection
+                    .as_ref()
+                    .and_then(|selection| selection.model.as_deref());
+                self.prd_invoke_tool(paths, tool_id, prompt, model)?;
                 result.dispatched = true;
             }
         }
@@ -1796,7 +1811,7 @@ pub struct CoordinatorEvent {
 }
 
 impl CoordinatorEvent {
-    fn from_record(record: crate::coordinator::CoordinatorEventRecord) -> Self {
+    pub fn from_record(record: crate::coordinator::CoordinatorEventRecord) -> Self {
         let raw = serde_json::to_value(&record)
             .unwrap_or_else(|_| serde_json::json!({ "event_id": record.event_id }));
         Self {

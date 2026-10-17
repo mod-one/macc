@@ -116,6 +116,30 @@ pub fn coordinator_start_managed_command_process_with_pid(
     cfg: Option<&CoordinatorConfig>,
     client_id: Option<&str>,
 ) -> Result<i32> {
+    let _lock = crate::fs_lock::AdvisoryLock::acquire(
+        &paths.root.join(".macc/state/supervisor-intervention.lock"),
+        std::time::Duration::ZERO,
+        "coordinator launch during supervisor intervention",
+    )?;
+    start_managed_inner(paths, command, args, cfg, client_id)
+}
+
+/// Restart while the caller holds the exclusive intervention lock.
+pub fn coordinator_restart_after_intervention(
+    paths: &ProjectPaths,
+    cfg: Option<&CoordinatorConfig>,
+    _lock: &crate::fs_lock::AdvisoryLock,
+) -> Result<i32> {
+    start_managed_inner(paths, "run", &[], cfg, None)
+}
+
+fn start_managed_inner(
+    paths: &ProjectPaths,
+    command: &str,
+    args: &[String],
+    cfg: Option<&CoordinatorConfig>,
+    client_id: Option<&str>,
+) -> Result<i32> {
     let key = handle_key(paths, command);
     if let CoordinatorManagedCommandPoll::Running { command, .. } =
         coordinator_poll_managed_command_process(paths)?
@@ -193,6 +217,20 @@ pub fn coordinator_poll_managed_command_process(
         let code = std::fs::read_to_string(&result_path)
             .ok()
             .and_then(|raw| raw.trim().parse::<i32>().ok());
+        // The exit may be observed hours later (a client opened afterwards):
+        // report how long the command ran, not how long ago it started.
+        let elapsed_secs = std::fs::metadata(&result_path)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .zip(chrono::DateTime::parse_from_rfc3339(&record.started_at).ok())
+            .and_then(|(finished, started)| {
+                chrono::DateTime::<chrono::Utc>::from(finished)
+                    .signed_duration_since(started)
+                    .to_std()
+                    .ok()
+            })
+            .map(|ran| ran.as_secs())
+            .unwrap_or(elapsed_secs);
         let _ = remove_managed_command(paths, &record.kind)?;
         let _ = std::fs::remove_file(result_path);
         Ok(CoordinatorManagedCommandPoll::Exited {
@@ -370,10 +408,25 @@ fn coordinator_start_command_process_with_pid(
         cmd = wrap_command_with_exit_record(cmd, root, command)?;
     }
 
+    let log_dir = paths.root.join(".macc/log/coordinator");
+    std::fs::create_dir_all(&log_dir).map_err(|source| MaccError::Io {
+        path: log_dir.display().to_string(),
+        action: "create coordinator daemon logs".into(),
+        source,
+    })?;
+    let stderr = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_dir.join("daemon-stderr.log"))
+        .map_err(|source| MaccError::Io {
+            path: log_dir.display().to_string(),
+            action: "open coordinator daemon stderr".into(),
+            source,
+        })?;
     cmd.env("MACC_INTERNAL_INVOCATION", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::from(stderr));
 
     // Detach from the controlling terminal so the coordinator survives SSH
     // session close.  setsid(2) creates a new session with no controlling
@@ -390,7 +443,9 @@ fn coordinator_start_command_process_with_pid(
         // child always satisfies this.
         unsafe {
             cmd.pre_exec(|| {
-                libc::setsid();
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
                 Ok(())
             });
         }
@@ -461,7 +516,8 @@ fn wrap_command_with_exit_record(
         .env("MACC_MANAGED_COMMAND_KIND", safe_kind)
         .arg("-c")
         .arg(
-            r#""$@"
+            r#"export MACC_COORDINATOR_READY_FILE="$MACC_MANAGED_RESULT_DIR/$MACC_MANAGED_COMMAND_KIND-$$.ready"
+"$@"
 status=$?
 result_path="$MACC_MANAGED_RESULT_DIR/$MACC_MANAGED_COMMAND_KIND-$$.exit"
 tmp_path="$result_path.tmp"
@@ -675,19 +731,18 @@ fn pid_is_alive(pid: i32) -> bool {
 /// a normal full-completion.
 fn read_dispatch_limit_reason(paths: &ProjectPaths, started_at: &str) -> Option<String> {
     use crate::coordinator_storage::{
-        CoordinatorSnapshot, CoordinatorStorage, CoordinatorStoragePaths, JsonStorage,
-        SqliteStorage,
+        CoordinatorStorage, CoordinatorStoragePaths, JsonStorage, SqliteStorage,
     };
     let storage_paths = CoordinatorStoragePaths::from_project_paths(paths);
     let sqlite = SqliteStorage::new(storage_paths.clone());
-    let snapshot: CoordinatorSnapshot = if sqlite.has_snapshot_data().unwrap_or(false) {
-        sqlite.load_snapshot().ok()?
+    let events = if sqlite.has_snapshot_data().unwrap_or(false) {
+        sqlite.load_recent_events(20).ok()?
     } else {
-        JsonStorage::new(storage_paths).load_snapshot().ok()?
+        JsonStorage::new(storage_paths).load_snapshot().ok()?.events
     };
     let started_at = chrono::DateTime::parse_from_rfc3339(started_at).ok()?;
     // Scan recent events from this command only for the dispatch-limit marker.
-    for event in snapshot.events.iter().rev().take(20) {
+    for event in events.iter().rev().take(20) {
         let in_scope = chrono::DateTime::parse_from_rfc3339(&event.ts)
             .ok()
             .is_some_and(|timestamp| timestamp >= started_at);

@@ -6,6 +6,7 @@ import CommandPalette from './CommandPalette';
 import { NotificationsDrawer } from './NotificationsDrawer';
 import RouteLoadingSkeleton from './RouteLoadingSkeleton';
 import { StatusBadge } from './StatusBadge';
+import { ApprovalCenter } from './ApprovalDialog';
 import { useNotificationStore } from '../stores/notificationStore';
 import { useNotificationCenter } from '../hooks/useNotificationCenter';
 import {
@@ -464,6 +465,7 @@ const Layout: React.FC = () => {
           {/* Coordinator status — center */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
             <StatusBadge status={coordState.label} tone={coordState.tone} className="px-2 py-0.5 text-[11px]" />
+            <ApprovalCenter />
             {activeWorkers > 0 && (
               <span style={{ fontSize: '11px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
                 {activeWorkers}w

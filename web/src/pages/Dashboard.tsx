@@ -14,6 +14,7 @@ import type {
 import { Button } from '../components/Button';
 import { StatusBadge, type StatusTone } from '../components/StatusBadge';
 import { OwnershipBadge } from '../components/OwnershipBadge';
+import { SupervisorRow } from '../components/SupervisorRow';
 import { TakeoverNotificationToast } from '../components/TakeoverNotificationToast';
 import { AlertTriangleIcon, MinusIcon, RefreshIcon, XCircleIcon } from '../components/icons';
 import { cn } from '../components/styles';
@@ -581,9 +582,27 @@ const Dashboard: React.FC = () => {
       {/* Queue strip */}
       {queueStats && (
         <div
-          className="flex overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-card)]"
+          className="overflow-hidden rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-card)]"
           style={{ boxShadow: 'var(--shadow-soft)' }}
         >
+          {/* Several PRD files can be queued: name the one being executed. */}
+          {snapshot?.prd && (
+            <div
+              className="flex items-center gap-2 border-b border-[var(--border)] px-4 py-2 text-xs"
+              data-testid="current-prd"
+              title={snapshot.prd.path}
+            >
+              <span className="font-semibold uppercase tracking-wide text-[var(--text-muted)]">PRD</span>
+              <span className="min-w-0 truncate font-medium text-[var(--text-primary)]">{snapshot.prd.name}</span>
+              {snapshot.prd.total > 1 && (
+                <span className="shrink-0 tabular-nums text-[var(--text-muted)]">
+                  {snapshot.prd.position}/{snapshot.prd.total}
+                  {snapshot.prd.completed ? ' done' : ''}
+                </span>
+              )}
+            </div>
+          )}
+          <div className="flex">
           {queueStats.map((stat, index) => (
             <div
               key={stat.label}
@@ -601,6 +620,7 @@ const Dashboard: React.FC = () => {
               <span className="mt-1.5 text-[11px] text-[var(--text-muted)]">{stat.label}</span>
             </div>
           ))}
+          </div>
         </div>
       )}
 
@@ -617,6 +637,12 @@ const Dashboard: React.FC = () => {
               {hasSnapshotWorkers ? snapshot!.workers.length : worktreeMetrics.total} total
             </span>
           </div>
+
+          {snapshot?.supervisor && (
+            <ul className="border-b border-[var(--border)]">
+              <SupervisorRow supervisor={snapshot.supervisor} />
+            </ul>
+          )}
 
           {hasSnapshotWorkers ? (
             <ul className="divide-y divide-[var(--border-subtle)]">

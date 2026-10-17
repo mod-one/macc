@@ -129,7 +129,14 @@ pub fn remove_all_worktrees(root: &Path, remove_branches: bool) -> Result<usize>
     let mut removed = 0usize;
 
     for entry in entries {
-        if entry.path == root_canon {
+        if entry.path == root_canon
+            || entry
+                .path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("supervisor-"))
+        {
+            // Supervisor evidence and unintegrated repairs have their own safe lifecycle.
             continue;
         }
         let branch = entry.branch.clone();

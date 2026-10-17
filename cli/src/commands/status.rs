@@ -51,6 +51,10 @@ fn print_status_human(snapshot: &RuntimeSnapshot, events_count: usize, verbose: 
 
     // Coordinator section
     print_coordinator_section(&snapshot.coordinator);
+    crate::coordinator::command::print_pending_approvals(
+        &snapshot.coordinator.pending_approvals,
+        false,
+    );
     println!();
 
     // Tasks section
@@ -63,6 +67,11 @@ fn print_status_human(snapshot: &RuntimeSnapshot, events_count: usize, verbose: 
     println!("  changes_requested: {}", q.changes_requested);
     println!("  blocked:           {}", q.blocked);
     println!("  merged:            {}", q.merged);
+    if q.waiting_approval + q.approved + q.rejected > 0 {
+        println!("  waiting_approval:  {}", q.waiting_approval);
+        println!("  approved:          {}", q.approved);
+        println!("  rejected:          {}", q.rejected);
+    }
     println!("  failed:            {}", q.failed);
     println!();
 
@@ -172,7 +181,20 @@ fn print_coordinator_section(coord: &CoordinatorStatus) {
                 let code = summary.error_code.as_deref().unwrap_or("unknown error");
                 println!("  Root cause:  {} ({})", task_id, code);
             }
-            println!("  Cause:       {}", summary.cause);
+            if summary.unmet_preconditions.is_empty() {
+                println!("  Cause:       {}", summary.cause);
+            } else {
+                // E903: the task is correct but cannot proceed. Show the
+                // conditions as a list, not a one-line failure string.
+                println!(
+                    "  Cause:       {} cannot be implemented because the following precondition{} not satisfied:",
+                    summary.task_id.as_deref().unwrap_or("the blocked task"),
+                    if summary.unmet_preconditions.len() == 1 { " is" } else { "s are" }
+                );
+                for item in &summary.unmet_preconditions {
+                    println!("                 - {}", item);
+                }
+            }
             if !summary.dependent_task_ids.is_empty() {
                 println!("  Dependents:  {}", summary.dependent_task_ids.join(", "));
             }

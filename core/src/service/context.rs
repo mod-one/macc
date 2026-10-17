@@ -75,7 +75,8 @@ pub fn run_generation(
             })?;
         }
 
-        invoke_context_tool(paths, performer, &prompt, None)?;
+        let run = ToolRun::resolve(spec, &canonical, None);
+        invoke_context_tool(paths, performer, &run, &prompt, None)?;
 
         if !target_abs.is_file() {
             return Err(MaccError::Validation(format!(
@@ -320,15 +321,72 @@ fn truncate_text_for_prompt(input: &str, max_chars: usize) -> String {
 pub fn invoke_tool_with_prompt(
     paths: &ProjectPaths,
     performer: &ToolPerformerSpec,
+    run: &ToolRun,
     prompt: &str,
     logger: Option<&dyn crate::coordinator::control_plane::CoordinatorLog>,
 ) -> crate::Result<()> {
-    invoke_context_tool(paths, performer, prompt, logger)
+    invoke_context_tool(paths, performer, run, prompt, logger)
+}
+
+/// Model and effort of a direct tool call (no performer script involved).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ToolRun {
+    pub model: String,
+    pub effort: String,
+}
+
+impl ToolRun {
+    /// `explicit_model` wins, then the tier named by `MACC_MODEL_TIER`
+    /// (`--model-tier`), then the tool's configured model and effort. Empty
+    /// values leave the choice to the tool itself.
+    pub fn resolve(
+        spec: &crate::tool::ToolSpec,
+        canonical: &crate::config::CanonicalConfig,
+        explicit_model: Option<&str>,
+    ) -> Self {
+        let tier = std::env::var("MACC_MODEL_TIER").ok();
+        Self::resolve_with_tier(spec, canonical, explicit_model, tier.as_deref())
+    }
+
+    fn resolve_with_tier(
+        spec: &crate::tool::ToolSpec,
+        canonical: &crate::config::CanonicalConfig,
+        explicit_model: Option<&str>,
+        tier: Option<&str>,
+    ) -> Self {
+        let nonempty = |value: Option<String>| value.filter(|v| !v.trim().is_empty());
+        let tier = tier
+            .filter(|name| !name.trim().is_empty())
+            .and_then(|name| {
+                canonical
+                    .tools
+                    .config
+                    .get(&spec.id)
+                    .and_then(|cfg| cfg.get("model_tiers"))
+                    .and_then(|tiers| tiers.get(name))
+                    .and_then(|value| {
+                        serde_json::from_value::<crate::tool::ModelTierSpec>(value.clone()).ok()
+                    })
+                    .or_else(|| spec.model_tiers.get(name).cloned())
+            });
+        let explicit = nonempty(explicit_model.map(str::to_owned));
+        // An explicit model is not paired with a tier's effort.
+        let tier = tier.filter(|_| explicit.is_none());
+        let model = explicit
+            .or_else(|| nonempty(tier.as_ref().map(|t| t.model.clone())))
+            .or_else(|| nonempty(crate::worktree::resolve_tool_model(spec, canonical)))
+            .unwrap_or_default();
+        let effort = nonempty(tier.and_then(|t| t.effort))
+            .or_else(|| nonempty(crate::worktree::resolve_tool_effort(spec, canonical)))
+            .unwrap_or_default();
+        Self { model, effort }
+    }
 }
 
 fn invoke_context_tool(
     paths: &ProjectPaths,
     performer: &ToolPerformerSpec,
+    run: &ToolRun,
     prompt: &str,
     logger: Option<&dyn crate::coordinator::control_plane::CoordinatorLog>,
 ) -> Result<()> {
@@ -341,7 +399,17 @@ fn invoke_context_tool(
 
     let mut cmd = std::process::Command::new(&performer.command);
     cmd.current_dir(&paths.root);
-    cmd.args(&performer.args);
+    // The spec's arguments are a template: a literal `{model}` must not reach the tool.
+    cmd.args(crate::tool::render_performer_args(
+        &performer.args,
+        &run.model,
+        &run.effort,
+    )?);
+    if performer.effort_config.is_none() && !run.effort.is_empty() {
+        if let Some(flag) = &performer.effort_flag {
+            cmd.arg(flag).arg(&run.effort);
+        }
+    }
 
     let prompt_mode = performer
         .prompt

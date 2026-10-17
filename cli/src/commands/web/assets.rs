@@ -4,17 +4,17 @@ use axum::extract::State;
 use axum::http::header::{self, HeaderValue};
 use axum::http::{StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
-#[cfg(not(any(test, clippy)))]
+#[cfg(not(any(test, clippy, debug_assertions)))]
 use rust_embed::RustEmbed;
 use std::ffi::OsStr;
 use std::path::Path;
 
-#[cfg(not(any(test, clippy)))]
+#[cfg(not(any(test, clippy, debug_assertions)))]
 #[derive(RustEmbed)]
 #[folder = "../web/dist"]
 struct EmbeddedWebAssets;
 
-#[cfg(not(any(test, clippy)))]
+#[cfg(not(any(test, clippy, debug_assertions)))]
 fn web_asset(path: &str) -> Option<Vec<u8>> {
     EmbeddedWebAssets::get(path).map(|asset| asset.data.into_owned())
 }
@@ -24,14 +24,14 @@ pub(super) fn web_asset_paths() -> impl Iterator<Item = &'static str> {
     TEST_WEB_ASSETS.iter().map(|(path, _)| *path)
 }
 
-#[cfg(any(test, clippy))]
+#[cfg(any(test, clippy, debug_assertions))]
 fn web_asset(path: &str) -> Option<Vec<u8>> {
     TEST_WEB_ASSETS
         .iter()
         .find_map(|(candidate, body)| (*candidate == path).then(|| body.as_bytes().to_vec()))
 }
 
-#[cfg(any(test, clippy))]
+#[cfg(any(test, clippy, debug_assertions))]
 const TEST_WEB_ASSETS: &[(&str, &str)] = &[
     (
         "index.html",

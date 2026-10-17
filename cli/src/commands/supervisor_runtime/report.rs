@@ -1,0 +1,217 @@
+use super::io;
+use super::repair;
+use macc_core::supervisor::{incident::Incident, SupervisorConfig};
+use macc_core::{MaccError, ProjectPaths, Result};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::path::{Path, PathBuf};
+#[derive(Debug, Serialize, Deserialize)]
+pub(super) struct Intervention {
+    #[serde(default)]
+    pub(super) log_dir: Option<PathBuf>,
+    pub(super) incident: Incident,
+    pub(super) attempt: u32,
+    pub(super) status: String,
+    pub(super) tool: Option<String>,
+    pub(super) diagnosis: Option<repair::Diagnosis>,
+    pub(super) worktree: Option<PathBuf>,
+    pub(super) validation: Vec<String>,
+    pub(super) commit: Option<String>,
+    pub(super) restart_pid: Option<i32>,
+    pub(super) detail: String,
+    /// Branch the repair is based on and published to.
+    #[serde(default)]
+    pub(super) target_branch: Option<String>,
+    /// Validation commands that fail on the unmodified base too (not a gate).
+    #[serde(default)]
+    pub(super) preexisting_failures: Vec<String>,
+    /// Repair rounds run in this attempt (a rejection starts another round).
+    #[serde(default)]
+    pub(super) repair_rounds: u32,
+    /// What unblocks a waiting intervention, as an exact operator step.
+    #[serde(default)]
+    pub(super) next_action: Option<String>,
+    /// When this attempt began (RFC 3339).
+    #[serde(default)]
+    pub(super) started_at: Option<String>,
+    /// When the current `status` phase began (RFC 3339).
+    #[serde(default)]
+    pub(super) phase_started_at: Option<String>,
+    /// The step in progress, in operator terms, for live clients.
+    #[serde(default)]
+    pub(super) activity: Option<String>,
+    /// The recovery restarted the coordinator without a source repair.
+    #[serde(default)]
+    pub(super) restart_only: bool,
+}
+
+/// Records each phase and step as it starts, so clients can show live progress.
+pub(super) struct Progress<'a> {
+    pub(super) paths: &'a ProjectPaths,
+    pub(super) config: &'a SupervisorConfig,
+    pub(super) dir: &'a Path,
+}
+impl Progress<'_> {
+    pub(super) fn enter(
+        &self,
+        report: &mut Intervention,
+        status: &str,
+        activity: impl Into<String>,
+    ) -> Result<()> {
+        report.status = status.into();
+        report.phase_started_at = Some(chrono::Utc::now().to_rfc3339());
+        self.step(report, activity)
+    }
+    /// A new step inside the current phase.
+    pub(super) fn step(
+        &self,
+        report: &mut Intervention,
+        activity: impl Into<String>,
+    ) -> Result<()> {
+        report.activity = Some(activity.into());
+        write_report(self.paths, self.config, self.dir, report)
+    }
+}
+pub(super) fn write_report(
+    paths: &ProjectPaths,
+    config: &SupervisorConfig,
+    dir: &Path,
+    report: &Intervention,
+) -> Result<()> {
+    let hints: Vec<_> = report
+        .diagnosis
+        .as_ref()
+        .map(|d| {
+            d.macc_findings
+                .iter()
+                .map(|finding| {
+                    json!({
+                        "problem_class":"ai_diagnosis", "detection_hook":"supervisor_incident",
+                        "suggested_coordinator_behavior":finding
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let value = json!({"timestamp":chrono::Utc::now().to_rfc3339(),"analysis_window_seconds":config.log_analysis_window_seconds,
+        "health":{"status":if report.status == "recovered" {"healthy"} else {"degraded"},"reasons":[report.status.clone()]},"findings":[],"recommendations":[],"actions_taken":[],"suggested_code_changes":[],"improvement_hints":hints,"intervention":report});
+    write_json(&dir.join("report.json"), &value)?;
+    let report_path = if config.report_output_path.is_absolute() {
+        config.report_output_path.clone()
+    } else {
+        paths.root.join(&config.report_output_path)
+    };
+    write_json(&report_path, &value)?;
+    // Stable latest file for status/UI consumers, independent of custom report location.
+    write_json(&paths.root.join(".macc/log/supervisor/latest.json"), &value)
+}
+pub(super) fn write_json(path: &Path, value: &serde_json::Value) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| io(path, e))?;
+    }
+    let temp = path.with_extension("tmp");
+    std::fs::write(
+        &temp,
+        serde_json::to_vec_pretty(value).map_err(|e| MaccError::Validation(e.to_string()))?,
+    )
+    .map_err(|e| io(path, e))?;
+    std::fs::rename(temp, path).map_err(|e| io(path, e))
+}
+pub(super) fn slug(id: &str) -> String {
+    id.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+/// Finalize evidence even when SIGTERM cancels an in-flight tool or validator.
+pub fn record_shutdown(paths: &ProjectPaths) -> Result<()> {
+    let latest = paths.root.join(".macc/log/supervisor/latest.json");
+    if !latest.exists() {
+        return Ok(());
+    }
+    let mut value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&latest).map_err(|e| io(&latest, e))?)
+            .map_err(|e| MaccError::Validation(e.to_string()))?;
+    if value
+        .pointer("/intervention/status")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !matches!(s, "recovered" | "escalated" | "interrupted"))
+    {
+        value["intervention"]["status"] = json!("interrupted");
+        value["intervention"]["detail"] =
+            json!("Supervisor stopped during intervention; isolated worktree and logs retained");
+        write_json(&latest, &value)?;
+        let dir = value
+            .pointer("/intervention/log_dir")
+            .and_then(|v| v.as_str())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                paths.root.join(".macc/log/supervisor").join(format!(
+                    "{}-attempt-{}",
+                    slug(
+                        value
+                            .pointer("/intervention/incident/id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown")
+                    ),
+                    value
+                        .pointer("/intervention/attempt")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0)
+                ))
+            });
+        if let Some(worktree) = value
+            .pointer("/intervention/worktree")
+            .and_then(|v| v.as_str())
+            .map(PathBuf::from)
+            .filter(|p| p.exists())
+        {
+            if super::workspace::finish(&paths.root, &worktree, &dir, true)? {
+                value["intervention"]["detail"] = json!(
+                    "Supervisor stopped during intervention; evidence archived; clean slot removed"
+                );
+            }
+            write_json(&latest, &value)?;
+        }
+        write_json(&dir.join("report.json"), &value)?;
+        let cfg = macc_core::load_canonical_config(&paths.config_path)?
+            .automation
+            .supervisor
+            .unwrap_or_default();
+        let report = if cfg.report_output_path.is_absolute() {
+            cfg.report_output_path
+        } else {
+            paths.root.join(cfg.report_output_path)
+        };
+        write_json(&report, &value)?;
+    }
+    Ok(())
+}
+
+/// Persist failures in the monitoring infrastructure even before an incident can be read.
+pub fn record_failure(paths: &ProjectPaths, config: &SupervisorConfig, error: &str) -> Result<()> {
+    let value = json!({"timestamp":chrono::Utc::now().to_rfc3339(),
+        "analysis_window_seconds":config.log_analysis_window_seconds,
+        "health":{"status":"degraded","reasons":[error]},"runtime_error":error});
+    write_json(
+        &paths.root.join(".macc/log/supervisor/runtime-error.json"),
+        &value,
+    )?;
+    let output = if config.report_output_path.is_absolute() {
+        config.report_output_path.clone()
+    } else {
+        paths.root.join(&config.report_output_path)
+    };
+    write_json(&output, &value)?;
+    write_json(
+        &paths.root.join(".macc/state/supervisor-health.json"),
+        &json!({
+            "checked_at":chrono::Utc::now().to_rfc3339(),"health":{"status":"error"},"detail":error
+        }),
+    )
+}

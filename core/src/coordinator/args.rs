@@ -34,7 +34,7 @@ fn parse_flag_kv_pairs(
         )));
     }
     let mut map = BTreeMap::new();
-    for pair in args.chunks_exact(2) {
+    for pair in args.as_chunks::<2>().0 {
         let key = pair[0].as_str();
         if !key.starts_with("--") {
             return Err(MaccError::Validation(format!(
@@ -135,7 +135,7 @@ pub fn parse_coordinator_extra_kv_args(extra_args: &[String]) -> Result<BTreeMap
         ));
     }
     let mut map = BTreeMap::new();
-    for pair in extra_args.chunks_exact(2) {
+    for pair in extra_args.as_chunks::<2>().0 {
         let key = pair[0].as_str();
         if !key.starts_with("--") {
             return Err(MaccError::Validation(format!(

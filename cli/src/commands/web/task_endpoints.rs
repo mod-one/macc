@@ -17,8 +17,9 @@ use std::time::Duration;
 
 use super::registry::{collect_registry_events, not_found_task, requeue_task, task_to_api};
 use super::sse::{
-    build_coordinator_sse_event, build_heartbeat_sse_event, pending_events_after,
-    register_web_viewers, resolve_source_seq_cursor, web_client_id, EventsQuery,
+    build_coordinator_sse_event, build_heartbeat_sse_event, coordinator_events_after,
+    initial_coordinator_events, pending_events_after, register_web_viewers,
+    resolve_source_seq_cursor, web_client_id, EventsQuery,
 };
 
 const SSE_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -340,10 +341,6 @@ pub(super) async fn task_stream_handler(
             .ok_or_else(|| not_found_task(&task_id))?;
     }
 
-    let initial_events = state
-        .engine
-        .get_coordinator_events(&state.paths)
-        .map_err(ApiError::from)?;
     let last_event_id = query.last_event_id.clone().or_else(|| {
         headers
             .get("last-event-id")
@@ -352,6 +349,9 @@ pub(super) async fn task_stream_handler(
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned)
     });
+    let (initial_events, last_event_id) = initial_coordinator_events(&state, last_event_id)
+        .await
+        .map_err(ApiError::from)?;
     let viewer_guards =
         register_web_viewers(&state, web_client_id(&query, &headers)).map_err(|err| *err)?;
 
@@ -397,9 +397,9 @@ fn task_event_stream(
 
             tokio::select! {
                 _ = poll_tick.tick() => {
-                    match state.engine.get_coordinator_events(&state.paths) {
+                    match coordinator_events_after(&state, source_seq_cursor).await {
                         Ok(events) => {
-                            pending_events = pending_events_after(&events, source_seq_cursor);
+                            pending_events = events;
                         }
                         Err(err) => {
                             tracing::warn!("failed to refresh task SSE events: {}", err);

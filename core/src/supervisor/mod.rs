@@ -24,6 +24,8 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 pub mod coordinator_supervisor;
+pub mod incident;
+pub mod live;
 pub mod mode_a;
 pub mod mode_b;
 pub mod mode_c;
@@ -33,6 +35,22 @@ pub mod mode_c;
 /// Configuration for the supervisor watchdog process.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SupervisorConfig {
+    /// Tool selection falls back to the coordinator tool, then the first enabled tool.
+    #[serde(default)]
+    pub tool: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+    #[serde(default = "default_intervention_timeout")]
+    pub intervention_timeout_seconds: u64,
+    /// Repair rounds per attempt: a rejected verification, or a validation
+    /// regression, is handed back to the repair agent until this is spent.
+    #[serde(default = "default_max_repair_rounds")]
+    pub max_repair_rounds: u32,
+    /// Explicit validation commands; otherwise the project validation workflow is detected.
+    #[serde(default)]
+    pub validation_commands: Vec<String>,
     /// How often the supervisor checks coordinator health (seconds).
     #[serde(default = "default_watchdog_interval_seconds")]
     pub watchdog_interval_seconds: u64,
@@ -61,7 +79,13 @@ pub struct SupervisorConfig {
 fn default_watchdog_interval_seconds() -> u64 {
     30
 }
+fn default_intervention_timeout() -> u64 {
+    3600
+}
 fn default_max_restart_attempts() -> u32 {
+    3
+}
+fn default_max_repair_rounds() -> u32 {
     3
 }
 fn default_log_analysis_window_seconds() -> u64 {
@@ -80,6 +104,12 @@ fn default_events_log_path() -> PathBuf {
 impl Default for SupervisorConfig {
     fn default() -> Self {
         Self {
+            tool: None,
+            model: None,
+            effort: None,
+            intervention_timeout_seconds: default_intervention_timeout(),
+            max_repair_rounds: default_max_repair_rounds(),
+            validation_commands: Vec::new(),
             watchdog_interval_seconds: default_watchdog_interval_seconds(),
             max_restart_attempts: default_max_restart_attempts(),
             log_analysis_window_seconds: default_log_analysis_window_seconds(),
@@ -415,6 +445,7 @@ impl SupervisorReport {
 /// Interface for managing and probing the coordinator OS process.
 ///
 /// Implementations may be real (spawning via tokio::process) or test doubles.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait ProcessManager: Send + Sync {
     /// Spawn the coordinator process. Returns `Ok(())` if start was requested;
@@ -457,6 +488,7 @@ pub enum ProcessManagerError {
 ///
 /// The canonical event log format is newline-delimited JSON at
 /// `.macc/log/coordinator/events.jsonl`.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait EventConsumer: Send + Sync {
     /// Return event lines from the log within the given time window.
@@ -493,6 +525,7 @@ mod tests {
             crash_debounce_checks: 4,
             report_output_path: PathBuf::from("/tmp/report.json"),
             events_log_path: PathBuf::from("/tmp/events.jsonl"),
+            ..SupervisorConfig::default()
         }
     }
 
@@ -711,3 +744,5 @@ mod tests {
         assert_eq!(change, back);
     }
 }
+
+pub mod tool_settings;

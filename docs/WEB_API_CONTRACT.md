@@ -214,12 +214,104 @@ Response 200:
 { "tool_cooldowns": [] }
 ```
 
+### GET `/api/v1/coordinator/approvals`
+
+Purpose: list `human_approval` gates that wait for a decision (or were rejected), with the full explanation clients show in their approval window. The same objects appear as `pending_approvals` in `GET /api/v1/status` and in the snapshot's `coordinator` object.
+
+Response 200:
+```json
+{
+  "default_actor": "Ann Example <ann@example.com>",
+  "pending_approvals": [
+    {
+      "task_id": "FIN-APP-001",
+      "title": "Approve the FIN-CR-001 normative contract",
+      "state": "waiting_approval",
+      "status": "waiting_approval",
+      "awaiting_decision": true,
+      "question": "Do you approve FIN-CR-001 (\"Specify settlement endpoints\") as delivered at revision abcdef123456?",
+      "subject_task": "FIN-CR-001",
+      "subject_revision": "abcdef1234567890abcdef1234567890abcdef12",
+      "subject_title": "Specify settlement endpoints",
+      "subject_objective": "Close the contract gap before code depends on it.",
+      "subject_description": "Problem/Goal: …",
+      "subject_result": "New EP-* rows in docs/12-api.md.",
+      "subject_acceptance_criteria": ["docs/12-api.md §18 lists the new EP-* rows."],
+      "description": "Adopt the FIN-CR-001 normative contract",
+      "approval_trigger": "normative-change",
+      "governance_ref": "docs/16-decisions.md",
+      "risks": ["An incorrect contract propagates into the generated OpenAPI."],
+      "required": "FINANCE 1/1, LEAD_TECHNIQUE 0/1",
+      "required_roles": ["FINANCE", "LEAD_TECHNIQUE"],
+      "missing_roles": ["LEAD_TECHNIQUE"],
+      "quorum": "every listed role must approve: one decision per role",
+      "evidence_type": "pull_request_review",
+      "evidence_required": true,
+      "expires_after_days": null,
+      "invalidate_on_subject_change": true,
+      "decisions": [
+        {
+          "decision": "approved",
+          "role": "FINANCE",
+          "actor": "Bea <bea@example.com>",
+          "revision": "abcdef1234567890abcdef1234567890abcdef12",
+          "evidence": "https://git.example.com/pr/7",
+          "recorded_at": "2026-10-14T09:00:00Z"
+        }
+      ],
+      "unblocks": ["FIN-API-002 — Settlement endpoints"],
+      "note": "waiting for approval of FIN-CR-001 at abcdef1… (FINANCE 1/1, LEAD_TECHNIQUE 0/1)",
+      "diff_stat": "abcdef1 Specify settlement endpoints\n docs/12-api.md | 40 +",
+      "approve_command": "macc coordinator approve FIN-APP-001 --role LEAD_TECHNIQUE --revision abcdef1… --evidence <url>"
+    }
+  ]
+}
+```
+
+Notes:
+- `awaiting_decision` is true while the approval status is `waiting_approval` or `expired`; clients open their approval window only for these gates.
+- `default_actor` is the git identity of the machine serving the Web UI; decisions use it when the request names no `actor`.
+
+### POST `/api/v1/coordinator/approvals/{task_id}/decision`
+
+Purpose: record one human decision on a gate. Requires Web project ownership (`X-Macc-Client-Id` of the owner) and is audit-logged. Validation is the one of `macc coordinator approve|reject|request-changes`: the role must be declared, `revision` must be the subject's current revision for an approval, `evidence` is required when `evidence_type` is not `manual`, and a rejection or change request needs a `reason`.
+
+Request body:
+```json
+{
+  "decision": "approved",
+  "role": "LEAD_TECHNIQUE",
+  "revision": "abcdef1234567890abcdef1234567890abcdef12",
+  "evidence": "https://git.example.com/pr/7",
+  "reason": null,
+  "actor": null
+}
+```
+
+`decision` is `approved`, `rejected` or `changes_requested` (`approve`, `reject`, `request-changes` are accepted).
+
+Response 200:
+```json
+{
+  "gate_decision": "Recorded approved for FIN-APP-001 as LEAD_TECHNIQUE (Ann Example <ann@example.com>). Gate is now approved: approved at abcdef1… (FINANCE 1/1, LEAD_TECHNIQUE 1/1)",
+  "pending_approvals": []
+}
+```
+
+Errors: an unknown decision, a refused validation (wrong role, stale revision, missing evidence or reason) and a non-gate task return a validation error envelope.
+
 ### GET `/api/v1/events` (SSE)
 
 Purpose: stream coordinator events.
 
 Headers:
 - `Accept: text/event-stream`
+- `Last-Event-ID` (optional, or the `last_event_id` query parameter): resume after this event.
+
+On connect the stream sends the last 500 events, or every event after
+`Last-Event-ID` when resuming, then each new event as it is stored. Only the
+last heartbeat of each task is stored, so a stream never replays a task's
+earlier heartbeats.
 
 SSE envelope:
 - `event`: `coordinator_event` or `heartbeat`
@@ -989,6 +1081,10 @@ Response 200: updated `ApiRegistryTask` object.
 Purpose: return the full `RuntimeSnapshot` — the shared runtime model consumed by CLI (`macc status --json`), TUI observer, and Web Mission Control.
 
 Response 200: full `RuntimeSnapshot` JSON with fields: `generated_at`, `project`, `coordinator`, `queue`, `workers`, `tasks`, `throttled_tools`, `recent_events`, `git`, `diagnostics`.
+
+Optional field `supervisor` is present while a supervisor intervention is running, or is unrecovered and no coordinator is running. It is not a worker or a task and is never counted in `queue`. Shape: `{ running, active, status, attempt, incident_id, task_ids, tool, activity, started_at, phase_started_at, diagnosis, reason, next_action, target_branch, worktree, log_dir, findings }`. `status` is one of `detected`, `diagnosing`, `repairing`, `validating`, `verifying`, `integrating`, `requeuing`, `restarting` (with `active: true`), or `escalated` / `interrupted`.
+
+Optional field `prd` names the PRD file the coordinator is working through: `{ path, name, position, total, completed }`. `path` is the configured path, `name` its file name, `position`/`total` the 1-based place in the PRD queue (`1`/`1` without a queue), and `completed` is true once every queued PRD has been executed.
 
 ### GET `/api/v1/search?q=<query>`
 

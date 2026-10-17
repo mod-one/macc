@@ -1,5 +1,8 @@
 import type {
   ApiActionResult,
+  ApiApprovalsResponse,
+  ApiGateDecisionRequest,
+  ApiGateDecisionResult,
   ApiApplyRequest,
   ApiApplyResponse,
   ApiBackup,
@@ -387,6 +390,27 @@ export async function postCoordinatorAction(
   options: ApiRequestOptions = {},
 ): Promise<ApiCoordinatorCommandResult> {
   return sendJson<ApiCoordinatorCommandResult>(`/coordinator/${action}`, 'POST', options);
+}
+
+// ── Human approval gates ─────────────────────────────────────────────────────
+
+export async function getApprovals(
+  options: ApiRequestOptions = {},
+): Promise<ApiApprovalsResponse> {
+  return sendJson<ApiApprovalsResponse>('/coordinator/approvals', 'GET', options);
+}
+
+export async function postGateDecision(
+  taskId: string,
+  request: ApiGateDecisionRequest,
+  options: ApiRequestOptions = {},
+): Promise<ApiGateDecisionResult> {
+  return sendJson<ApiGateDecisionResult, ApiGateDecisionRequest>(
+    `/coordinator/approvals/${encodeURIComponent(taskId)}/decision`,
+    'POST',
+    options,
+    request,
+  );
 }
 
 export async function listProcessOwnership(

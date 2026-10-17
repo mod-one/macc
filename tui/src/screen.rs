@@ -53,6 +53,7 @@ impl Screen {
             ("s", "Save Config"),
             ("/", "Search / Filter"),
             ("u / U", "Undo / Redo config"),
+            ("A", "Decide a waiting approval"),
         ];
 
         let screen_bindings = match self {

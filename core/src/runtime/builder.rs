@@ -12,7 +12,8 @@ impl RuntimeSnapshotBuilder {
         let storage_paths = CoordinatorStoragePaths::from_project_paths(paths);
         let sqlite = SqliteStorage::new(storage_paths.clone());
         let snapshot = if sqlite.has_snapshot_data().unwrap_or(false) {
-            sqlite.load_snapshot()
+            // Recent events come from the events log below, not from storage.
+            sqlite.load_snapshot_without_events()
         } else {
             JsonStorage::new(storage_paths.clone()).load_snapshot()
         };
@@ -53,6 +54,10 @@ impl RuntimeSnapshotBuilder {
             coordinator.last_run_summary =
                 crate::service::run_summary::load_latest_run_summary(&sqlite, &snapshot.registry)
                     .unwrap_or(None);
+            coordinator.pending_approvals = crate::coordinator::approval::current_pending_approvals(
+                &paths.root,
+                &snapshot.registry,
+            );
         }
 
         let recent_events = load_recent_events(paths);
@@ -64,6 +69,15 @@ impl RuntimeSnapshotBuilder {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "project".to_string());
+
+        let supervisor =
+            crate::supervisor::live::load(paths).filter(|live| live.visible(coordinator.running));
+
+        let prd = crate::load_canonical_config(&paths.config_path)
+            .ok()
+            .map(|config| {
+                crate::prd_queue::current(&paths.root, config.automation.coordinator.as_ref())
+            });
 
         Ok(RuntimeSnapshot {
             generated_at: Utc::now().to_rfc3339(),
@@ -81,6 +95,8 @@ impl RuntimeSnapshotBuilder {
             recent_events,
             git,
             diagnostics: RuntimeDiagnostics::default(),
+            supervisor,
+            prd,
         })
     }
 }
@@ -118,6 +134,9 @@ fn build_from_snapshot(
             "blocked" => queue.blocked += 1,
             "merged" => queue.merged += 1,
             "abandoned" => queue.failed += 1,
+            "waiting_approval" | "expired" => queue.waiting_approval += 1,
+            "approved" => queue.approved += 1,
+            "rejected" => queue.rejected += 1,
             _ => {}
         }
 

@@ -9,7 +9,7 @@
 
 use crate::commit_message;
 use crate::coordinator::integration::{IntegrationWorktree, PublishOutcome};
-use crate::coordinator::model::TaskRegistry;
+use crate::coordinator::model::{GateVerdict, TaskRegistry};
 use crate::coordinator::WorkflowState;
 use crate::git;
 use crate::{MaccError, Result};
@@ -54,6 +54,9 @@ pub struct ReconcileReport {
     pub external_committed_ids: Vec<String>,
     /// Number of commits scanned.
     pub commits_scanned: usize,
+    /// Durable agent gate decisions; human approvals are never restored from tags.
+    #[serde(default)]
+    pub completion_verdicts: BTreeMap<String, GateVerdict>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -188,7 +191,7 @@ pub fn discover_committed_task_ids(repo_root: &Path, head_ref: &str) -> Result<H
     let commits = read_commit_range(repo_root, None, head_ref)?;
     let mut ids = HashSet::new();
     for commit in &commits {
-        if let Some(task_id) = commit_message::parse(&commit.full_message).task_id {
+        if let Some(task_id) = crate::commit_completion::task_id(&commit.full_message) {
             ids.insert(task_id);
         }
     }
@@ -201,8 +204,7 @@ pub fn discover_committed_task_ids(repo_root: &Path, head_ref: &str) -> Result<H
 fn extract_task_ids_from_commits(commits: &[GitCommitInfo]) -> BTreeMap<String, (String, String)> {
     let mut found: BTreeMap<String, (String, String)> = BTreeMap::new();
     for commit in commits {
-        let parsed = commit_message::parse(&commit.full_message);
-        if let Some(task_id) = parsed.task_id {
+        if let Some(task_id) = crate::commit_completion::task_id(&commit.full_message) {
             found
                 .entry(task_id)
                 .or_insert_with(|| (commit.sha.clone(), commit.subject.clone()));
@@ -223,7 +225,26 @@ pub fn reconcile(registry: &TaskRegistry, commits: &[GitCommitInfo]) -> Reconcil
         ..Default::default()
     };
 
+    for commit in commits {
+        let parsed = commit_message::parse(&commit.full_message);
+        if let (Some(id), Some(verdict)) = (
+            crate::commit_completion::task_id(&commit.full_message),
+            parsed.tags.get("gate_verdict"),
+        ) {
+            if let Ok(verdict) = verdict.parse::<GateVerdict>() {
+                report.completion_verdicts.entry(id).or_insert(verdict);
+            }
+        }
+    }
+
     for (task_id, (sha, subject)) in &commit_tasks {
+        if registry
+            .find_task(task_id)
+            .is_some_and(|task| task.is_human_approval_gate())
+        {
+            continue;
+        }
+
         let Some(current_state) = task_states.get(task_id) else {
             // Task ID is in commit history but not in the current registry.
             // This is the cross-lot case: a prior PRD lot delivered the task
@@ -275,6 +296,21 @@ pub fn apply_reconcile_report(registry: &mut TaskRegistry, report: &ReconcileRep
             task.state = WorkflowState::Merged.as_str().to_string();
             task.updated_at = Some(now.to_string());
             task.state_changed_at = Some(now.to_string());
+            if let Some(evidence) = report
+                .reconciled
+                .iter()
+                .find(|entry| entry.task_id == task.id)
+            {
+                task.task_runtime.extra.insert(
+                    "completion_commit_sha".into(),
+                    evidence.matched_commit_sha.clone().into(),
+                );
+            }
+            if !task.is_human_approval_gate() {
+                if let Some(verdict) = report.completion_verdicts.get(&task.id) {
+                    task.task_runtime.gate_verdict = Some(*verdict);
+                }
+            }
             task.clear_assignment();
             // Reset runtime to idle
             task.task_runtime.status = Some("idle".to_string());
@@ -381,6 +417,23 @@ pub fn sync_unmerged_branches(
         let commits = read_commit_range(repo_root, Some(base_branch), branch)?;
         let task_commits = extract_task_ids_from_commits(&commits);
         let discovered_task_ids: Vec<String> = task_commits.keys().cloned().collect();
+        let unfinished = crate::commit_completion::unfinished_task_ids(
+            commits.iter().map(|commit| commit.full_message.as_str()),
+        );
+        if !unfinished.is_empty() {
+            out.push(SyncBranchResult {
+                branch: branch.clone(),
+                discovered_task_ids,
+                merged_task_ids: Vec::new(),
+                status: SyncBranchStatus::SkippedTaskState,
+                detail: Some(format!(
+                    "unfinished task commits without a later delivery: {}",
+                    unfinished.join(", ")
+                )),
+            });
+            continue;
+        }
+
         if discovered_task_ids.is_empty() {
             // Report only branches MACC created: a MACC-managed branch with no
             // trailers is a real signal (something committed without tagging).
@@ -401,7 +454,7 @@ pub fn sync_unmerged_branches(
         let mut eligible_task_ids = Vec::new();
         for task_id in &discovered_task_ids {
             if let Some(task) = registry.tasks.iter().find(|task| task.id == *task_id) {
-                if is_unmerged_branch_sync_state(&task.state) {
+                if !task.is_human_approval_gate() && is_unmerged_branch_sync_state(&task.state) {
                     eligible_task_ids.push(task_id.clone());
                 }
             }
@@ -447,6 +500,7 @@ pub fn sync_unmerged_branches(
                 already_done: Vec::new(),
                 external_committed_ids: Vec::new(),
                 commits_scanned: commits.len(),
+                completion_verdicts: reconcile(registry, &commits).completion_verdicts,
             };
             let now = crate::coordinator::helpers::now_iso_coordinator();
             apply_reconcile_report(registry, &report, &now);
@@ -628,6 +682,7 @@ mod tests {
             already_done: vec![],
             external_committed_ids: vec!["PRIOR-LOT-001".into(), "PRIOR-LOT-002".into()],
             commits_scanned: 2,
+            ..Default::default()
         };
         apply_reconcile_report(&mut registry, &report, "2026-05-22T13:00:00Z");
         assert!(registry.external_merged_task_ids.contains("PRIOR-LOT-001"));
@@ -647,6 +702,7 @@ mod tests {
             already_done: vec![],
             external_committed_ids: vec!["NEWER-LOT-001".into()],
             commits_scanned: 1,
+            ..Default::default()
         };
         apply_reconcile_report(&mut registry, &report, "2026-05-22T13:01:00Z");
         assert!(registry.external_merged_task_ids.contains("OLDER-LOT-001"));
@@ -704,10 +760,67 @@ mod tests {
             already_done: vec![],
             external_committed_ids: vec![],
             commits_scanned: 1,
+            ..Default::default()
         };
         apply_reconcile_report(&mut registry, &report, "2026-03-17T12:00:00Z");
         assert_eq!(registry.tasks[0].state, "merged");
+        assert_eq!(
+            registry.tasks[0].task_runtime.extra["completion_commit_sha"],
+            "abc"
+        );
         assert_eq!(registry.tasks[1].state, "in_progress"); // untouched
+    }
+
+    #[test]
+    fn reconciliation_restores_agent_verdict_but_never_human_approval() {
+        use crate::coordinator::model::{GateKind, TaskGate};
+        let mut agent = make_task("GATE", "todo");
+        agent.gate = Some(TaskGate::default());
+        let mut human = make_task("HUMAN", "todo");
+        human.gate = Some(TaskGate {
+            kind: GateKind::HumanApproval,
+            ..Default::default()
+        });
+        let mut registry = make_registry(vec![agent, human]);
+        let commits = vec![
+            make_commit("merge", "chore: GATE - merge\n\n[macc:task GATE]"),
+            make_commit(
+                "proof",
+                "chore: GATE - validation\n\n[macc:task GATE]\n[macc:gate_verdict rejected]",
+            ),
+            make_commit(
+                "older",
+                "chore: GATE - validation\n\n[macc:task GATE]\n[macc:gate_verdict accepted]",
+            ),
+            make_commit(
+                "human",
+                "chore: HUMAN - validation\n\n[macc:task HUMAN]\n[macc:gate_verdict accepted]",
+            ),
+        ];
+        let report = reconcile(&registry, &commits);
+        apply_reconcile_report(&mut registry, &report, "2026-10-03T00:00:00Z");
+        assert!(registry.find_task("GATE").unwrap().is_merged());
+        assert_eq!(
+            registry
+                .find_task("GATE")
+                .unwrap()
+                .task_runtime
+                .gate_verdict,
+            Some(GateVerdict::Rejected)
+        );
+        assert!(!registry
+            .find_task("GATE")
+            .unwrap()
+            .gate_verdict_satisfies_dependencies());
+        assert_eq!(registry.find_task("HUMAN").unwrap().state, "todo");
+        assert_eq!(
+            registry
+                .find_task("HUMAN")
+                .unwrap()
+                .task_runtime
+                .gate_verdict,
+            None
+        );
     }
 
     #[test]
@@ -940,3 +1053,7 @@ mod tests {
         assert_eq!(registry.tasks[0].state, "todo");
     }
 }
+
+#[cfg(test)]
+#[path = "commit_reconciler_completion_tests.rs"]
+mod completion_tests;

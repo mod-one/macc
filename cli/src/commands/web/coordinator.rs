@@ -37,6 +37,8 @@ pub(super) struct ApiCoordinatorStatus {
     pub last_run_stop_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_run_summary: Option<CoordinatorRunSummary>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pending_approvals: Vec<macc_core::coordinator::approval::PendingApproval>,
 }
 
 #[derive(Debug, Serialize)]
@@ -79,6 +81,7 @@ impl From<CoordinatorStatus> for ApiCoordinatorStatus {
             last_run_status: status.last_run_status,
             last_run_stop_reason: status.last_run_stop_reason,
             last_run_summary: status.last_run_summary,
+            pending_approvals: status.pending_approvals,
         }
     }
 }
@@ -868,5 +871,114 @@ pub(super) async fn coordinator_preflight_create_branch_handler(
         branch: req.branch,
         created: true,
         source: source_label,
+    }))
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct ApiApprovals {
+    pub pending_approvals: Vec<macc_core::coordinator::approval::PendingApproval>,
+    /// Identity a decision is recorded under when the request names none:
+    /// the git identity of the machine serving the Web UI.
+    pub default_actor: String,
+}
+
+#[derive(Debug, Serialize)]
+pub(super) struct ApiGateDecisionResult {
+    /// One-line summary of what was recorded and the gate's new state.
+    pub gate_decision: String,
+    pub pending_approvals: Vec<macc_core::coordinator::approval::PendingApproval>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct ApiGateDecisionRequest {
+    /// `approved`, `rejected` or `changes_requested` (`approve`, `reject`,
+    /// `request-changes` are accepted too).
+    pub decision: String,
+    pub role: String,
+    /// The subject revision the operator reviewed; must still be current.
+    #[serde(default)]
+    pub revision: Option<String>,
+    #[serde(default)]
+    pub evidence: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// Who decides; defaults to the server's git identity.
+    #[serde(default)]
+    pub actor: Option<String>,
+}
+
+pub(super) async fn list_approvals_handler(
+    State(state): State<WebState>,
+) -> std::result::Result<Json<ApiApprovals>, ApiError> {
+    let paths = state.paths.clone();
+    let engine = state.engine.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let env_cfg = CoordinatorEnvConfig::default();
+        let pending = engine
+            .coordinator_execute_command(
+                &paths,
+                CoordinatorCommand::ListApprovals,
+                CoordinatorCommandRequest {
+                    canonical: None,
+                    coordinator_cfg: None,
+                    env_cfg: &env_cfg,
+                    logger: None,
+                },
+            )?
+            .pending_approvals
+            .unwrap_or_default();
+        Ok::<_, macc_core::MaccError>(ApiApprovals {
+            pending_approvals: pending,
+            default_actor: macc_core::service::coordinator_workflow::operator_identity(&paths.root),
+        })
+    })
+    .await
+    .map_err(|e| ApiError::validation(e.to_string()))??;
+    Ok(Json(result))
+}
+
+/// Record one human decision on a `human_approval` gate. Validation (role,
+/// current revision, evidence, reason) is the same as for
+/// `macc coordinator approve|reject|request-changes`.
+pub(super) async fn gate_decision_handler(
+    State(state): State<WebState>,
+    Path(task_id): Path<String>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<ApiGateDecisionRequest>,
+) -> std::result::Result<Json<ApiGateDecisionResult>, ApiError> {
+    crate::commands::web::mutation_gate::require_project_owner(&state, &headers)?;
+    let decision = request
+        .decision
+        .parse::<macc_core::coordinator::model::ApprovalDecision>()
+        .map_err(ApiError::validation)?;
+    let paths = state.paths.clone();
+    let engine = state.engine.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let env_cfg = CoordinatorEnvConfig::default();
+        let trimmed = |v: Option<String>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        engine.coordinator_execute_command(
+            &paths,
+            CoordinatorCommand::GateDecision {
+                task_id,
+                decision,
+                role: request.role,
+                actor: trimmed(request.actor),
+                revision: trimmed(request.revision),
+                evidence: trimmed(request.evidence),
+                reason: trimmed(request.reason),
+            },
+            CoordinatorCommandRequest {
+                canonical: None,
+                coordinator_cfg: None,
+                env_cfg: &env_cfg,
+                logger: None,
+            },
+        )
+    })
+    .await
+    .map_err(|e| ApiError::validation(e.to_string()))??;
+    Ok(Json(ApiGateDecisionResult {
+        gate_decision: result.gate_decision.unwrap_or_default(),
+        pending_approvals: result.pending_approvals.unwrap_or_default(),
     }))
 }
