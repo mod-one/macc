@@ -144,3 +144,11 @@ or vendor-native MCP proxy in this milestone.
 Protocol references: [stdio transport](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports),
 [lifecycle](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle),
 [tools](https://modelcontextprotocol.io/specification/2025-11-25/server/tools).
+
+## P3-A freshness extension
+
+[Evidence freshness and retrieval quality](O2_P3_FRESHNESS_QUALITY.md) adds optional
+symbol/version bindings and stronger operator conflict resolution. MCP keeps its
+fixed scoped catalog and proposal-only writes; freshness checks apply to agent
+search/read as well as automatic context. Capture, promotion and conflict resolution
+remain separate operator actions.

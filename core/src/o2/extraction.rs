@@ -42,11 +42,12 @@ pub(crate) fn phase_in(
     if exists {
         return Ok(Some(id));
     } // Do not overwrite operator review or duplicate unchanged failures.
-    let mut evidence=vec![memory::Evidence{kind:"review".into(),reference:format!("checkpoint:{}",c.id),sha256:Some(digest(&serde_json::to_vec(c).map_err(|e|error(e.to_string()))?)),revision:Some(c.source_revision.clone()),summary:"Normalized phase outcome from a checksummed checkpoint; no cause or resolution inferred".into()}];
+    let mut evidence=vec![memory::Evidence{binding:None,kind:"review".into(),reference:format!("checkpoint:{}",c.id),sha256:Some(digest(&serde_json::to_vec(c).map_err(|e|error(e.to_string()))?)),revision:Some(c.source_revision.clone()),summary:"Normalized phase outcome from a checksummed checkpoint; no cause or resolution inferred".into()}];
     for path in c.changed_files.iter().take(3) {
         if let Ok((_, raw)) = paths::source(Path::new(&c.worktree), path, 1048576) {
             if std::str::from_utf8(&raw).is_ok_and(|s| paths::safe_text(s).is_ok()) {
                 evidence.push(memory::Evidence {
+                    binding: None,
                     kind: "file".into(),
                     reference: path.clone(),
                     sha256: Some(digest(&raw)),

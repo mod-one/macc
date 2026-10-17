@@ -92,7 +92,7 @@ pub fn propose(root: &Path, c: &Credentials, request: AgentProposal) -> Result<V
             clean(path)?;
             let (_, raw) = paths::source(&scope.worktree, path, 1048576)?;
             clean(std::str::from_utf8(&raw).map_err(|e| error(e.to_string()))?)?;
-            evidence.push(memory::Evidence{kind:"file".into(),reference:path.clone(),sha256:Some(digest(&raw)),revision:None,summary:"Agent-supplied assertion; exact source bytes captured; operator review required".into()});
+            evidence.push(memory::Evidence{binding:None,kind:"file".into(),reference:path.clone(),sha256:Some(digest(&raw)),revision:None,summary:"Agent-supplied assertion; exact source bytes captured; operator review required".into()});
         }
         Ok(memory::Proposal {
             kind: request.kind,
@@ -123,6 +123,7 @@ pub fn challenge(root: &Path, c: &Credentials, request: Challenge) -> Result<Val
             scope_ref: Some(scope.task.clone()),
             confidence: 0.6,
             evidence: vec![memory::Evidence {
+                binding: None,
                 kind: "review".into(),
                 reference: format!("memory:{}", m.memory.id),
                 sha256: Some(m.checksum),

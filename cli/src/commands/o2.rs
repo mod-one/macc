@@ -70,6 +70,30 @@ pub enum O2Command {
         #[arg(long)]
         worktree: Option<String>,
     },
+    MemoryEvidenceSources,
+    MemorySymbolEvidence {
+        path: String,
+        symbol: String,
+        #[arg(long, default_value = "native")]
+        provider: String,
+        #[arg(long)]
+        worktree: Option<String>,
+    },
+    MemoryToolEvidence {
+        tool_id: String,
+    },
+    MemoryConflicts,
+    MemoryResolveConflict {
+        id: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long, default_value="both_stale", value_parser=["both_stale","keep_left","keep_right","dismiss"])]
+        resolution: String,
+        #[arg(long)]
+        checksum: Option<String>,
+        #[arg(long)]
+        confirm: bool,
+    },
     FtsRebuild,
     ContextList,
     ContextGet {
@@ -240,6 +264,36 @@ impl Command for O2 {
             O2Command::MemoryEvidence { path, worktree } => Action::MemoryEvidence {
                 path: path.clone(),
                 worktree: worktree.clone(),
+            },
+            O2Command::MemoryEvidenceSources => Action::MemoryEvidenceSources,
+            O2Command::MemorySymbolEvidence {
+                path,
+                symbol,
+                provider,
+                worktree,
+            } => Action::MemorySymbolEvidence {
+                path: path.clone(),
+                symbol: symbol.clone(),
+                provider: provider.clone(),
+                worktree: worktree.clone(),
+            },
+            O2Command::MemoryToolEvidence { tool_id } => Action::MemoryToolEvidence {
+                tool_id: tool_id.clone(),
+            },
+            O2Command::MemoryConflicts => Action::MemoryConflicts,
+            O2Command::MemoryResolveConflict {
+                id,
+                reason,
+                resolution,
+                checksum,
+                confirm,
+            } => Action::MemoryResolveConflict {
+                id: id.clone(),
+                reason: reason.clone(),
+                resolution: serde_json::from_value(serde_json::json!(resolution))
+                    .map_err(|e| MaccError::Validation(e.to_string()))?,
+                expected_checksum: checksum.clone(),
+                confirmed: *confirm,
             },
             O2Command::FtsRebuild => Action::FtsRebuild,
             O2Command::ContextList => Action::ContextList,

@@ -59,7 +59,8 @@ pub(super) fn approved(
     if conflict {
         return Err(error("Memory has an unresolved conflict"));
     }
-    memory::freshness(&scope.worktree, &m, p.memory.provider_note_ttl_days)?;
+    let prepared = memory::prepare_record_at(root, id, &scope.worktree)?;
+    memory::preflight::Verifier::new(root, &scope.worktree, db, &p.memory, &prepared).check(&m)?;
     memory::hit(m, 0, "approved; scope and current evidence verified")
 }
 pub fn call_read(root: &Path, c: &Credentials, name: &str, args: Value) -> Result<Value> {
@@ -71,17 +72,20 @@ pub fn call_read(root: &Path, c: &Credentials, name: &str, args: Value) -> Resul
             if !(1..=20).contains(&request.limit) {
                 return Err(error("Result limit must be 1..20"));
             }
+            let search = memory::Search {
+                query: request.query,
+                access: scope.access.clone(),
+                include_inactive: false,
+            };
+            let prepared = memory::prepare_search(root, &search)?;
             let mut hits = memory::search::search_in(
                 &db,
                 &scope.project,
                 root,
                 &scope.worktree,
-                &memory::Search {
-                    query: request.query,
-                    access: scope.access.clone(),
-                    include_inactive: false,
-                },
+                &search,
                 false,
+                &prepared,
             )?
             .hits;
             if name == "memory.related_to_diff" {

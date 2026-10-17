@@ -40,11 +40,15 @@ impl Panel {
                     return Ok(());
                 }
                 let form = self.form.take().unwrap();
+                let running = self.job.is_some();
                 if let Err(e) = self.submit(root, &form.name, form.values.clone()) {
                     let mut retained = form;
                     retained.input = retained.values.pop().unwrap_or_default();
                     self.form = Some(retained);
                     return Err(e);
+                }
+                if !running && self.job.is_some() {
+                    self.retain_job_form(form);
                 }
             }
             _ => {}
@@ -116,29 +120,31 @@ impl Panel {
             }
             "search" => {
                 self.conflicts = false;
+                self.captured_evidence=None;
                 self.query = v[0].clone();
                 self.access = json!({"task_id":empty(&v[1]),"tool_id":empty(&v[2]),"worktree":empty(&v[3]),"feature":empty(&v[4]),"user_id":empty(&v[5])});
                 let search = serde_json::from_value(
                     json!({"query":v[0],"access":self.access,"include_inactive":true}),
                 )
                 .unwrap();
-                let value = execute(root, Action::MemorySearch { search })?;
-                self.rows = value.as_array().cloned().unwrap_or_default();
-                self.selected = 0;
-                return Ok(());
+                if !self.view.as_ref().is_some_and(|v|v.ready) {return Err(MaccError::Validation("O2 SQLite authority unavailable; input retained".into()));}
+                self.rows.clear(); self.selected=0;
+                return self.launch(root,Action::MemorySearch {search});
             }
+            "capture_symbol" => Action::MemorySymbolEvidence { path:v[0].clone(),symbol:v[1].clone(),provider:if v[2].is_empty(){"native".into()}else{v[2].clone()},worktree:(!v[3].is_empty()).then(||v[3].clone()) },
+            "capture_tool" => Action::MemoryToolEvidence {tool_id:v[0].clone()},
             "propose" => {
-                let evidence = execute(
+                let evidence = if v[5].is_empty() { self.captured_evidence.clone().ok_or_else(||MaccError::Validation("Capture evidence with y/Y or enter a source path".into()))? } else { execute(
                     root,
                     Action::MemoryEvidence {
                         path: v[5].clone(),
                         worktree: (v[3] == "worktree").then(|| v[4].clone()),
                     },
-                )?;
+                )? };
                 Action::MemoryPropose{proposal:serde_json::from_value(json!({"kind":v[0],"title":v[1],"body":v[2],"scope":v[3],"scope_ref":empty(&v[4]),"confidence":v[6].parse::<f64>().map_err(|_|MaccError::Validation("Confidence must be numeric".into()))?,"evidence":[evidence],"tags":[],"source_task":if v[3]=="task"{empty(&v[4])}else{Value::Null},"source_revision":null})).map_err(|e|MaccError::Validation(e.to_string()))?}
             }
-            "review" => {
-                let evidence = if v.get(2).is_some_and(|s| !s.is_empty()) {
+            "review" | "review_captured" => {
+                let evidence = if name=="review_captured" {Some(vec![self.captured_evidence.clone().ok_or_else(||MaccError::Validation("Capture current evidence first".into()))?])} else if v.get(2).is_some_and(|s| !s.is_empty()) {
                     Some(vec![execute(
                         root,
                         Action::MemoryEvidence {
@@ -186,6 +192,8 @@ impl Panel {
             "resolve_conflict" => {
                 pending = true;
                 Action::MemoryResolveConflict {
+                    resolution: serde_json::from_value(json!(v.get(1).filter(|v|!v.is_empty()).map(String::as_str).unwrap_or("both_stale"))).map_err(|e|MaccError::Validation(e.to_string()))?,
+                    expected_checksum:self.selected()?["checksum"].as_str().map(str::to_string),
                     id: self.selected()?["id"].as_str().unwrap_or_default().into(),
                     reason: v[0].clone(),
                     confirmed: true,
@@ -289,7 +297,11 @@ impl Panel {
         } else {
             if matches!(
                 action,
-                Action::CodeQuery { .. } | Action::CodeCompare { .. }
+                Action::CodeQuery { .. }
+                    | Action::CodeCompare { .. }
+                    | Action::MemoryToolEvidence { .. }
+                    | Action::MemorySymbolEvidence { .. }
+                    | Action::MemoryPull { .. }
             ) {
                 return self.launch(root, action);
             }

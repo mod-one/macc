@@ -54,12 +54,27 @@ pub enum Action {
         #[serde(default)]
         worktree: Option<String>,
     },
+    MemorySymbolEvidence {
+        path: String,
+        symbol: String,
+        provider: String,
+        #[serde(default)]
+        worktree: Option<String>,
+    },
+    MemoryEvidenceSources,
+    MemoryToolEvidence {
+        tool_id: String,
+    },
     MemoryConflict {
         left: String,
         right: String,
         reason: String,
     },
     MemoryResolveConflict {
+        #[serde(default)]
+        resolution: memory::Resolution,
+        #[serde(default)]
+        expected_checksum: Option<String>,
         id: String,
         reason: String,
         confirmed: bool,
@@ -135,6 +150,8 @@ impl Action {
                 | Self::MemoryPull { .. }
                 | Self::MemoryRead { .. }
                 | Self::MemoryEvidence { .. }
+                | Self::MemorySymbolEvidence { .. }
+                | Self::MemoryEvidenceSources
                 | Self::MemoryConflicts
                 | Self::ContextList
                 | Self::ContextGet { .. }
@@ -193,6 +210,7 @@ pub fn execute(root: &Path, action: Action) -> Result<Value> {
             let (_, bytes) = paths::source(&target, &path, 1048576)?;
             paths::safe_text(std::str::from_utf8(&bytes).map_err(|e| error(e.to_string()))?)?;
             value(memory::Evidence {
+                binding: None,
                 kind: "file".into(),
                 reference: path,
                 sha256: Some(digest(&bytes)),
@@ -211,39 +229,31 @@ pub fn execute(root: &Path, action: Action) -> Result<Value> {
             id,
             reason,
             confirmed,
-        } => {
-            if !confirmed || reason.trim().is_empty() || reason.len() > 500 {
-                return Err(error(
-                    "Conflict resolution requires confirmed review and reason",
-                ));
-            }
-            paths::safe_text(&reason)?;
-            let _guard = store::lock(root)?;
-            let (mut db, _) = database(root)?;
-            let tx = sql(db.transaction())?;
-            let changed = sql(tx.execute(
-                "UPDATE memory_conflicts SET status='resolved' WHERE id=?1 AND status='open'",
-                [&id],
-            ))?;
-            if changed != 1 {
-                return Err(error("Open conflict not found"));
-            }
-            schema::audit(
-                &tx,
-                "memory_conflict_resolved",
-                &id,
-                json!({"reason":reason}),
-            )?;
-            sql(tx.commit())?;
-            Ok(json!({"resolved":id}))
-        }
-        Action::MemoryConflicts => {
-            let _guard = store::lock(root)?;
-            let (db, _) = database(root)?;
-            let mut q=sql(db.prepare("SELECT id,left_id,right_id,reason,status FROM memory_conflicts ORDER BY rowid DESC LIMIT 100"))?;
-            let rows=sql(q.query_map([],|r|Ok(json!({"id":r.get::<_,String>(0)?,"left":r.get::<_,String>(1)?,"right":r.get::<_,String>(2)?,"reason":r.get::<_,String>(3)?,"status":r.get::<_,String>(4)?}))))?.map(sql).collect::<Result<Vec<_>>>()?;
-            value(rows)
-        }
+            resolution,
+            expected_checksum,
+        } => memory::resolve_conflict(
+            root,
+            &id,
+            &reason,
+            confirmed,
+            resolution,
+            expected_checksum.as_deref(),
+        ),
+        Action::MemoryConflicts => value(memory::conflicts(root)?),
+        Action::MemorySymbolEvidence {
+            path,
+            symbol,
+            provider,
+            worktree,
+        } => value(memory::symbol_evidence(
+            root,
+            &path,
+            &symbol,
+            &provider,
+            worktree.as_deref(),
+        )?),
+        Action::MemoryEvidenceSources => providers::evidence_sources(root),
+        Action::MemoryToolEvidence { tool_id } => value(memory::tool_evidence(root, &tool_id)?),
         Action::FtsRebuild => {
             memory::fts_rebuild(root)?;
             Ok(json!({"rebuilt":true}))

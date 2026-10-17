@@ -1,6 +1,7 @@
 //! Durable task context, independent of provider conversations and task delivery.
 mod git_state;
 mod lifecycle;
+mod memory_context;
 mod model;
 mod schema;
 #[cfg(test)]

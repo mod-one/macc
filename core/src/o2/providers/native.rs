@@ -2,6 +2,18 @@ pub(super) use super::snapshot::{source_snapshot as snapshot, SourceSnapshot as 
 use super::*;
 pub(super) struct Native;
 impl CodeIntelligenceProvider for Native {
+    fn symbol_languages(&self) -> Vec<String> {
+        vec!["rust".into()]
+    }
+    fn symbol_fingerprint(
+        &self,
+        _root: &Path,
+        target: &Path,
+        path: &str,
+        symbol: &str,
+    ) -> Result<Capability<SymbolFingerprint>> {
+        super::symbols::rust(target, path, symbol)
+    }
     fn priority(&self, q: &Query) -> u32 {
         if q.kind == "file_search" {
             0

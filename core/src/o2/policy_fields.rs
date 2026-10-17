@@ -3,6 +3,34 @@ use super::policy::*;
 pub fn fields() -> Vec<Field> {
     let defaults = serde_json::to_value(Policy::default()).unwrap();
     let specs = [
+        (
+            "memory.symbol_check_limit",
+            "Maximum distinct symbol checks per retrieval",
+            "number",
+            1.,
+            500.,
+        ),
+        (
+            "memory.ranking_reference_weight",
+            "Exact source/symbol ranking weight",
+            "number",
+            0.,
+            1000.,
+        ),
+        (
+            "memory.ranking_authority_weight",
+            "Authority-kind ranking weight",
+            "number",
+            0.,
+            1000.,
+        ),
+        (
+            "memory.ranking_confidence_weight",
+            "Confidence ranking weight",
+            "number",
+            0.,
+            100.,
+        ),
         ("memory.enabled", "Memory Ledger", "bool", 0., 1.),
         (
             "memory.phase_extraction_enabled",
@@ -73,6 +101,41 @@ pub fn fields() -> Vec<Field> {
             "number",
             1.,
             90.,
+        ),
+        (
+            "memory.provider_note_probe_limit",
+            "Maximum live version checks per retrieval",
+            "number",
+            1.,
+            8.,
+        ),
+        (
+            "memory.ranking_task_weight",
+            "Same-task ranking weight",
+            "number",
+            0.,
+            1000.,
+        ),
+        (
+            "memory.ranking_evidence_weight",
+            "Verified evidence ranking weight",
+            "number",
+            0.,
+            100.,
+        ),
+        (
+            "memory.ranking_length_penalty",
+            "Length penalty per 400 characters",
+            "number",
+            0.,
+            100.,
+        ),
+        (
+            "memory.ranking_duplicate_penalty",
+            "Duplicate claim ranking penalty",
+            "number",
+            0.,
+            1000.,
         ),
         ("context_engine.enabled", "Context Engine", "bool", 0., 1.),
         (

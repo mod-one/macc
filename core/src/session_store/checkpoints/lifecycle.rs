@@ -15,6 +15,7 @@ fn idle(db: &rusqlite::Connection, worktree: &str) -> Result<()> {
     Ok(())
 }
 pub fn prepare(root: &Path, request: &ContextRequest) -> Result<PreparedContext> {
+    let freshness = super::memory_context::preflight(root, request)?;
     let _guard = lock(root)?;
     let (mut db, a) = db::active(root)?;
     if !ready(&db)? {
@@ -72,7 +73,7 @@ pub fn prepare(root: &Path, request: &ContextRequest) -> Result<PreparedContext>
         }
         c.blocking_issues.extend(previous.blocking_issues);
     }
-    let optional_context = crate::o2::context::for_checkpoint(&tx, root, &c)?;
+    let optional_context = crate::o2::context::for_checkpoint(&tx, root, &c, &freshness)?;
     schema::insert(&tx, &c, policy.checkpoints.max_content_bytes)?;
     sql(tx.commit())?;
     let acknowledgement = format!(

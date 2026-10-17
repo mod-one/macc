@@ -11,6 +11,11 @@ pub fn review(root: &Path, r: &Review) -> Result<Memory> {
     }
     super::super::paths::safe_text(&r.reason)?;
     let policy = super::super::policy::load(root)?;
+    let prepared = if r.status == "active" {
+        super::preflight::prepare_review(root, r)?
+    } else {
+        PreparedFreshness::default()
+    };
     let _guard = store::lock(root)?;
     let (mut db, a) = database(root)?;
     let tx = sql(db.transaction())?;
@@ -39,7 +44,16 @@ pub fn review(root: &Path, r: &Review) -> Result<Memory> {
     if r.status == "active" {
         if m.proposal.evidence.is_empty()
             || !m.proposal.evidence.iter().any(|e| {
-                ["file", "prd", "test", "human_approval", "review"].contains(&e.kind.as_str())
+                [
+                    "file",
+                    "prd",
+                    "test",
+                    "human_approval",
+                    "review",
+                    "symbol",
+                    "provider",
+                ]
+                .contains(&e.kind.as_str())
             })
         {
             return Err(error("Activation requires validated source or explicit human/review evidence; a commit alone is insufficient"));
@@ -49,7 +63,7 @@ pub fn review(root: &Path, r: &Review) -> Result<Memory> {
         } else {
             root.to_path_buf()
         };
-        freshness(&target, &m, policy.memory.provider_note_ttl_days)?;
+        super::preflight::Verifier::new(root, &target, &tx, &policy.memory, &prepared).check(&m)?;
         m.verified_revision = Some(crate::git::head_commit(&target)?);
         m.reviewed_by = Some("project_owner".into());
     }
@@ -80,6 +94,9 @@ pub fn conflict(root: &Path, left: &str, right: &str, reason: &str) -> Result<St
     let tx = sql(db.transaction())?;
     load(&tx, left, &a.project_id)?;
     load(&tx, right, &a.project_id)?;
+    if let Some(id) = super::conflicts::existing(&tx, left, right)? {
+        return Ok(id);
+    }
     let id = uuid::Uuid::new_v4().to_string();
     sql(tx.execute(
         "INSERT INTO memory_conflicts VALUES(?1,?2,?3,?4,'open')",

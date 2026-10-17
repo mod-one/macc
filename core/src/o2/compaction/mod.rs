@@ -1,4 +1,5 @@
 //! Native auto configuration is adapter-declared; explicit headless compaction is never guessed.
+pub(crate) mod observations;
 mod options;
 mod pressure;
 pub use pressure::states;

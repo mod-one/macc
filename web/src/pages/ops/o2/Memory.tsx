@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { useScopedAction } from './useScopedAction';
 import AgentMemory from './AgentMemory';
+import EvidenceCapture from './EvidenceCapture';
+import Conflicts from './Conflicts';
 import { o2Action, type Evidence, type MemoryHit } from '../../../api/o2';
 export default function Memory({ taskScope = '' }: { taskScope?: string }) {
   const [rows, setRows] = useState<MemoryHit[]>([]); const [query, setQuery] = useState(''); const [task, setTask] = useState(taskScope); const [tool, setTool] = useState(''); const [worktree, setWorktree] = useState('');
@@ -9,7 +11,7 @@ export default function Memory({ taskScope = '' }: { taskScope?: string }) {
   const [title, setTitle] = useState(''); const [body, setBody] = useState(''); const [source, setSource] = useState(''); const [kind, setKind] = useState('discovery'); const [scope, setScope] = useState('project'); const [scopeRef, setScopeRef] = useState(''); const [confidence, setConfidence] = useState(0.8);
   const [pull, setPull] = useState<{ next_cursor?: number | null; next_offset?: number | null; id?: string } | null>(null);
   const [replacement, setReplacement] = useState('');
-  const [reason, setReason] = useState(''); const [verdict, setVerdict] = useState('active'); const [confirmed, setConfirmed] = useState(false); const [right, setRight] = useState(''); const [conflicts, setConflicts] = useState<Array<{ id: string; reason: string; status: string }>>([]);
+  const [reason, setReason] = useState(''); const [verdict, setVerdict] = useState('active'); const [confirmed, setConfirmed] = useState(false); const [right, setRight] = useState('');
   // Keep proposal drafts; evidence and review authority belong to one exact scope.
   const [previousTaskScope, setPreviousTaskScope] = useState(taskScope);
   if (previousTaskScope !== taskScope) { setPreviousTaskScope(taskScope); setTask(taskScope); }
@@ -17,9 +19,13 @@ export default function Memory({ taskScope = '' }: { taskScope?: string }) {
   const [previousIdentity, setPreviousIdentity] = useState(identity);
   if (previousIdentity !== identity) {
     setPreviousIdentity(identity); setRows([]); setSelected(null); setPull(null); setConfirmed(false);
-    setNotice(''); setConflicts([]); setReplacement(''); setReason(''); setRight('');
+    setNotice(''); setReplacement(''); setReason(''); setRight('');
   }
   const { run, busy, error } = useScopedAction(identity);
+  const [captured, setCaptured] = useState<Evidence | null>(null); const [useCaptured, setUseCaptured] = useState(false);
+  const captureKey = JSON.stringify([identity, source, scope, scopeRef]);
+  const [previousCaptureKey, setPreviousCaptureKey] = useState(captureKey);
+  if (previousCaptureKey !== captureKey) { setPreviousCaptureKey(captureKey); setCaptured(null); setUseCaptured(false); setConfirmed(false); }
   const access = { task_id: task || null, tool_id: tool || null, worktree: worktree || null, feature: feature || null, user_id: user || null };
   const search = async (request: typeof o2Action) => { setRows(await request<MemoryHit[]>('memory_search', { search: { query, access, include_inactive: true } })); };
   return <section aria-label="Memory Ledger">
@@ -47,20 +53,22 @@ export default function Memory({ taskScope = '' }: { taskScope?: string }) {
       <label>Scope reference<input value={scopeRef} onChange={e => setScopeRef(e.target.value)} /></label>
       <label>Confidence<input type="number" min={0} max={1} step={0.01} value={confidence} onChange={e => setConfidence(Number(e.target.value))} /></label>
       <label>Evidence source path<input value={source} onChange={e => setSource(e.target.value)} /></label>
-      <button disabled={busy} onClick={() => { void run(async request => { const evidence = await request<Evidence>('memory_evidence', { path: source, worktree: scope === 'worktree' ? scopeRef : null }); await request('memory_propose', { proposal: { kind, title, body, scope, scope_ref: scope === 'project' ? null : scopeRef, confidence, evidence: [evidence], tags: [], source_task: task || null, source_revision: evidence.revision } }); setNotice('Memory proposed. Inspect and review it before activation.'); await search(request); }); }}>Submit memory proposal</button>
+      <button disabled={busy} onClick={() => { void run(async request => { const evidence = captured ?? await request<Evidence>('memory_evidence', { path: source, worktree: scope === 'worktree' ? scopeRef : null }); await request('memory_propose', { proposal: { kind, title, body, scope, scope_ref: scope === 'project' ? null : scopeRef, confidence, evidence: [evidence], tags: [], source_task: task || null, source_revision: evidence.revision } }); setNotice('Memory proposed. Inspect and review it before activation.'); await search(request); }); }}>Submit memory proposal</button>
+      <EvidenceCapture path={source} worktree={scope === 'worktree' ? scopeRef : null} identity={identity} captured={e => { setCaptured(e); setConfirmed(false); setUseCaptured(false); }} />
+      {captured && <p role="status">Using captured {captured.kind} evidence: {captured.reference}</p>}
     </details>
     {selected && <section aria-label="Memory review"><h3>{selected.memory.proposal.title}</h3><pre style={{ whiteSpace: 'pre-wrap' }}>{JSON.stringify(selected, null, 2)}</pre>
       <button disabled={busy} onClick={() => { void run(async request => { setPull(await request('memory_read', { id: selected.memory.id, access, offset: 0 })); }); }}>Preview bounded agent record</button>
+      {captured && <label><input type="checkbox" checked={useCaptured} onChange={e => { setUseCaptured(e.target.checked); setConfirmed(false); }} />Use captured evidence for revalidation</label>}
       <label>Review verdict<select value={verdict} onChange={e => { setVerdict(e.target.value); setConfirmed(false); }}>{['active', 'rejected', 'stale', 'invalidated'].map(v => <option key={v}>{v}</option>)}</select></label>
       <label>Replacement evidence path (optional revalidation)<input value={replacement} onChange={e => { setReplacement(e.target.value); setConfirmed(false); }} /></label>
       <label>Review reason<input value={reason} onChange={e => { setReason(e.target.value); setConfirmed(false); }} /></label>
       <label><input type="checkbox" checked={confirmed} onChange={e => setConfirmed(e.target.checked)} />I reviewed the source evidence and this transition</label>
-      <button disabled={busy || !confirmed} onClick={() => { void run(async request => { const evidence = replacement ? [await request<Evidence>('memory_evidence', { path: replacement, worktree: selected.memory.proposal.scope === 'worktree' ? selected.memory.proposal.scope_ref : null })] : null; await request('memory_review', { review: { id: selected.memory.id, status: verdict, reason, confirmed, expected_checksum: selected.checksum, evidence } }); setSelected(null); setConfirmed(false); await search(request); }); }}>Apply reviewed memory transition</button>
+      <button disabled={busy || !confirmed} onClick={() => { void run(async request => { const evidence = useCaptured && captured ? [captured] : replacement ? [await request<Evidence>('memory_evidence', { path: replacement, worktree: selected.memory.proposal.scope === 'worktree' ? selected.memory.proposal.scope_ref : null })] : null; await request('memory_review', { review: { id: selected.memory.id, status: verdict, reason, confirmed, expected_checksum: selected.checksum, evidence } }); setSelected(null); setConfirmed(false); await search(request); }); }}>Apply reviewed memory transition</button>
       <label>Conflicting memory ID<input value={right} onChange={e => setRight(e.target.value)} /></label>
       <button disabled={busy || !confirmed} onClick={() => { void run(async request => { await request('memory_conflict', { left: selected.memory.id, right, reason }); setNotice('Conflict recorded; both claims are excluded from automatic context.'); }); }}>Record reviewed conflict</button>
     </section>}
-    <button onClick={() => { void run(async request => { setConflicts(await request('memory_conflicts')); }); }}>Inspect memory conflicts</button>
-    <ul>{conflicts.map(c => <li key={c.id}>{c.reason} · {c.status}{c.status === 'open' && <button disabled={!confirmed || busy} onClick={() => { void run(async request => { await request('memory_resolve_conflict', { id: c.id, reason, confirmed }); setConflicts(await request('memory_conflicts')); }); }}>Resolve reviewed conflict</button>}</li>)}</ul>
+    <Conflicts identity={identity} access={access} />
     {notice && <p role="status">{notice}</p>}{error && <p role="alert">{error}</p>}
   </section>;
 }

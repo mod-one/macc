@@ -14,11 +14,13 @@ mod response;
 mod routing;
 mod serena;
 mod snapshot;
+mod symbols;
 use super::*;
 pub use compare::compare;
 pub use lifecycle::{inspect, plan};
 pub use operations::operation;
 pub use snapshot::{source_snapshot, SourceSnapshot};
+pub use symbols::{fingerprint, sources as evidence_sources, SymbolFingerprint};
 mod apply;
 pub use apply::apply;
 pub use model::*;
@@ -26,6 +28,22 @@ pub(crate) use native::worktree as native_worktree;
 use rusqlite::OptionalExtension;
 pub trait CodeIntelligenceProvider: Send + Sync {
     fn descriptor(&self) -> Descriptor;
+    fn symbol_languages(&self) -> Vec<String> {
+        vec![]
+    }
+    /// Read-only semantic fingerprint, distinct from literal search or graph inference.
+    fn symbol_fingerprint(
+        &self,
+        _root: &Path,
+        _target: &Path,
+        _path: &str,
+        _symbol: &str,
+    ) -> Result<Capability<SymbolFingerprint>> {
+        Ok(Capability::Unsupported {
+            capability: "symbol_fingerprint".into(),
+            reason: "This adapter has no verified symbol fingerprint backend".into(),
+        })
+    }
     /// Live LSP providers validate an exported current snapshot per query.
     fn requires_cached_snapshot(&self) -> bool {
         true

@@ -58,6 +58,7 @@ pub(super) fn proposal(root: &Path, task: Option<&str>) -> memory::Proposal {
         scope_ref: task.map(str::to_string),
         confidence: 0.9,
         evidence: vec![memory::Evidence {
+            binding: None,
             kind: "file".into(),
             reference: "contract.rs".into(),
             sha256: Some(digest(&bytes)),
@@ -141,6 +142,7 @@ fn secrets_commit_only_and_unconfirmed_reviews_are_rejected() {
     assert!(memory::propose(r, &p).is_err());
     p = proposal(r, None);
     p.evidence = vec![memory::Evidence {
+        binding: None,
         kind: "commit".into(),
         reference: crate::git::head_commit(r).unwrap(),
         sha256: None,
@@ -209,10 +211,11 @@ fn context_keeps_mandatory_prd_when_optional_budget_is_zero() {
     p.context_engine.push_memory_limit_tokens = 0;
     policy::update(r, &view.revision, Some(p)).unwrap();
     let c:store::checkpoints::Checkpoint=serde_json::from_value(json!({"schema_version":1,"id":"cp-a","project_id":store::authority(r).unwrap().unwrap().project_id,"task_id":"A","role":"performer","tool_id":"future-tool","phase":"dev","worktree":r,"branch":"main","source_revision":crate::git::head_commit(r).unwrap(),"worktree_dirty_digest":"dirty","worktree_content_digest":"content","source_hashes":{"design.md":"pinned"},"acceptance_criteria_ids":["AC-1"],"mandatory_task":{"tasks":[{"id":"A","acceptance_criteria":["Preserve every mandatory constraint"],"design_ref":"design.md"}]},"completed_steps":[],"remaining_steps":["verify"],"changed_files":[],"decisions":[],"test_results":[],"blocking_issues":[],"review_objections":null,"memory_refs":[],"source_refs":["design.md"],"next_action":"verify","reason":"test","validation":{}})).unwrap();
+    let prepared = context::prepare_freshness(r, &c).unwrap();
     let _guard = store::lock(r).unwrap();
     let (mut db, _) = database(r).unwrap();
     let tx = db.transaction().unwrap();
-    let prompt = context::for_checkpoint(&tx, r, &c).unwrap();
+    let prompt = context::for_checkpoint(&tx, r, &c, &prepared).unwrap();
     tx.commit().unwrap();
     drop(db);
     drop(_guard);

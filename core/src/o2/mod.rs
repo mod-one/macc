@@ -62,3 +62,9 @@ mod regression_tests;
 mod acceptance_tests;
 #[cfg(test)]
 mod pipeline_tests;
+
+#[cfg(test)]
+mod p3_tests;
+
+#[cfg(test)]
+mod preflight_tests;

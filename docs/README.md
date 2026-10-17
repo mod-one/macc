@@ -42,3 +42,5 @@ When in doubt, prioritize:
 4. `../CHANGELOG.md`
 
 - [Supervisor intervention lifecycle](SUPERVISOR_LIFECYCLE.md)
+
+- [O2 P3-A: evidence freshness and retrieval quality](O2_P3_FRESHNESS_QUALITY.md) — symbol evidence, version TTL, reviewed conflicts and shared ranking controls.

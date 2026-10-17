@@ -14,6 +14,7 @@ fn push_budget_includes_all_references_metadata_and_prompt_framing() {
         let text = "contract proof";
         std::fs::write(root.join(&path), text).unwrap();
         proposal.evidence.push(memory::Evidence {
+            binding: None,
             kind: "file".into(),
             reference: path,
             sha256: Some(digest(text.as_bytes())),

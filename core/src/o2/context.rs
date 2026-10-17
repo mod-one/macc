@@ -38,6 +38,7 @@ pub(crate) fn for_checkpoint(
     db: &rusqlite::Connection,
     root: &Path,
     c: &Checkpoint,
+    prepared: &memory::PreparedFreshness,
 ) -> Result<String> {
     let policy = super::policy::load(root)?;
     if !policy.context_engine.enabled {
@@ -64,6 +65,7 @@ pub(crate) fn for_checkpoint(
             include_inactive: false,
         },
         true,
+        prepared,
     )?;
     let (content_fingerprint, cache_hit, mut selection) = super::context_cache::select(
         db,
@@ -205,4 +207,22 @@ fn retrieval_query(task: &serde_json::Value) -> String {
         query.push_str(&word);
     }
     query
+}
+
+/// Must run before acquiring the session authority lock/transaction.
+pub(crate) fn prepare_freshness(root: &Path, c: &Checkpoint) -> Result<memory::PreparedFreshness> {
+    memory::prepare_search(
+        root,
+        &memory::Search {
+            query: retrieval_query(&c.mandatory_task),
+            access: memory::Access {
+                task_id: Some(c.task_id.clone()),
+                worktree: Some(c.worktree.clone()),
+                tool_id: Some(c.tool_id.clone()),
+                feature: task_feature(&c.mandatory_task),
+                ..Default::default()
+            },
+            include_inactive: false,
+        },
+    )
 }

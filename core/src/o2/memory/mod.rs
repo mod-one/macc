@@ -1,5 +1,13 @@
 //! Durable claims, evidence and review, never task completion authority.
+mod conflicts;
+mod freshness;
 mod model;
+pub(crate) mod preflight;
+pub(crate) use preflight::{prepare_record_at, prepare_records, prepare_search, PreparedFreshness};
+mod ranking;
+pub use conflicts::{conflicts, resolve_conflict};
+pub(crate) use freshness::Checker;
+pub use freshness::{symbol_evidence, tool_evidence};
 mod review;
 pub(crate) mod search;
 use super::*;
@@ -58,7 +66,17 @@ pub(super) fn validate(p: &Proposal, max: u64) -> Result<()> {
         ));
     }
     for e in &p.evidence {
-        if !["file", "prd", "test", "commit", "review", "human_approval"].contains(&e.kind.as_str())
+        if ![
+            "file",
+            "prd",
+            "test",
+            "commit",
+            "review",
+            "human_approval",
+            "symbol",
+            "provider",
+        ]
+        .contains(&e.kind.as_str())
             || e.reference.len() > 512
             || e.reference.trim().is_empty()
             || e.summary.chars().count() > 500
@@ -74,6 +92,7 @@ pub(super) fn validate(p: &Proposal, max: u64) -> Result<()> {
         super::paths::safe_text(value)?;
     }
     for e in &p.evidence {
+        freshness::validate_binding(e)?;
         super::paths::safe_text(&e.reference)?;
         super::paths::safe_text(&e.summary)?;
     }
@@ -182,7 +201,13 @@ pub(super) fn save(db: &rusqlite::Connection, m: &Memory) -> Result<()> {
         .tags
         .iter()
         .cloned()
-        .chain(m.proposal.evidence.iter().map(|e| e.reference.clone()))
+        .chain(m.proposal.evidence.iter().flat_map(|e| {
+            let mut refs = vec![e.reference.clone()];
+            if let Some(Binding::Symbol { symbol, .. }) = &e.binding {
+                refs.push(symbol.clone());
+            }
+            refs
+        }))
         .collect::<Vec<_>>()
         .join(" ");
     sql(db.execute("INSERT INTO memory_search_projection(memory_id,title,body,refs) VALUES(?1,?2,?3,?4) ON CONFLICT(memory_id) DO UPDATE SET title=excluded.title,body=excluded.body,refs=excluded.refs",params![m.id,m.proposal.title,m.proposal.body,refs]))?;
@@ -196,22 +221,6 @@ pub(super) fn save(db: &rusqlite::Connection, m: &Memory) -> Result<()> {
                 serde_json::to_string(e).map_err(|e| error(e.to_string()))?
             ],
         ))?;
-    }
-    Ok(())
-}
-pub(super) fn freshness(worktree: &Path, m: &Memory, ttl: u64) -> Result<()> {
-    if m.proposal.kind == "provider_note" && now() - m.updated_at > (ttl * 86400) as i64 {
-        return Err(error(
-            "Provider note expired; verify against installed version",
-        ));
-    }
-    for e in &m.proposal.evidence {
-        if ["file", "prd", "test"].contains(&e.kind.as_str()) {
-            let (_, data) = super::paths::source(worktree, &e.reference, 1048576)?;
-            if e.sha256.as_deref() != Some(&digest(&data)) {
-                return Err(error(format!("Evidence changed: {}", e.reference)));
-            }
-        }
     }
     Ok(())
 }

@@ -1,0 +1,31 @@
+import { act, fireEvent, render, screen } from '@testing-library/react';
+import { beforeEach, expect, it, vi } from 'vitest';
+import EvidenceCapture from './EvidenceCapture';
+import { o2Action } from '../../../api/o2';
+vi.mock('../../../api/o2', () => ({ o2Action: vi.fn() }));
+beforeEach(() => vi.resetAllMocks());
+it('offers registered adapters, captures exact symbols and clears a changed selection', async () => {
+  const captured=vi.fn();
+  const proof={kind:'symbol', reference:'lib.rs', sha256:'proof', binding:{type:'symbol',provider:'native',symbol:'Type/f'}};
+  vi.mocked(o2Action).mockImplementation(async action=>action==='memory_evidence_sources'?{providers:[{id:'native',languages:['rust']}],tools:['future-tool']}:proof);
+  render(<EvidenceCapture path="lib.rs" worktree={null} identity="A" captured={captured}/>);
+  fireEvent.click(screen.getByRole('button',{name:'Load evidence adapters'}));await screen.findByRole('option',{name:'native (rust)'});
+  fireEvent.change(screen.getByLabelText('Symbol provider'),{target:{value:'native'}});
+  fireEvent.change(screen.getByLabelText('Qualified symbol'),{target:{value:'Type/f'}});
+  fireEvent.click(screen.getByRole('button',{name:'Capture symbol evidence'}));
+  await screen.findByRole('status');expect(captured).toHaveBeenLastCalledWith(proof);
+  expect(o2Action).toHaveBeenCalledWith('memory_symbol_evidence',{path:'lib.rs',symbol:'Type/f',provider:'native',worktree:null});
+  fireEvent.change(screen.getByLabelText('Qualified symbol'),{target:{value:'Type/g'}});
+  expect(captured).toHaveBeenLastCalledWith(null);expect(screen.queryByRole('status')).not.toBeInTheDocument();
+});
+it('never attaches a provider observation returned after a task scope change', async () => {
+  let resolve!:(value:unknown)=>void;const captured=vi.fn();
+  vi.mocked(o2Action).mockImplementation(async action=>action==='memory_evidence_sources'?{providers:[],tools:['future-tool']}:new Promise(r=>{resolve=r;}));
+  const view=render(<EvidenceCapture path="" worktree={null} identity="A" captured={captured}/>);
+  fireEvent.click(screen.getByRole('button',{name:'Load evidence adapters'}));await screen.findByRole('option',{name:'future-tool'});
+  fireEvent.change(screen.getByLabelText('Observed tool'),{target:{value:'future-tool'}});
+  captured.mockClear();fireEvent.click(screen.getByRole('button',{name:'Capture provider version evidence'}));
+  view.rerender(<EvidenceCapture path="" worktree={null} identity="B" captured={captured}/>);
+  await act(async()=>{resolve({kind:'provider',reference:'future-tool'});});
+  expect(captured).not.toHaveBeenCalled();expect(screen.queryByRole('status')).not.toBeInTheDocument();
+});

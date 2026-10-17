@@ -95,11 +95,13 @@ fn typed_conflict_resolution_previews_then_confirms_the_shared_action() {
         panel.key(root, KeyCode::Char(c)).unwrap();
     }
     panel.key(root, KeyCode::Enter).unwrap();
+    panel.key(root, KeyCode::Enter).unwrap(); // Default conservative both_stale outcome.
     assert!(panel.pending.is_some());
     let before = execute(root, Action::MemoryConflicts).unwrap();
     assert_eq!(before[0]["status"], "open");
     assert!(panel.mutation(KeyCode::Char('a')));
     panel.key(root, KeyCode::Char('a')).unwrap();
+    settle(&mut panel, root);
     let after = execute(root, Action::MemoryConflicts).unwrap();
     assert_eq!(after[0]["status"], "resolved");
     assert!(panel.pending.is_none());
@@ -280,4 +282,158 @@ fn overview_async_refresh_does_not_replace_another_domains_rows() {
     }
     assert!(panel.job.is_none());
     assert_eq!(panel.rows[0]["memory"]["id"], "keep-selected");
+}
+
+fn settle(panel: &mut Panel, root: &Path) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while panel.job.is_some() && std::time::Instant::now() < deadline {
+        panel.poll(root);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(panel.job.is_none(), "{}", panel.message);
+}
+#[test]
+fn async_memory_search_retains_failed_form_and_ignores_obsolete_scope() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    std::fs::create_dir_all(root.join(".macc/state")).unwrap();
+    let plan = macc_core::session_store::migrate(root, false, None).unwrap();
+    macc_core::session_store::migrate(root, true, Some(&plan.source_sha256)).unwrap();
+    let mut panel = Panel::default();
+    panel.refresh(root).unwrap();
+    settle(&mut panel, root);
+    panel.key(root, KeyCode::Char('/')).unwrap();
+    for text in [
+        "q".repeat(513),
+        "A".into(),
+        "".into(),
+        "".into(),
+        "".into(),
+        "user".into(),
+    ] {
+        for c in text.chars() {
+            panel.key(root, KeyCode::Char(c)).unwrap();
+        }
+        panel.key(root, KeyCode::Enter).unwrap();
+    }
+    assert!(panel.job.is_some());
+    settle(&mut panel, root);
+    assert!(panel.form.is_some());
+    assert_eq!(panel.form.as_ref().unwrap().values[0].len(), 513);
+    panel.form = None;
+    panel.query = String::new();
+    panel.refresh(root).unwrap();
+    panel.access = json!({"task_id":"B"});
+    panel.tab = 1;
+    panel.rows = vec![json!({"id":"keep-context"})];
+    settle(&mut panel, root);
+    assert_eq!(panel.rows[0]["id"], "keep-context");
+}
+
+#[test]
+fn symbol_capture_proposal_and_captured_revalidation_use_the_shared_services() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path();
+    std::fs::write(root.join("contract.rs"), "pub fn contract(){}\n").unwrap();
+    std::fs::write(root.join(".gitignore"), ".macc/\n").unwrap();
+    for args in [
+        vec!["init", "-b", "main"],
+        vec!["config", "user.name", "Test"],
+        vec!["config", "user.email", "test@example.invalid"],
+        vec!["add", "."],
+        vec!["commit", "-m", "fixture"],
+    ] {
+        assert!(macc_core::git::run_git_output_mapped(
+            root,
+            &args,
+            "Initialize symbol capture fixture"
+        )
+        .unwrap()
+        .status
+        .success());
+    }
+    std::fs::create_dir_all(root.join(".macc/state")).unwrap();
+    let plan = macc_core::session_store::migrate(root, false, None).unwrap();
+    macc_core::session_store::migrate(root, true, Some(&plan.source_sha256)).unwrap();
+    let view = policy::inspect(root).unwrap();
+    let mut p = view.policy;
+    p.memory.enabled = true;
+    p.code_intelligence.enabled = true;
+    policy::update(root, &view.revision, Some(p)).unwrap();
+    let mut panel = Panel::default();
+    panel.refresh(root).unwrap();
+    settle(&mut panel, root);
+    fn fill(panel: &mut Panel, root: &Path, key: char, fields: &[&str]) {
+        panel.key(root, KeyCode::Char(key)).unwrap();
+        for value in fields {
+            for c in value.chars() {
+                panel.key(root, KeyCode::Char(c)).unwrap();
+            }
+            panel.key(root, KeyCode::Enter).unwrap();
+        }
+    }
+    fill(
+        &mut panel,
+        root,
+        'y',
+        &["contract.rs", "contract", "native", ""],
+    );
+    settle(&mut panel, root);
+    assert_eq!(panel.captured_evidence.as_ref().unwrap()["kind"], "symbol");
+    fill(
+        &mut panel,
+        root,
+        'n',
+        &[
+            "decision",
+            "Contract",
+            "Reviewed contract",
+            "project",
+            "",
+            "",
+            "0.9",
+        ],
+    );
+    settle(&mut panel, root);
+    assert_eq!(panel.rows[0]["memory"]["status"], "proposed");
+    fill(
+        &mut panel,
+        root,
+        'p',
+        &["active", "Reviewed symbol source", ""],
+    );
+    panel.key(root, KeyCode::Char('a')).unwrap();
+    settle(&mut panel, root);
+    assert_eq!(panel.rows[0]["memory"]["status"], "active");
+    std::fs::write(
+        root.join("contract.rs"),
+        "pub fn contract(){let changed=1;}\n",
+    )
+    .unwrap();
+    fill(&mut panel, root, 'p', &["stale", "Source changed", ""]);
+    panel.key(root, KeyCode::Char('a')).unwrap();
+    settle(&mut panel, root);
+    fill(
+        &mut panel,
+        root,
+        'y',
+        &["contract.rs", "contract", "native", ""],
+    );
+    settle(&mut panel, root);
+    fill(
+        &mut panel,
+        root,
+        'R',
+        &["active", "Reviewed updated symbol"],
+    );
+    assert!(
+        matches!(&panel.pending,Some(Action::MemoryReview{review}) if review.evidence.is_some())
+    );
+    panel.key(root, KeyCode::Char('a')).unwrap();
+    settle(&mut panel, root);
+    assert_eq!(panel.rows[0]["memory"]["status"], "active");
+    panel.access = json!({"task_id":"B"});
+    panel.refresh(root).unwrap();
+    settle(&mut panel, root);
+    assert!(panel.captured_evidence.is_none());
 }

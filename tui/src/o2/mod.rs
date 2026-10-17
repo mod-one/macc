@@ -39,6 +39,8 @@ pub struct Panel {
     access: Value,
     query: String,
     conflicts: bool,
+    captured_evidence: Option<Value>,
+    captured_scope: Value,
     job: Option<jobs::Job>,
 }
 impl Panel {
@@ -56,6 +58,9 @@ impl Panel {
     pub fn refresh(&mut self, root: &Path) -> Result<()> {
         if self.access.is_null() {
             self.access = json!({});
+        }
+        if self.captured_scope != self.access {
+            self.captured_evidence = None;
         }
         let view = policy::inspect(root)?;
         if self.view.is_none() {
@@ -83,7 +88,7 @@ impl Panel {
                 _ => None,
             };
             if let Some(action) = action {
-                if matches!(&action, Action::Providers) {
+                if matches!(&action, Action::Providers | Action::MemorySearch { .. }) {
                     if self.job.is_none() {
                         self.launch(root, action)?;
                     }
@@ -121,6 +126,12 @@ impl Panel {
         Ok(())
     }
     fn result(&mut self, value: Value) {
+        if value["binding"].is_object()
+            && (value["kind"] == "symbol" || value["kind"] == "provider")
+        {
+            self.captured_evidence = Some(value.clone());
+            self.captured_scope = self.access.clone();
+        }
         self.details = serde_json::to_string_pretty(&value).unwrap_or_default();
         self.scroll = 0;
     }
@@ -174,10 +185,13 @@ impl Panel {
             KeyCode::Char('m') if self.tab==2=>self.start("adopt_native",true,&["Idle logical session ID whose existing native setting should become MACC-managed"]),
             KeyCode::Char('c') if self.tab==2=>self.start("checkpoint",true,&["Idle logical session ID for checkpoint"]),
             KeyCode::Char('u')=>{let plan=execute(root,Action::UpgradePlan)?;self.pending=Some(Action::UpgradeApply{source_sha256:plan["source_sha256"].as_str().unwrap_or_default().into()});self.result(plan);self.message="Inspect the upgrade and backup conditions. Press a to apply this exact reviewed source hash.".into();},
-            KeyCode::Char('a')=>{if let Some(action)=self.pending.as_ref(){if matches!(action,Action::ProviderApply{..}){self.launch(root,action.clone())?;return Ok(());}let result=execute(root,action.clone())?;self.pending=None;self.result(result);self.refresh(root)?;self.message="Reviewed operation applied.".into();}},
+            KeyCode::Char('a')=>{if let Some(action)=self.pending.as_ref(){if matches!(action,Action::ProviderApply{..}|Action::MemoryReview{..}|Action::MemoryResolveConflict{..}|Action::MemoryToolEvidence{..}){self.launch(root,action.clone())?;return Ok(());}let result=execute(root,action.clone())?;self.pending=None;self.result(result);self.refresh(root)?;self.message="Reviewed operation applied.".into();}},
             KeyCode::Char('h') if self.tab==0=>{let data=execute(root,Action::AgentStatus)?;self.result(data);},
             KeyCode::Char('e') if self.tab==0=>self.start("extract",true,&["Verified finished checkpoint ID to extract proposals (no memory activation)"]),
-            KeyCode::Char('n') if self.tab==0=>self.start("propose",true,&["Kind (discovery, constraint, decision…)","Title","Body (concise sourced fact)","Scope (project, task, feature, worktree, tool, user)","Scope reference (blank for project)","Evidence source path","Confidence (0..1)"]),
+            KeyCode::Char('y') if self.tab==0=>self.start("capture_symbol",false,&["Tracked Rust source path","Qualified symbol (module/Type/method)","Provider ID (native)","Worktree (blank for project)"]),
+            KeyCode::Char('Y') if self.tab==0=>self.start("capture_tool",true,&["Registered tool ID (see evidence sources via j: memory_evidence_sources)"]),
+            KeyCode::Char('n') if self.tab==0=>self.start("propose",true,&["Kind (discovery, constraint, decision…)","Title","Body (concise sourced fact)","Scope (project, task, feature, worktree, tool, user)","Scope reference (blank for project)","Evidence source path (blank uses captured bound evidence)","Confidence (0..1)"]),
+            KeyCode::Char('R') if self.tab==0 && !self.conflicts=>{self.selected()?;if self.captured_evidence.is_none(){return Err(MaccError::Validation("Capture fresh evidence with y/Y first".into()));}self.start("review_captured",true,&["Transition (active for revalidation)","Reason after reviewing the newly captured evidence"]);},
             KeyCode::Char('p') if self.tab==0 && !self.conflicts=>{self.selected()?;self.start("review",true,&["Transition (active, rejected, stale, invalidated)","Review reason","Replacement evidence path (blank preserves existing evidence)"]);},
             KeyCode::Char('c') if self.tab==0 && !self.conflicts=>{self.selected()?;self.start("conflict",true,&["Conflicting memory ID","Reason after inspecting both claims"]);},
             KeyCode::Char('p') if self.tab==3=>self.start("provider",true,&["Provider ID (native, graphify, serena)","Operation (install, deploy, index, update, rollback, disable, undeploy, uninstall)"]),
@@ -192,7 +206,7 @@ impl Panel {
                 self.selected = 0;
                 self.refresh(root)?;
             }
-            KeyCode::Char('v') if self.tab==0 && self.conflicts=>{self.selected()?;self.start("resolve_conflict",true,&["Reason after reviewing both conflicting claims"]);},
+            KeyCode::Char('v') if self.tab==0 && self.conflicts=>{self.selected()?;self.start("resolve_conflict",true,&["Reason after reviewing both conflicting claims","Outcome (both_stale, keep_left, keep_right, dismiss; blank marks active claims stale)"]);},
             KeyCode::Char('l') if self.tab==0=>self.start("pull",false,&["Agent search cursor (0 for first page)"]),
             KeyCode::Char('g') if self.tab==0 && !self.conflicts=>{self.selected()?;self.start("read",false,&["Agent record offset (0 for first fragment)"]);},
             KeyCode::Char('j')=>self.start("advanced",false,&["Advanced typed operation JSON (all shared O2 actions)"]),
@@ -209,7 +223,7 @@ impl Panel {
         } else if self.tab == 5 {
             self.overview_lines(&mut lines);
         } else {
-            lines.push(match self.tab{0=>"h scoped MCP setup | e extract checkpoint → a confirm | n propose | p review → a confirm | c conflict | f toggle conflict list | v resolve selected conflict | l agent search page | g agent record fragment | b rebuild FTS. Only reviewed active current facts enter prompts.",1=>"Context manifests keep PRD/criteria and pinned source hashes separate from optional estimated memory. b reduce output and preserve raw artifact.",2=>"p probe version/help | d runtime decisions | c create checkpoint | m preview native setting adoption | v review scoped rotation. Native settings are opt-in under Policies. Compression execution remains unobserved unless an adapter reports it.",_=>"p preview lifecycle → a confirm. Native ships with MACC; external adapters are optional. / current-code query | v compare with native | d inspect operation UUID."}.into());
+            lines.push(match self.tab{0=>"y capture symbol | Y capture tool version | R review with captured evidence | h scoped MCP setup | e extract checkpoint → a confirm | n propose | p review → a confirm | c conflict | f toggle conflict list | v resolve selected conflict | l agent search page | g agent record fragment | b rebuild FTS. Only reviewed active current facts enter prompts.",1=>"Context manifests keep PRD/criteria and pinned source hashes separate from optional estimated memory. b reduce output and preserve raw artifact.",2=>"p probe version/help | d runtime decisions | c create checkpoint | m preview native setting adoption | v review scoped rotation. Native settings are opt-in under Policies. Compression execution remains unobserved unless an adapter reports it.",_=>"p preview lifecycle → a confirm. Native ships with MACC; external adapters are optional. / current-code query | v compare with native | d inspect operation UUID."}.into());
             for (i, row) in self.rows.iter().enumerate() {
                 let label = if self.tab == 0 && self.conflicts {
                     format!("{} | {} | {}", row["id"], row["status"], row["reason"])

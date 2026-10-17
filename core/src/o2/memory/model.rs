@@ -11,6 +11,8 @@ pub struct Access {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Evidence {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<Binding>,
     pub kind: String,
     pub reference: String,
     pub sha256: Option<String>,
@@ -71,4 +73,21 @@ pub struct Hit {
     pub checksum: String,
     pub rank_reason: String,
     pub score: i64,
+}
+
+/// Optional, checksummed provenance. Legacy evidence omits this field unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Binding {
+    Symbol { provider: String, symbol: String },
+    Tool { tool_id: String, observed_at: i64 },
+}
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Resolution {
+    KeepLeft,
+    KeepRight,
+    #[default]
+    BothStale,
+    Dismiss,
 }

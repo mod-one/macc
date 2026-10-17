@@ -24,6 +24,15 @@ pub struct MemoryPolicy {
     pub search_limit: u64,
     pub min_confidence: f64,
     pub provider_note_ttl_days: u64,
+    pub provider_note_probe_limit: u64,
+    pub symbol_check_limit: u64,
+    pub ranking_task_weight: u64,
+    pub ranking_reference_weight: u64,
+    pub ranking_authority_weight: u64,
+    pub ranking_confidence_weight: u64,
+    pub ranking_evidence_weight: u64,
+    pub ranking_length_penalty: u64,
+    pub ranking_duplicate_penalty: u64,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
@@ -85,6 +94,15 @@ impl Default for MemoryPolicy {
             search_limit: 20,
             min_confidence: 0.6,
             provider_note_ttl_days: 14,
+            provider_note_probe_limit: 2,
+            symbol_check_limit: 50,
+            ranking_task_weight: 100,
+            ranking_reference_weight: 30,
+            ranking_authority_weight: 40,
+            ranking_confidence_weight: 10,
+            ranking_evidence_weight: 15,
+            ranking_length_penalty: 20,
+            ranking_duplicate_penalty: 80,
         }
     }
 }
