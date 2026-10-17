@@ -1361,7 +1361,13 @@ fn parse_since_to_seconds(s: &str) -> Option<u64> {
 
 fn main() {
     let cli = Cli::parse();
-    init_tracing(cli.verbose);
+    let protocol_stdio = matches!(
+        &cli.command,
+        Some(Commands::O2 {
+            command: commands::o2::O2Command::Mcp
+        })
+    );
+    init_tracing(cli.verbose, protocol_stdio);
 
     // Propagate debug mode to child processes (coordinator, performers, workers).
     // MACC_DEBUG=1 is read by performer_lib.sh and performer.sh to control
@@ -1389,15 +1395,19 @@ fn main() {
     }
 }
 
-fn init_tracing(verbose: bool) {
+fn init_tracing(verbose: bool, protocol_stdio: bool) {
     let fallback = if verbose { "debug" } else { "info" };
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .or_else(|_| tracing_subscriber::EnvFilter::try_new(fallback))
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    let _ = tracing_subscriber::fmt()
+    let subscriber = tracing_subscriber::fmt()
         .with_env_filter(filter)
-        .with_target(false)
-        .try_init();
+        .with_target(false);
+    if protocol_stdio {
+        let _ = subscriber.with_writer(std::io::stderr).try_init();
+    } else {
+        let _ = subscriber.try_init();
+    }
 }
 
 fn get_exit_code(err: &MaccError) -> i32 {

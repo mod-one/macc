@@ -5,6 +5,48 @@ pub fn fields() -> Vec<Field> {
     let specs = [
         ("memory.enabled", "Memory Ledger", "bool", 0., 1.),
         (
+            "memory.phase_extraction_enabled",
+            "Extract phase lesson proposals",
+            "bool",
+            0.,
+            1.,
+        ),
+        (
+            "memory.mcp_enabled",
+            "Enable scoped stdio memory MCP",
+            "bool",
+            0.,
+            1.,
+        ),
+        (
+            "memory.agent_proposals_allowed",
+            "Allow agent proposals and challenges",
+            "bool",
+            0.,
+            1.,
+        ),
+        (
+            "memory.mcp_output_tokens",
+            "MCP complete response token estimate limit",
+            "number",
+            256.,
+            4000.,
+        ),
+        (
+            "memory.mcp_input_bytes",
+            "MCP request byte limit",
+            "number",
+            4096.,
+            262144.,
+        ),
+        (
+            "memory.mcp_max_proposals_per_session",
+            "Agent proposal limit per logical session",
+            "number",
+            0.,
+            100.,
+        ),
+        (
             "memory.max_body_chars",
             "Maximum memory characters",
             "number",

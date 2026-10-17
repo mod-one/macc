@@ -134,7 +134,7 @@ pub(crate) fn redact_evidence(v: &mut Value) {
         _ => {}
     }
 }
-pub(super) fn load(db: &rusqlite::Connection, id: &str) -> Result<Checkpoint> {
+pub(crate) fn load(db: &rusqlite::Connection, id: &str) -> Result<Checkpoint> {
     let (raw, sha): (String, String) = sql(db.query_row(
         "SELECT content_json,content_sha256 FROM task_checkpoints WHERE id=?1",
         [id],
@@ -178,7 +178,7 @@ pub(super) fn list(db: &rusqlite::Connection) -> Result<Vec<CheckpointView>> {
     }))?;
     rows.map(sql).collect()
 }
-pub(super) fn latest(
+pub(crate) fn latest(
     db: &rusqlite::Connection,
     project: &str,
     task: &str,

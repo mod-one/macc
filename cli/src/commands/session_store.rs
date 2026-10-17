@@ -25,6 +25,7 @@ pub enum SessionStoreCommands {
     Usage,
     UsageBegin,
     CompactionOptions,
+    McpOptions,
     UsageEnd,
     UsageUpgrade {
         #[arg(long)]
@@ -123,6 +124,9 @@ impl Command for SessionStoreCommand {
                     *apply,
                     expected_sha256.as_deref(),
                 )?)
+            }
+            SessionStoreCommands::McpOptions => {
+                emit(macc_core::o2::agent::options(root, &input()?)?)
             }
             SessionStoreCommands::Status => emit(store::inspect(root)?),
             SessionStoreCommands::Backup => {

@@ -22,7 +22,7 @@ pub(super) fn query(
         });
     }
     let receipt = {
-        let (db, _) = database(root)?;
+        let (db, _) = readonly_database(root)?;
         super::super::receipt(&db, "graphify")?.ok_or_else(|| error("Graphify not deployed"))?
     };
     let meta = receipt

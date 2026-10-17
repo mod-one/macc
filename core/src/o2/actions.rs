@@ -6,6 +6,10 @@ use serde_json::{json, Value};
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Action {
     Status,
+    AgentStatus,
+    MemoryExtract {
+        checkpoint_id: String,
+    },
     PolicyPreview {
         revision: String,
         policy: Option<policy::Policy>,
@@ -119,6 +123,7 @@ impl Action {
         !matches!(
             self,
             Self::Status
+                | Self::AgentStatus
                 | Self::PolicyPreview { .. }
                 | Self::UpgradePlan
                 | Self::MemorySearch { .. }
@@ -146,6 +151,10 @@ fn value<T: Serialize>(v: T) -> Result<Value> {
 pub fn execute(root: &Path, action: Action) -> Result<Value> {
     match action {
         Action::Status => value(policy::inspect(root)?),
+        Action::AgentStatus => agent::status(root),
+        Action::MemoryExtract { checkpoint_id } => {
+            extraction::from_checkpoint(root, &checkpoint_id)
+        }
         Action::PolicyPreview { revision, policy } => {
             if let Some(p) = &policy {
                 p.validate()?;

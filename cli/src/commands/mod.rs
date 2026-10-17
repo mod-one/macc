@@ -20,6 +20,7 @@ pub mod lock;
 pub mod logs;
 pub mod migrate;
 pub mod o2;
+mod o2_mcp;
 pub mod plan;
 pub mod prd;
 pub mod process;

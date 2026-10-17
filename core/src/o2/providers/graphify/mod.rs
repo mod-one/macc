@@ -67,7 +67,7 @@ impl CodeIntelligenceProvider for Graphify {
         } else if !supported() {
             "incompatible".to_string()
         } else {
-            let (db, _) = database(root)?;
+            let (db, _) = readonly_database(root)?;
             super::receipt(&db, "graphify")?
                 .map(|r| r.state)
                 .unwrap_or_else(|| "missing".into())

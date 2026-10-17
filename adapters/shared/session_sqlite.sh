@@ -46,8 +46,22 @@ cleanup_sqlite_session() {
     fi
     sqlite_lease_key=""
   fi
+  unset MACC_O2_PROJECT_ROOT MACC_O2_MCP_SESSION MACC_O2_MCP_GENERATION MACC_O2_MCP_TOKEN
   if [[ -n "$usage_raw_capture" ]]; then rm -f -- "$usage_raw_capture"; fi
   if [[ -n "$checkpoint_prompt_file" ]]; then rm -f -- "$checkpoint_prompt_file"; fi
+}
+prepare_mcp_access() {
+  unset MACC_O2_PROJECT_ROOT MACC_O2_MCP_SESSION MACC_O2_MCP_GENERATION MACC_O2_MCP_TOKEN
+  local options key value
+  if options="$(printf '%s' "$sqlite_lease_key" | session_service mcp-options)"; then
+    while IFS=$'\t' read -r key value; do
+      case "$key" in
+        MACC_O2_PROJECT_ROOT|MACC_O2_MCP_SESSION|MACC_O2_MCP_GENERATION|MACC_O2_MCP_TOKEN) export "$key=$value" ;;
+      esac
+    done < <(jq -r '.env | to_entries[]? | [.key,.value] | @tsv' <<<"$options")
+  else
+    echo 'Warning: scoped memory MCP unavailable; provider execution and Git work retained' >&2
+  fi
 }
 run_sqlite_session() {
   local generate=false request grant interval new_sid rc=0
@@ -65,6 +79,7 @@ run_sqlite_session() {
   sid="$(jq -r '.provider_session_id // empty' <<<"$grant")"
   sid_is_new="$(jq -r 'if .is_new then 1 else 0 end' <<<"$grant")"
   prepare_usage
+  prepare_mcp_access
   local native_options native_key native_value
   if native_options="$(printf '%s' "$sqlite_lease_key" | session_service compaction-options)"; then
     while IFS=$'\t' read -r native_key native_value; do
@@ -122,6 +137,13 @@ run_sqlite_session() {
   if grep -qiE "(hit your (usage|session) limit|MACC_TOOL_LIMIT:)" "$output_capture"; then result=quota; fi
   if grep -Eq '^MACC_TASK_RESULT: *precondition_unmet' "$output_capture"; then result=precondition_unmet; fi
   finish_usage "$result"
+  # The shared review protocol is provider-neutral. This records an observation,
+  # not a review postcheck, task transition or permission to deliver.
+  if [[ "$result" == success && "${MACC_SESSION_ROLE:-}" == reviewer ]]; then
+    local review_verdict
+    review_verdict="$(sed -n 's/^[[:space:]]*REVIEW_VERDICT:[[:space:]]*//p' "$output_capture" | tail -1 | tr '[:lower:]' '[:upper:]' | sed 's/[[:space:]]*$//')"
+    if [[ "$review_verdict" == CHANGES_REQUESTED ]]; then result=changes_requested; fi
+  fi
   checkpoint_rc=0
   finish_checkpoint "$result" "$acknowledged" || checkpoint_rc=$?
   if [[ "$checkpoint_rc" == 2 ]]; then return 0; elif [[ "$checkpoint_rc" != 0 ]]; then return 1; fi

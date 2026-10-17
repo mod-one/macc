@@ -3,8 +3,8 @@
 **Project:** MACC — Multi-Assistant Code Config  
 **Document:** Revised and unified specification of `10_MACC_O2_SQLite_Shared_Memory_Spec.md`  
 **Motifs:** O2 Cross-Agent Memory Ledger; Shared Context Store; Code Intelligence Providers; Multi-Tool Session Lifecycle; Adaptive Compaction  
-**Version:** 2.10 — P0/P1, P2-A Graphify and P2-B Python/Jedi Serena implementation progress; later stages remain proposed
-**Date:** 2026-10-16
+**Version:** 2.11 — P0/P1, P2-A Graphify, P2-B Python/Jedi Serena and P2-C memory/MCP implementation progress; later stages remain proposed
+**Date:** 2026-10-17
 **Code baseline inspected:** `df95759` — `feat: implement review and correction cycle budget management`  
 **Language:** English  
 **Applies to:** Rust core, native coordinator, performer runners, tool adapters, SQLite, local MCP, TUI, local Web UI  
@@ -67,7 +67,7 @@ MACC already separates its native Rust coordinator from isolated agent worktrees
 
 ### 1.4 Implementation baseline and remaining work
 
-This table describes inspected source, not deployed runtime state. **Existing** means a code path is present; it does not certify all O2 acceptance criteria or provider versions. **Partial** identifies a foundation that must be extended. Unchecked acceptance items in §22 remain delivery gates.
+This table preserves the original version 2.1 inspection baseline, not deployed runtime state. Delivered P0–P2-C changes and their limits are recorded in §20.1–§20.7. **Existing** means a code path is present; it does not certify all O2 acceptance criteria or provider versions. **Partial** identifies a foundation that must be extended. Unchecked acceptance items in §22 remain delivery gates.
 
 | Area | Current source baseline | O2 work still required |
 |---|---|---|
@@ -1378,7 +1378,7 @@ Use the commands defined in §8.11; integrate with `macc plan`, `macc apply`, `m
 
 ### 14.1 Default MCP server
 
-Use `macc memory mcp` as a single local stdio server, with a restricted project/task token or equivalent signed local session context supplied by the coordinator. The coordinator itself calls the Rust API directly; external agents receive only scoped capabilities. Avoid a separate always-on Graphify MCP by default.
+The delivered P2-C command is `macc o2 mcp` (`macc memory mcp` was the proposed namespace). Use it as a single local stdio server, with a restricted project/task token or equivalent signed local session context supplied by the coordinator. The coordinator itself calls the Rust API directly; external agents receive only scoped capabilities. Avoid a separate always-on Graphify MCP by default.
 
 ### 14.2 Recommended tools
 
@@ -1412,6 +1412,8 @@ Use `macc memory mcp` as a single local stdio server, with a restricted project/
 }
 ```
 
+The example above describes the internal retrieval target. In delivered P2-C MCP, project/task/worktree/feature/tool scope is derived from the runner capability, and caller-supplied scope/status fields are rejected. The scoped search arguments are `query`, `cursor` and `limit`; detailed source queries use the provider port.
+
 Response includes `memory_id`, `kind`, `title`, concise body, authority/status, evidence source references, freshness and reason for ranking. Do not return unbounded full logs or arbitrary file contents. Enforce auth-derived scope; never trust `project_id`/`task_id` supplied by the agent alone to escalate access.
 
 ### 14.4 Context query contract
@@ -1426,6 +1428,8 @@ Response includes `memory_id`, `kind`, `title`, concise body, authority/status, 
   "minimum_source_authority": "verified"
 }
 ```
+
+Delivered P2-C `context.get_checkpoint` takes no scope arguments and returns the invocation’s granted checkpoint summary. Code/source query arguments are `text`, optional `kind` and optional relative `path`; callers cannot supply a task, revision or execution root.
 
 ### 14.5 Isolation and prompt-injection controls
 
@@ -1912,6 +1916,38 @@ Deterministic lifecycle/routing/freshness/security tests and an opt-in real-pack
 symbol accuracy fixture cover the supported backend. Full upstream language
 coverage, editing tools, MCP exposure, persistent LSP workers, release discovery,
 and production performance/token-savings claims are outside this milestone.
+
+---
+
+### 20.7 P2-C implementation progress
+
+P2-C adds deterministic phase-observation proposals and a local, restricted MCP
+stdio adapter over the shared memory/checkpoint/provider ports. See
+[Memory proposals and scoped MCP](../O2_P2_MEMORY_MCP.md) for settings, registration,
+protocol boundaries and operational behavior. The common runner grants derived
+capabilities bound to its live SQLite lease, task, role, generation and worktree.
+Clients must register the MCP command and forward its runtime environment through
+their supported configuration; universal automatic client registration is not
+claimed. Feature scope is pinned to the checkpoint granted at reservation.
+
+Read operations use read-only/query-only SQLite connections. The fixed catalog
+exposes approved scoped memory lookup, checksum-linked fragments, current-diff
+relations, checkpoint summaries and existing code-query ports. Limited writes
+create idempotent, rate-limited task proposals/challenges only. Privileged review,
+scope expansion, arbitrary commands, provider lifecycle and checkpoint mutation
+are absent. Tool responses include JSON-RPC envelope/escaping in their token budget;
+fixed protocol control replies are separate. Evidence freshness, secret/control
+checks and live authorization remain required.
+
+Failure and changes-requested checkpoints can propose observations with source and
+checkpoint evidence, without inferring a root cause, passing test or task delivery.
+Unchanged observations deduplicate and retain operator decisions. No extra AI worker
+or timer is launched. Backfill uses the recorded outcome of a validated checkpoint.
+All six new policies use the existing typed CLI/TUI/Web catalog; both interactive
+clients expose redacted setup and extraction controls. Optional features default
+off and require no new migration on an existing O2 schema. Semantic lesson inference,
+universal client setup and protection from unrestricted same-user shell access are
+outside this milestone. Operator review remains mandatory for active memory.
 
 ---
 

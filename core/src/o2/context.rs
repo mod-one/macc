@@ -116,7 +116,7 @@ pub(crate) fn for_checkpoint(
     )?;
     super::context_prompt::render(&bundle.selected, &bundle.id)
 }
-fn task_feature(task: &serde_json::Value) -> Option<String> {
+pub(crate) fn task_feature(task: &serde_json::Value) -> Option<String> {
     let selected = &task["tasks"][0];
     selected["feature_id"]
         .as_str()

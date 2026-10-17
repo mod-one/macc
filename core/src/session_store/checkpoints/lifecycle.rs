@@ -228,6 +228,9 @@ pub fn finish(root: &Path, request: &FinishRequest) -> Result<Checkpoint> {
             [&c.id],
         ))?;
     }
+    if !sources_changed {
+        crate::o2::extraction::phase_in(&tx, root, &c, result)?;
+    }
     sql(tx.commit())?;
     if sources_changed {
         return Err(error(format!("Checkpoint {} requires reconciliation: mandatory task sources changed during invocation",c.id)));

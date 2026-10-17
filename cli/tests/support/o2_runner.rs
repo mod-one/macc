@@ -210,3 +210,80 @@ fn agent_cli_budgets_cover_stdout_serialization_and_all_memory_fragments() {
         .to_string()
         .contains("Output bounded"));
 }
+
+#[test]
+fn scoped_mcp_flows_through_generic_runner_and_real_cli_stdio() {
+    use macc_core::o2::policy;
+    let (temp, lib) = setup();
+    let root = temp.path();
+    let view = policy::inspect(root).unwrap();
+    let mut p = view.policy;
+    p.memory.enabled = true;
+    p.memory.mcp_enabled = true;
+    p.memory.phase_extraction_enabled = true;
+    policy::update(root, &view.revision, Some(p)).unwrap();
+    let frames=concat!(
+        "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{},\"clientInfo\":{\"name\":\"fixture\",\"version\":\"1\"}}}\n",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"context.get_checkpoint\",\"arguments\":{}}}\n"
+    );
+    std::fs::write(root.join(".macc/mcp-input"), frames).unwrap();
+    let fake = root.join("fake-ai.sh");
+    let script = std::fs::read_to_string(&fake).unwrap();
+    let extra = r#"
+"$MACC_SESSION_SERVICE_BIN" --verbose o2 mcp < "$MCP_INPUT" > "$MCP_OUTPUT" || exit 43
+jq -nc '{session_id:env.MACC_O2_MCP_SESSION,generation:(env.MACC_O2_MCP_GENERATION|tonumber),token:env.MACC_O2_MCP_TOKEN}' > "$MCP_CAPTURE"
+echo 'REVIEW_VERDICT: CHANGES_REQUESTED'
+"#;
+    std::fs::write(
+        &fake,
+        script.replace("call_arg=", &format!("{extra}\ncall_arg=")),
+    )
+    .unwrap();
+    let out = runner(root, &lib, "A", "reviewer")
+        .env("MCP_INPUT", root.join(".macc/mcp-input"))
+        .env("MCP_OUTPUT", root.join(".macc/mcp-output"))
+        .env("MCP_CAPTURE", root.join(".macc/mcp-capture"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let output = std::fs::read_to_string(root.join(".macc/mcp-output")).unwrap();
+    let replies = output
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(replies.len(), 2);
+    assert_eq!(replies[0]["result"]["serverInfo"]["name"], "macc-o2");
+    let checkpoint: Value =
+        serde_json::from_str(replies[1]["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(checkpoint["task_id"], "A");
+    let credentials =
+        serde_json::from_slice(&std::fs::read(root.join(".macc/mcp-capture")).unwrap()).unwrap();
+    assert!(macc_core::o2::mcp::Server::new(root, credentials).is_err());
+    let usage = macc_core::session_store::usage::inspect(root).unwrap();
+    assert_eq!(usage.records[0].outcome.as_deref(), Some("success"));
+    let hits = macc_core::o2::memory::search(
+        root,
+        &macc_core::o2::memory::Search {
+            query: "".into(),
+            access: macc_core::o2::memory::Access {
+                task_id: Some("A".into()),
+                ..Default::default()
+            },
+            include_inactive: true,
+        },
+    )
+    .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].memory.status, "proposed");
+    assert!(hits[0]
+        .memory
+        .proposal
+        .tags
+        .contains(&"outcome:changes_requested".into()));
+}

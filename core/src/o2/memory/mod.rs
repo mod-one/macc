@@ -7,7 +7,7 @@ pub use model::*;
 pub use review::{conflict, review};
 use rusqlite::params;
 pub use search::{fts_rebuild, search};
-fn validate(p: &Proposal, max: u64) -> Result<()> {
+pub(super) fn validate(p: &Proposal, max: u64) -> Result<()> {
     if ![
         "constraint",
         "discovery",
@@ -88,9 +88,27 @@ pub fn propose(root: &Path, p: &Proposal) -> Result<Memory> {
     let _guard = store::lock(root)?;
     let (mut db, a) = database(root)?;
     let tx = sql(db.transaction())?;
+    let m = propose_in(
+        &tx,
+        &a.project_id,
+        p,
+        &uuid::Uuid::new_v4().to_string(),
+        policy.memory.max_body_chars,
+    )?;
+    sql(tx.commit())?;
+    Ok(m)
+}
+pub(super) fn propose_in(
+    db: &rusqlite::Connection,
+    project: &str,
+    p: &Proposal,
+    id: &str,
+    max: u64,
+) -> Result<Memory> {
+    validate(p, max)?;
     let m = Memory {
-        id: uuid::Uuid::new_v4().to_string(),
-        project_id: a.project_id,
+        id: id.into(),
+        project_id: project.into(),
         status: "proposed".into(),
         proposal: p.clone(),
         created_at: now(),
@@ -99,14 +117,13 @@ pub fn propose(root: &Path, p: &Proposal) -> Result<Memory> {
         reviewed_by: None,
         staleness_reason: None,
     };
-    save(&tx, &m)?;
+    save(db, &m)?;
     super::schema::audit(
-        &tx,
+        db,
         "memory_proposed",
         &m.id,
         serde_json::json!({"scope":p.scope,"task":p.source_task}),
     )?;
-    sql(tx.commit())?;
     Ok(m)
 }
 pub(super) fn load(db: &rusqlite::Connection, id: &str, project: &str) -> Result<Memory> {

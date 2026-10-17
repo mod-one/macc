@@ -196,3 +196,23 @@ fn provider_health_refresh_is_background_and_preserves_pending_review() {
     assert!(panel.rows.iter().any(|r| r["provider"]["id"] == "serena"));
     assert!(matches!(panel.pending, Some(Action::ProviderApply { .. })));
 }
+
+#[test]
+fn agent_setup_is_read_only_and_extraction_requires_explicit_apply() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let mut panel = Panel::default();
+    panel.refresh(root).unwrap();
+    assert!(!panel.mutation(KeyCode::Char('h')));
+    panel.key(root, KeyCode::Char('h')).unwrap();
+    assert!(panel.details.contains("required_inherited_environment"));
+    panel.key(root, KeyCode::Char('e')).unwrap();
+    assert!(panel.mutation(KeyCode::Enter));
+    for c in "checkpoint-id".chars() {
+        panel.key(root, KeyCode::Char(c)).unwrap();
+    }
+    panel.key(root, KeyCode::Enter).unwrap();
+    assert!(matches!(panel.pending, Some(Action::MemoryExtract { .. })));
+    assert!(panel.mutation(KeyCode::Char('a')));
+    assert!(!root.join(".macc/memory.db").exists());
+}

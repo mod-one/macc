@@ -12,6 +12,12 @@ use std::io::Read;
 #[derive(Subcommand, Clone, Debug)]
 pub enum O2Command {
     Status,
+    /// Serve scoped O2 MCP over stdio using runner-provided capability environment.
+    Mcp,
+    AgentStatus,
+    MemoryExtract {
+        checkpoint_id: String,
+    },
     Upgrade {
         #[arg(long)]
         apply: bool,
@@ -133,7 +139,15 @@ impl O2 {
 }
 impl Command for O2 {
     fn run(&self) -> Result<()> {
+        if matches!(self.command, O2Command::Mcp) {
+            return super::o2_mcp::run();
+        }
         let action = match &self.command {
+            O2Command::Mcp => unreachable!(),
+            O2Command::AgentStatus => Action::AgentStatus,
+            O2Command::MemoryExtract { checkpoint_id } => Action::MemoryExtract {
+                checkpoint_id: checkpoint_id.clone(),
+            },
             O2Command::Status => Action::Status,
             O2Command::Upgrade {
                 apply,

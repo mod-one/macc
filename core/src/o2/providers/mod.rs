@@ -176,7 +176,7 @@ fn query_selected(
         // Read after acquiring the provider lock: lifecycle may have completed
         // since the query began (including disable/uninstall).
         let current = {
-            let (db, _) = database(root)?;
+            let (db, _) = readonly_database(root)?;
             receipt(&db, &descriptor.id)?
         };
         let state = current.as_ref();

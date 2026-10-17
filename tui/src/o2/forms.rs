@@ -96,6 +96,7 @@ impl Panel {
                 )
                 .unwrap(),
             },
+            "extract" => { pending = true; Action::MemoryExtract { checkpoint_id:v[0].clone() } },
             "operation" => Action::ProviderOperation { id: v[0].clone() },
             "field" => {
                 let f = &self.view.as_ref().unwrap().fields[self.selected];

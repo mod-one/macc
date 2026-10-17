@@ -3,7 +3,9 @@
 pub(crate) mod bundle;
 pub mod checkpoints;
 mod db;
-pub(crate) use db::{active as active_database, snapshot as snapshot_database};
+pub(crate) use db::{
+    active as active_database, readonly as readonly_database, snapshot as snapshot_database,
+};
 pub(crate) use leases::verify as verify_lease;
 pub(crate) use migration::stopped as require_stopped;
 pub(crate) mod fingerprint;

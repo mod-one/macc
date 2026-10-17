@@ -71,7 +71,7 @@ impl CodeIntelligenceProvider for Serena {
         } else if !supported() {
             "incompatible".into()
         } else {
-            let (db, _) = database(root)?;
+            let (db, _) = readonly_database(root)?;
             super::receipt(&db, "serena")?
                 .map(|r| r.state)
                 .unwrap_or_else(|| "missing".into())

@@ -263,3 +263,12 @@ file path, required by Serena to avoid incomplete mixed-language results.
 Other languages remain explicitly unsupported and use the available fallback.
 See [Managed Serena](O2_P2_SERENA.md) for exact defaults, lifecycle operations,
 platform/dependency diagnosis, source restrictions and validation.
+
+### Memory extraction and scoped MCP (P2-C)
+
+The six `memory.phase_extraction_enabled`, `memory.mcp_enabled`,
+`memory.agent_proposals_allowed`, `memory.mcp_output_tokens`,
+`memory.mcp_input_bytes` and `memory.mcp_max_proposals_per_session` settings use
+the shared O2 policy editors in TUI and Web. Extraction and MCP default off.
+See [Memory proposals and scoped MCP](O2_P2_MEMORY_MCP.md) for defaults, bounds,
+explicit client registration, runtime capability forwarding and review boundaries.

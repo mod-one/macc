@@ -14,6 +14,12 @@ pub struct Policy {
 #[serde(default, deny_unknown_fields)]
 pub struct MemoryPolicy {
     pub enabled: bool,
+    pub phase_extraction_enabled: bool,
+    pub mcp_enabled: bool,
+    pub agent_proposals_allowed: bool,
+    pub mcp_output_tokens: u64,
+    pub mcp_input_bytes: u64,
+    pub mcp_max_proposals_per_session: u64,
     pub max_body_chars: u64,
     pub search_limit: u64,
     pub min_confidence: f64,
@@ -69,6 +75,12 @@ impl Default for MemoryPolicy {
     fn default() -> Self {
         Self {
             enabled: false,
+            phase_extraction_enabled: false,
+            mcp_enabled: false,
+            agent_proposals_allowed: true,
+            mcp_output_tokens: 1000,
+            mcp_input_bytes: 65536,
+            mcp_max_proposals_per_session: 20,
             max_body_chars: 1200,
             search_limit: 20,
             min_confidence: 0.6,

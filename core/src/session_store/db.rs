@@ -160,3 +160,30 @@ pub(crate) fn snapshot(db: &Connection, path: &Path) -> Result<()> {
     sql(db.execute("VACUUM INTO ?1", [path.to_string_lossy().as_ref()]))?;
     Ok(())
 }
+
+/// Query-only connection: no migration, permission changes, lease recovery or WAL writes.
+pub(crate) fn readonly(root: &Path) -> Result<(Connection, Authority)> {
+    let a = authority(root)?
+        .filter(|a| a.mode == "sqlite")
+        .ok_or_else(|| error("SQLite authority is not active"))?;
+    let db = sql(Connection::open_with_flags(
+        root.join(".macc/memory.db"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ))?;
+    sql(db.busy_timeout(std::time::Duration::from_secs(5)))?;
+    sql(db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA query_only=ON;"))?;
+    let project: String = sql(db.query_row(
+        "SELECT value FROM session_meta WHERE key='project_id'",
+        [],
+        |r| r.get(0),
+    ))?;
+    let version: String = sql(db.query_row(
+        "SELECT value FROM session_meta WHERE key='schema_version'",
+        [],
+        |r| r.get(0),
+    ))?;
+    if project != a.project_id || version != "1" {
+        return Err(error("Database/authority identity or version mismatch"));
+    }
+    Ok((db, a))
+}

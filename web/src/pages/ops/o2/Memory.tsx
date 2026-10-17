@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import AgentMemory from './AgentMemory';
 import { o2Action, type Evidence, type MemoryHit } from '../../../api/o2';
 export default function Memory() {
   const [rows, setRows] = useState<MemoryHit[]>([]); const [query, setQuery] = useState(''); const [task, setTask] = useState(''); const [tool, setTool] = useState(''); const [worktree, setWorktree] = useState('');
@@ -12,6 +13,7 @@ export default function Memory() {
   const search = async () => { setRows(await o2Action<MemoryHit[]>('memory_search', { search: { query, access, include_inactive: true } })); };
   const run = async (action: () => Promise<void>) => { setBusy(true); setError(''); setNotice(''); try { await action(); } catch (e) { setError(String(e)); } finally { setBusy(false); } };
   return <section aria-label="Memory Ledger">
+    <AgentMemory onExtracted={search} />
     <h2>Memory Ledger</h2><p>Agent writes are proposals. Only reviewed active facts with current evidence enter automatic context. A memory never completes a task or overrides the PRD.</p>
     <label>Search memories<input value={query} onChange={e => setQuery(e.target.value)} /></label>{' '}
     <label>Task scope<input value={task} onChange={e => setTask(e.target.value)} /></label>{' '}

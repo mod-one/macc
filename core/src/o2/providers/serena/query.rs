@@ -39,7 +39,7 @@ pub(super) fn query(root: &Path, q: &Query, p: &CodePolicy) -> Result<Capability
     {
         return Ok(Capability::Unsupported{capability:q.kind.clone(),reason:"Serena definition path must be an allowed tracked Python file; other languages are disabled".into()});
     }
-    let (db, _) = database(root)?;
+    let (db, _) = readonly_database(root)?;
     let r = super::super::receipt(&db, "serena")?.ok_or_else(|| error("Deploy Serena first"))?;
     if r.state != "healthy" {
         return Err(error("Serena deployment is not healthy"));
