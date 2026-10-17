@@ -421,6 +421,19 @@ pub fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
+pub fn build_sha() -> &'static str {
+    env!("MACC_BUILD_SHA")
+}
+
+pub fn build_version() -> &'static str {
+    concat!(
+        env!("CARGO_PKG_VERSION"),
+        " (build ",
+        env!("MACC_BUILD_SHA"),
+        ")"
+    )
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 struct ManagedPathsState {
     version: u32,
@@ -1782,6 +1795,11 @@ mod tests {
             web_pkg.get("version").and_then(|v| v.as_str()),
             Some(version()),
             "web/package.json version must match macc_core::version()"
+        );
+        assert!(!build_sha().is_empty());
+        assert_eq!(
+            build_version(),
+            format!("{} (build {})", version(), build_sha())
         );
     }
 

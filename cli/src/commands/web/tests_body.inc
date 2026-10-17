@@ -228,6 +228,9 @@ async fn health_endpoint_returns_ok_status() {
         .to_bytes();
     let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
     assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["version"], macc_core::version());
+    assert_eq!(payload["build_sha"], macc_core::build_sha());
+    assert_eq!(payload["build_version"], macc_core::build_version());
     assert!(payload.get("uptime_seconds").is_some());
     assert!(payload["uptime_seconds"].is_number());
     assert!(payload["coordinator"]["last_heartbeat_at"].is_string());

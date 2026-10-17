@@ -21,7 +21,12 @@ export interface ApiErrorEnvelope {
 }
 
 export interface ApiHealthResponse {
-  status: 'ok';
+  status: 'ok' | 'degraded' | 'unhealthy';
+  version?: string;
+  build_sha?: string;
+  build_version?: string;
+  uptime_seconds?: number;
+  db_ok?: boolean;
   project_root?: string;
 }
 

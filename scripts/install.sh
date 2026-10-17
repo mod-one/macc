@@ -212,7 +212,7 @@ echo "  - $INSTALL_DIR/macc-uninstall"
 
 INSTALLED_VERSION=""
 if INSTALLED_VERSION="$("$INSTALL_DIR/macc" --version 2>/dev/null)"; then
-  echo "  - version: $INSTALLED_VERSION (build ${MACC_BUILD_SHA})"
+  echo "  - version: $INSTALLED_VERSION"
 else
   echo "Warning: post-install verification failed — '$INSTALL_DIR/macc --version' returned non-zero" >&2
 fi

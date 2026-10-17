@@ -703,7 +703,9 @@ async fn health_handler(
 
     Json(serde_json::json!({
         "status": status,
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": macc_core::version(),
+        "build_sha": macc_core::build_sha(),
+        "build_version": macc_core::build_version(),
         "uptime_seconds": uptime_seconds,
         "db_ok": db_ok,
         "coordinator": {
