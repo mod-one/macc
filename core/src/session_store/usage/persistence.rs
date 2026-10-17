@@ -89,6 +89,13 @@ pub fn begin(root: &Path, r: &BeginRequest) -> Result<CapturePlan> {
     };
     sql(tx.execute("INSERT INTO invocation_usage(invocation_id,session_id,generation,lease_hash,plan_json,record_json,status,started_at,task_id,tool_id,phase,cost_quality) VALUES(?1,?2,?3,?4,?5,?6,'pending',?7,?8,?9,?10,'unknown')",params![record.invocation_id,r.key.session_id,r.key.generation,key_hash(&r.key),encoded(&plan)?,encoded(&record)?,now(),record.task_id,record.tool_id,record.phase]))?;
     crate::o2::context_usage::record_items(&tx, &record)?;
+    crate::o2::tuning::capture(
+        root,
+        &tx,
+        &record.invocation_id,
+        &identity,
+        r.key.generation,
+    )?;
     db::event(
         &tx,
         &r.key.session_id,
@@ -223,6 +230,7 @@ pub fn end(root: &Path, r: &EndRequest) -> Result<UsageRecord> {
     record.status = "recorded".into();
     record.outcome = Some(r.outcome.clone());
     record.elapsed_ms = Some((now() - started).max(0) as u64 * 1000);
+    crate::o2::tuning::finish(root, &tx, &record.invocation_id)?;
     let c = &record.incremental;
     sql(tx.execute("UPDATE invocation_usage SET record_json=?2,receipt=?3,status='recorded',currency=?4,cost_quality=?5,input_uncached=?6,cached_read=?7,cached_write=?8,output=?9,reasoning=?10,cost=?11 WHERE invocation_id=?1",params![record.invocation_id,encoded(&record)?,receipt,record.currency,record.cost_quality,c.input_uncached,c.cached_read,c.cached_write,c.output,c.reasoning,c.cost]))?;
     db::event(

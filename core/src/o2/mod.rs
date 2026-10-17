@@ -16,6 +16,7 @@ mod schema;
 pub mod semantic;
 #[cfg(test)]
 mod tests;
+pub mod tuning;
 pub use schema::{ready, upgrade};
 pub(crate) fn initial_schema() -> &'static str {
     schema::SCHEMA

@@ -1368,9 +1368,7 @@ fn main() {
     let cli = Cli::parse();
     let protocol_stdio = matches!(
         &cli.command,
-        Some(Commands::O2 {
-            command: commands::o2::O2Command::Mcp
-        })
+        Some(Commands::O2 { command }) if command.is_mcp()
     );
     init_tracing(cli.verbose, protocol_stdio);
 

@@ -6,6 +6,9 @@ mod semantic;
 #[cfg(test)]
 mod semantic_tests;
 mod settings;
+mod tuning;
+#[cfg(test)]
+mod tuning_tests;
 use crossterm::event::KeyCode;
 use macc_core::{
     o2::{
@@ -26,6 +29,8 @@ pub struct Panel {
     pub open: bool,
     pub session_task: Option<String>,
     overview: overview::Overview,
+    tuning_field: usize,
+    tuning_preview: Option<Value>,
     tab: usize,
     selected: usize,
     scroll: u16,
@@ -50,6 +55,9 @@ pub struct Panel {
 }
 impl Panel {
     pub fn mutation(&self, key: KeyCode) -> bool {
+        if self.tab == 6 && key == KeyCode::Char('s') {
+            return false;
+        }
         if self.tab == 5 && key == KeyCode::Char('s') {
             return false;
         }
@@ -79,6 +87,12 @@ impl Panel {
         self.view = Some(view);
         if self.tab == 5 {
             return self.refresh_overview(root);
+        }
+        if self.tab == 6 {
+            if self.job.is_none() {
+                self.launch(root, Action::TuningStatus { id: None })?;
+            }
+            return Ok(());
         }
         let ready = self.view.as_ref().is_some_and(|v| v.ready);
         if ready {
@@ -134,7 +148,18 @@ impl Panel {
         Ok(())
     }
     fn result(&mut self, value: Value) {
-        self.semantic_result(&value);
+        if self.tab == 6 {
+            self.tuning_preview = (value["report_id"].is_string() && value["before"].is_object())
+                .then(|| value.clone());
+            if self.tuning_preview.is_none()
+                && matches!(self.pending, Some(Action::TuningApply { .. }))
+            {
+                self.pending = None;
+            }
+        }
+        if self.tab == 0 {
+            self.semantic_result(&value);
+        }
         if value["binding"].is_object()
             && (value["kind"] == "symbol" || value["kind"] == "provider")
         {
@@ -153,12 +178,24 @@ impl Panel {
         if self.form.is_some() {
             return self.form_key(root, key);
         }
-        if let KeyCode::Char(c @ '1'..='6') = key {
+        if let KeyCode::Char(c @ '1'..='7') = key {
             if self.tab == 5 {
                 self.overview.selected_task = self
                     .rows
                     .get(self.selected)
                     .and_then(|v| v["task_id"].as_str().map(str::to_string));
+            }
+            self.tuning_preview = None;
+            if self.pending.as_ref().is_some_and(|a| {
+                matches!(
+                    a,
+                    Action::TuningCreate { .. }
+                        | Action::TuningObserve { .. }
+                        | Action::TuningClose { .. }
+                        | Action::TuningApply { .. }
+                )
+            }) {
+                self.pending = None;
             }
             self.rows.clear();
             self.tab = c as usize - '1' as usize;
@@ -183,6 +220,9 @@ impl Panel {
         if self.overview_key(root, key)? {
             return Ok(());
         }
+        if self.tuning_key(root, key)? {
+            return Ok(());
+        }
         if self.semantic_key(root, key)? {
             return Ok(());
         }
@@ -197,7 +237,7 @@ impl Panel {
             KeyCode::Char('m') if self.tab==2=>self.start("adopt_native",true,&["Idle logical session ID whose existing native setting should become MACC-managed"]),
             KeyCode::Char('c') if self.tab==2=>self.start("checkpoint",true,&["Idle logical session ID for checkpoint"]),
             KeyCode::Char('u')=>{let plan=execute(root,Action::UpgradePlan)?;self.pending=Some(Action::UpgradeApply{source_sha256:plan["source_sha256"].as_str().unwrap_or_default().into()});self.result(plan);self.message="Inspect the upgrade and backup conditions. Press a to apply this exact reviewed source hash.".into();},
-            KeyCode::Char('a')=>{if let Some(action)=self.pending.as_ref(){if matches!(action,Action::ProviderApply{..}|Action::SemanticBenchmark{..}|Action::SemanticGate{..}|Action::MemoryReview{..}|Action::MemoryResolveConflict{..}|Action::MemoryToolEvidence{..}){self.launch(root,action.clone())?;return Ok(());}let result=execute(root,action.clone())?;self.pending=None;self.result(result);self.refresh(root)?;self.message="Reviewed operation applied.".into();}},
+            KeyCode::Char('a')=>{if let Some(action)=self.pending.as_ref(){if matches!(action,Action::TuningCreate{..}|Action::TuningObserve{..}|Action::TuningClose{..}|Action::TuningApply{..}|Action::ProviderApply{..}|Action::SemanticBenchmark{..}|Action::SemanticGate{..}|Action::MemoryReview{..}|Action::MemoryResolveConflict{..}|Action::MemoryToolEvidence{..}){self.launch(root,action.clone())?;return Ok(());}let result=execute(root,action.clone())?;self.pending=None;self.result(result);self.refresh(root)?;self.message="Reviewed operation applied.".into();}},
             KeyCode::Char('h') if self.tab==0=>{let data=execute(root,Action::AgentStatus)?;self.result(data);},
             KeyCode::Char('e') if self.tab==0=>self.start("extract",true,&["Verified finished checkpoint ID to extract proposals (no memory activation)"]),
             KeyCode::Char('y') if self.tab==0=>self.start("capture_symbol",false,&["Tracked Rust source path","Qualified symbol (module/Type/method)","Provider ID (native)","Worktree (blank for project)"]),
@@ -228,10 +268,16 @@ impl Panel {
         Ok(())
     }
     pub fn draw(&self, f: &mut Frame, area: Rect, outer_message: &str) {
-        let mut lines=vec!["1 Memory | 2 Context | 3 Compaction | 4 Code Intelligence | 5 Policies | 6 Overview | r refresh | u preview schema upgrade | a apply reviewed action | j advanced action | o/Esc back".into(),"↑↓ select | Enter inspect | PgUp/PgDn scroll | / scoped search or decision simulation".into(),format!("SQLite: {} | O2 ready: {}",self.view.as_ref().is_some_and(|v|v.sqlite),self.view.as_ref().is_some_and(|v|v.ready)),self.message.clone()];
+        let mut lines=vec!["1 Memory | 2 Context | 3 Compaction | 4 Code Intelligence | 5 Policies | 6 Overview | 7 Policy trials | r refresh | u preview schema upgrade | a apply reviewed action | j advanced action | o/Esc back".into(),"↑↓ select | Enter inspect | PgUp/PgDn scroll | / scoped search or decision simulation".into(),format!("SQLite: {} | O2 ready: {}",self.view.as_ref().is_some_and(|v|v.sqlite),self.view.as_ref().is_some_and(|v|v.ready)),self.message.clone()];
         lines.push(outer_message.into());
         if self.tab == 4 {
             self.draw_settings(&mut lines);
+        } else if self.tab == 6 {
+            lines.push(format!(
+                "Safe field: {} (←/→ select)",
+                macc_core::o2::tuning::FIELDS[self.tuning_field]
+            ));
+            lines.push("n pre-register | i inspect | q seal paired quality | e evaluate | x cancel | p preview passing report | s prepare adoption | a confirm. Exact billed costs only; no automatic runs or policy changes. Configure tuning limits under 5 → context_engine.tuning_*.".into());
         } else if self.tab == 5 {
             self.overview_lines(&mut lines);
         } else {

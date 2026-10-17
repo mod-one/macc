@@ -92,6 +92,33 @@ pub enum Action {
         enabled: bool,
         confirmed: bool,
     },
+    TuningStatus {
+        id: Option<String>,
+    },
+    TuningCreate {
+        plan: tuning::Plan,
+        confirmed: bool,
+    },
+    TuningObserve {
+        trial_id: String,
+        observation: tuning::Observation,
+        confirmed: bool,
+    },
+    TuningClose {
+        trial_id: String,
+        cancel: bool,
+        confirmed: bool,
+    },
+    TuningPreview {
+        report_id: String,
+        checksum: String,
+    },
+    TuningApply {
+        report_id: String,
+        checksum: String,
+        revision: String,
+        confirmed: bool,
+    },
     FtsRebuild,
     ContextList,
     ContextGet {
@@ -153,6 +180,8 @@ impl Action {
         !matches!(
             self,
             Self::Status
+                | Self::TuningStatus { .. }
+                | Self::TuningPreview { .. }
                 | Self::SemanticStatus { .. }
                 | Self::Overview { .. }
                 | Self::AgentStatus
@@ -184,6 +213,28 @@ fn value<T: Serialize>(v: T) -> Result<Value> {
 }
 pub fn execute(root: &Path, action: Action) -> Result<Value> {
     match action {
+        Action::TuningStatus { id } => tuning::inspect(root, id.as_deref()),
+        Action::TuningCreate { plan, confirmed } => tuning::create(root, plan, confirmed),
+        Action::TuningObserve {
+            trial_id,
+            observation,
+            confirmed,
+        } => tuning::record(root, &trial_id, observation, confirmed),
+        Action::TuningClose {
+            trial_id,
+            cancel,
+            confirmed,
+        } => tuning::close(root, &trial_id, cancel, confirmed),
+        Action::TuningPreview {
+            report_id,
+            checksum,
+        } => tuning::preview(root, &report_id, &checksum),
+        Action::TuningApply {
+            report_id,
+            checksum,
+            revision,
+            confirmed,
+        } => tuning::apply(root, &report_id, &checksum, &revision, confirmed),
         Action::Status => value(policy::inspect(root)?),
         Action::SemanticStatus { access } => semantic::status(root, &access),
         Action::SemanticBenchmark { suite } => semantic::benchmark(root, suite),

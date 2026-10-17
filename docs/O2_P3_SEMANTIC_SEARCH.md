@@ -178,3 +178,10 @@ facts, byte/time limits, non-finite vectors and forbidden remote backends. Clien
 contract tests cover typed forms, confirmation, report checksums and late replies.
 These fixtures demonstrate a retrieval class where the local second pass helps;
 they are not a substitute for a representative project benchmark.
+
+## Task-level policy experiments
+
+Semantic retrieval benchmarks measure labelled search quality. For paired task
+quality, measured incremental cost and explicit policy adoption, use the separate
+[P3-D policy trial workflow](O2_P3_POLICY_TUNING.md). A semantic benchmark alone
+cannot establish task-level cost savings or authorize tuning adoption.

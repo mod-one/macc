@@ -47,6 +47,11 @@ pub struct MemoryPolicy {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct ContextPolicy {
+    pub tuning_enabled: bool,
+    pub tuning_min_pairs: u64,
+    pub tuning_alpha: f64,
+    pub tuning_min_cost_reduction: f64,
+    pub tuning_max_latency_regression: f64,
     pub enabled: bool,
     pub push_memory_limit_tokens: u64,
     pub pull_limit_tokens: u64,
@@ -140,6 +145,11 @@ impl Default for MemoryPolicy {
 impl Default for ContextPolicy {
     fn default() -> Self {
         Self {
+            tuning_enabled: false,
+            tuning_min_pairs: 20,
+            tuning_alpha: 0.01,
+            tuning_min_cost_reduction: 0.05,
+            tuning_max_latency_regression: 0.10,
             enabled: false,
             push_memory_limit_tokens: 1200,
             pull_limit_tokens: 2000,

@@ -4,6 +4,8 @@ pub(super) struct Job {
     receiver: std::sync::mpsc::Receiver<Result<Value>>,
     operation: Option<String>,
     providers: bool,
+    tuning: bool,
+    tuning_action: Option<Value>,
     memory: Option<Value>,
     details_scope: Option<Value>,
     applied_memory: bool,
@@ -29,6 +31,16 @@ impl Panel {
         } else {
             None
         };
+        let tuning = matches!(
+            &action,
+            Action::TuningStatus { .. }
+                | Action::TuningCreate { .. }
+                | Action::TuningObserve { .. }
+                | Action::TuningClose { .. }
+                | Action::TuningPreview { .. }
+                | Action::TuningApply { .. }
+        );
+        let tuning_action = tuning.then(|| serde_json::to_value(&action).unwrap_or_default());
         let providers = matches!(&action, Action::Providers);
         let memory = matches!(&action, Action::MemorySearch { .. })
             .then(|| json!({"query":self.query,"access":self.access}));
@@ -63,6 +75,8 @@ impl Panel {
             receiver,
             operation,
             providers,
+            tuning,
+            tuning_action,
             memory,
             details_scope,
             applied_memory,
@@ -97,6 +111,8 @@ impl Panel {
         };
         match job.receiver.try_recv() {
             Ok(result) => {
+                let tuning = job.tuning;
+                let tuning_action = job.tuning_action.clone();
                 let operation = job.operation.clone();
                 let providers = job.providers;
                 let overview = job.overview.clone();
@@ -106,6 +122,19 @@ impl Panel {
                 let memory_action = job.memory_action.clone();
                 let retry_form = job.retry_form.clone();
                 self.job = None;
+                if tuning
+                    && result.is_ok()
+                    && self
+                        .pending
+                        .as_ref()
+                        .and_then(|a| serde_json::to_value(a).ok())
+                        == tuning_action
+                {
+                    self.pending = None;
+                }
+                if tuning && self.tab != 6 {
+                    return;
+                }
                 if applied_memory
                     && result.is_ok()
                     && self

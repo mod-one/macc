@@ -48,3 +48,4 @@ When in doubt, prioritize:
 - [O2 P3-B native symbol map](O2_P3_NATIVE_MAP.md): optional pinned grammars, incremental file reuse and shared client controls.
 
 - [O2 P3-C local semantic search](O2_P3_SEMANTIC_SEARCH.md): corpus-local LSA, reviewed quality/resource gates and shared client workflows.
+- [O2 P3-D: Reviewed policy tuning](O2_P3_POLICY_TUNING.md) — Pre-registered task trials, measured cost/quality gates, and explicit CLI/TUI/Web policy adoption.

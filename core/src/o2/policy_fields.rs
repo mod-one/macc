@@ -4,6 +4,41 @@ pub fn fields() -> Vec<Field> {
     let defaults = serde_json::to_value(Policy::default()).unwrap();
     let specs = [
         (
+            "context_engine.tuning_enabled",
+            "Enable reviewed policy trials and invocation policy stamps",
+            "bool",
+            0.,
+            1.,
+        ),
+        (
+            "context_engine.tuning_min_pairs",
+            "Minimum independent task pairs for policy trials",
+            "number",
+            20.,
+            100.,
+        ),
+        (
+            "context_engine.tuning_alpha",
+            "Maximum one-sided trial significance level",
+            "number",
+            0.001,
+            0.05,
+        ),
+        (
+            "context_engine.tuning_min_cost_reduction",
+            "Required measured incremental cost reduction",
+            "number",
+            0.01,
+            0.9,
+        ),
+        (
+            "context_engine.tuning_max_latency_regression",
+            "Maximum aggregate task latency regression",
+            "number",
+            0.,
+            0.5,
+        ),
+        (
             "memory.semantic_enabled",
             "Enable benchmark-gated local semantic memory search",
             "bool",

@@ -1,4 +1,5 @@
 //! Thin command transport; every operation is shared with both interactive clients.
+pub use super::o2_parser::O2Command;
 use super::{AppContext, Command};
 use clap::Subcommand;
 use macc_core::{
@@ -10,7 +11,7 @@ use macc_core::{
 };
 use std::io::Read;
 #[derive(Subcommand, Clone, Debug)]
-pub enum O2Command {
+pub enum ExistingCommand {
     Status,
     /// Serve scoped O2 MCP over stdio using runner-provided capability environment.
     Mcp,
@@ -160,7 +161,7 @@ pub enum O2Command {
         tool_id: String,
     },
 }
-fn stdin() -> Result<String> {
+pub(super) fn stdin() -> Result<String> {
     let mut value = String::new();
     std::io::stdin()
         .take(8 * 1024 * 1024 + 1)
@@ -184,78 +185,21 @@ impl O2 {
 }
 impl Command for O2 {
     fn run(&self) -> Result<()> {
-        if matches!(self.command, O2Command::Mcp) {
+        if self.command.is_mcp() {
             return super::o2_mcp::run();
         }
         let action = match &self.command {
-            O2Command::Mcp => unreachable!(),
-            O2Command::AgentStatus => Action::AgentStatus,
-            O2Command::SemanticStatus {
-                task,
-                tool,
-                worktree,
-                feature,
-                user,
-            } => Action::SemanticStatus {
-                access: memory::Access {
-                    task_id: task.clone(),
-                    tool_id: tool.clone(),
-                    worktree: worktree.clone(),
-                    feature: feature.clone(),
-                    user_id: user.clone(),
-                },
-            },
-            O2Command::SemanticBenchmark => Action::SemanticBenchmark {
-                suite: serde_json::from_str(&stdin()?)
-                    .map_err(|e| MaccError::Validation(e.to_string()))?,
-            },
-            O2Command::SemanticGate {
-                report_id,
-                checksum,
-                revoke,
-                confirm,
-            } => Action::SemanticGate {
-                report_id: report_id.clone(),
-                checksum: checksum.clone(),
-                enabled: !*revoke,
-                confirmed: *confirm,
-            },
-            O2Command::MemoryExtract { checkpoint_id } => Action::MemoryExtract {
-                checkpoint_id: checkpoint_id.clone(),
-            },
-            O2Command::Status => Action::Status,
-            O2Command::Upgrade {
-                apply,
-                expected_sha256,
-            } => {
-                if *apply {
-                    Action::UpgradeApply {
-                        source_sha256: expected_sha256.clone().ok_or_else(|| {
-                            MaccError::Validation(
-                                "Preview upgrade and supply --expected-sha256".into(),
-                            )
-                        })?,
-                    }
-                } else {
-                    Action::UpgradePlan
-                }
-            }
-            O2Command::Action => {
-                serde_json::from_str(&stdin()?).map_err(|e| MaccError::Validation(e.to_string()))?
-            }
-            O2Command::MemorySearch {
-                query,
-                task,
-                tool,
-                worktree,
-                all,
-                full,
-                cursor,
-                feature,
-                user,
-            } => {
-                let search = memory::Search {
-                    query: query.clone(),
+            O2Command::Tuning(command) => command.action()?,
+            O2Command::Existing(command) => match command {
+                ExistingCommand::Mcp => unreachable!(),
+                ExistingCommand::AgentStatus => Action::AgentStatus,
+                ExistingCommand::SemanticStatus {
+                    task,
+                    tool,
+                    worktree,
+                    feature,
+                    user,
+                } => Action::SemanticStatus {
                     access: memory::Access {
                         task_id: task.clone(),
                         tool_id: tool.clone(),
@@ -263,140 +207,201 @@ impl Command for O2 {
                         feature: feature.clone(),
                         user_id: user.clone(),
                     },
-                    include_inactive: *all,
-                };
-                if *full {
-                    Action::MemorySearch { search }
-                } else {
-                    Action::MemoryPull {
-                        search,
-                        cursor: *cursor,
+                },
+                ExistingCommand::SemanticBenchmark => Action::SemanticBenchmark {
+                    suite: serde_json::from_str(&stdin()?)
+                        .map_err(|e| MaccError::Validation(e.to_string()))?,
+                },
+                ExistingCommand::SemanticGate {
+                    report_id,
+                    checksum,
+                    revoke,
+                    confirm,
+                } => Action::SemanticGate {
+                    report_id: report_id.clone(),
+                    checksum: checksum.clone(),
+                    enabled: !*revoke,
+                    confirmed: *confirm,
+                },
+                ExistingCommand::MemoryExtract { checkpoint_id } => Action::MemoryExtract {
+                    checkpoint_id: checkpoint_id.clone(),
+                },
+                ExistingCommand::Status => Action::Status,
+                ExistingCommand::Upgrade {
+                    apply,
+                    expected_sha256,
+                } => {
+                    if *apply {
+                        Action::UpgradeApply {
+                            source_sha256: expected_sha256.clone().ok_or_else(|| {
+                                MaccError::Validation(
+                                    "Preview upgrade and supply --expected-sha256".into(),
+                                )
+                            })?,
+                        }
+                    } else {
+                        Action::UpgradePlan
                     }
                 }
-            }
-            O2Command::MemoryPropose => Action::MemoryPropose {
-                proposal: serde_json::from_str(&stdin()?)
+                ExistingCommand::Action => serde_json::from_str(&stdin()?)
                     .map_err(|e| MaccError::Validation(e.to_string()))?,
-            },
-            O2Command::MemoryReview => Action::MemoryReview {
-                review: serde_json::from_str(&stdin()?)
-                    .map_err(|e| MaccError::Validation(e.to_string()))?,
-            },
-            O2Command::MemoryGet {
-                id,
-                task,
-                full,
-                offset,
-                feature,
-                tool,
-                worktree,
-                user,
-            } => {
-                let access = memory::Access {
-                    task_id: task.clone(),
-                    tool_id: tool.clone(),
-                    worktree: worktree.clone(),
-                    feature: feature.clone(),
-                    user_id: user.clone(),
-                };
-                if *full {
-                    Action::MemoryGet {
-                        id: id.clone(),
-                        access,
-                    }
-                } else {
-                    Action::MemoryRead {
-                        id: id.clone(),
-                        access,
-                        offset: *offset,
+                ExistingCommand::MemorySearch {
+                    query,
+                    task,
+                    tool,
+                    worktree,
+                    all,
+                    full,
+                    cursor,
+                    feature,
+                    user,
+                } => {
+                    let search = memory::Search {
+                        query: query.clone(),
+                        access: memory::Access {
+                            task_id: task.clone(),
+                            tool_id: tool.clone(),
+                            worktree: worktree.clone(),
+                            feature: feature.clone(),
+                            user_id: user.clone(),
+                        },
+                        include_inactive: *all,
+                    };
+                    if *full {
+                        Action::MemorySearch { search }
+                    } else {
+                        Action::MemoryPull {
+                            search,
+                            cursor: *cursor,
+                        }
                     }
                 }
-            }
-            O2Command::MemoryEvidence { path, worktree } => Action::MemoryEvidence {
-                path: path.clone(),
-                worktree: worktree.clone(),
-            },
-            O2Command::MemoryEvidenceSources => Action::MemoryEvidenceSources,
-            O2Command::MemorySymbolEvidence {
-                path,
-                symbol,
-                provider,
-                worktree,
-            } => Action::MemorySymbolEvidence {
-                path: path.clone(),
-                symbol: symbol.clone(),
-                provider: provider.clone(),
-                worktree: worktree.clone(),
-            },
-            O2Command::MemoryToolEvidence { tool_id } => Action::MemoryToolEvidence {
-                tool_id: tool_id.clone(),
-            },
-            O2Command::MemoryConflicts => Action::MemoryConflicts,
-            O2Command::MemoryResolveConflict {
-                id,
-                reason,
-                resolution,
-                checksum,
-                confirm,
-            } => Action::MemoryResolveConflict {
-                id: id.clone(),
-                reason: reason.clone(),
-                resolution: serde_json::from_value(serde_json::json!(resolution))
-                    .map_err(|e| MaccError::Validation(e.to_string()))?,
-                expected_checksum: checksum.clone(),
-                confirmed: *confirm,
-            },
-            O2Command::FtsRebuild => Action::FtsRebuild,
-            O2Command::ContextList => Action::ContextList,
-            O2Command::ContextGet { id } => Action::ContextGet { id: id.clone() },
-            O2Command::Reduce { bundle } => Action::Reduce {
-                kind: bundle.clone(),
-                raw: stdin()?,
-            },
-            O2Command::Providers => Action::Providers,
-            O2Command::ProviderPlan {
-                provider,
-                operation,
-            } => Action::ProviderPlan {
-                provider: provider.clone(),
-                operation: operation.clone(),
-            },
-            O2Command::ProviderApply { plan_id, checksum } => Action::ProviderApply {
-                plan_id: plan_id.clone(),
-                checksum: checksum.clone(),
-            },
-            O2Command::CodeQuery {
-                text,
-                kind,
-                worktree,
-                path,
-            } => Action::CodeQuery {
-                query: macc_core::o2::providers::Query {
+                ExistingCommand::MemoryPropose => Action::MemoryPropose {
+                    proposal: serde_json::from_str(&stdin()?)
+                        .map_err(|e| MaccError::Validation(e.to_string()))?,
+                },
+                ExistingCommand::MemoryReview => Action::MemoryReview {
+                    review: serde_json::from_str(&stdin()?)
+                        .map_err(|e| MaccError::Validation(e.to_string()))?,
+                },
+                ExistingCommand::MemoryGet {
+                    id,
+                    task,
+                    full,
+                    offset,
+                    feature,
+                    tool,
+                    worktree,
+                    user,
+                } => {
+                    let access = memory::Access {
+                        task_id: task.clone(),
+                        tool_id: tool.clone(),
+                        worktree: worktree.clone(),
+                        feature: feature.clone(),
+                        user_id: user.clone(),
+                    };
+                    if *full {
+                        Action::MemoryGet {
+                            id: id.clone(),
+                            access,
+                        }
+                    } else {
+                        Action::MemoryRead {
+                            id: id.clone(),
+                            access,
+                            offset: *offset,
+                        }
+                    }
+                }
+                ExistingCommand::MemoryEvidence { path, worktree } => Action::MemoryEvidence {
                     path: path.clone(),
-                    text: text.clone(),
-                    kind: kind.clone(),
                     worktree: worktree.clone(),
                 },
-            },
-            O2Command::ProviderOperation { id } => Action::ProviderOperation { id: id.clone() },
-            O2Command::CodeCompare {
-                provider,
-                text,
-                kind,
-                worktree,
-                path,
-            } => Action::CodeCompare {
-                provider: provider.clone(),
-                query: macc_core::o2::providers::Query {
+                ExistingCommand::MemoryEvidenceSources => Action::MemoryEvidenceSources,
+                ExistingCommand::MemorySymbolEvidence {
+                    path,
+                    symbol,
+                    provider,
+                    worktree,
+                } => Action::MemorySymbolEvidence {
                     path: path.clone(),
-                    text: text.clone(),
-                    kind: kind.clone(),
+                    symbol: symbol.clone(),
+                    provider: provider.clone(),
                     worktree: worktree.clone(),
                 },
-            },
-            O2Command::CompactionList => Action::CompactionList,
-            O2Command::CompactionProbe { tool_id } => Action::CompactionProbe {
-                tool_id: tool_id.clone(),
+                ExistingCommand::MemoryToolEvidence { tool_id } => Action::MemoryToolEvidence {
+                    tool_id: tool_id.clone(),
+                },
+                ExistingCommand::MemoryConflicts => Action::MemoryConflicts,
+                ExistingCommand::MemoryResolveConflict {
+                    id,
+                    reason,
+                    resolution,
+                    checksum,
+                    confirm,
+                } => Action::MemoryResolveConflict {
+                    id: id.clone(),
+                    reason: reason.clone(),
+                    resolution: serde_json::from_value(serde_json::json!(resolution))
+                        .map_err(|e| MaccError::Validation(e.to_string()))?,
+                    expected_checksum: checksum.clone(),
+                    confirmed: *confirm,
+                },
+                ExistingCommand::FtsRebuild => Action::FtsRebuild,
+                ExistingCommand::ContextList => Action::ContextList,
+                ExistingCommand::ContextGet { id } => Action::ContextGet { id: id.clone() },
+                ExistingCommand::Reduce { bundle } => Action::Reduce {
+                    kind: bundle.clone(),
+                    raw: stdin()?,
+                },
+                ExistingCommand::Providers => Action::Providers,
+                ExistingCommand::ProviderPlan {
+                    provider,
+                    operation,
+                } => Action::ProviderPlan {
+                    provider: provider.clone(),
+                    operation: operation.clone(),
+                },
+                ExistingCommand::ProviderApply { plan_id, checksum } => Action::ProviderApply {
+                    plan_id: plan_id.clone(),
+                    checksum: checksum.clone(),
+                },
+                ExistingCommand::CodeQuery {
+                    text,
+                    kind,
+                    worktree,
+                    path,
+                } => Action::CodeQuery {
+                    query: macc_core::o2::providers::Query {
+                        path: path.clone(),
+                        text: text.clone(),
+                        kind: kind.clone(),
+                        worktree: worktree.clone(),
+                    },
+                },
+                ExistingCommand::ProviderOperation { id } => {
+                    Action::ProviderOperation { id: id.clone() }
+                }
+                ExistingCommand::CodeCompare {
+                    provider,
+                    text,
+                    kind,
+                    worktree,
+                    path,
+                } => Action::CodeCompare {
+                    provider: provider.clone(),
+                    query: macc_core::o2::providers::Query {
+                        path: path.clone(),
+                        text: text.clone(),
+                        kind: kind.clone(),
+                        worktree: worktree.clone(),
+                    },
+                },
+                ExistingCommand::CompactionList => Action::CompactionList,
+                ExistingCommand::CompactionProbe { tool_id } => Action::CompactionProbe {
+                    tool_id: tool_id.clone(),
+                },
             },
         };
         let paths = self.app.project_paths()?;

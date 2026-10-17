@@ -56,6 +56,9 @@ impl Panel {
         Ok(())
     }
     fn submit(&mut self, root: &Path, name: &str, v: Vec<String>) -> Result<()> {
+        if self.tuning_form(root, name, &v)? {
+            return Ok(());
+        }
         let empty = |s: &str| if s.is_empty() { Value::Null } else { json!(s) };
         let parse = |s: &str| {
             s.parse::<u64>()
