@@ -75,3 +75,10 @@ it('edits executable paths as text in the shared policy catalog', async () => {
   fireEvent.click(screen.getByRole('button', { name: 'Validate and preview O2 policy' }));
   await waitFor(() => expect(o2Action).toHaveBeenCalledWith('policy_preview', { revision: 'original', policy: { code_intelligence: { graphify_python: '/usr/bin/python3' } } }));
 });
+
+it('filters domain controls without removing other draft values from preview', async () => {
+  render(<Policy view={{ ...view, policy: { ...view.policy, code_intelligence: { enabled: true } } }} saved={vi.fn()} domainFilter="memory" />);
+  fireEvent.click(screen.getByLabelText('Memory Ledger'));
+  fireEvent.click(screen.getByRole('button', { name: 'Validate and preview O2 policy' }));
+  await waitFor(() => expect(o2Action).toHaveBeenCalledWith('policy_preview', { revision: 'original', policy: { memory: { enabled: true, max_body_chars: 1200 }, code_intelligence: { enabled: true } } }));
+});

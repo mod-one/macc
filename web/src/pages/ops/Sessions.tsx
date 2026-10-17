@@ -13,7 +13,8 @@ export default function Sessions() {
   const [plan, setPlan] = useState<MigrationPlan | null>(null);
   const [storageWarning, setStorageWarning] = useState('');
   const [error, setError] = useState(''); const [message, setMessage] = useState('');
-  const [busy, setBusy] = useState(false); const [filter, setFilter] = useState('');
+  const [taskScope, setTaskScope] = useState(() => new URLSearchParams(window.location.search).get('task') ?? '');
+  const [busy, setBusy] = useState(false); const [filter, setFilter] = useState(() => new URLSearchParams(window.location.search).get('task') ?? '');
   const [selected, setSelected] = useState<string | null>(null); const [events, setEvents] = useState<unknown[]>([]);
   const [closing, setClosing] = useState<string | null>(null); const [updated, setUpdated] = useState('');
   useEffect(() => {
@@ -65,7 +66,7 @@ export default function Sessions() {
       else window.sessionStorage.removeItem(key);
     } catch { setStorageWarning('Local draft storage is unavailable. Apply or discard before navigating away.'); }
   }, [draft, view, revision, inherit]);
-  const rows = view?.sessions.filter(s => `${s.task_id} ${s.role} ${s.tool_id} ${s.status}`.toLowerCase().includes(filter.toLowerCase())) ?? [];
+  const rows = view?.sessions.filter(s => (!taskScope || s.task_id === taskScope) && `${s.task_id} ${s.role} ${s.tool_id} ${s.status}`.toLowerCase().includes(filter.toLowerCase())) ?? [];
   return <section aria-label="Session administration" style={{ padding: 24, display: 'grid', gap: 20 }}>
     <h1>Session ownership</h1>
     <p>Authority: <strong>{view?.backend ?? 'Loading…'}</strong> · Updated: {updated || 'waiting'}. Refresh preserves your draft.</p>
@@ -103,9 +104,10 @@ export default function Sessions() {
       <button disabled={busy || view?.backend !== 'sqlite'} onClick={() => { void run(async () => { setMessage(JSON.stringify(await sessionAction('recover'))); }); }}>Quarantine expired dead-owner leases</button>
     </section>
     {view && <Usage sqlite={view.backend === 'sqlite'} />}
-    {view && <Checkpoints view={view} reload={async () => { setView(await getSessions()); }} />}
+    {view && <Checkpoints taskScope={taskScope} selectedId={new URLSearchParams(window.location.search).get('id') ?? ''} view={view} reload={async () => { setView(await getSessions()); }} />}
     <section aria-label="Session inventory">
       <h2>Latest sessions</h2>
+      {taskScope && <p>Exact task scope: {taskScope}. <button onClick={() => { setTaskScope(''); setFilter(''); }}>Clear session task scope</button></p>}
       <label htmlFor="session-filter">Filter by task, role, tool or status</label>{' '}
       <input id="session-filter" value={filter} onChange={e => setFilter(e.target.value)} />
       <div style={{ overflowX: 'auto' }}><table><thead><tr>{['Task', 'Role', 'Tool', 'Status', 'Generation', 'Uses', 'Owner PID', 'Lease remaining', 'Actions'].map(x => <th key={x}>{x}</th>)}</tr></thead>

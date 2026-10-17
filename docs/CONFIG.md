@@ -272,3 +272,10 @@ The six `memory.phase_extraction_enabled`, `memory.mcp_enabled`,
 the shared O2 policy editors in TUI and Web. Extraction and MCP default off.
 See [Memory proposals and scoped MCP](O2_P2_MEMORY_MCP.md) for defaults, bounds,
 explicit client registration, runtime capability forwarding and review boundaries.
+
+### Consolidated O2 workflows (P2-D)
+
+[O2 Overview](O2_P2_CLIENT_WORKFLOWS.md) connects task evidence with existing domain
+editors in both clients. Domain configuration routes show matching typed controls
+and keep the complete revision-bound draft. The overview adds query filters and
+paging, with no new persistent configuration or automatic provider operations.

@@ -216,3 +216,68 @@ fn agent_setup_is_read_only_and_extraction_requires_explicit_apply() {
     assert!(panel.mutation(KeyCode::Char('a')));
     assert!(!root.join(".macc/memory.db").exists());
 }
+
+#[test]
+fn overview_navigation_preserves_scope_selection_and_policy_draft() {
+    let temp = tempfile::tempdir().unwrap();
+    let r = temp.path();
+    let mut panel = Panel::default();
+    panel.refresh(r).unwrap();
+    panel.draft["memory"]["enabled"] = json!(true);
+    panel.tab = 5;
+    panel.rows = vec![json!({"task_id":"A"}), json!({"task_id":"B"})];
+    panel.selected = 1;
+    panel.replace_rows(vec![json!({"task_id":"B"}), json!({"task_id":"A"})]);
+    assert_eq!(panel.selected, 0);
+    assert!(!panel.mutation(KeyCode::Char('s')));
+    panel.key(r, KeyCode::Char('s')).unwrap();
+    assert_eq!(panel.session_task.as_deref(), Some("B"));
+    panel.key(r, KeyCode::Char('m')).unwrap();
+    assert_eq!(panel.access["task_id"], "B");
+    assert_eq!(panel.tab, 0);
+    assert_eq!(panel.draft["memory"]["enabled"], true);
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 25)).unwrap();
+    panel.tab = 5;
+    terminal.draw(|f| panel.draw(f, f.size(), "")).unwrap();
+    let contents = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|c| c.symbol())
+        .collect::<String>();
+    assert!(contents.contains("Overview"));
+    assert!(contents.contains("scoped memory"));
+    panel.tab = 2;
+    panel.rows = vec![json!({"tool_id":"a"}), json!({"tool_id":"b"})];
+    panel.selected = 1;
+    panel.replace_rows(vec![json!({"tool_id":"b"}), json!({"tool_id":"a"})]);
+    assert_eq!(panel.selected, 0);
+    panel.tab = 0;
+    panel.conflicts = true;
+    panel.rows = vec![json!({"id":"a"}), json!({"id":"b"})];
+    panel.selected = 1;
+    panel.replace_rows(vec![json!({"id":"b"}), json!({"id":"a"})]);
+    assert_eq!(panel.selected, 0);
+}
+
+#[test]
+fn overview_async_refresh_does_not_replace_another_domains_rows() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let mut panel = Panel::default();
+    panel.refresh(root).unwrap();
+    panel.open = true;
+    panel.key(root, KeyCode::Char('6')).unwrap();
+    panel.tab = 0;
+    panel.rows = vec![json!({"memory":{"id":"keep-selected"}})];
+    for _ in 0..100 {
+        panel.poll(root);
+        if panel.job.is_none() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(panel.job.is_none());
+    assert_eq!(panel.rows[0]["memory"]["id"], "keep-selected");
+}

@@ -6,6 +6,7 @@ pub mod context;
 pub mod extraction;
 pub mod mcp;
 pub mod memory;
+pub mod overview;
 mod paths;
 pub mod policy;
 #[cfg(test)]

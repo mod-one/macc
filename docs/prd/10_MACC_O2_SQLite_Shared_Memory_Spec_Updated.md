@@ -3,7 +3,7 @@
 **Project:** MACC — Multi-Assistant Code Config  
 **Document:** Revised and unified specification of `10_MACC_O2_SQLite_Shared_Memory_Spec.md`  
 **Motifs:** O2 Cross-Agent Memory Ledger; Shared Context Store; Code Intelligence Providers; Multi-Tool Session Lifecycle; Adaptive Compaction  
-**Version:** 2.11 — P0/P1, P2-A Graphify, P2-B Python/Jedi Serena and P2-C memory/MCP implementation progress; later stages remain proposed
+**Version:** 2.12 — P0/P1 and P2-A–D implementation progress; later stages remain proposed
 **Date:** 2026-10-17
 **Code baseline inspected:** `df95759` — `feat: implement review and correction cycle budget management`  
 **Language:** English  
@@ -67,7 +67,7 @@ MACC already separates its native Rust coordinator from isolated agent worktrees
 
 ### 1.4 Implementation baseline and remaining work
 
-This table preserves the original version 2.1 inspection baseline, not deployed runtime state. Delivered P0–P2-C changes and their limits are recorded in §20.1–§20.7. **Existing** means a code path is present; it does not certify all O2 acceptance criteria or provider versions. **Partial** identifies a foundation that must be extended. Unchecked acceptance items in §22 remain delivery gates.
+This table preserves the original version 2.1 inspection baseline, not deployed runtime state. Delivered P0–P2-D changes and their limits are recorded in §20.1–§20.8. **Existing** means a code path is present; it does not certify all O2 acceptance criteria or provider versions. **Partial** identifies a foundation that must be extended. Unchecked acceptance items in §22 remain delivery gates.
 
 | Area | Current source baseline | O2 work still required |
 |---|---|---|
@@ -1565,7 +1565,7 @@ Subscription usage and API charges may be non-comparable; report both transparen
 
 MACC already has a local Ops-oriented Web UI and Ratatui screens. Live-task presentation resolves model and effort through shared Rust execution labels; retain these beside any new session/pressure indicators. Existing registry, cooldown and supervisor views are not the proposed O2 Memory/Context/Code Intelligence pages. New features must use shared Rust APIs, not parallel frontend business logic. Keep the interface compact, self-explanatory and action-oriented.
 
-**Delivery requirement:** feature and configuration parity is mandatory across TUI and Web. Layouts may differ, but capabilities, defaults, validation, permissions and activation semantics must match. All pages and routes added below are proposed; the existing Settings/Automation and Web `/config` navigation are integration points, not evidence that O2 editors already exist.
+**Delivery requirement:** feature and configuration parity is mandatory across TUI and Web. Layouts may differ, but capabilities, defaults, validation, permissions and activation semantics must match. The routes below describe the design target. Delivered P0–P2-D client coverage is tracked in §20; P2-D connects existing Ops/configuration pages with task-scoped query links and a consolidated overview. Unimplemented illustrative detail routes remain proposed.
 
 ### 17.1 TUI
 
@@ -1592,6 +1592,8 @@ Keyboard actions must be discoverable and safe: inspect, preview, rebuild index,
 | `/ops/code-intelligence/:providerId` | Version, health, deployment, indexes and diagnostics |
 
 Add proposed configuration routes under the existing `/config` group: `/config/memory`, `/config/context`, `/config/sessions`, `/config/compaction` and `/config/code-intelligence`. Extend `/config/settings` with an O2 Observability tab. Each page links to the matching Ops view and back, preserving selected task/provider and filters. TUI exposes equivalent sections in its existing configuration navigation, with direct access from Ops detail views.
+
+Delivered P2-D adds `/ops/overview` and `/config/overview`, with `task`, domain-local `id` and `provider` query parameters on existing domain routes. See [client workflows](../O2_P2_CLIENT_WORKFLOWS.md). This does not claim the illustrative `/:id` and `/task/:taskId` routes above exist.
 
 ### 17.3 Provider Manager UX
 
@@ -1948,6 +1950,34 @@ clients expose redacted setup and extraction controls. Optional features default
 off and require no new migration on an existing O2 schema. Semantic lesson inference,
 universal client setup and protection from unrestricted same-user shell access are
 outside this milestone. Operator review remains mandatory for active memory.
+
+---
+
+### 20.8 P2-D implementation progress
+
+P2-D delivers a shared, read-only task overview and cross-domain navigation in TUI
+and Web. See [Consolidated task workflows](../O2_P2_CLIENT_WORKFLOWS.md) for exact
+routes, keyboard controls, query limits and compatibility. The same typed Rust
+application action provides bounded task pages, project memory status counts,
+recorded provider deployments, checkpoint/reconciliation counts and latest context
+budget references. Read transactions do not execute providers or grant delivery.
+Historical checkpoint states do not trigger current reconciliation counts.
+
+Web `/ops/overview` and `/config/overview` use task-scoped links to existing domain
+screens; domain configuration pages filter typed controls without removing other
+draft values. Domain switches clear incompatible record IDs and retain task scope.
+The Sessions/checkpoint screens accept task/detail links. TUI adds `6 Overview`
+with task-filtered memory/context and a bridge to sessions/checkpoints. Refreshes
+retain selection, filters and policy drafts. Asynchronous snapshots ignore obsolete
+requests; failed refreshes report stale data and allow explicit retry.
+
+Keyboard navigation, labels, table headings, status/error feedback, numeric budget
+text and automated accessibility/workflow tests cover the added paths. All durable
+policies remain in the existing shared catalogs; P2-D adds no database migration,
+provider installation, new AI workers or scheduling changes. Unsupported capabilities
+remain explained by existing adapters. The overview uses snapshot polling, with
+honest stored-state/estimate labels; universal event-stream delivery and every
+illustrative future detail route remain outside this increment.
 
 ---
 

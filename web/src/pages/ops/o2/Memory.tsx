@@ -1,14 +1,15 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import AgentMemory from './AgentMemory';
 import { o2Action, type Evidence, type MemoryHit } from '../../../api/o2';
-export default function Memory() {
-  const [rows, setRows] = useState<MemoryHit[]>([]); const [query, setQuery] = useState(''); const [task, setTask] = useState(''); const [tool, setTool] = useState(''); const [worktree, setWorktree] = useState('');
+export default function Memory({ taskScope = '' }: { taskScope?: string }) {
+  const [rows, setRows] = useState<MemoryHit[]>([]); const [query, setQuery] = useState(''); const [task, setTask] = useState(taskScope); const [tool, setTool] = useState(''); const [worktree, setWorktree] = useState('');
   const [feature, setFeature] = useState(''); const [user, setUser] = useState('');
   const [selected, setSelected] = useState<MemoryHit | null>(null); const [error, setError] = useState(''); const [busy, setBusy] = useState(false); const [notice, setNotice] = useState('');
   const [title, setTitle] = useState(''); const [body, setBody] = useState(''); const [source, setSource] = useState(''); const [kind, setKind] = useState('discovery'); const [scope, setScope] = useState('project'); const [scopeRef, setScopeRef] = useState(''); const [confidence, setConfidence] = useState(0.8);
   const [pull, setPull] = useState<{ next_cursor?: number | null; next_offset?: number | null; id?: string } | null>(null);
   const [replacement, setReplacement] = useState('');
   const [reason, setReason] = useState(''); const [verdict, setVerdict] = useState('active'); const [confirmed, setConfirmed] = useState(false); const [right, setRight] = useState(''); const [conflicts, setConflicts] = useState<Array<{ id: string; reason: string; status: string }>>([]);
+  useEffect(() => { setTask(taskScope); setSelected(null); setRows([]); setConfirmed(false); }, [taskScope]);
   const access = { task_id: task || null, tool_id: tool || null, worktree: worktree || null, feature: feature || null, user_id: user || null };
   const search = async () => { setRows(await o2Action<MemoryHit[]>('memory_search', { search: { query, access, include_inactive: true } })); };
   const run = async (action: () => Promise<void>) => { setBusy(true); setError(''); setNotice(''); try { await action(); } catch (e) { setError(String(e)); } finally { setBusy(false); } };

@@ -1,8 +1,10 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { o2Action } from '../../../api/o2';
 interface Bundle { id: string; task_id: string; phase: string; optional_estimated_tokens: number; measurement_quality: string }
-export default function Context() {
-  const [rows, setRows] = useState<Bundle[]>([]); const [filter, setFilter] = useState(''); const [details, setDetails] = useState<unknown>(null); const [error, setError] = useState(''); const [raw, setRaw] = useState(''); const [kind, setKind] = useState('test');
+export default function Context({ taskScope = '', selectedId = '' }: { taskScope?: string; selectedId?: string }) {
+  const [rows, setRows] = useState<Bundle[]>([]); const [filter, setFilter] = useState(taskScope); const [details, setDetails] = useState<unknown>(null); const [error, setError] = useState(''); const [raw, setRaw] = useState(''); const [kind, setKind] = useState('test');
+  useEffect(() => { setFilter(taskScope); }, [taskScope]);
+  useEffect(() => { if (!selectedId) return; let active = true; void o2Action('context_get', { id: selectedId }).then(value => { if (active) setDetails(value); }).catch(e => { if (active) setError(String(e)); }); return () => { active = false; }; }, [selectedId]);
   const run = async (action: () => Promise<void>) => { setError(''); try { await action(); } catch (e) { setError(String(e)); } };
   return <section aria-label="Context Engine"><h2>Context Engine</h2><p>Mandatory PRD and pinned source references remain separate from optional memory limits. Token budgets here are estimates. Full manifests show selected facts, exclusions and evidence hashes.</p>
     <label>Filter context by task<input value={filter} onChange={e => setFilter(e.target.value)} /></label>

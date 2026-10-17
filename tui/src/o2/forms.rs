@@ -89,6 +89,7 @@ impl Panel {
                 self.inherit = false;
                 return Ok(());
             }
+            "overview_filter" => { self.overview_filter(root,&v[0])?; return Ok(()); },
             "compare" => Action::CodeCompare {
                 provider: v[0].clone(),
                 query: serde_json::from_value(

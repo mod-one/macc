@@ -102,3 +102,22 @@ it('requires a reviewed upgrade before enabling checkpoints on existing SQLite',
   expect(api.applyAuthority).not.toHaveBeenCalled(); fireEvent.click(apply);
   await waitFor(() => expect(api.applyAuthority).toHaveBeenCalledWith(plan));
 });
+
+it('opens task-scoped checkpoints from an overview link without a mutation', async () => {
+  window.history.replaceState({}, '', '/ops/sessions?task=A&id=cp-a');
+  try {
+    vi.mocked(api.getCheckpoint).mockResolvedValue({ task_id: 'A', phase: 'fix' });
+    const checkpoint = (task: string) => ({ id: `cp-${task}`, task_id: task, role: 'performer', tool_id: 'fixture', phase: 'dev', reason: 'observed', validation_state: 'verified', created_at: 1, content_sha256: 'test' });
+    vi.mocked(api.getSessions).mockResolvedValue({ ...view, checkpoints: [checkpoint('A'), checkpoint('B')] });
+    render(<Sessions />);
+    expect(await screen.findByLabelText('Filter by task, role, tool or status')).toHaveValue('A');
+    expect(screen.getByLabelText('Filter checkpoints by task, phase or role')).toHaveValue('A');
+    await waitFor(() => expect(api.getCheckpoint).toHaveBeenCalledWith('cp-a'));
+    expect(api.applyReconciliation).not.toHaveBeenCalled();
+    expect(api.sessionAction).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Inspect A checkpoint' })).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Inspect B checkpoint' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Clear session task scope' }));
+    expect(await screen.findByRole('button', { name: 'Inspect B checkpoint' })).toBeVisible();
+  } finally { window.history.replaceState({}, '', '/'); }
+});

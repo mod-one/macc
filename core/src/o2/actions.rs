@@ -7,6 +7,9 @@ use serde_json::{json, Value};
 pub enum Action {
     Status,
     AgentStatus,
+    Overview {
+        query: overview::Query,
+    },
     MemoryExtract {
         checkpoint_id: String,
     },
@@ -123,6 +126,7 @@ impl Action {
         !matches!(
             self,
             Self::Status
+                | Self::Overview { .. }
                 | Self::AgentStatus
                 | Self::PolicyPreview { .. }
                 | Self::UpgradePlan
@@ -151,6 +155,7 @@ fn value<T: Serialize>(v: T) -> Result<Value> {
 pub fn execute(root: &Path, action: Action) -> Result<Value> {
     match action {
         Action::Status => value(policy::inspect(root)?),
+        Action::Overview { query } => value(overview::inspect(root, &query)?),
         Action::AgentStatus => agent::status(root),
         Action::MemoryExtract { checkpoint_id } => {
             extraction::from_checkpoint(root, &checkpoint_id)

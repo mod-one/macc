@@ -1,0 +1,53 @@
+import { fireEvent, render, screen, waitFor, act } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import axe from 'axe-core';
+import Overview, { type OverviewView } from './Overview';
+import { o2Action } from '../../../api/o2';
+vi.mock('../../../api/o2', () => ({ o2Action: vi.fn() }));
+const view: OverviewView = { ready: true, captured_at: 1, notice: 'Observed records, not delivery.', memory_statuses: { proposed: 2 }, providers: [], next_cursor: 'A', tasks: [{ task_id: 'A', sessions: 1, lease_records: 0, checkpoints: 2, needs_reconciliation: 0, contexts: 1, proposals: 2, latest_context: { id: 'context-a', phase: 'dev', optional_estimated_tokens: 200, optional_limit_tokens: 1200, measurement_quality: 'estimated' }, latest_checkpoint: { id: 'checkpoint-a', phase: 'dev', validation_state: 'verified' } }] };
+beforeEach(() => { vi.resetAllMocks(); vi.mocked(o2Action).mockResolvedValue(view); });
+afterEach(() => vi.useRealTimers());
+const element = (task = '', active = true, scope = vi.fn()) => <MemoryRouter><Overview task={task} active={active} scope={scope} /></MemoryRouter>;
+it('uses the shared read action, exposes keyboard links and has no serious accessibility violations', async () => {
+  render(element('A'));
+  expect(await screen.findByRole('link', { name: 'Context evidence' })).toHaveAttribute('href', '/ops/context?task=A&id=context-a');
+  expect(screen.getByRole('link', { name: 'Sessions and checkpoints' })).toHaveAttribute('href', '/ops/sessions?task=A&id=checkpoint-a');
+  expect(o2Action).toHaveBeenCalledWith('overview', { query: { task_id: 'A', after: null, limit: 25 } }, expect.any(AbortSignal));
+  expect(screen.getByText(/200 \/ 1200 estimated tokens/)).toBeInTheDocument();
+  const report = await axe.run(document.body, { rules: { 'color-contrast': { enabled: false }, region: { enabled: false } } });
+  expect(report.violations.filter(v => ['serious', 'critical'].includes(v.impact ?? ''))).toEqual([]);
+  expect(o2Action).not.toHaveBeenCalledWith('providers');
+});
+it('filters and pages without turning inspection into a mutation', async () => {
+  const scope = vi.fn(); render(element('', true, scope));
+  await screen.findByRole('button', { name: 'Focus A' });
+  fireEvent.change(screen.getByLabelText('Exact overview task'), { target: { value: 'A' } });
+  fireEvent.submit(screen.getByRole('button', { name: 'Apply task filter' }).closest('form')!);
+  expect(scope).toHaveBeenCalledWith('A');
+  fireEvent.click(screen.getByRole('button', { name: 'Next task page' }));
+  await waitFor(() => expect(o2Action).toHaveBeenLastCalledWith('overview', { query: { task_id: null, after: 'A', limit: 25 } }, expect.any(AbortSignal)));
+});
+it('retains a failed-refresh snapshot with a stale indicator', async () => {
+  render(element('A')); await screen.findByRole('link', { name: 'Context evidence' });
+  vi.mocked(o2Action).mockRejectedValueOnce(new Error('offline'));
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh overview' }));
+  expect(await screen.findByRole('alert')).toHaveTextContent('offline');
+  expect(screen.getByRole('status')).toHaveTextContent('Stale');
+  expect(screen.getByRole('link', { name: 'Context evidence' })).toBeInTheDocument();
+});
+it('ignores old responses when scope changes and does not fetch while hidden', async () => {
+  let old!: (v: OverviewView) => void;
+  vi.mocked(o2Action).mockImplementationOnce(() => new Promise(resolve => { old = resolve; }));
+  const first = render(element('A'));
+  const oldSignal=vi.mocked(o2Action).mock.calls[0][2];
+  first.rerender(element('B'));
+  expect(oldSignal?.aborted).toBe(true);
+  await waitFor(() => expect(o2Action).toHaveBeenCalledTimes(2));
+  await act(async () => old({ ...view, notice: 'obsolete' }));
+  expect(screen.queryByText('obsolete')).not.toBeInTheDocument();
+  first.rerender(element('B', false));
+  vi.mocked(o2Action).mockClear();
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh overview' }));
+  expect(o2Action).not.toHaveBeenCalled();
+});

@@ -28,7 +28,25 @@ pub struct SessionsScreen {
 }
 impl SessionsScreen {
     pub fn refresh(&mut self, root: &Path) -> macc_core::Result<()> {
+        let selected_session = self.selected_id();
+        let selected_field = self.path();
         let view = store::inspect(root)?;
+        self.selected = if let Some(id) = selected_session {
+            view.sessions
+                .iter()
+                .position(|s| s.id == id)
+                .map(|i| view.fields.len() + i)
+                .unwrap_or(0)
+        } else if let Some(path) = selected_field {
+            view.fields
+                .iter()
+                .position(|f| format!("/{}", f.path.replace('.', "/")) == path)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        self.checkpoints
+            .preserve_selection(self.view.as_ref(), &view);
         if self.view.is_none() {
             self.draft_revision = view.revision.clone();
             self.draft = serde_json::to_value(&view.policy).unwrap_or(Value::Null);
@@ -83,6 +101,18 @@ impl SessionsScreen {
         }
         if self.o2.open {
             self.o2.key(root, key)?;
+            if let Some(task) = self.o2.session_task.take() {
+                self.o2.open = false;
+                self.selected = 0;
+                self.details.clear();
+                self.checkpoints.scope_task(task.clone());
+                if let Some(v) = &self.view {
+                    if let Some(index) = v.sessions.iter().position(|s| s.task_id == task) {
+                        self.selected = v.fields.len() + index;
+                    }
+                }
+                self.message=format!("Sessions for task {task}: first retained session selected when available. h opens checkpoints; o returns to O2 with drafts retained.");
+            }
             return Ok(false);
         }
         if self.usage.open {

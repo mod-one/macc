@@ -1,12 +1,14 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { getCheckpoint, previewReconciliation, applyReconciliation, planAuthority, applyAuthority } from '../../api/sessions';
 import type { SessionStoreView, ReconciliationPlan, MigrationPlan } from '../../api/sessions';
-export default function Checkpoints({ view, reload }: { view: SessionStoreView; reload: () => Promise<void> }) {
-  const [filter, setFilter] = useState('');
+export default function Checkpoints({ view, reload, taskScope = '', selectedId = '' }: { view: SessionStoreView; reload: () => Promise<void>; taskScope?: string; selectedId?: string }) {
+  const [filter, setFilter] = useState(taskScope);
   const [details, setDetails] = useState<unknown>(null);
   const [error, setError] = useState(''); const [busy, setBusy] = useState(false);
   const [plan, setPlan] = useState<{ id: string; data: ReconciliationPlan } | null>(null);
   const [upgrade, setUpgrade] = useState<MigrationPlan | null>(null);
+  useEffect(() => { if (!selectedId) return; let active = true; void getCheckpoint(selectedId).then(value => { if (active) setDetails(value); }).catch(e => { if (active) setError(String(e)); }); return () => { active = false; }; }, [selectedId]);
+  useEffect(() => { setFilter(taskScope); }, [taskScope]);
   const run = async (action: () => Promise<void>) => {
     setBusy(true); setError(''); try { await action(); await reload(); } catch (e) { setError(String(e)); } finally { setBusy(false); }
   };
@@ -22,7 +24,7 @@ export default function Checkpoints({ view, reload }: { view: SessionStoreView; 
     <label htmlFor="checkpoint-filter">Filter checkpoints by task, phase or role</label>{' '}
     <input id="checkpoint-filter" value={filter} onChange={e => setFilter(e.target.value)} />
     <div style={{ overflowX: 'auto' }}><table><thead><tr>{['Task', 'Phase', 'Role', 'Tool', 'Reason', 'Validation', 'Actions'].map(x => <th key={x}>{x}</th>)}</tr></thead><tbody>
-      {view.checkpoints.filter(c => `${c.task_id} ${c.phase} ${c.role}`.toLowerCase().includes(filter.toLowerCase())).map(c => <tr key={c.id}>
+      {view.checkpoints.filter(c => (!taskScope || c.task_id === taskScope) && `${c.task_id} ${c.phase} ${c.role}`.toLowerCase().includes(filter.toLowerCase())).map(c => <tr key={c.id}>
         <td>{c.task_id}</td><td>{c.phase}</td><td>{c.role}</td><td>{c.tool_id}</td><td>{c.reason}</td><td>{c.validation_state}</td><td>
           <button disabled={busy} onClick={() => { void run(async () => { setDetails(await getCheckpoint(c.id)); }); }}>Inspect {c.task_id} checkpoint</button>{' '}
           <button disabled={busy} onClick={() => { void run(async () => { setPlan({ id: c.id, data: await previewReconciliation(c.id) }); }); }}>Preview reconciliation</button>

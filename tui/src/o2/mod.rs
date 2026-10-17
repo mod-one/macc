@@ -1,6 +1,7 @@
 //! Interactive O2 clients call the same application service as CLI and Web.
 mod forms;
 mod jobs;
+mod overview;
 mod settings;
 use crossterm::event::KeyCode;
 use macc_core::{
@@ -20,6 +21,8 @@ use std::path::Path;
 #[derive(Default)]
 pub struct Panel {
     pub open: bool,
+    pub session_task: Option<String>,
+    overview: overview::Overview,
     tab: usize,
     selected: usize,
     scroll: u16,
@@ -40,6 +43,9 @@ pub struct Panel {
 }
 impl Panel {
     pub fn mutation(&self, key: KeyCode) -> bool {
+        if self.tab == 5 && key == KeyCode::Char('s') {
+            return false;
+        }
         if let Some(f) = &self.form {
             return key == KeyCode::Enter && f.mutation;
         }
@@ -58,6 +64,9 @@ impl Panel {
                 .map_err(|e| MaccError::Validation(e.to_string()))?;
         }
         self.view = Some(view);
+        if self.tab == 5 {
+            return self.refresh_overview(root);
+        }
         let ready = self.view.as_ref().is_some_and(|v| v.ready);
         if ready {
             let action = match self.tab {
@@ -81,11 +90,23 @@ impl Panel {
                     return Ok(());
                 }
                 let data = execute(root, action)?;
-                self.rows = if self.tab == 3 {
+                let rows = if self.tab == 3 {
                     data["providers"].as_array().cloned().unwrap_or_default()
                 } else {
                     data.as_array().cloned().unwrap_or_default()
                 };
+                let rows = if self.tab == 1 {
+                    rows.into_iter()
+                        .filter(|r: &Value| {
+                            self.access["task_id"]
+                                .as_str()
+                                .is_none_or(|t| r["task_id"] == t)
+                        })
+                        .collect()
+                } else {
+                    rows
+                };
+                self.replace_rows(rows);
             }
         }
         let count = if self.tab == 4 {
@@ -112,12 +133,34 @@ impl Panel {
         if self.form.is_some() {
             return self.form_key(root, key);
         }
-        if let KeyCode::Char(c @ '1'..='5') = key {
+        if let KeyCode::Char(c @ '1'..='6') = key {
+            if self.tab == 5 {
+                self.overview.selected_task = self
+                    .rows
+                    .get(self.selected)
+                    .and_then(|v| v["task_id"].as_str().map(str::to_string));
+            }
             self.rows.clear();
             self.tab = c as usize - '1' as usize;
             self.selected = 0;
             self.scroll = 0;
+            if self.tab == 5 {
+                self.rows = self
+                    .overview
+                    .snapshot
+                    .as_ref()
+                    .and_then(|v| v["tasks"].as_array().cloned())
+                    .unwrap_or_default();
+                self.selected = self
+                    .rows
+                    .iter()
+                    .position(|v| v["task_id"].as_str() == self.overview.selected_task.as_deref())
+                    .unwrap_or(0);
+            }
             self.refresh(root)?;
+            return Ok(());
+        }
+        if self.overview_key(root, key)? {
             return Ok(());
         }
         if self.tab == 4 && self.setting_key(root, key)? {
@@ -159,10 +202,12 @@ impl Panel {
         Ok(())
     }
     pub fn draw(&self, f: &mut Frame, area: Rect, outer_message: &str) {
-        let mut lines=vec!["1 Memory | 2 Context | 3 Compaction | 4 Code Intelligence | 5 Policies | r refresh | u preview schema upgrade | a apply reviewed action | j advanced action | o/Esc back".into(),"↑↓ select | Enter inspect | PgUp/PgDn scroll | / scoped search or decision simulation".into(),format!("SQLite: {} | O2 ready: {}",self.view.as_ref().is_some_and(|v|v.sqlite),self.view.as_ref().is_some_and(|v|v.ready)),self.message.clone()];
+        let mut lines=vec!["1 Memory | 2 Context | 3 Compaction | 4 Code Intelligence | 5 Policies | 6 Overview | r refresh | u preview schema upgrade | a apply reviewed action | j advanced action | o/Esc back".into(),"↑↓ select | Enter inspect | PgUp/PgDn scroll | / scoped search or decision simulation".into(),format!("SQLite: {} | O2 ready: {}",self.view.as_ref().is_some_and(|v|v.sqlite),self.view.as_ref().is_some_and(|v|v.ready)),self.message.clone()];
         lines.push(outer_message.into());
         if self.tab == 4 {
             self.draw_settings(&mut lines);
+        } else if self.tab == 5 {
+            self.overview_lines(&mut lines);
         } else {
             lines.push(match self.tab{0=>"h scoped MCP setup | e extract checkpoint → a confirm | n propose | p review → a confirm | c conflict | f toggle conflict list | v resolve selected conflict | l agent search page | g agent record fragment | b rebuild FTS. Only reviewed active current facts enter prompts.",1=>"Context manifests keep PRD/criteria and pinned source hashes separate from optional estimated memory. b reduce output and preserve raw artifact.",2=>"p probe version/help | d runtime decisions | c create checkpoint | m preview native setting adoption | v review scoped rotation. Native settings are opt-in under Policies. Compression execution remains unobserved unless an adapter reports it.",_=>"p preview lifecycle → a confirm. Native ships with MACC; external adapters are optional. / current-code query | v compare with native | d inspect operation UUID."}.into());
             for (i, row) in self.rows.iter().enumerate() {

@@ -1,0 +1,24 @@
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { MemoryRouter, Routes, Route } from 'react-router-dom';
+import { beforeEach, expect, it, vi } from 'vitest';
+import O2 from './O2';
+import { getO2, o2Action, type O2View } from '../../api/o2';
+vi.mock('../../api/o2', () => ({ getO2: vi.fn(), o2Action: vi.fn() }));
+vi.mock('./o2/Memory', () => ({ default: ({ taskScope }: { taskScope: string }) => <section>Memory scope {taskScope}</section> }));
+vi.mock('./o2/Context', () => ({ default: ({ taskScope, selectedId }: { taskScope: string; selectedId: string }) => <section>Context scope {taskScope} selected {selectedId}</section> }));
+vi.mock('./o2/Providers', () => ({ default: () => <section>Providers</section> }));
+vi.mock('./o2/Compaction', () => ({ default: () => <section>Compaction</section> }));
+const view: O2View = { project_root: '/repo', revision: 'original', source: 'project', sqlite: true, ready: true, policy: { memory: { enabled: false } }, fields: [{ path: 'memory.enabled', label: 'Memory Ledger', kind: 'bool', min: 0, max: 1, default: false, choices: [], activation: 'next call' }] };
+beforeEach(() => { sessionStorage.clear(); vi.resetAllMocks(); vi.mocked(getO2).mockResolvedValue(view); vi.mocked(o2Action).mockResolvedValue({ ready: true, captured_at: 1, notice: 'Observed', memory_statuses: {}, providers: [], tasks: [], next_cursor: null }); });
+it('retains task scope and unsaved policy across domain navigation without reusing foreign record IDs', async () => {
+  render(<MemoryRouter initialEntries={['/ops/o2?task=A&id=foreign-record']}><Routes><Route path="/ops/:domain" element={<O2 />} /></Routes></MemoryRouter>);
+  const field = await screen.findByLabelText('Memory Ledger');
+  fireEvent.click(field);
+  fireEvent.click(screen.getByRole('button', { name: 'Context' }));
+  expect(await screen.findByText('Context scope A selected')).toBeVisible();
+  fireEvent.click(screen.getByRole('button', { name: 'Policies' }));
+  expect(screen.getByLabelText('Memory Ledger')).toBeChecked();
+  expect(screen.getByText('Unsaved policy draft.')).toBeVisible();
+  expect(screen.getByRole('link', { name: 'Sessions and checkpoints' })).toHaveAttribute('href', '/ops/sessions?task=A');
+  await waitFor(() => expect(sessionStorage.getItem('macc.o2.policy:/repo')).toContain('original'));
+});
