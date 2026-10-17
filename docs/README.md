@@ -44,3 +44,5 @@ When in doubt, prioritize:
 - [Supervisor intervention lifecycle](SUPERVISOR_LIFECYCLE.md)
 
 - [O2 P3-A: evidence freshness and retrieval quality](O2_P3_FRESHNESS_QUALITY.md) — symbol evidence, version TTL, reviewed conflicts and shared ranking controls.
+
+- [O2 P3-B native symbol map](O2_P3_NATIVE_MAP.md): optional pinned grammars, incremental file reuse and shared client controls.

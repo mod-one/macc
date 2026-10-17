@@ -82,3 +82,16 @@ it('filters domain controls without removing other draft values from preview', a
   fireEvent.click(screen.getByRole('button', { name: 'Validate and preview O2 policy' }));
   await waitFor(() => expect(o2Action).toHaveBeenCalledWith('policy_preview', { revision: 'original', policy: { memory: { enabled: true, max_body_chars: 1200 }, code_intelligence: { enabled: true } } }));
 });
+
+it('previews native map opt-in and parser limits using typed shared fields', async () => {
+  vi.mocked(o2Action).mockResolvedValue({ validated: true });
+  const config: O2View = { ...view, policy: { code_intelligence: { native_map_enabled: false, native_symbols_per_file: 1000 } }, fields: [
+    { path: 'code_intelligence.native_map_enabled', label: 'Enable native parsed symbol map', kind: 'bool', min: 0, max: 1, choices: [], default: false, activation: 'next query' },
+    { path: 'code_intelligence.native_symbols_per_file', label: 'Native symbols per file limit', kind: 'number', min: 1, max: 10000, choices: [], default: 1000, activation: 'next query' },
+  ] };
+  render(<Policy view={config} saved={vi.fn()} domainFilter="code_intelligence" />);
+  fireEvent.click(screen.getByLabelText('Enable native parsed symbol map'));
+  fireEvent.change(screen.getByLabelText('Native symbols per file limit'), { target: { value: '500' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Validate and preview O2 policy' }));
+  await waitFor(() => expect(o2Action).toHaveBeenCalledWith('policy_preview', { revision: 'original', policy: { code_intelligence: { native_map_enabled: true, native_symbols_per_file: 500 } } }));
+});

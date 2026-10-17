@@ -55,3 +55,14 @@ it('sends a scoped symbol query through the shared provider action', async () =>
   fireEvent.click(screen.getByRole('button', { name: 'Search code' }));
   await waitFor(() => expect(o2Action).toHaveBeenCalledWith('code_query', { query: { text: 'Other/target', kind: 'symbol_definition', worktree: null, path: 'src/sample.py' } }));
 });
+
+it('routes native signature queries through the provider port without a lifecycle mutation', async () => {
+  vi.mocked(o2Action).mockReset(); vi.mocked(o2Action).mockResolvedValue({ outcome: 'supported', data: { provider_id: 'native', hits: [] } });
+  render(<Providers />);
+  expect(screen.getByText(/optional native map supports/)).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText('Literal code query'), { target: { value: 'User/send' } });
+  fireEvent.change(screen.getByLabelText('Code query type'), { target: { value: 'symbol_signature' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Search code' }));
+  await waitFor(() => expect(o2Action).toHaveBeenCalledWith('code_query', { query: { text: 'User/send', kind: 'symbol_signature', worktree: null } }));
+  expect(o2Action).not.toHaveBeenCalledWith('provider_apply', expect.anything());
+});

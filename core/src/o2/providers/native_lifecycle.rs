@@ -29,7 +29,24 @@ pub(super) fn execute(
                 return Err(error("Deploy before indexing/updating"));
             }
             let path = &plan.affected_paths[0];
-            let raw = serde_json::to_vec(&index).map_err(|e| error(e.to_string()))?;
+            let raw = if policy.native_map_enabled {
+                let cached = match super::native_map::load(root, previous.as_ref(), policy) {
+                    Ok(value) => value,
+                    Err(e) => {
+                        tracing::warn!("Native cache rebuild: {e}");
+                        None
+                    }
+                };
+                let map = super::native_map::build(root, policy, cached.as_ref())?;
+                result.metadata = Some(map.metadata());
+                serde_json::to_vec(&map).map_err(|e| error(e.to_string()))?
+            } else {
+                result.metadata = None;
+                serde_json::to_vec(&index).map_err(|e| error(e.to_string()))?
+            };
+            if raw.len() as u64 > policy.native_index_max_bytes {
+                return Err(error("Native index exceeds configured artifact bound"));
+            }
             store::write(root, &root.join(path), &raw)?;
             result.index = Some(path.clone());
             result.index_sha256 = Some(digest(&raw));

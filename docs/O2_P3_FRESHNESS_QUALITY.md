@@ -2,8 +2,9 @@
 
 P3-A extends the existing Memory Ledger, provider port, registered tool observations
 and shared client actions. It does not add a second memory authority, AI worker,
-timer, task-delivery rule or automatic promotion policy. P3-B's persistent native
-symbol map and incremental indexing remain separate work.
+timer, task-delivery rule or automatic promotion policy. The optional persistent
+native symbol map and incremental indexing are documented separately in the
+[P3-B guide](O2_P3_NATIVE_MAP.md).
 
 ## Symbol evidence
 
@@ -188,3 +189,9 @@ TTL versus review timestamps, non-expiring static decisions, conflict CAS/defaul
 and no implicit promotion, ranking/deduplication and policy tuning, bounded push
 rendering, async TUI scope/form preservation and routed Web capture/conflict flows.
 Tests use a temporary registered future-tool fixture, never a paid AI service.
+
+## Native map extension
+
+[P3-B native map](O2_P3_NATIVE_MAP.md) adds optional Tree-sitter navigation and
+incremental declaration/signature artifacts for Rust, Python, TypeScript and TSX.
+It preserves the Rust memory-fingerprint recipe and explicit evidence review.

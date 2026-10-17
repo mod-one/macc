@@ -437,3 +437,41 @@ fn symbol_capture_proposal_and_captured_revalidation_use_the_shared_services() {
     settle(&mut panel, root);
     assert!(panel.captured_evidence.is_none());
 }
+
+#[test]
+fn native_map_opt_in_is_previewed_and_applied_through_the_shared_catalog() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path();
+    let mut panel = Panel::default();
+    panel.refresh(root).unwrap();
+    panel.key(root, KeyCode::Char('5')).unwrap();
+    panel.selected = panel
+        .view
+        .as_ref()
+        .unwrap()
+        .fields
+        .iter()
+        .position(|f| f.path == "code_intelligence.native_map_enabled")
+        .unwrap();
+    panel.key(root, KeyCode::Enter).unwrap();
+    assert_eq!(panel.draft["code_intelligence"]["native_map_enabled"], true);
+    assert!(
+        !policy::load(root)
+            .unwrap()
+            .code_intelligence
+            .native_map_enabled
+    );
+    assert!(panel.key(root, KeyCode::Char('s')).is_err());
+    panel.key(root, KeyCode::Char('p')).unwrap();
+    panel.key(root, KeyCode::Char('s')).unwrap();
+    assert!(
+        policy::load(root)
+            .unwrap()
+            .code_intelligence
+            .native_map_enabled
+    );
+    assert_eq!(
+        panel.view.as_ref().unwrap().fields[panel.selected].path,
+        "code_intelligence.native_map_enabled"
+    );
+}

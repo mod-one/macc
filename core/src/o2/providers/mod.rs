@@ -8,6 +8,7 @@ mod lifecycle;
 mod model;
 mod native;
 mod native_lifecycle;
+mod native_map;
 mod operations;
 mod process;
 mod response;

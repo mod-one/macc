@@ -58,6 +58,17 @@ pub struct CompactionPolicy {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct CodePolicy {
+    pub native_map_enabled: bool,
+    pub native_incremental: bool,
+    pub native_rust: bool,
+    pub native_python: bool,
+    pub native_typescript: bool,
+    pub native_tsx: bool,
+    pub native_corpus_max_bytes: u64,
+    pub native_index_max_bytes: u64,
+    pub native_symbols_per_file: u64,
+    pub native_parse_timeout_ms: u64,
+    pub native_build_timeout_ms: u64,
     pub enabled: bool,
     pub routing: String,
     pub max_files: u64,
@@ -134,6 +145,17 @@ impl Default for CompactionPolicy {
 impl Default for CodePolicy {
     fn default() -> Self {
         Self {
+            native_map_enabled: false,
+            native_incremental: true,
+            native_rust: true,
+            native_python: true,
+            native_typescript: true,
+            native_tsx: true,
+            native_corpus_max_bytes: 16777216,
+            native_index_max_bytes: 16777216,
+            native_symbols_per_file: 1000,
+            native_parse_timeout_ms: 100,
+            native_build_timeout_ms: 5000,
             enabled: false,
             routing: "native_only".into(),
             max_files: 10000,

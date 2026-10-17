@@ -14,6 +14,14 @@ impl CodeIntelligenceProvider for Native {
     ) -> Result<Capability<SymbolFingerprint>> {
         super::symbols::rust(target, path, symbol)
     }
+    fn plan_details(
+        &self,
+        _root: &Path,
+        _action: &str,
+        p: &super::super::policy::CodePolicy,
+    ) -> Result<serde_json::Value> {
+        Ok(super::native_map::details(p))
+    }
     fn priority(&self, q: &Query) -> u32 {
         if q.kind == "file_search" {
             0
@@ -45,7 +53,8 @@ impl CodeIntelligenceProvider for Native {
             local_only: true,
             unsupported: vec![
                 "dependency_path: no parsed graph".into(),
-                "symbol_definition: literal search only".into(),
+                "symbol_definition/symbol_signature: optional native map policy required".into(),
+                "references: literal matches, no semantic reference resolution".into(),
             ],
         }
     }
@@ -79,13 +88,32 @@ impl CodeIntelligenceProvider for Native {
     ) -> Result<Capability<Receipt>> {
         super::native_lifecycle::execute(root, plan, previous, policy).map(Capability::Supported)
     }
+    fn health(
+        &self,
+        root: &Path,
+        receipt: Option<&Receipt>,
+        p: &super::super::policy::CodePolicy,
+    ) -> Result<Detection> {
+        let mut view = self.detect(root)?;
+        if p.native_map_enabled && p.native_incremental {
+            match super::native_map::load(root, receipt, p) {
+                Ok(Some(_)) => view.diagnostics.push("Compatible native map available; query files are checked against current sources".into()),
+                Ok(None) => view.diagnostics.push("No compatible native map base; queries parse current sources. Preview index/update to persist a base".into()),
+                Err(e) => {
+                    view.status = "degraded".into();
+                    view.diagnostics.push(format!("Native cache unavailable: {e}; current-file query fallback retained"));
+                }
+            }
+        }
+        Ok(view)
+    }
     fn detect(&self, root: &Path) -> Result<Detection> {
         let healthy = crate::git::head_commit(root).is_ok();
         Ok(Detection {
             provider: self.descriptor(),
             status: if healthy { "healthy" } else { "degraded" }.into(),
             diagnostics: vec![if healthy {
-                "Git repository detected; bundled literal search requires no network/runtime dependency"
+                "Git repository detected; bundled literal search and optional parsed symbol map require no network/runtime dependency"
             } else {
                 "Git repository with a commit required"
             }
@@ -98,6 +126,9 @@ impl CodeIntelligenceProvider for Native {
         q: &Query,
         p: &super::super::policy::CodePolicy,
     ) -> Result<Capability<QueryResult>> {
+        if ["symbol_definition", "symbol_signature"].contains(&q.kind.as_str()) {
+            return super::native_map::query(root, q, p);
+        }
         if !["file_search", "references"].contains(&q.kind.as_str()) {
             return Ok(Capability::Unsupported{capability:q.kind.clone(),reason:"Native fallback provides literal file/reference search; it does not infer symbol definitions or graph paths".into()});
         }
