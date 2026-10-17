@@ -1,4 +1,4 @@
-.PHONY: fmt fmt-check lint test test-tool-runner test-contract web-build web-ci all check check-generic check-version
+.PHONY: fmt fmt-check lint test test-tool-runner test-contract web-build web-ci all check check-generic check-version release-bump
 
 all: fmt lint check-version test test-tool-runner web-ci check-generic test-contract
 
@@ -53,5 +53,8 @@ aws != expected and errors.append(f"adapters/Cargo.toml ({aws}) != {expected}");
 web != expected and errors.append(f"web/package.json ({web}) != {expected}"); \
 not re.search(rf"^## \[{re.escape(expected)}\]", changelog, re.M) and errors.append(f"CHANGELOG.md missing ## [{expected}]"); \
 sys.exit("\n".join(errors)) if errors else print(f"Version check OK: {expected}")' "$(TAG_VERSION)"
+
+release-bump:
+	@./scripts/bump-version.sh "$(VERSION)"
 
 check: fmt-check lint check-version test test-tool-runner web-ci check-generic test-contract

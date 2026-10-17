@@ -11,7 +11,7 @@ const About: React.FC = () => {
       .catch(() => null);
   }, []);
 
-  const version = health?.version ?? '0.2.0';
+  const version = health?.version ?? '0.3.0';
   const buildSha = health?.build_sha ?? 'unknown';
   const buildVersion = health?.build_version ?? `${version} (build ${buildSha})`;
 

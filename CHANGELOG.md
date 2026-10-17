@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-17
+
 ### Fixed — Coordinator restarts after an interrupted dispatch
 - A new pool worktree takes the lowest free `worker-NN` slot (no directory, no registered worktree, no leftover `ai/<tool>/worker-NN` branch). It used to take `worker-<pool size + 1>`, so once a slot was missing (`worker-01`, `worker-02`, `worker-04`) it picked an occupied one and the run failed on `git worktree add … already exists`.
 

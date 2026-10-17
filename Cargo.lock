@@ -1257,7 +1257,7 @@ dependencies = [
 
 [[package]]
 name = "macc-adapter-agy"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "inventory",
  "macc-adapter-shared",
@@ -1270,7 +1270,7 @@ dependencies = [
 
 [[package]]
 name = "macc-adapter-claude"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "inventory",
@@ -1283,7 +1283,7 @@ dependencies = [
 
 [[package]]
 name = "macc-adapter-codex"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "inventory",
@@ -1296,7 +1296,7 @@ dependencies = [
 
 [[package]]
 name = "macc-adapter-gemini"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "inventory",
  "macc-adapter-shared",
@@ -1309,7 +1309,7 @@ dependencies = [
 
 [[package]]
 name = "macc-adapter-shared"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "macc-core",
@@ -1324,7 +1324,7 @@ dependencies = [
 
 [[package]]
 name = "macc-adapter-vibe"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "inventory",
  "macc-adapter-shared",
@@ -1337,7 +1337,7 @@ dependencies = [
 
 [[package]]
 name = "macc-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1375,7 +1375,7 @@ dependencies = [
 
 [[package]]
 name = "macc-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1398,7 +1398,7 @@ dependencies = [
 
 [[package]]
 name = "macc-registry"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "macc-adapter-agy",
@@ -1413,7 +1413,7 @@ dependencies = [
 
 [[package]]
 name = "macc-tui"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "chrono",

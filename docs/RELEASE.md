@@ -11,19 +11,19 @@ This project uses Semantic Versioning (`MAJOR.MINOR.PATCH`) and Git tags (`vX.Y.
 ## Release Checklist
 
 1. Ensure CI is green on `main`.
-2. Update `CHANGELOG.md`:
-   - move relevant items from `Unreleased` to a new version section with date.
+2. Bump versions and promote `CHANGELOG.md` (`[Unreleased]` -> `[X.Y.Z]`):
+   - `make release-bump VERSION=X.Y.Z`
+   - `make check-version TAG_VERSION=vX.Y.Z`
 3. Run quality baseline locally:
    - `make check`
    - `make test-contract`
    - `./automat/tests/run.sh`
-4. Bump crate versions where applicable.
-5. Commit release prep:
+4. Commit release prep:
    - `chore(release): vX.Y.Z`
-6. Tag:
+5. Tag:
    - `git tag vX.Y.Z`
    - `git push origin vX.Y.Z`
-7. Create GitHub Release:
+6. Create GitHub Release:
    - title: `vX.Y.Z`
    - notes: from `CHANGELOG.md` section for `vX.Y.Z` (plus generated notes if desired).
 
