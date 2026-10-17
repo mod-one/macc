@@ -80,6 +80,16 @@ else
   fail "a provided explanation is passed through verbatim" "got: '$got'"
 fi
 
+# An echoed prompt must not pass for an explanation: without the tool's own
+# EXP line the placeholder must win, not the `" line.` fragment of item 12.
+printf '12) ...All three require a brief "MACC_TASK_RESULT_EXP:" line.\nMACC_TASK_RESULT: error_without_changes\n' >"$out_file"
+got="$(run_harness "$tmp_root" 0 "" "resolve_task_result_exp '$out_file' 'error_without_changes'" 2>/dev/null)"
+if [[ "$got" == *"no explanation provided"* ]]; then
+  pass "echoed prompt text is not mistaken for an explanation"
+else
+  fail "echoed prompt text is not mistaken for an explanation" "got: '$got'"
+fi
+
 printf 'MACC_TASK_RESULT: success_with_changes\n' >"$out_file"
 got="$(run_harness "$tmp_root" 0 "" "resolve_task_result_exp '$out_file' 'success_with_changes'" 2>/dev/null)"
 if [[ -z "$got" ]]; then
@@ -129,6 +139,23 @@ if [[ "$section" == *"treat the task as unstarted"* ]]; then
   pass "no commits on the branch is stated explicitly"
 else
   fail "no commits on the branch is stated explicitly" "got: $section"
+fi
+
+# Dirty-only work is a continuation even with no commits ahead of base.
+printf 'staged edit\n' > "$wt2/base.txt"
+git -C "$wt2" add base.txt
+printf 'unstaged edit\n' >> "$wt2/base.txt"
+printf 'new implementation\n' > "$wt2/new-feature.txt"
+before_status="$(git -C "$wt2" status --porcelain)"
+section="$(run_harness "$wt2" 1 main "build_continuation_section T2" 2>/dev/null)"
+check_contains "Uncommitted work retained" "dirty-only work is included in continuation context"
+check_contains "base.txt" "staged and unstaged paths are included"
+check_contains "new-feature.txt" "untracked implementation is included"
+check_contains "report MACC_TASK_RESULT: success_with_changes" "retained edits still require source delivery"
+if [[ "$section" != *"treat the task as unstarted"* && "$(git -C "$wt2" status --porcelain)" == "$before_status" ]]; then
+  pass "dirty-only continuation preserves the index and never claims an unstarted task"
+else
+  fail "dirty-only continuation preserves the index and never claims an unstarted task"
 fi
 
 # ── 3b. terminal error contract validation ──────────────────────────────────

@@ -158,6 +158,7 @@ fn check_scheduler_contract(task: &Value, result: &mut ValidationResult) {
                 "Task '{task_id}' has invalid gate.required_verdict; only 'accepted' is currently supported"
             ));
         }
+        check_human_approval_gate(task_id, task, gate, result);
     }
     let notes = task
         .get("notes")
@@ -179,6 +180,56 @@ fn check_scheduler_contract(task: &Value, result: &mut ValidationResult) {
     if task.get("gate").is_none() && matches!(category.as_str(), "gate" | "acceptance") {
         result.add_warning(format!(
             "Task '{task_id}' has category '{category}' but no gate declaration"
+        ));
+    }
+}
+
+/// A `human_approval` gate is scheduler-enforced: it must parse, pass the
+/// same structural rules the coordinator applies at sync time, and carry no
+/// executable work (a performer never runs it).
+fn check_human_approval_gate(
+    task_id: &str,
+    task: &Value,
+    gate: &Value,
+    result: &mut ValidationResult,
+) {
+    if gate.get("kind").and_then(Value::as_str) != Some("human_approval") {
+        return;
+    }
+    let parsed: crate::coordinator::model::TaskGate = match serde_json::from_value(gate.clone()) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            result.add_error(format!(
+                "Task '{task_id}' has an unreadable human_approval gate: {err}"
+            ));
+            return;
+        }
+    };
+    let dependencies: Vec<String> = task
+        .get("dependencies")
+        .and_then(Value::as_array)
+        .map(|deps| {
+            deps.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    for problem in parsed.validate_human_approval(task_id, &dependencies) {
+        result.add_error(format!("Invalid human approval gate: {problem}"));
+    }
+    let writes = task
+        .pointer("/change_scope/allowed_paths")
+        .and_then(Value::as_array)
+        .is_some_and(|paths| !paths.is_empty());
+    if writes {
+        result.add_error(format!(
+            "Task '{task_id}' is a human_approval gate but declares change_scope.allowed_paths; a gate is never executed by a performer — move the work to the subject task"
+        ));
+    }
+    if parsed.governance_ref.is_none() {
+        result.add_warning(format!(
+            "Task '{task_id}' does not cite gate.governance_ref; approver roles should be derived from the specification governance, not assumed"
         ));
     }
 }
@@ -287,5 +338,43 @@ mod tests {
 
         assert!(!result.ok);
         assert_eq!(result.errors.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod human_gate_validation_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn run(task: Value) -> ValidationResult {
+        let mut result = ValidationResult::pass();
+        check_scheduler_contract(&task, &mut result);
+        result
+    }
+
+    #[test]
+    fn a_valid_gate_passes_with_governance_cited() {
+        let r = run(json!({"id":"SEC-APP-003","dependencies":["SEC-ADR-003"],
+            "gate":{"kind":"human_approval","subject_task":"SEC-ADR-003",
+                    "required_approvers":[{"role":"PRODUCT_OWNER"}],
+                    "governance_ref":"docs/16-decisions.md"}}));
+        assert!(r.ok, "{:?}", r.errors);
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    }
+
+    #[test]
+    fn structural_defects_and_executable_scope_are_errors() {
+        let r = run(json!({"id":"SEC-APP-003","dependencies":[],
+            "change_scope":{"allowed_paths":["docs/**"]},
+            "gate":{"kind":"human_approval","subject_task":"SEC-ADR-003","required_approvers":[]}}));
+        assert!(!r.ok);
+        let text = r.errors.join("\n");
+        assert!(
+            text.contains("must also be listed in dependencies"),
+            "{text}"
+        );
+        assert!(text.contains("at least one role"), "{text}");
+        assert!(text.contains("allowed_paths"), "{text}");
+        assert!(r.warnings.join(" ").contains("governance_ref"));
     }
 }

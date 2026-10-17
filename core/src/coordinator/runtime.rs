@@ -3,7 +3,6 @@ use crate::coordinator::integration::{IntegrationWorktree, PublishOutcome};
 use crate::coordinator::model::Task;
 use crate::coordinator::rate_limit::ToolThrottleRegistry;
 use crate::coordinator::{CoordinatorEventRecord, PerformerCompletionKind};
-use crate::coordinator_storage::CoordinatorStorage;
 use crate::git;
 use crate::service::process_ownership::RegisteredProcessGuard;
 use crate::{MaccError, Result};
@@ -95,6 +94,8 @@ pub struct CoordinatorJobEvent {
     pub error_message: Option<String>,
     pub result_explanation: Option<String>,
     pub gate_verdict: Option<crate::coordinator::model::GateVerdict>,
+    /// Preconditions the tool reported as unsatisfied (`precondition_unmet`).
+    pub unmet_preconditions: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1174,7 +1175,7 @@ pub fn build_phase_prompt(mode: &str, task_id: &str, tool: &str, task: &Task) ->
         ));
     }
     Ok(format!(
-        "You are the assigned {} performer running inside a MACC worktree.\n\nMode: {}\nTask ID: {}\n\nTask registry entry (JSON):\n{}\n\nInstructions:\n1) Execute the {} phase only.\n2) Keep changes minimal and focused on this task.\n3) Update code/tests/docs as needed for this phase.\n4) Do not modify task registry state directly.\n",
+        "You are the assigned {} performer running inside a MACC worktree.\n\nMode: {}\nTask ID: {}\n\nTask registry entry (JSON):\n{}\n\nInstructions:\n1) Execute the {} phase only.\n2) Keep changes minimal and focused on this task. Inspect git status, staged/unstaged changes, untracked files and existing commits first. Retained work may come from an interrupted performer. Complete the remaining work without resetting, cleaning or overwriting correct prior implementation.\n3) Update code/tests/docs as needed for this phase.\n4) Do not modify task registry state directly.\n",
         tool, mode, task_id, task_payload, mode
     ))
 }
@@ -1405,6 +1406,10 @@ pub fn spawn_performer_job(
             gate_verdict: completion_details
                 .as_ref()
                 .and_then(|details| details.gate_verdict),
+            unmet_preconditions: completion_details
+                .as_ref()
+                .map(|details| details.unmet_preconditions.clone())
+                .unwrap_or_default(),
         });
     });
     Ok(pid)
@@ -1423,6 +1428,7 @@ struct CompletionDetails {
     message: Option<String>,
     result_explanation: Option<String>,
     gate_verdict: Option<crate::coordinator::model::GateVerdict>,
+    unmet_preconditions: Vec<String>,
 }
 
 const COORDINATOR_COMPAT_PHASE_RESULT_LOG_FALLBACK: &str =
@@ -1478,37 +1484,36 @@ fn read_last_completion_details_once(
     let storage_paths =
         crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&project_paths);
     let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
-    let snapshot = match sqlite.load_snapshot() {
-        Ok(snap) => snap,
-        Err(err) => {
-            tracing::warn!(
-                task_id,
-                attempt,
-                "read_last_completion_details: load_snapshot failed: {}",
-                err
-            );
-            return None;
-        }
+    let query = crate::coordinator_storage::EventQuery {
+        task_id: Some(task_id),
+        event_type: Some("phase_result"),
+        skip_heartbeats: false,
     };
-    for event in snapshot.events.iter().rev() {
-        let Some(event_task_id) = event.task_id.as_deref() else {
-            continue;
-        };
-        if event_task_id != task_id {
-            continue;
-        }
+    let mut details = None;
+    let scanned = sqlite.scan_events_newest_first(query, |event| {
         if !event_source.is_empty() && event.source != event_source {
-            continue;
+            return std::ops::ControlFlow::Continue(());
         }
-        if event.event_type != "phase_result" {
-            continue;
-        }
-        return Some(CompletionDetails {
+        details = Some(CompletionDetails {
             result_kind: event.payload_result_kind(),
             message: event.message().map(|value| value.to_string()),
             result_explanation: event.payload_result_exp(),
             gate_verdict: event.payload_gate_verdict(),
+            unmet_preconditions: event.payload_unmet_preconditions(),
         });
+        std::ops::ControlFlow::Break(())
+    });
+    if let Err(err) = scanned {
+        tracing::warn!(
+            task_id,
+            attempt,
+            "read_last_completion_details: event scan failed: {}",
+            err
+        );
+        return None;
+    }
+    if details.is_some() {
+        return details;
     }
     if attempt < 2 {
         tracing::debug!(
@@ -1530,8 +1535,22 @@ fn read_completion_details_from_worktree_log(
     let mut message = None;
     let mut result_explanation = None;
     let mut gate_verdict = None;
+    // Collected in reverse file order, restored below.
+    let mut unmet_preconditions: Vec<String> = Vec::new();
     for line in raw.lines().rev() {
         let trimmed = line.trim();
+        if let Some(item) = trimmed
+            .strip_prefix("MACC_TASK_PRECONDITION:")
+            .or_else(|| trimmed.strip_prefix("- Unmet precondition:"))
+        {
+            let item = item.trim();
+            // `<condition>` is the placeholder from the prompt contract; a
+            // tool that echoes its prompt must not turn it into a condition.
+            if !item.is_empty() && !item.starts_with('<') {
+                unmet_preconditions.push(item.to_string());
+            }
+            continue;
+        }
         if result_explanation.is_none() {
             if let Some(exp) = trimmed.strip_prefix("- Explanation:") {
                 result_explanation = Some(exp.trim().to_string());
@@ -1566,11 +1585,17 @@ fn read_completion_details_from_worktree_log(
             message = Some(trimmed.to_string());
         }
     }
+    unmet_preconditions.reverse();
+    // Order-preserving global de-duplication: a tool that repeats a condition
+    // (e.g. once in prose, once as a marker) must not list it twice.
+    let mut seen = std::collections::HashSet::new();
+    unmet_preconditions.retain(|item| seen.insert(item.clone()));
     result_kind.map(|kind| CompletionDetails {
         result_kind: Some(kind),
         message,
         result_explanation,
         gate_verdict,
+        unmet_preconditions,
     })
 }
 
@@ -1597,14 +1622,30 @@ pub fn read_performer_log_tail(
     max_bytes: usize,
 ) -> Option<String> {
     let log_path = performer_task_log_path(worktree_path, task_id);
-    let raw = std::fs::read_to_string(&log_path).ok()?;
+    // Older shell runners translated echo's trailing newline into a dash.
+    let legacy_path = log_path.with_file_name(format!("{}-.md", log_path.file_stem()?.to_str()?));
+    let raw = std::fs::read_to_string(&log_path)
+        .or_else(|_| std::fs::read_to_string(legacy_path))
+        .ok()?;
     if raw.is_empty() {
         return None;
     }
     if raw.len() <= max_bytes {
         Some(raw)
     } else {
-        Some(raw[raw.len() - max_bytes..].to_string())
+        let mut start = raw.len() - max_bytes;
+        while !raw.is_char_boundary(start) {
+            start += 1;
+        }
+        // Start at the next full line: a cut through the middle of a line
+        // would hand the normalizer (and any message built from it) a
+        // fragment such as "s does not serve without a page".
+        let tail = &raw[start..];
+        let tail = match tail.find('\n') {
+            Some(newline) if newline + 1 < tail.len() => &tail[newline + 1..],
+            _ => tail,
+        };
+        Some(tail.to_string())
     }
 }
 
@@ -1617,63 +1658,52 @@ fn read_last_error_details_from_sqlite(
     let storage_paths =
         crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&project_paths);
     let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
-    let snapshot = match sqlite.load_snapshot() {
-        Ok(snap) => snap,
-        Err(err) => {
-            tracing::warn!(
-                task_id,
-                "read_last_error_details_from_sqlite: load_snapshot failed: {}",
-                err
-            );
-            return None;
-        }
+    // Heartbeats are neither failures nor terminal successes.
+    let query = crate::coordinator_storage::EventQuery {
+        task_id: Some(task_id),
+        event_type: None,
+        skip_heartbeats: true,
     };
     let mut failed_candidate: Option<ErrorDetails> = None;
     let mut saw_terminal_success_before_failed = false;
-    for event in snapshot.events.iter().rev() {
-        let Some(event_task_id) = event.task_id.as_deref() else {
-            continue;
-        };
-        if event_task_id != task_id {
-            continue;
-        }
+    let scanned = sqlite.scan_events_newest_first(query, |event| {
         let source = event.source.as_str();
         if !event_source.is_empty() && source != event_source {
-            continue;
+            return std::ops::ControlFlow::Continue(());
         }
         let event_type = event.event_type.as_str();
         let status = event.status.as_str();
-        let is_terminal_success = event.is_terminal_success();
-        if is_terminal_success && failed_candidate.is_some() {
+        if event.is_terminal_success() && failed_candidate.is_some() {
             saw_terminal_success_before_failed = true;
-            continue;
+            return std::ops::ControlFlow::Continue(());
         }
         if event_type != "failed" && !(event_type == "phase_result" && status == "failed") {
-            continue;
+            return std::ops::ControlFlow::Continue(());
         }
-        let error_code = event.payload_error_code();
-        let error_origin = event.payload_origin();
-        let error_message = event.message().map(|v| v.to_string());
         if failed_candidate.is_none() {
             failed_candidate = Some(ErrorDetails {
-                error_code,
-                error_origin,
-                error_message,
+                error_code: event.payload_error_code(),
+                error_origin: event.payload_origin(),
+                error_message: event.message().map(|v| v.to_string()),
             });
         }
+        std::ops::ControlFlow::Continue(())
+    });
+    if let Err(err) = scanned {
+        tracing::warn!(
+            task_id,
+            "read_last_error_details_from_sqlite: event scan failed: {}",
+            err
+        );
+        return None;
     }
     if saw_terminal_success_before_failed {
         return None;
     }
-    failed_candidate.and_then(|details| {
-        if details.error_code.is_some()
+    failed_candidate.filter(|details| {
+        details.error_code.is_some()
             || details.error_origin.is_some()
             || details.error_message.is_some()
-        {
-            Some(details)
-        } else {
-            None
-        }
     })
 }
 
@@ -2551,5 +2581,90 @@ pub fn terminate_process_group_gracefully(pgid: i64, grace_secs: u64) {
         unsafe {
             let _ = libc::killpg(pgid as libc::pid_t, libc::SIGKILL);
         }
+    }
+}
+
+#[cfg(test)]
+mod precondition_log_fallback_tests {
+    use super::{performer_task_log_path, read_completion_details_from_worktree_log};
+    use crate::coordinator::PerformerCompletionKind;
+
+    #[test]
+    fn quota_log_tail_supports_legacy_names_and_utf8_boundaries() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = performer_task_log_path(dir.path(), "SEC-API-004");
+        std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+        let legacy = log.with_file_name("SEC-API-004-.md");
+        std::fs::write(
+            &legacy,
+            "ERROR: You\u{2019}ve hit your usage limit. MACC_TOOL_LIMIT: quota_exhausted",
+        )
+        .unwrap();
+        let tail = super::read_performer_log_tail(dir.path(), "SEC-API-004", 8192).unwrap();
+        assert!(tail.contains("quota_exhausted"));
+        std::fs::write(&log, "\u{20ac}\u{20ac}").unwrap();
+        assert_eq!(
+            super::read_performer_log_tail(dir.path(), "SEC-API-004", 4).unwrap(),
+            "\u{20ac}"
+        );
+    }
+
+    #[test]
+    fn log_tail_starts_at_a_full_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = performer_task_log_path(dir.path(), "WEB-UI-005");
+        std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+        std::fs::write(
+            &log,
+            "The BFF route does not serve without a page.\nMACC_TASK_RESULT: precondition_unmet\n",
+        )
+        .unwrap();
+        // 45 bytes cut into the first line: the partial line is dropped.
+        let tail = super::read_performer_log_tail(dir.path(), "WEB-UI-005", 45).unwrap();
+        assert_eq!(tail, "MACC_TASK_RESULT: precondition_unmet\n");
+    }
+
+    #[test]
+    fn worktree_log_fallback_collects_preconditions_in_order_without_duplicates() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let log = performer_task_log_path(dir.path(), "SEC-API-003");
+        std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+        std::fs::write(
+            &log,
+            "  With precondition_unmet, ALSO print one \"MACC_TASK_PRECONDITION: <condition>\" line.\ncodex\nMACC_TASK_PRECONDITION: <condition>\nMACC_TASK_PRECONDITION: first condition\r\nMACC_TASK_PRECONDITION:   second condition  \nMACC_TASK_PRECONDITION: first condition\nMACC_TASK_RESULT_EXP: summary line\nMACC_TASK_RESULT: precondition_unmet\n- Result kind: precondition_unmet\n- Unmet precondition: third condition\n",
+        )
+        .unwrap();
+
+        let details = read_completion_details_from_worktree_log(dir.path(), "SEC-API-003")
+            .expect("details parsed");
+        assert_eq!(
+            details.result_kind,
+            Some(PerformerCompletionKind::PreconditionUnmet)
+        );
+        assert_eq!(details.result_explanation.as_deref(), Some("summary line"));
+        assert_eq!(
+            details.unmet_preconditions,
+            vec![
+                "first condition".to_string(),
+                "second condition".to_string(),
+                "third condition".to_string()
+            ],
+            "emission order kept, whitespace and CR trimmed, exact duplicates dropped"
+        );
+    }
+
+    #[test]
+    fn worktree_log_fallback_without_precondition_lines_yields_empty_list() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let log = performer_task_log_path(dir.path(), "T-1");
+        std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+        std::fs::write(
+            &log,
+            "MACC_TASK_RESULT_EXP: why\nMACC_TASK_RESULT: precondition_unmet\n",
+        )
+        .unwrap();
+        let details =
+            read_completion_details_from_worktree_log(dir.path(), "T-1").expect("details");
+        assert!(details.unmet_preconditions.is_empty());
     }
 }

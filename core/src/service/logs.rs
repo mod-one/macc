@@ -106,6 +106,43 @@ pub fn read_log_content(
     })
 }
 
+/// How much of the coordinator log status and failure analysis read.
+pub const STATUS_LOG_TAIL_BYTES: u64 = 256 * 1024;
+
+/// The last `max_bytes` of a log, starting at a full line. Status and
+/// failure analysis only look at the latest lines, and a run log grows to
+/// megabytes over a long run.
+pub fn read_log_tail(
+    paths: &ProjectPaths,
+    component: &str,
+    worktree_filter: Option<&str>,
+    task_filter: Option<&str>,
+    max_bytes: u64,
+) -> Result<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let path = select_log_file(paths, component, worktree_filter, task_filter)?;
+    let io_err = |e: std::io::Error| MaccError::Io {
+        path: path.to_string_lossy().into(),
+        action: "read log file".into(),
+        source: e,
+    };
+    let mut file = std::fs::File::open(&path).map_err(io_err)?;
+    let len = file.metadata().map_err(io_err)?.len();
+    let start = len.saturating_sub(max_bytes);
+    file.seek(SeekFrom::Start(start)).map_err(io_err)?;
+    let mut bytes = Vec::with_capacity((len - start) as usize);
+    file.read_to_end(&mut bytes).map_err(io_err)?;
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    if start == 0 {
+        return Ok(text);
+    }
+    // Drop the partial first line.
+    Ok(match text.find('\n') {
+        Some(newline) => text[newline + 1..].to_string(),
+        None => String::new(),
+    })
+}
+
 fn collect_log_files(
     dir: &std::path::Path,
     task_filter: Option<&str>,
@@ -241,4 +278,30 @@ fn collect_performer_worktree_logs(
         files.extend(collect_log_files(&log_dir, task_filter)?);
     }
     Ok(files)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_log_tail_starts_at_a_full_line() {
+        let root = std::env::temp_dir().join(format!(
+            "macc_log_tail_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let paths = ProjectPaths::from_root(&root);
+        let dir = paths.macc_dir.join("log/coordinator");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("run-1.md"), "first line\nsecond line\nlast line\n").unwrap();
+
+        let tail = read_log_tail(&paths, "coordinator", None, None, 15).unwrap();
+        assert_eq!(tail, "last line\n");
+        let whole = read_log_tail(&paths, "coordinator", None, None, 1024).unwrap();
+        assert_eq!(whole, "first line\nsecond line\nlast line\n");
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

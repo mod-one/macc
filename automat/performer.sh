@@ -122,6 +122,12 @@ fi
 
 cd "$worktree"
 
+evidence_helper="$(dirname "${BASH_SOURCE[0]}")/completion_evidence.sh"
+if [[ ! -f "$evidence_helper" ]]; then
+  evidence_helper="${worktree}/.macc/automation/completion_evidence.sh"
+fi
+source "$evidence_helper"
+
 tool_json="${worktree}/.macc/tool.json"
 worktree_meta="${worktree}/.macc/worktree.json"
 
@@ -139,6 +145,10 @@ if [[ ! -f "$worktree_meta" ]]; then
   LAST_ERROR_MESSAGE="worktree metadata not found"
   echo "Error: worktree metadata not found in worktree: $worktree_meta" >&2
   exit 1
+fi
+
+if [[ -z "$base_ref" ]]; then
+  base_ref="$(jq -r '.base_branch // ""' "$worktree_meta")"
 fi
 
 expected_branch="$(jq -r '.branch // ""' "$worktree_meta")"
@@ -183,7 +193,7 @@ mkdir -p "$performer_log_dir"
 task_log_path() {
   local id="$1"
   local safe
-  safe="$(echo "$id" | tr '[:space:]' '-' | tr -cd '[:alnum:]_.-')"
+  safe="$(printf '%s' "$id" | tr '[:space:]' '-' | tr -cd '[:alnum:]_.-')"
   if [[ -z "$safe" ]]; then
     safe="task"
   fi
@@ -647,19 +657,20 @@ previous_result_explanation() {
   grep -E '^- Explanation:' "$path" | tail -n 1 | sed -E 's/^- Explanation:[[:space:]]*//'
 }
 
-# Summarise what the previous attempt already committed on this branch.
+# Summarise both committed and uncommitted work without changing the index.
 build_prior_work_summary() {
-  local base="$1"
-  [[ -n "$base" ]] || return 0
-  git rev-parse --verify "$base" >/dev/null 2>&1 || return 0
-
-  local commits stat
-  commits="$(git log --oneline "${base}..HEAD" 2>/dev/null || true)"
-  [[ -n "$commits" ]] || return 0
-  stat="$(git diff --stat "${base}..HEAD" 2>/dev/null | tail -n 40 || true)"
-
-  printf 'Commits already made on this branch (not yet merged into %s):\n\n%s\n\nFiles changed:\n\n%s\n' \
-    "$base" "$commits" "$stat"
+  local base="$1" commits="" stat="" dirty=""
+  if [[ -n "$base" ]] && git rev-parse --verify "$base" >/dev/null 2>&1; then
+    commits="$(git log --oneline "${base}..HEAD" 2>/dev/null || true)"
+    if [[ -n "$commits" ]]; then
+      stat="$(git diff --stat "${base}..HEAD" 2>/dev/null | tail -n 40 || true)"
+      printf 'Commits already made on this branch (not yet merged into %s):\n\n%s\n\nFiles changed:\n\n%s\n' "$base" "$commits" "$stat"
+    fi
+  fi
+  dirty="$(git status --short -- . ':!performer.sh' ':!worktree.prd.json' 2>/dev/null || true)"
+  if [[ -n "$dirty" ]]; then
+    printf '\nUncommitted work retained from the previous performer (staged, unstaged and untracked files):\n\n%s\n' "$dirty"
+  fi
 }
 
 build_continuation_section() {
@@ -673,32 +684,37 @@ build_continuation_section() {
 ## CONTINUATION — this task was already started
 
 This is attempt ${resume_attempt} of this task. A previous attempt implemented
-part of it, committed that work, and then reported that it could not finish.
-The commits below are already on this branch and are YOURS -- they are not
-someone else's work and they are not merged yet.
+part of it and stopped before finishing, possibly because its tool became
+unavailable. You are continuing the SAME task on the SAME branch and worktree.
+Prior commits, staged edits, unstaged edits and untracked files are retained.
+Inspect and preserve that work even if this is a different tool or session.
 
 Reason the previous attempt stopped:
 ${prior_exp:-(not recorded)}
 
-${prior_work:-(no commits found on this branch; treat the task as unstarted)}
+${prior_work:-(no commits or uncommitted changes found; treat the task as unstarted only after inspecting its current files)}
 
 Note: the base branch (${base_ref:-unknown}) may have advanced since those
 commits were made, so files you touched may look different from what you left.
 
 How to proceed:
-1) FIRST assess the current state: read the committed work above and check what
-   the task still requires. Do not re-derive the implementation from scratch.
-2) Then complete ONLY the remaining work. Do not revert, rewrite, or duplicate
-   what is already committed and correct.
+1) FIRST assess the current state: inspect git status, git diff, git diff --cached,
+   untracked files and the prior commits. Check what the task still requires.
+   Do not re-derive the implementation from scratch.
+2) Then complete ONLY the remaining work. Preserve correct prior implementation.
+   Do not reset, clean, revert or overwrite it to start over.
+   If retained uncommitted changes already satisfy the task after validation,
+   report MACC_TASK_RESULT: success_with_changes even if you made no further edits.
+   The runner must commit those changes before delivery.
 3) If the remaining gap is a pre-existing repository problem outside this
    task's scope (for example an unrelated failing test or build target), the
    task is DONE: report success and state the out-of-scope issue in your
    explanation. Do not report an error for problems this task did not cause.
-4) If the previously committed work is genuinely unusable and must be discarded,
+4) If the prior work is genuinely unusable and must be discarded,
    do NOT quietly rewrite it -- stop and report:
    MACC_TASK_RESULT_EXP: prior work unsalvageable: <reason>
    MACC_TASK_RESULT: error_without_changes
-   so the coordinator can reset the branch and restart the task cleanly.
+   Existing work must remain available for recovery; do not discard it yourself.
 CONT
 }
 
@@ -740,14 +756,21 @@ Instructions:
    - MACC_TASK_RESULT: error_with_changes   (if you started work but cannot finish)
    - MACC_TASK_RESULT: error_without_changes (if you could not start or make any progress)
    - MACC_TASK_RESULT: precondition_unmet (if execution is correct but a required gate or external condition is not met; never retryable)
-11) Use already_satisfied only when you verified the task is already done and can cite the evidence briefly.
+11) Use already_satisfied only after verifying every acceptance criterion. Both already_satisfied and success_without_changes require MACC_TASK_RESULT_EXP: with concrete criteria evidence, commands executed and their results. The runner records or reuses a durable validation commit; do not commit yourself.
 12) Use error_with_changes or error_without_changes ONLY when THIS task could not be completed because execution malfunctioned (sandbox failures, environment issues, permission errors, etc.). Use precondition_unmet instead when stopping is the task's correct specified behavior. All three require a brief "MACC_TASK_RESULT_EXP:" line.
+    With precondition_unmet, ALSO print one "MACC_TASK_PRECONDITION: <condition>" line per unsatisfied precondition, each on its own line, before the result marker. Name the concrete condition (the dependency verdict, approval, decision, data, or environment that is missing), not a generic summary. These lines are shown to the operator as the reason the task cannot be implemented yet.
 13) Pre-existing repository problems that this task did not cause and is not scoped to fix are NOT a reason to report an error. If a repo-wide check (test suite, build, lint) fails only in areas unrelated to this task, and this task's own work is complete and verified, report success and note the unrelated failures in your explanation. Judge this task by its own acceptance criteria, not by the health of the whole repository.
 14) If you finish successfully but forget the marker, the runner will infer the result from repository state; still print the marker explicitly.
-15) If the task JSON contains `gate`, also print exactly one `MACC_TASK_GATE_VERDICT: accepted|rejected|pending` line. A successful task execution does not imply an accepted gate verdict.
+15) If the task JSON contains `gate` (kind `verdict` or no kind), also print exactly one `MACC_TASK_GATE_VERDICT: accepted|rejected|pending` line. A successful task execution does not imply an accepted gate verdict. Never produce, simulate, or claim a human approval: approvals are recorded only by people through `macc coordinator approve`, and a verdict you print is ignored for `human_approval` gates. If your task needs an approval that has not been recorded, that is `precondition_unmet`, not something to decide yourself.
 
 ${prompt_closing_line}
 PROMPT
+}
+
+# True when the task JSON declares `gate.kind: human_approval`.
+is_human_approval_gate() {
+  local task_json="$1"
+  [[ "$(printf '%s' "$task_json" | jq -r '.gate.kind // empty' 2>/dev/null)" == "human_approval" ]]
 }
 
 extract_task_result_marker() {
@@ -769,7 +792,11 @@ extract_task_result_marker() {
 extract_task_result_exp() {
   local output_file="$1"
   local raw=""
-  raw="$(grep -E 'MACC_TASK_RESULT_EXP:' "$output_file" | tail -n 1 | sed -E 's/^.*MACC_TASK_RESULT_EXP:[[:space:]]*//')"
+  # Anchored at line start: tools that echo the prompt reproduce
+  # `…a brief "MACC_TASK_RESULT_EXP:" line.` mid-sentence; when the tool then
+  # omits its own explanation, an unanchored match would report `" line.` as
+  # the explanation instead of the explicit missing-explanation placeholder.
+  raw="$(grep -E '^[[:space:]]*MACC_TASK_RESULT_EXP:' "$output_file" | tail -n 1 | sed -E 's/^[[:space:]]*MACC_TASK_RESULT_EXP:[[:space:]]*//')"
   printf '%s' "$raw" | tr -d '\r' | xargs
 }
 
@@ -783,6 +810,29 @@ extract_task_gate_verdict() {
     not_accepted) printf '%s' "rejected" ;;
     *) printf '%s' "" ;;
   esac
+}
+
+# One entry per `MACC_TASK_PRECONDITION:` line, in emission order, blank and
+# duplicate lines dropped. Printed newline-separated so callers can iterate.
+extract_task_preconditions() {
+  local output_file="$1"
+  # Anchored at line start: some tools (codex) echo the prompt into their
+  # output, and the prompt itself contains `"MACC_TASK_PRECONDITION: <condition>"`
+  # mid-sentence. An unanchored match turned that instruction into a bogus
+  # first "condition" shown to the operator. A placeholder value (`<…>`) is
+  # rejected for the same reason.
+  grep -E '^[[:space:]]*MACC_TASK_PRECONDITION:' "$output_file" \
+    | sed -E 's/^[[:space:]]*MACC_TASK_PRECONDITION:[[:space:]]*//' \
+    | tr -d '\r' \
+    | sed -E 's/^[[:space:]]+|[[:space:]]+$//g' \
+    | grep -vE '^<' \
+    | awk 'NF && !seen[$0]++'
+}
+
+# The same list as a JSON array (`[]` when none), for the phase_result payload.
+task_preconditions_json() {
+  local output_file="$1"
+  extract_task_preconditions "$output_file" | jq -R . | jq -sc .
 }
 
 # A terminal `error_*` result without an explanation leaves the coordinator --
@@ -854,19 +904,17 @@ detect_success_result_kind() {
 detect_rate_limit() {
   local output_file="$1"
   [[ -f "$output_file" ]] || return 0
-  local combined
-  combined="$(cat "$output_file" 2>/dev/null | tr '[:upper:]' '[:lower:]')"
   # E602: hard quota exhaustion — do NOT retry
-  if echo "$combined" | grep -qE \
-      'quota[[:space:]]+exceeded|insufficient[_[:space:]]quota|usage[[:space:]]+limit[[:space:]]+reached|hit[[:space:]]+your[[:space:]]+limit|billing[[:space:]]+quota'; then
+  if grep -qiE \
+      'macc_tool_limit:.*quota_exhausted|quota[[:space:]]+exceeded|insufficient[_[:space:]]quota|usage[[:space:]]+limit[[:space:]]+reached|hit[[:space:]]+your[[:space:]]+(usage[[:space:]]+|session[[:space:]]+)?limit|billing[[:space:]]+quota' "$output_file"; then
     LAST_ERROR_CODE="E602"
     LAST_ERROR_ORIGIN="runner"
-    LAST_ERROR_MESSAGE="quota exhausted"
+    LAST_ERROR_MESSAGE="quota exhausted; $(grep -iE 'try again at|retry_hint|retry.after' "$output_file" | tail -n 1 || true)"
     return 0
   fi
   # E601: transient rate-limit / 429
-  if echo "$combined" | grep -qE \
-      '429|resource_exhausted|model_capacity_exhausted|no[[:space:]]+capacity[[:space:]]+available|rate[[:space:]]+limit(ed)?|too[[:space:]]+many[[:space:]]+requests|529|overloaded'; then
+  if grep -qiE \
+      '429|resource_exhausted|model_capacity_exhausted|no[[:space:]]+capacity[[:space:]]+available|rate[[:space:]]+limit(ed)?|too[[:space:]]+many[[:space:]]+requests|529|overloaded' "$output_file"; then
     LAST_ERROR_CODE="E601"
     LAST_ERROR_ORIGIN="runner"
     LAST_ERROR_MESSAGE="rate limited"
@@ -954,6 +1002,16 @@ run_tool() {
       fi
       local result_exp=""
       result_exp="$(resolve_task_result_exp "$output_capture" "$result_kind")"
+      # The list of unsatisfied preconditions travels as a structured array so
+      # every client can show "cannot be implemented because: …" verbatim.
+      local unmet_json="[]"
+      if [[ "$result_kind" == "precondition_unmet" ]]; then
+        unmet_json="$(task_preconditions_json "$output_capture")"
+        if [[ "$unmet_json" == "[]" ]]; then
+          echo "Warning: precondition_unmet reported without any MACC_TASK_PRECONDITION line; only the summary explanation will be shown" >&2
+          log_task_line "- Warning: precondition_unmet reported without MACC_TASK_PRECONDITION lines"
+        fi
+      fi
       must_emit_performer_event "phase_result" "$CURRENT_PHASE" "failed" "$(jq -nc \
         --arg attempt "$attempt" \
         --arg result_kind "$result_kind" \
@@ -961,6 +1019,7 @@ run_tool() {
         --arg origin "$LAST_ERROR_ORIGIN" \
         --arg message "$LAST_ERROR_MESSAGE" \
         --arg result_exp "$result_exp" \
+        --argjson unmet "$unmet_json" \
         '({
           attempt:($attempt|tonumber?),
           result_kind:$result_kind,
@@ -969,10 +1028,16 @@ run_tool() {
         + (if $code       != "" then {error_code:$code}       else {} end)
         + (if $origin     != "" then {origin:$origin}         else {} end)
         + (if $message    != "" then {message:$message}       else {} end)
-        + (if $result_exp != "" then {result_exp:$result_exp} else {} end))')"
+        + (if $result_exp != "" then {result_exp:$result_exp} else {} end)
+        + (if ($unmet|length) > 0 then {unmet_preconditions:$unmet} else {} end))')"
       log_task_line "- Result kind: ${result_kind}"
       if [[ -n "$result_exp" ]]; then
         log_task_line "- Explanation: ${result_exp}"
+      fi
+      if [[ "$unmet_json" != "[]" ]]; then
+        while IFS= read -r unmet_item; do
+          [[ -n "$unmet_item" ]] && log_task_line "- Unmet precondition: ${unmet_item}"
+        done < <(extract_task_preconditions "$output_capture")
       fi
       log_task_line ""
       log_task_line "- Exit status: 0 (failed due to ${result_kind})"
@@ -985,8 +1050,25 @@ run_tool() {
     fi
     local result_exp=""
     result_exp="$(resolve_task_result_exp "$output_capture" "$result_kind")"
+    COMPLETION_COMMIT_SHA=""
+    COMPLETION_EVIDENCE_CREATED="false"
     local gate_verdict=""
     gate_verdict="$(extract_task_gate_verdict "$output_capture")"
+    local reported_result_kind="$result_kind"
+    if [[ "$result_kind" == "already_satisfied" || "$result_kind" == "success_without_changes" ]]; then
+      if ! record_completion_evidence "$task_id" "$next_title" "$result_kind" "$result_exp" "$next_task_json" false "$gate_verdict"; then
+        echo "Error: $LAST_ERROR_MESSAGE" >&2
+        log_task_line "- Completion evidence refused: $LAST_ERROR_MESSAGE"
+        rm -f "$output_capture"
+        return 1
+      fi
+      # A validation commit is real unpublished Git work. It must traverse the
+      # existing merge lane rather than the no-change fast path to merged.
+      if [[ "$COMPLETION_EVIDENCE_CREATED" == "true" ]]; then
+        result_kind="success_with_changes"
+        changed="true"
+      fi
+    fi
     if ! validate_terminal_result_contract "$output_capture" "$result_kind"; then
       emit_performer_event "contract_violation" "$CURRENT_PHASE" "warning" "$(jq -nc \
         --arg kind "$result_kind" \
@@ -1013,6 +1095,8 @@ run_tool() {
       --argjson changed "$changed" \
       --arg result_exp "$result_exp" \
       --arg gate_verdict "$gate_verdict" \
+      --arg completion_commit_sha "$COMPLETION_COMMIT_SHA" \
+      --arg reported_result_kind "$reported_result_kind" \
       '({
         attempt:($attempt|tonumber?),
         changed:$changed,
@@ -1025,7 +1109,8 @@ run_tool() {
       }
       + (if $result_kind != "" then {result_kind:$result_kind} else {} end)
       + (if $result_exp  != "" then {result_exp:$result_exp}  else {} end)
-      + (if $gate_verdict != "" then {gate_verdict:$gate_verdict} else {} end))')"; then
+      + (if $gate_verdict != "" then {gate_verdict:$gate_verdict} else {} end)
+      + (if $completion_commit_sha != "" then {completion_commit_sha:$completion_commit_sha,reported_result_kind:$reported_result_kind} else {} end))')"; then
       echo "Error: failed to persist terminal phase_result event (status=done); refusing to mark task passed" >&2
       log_task_line "- Exit status: ${status}"
       exit 1
@@ -1234,13 +1319,21 @@ heartbeat_start
 for ((i=1; i<=PERFORMER_MAX_ITERATIONS; i++)); do
   next_task_json="$(get_next_task_json)"
   if [[ -z "$next_task_json" ]]; then
-    commit_changes "$last_id" "$last_title"
+    # A passed PRD alone is ephemeral state. This shortcut requires an existing
+    # reference-branch delivery; it cannot manufacture an unverified success.
+    local_task_json="$(jq -c --arg id "$task_id" "${JQ_ITEMS} | map(select(.id == \$id)) | .[0] // {}" "$prd")"
+    if ! record_completion_evidence "$task_id" "Previously validated task" "already_satisfied" \
+        "Passed task matched a previously published MACC delivery commit" "$local_task_json" "true"; then
+      echo "Error: $LAST_ERROR_MESSAGE" >&2
+      exit 1
+    fi
     # Fatal on rejection (see the "done" path in run_tool() for the full
     # rationale): do not set TERMINAL_EVENT_EMITTED or exit 0 unless the
     # coordinator actually accepted this terminal event. Leaving
     # TERMINAL_EVENT_EMITTED unset on failure lets the on_exit trap's
     # synthetic "failed" event fire as a fallback signal.
-    if ! must_emit_performer_event "phase_result" "$CURRENT_PHASE" "done" "$(jq -nc '{
+    if ! must_emit_performer_event "phase_result" "$CURRENT_PHASE" "done" "$(jq -nc --arg sha "$COMPLETION_COMMIT_SHA" '{
+      completion_commit_sha:$sha,
       attempt: 0,
       result_kind: "already_satisfied",
       changed: false,
@@ -1265,6 +1358,26 @@ for ((i=1; i<=PERFORMER_MAX_ITERATIONS; i++)); do
   echo "Performer: task ${next_id} (${tool})"
   soft_emit_performer_event "progress" "$CURRENT_PHASE" "running" "$(jq -nc --arg task "$next_id" --arg title "$next_title" '{task_id:$task, title:$title}')"
 
+  # A human approval gate is a coordinator checkpoint, never agent work: the
+  # coordinator does not dispatch it, and if something does anyway the
+  # performer must refuse rather than let a model "approve" it.
+  if is_human_approval_gate "$next_task_json"; then
+    set_last_error "E908" "approval" "human approval gate dispatched to a performer"
+    log_task_line "- Refused: ${next_id} is a human approval gate; it is decided with \`macc coordinator approve\`, not by a performer."
+    echo "Error: ${next_id} is a human approval gate and must not be run by a performer." >&2
+    if must_emit_performer_event "phase_result" "$CURRENT_PHASE" "failed" "$(jq -nc --arg id "$next_id" '{
+      attempt: 0,
+      result_kind: "error_without_changes",
+      error_code: "E908",
+      origin: "approval",
+      message: "human approval gate dispatched to a performer",
+      result_exp: ("Task " + $id + " is a human approval gate. Only `macc coordinator approve|reject|request-changes` can decide it; the performer refused to run it.")
+    }')"; then
+      TERMINAL_EVENT_EMITTED="true"
+    fi
+    exit 1
+  fi
+
   prompt_file="$(mktemp)"
   build_prompt "$next_task_json" "$next_id" "$next_title" >"$prompt_file"
   if [[ "${MACC_DEBUG:-0}" == "1" ]]; then
@@ -1284,6 +1397,10 @@ for ((i=1; i<=PERFORMER_MAX_ITERATIONS; i++)); do
     else
       attempt_rc=$?
       echo "Tool failed for task ${next_id} (attempt ${attempt}/${PERFORMER_TOOL_MAX_ATTEMPTS})" >&2
+      # Let the coordinator select another tool instead of spending another attempt.
+      if [[ "$LAST_ERROR_CODE" == "E602" || "$LAST_ERROR_CODE" == "E601" ]]; then
+        break
+      fi
     fi
   done
   if [[ "$tool_success" != "true" ]]; then

@@ -19,14 +19,14 @@
     "@tanstack/react-virtual": "^3.13.23",
     "@tomplum/react-git-log": "^3.5.1",
     "@xyflow/react": "^12.10.1",
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/xterm": "^5.5.0",
     "diff": "^8.0.4",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "react-markdown": "^10.1.0",
     "react-router-dom": "^7.13.1",
     "react-syntax-highlighter": "^16.1.1",
-    "xterm": "^5.3.0",
-    "xterm-addon-fit": "^0.8.0",
     "zustand": "^5.0.12"
   },
   "devDependencies": {
@@ -55,5 +55,8 @@
     "typescript-eslint": "^8.56.1",
     "vite": "^8.0.0",
     "vitest": "^4.1.0"
+  },
+  "allowScripts": {
+    "msw@2.12.13": true
   }
 }

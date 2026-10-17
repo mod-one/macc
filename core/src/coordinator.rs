@@ -3,11 +3,14 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::str::FromStr;
 
+pub mod approval;
 pub mod args;
 pub mod commit_reconciler;
 pub mod control_plane;
+pub mod delivery_evidence;
 pub mod engine;
 pub mod error_normalizer;
+pub mod execution_labels;
 pub mod helpers;
 pub mod integration;
 pub mod ipc;
@@ -16,6 +19,7 @@ pub mod managed_command_registry;
 pub mod model;
 pub mod model_routing;
 pub mod prd_auditor;
+pub mod precondition_scope;
 pub mod preflight;
 pub mod rate_limit;
 pub mod runtime;
@@ -107,6 +111,18 @@ pub enum WorkflowState {
     Merged,
     Blocked,
     Abandoned,
+    /// A `human_approval` gate whose dependencies are satisfied and which is
+    /// waiting for its approval quorum. No performer runs; no worker is used.
+    WaitingApproval,
+    /// A `human_approval` gate whose quorum was met for the bound revision.
+    /// Satisfies dependants exactly like `merged`.
+    Approved,
+    /// A `human_approval` gate an approver rejected. Blocks dependants like a
+    /// blocked root until an operator re-opens it.
+    Rejected,
+    /// An approval that outlived `expires_after_days` or whose subject changed
+    /// after approval. Needs a fresh approval round.
+    Expired,
 }
 
 impl WorkflowState {
@@ -123,7 +139,16 @@ impl WorkflowState {
             WorkflowState::Merged => "merged",
             WorkflowState::Blocked => "blocked",
             WorkflowState::Abandoned => "abandoned",
+            WorkflowState::WaitingApproval => "waiting_approval",
+            WorkflowState::Approved => "approved",
+            WorkflowState::Rejected => "rejected",
+            WorkflowState::Expired => "expired",
         }
+    }
+
+    /// States that satisfy a dependency edge: delivered work or an approved gate.
+    pub fn satisfies_dependants(self) -> bool {
+        matches!(self, WorkflowState::Merged | WorkflowState::Approved)
     }
 }
 
@@ -143,6 +168,10 @@ impl FromStr for WorkflowState {
             "merged" => Ok(WorkflowState::Merged),
             "blocked" => Ok(WorkflowState::Blocked),
             "abandoned" => Ok(WorkflowState::Abandoned),
+            "waiting_approval" => Ok(WorkflowState::WaitingApproval),
+            "approved" => Ok(WorkflowState::Approved),
+            "rejected" => Ok(WorkflowState::Rejected),
+            "expired" => Ok(WorkflowState::Expired),
             other => Err(format!("unknown workflow state: {}", other)),
         }
     }
@@ -327,6 +356,9 @@ pub fn is_valid_workflow_transition(from: WorkflowState, to: WorkflowState) -> b
             // Testing → InProgress (test fail → fix → retry; spec §15.2)
             | (WorkflowState::Testing, WorkflowState::InProgress)
             | (WorkflowState::Testing, WorkflowState::PrOpen)
+            // Testing → ChangesRequested (review verdict recorded before the
+            // task was advanced to Reviewing)
+            | (WorkflowState::Testing, WorkflowState::ChangesRequested)
             | (WorkflowState::Testing, WorkflowState::Blocked)
             | (WorkflowState::Testing, WorkflowState::Abandoned)
             // Reviewing → Merged (review passes; spec §17.1)
@@ -343,6 +375,8 @@ pub fn is_valid_workflow_transition(from: WorkflowState, to: WorkflowState) -> b
             | (WorkflowState::PrOpen, WorkflowState::Blocked)
             | (WorkflowState::PrOpen, WorkflowState::Abandoned)
             | (WorkflowState::ChangesRequested, WorkflowState::PrOpen)
+            // A successful correction re-enters configured validation before delivery.
+            | (WorkflowState::ChangesRequested, WorkflowState::InProgress)
             // ChangesRequested → Testing (re-test after fix)
             | (WorkflowState::ChangesRequested, WorkflowState::Testing)
             // ChangesRequested → Reviewing (re-review after fix)
@@ -518,6 +552,11 @@ pub struct CoordinatorPhaseResultPayload {
     pub result_kind: Option<PerformerCompletionKind>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate_verdict: Option<crate::coordinator::model::GateVerdict>,
+    /// Each precondition the tool found unsatisfied, one entry per
+    /// `MACC_TASK_PRECONDITION:` line. Only meaningful with
+    /// `result_kind = precondition_unmet`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unmet_preconditions: Vec<String>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -808,6 +847,35 @@ impl CoordinatorEventRecord {
             .or_else(|| self.extra.get("result_exp").and_then(Value::as_str))
             .filter(|s| !s.is_empty())
             .map(ToString::to_string)
+    }
+
+    /// Extract the list of unsatisfied preconditions reported by the tool
+    /// (`MACC_TASK_PRECONDITION:` markers, one per line). Empty when the tool
+    /// reported none, so callers fall back to `payload_result_exp`.
+    pub fn payload_unmet_preconditions(&self) -> Vec<String> {
+        let norm = self.normalized_payload();
+        let from = |value: Option<&Value>| -> Vec<String> {
+            value
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::trim)
+                        .filter(|item| !item.is_empty())
+                        .map(ToString::to_string)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let mut out = from(norm.get("unmet_preconditions"));
+        if out.is_empty() {
+            out = from(self.payload.get("unmet_preconditions"));
+        }
+        if out.is_empty() {
+            out = from(self.extra.get("unmet_preconditions"));
+        }
+        out
     }
 
     pub fn is_terminal_success(&self) -> bool {
@@ -1184,6 +1252,43 @@ mod tests {
             .map(|s| s.to_string())
             .collect();
         assert_eq!(schema_types, core_types);
+    }
+
+    #[test]
+    fn phase_result_payload_exposes_unmet_preconditions() {
+        let mut event = CoordinatorEventRecord {
+            schema_version: COORDINATOR_EVENT_SCHEMA_VERSION.to_string(),
+            event_id: "evt-1".to_string(),
+            run_id: Some("run-1".to_string()),
+            coordinator_epoch: None,
+            claim_id: None,
+            seq: 1,
+            ts: "2026-09-21T00:00:00Z".to_string(),
+            source: "performer:test".to_string(),
+            task_id: Some("SEC-API-003".to_string()),
+            event_type: "phase_result".to_string(),
+            phase: Some("dev".to_string()),
+            status: "failed".to_string(),
+            payload: serde_json::json!({
+                "result_kind": "precondition_unmet",
+                "result_exp": "decisions unresolved",
+                "unmet_preconditions": ["  approval pending ", "", "entity undecided"]
+            }),
+            detail: None,
+            msg: None,
+            extra: BTreeMap::new(),
+        };
+        assert_eq!(
+            event.payload_unmet_preconditions(),
+            vec![
+                "approval pending".to_string(),
+                "entity undecided".to_string()
+            ],
+            "trimmed, blanks dropped"
+        );
+        // Older payloads without the field must not break anything.
+        event.payload = serde_json::json!({"result_kind": "precondition_unmet"});
+        assert!(event.payload_unmet_preconditions().is_empty());
     }
 
     #[test]

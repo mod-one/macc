@@ -31,7 +31,8 @@ pub struct TaskSelectorConfig {
     /// How many times a task parked by the same-worktree retry path may be
     /// re-dispatched into its existing worktree. Beyond this the task is left
     /// for `apply_stale_heartbeat_policy` / operator action rather than being
-    /// retried forever. `0` disables same-worktree resume entirely.
+    /// retried forever. `0` disables implementation-error resume. Availability
+    /// cooldowns always retain their worktree and do not consume this budget.
     pub max_same_worktree_retries: usize,
 }
 
@@ -168,6 +169,12 @@ pub fn select_next_ready_task_typed(
         if task.workflow_state() != Some(crate::coordinator::WorkflowState::Todo) {
             continue;
         }
+        // A human approval gate is a checkpoint, not work: it is moved to
+        // `waiting_approval` by `reconcile_human_gates` and must never reach a
+        // performer, even if reconciliation has not run yet this cycle.
+        if task.is_human_approval_gate() {
+            continue;
+        }
         // A `todo` task normally must not carry a worktree -- that would mean it
         // is still assigned somewhere. The one exception is a task parked for a
         // same-worktree retry, which keeps its worktree on purpose so the retry
@@ -226,10 +233,12 @@ pub fn select_next_ready_task_typed(
 /// `engine::transitions`), so a task that keeps failing stops being selected
 /// instead of cycling forever against the same broken state.
 fn resume_worktree_for(task: &Task, max_retries: usize) -> Option<ResumeWorktree> {
-    if max_retries == 0 || !task.is_awaiting_same_worktree_retry() {
+    if !task.is_awaiting_same_worktree_retry() {
         return None;
     }
-    if task.task_runtime.retries_count() > max_retries {
+    if !task.is_awaiting_tool_availability_retry()
+        && (max_retries == 0 || task.task_runtime.retries_count() > max_retries)
+    {
         return None;
     }
     Some(ResumeWorktree {
@@ -269,8 +278,13 @@ fn blocked_dependency_path<'a>(
         let Some(dependency) = tasks_by_id.get(dependency_id.as_str()).copied() else {
             continue;
         };
-        if dependency.workflow_state() == Some(crate::coordinator::WorkflowState::Blocked)
-            || (dependency.is_merged() && !dependency.gate_verdict_satisfies_dependencies())
+        if matches!(
+            dependency.workflow_state(),
+            Some(
+                crate::coordinator::WorkflowState::Blocked
+                    | crate::coordinator::WorkflowState::Rejected
+            )
+        ) || (dependency.is_merged() && !dependency.gate_verdict_satisfies_dependencies())
         {
             return Some(vec![task.id.clone(), dependency.id.clone()]);
         }
@@ -286,6 +300,33 @@ fn blocked_dependency_path<'a>(
 }
 
 fn blocked_task_reason(task: &Task) -> String {
+    if task.workflow_state() == Some(crate::coordinator::WorkflowState::Rejected) {
+        let by = task
+            .task_runtime
+            .approval
+            .as_ref()
+            .and_then(|state| {
+                state
+                    .effective
+                    .iter()
+                    .rev()
+                    .find(|a| a.decision == crate::coordinator::model::ApprovalDecision::Rejected)
+                    .cloned()
+            })
+            .map(|a| {
+                format!(
+                    " by {} ({}){}",
+                    a.actor,
+                    a.role,
+                    a.reason
+                        .as_deref()
+                        .map(|r| format!(": {r}"))
+                        .unwrap_or_default()
+                )
+            })
+            .unwrap_or_default();
+        return format!("approval gate rejected{by} [E909]");
+    }
     if task.is_merged() && !task.gate_verdict_satisfies_dependencies() {
         let verdict = task
             .task_runtime
@@ -300,13 +341,38 @@ fn blocked_task_reason(task: &Task) -> String {
         .as_deref()
         .filter(|value| !value.is_empty())
         .unwrap_or("unknown error");
+    // Structured evidence outranks the normalized error text, which is often
+    // just the truncated head of a performer log.
+    let preconditions: Vec<&str> = task
+        .task_runtime
+        .unmet_preconditions
+        .iter()
+        .map(|item| item.trim())
+        .filter(|item| !item.is_empty())
+        .collect();
+    if code != "E903" && !preconditions.is_empty() {
+        return format!(
+            "blocked ({code}): unmet precondition{}: {}",
+            if preconditions.len() == 1 { "" } else { "s" },
+            preconditions.join("; ")
+        );
+    }
     let message = task
         .task_runtime
-        .last_error_message
+        .result_explanation
         .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && code != "E903")
+        .or(task.task_runtime.last_error_message.as_deref())
         .or(task.task_runtime.last_error.as_deref())
         .filter(|value| !value.is_empty())
         .unwrap_or("no blocking explanation was recorded");
+    if code == "E903" {
+        // Not a failure: the recorded message already reads "Task X cannot be
+        // implemented because …" with the conditions listed. Keep it intact
+        // so the operator sees the conditions, not a "blocked" label.
+        return format!("{message} [{code}]");
+    }
     format!("blocked ({code}): {message}")
 }
 
@@ -461,6 +527,26 @@ pub fn diagnose_unschedulable_tasks(
                 });
                 continue;
             }
+            let waiting: Vec<String> = unmet
+                .iter()
+                .filter(|dep| {
+                    registry
+                        .tasks
+                        .iter()
+                        .any(|t| &t.id == *dep && t.is_awaiting_approval())
+                })
+                .cloned()
+                .collect();
+            if !waiting.is_empty() {
+                push(
+                    &mut out,
+                    format!(
+                        "waiting on human approval of {} (no worker is used; run `macc coordinator approve`)",
+                        waiting.join(", ")
+                    ),
+                );
+                continue;
+            }
             push(
                 &mut out,
                 format!("waiting on dependencies: {}", unmet.join(", ")),
@@ -518,11 +604,11 @@ fn dependencies_ready(
     })
 }
 
-fn satisfied_dependency_ids(registry: &TaskRegistry) -> HashSet<String> {
+pub(crate) fn satisfied_dependency_ids(registry: &TaskRegistry) -> HashSet<String> {
     registry
         .tasks
         .iter()
-        .filter(|task| task.is_merged() && task.gate_verdict_satisfies_dependencies())
+        .filter(|task| task.satisfies_dependants())
         .map(|task| task.id.clone())
         .collect()
 }
@@ -725,9 +811,8 @@ fn pick_tool(
     //
     // For review/fix phases the task is mid-flight and normally must not
     // switch tools (idempotency guard).  However, when the task's *own*
-    // tool is throttled (e.g. E602 quota exhaustion), the worktree has
-    // already been rolled back to pre-phase state by the caller, so a
-    // tool switch is safe and necessary to make progress.
+    // tool is throttled (e.g. E602 quota exhaustion), a replacement tool
+    // continues in the attached worktree with its existing edits intact.
     let in_mid_flight_phase = matches!(
         task.task_runtime.current_phase.as_deref(),
         Some("review") | Some("fix")
@@ -1700,5 +1785,101 @@ mod tests {
             });
         reconcile_task_blocks(&mut registry, "2026-09-06T10:00:00Z");
         assert_eq!(registry.find_task("FLEET-WINDOW").unwrap().state, "todo");
+    }
+}
+
+#[cfg(test)]
+mod precondition_reason_tests {
+    use super::blocked_task_reason;
+    use crate::coordinator::model::TaskRegistry;
+    use serde_json::json;
+
+    #[test]
+    fn structured_preconditions_replace_a_truncated_log_header_for_any_code() {
+        let registry = TaskRegistry::from_value(&json!({"tasks":[{
+            "id":"WEB-BFF-002","state":"blocked",
+            "task_runtime":{
+                "last_error_code":"E901",
+                "last_error_message":"# Performer log for task WEB-BFF-002",
+                "unmet_preconditions":["allowed_paths must include apps/web/src/config.ts"]
+            }
+        }]}))
+        .expect("registry");
+        assert_eq!(
+            blocked_task_reason(&registry.tasks[0]),
+            "blocked (E901): unmet precondition: allowed_paths must include apps/web/src/config.ts"
+        );
+    }
+
+    #[test]
+    fn result_explanation_outranks_the_normalized_error_text() {
+        let registry = TaskRegistry::from_value(&json!({"tasks":[{
+            "id":"T","state":"blocked",
+            "task_runtime":{
+                "last_error_code":"E901",
+                "last_error_message":"# Performer log for task T",
+                "result_explanation":"schema migration 0042 is missing"
+            }
+        }]}))
+        .expect("registry");
+        assert_eq!(
+            blocked_task_reason(&registry.tasks[0]),
+            "blocked (E901): schema migration 0042 is missing"
+        );
+    }
+
+    #[test]
+    fn e903_root_reason_keeps_the_cannot_be_implemented_text_intact() {
+        let registry = TaskRegistry::from_value(&json!({"tasks":[{
+            "id":"SEC-API-003","state":"blocked",
+            "task_runtime":{
+                "last_error_code":"E903",
+                "last_error_message":"Task SEC-API-003 cannot be implemented because the following precondition is not satisfied:\n  - SEC-CR-001 approval pending"
+            }
+        }]})).expect("registry");
+        let reason = blocked_task_reason(&registry.tasks[0]);
+        assert!(
+            reason.starts_with("Task SEC-API-003 cannot be implemented"),
+            "{reason}"
+        );
+        assert!(reason.ends_with("[E903]"), "{reason}");
+        assert!(!reason.starts_with("blocked ("), "{reason}");
+    }
+
+    #[test]
+    fn other_codes_keep_the_blocked_prefix() {
+        let registry = TaskRegistry::from_value(&json!({"tasks":[{
+            "id":"T","state":"blocked",
+            "task_runtime":{"last_error_code":"E902","last_error_message":"budget spent"}
+        }]}))
+        .expect("registry");
+        assert_eq!(
+            blocked_task_reason(&registry.tasks[0]),
+            "blocked (E902): budget spent"
+        );
+    }
+}
+
+#[cfg(test)]
+mod human_gate_selection_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_human_gate_in_todo_is_never_selected_for_a_performer() {
+        let registry = TaskRegistry::from_value(&json!({"tasks":[
+            {"id":"SEC-ADR-003","state":"merged"},
+            {"id":"SEC-APP-003","state":"todo","priority":"1","dependencies":["SEC-ADR-003"],
+             "gate":{"kind":"human_approval","subject_task":"SEC-ADR-003",
+                     "required_approvers":[{"role":"PRODUCT_OWNER"}]}}
+        ]}))
+        .unwrap();
+        let config = TaskSelectorConfig {
+            enabled_tools: vec!["codex".into()],
+            default_tool: "codex".into(),
+            max_parallel: 3,
+            ..TaskSelectorConfig::default()
+        };
+        assert!(select_next_ready_task_typed(&registry, &config).is_none());
     }
 }

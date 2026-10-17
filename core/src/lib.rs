@@ -1,5 +1,6 @@
 pub mod automation;
 pub mod catalog;
+pub mod commit_completion;
 pub mod commit_message;
 pub mod config;
 pub mod context;
@@ -17,6 +18,7 @@ pub mod ops_motif;
 pub mod packages;
 pub mod plan;
 pub mod prd_generation;
+pub mod prd_queue;
 pub mod process_ownership;
 pub mod profile;
 pub mod resolve;

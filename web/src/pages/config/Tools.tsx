@@ -12,6 +12,7 @@ import type {
 import { Button, RightDrawer } from '../../components';
 import { CopyIcon, RefreshIcon, SearchIcon } from '../../components/icons';
 import { cn } from '../../components/styles';
+import { ToolCooldownPanel } from '../../components/ToolCooldownPanel';
 
 type ToolFilter = 'all' | 'enabled' | 'installed';
 type ToolHealth = 'healthy' | 'degraded';
@@ -1104,6 +1105,11 @@ const Tools: React.FC = () => {
         </ul>
       )}
 
+      <section aria-label="Tool availability" className="mt-6">
+        <h2 className="mb-3 text-lg font-semibold">Tool availability</h2>
+        <p className="mb-3 text-sm text-[var(--text-secondary)]">Cooldowns are shared with the coordinator. Resetting allows another attempt; it does not renew provider quota.</p>
+        <ToolCooldownPanel tools={config?.enabledTools ?? []} />
+      </section>
       <RightDrawer
         description={selectedTool ? `${selectedTool.id} adapter configuration` : undefined}
         footer={

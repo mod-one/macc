@@ -14,6 +14,14 @@ pub struct RuntimeSnapshot {
     pub recent_events: Vec<RuntimeEvent>,
     pub git: GitRuntimeSummary,
     pub diagnostics: RuntimeDiagnostics,
+    /// The supervisor's intervention, when one is running or awaiting the
+    /// operator. Separate from `workers`/`tasks`: it is not a coordinator task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisor: Option<crate::supervisor::live::SupervisorLive>,
+    /// The PRD file the coordinator is working through, with its position in
+    /// the PRD queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prd: Option<crate::prd_queue::CurrentPrd>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -33,6 +41,9 @@ pub struct CoordinatorStatus {
     pub run_id: Option<String>,
     pub epoch: Option<i64>,
     pub last_run_summary: Option<crate::service::run_summary::CoordinatorRunSummary>,
+    /// Human approval gates waiting for a decision.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_approvals: Vec<crate::coordinator::approval::PendingApproval>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -48,6 +59,13 @@ pub struct QueueSummary {
     pub merged: usize,
     pub failed: usize,
     pub total: usize,
+    /// Human approval gates waiting (or expired, awaiting renewal).
+    #[serde(default)]
+    pub waiting_approval: usize,
+    #[serde(default)]
+    pub approved: usize,
+    #[serde(default)]
+    pub rejected: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

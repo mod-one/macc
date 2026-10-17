@@ -1,8 +1,10 @@
+pub mod args;
 pub mod descriptor;
 pub mod loader;
 pub mod registry;
 pub mod spec;
 
+pub use args::render_performer_args;
 pub use descriptor::{
     ActionKind, FieldDefault, FieldKind, ToolDescriptor, ToolField, ToolInstallDescriptor,
 };

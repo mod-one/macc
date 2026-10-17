@@ -5,6 +5,7 @@ use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::response::sse::{Event, Sse};
 use macc_core::coordinator::COORDINATOR_EVENT_SCHEMA_VERSION;
+use macc_core::coordinator_storage::{CoordinatorStoragePaths, SqliteStorage};
 use macc_core::engine::CoordinatorEvent;
 use macc_core::process_ownership::{ClientIdentity, ClientKind, ProcessHandle};
 use serde::Deserialize;
@@ -13,6 +14,10 @@ use std::convert::Infallible;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const SSE_POLL_INTERVAL: Duration = Duration::from_millis(250);
+/// Events sent on connect when the client resumes nothing.
+const SSE_INITIAL_BACKLOG: usize = 500;
+/// Most events read per poll; a backlog drains over the next polls.
+const SSE_POLL_BATCH: usize = 1000;
 const SSE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const WEB_CLIENT_HEADER: &str = "X-Macc-Client-Id";
 
@@ -32,10 +37,6 @@ pub(super) async fn events_handler(
     Sse<impl tokio_stream::Stream<Item = std::result::Result<Event, Infallible>>>,
     ApiError,
 > {
-    let initial_events = state
-        .engine
-        .get_coordinator_events(&state.paths)
-        .map_err(ApiError::from)?;
     let last_event_id = query.last_event_id.clone().or_else(|| {
         headers
             .get("last-event-id")
@@ -44,6 +45,9 @@ pub(super) async fn events_handler(
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned)
     });
+    let (initial_events, last_event_id) = initial_coordinator_events(&state, last_event_id)
+        .await
+        .map_err(ApiError::from)?;
     let viewer_guards =
         register_web_viewers(&state, web_client_id(&query, &headers)).map_err(|err| *err)?;
 
@@ -82,9 +86,9 @@ pub(super) fn coordinator_event_stream(
 
             tokio::select! {
                 _ = poll_tick.tick() => {
-                    match state.engine.get_coordinator_events(&state.paths) {
+                    match coordinator_events_after(&state, source_seq_cursor).await {
                         Ok(events) => {
-                            pending_events = pending_events_after(&events, source_seq_cursor);
+                            pending_events = events;
                         }
                         Err(err) => {
                             tracing::warn!("failed to refresh coordinator SSE events: {}", err);
@@ -144,6 +148,92 @@ pub(super) fn register_web_viewers(
     }
 
     Ok(viewer_guards)
+}
+
+/// Where live streams read events from. The coordinator database answers
+/// "what is new since seq N" from an index; the engine call loads the whole
+/// log and is kept for projects without one (and for engines in tests).
+fn storage_with_events(paths: &macc_core::ProjectPaths) -> Option<SqliteStorage> {
+    let storage_paths = CoordinatorStoragePaths::from_project_paths(paths);
+    // Never create a database just to stream from it.
+    if !storage_paths.sqlite_path.exists() {
+        return None;
+    }
+    let sqlite = SqliteStorage::new(storage_paths);
+    sqlite
+        .has_snapshot_data()
+        .unwrap_or(false)
+        .then_some(sqlite)
+}
+
+/// The events to send on connect (those after the client's last event, or
+/// the recent backlog) and the last event id the stream resumes from. A
+/// resumed position comes back as `cursor-<seq>`, so the stream does not
+/// restart from the first event when nothing new arrived yet.
+pub(super) async fn initial_coordinator_events(
+    state: &WebState,
+    last_event_id: Option<String>,
+) -> macc_core::Result<(Vec<CoordinatorEvent>, Option<String>)> {
+    let state = state.clone();
+    blocking(move || match storage_with_events(&state.paths) {
+        Some(sqlite) => {
+            let resumed = match last_event_id.as_deref() {
+                Some(id) => sqlite
+                    .event_seq(id)?
+                    .or_else(|| parse_source_seq_from_sse_id(id)),
+                None => None,
+            };
+            let records = match resumed {
+                Some(seq) => sqlite.load_events_after(seq, SSE_POLL_BATCH)?,
+                None => sqlite.load_recent_events(SSE_INITIAL_BACKLOG)?,
+            };
+            Ok((
+                records
+                    .into_iter()
+                    .map(CoordinatorEvent::from_record)
+                    .collect(),
+                resumed.map(|seq| format!("cursor-{seq}")),
+            ))
+        }
+        None => Ok((
+            state.engine.get_coordinator_events(&state.paths)?,
+            last_event_id,
+        )),
+    })
+    .await
+}
+
+/// Events newer than `after_seq`, oldest first.
+pub(super) async fn coordinator_events_after(
+    state: &WebState,
+    after_seq: i64,
+) -> macc_core::Result<VecDeque<CoordinatorEvent>> {
+    let state = state.clone();
+    blocking(move || match storage_with_events(&state.paths) {
+        Some(sqlite) => Ok(sqlite
+            .load_events_after(after_seq, SSE_POLL_BATCH)?
+            .into_iter()
+            .map(CoordinatorEvent::from_record)
+            .collect()),
+        None => Ok(pending_events_after(
+            &state.engine.get_coordinator_events(&state.paths)?,
+            after_seq,
+        )),
+    })
+    .await
+}
+
+/// Storage reads block: keep them off the async workers.
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> macc_core::Result<T> + Send + 'static,
+) -> macc_core::Result<T> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .unwrap_or_else(|err| {
+            Err(macc_core::MaccError::Validation(format!(
+                "event read task failed: {err}"
+            )))
+        })
 }
 
 pub(super) fn pending_events_after(

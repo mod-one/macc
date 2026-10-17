@@ -362,7 +362,12 @@ pub fn truncate_raw_message(msg: &str) -> String {
     if msg.len() <= 500 {
         msg.to_string()
     } else {
-        let mut s = msg[..500].to_string();
+        // Cut on a character boundary: tool output is often non-ASCII.
+        let mut end = 500;
+        while !msg.is_char_boundary(end) {
+            end -= 1;
+        }
+        let mut s = msg[..end].to_string();
         s.push('…');
         s
     }
@@ -599,6 +604,14 @@ mod tests {
     fn truncate_raw_message_short() {
         let msg = "short error";
         assert_eq!(truncate_raw_message(msg), "short error");
+    }
+
+    #[test]
+    fn truncate_raw_message_cuts_on_a_character_boundary() {
+        let msg = format!("{}é{}", "a".repeat(499), "b".repeat(20));
+        let truncated = truncate_raw_message(&msg);
+        assert!(truncated.ends_with('…'));
+        assert!(truncated.starts_with(&"a".repeat(499)));
     }
 
     #[test]

@@ -27,6 +27,21 @@ fn read_tool_id_from_tool_json(worktree: &std::path::Path) -> Option<String> {
         .map(|id| id.to_string())
 }
 
+/// A phase fallback is local to its task; configured coordinator tools remain defaults.
+pub(super) fn phase_tool_for_task<'a>(
+    task: &'a crate::coordinator::model::Task,
+    configured: Option<&'a str>,
+) -> Option<&'a str> {
+    task.task_runtime
+        .extra
+        .get("phase_tool_override")
+        .and_then(serde_json::Value::as_str)
+        .filter(|tool| !tool.trim().is_empty())
+        .or_else(|| configured.filter(|tool| !tool.trim().is_empty()))
+        .or_else(|| task.coordinator_tool())
+        .or_else(|| task.task_tool())
+}
+
 /// Ensure the worktree's `.macc/tool.json` matches the desired tool.
 /// If the current tool.json is missing or for a different tool, regenerate it.
 pub(super) fn ensure_tool_json_for_tool(
@@ -35,10 +50,22 @@ pub(super) fn ensure_tool_json_for_tool(
     desired_tool: &str,
 ) -> Result<()> {
     let current_tool = read_tool_id_from_tool_json(worktree);
-    if current_tool.as_deref() == Some(desired_tool) {
-        return Ok(());
+    if current_tool.as_deref() != Some(desired_tool) {
+        crate::worktree::write_tool_json(repo_root, worktree, desired_tool)?;
     }
-    crate::worktree::write_tool_json(repo_root, worktree, desired_tool)?;
+    // worktree apply reads this tool ID, while the runner reads tool.json.
+    if let Some(mut metadata) = crate::read_worktree_metadata(worktree)? {
+        if metadata.tool != desired_tool {
+            metadata.tool = desired_tool.to_string();
+            let paths = crate::ProjectPaths::from_root(worktree);
+            let content = serde_json::to_vec_pretty(&metadata).map_err(|error| {
+                crate::MaccError::Validation(format!(
+                    "Failed to serialize handoff metadata: {error}"
+                ))
+            })?;
+            crate::atomic_write(&paths, &worktree.join(".macc/worktree.json"), &content)?;
+        }
+    }
     Ok(())
 }
 
@@ -249,11 +276,7 @@ impl coordinator_runtime::PhaseExecutor for NativePhaseExecutor<'_> {
                 mode
             )));
         }
-        let phase_tool = coordinator_tool_override
-            .filter(|v| !v.trim().is_empty())
-            .or_else(|| task.coordinator_tool())
-            .or_else(|| task.task_tool())
-            .filter(|v| !v.trim().is_empty())
+        let phase_tool = phase_tool_for_task(task, coordinator_tool_override)
             .unwrap_or_default()
             .to_string();
         if phase_tool.is_empty() {

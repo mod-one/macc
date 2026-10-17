@@ -296,7 +296,7 @@ The `macc prd` group manages the full PRD lifecycle. The internal generation too
 | `macc prd generate --from <brief.md> --update <prd.json>` | Update an existing PRD from a brief |
 | `macc prd generate --from <brief.md> --dry-run` | Preview the generation prompt without invoking the tool |
 | `macc prd generate --from <brief.md> --promote` | Generate and immediately promote to `prd.json` |
-| `macc prd audit [--prd prd.json] [--tool <id>]` | Enrich PRD from commit history; prints prompt when `--tool` is omitted |
+| `macc prd audit [--prd <file-or-directory>] [--tool <id>]` | Enrich PRD from commit history; prints prompt when `--tool` is omitted. `--prd` takes a PRD file or a directory (its `.json` files with a top-level `tasks` array, in name order); without it the coordinator PRD queue (`prd_files`) is audited, else `prd_file`, else `prd.json`. Several PRDs are audited one after the other; a failing one is reported at the end without stopping the others |
 | `macc prd audit --dry-run` | Preview the audit prompt without invoking a tool |
 | `macc prd promote <source.json> [--dest prd.json] [-y]` | Promote a generated PRD to the active `prd.json` |
 | `macc prd validate <prd.json>` | Validate PRD structure |
@@ -324,6 +324,67 @@ macc coordinator [command] [flags]
 Default command is `run`. The coordinator starts, runs until the queue is exhausted or a limit is reached, then exits. It also opens a client (TUI by default, web if `--client web`, or none with `--no-client`).
 
 #### Coordinator commands
+
+##### Ordered PRD Queue (CLI and TUI)
+
+Configure an explicit sequence in `.macc/macc.yaml`:
+
+```yaml
+automation:
+  coordinator:
+    prd_files:
+      - docs/prd/01-foundations.json
+      - docs/prd/02-delivery.json
+```
+
+Paths are relative to the project root (absolute paths also work). `prd_files`
+takes precedence over legacy `prd_file`; explicit `--prd PATH` runs only that
+file, without consuming queue progress. An empty queue retains the legacy input.
+
+```bash
+macc coordinator prds add docs/prd/01-foundations.json
+macc coordinator prds add docs/prd/release
+macc coordinator prds list
+macc coordinator prds move 3 1
+macc coordinator prds remove 2
+macc coordinator prds edit
+macc coordinator prds check
+macc coordinator prds status
+macc coordinator prds status --json
+macc coordinator run --no-client
+```
+
+Directory import snapshots immediate `*.json` children in lexical filename order;
+it is not recursive and does not discover new files during execution. Use padded
+filenames (`01`, `02`, `10`). Every JSON file must be a PRD with a nonempty tasks
+array; an invalid file rejects the entire import. Existing paths are deduplicated.
+
+In **TUI Settings > Coordinator > PRD Queue**, press Enter to open the same
+editor as `prds edit`: `a` adds a file/directory, Space grabs/releases an entry,
+arrows reorder it, `d` removes it, Enter accepts, Escape cancels. In the TUI,
+press `s` after closing the editor to save the configuration. CLI edit saves on
+accept. File removal only removes a queue entry, never the file from disk.
+`R` in the editor offers a separately confirmed reset of saved progress, refused
+while a coordinator is running. This reset is immediate; it does not save draft
+file edits and is not undone by subsequently cancelling the editor.
+
+PRDs execute sequentially; normal task parallelism remains available within each
+PRD. Advance requires every task to be merged and every declared gate to satisfy
+its required verdict. A blocked task, incomplete delivery, pause or stop prevents
+advancing. Task IDs must be unique across the queue. Dependencies on earlier PRDs
+are supported; dependencies on later PRDs are rejected before launch.
+
+Progress, file fingerprints and the last blocking reason survive client restarts
+in `.macc/state/prd-queue.json`. Registry snapshots are archived alongside it before
+switching PRDs and after successful delivery. Relaunch resumes the current PRD.
+Changing files or their order requires reviewing the queue and explicitly running
+`macc coordinator prds reset --confirm`. Reset affects queue progress only; it
+does not undo commits or clear task delivery state. Configuration changes do not
+silently reset a running queue. The runtime/edit lock prevents concurrent CLI
+queue edits and runs; unfinished work from another input must be resolved before
+replacing its registry. The Web frontend has no new queue editor in this release.
+
+##### Command Reference
 
 | Command | Description |
 |---|---|
@@ -774,7 +835,75 @@ For tools that use a config file for effort (e.g. Codex with `.codex/config.toml
 }
 ```
 
-`blocked_on_external` is scheduler-visible and starts the task in `blocked`; do not encode “do not retry” only in prose. A task with `gate` must emit `MACC_TASK_GATE_VERDICT: accepted|rejected|pending`. Its implementation may merge successfully while a rejected verdict keeps dependants blocked. A correct runtime refusal uses `MACC_TASK_RESULT: precondition_unmet` and is never retried.
+`blocked_on_external` is scheduler-visible and starts the task in `blocked`; do not encode “do not retry” only in prose. A task with `gate` must emit `MACC_TASK_GATE_VERDICT: accepted|rejected|pending`. Its implementation may merge successfully while a rejected verdict keeps dependants blocked. A correct runtime refusal uses `MACC_TASK_RESULT: precondition_unmet` and is never retried; it must also print one `MACC_TASK_PRECONDITION: <condition>` line per unsatisfied precondition, which MACC records on the task (`unmet_preconditions`) and shows verbatim as "Task X cannot be implemented because the following preconditions are not satisfied: …" in the run stop reason, `macc status`, the TUI overlay and the web run summary.
+
+When a precondition names a path outside the task's `change_scope` (not matched by `allowed_paths`, or inside `read_only_paths`/`forbidden_paths`), the fix belongs to another module: MACC appends "The fix lies outside X's change scope (…)" to the record, stores the paths in `task_runtime.out_of_scope_fix`, emits a `precondition_out_of_scope` event, adds `out_of_scope_paths` to the run summary with a next action pointing to a supervisor repair or a task owning those paths, and passes the paths to the supervisor diagnosis. `macc prd generate` and `macc prd audit` ask the planner to check, while planning, that each endpoint a task consumes from another module declares an audience and contract serving that consumer (for example a Web task calling an API route), and to plan the contract change in the owning module otherwise.
+
+A structured precondition report or `MACC_TASK_RESULT_EXP` explanation is what MACC records as the error message; the provider-error normalizer, which reads the end of the performer log, never reclassifies a run that listed preconditions, and its excerpt starts at a full line.
+
+### Human approval gates
+
+A decision that only people may take — a normative change or ADR, an open product decision, a sensitive architecture or data model, security/identity/payment/privacy, an irreversible migration, a production activation — is declared as its own task with `gate.kind: human_approval`:
+
+```json
+{
+  "id": "SEC-APP-003",
+  "title": "Approve the recovery-code persistence model",
+  "dependencies": ["SEC-ADR-003"],
+  "gate": {
+    "kind": "human_approval",
+    "subject_task": "SEC-ADR-003",
+    "description": "Adopt ADR-003 recovery-code persistence model",
+    "required_approvers": [
+      { "role": "PRODUCT_OWNER", "count": 1 },
+      { "role": "SECURITY_OWNER", "count": 1 }
+    ],
+    "quorum": "all",
+    "bind_to": "commit_sha",
+    "evidence_type": "pull_request_review",
+    "invalidate_on_subject_change": true,
+    "expires_after_days": 90,
+    "risks": ["Irreversible migration of identity.mfa_factor"],
+    "governance_ref": "docs/16-decisions.md"
+  }
+}
+```
+
+`subject_task` must be listed in `dependencies`. `quorum` is `all` (default), `any`, or a number of distinct approvals. The gate carries no executable work and no `change_scope`.
+
+The coordinator never dispatches a gate. Once its dependencies are delivered it moves to `waiting_approval`, bound to the subject's current revision (the latest commit carrying `[macc:task <subject>]` on the reference branch). It uses no worker, is never retried, and a run waiting on it stays alive instead of aborting for lack of progress. `macc status`, `macc coordinator approvals`, the TUI Coordinator Live pane, `GET /api/v1/coordinator/status` and `GET /api/v1/coordinator/approvals` show the subject, revision, diff, risks, missing approvers and the exact command:
+
+```bash
+macc coordinator approvals
+macc coordinator approve SEC-APP-003 --role PRODUCT_OWNER --revision <commit-sha> --evidence <pull-request-url> [--as "Name <email>"]
+macc coordinator reject SEC-APP-003 --role SECURITY_OWNER --reason "…"
+macc coordinator request-changes SEC-APP-003 --role SECURITY_OWNER --reason "…"
+```
+
+#### Deciding interactively
+
+Each client presents the same full request: the question, the gate's decision and trigger, the subject's title, revision, objective, expected result, description and acceptance criteria, the revision's diff stat, the risks, the approvers' progress and quorum rule, the decisions already recorded, the evidence and binding rules, and what approving, rejecting or requesting changes does (including the tasks the gate unblocks).
+
+- **CLI.** In a terminal, `macc coordinator approvals` walks every gate awaiting a decision: it prints the request, then asks for the decision, the role (missing roles first), the evidence or the reason, and a confirmation. The revision is the subject's current one. After a decision it offers the gate's remaining roles. `approve|reject|request-changes <GATE>` prompt only for the values missing from the command line and record directly when nothing is missing; with no gate id, the only waiting gate is used. `--no-interactive`, or a non-terminal stdin/stdout, keeps the plain listing and requires every flag.
+- **TUI.** The approval window opens by itself, on any screen, when a gate awaits a decision (it does not interrupt typing in a field). `a`/`r`/`c` start a decision, then a role picker, an evidence or reason field and a confirmation; arrows and PgUp/PgDn scroll the request, `Tab` shows the next gate, `Esc` puts the gate off until its subject revision changes, and `A` re-opens it. Gates are re-read every 5 seconds even when no coordinator command runs.
+- **Web.** A dialog opens by itself on every page, and the top bar shows "N approvals waiting" to re-open it. The form takes the decision, role, optional identity override, evidence or reason, then a confirmation; the outcome is also kept in the notification center. It uses `GET /api/v1/coordinator/approvals` and `POST /api/v1/coordinator/approvals/:id/decision`, which require Web project ownership like other mutations and are audit-logged.
+
+Every client records through the same command, so the validation below is identical everywhere. Listings (`approvals`, `status`, the snapshot) evaluate gates against the ledger and the current subject revisions when they are read, without saving or emitting events, so a newly delivered subject or a new revision shows up even when no coordinator is running. Only gates whose approval status is `waiting_approval` or `expired` open a window; a rejected gate or one waiting for requested changes waits for a new subject revision.
+
+| State | Meaning | Dependants |
+|---|---|---|
+| `waiting_approval` | Subject delivered; quorum not met (approval status `waiting_approval` or `changes_requested`) | wait |
+| `approved` | Quorum met for the current subject revision | proceed, as for `merged` |
+| `rejected` | An approver rejected the current revision (`E909`) | blocked (`E905`) |
+| `expired` | Approvals older than `expires_after_days` | wait |
+
+Each decision records the actor (`--as`, else the operator's git identity), role, revision, evidence, reason and time in the append-only `gate_decisions` table. Gate state is **derived from that ledger on every cycle**, so it cannot be set any other way: `state-apply-transition` refuses approval states, a tool-reported `MACC_TASK_GATE_VERDICT` is ignored for human gates, a performer refuses to run one (`E908`), and an `approved` state without a recorded quorum is reverted. A new subject revision automatically withdraws a prior approval (and re-opens a rejected gate) because decisions are bound to the revision they name. A wrong role, a stale revision, a missing `--revision` on approval, missing evidence when `evidence_type` is not `manual`, and a rejection without a reason are all refused.
+
+Where the proof lives: the PRD declares the approval policy; `coordinator.sqlite` holds the operational state and the decision ledger; the pull request holds the human review; the ADR and `CHANGELOG` hold the durable decision.
+
+Not yet implemented (level 1): verifying approvers against GitHub/GitLab reviews or `CODEOWNERS`, and cryptographic signing of decisions. Until then, role membership is asserted by the operator running the command, and anyone with write access to `.macc/state` can alter the ledger.
+
+`precondition_unmet` remains for a task that *cannot be executed*; a normal wait for approval is represented by a gate, never by a failure.
 
 ### PRD generation workflow
 

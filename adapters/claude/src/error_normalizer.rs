@@ -40,7 +40,7 @@ fn patterns() -> &'static Vec<Pattern> {
             // ── Non-retryable (check first) ────────────────────────
             // Quota / usage cap — must precede generic 429
             Pattern {
-                regex: Regex::new(r"(?i)(hit your limit|usage limit|usage cap|resets \d+[ap]m)")
+                regex: Regex::new(r"(?i)(hit your (?:(?:usage|session) )?limit|usage limit|usage cap|out of extra usage|MACC_TOOL_LIMIT:\s*quota_exhausted|resets \d{1,2}(?::\d{2})?\s*[ap]m)")
                     .unwrap(),
                 class: CanonicalClass::QuotaExhausted,
             },
@@ -115,10 +115,12 @@ fn retry_after_regex() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"(?i)(?:retry.after|retry_after)\s*[:=]\s*(\d+)").unwrap())
 }
 
-/// Regex for extracting "resets Xam/pm (UTC)" from quota messages.
+/// Regex for extracting UTC reset times, with optional minutes.
 fn resets_time_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?i)resets\s+(\d{1,2})(am|pm)\s*\(UTC\)").unwrap())
+    RE.get_or_init(|| {
+        Regex::new(r"(?i)resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(UTC\)").unwrap()
+    })
 }
 
 /// Regex for the absolute-timestamp "try again at <Month> <Day>, <Year>
@@ -180,23 +182,32 @@ fn parse_try_again_at_seconds(text: &str) -> Option<u64> {
     Some((retry_ts - now_ts) as u64)
 }
 
-/// Parse "resets Xam/pm (UTC)" into seconds from now until that reset time.
+/// Parse "resets X[:MM]am/pm (UTC)" until the next occurrence of that time.
 /// Returns None if the pattern is not found or the time is invalid.
 fn parse_reset_time_as_seconds(text: &str) -> Option<u64> {
+    parse_reset_time_at(text, chrono::Utc::now())
+}
+
+fn parse_reset_time_at(text: &str, now: chrono::DateTime<chrono::Utc>) -> Option<u64> {
     let caps = resets_time_regex().captures(text)?;
     let hour_12: u32 = caps.get(1)?.as_str().parse().ok()?;
-    let ampm = caps.get(2)?.as_str().to_ascii_lowercase();
+    let minute: u32 = caps
+        .get(2)
+        .map(|value| value.as_str().parse())
+        .transpose()
+        .ok()?
+        .unwrap_or(0);
+    let ampm = caps.get(3)?.as_str().to_ascii_lowercase();
 
     let hour_24 = match (hour_12, ampm.as_str()) {
         (12, "am") => 0,
         (12, "pm") => 12,
-        (h, "am") if h <= 11 => h,
-        (h, "pm") if h <= 11 => h + 12,
+        (h, "am") if (1..=11).contains(&h) => h,
+        (h, "pm") if (1..=11).contains(&h) => h + 12,
         _ => return None,
     };
 
-    let now = chrono::Utc::now();
-    let today_reset = now.date_naive().and_hms_opt(hour_24, 0, 0)?;
+    let today_reset = now.date_naive().and_hms_opt(hour_24, minute, 0)?;
     let today_reset_utc = today_reset.and_utc();
 
     // If reset time is in the past, it means tomorrow.
@@ -206,7 +217,8 @@ fn parse_reset_time_as_seconds(text: &str) -> Option<u64> {
         today_reset_utc
     };
 
-    let diff = (reset - now).num_seconds();
+    // Coordinator throttle timestamps use whole Unix seconds.
+    let diff = reset.timestamp() - now.timestamp();
     if diff > 0 {
         Some(diff as u64)
     } else {
@@ -378,6 +390,71 @@ mod tests {
             err.retry_after_seconds.is_some(),
             "should extract reset time from 'resets 10pm (UTC)'"
         );
+    }
+
+    #[test]
+    fn session_limit_with_minutes_is_quota_on_either_stream() {
+        let message = "You've hit your session limit · resets 12:30am (UTC)";
+        for (stderr, stdout) in [(message, ""), ("", message)] {
+            let err = norm(1, stderr, stdout).unwrap();
+            assert_eq!(err.canonical_class, CanonicalClass::QuotaExhausted);
+            assert_eq!(err.error_code, "E602");
+            assert!(err.retry_after_seconds.is_some());
+        }
+        let err = norm(0, "", message).unwrap();
+        assert_eq!(err.error_code, "E602");
+    }
+
+    #[test]
+    fn quota_marker_and_session_limit_without_reset_are_recognized() {
+        for message in [
+            "You've hit your session limit",
+            "MACC_TOOL_LIMIT: quota_exhausted tool=claude",
+            "You're out of extra usage",
+        ] {
+            let err = norm(1, message, "").unwrap();
+            assert_eq!(err.error_code, "E602");
+            assert!(err.retry_after_seconds.is_none());
+        }
+    }
+
+    #[test]
+    fn utc_reset_minutes_midnight_noon_and_rollover_are_exact() {
+        use chrono::TimeZone;
+        let at = |hour, minute| {
+            chrono::Utc
+                .with_ymd_and_hms(2026, 10, 3, hour, minute, 0)
+                .single()
+                .unwrap()
+        };
+        assert_eq!(
+            parse_reset_time_at("resets 12:30am (UTC)", at(20, 44)),
+            Some(13560)
+        );
+        assert_eq!(
+            parse_reset_time_at("resets 12:30am (UTC)", at(0, 10)),
+            Some(1200)
+        );
+        assert_eq!(
+            parse_reset_time_at("resets 12:30am (UTC)", at(0, 30)),
+            Some(86400)
+        );
+        assert_eq!(
+            parse_reset_time_at("resets 12:30 PM (UTC)", at(12, 0)),
+            Some(1800)
+        );
+        assert_eq!(
+            parse_reset_time_at("resets 8pm (UTC)", at(19, 0)),
+            Some(3600)
+        );
+        for message in [
+            "resets 0am (UTC)",
+            "resets 13pm (UTC)",
+            "resets 12:60am (UTC)",
+            "resets 12:30am (unknown)",
+        ] {
+            assert_eq!(parse_reset_time_at(message, at(20, 44)), None, "{message}");
+        }
     }
 
     #[test]

@@ -141,3 +141,36 @@ Returns the same `RuntimeSnapshot` consumed by the CLI and TUI, including:
 - `git` — current branch, cleanliness, worktree count
 
 The coordinator's running and paused state is read directly from `.macc/state/coordinator.sqlite` (`coordinator_runs` table) and the pause file (`.macc/state/coordinator-pause.json`), so the snapshot is accurate even when queried from outside the coordinator process.
+
+## 7. Provider Quota Exhaustion
+
+A performer quota failure (`E602`) cools down the tool, not the task. The
+coordinator persists the tool's availability deadline in SQLite and can dispatch
+the task to another enabled tool when rate-limit fallback is enabled. Committed
+work is retained for same-worktree continuation. Quota exhaustion does not spend
+the task's retry budget or block its dependency chain.
+
+The Codex reset hint (`try again at ...`) supplies the deadline when available;
+an offset-less date is interpreted in the runner's local timezone. Without a
+usable hint, performer quota failures use a one-hour fallback cooldown. When
+fallback routing is enabled and all eligible tools are cooling down, the
+coordinator waits instead of reporting a no-progress failure;
+the configured overall run timeout still applies.
+
+Coordinator Live in the TUI and the Web console display the persisted cooldowns,
+including when the task has already moved to a different tool. In TUI Tools,
+select a tool and press uppercase `C` to reset its MACC cooldown. Web Tools
+provides the same operation under **Tool availability**, with confirmation.
+
+The existing CLI commands are:
+
+```bash
+macc coordinator tool-cooldown-list
+macc coordinator tool-cooldown-set --tool codex --duration 3600
+macc coordinator tool-cooldown-clear --tool codex
+```
+
+Changes are reloaded on the next coordinator cycle. Clearing a cooldown only
+allows another attempt; it does not renew the provider's quota. Existing
+ownership checks still apply. Previously blocked tasks are not automatically
+unblocked by upgrading MACC or resetting a tool cooldown.

@@ -539,6 +539,9 @@ run_resume_and_capture() {
     i=$((i + 1))
   done
 
+  # Apply the tier effort to the resume/retry invocation as well.
+  _replace_effort_in_args final_args
+
   # Apply tier model override to resume args.
   # Config-file updates (model_config, effort_config) were already done by
   # _apply_tier_model_to_args before the first call — no need to repeat them.
@@ -727,7 +730,19 @@ _apply_tier_model_to_args() {
       _ecfg_path="$(jq -r '.performer.effort_config.path // empty' "$tool_json" 2>/dev/null || true)"
       _ecfg_fmt="$(jq -r '.performer.effort_config.format // empty' "$tool_json" 2>/dev/null || true)"
       _ecfg_key="$(jq -r '.performer.effort_config.key // "model_reasoning_effort"' "$tool_json" 2>/dev/null || true)"
-      if [[ -n "$_ecfg_path" && -n "$_ecfg_fmt" ]]; then
+      local _effort_in_args=false _previous_arg=""
+      for _a in "${args[@]}"; do
+        if [[ "$_previous_arg" == "-c" || "$_previous_arg" == "--config" ]] \
+            && [[ "$_a" == "${_ecfg_key}="* ]]; then
+          _effort_in_args=true
+        fi
+        _previous_arg="$_a"
+      done
+      if $_effort_in_args; then
+        # CLI overrides take precedence. Avoid rewriting TOML (and accidentally
+        # modifying a profile/table key or appending the key inside a table).
+        _replace_effort_in_args args
+      elif [[ -n "$_ecfg_path" && -n "$_ecfg_fmt" ]]; then
         # Write effort to config file — do NOT append a CLI flag.
         _apply_tier_model_via_config_file "$_ecfg_path" "$_ecfg_fmt" "$_ecfg_key" "$_tier_effort"
       elif [[ -n "$_effort_flag" ]]; then
@@ -759,7 +774,29 @@ _apply_tier_model_to_args() {
   fi
 }
 
+# Inline effort override: tools that take reasoning effort as a config
+# override argument (codex: `-c model_reasoning_effort="high"`) carry it in
+# their args as `<effort_config.key>="<effort>"`, resolved from the tool config
+# when tool.json is written. When routing selects a tier effort, rewrite that
+# argument without changing the configured default on disk.
+# No-op when there is no tier effort, no effort_config key, or no such argument.
+_replace_effort_in_args() {
+  # $1 = name of array variable to modify (passed by name via nameref)
+  [[ -z "$_tier_effort" ]] && return 0
+  local _key
+  _key="$(jq -r '.performer.effort_config.key // empty' "$tool_json" 2>/dev/null || true)"
+  [[ -z "$_key" ]] && return 0
+  local -n _eff_ref="$1"
+  local _i
+  for _i in "${!_eff_ref[@]}"; do
+    if [[ "${_eff_ref[$_i]}" == "${_key}="* ]]; then
+      _eff_ref[$_i]="${_key}=\"${_tier_effort}\""
+    fi
+  done
+}
+
 _apply_tier_model_to_args
+_replace_effort_in_args args
 
 prompt_mode="$(jq -r '.performer.prompt.mode // "stdin"' "$tool_json")"
 prompt_arg="$(jq -r '.performer.prompt.arg // empty' "$tool_json")"
@@ -916,9 +953,13 @@ if [[ "$session_enabled" == "true" && -n "$session_resume_command" ]]; then
   fi
 
   if [[ -n "$sid" ]]; then
-    if ! run_resume_and_capture "$output_capture" "$sid" "$prompt_text"; then
+    if run_resume_and_capture "$output_capture" "$sid" "$prompt_text"; then
+      rc=0
+    else
       rc=$?
-      run_default_call || rc=$?
+      if [[ "${TOOL_RESUME_FALLBACK:-true}" == "true" ]]; then
+        run_default_call && rc=0 || rc=$?
+      fi
     fi
   else
     run_default_call || rc=$?

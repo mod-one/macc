@@ -7,6 +7,7 @@ use crate::coordinator::error_normalizer::{
     E104_PERFORMER_PARTIAL_CHANGES, E105_PERFORMER_EXIT_NON_ZERO,
 };
 use crate::coordinator::model::Task;
+use crate::coordinator::precondition_scope;
 use crate::coordinator::rate_limit::{
     update_throttle_state, RateLimitInfo, ToolThrottleState, E601_RATE_LIMITED,
     E602_QUOTA_EXHAUSTED,
@@ -46,11 +47,87 @@ fn describe_tool_error(task: &Task, reason: &str) -> String {
     }
 }
 
+/// Build the operator-facing record for a task that stopped because its
+/// preconditions are not satisfied (`precondition_unmet`, E903).
+///
+/// This is the text every client shows verbatim — the run's stop reason, the
+/// TUI overlay, `macc status`, the web summary — so it must name the task, say
+/// plainly that it *cannot be implemented yet* (this is not a malfunction), and
+/// list each unmet condition. When the tool listed none, its explanation
+/// stands in as the single condition rather than leaving the list empty.
+pub fn describe_unmet_preconditions(
+    task_id: &str,
+    unmet: &[String],
+    explanation: Option<&str>,
+) -> String {
+    let explanation = explanation.map(str::trim).filter(|value| !value.is_empty());
+    let items: Vec<&str> = if unmet.is_empty() {
+        explanation.into_iter().collect()
+    } else {
+        unmet.iter().map(String::as_str).collect()
+    };
+    let mut out = format!(
+        "Task {} cannot be implemented because the following precondition{} not satisfied:",
+        task_id,
+        if items.len() == 1 { " is" } else { "s are" }
+    );
+    if items.is_empty() {
+        out.push_str(
+            "
+  - (the tool did not name the condition: MACC_TASK_PRECONDITION and MACC_TASK_RESULT_EXP were both missing)",
+        );
+    }
+    for item in &items {
+        out.push_str(
+            "
+  - ",
+        );
+        out.push_str(item);
+    }
+    if !unmet.is_empty() {
+        if let Some(explanation) = explanation {
+            out.push_str(
+                "
+Tool summary: ",
+            );
+            out.push_str(explanation);
+        }
+    }
+    out
+}
+
+/// Whether `strategy` records a provider availability failure (rate limit or
+/// quota), the only outcomes that own the task's `throttle_state`.
+fn is_availability_outcome(strategy: &RetryStrategy) -> bool {
+    matches!(
+        strategy,
+        RetryStrategy::Retry {
+            outcome: RetryOutcome::RateLimitBackoff { .. }
+                | RetryOutcome::QuotaExhaustedRequeue { .. },
+            ..
+        }
+    )
+}
+
+/// Drop the throttle bookkeeping a previous rate-limit or quota outcome left on
+/// the task. Any other outcome means the tool ran and answered, so a stale
+/// `throttled_until` (a quota cooldown can be a day) must not survive into
+/// later decisions; the delay it imposed on the task goes with it.
+fn clear_stale_throttle(task: &mut Task) {
+    let runtime = task.ensure_runtime();
+    if runtime.extra.remove("throttle_state").is_some() {
+        runtime.delayed_until = None;
+    }
+}
+
 pub(super) fn apply_state_transitions(
     task: &mut Task,
     strategy: &RetryStrategy,
     now: &str,
 ) -> JobCompletionResult {
+    if !is_availability_outcome(strategy) {
+        clear_stale_throttle(task);
+    }
     match strategy {
         RetryStrategy::Retry {
             same_worktree,
@@ -156,7 +233,13 @@ pub(super) fn apply_state_transitions(
                 if let Ok(v) = serde_json::to_value(&throttle) {
                     runtime.extra.insert("throttle_state".to_string(), v);
                 }
-                runtime.delayed_until = Some(delayed_until.clone());
+                // Tool cooldown is persisted independently. An attached task
+                // can immediately continue with another available tool.
+                runtime.delayed_until = if *same_worktree {
+                    None
+                } else {
+                    Some(delayed_until.clone())
+                };
                 runtime.set_status(RuntimeStatus::Idle);
                 runtime.current_phase = Some("dev".to_string());
                 runtime.completion_kind = None;
@@ -168,8 +251,13 @@ pub(super) fn apply_state_transitions(
                 );
                 runtime.last_error = Some(format!("rate-limited; backoff {}s", backoff));
                 store_classified_error_in_extra(runtime, tool_error, *now_ts);
+                preserve_active_session_chain(task);
                 capture_last_assignment_before_clear(task);
-                task.worktree = None;
+                if *same_worktree {
+                    task.ensure_runtime().set_status(RuntimeStatus::Failed);
+                } else {
+                    task.worktree = None;
+                }
                 task.set_workflow_state(WorkflowState::Todo);
                 task.touch_state_changed(now);
                 JobCompletionResult {
@@ -182,7 +270,6 @@ pub(super) fn apply_state_transitions(
             }
             RetryOutcome::QuotaExhaustedRequeue {
                 cooldown,
-                delayed_until,
                 error,
                 tool_error,
                 now_ts,
@@ -208,7 +295,6 @@ pub(super) fn apply_state_transitions(
                 if let Ok(v) = serde_json::to_value(&throttle) {
                     runtime.extra.insert("throttle_state".to_string(), v);
                 }
-                runtime.delayed_until = Some(delayed_until.clone());
                 runtime.set_status(RuntimeStatus::Idle);
                 runtime.completion_kind = None;
                 runtime.pid = None;
@@ -218,9 +304,17 @@ pub(super) fn apply_state_transitions(
                     error.message.clone(),
                 );
                 runtime.last_error = Some(format!("quota exhausted; cooldown {}s", cooldown));
+                // Availability belongs to the tool; another tool can run the task now.
+                runtime.delayed_until = None;
+                if *same_worktree {
+                    runtime.set_status(RuntimeStatus::Failed);
+                }
                 store_classified_error_in_extra(runtime, tool_error, *now_ts);
+                preserve_active_session_chain(task);
                 capture_last_assignment_before_clear(task);
-                task.worktree = None;
+                if !same_worktree {
+                    task.worktree = None;
+                }
                 task.set_workflow_state(WorkflowState::Todo);
                 task.touch_state_changed(now);
                 JobCompletionResult {
@@ -237,11 +331,18 @@ pub(super) fn apply_state_transitions(
                 now_ts,
             } => {
                 task.set_workflow_state(WorkflowState::Todo);
+                preserve_active_session_chain(task);
                 capture_last_assignment_before_clear(task);
-                task.worktree = None;
+                if !same_worktree {
+                    task.worktree = None;
+                }
                 let runtime = task.ensure_runtime();
                 runtime.increment_retries();
-                runtime.set_status(RuntimeStatus::Idle);
+                runtime.set_status(if *same_worktree {
+                    RuntimeStatus::Failed
+                } else {
+                    RuntimeStatus::Idle
+                });
                 runtime.pid = None;
                 runtime.current_phase = Some("dev".to_string());
                 runtime.completion_kind = None;
@@ -361,7 +462,49 @@ pub(super) fn apply_state_transitions(
                 error_code,
                 attempts,
             } => {
-                let described = describe_tool_error(task, reason);
+                // A precondition stop is a correct outcome, not a tool error:
+                // record it as "cannot be implemented because …" with the
+                // conditions listed, never as "tool execution failed".
+                let mut out_of_scope = Vec::new();
+                let detail = if *completion_kind == PerformerCompletionKind::PreconditionUnmet {
+                    let mut texts: Vec<&str> = task
+                        .task_runtime
+                        .unmet_preconditions
+                        .iter()
+                        .map(String::as_str)
+                        .collect();
+                    texts.extend(task.task_runtime.result_explanation.as_deref());
+                    out_of_scope = precondition_scope::out_of_scope_paths(task, &texts);
+                    let mut detail = describe_unmet_preconditions(
+                        &task.id,
+                        &task.task_runtime.unmet_preconditions,
+                        task.task_runtime.result_explanation.as_deref(),
+                    );
+                    if !out_of_scope.is_empty() {
+                        detail.push('\n');
+                        detail.push_str(&precondition_scope::out_of_scope_note(
+                            &task.id,
+                            &out_of_scope,
+                        ));
+                    }
+                    detail
+                } else {
+                    let described = describe_tool_error(task, reason);
+                    let suffix = if *error_code == "E907" {
+                        format!(
+                            "identical explanation repeated on {} consecutive attempts",
+                            attempts
+                        )
+                    } else {
+                        "explained failure without repository changes; not retried".to_string()
+                    };
+                    format!("{} ({})", described, suffix)
+                };
+                let origin = if *completion_kind == PerformerCompletionKind::PreconditionUnmet {
+                    "precondition"
+                } else {
+                    "coordinator"
+                };
                 task.set_workflow_state(WorkflowState::Blocked);
                 preserve_active_session_chain(task);
                 capture_last_assignment_before_clear(task);
@@ -373,19 +516,18 @@ pub(super) fn apply_state_transitions(
                 runtime.set_status(RuntimeStatus::Failed);
                 runtime.current_phase = None;
                 runtime.pid = None;
-                let suffix = match completion_kind {
-                    PerformerCompletionKind::PreconditionUnmet => {
-                        "correct terminal stop; precondition is not met".to_string()
-                    }
-                    _ if *error_code == "E907" => format!(
-                        "identical explanation repeated on {} consecutive attempts",
-                        attempts
-                    ),
-                    _ => "explained failure without repository changes; not retried".to_string(),
-                };
-                let detail = format!("{} ({})", described, suffix);
-                runtime.set_last_error_details(*error_code, "coordinator", detail.clone());
+                runtime.set_last_error_details(*error_code, origin, detail.clone());
                 runtime.last_error = Some(detail.clone());
+                if out_of_scope.is_empty() {
+                    runtime
+                        .extra
+                        .remove(precondition_scope::OUT_OF_SCOPE_FIX_KEY);
+                } else {
+                    runtime.extra.insert(
+                        precondition_scope::OUT_OF_SCOPE_FIX_KEY.to_string(),
+                        serde_json::json!({ "paths": out_of_scope }),
+                    );
+                }
                 task.tool = None;
                 task.assignee = None;
                 task.touch_state_changed(now);
@@ -448,5 +590,60 @@ pub(super) fn apply_state_transitions(
             completion_kind: None,
             tool_error: None,
         },
+    }
+}
+
+#[cfg(test)]
+mod describe_unmet_preconditions_tests {
+    use super::describe_unmet_preconditions;
+
+    #[test]
+    fn lists_every_condition_and_names_the_task() {
+        let unmet = vec![
+            "SEC-CR-001 is still pending Product Owner approval".to_string(),
+            "Recovery-code persistence has no database entity".to_string(),
+        ];
+        let text = describe_unmet_preconditions(
+            "SEC-API-003",
+            &unmet,
+            Some("Required decisions unresolved."),
+        );
+        assert!(text.starts_with(
+            "Task SEC-API-003 cannot be implemented because the following preconditions are not satisfied:"
+        ), "{text}");
+        assert!(text.contains("\n  - SEC-CR-001 is still pending Product Owner approval"));
+        assert!(text.contains("\n  - Recovery-code persistence has no database entity"));
+        assert!(text.contains("\nTool summary: Required decisions unresolved."));
+        assert!(!text.to_ascii_lowercase().contains("tool execution failed"));
+    }
+
+    #[test]
+    fn single_condition_uses_singular_wording() {
+        let unmet = vec!["the observation window has not run".to_string()];
+        let text = describe_unmet_preconditions("T-1", &unmet, None);
+        assert!(
+            text.contains("the following precondition is not satisfied:"),
+            "{text}"
+        );
+        assert!(text.contains("\n  - the observation window has not run"));
+        assert!(!text.contains("Tool summary"));
+    }
+
+    #[test]
+    fn explanation_stands_in_when_no_condition_was_listed() {
+        // Older tools (or a tool that ignored the contract) emit only the
+        // one-line explanation; it must still surface as the condition.
+        let text = describe_unmet_preconditions("T-1", &[], Some("acceptance verdict is rejected"));
+        assert!(text.contains("precondition is not satisfied:"), "{text}");
+        assert!(text.contains("\n  - acceptance verdict is rejected"));
+    }
+
+    #[test]
+    fn total_silence_is_stated_not_hidden() {
+        let text = describe_unmet_preconditions("T-1", &[], None);
+        assert!(
+            text.contains("the tool did not name the condition"),
+            "{text}"
+        );
     }
 }

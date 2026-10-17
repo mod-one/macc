@@ -360,7 +360,8 @@ enum Commands {
     /// Run the project coordinator automation script
     #[command(trailing_var_arg = true)]
     Coordinator {
-        /// Coordinator command (run, control-plane-run, dispatch, advance, resume, sync, sync-prd, status, reconcile, block-task, unblock-task, unlock, cleanup, retry-phase, cutover-gate, stop, sessions, validate-transition, validate-runtime-transition, runtime-status-from-event, storage-import, storage-export, events-export, storage-verify, storage-sync, select-ready-task, state-apply-transition, state-set-runtime, state-task-field, state-task-exists, state-counts, state-locks, state-set-merge-pending, state-set-merge-processed, state-increment-retries, state-upsert-slo-warning, state-slo-metric)
+        /// Coordinator command (run, control-plane-run, dispatch, advance, resume, sync, sync-prd, status, reconcile, block-task, unblock-task, approvals, approve, reject, request-changes, unlock, cleanup, retry-phase, cutover-gate, stop, sessions, validate-transition, validate-runtime-transition, runtime-status-from-event, storage-import, storage-export, events-export, storage-verify, storage-sync, select-ready-task, state-apply-transition, state-set-runtime, state-task-field, state-task-exists, state-counts, state-locks, state-set-merge-pending, state-set-merge-processed, state-increment-retries, state-upsert-slo-warning, state-slo-metric)
+        /// Use `prds help` to manage the ordered PRD file queue and visual editor.
         #[arg(default_value = "run")]
         command_name: String,
         /// Start the coordinator after a relative delay, for example 30m or 2h
@@ -381,6 +382,9 @@ enum Commands {
         /// Start supervisor in daemon+attach mode before running coordinator
         #[arg(long)]
         supervisor: bool,
+        /// Explicitly disable autonomous supervision (also skips the startup question)
+        #[arg(long, conflicts_with = "supervisor")]
+        no_supervisor: bool,
         /// Drain stop (disable new dispatch, let active tasks finish)
         #[arg(long)]
         drain: bool,
@@ -746,9 +750,10 @@ pub enum PrdSubcommands {
     },
     /// Enrich an existing PRD from commit history and delivered code
     Audit {
-        /// PRD file to audit (default: prd.json)
-        #[arg(long = "prd", default_value = "prd.json")]
-        prd_path: String,
+        /// PRD file, or directory of PRD files, to audit (default: the
+        /// coordinator PRD queue, else its prd_file, else prd.json)
+        #[arg(long = "prd")]
+        prd_path: Option<String>,
         /// Tool to invoke (when omitted, prints the prompt only)
         #[arg(long)]
         tool: Option<String>,
@@ -1139,6 +1144,9 @@ pub enum SupervisorCommands {
         /// Explicit coordinator PID to write into the coordinator PID file before attach
         #[arg(long)]
         coordinator_pid: Option<u32>,
+        /// Reset the bounded intervention budget after correcting an external condition
+        #[arg(long)]
+        retry: bool,
     },
     /// Stop the supervisor watchdog
     Stop,
@@ -2005,7 +2013,7 @@ fn run_with_engine_provider(
                         std::env::set_var("MACC_MODEL_ROUTING_MODE", "auto");
                     }
                     PrdSubcommand::Audit {
-                        prd_path: std::path::PathBuf::from(prd_path),
+                        prd_path: prd_path.as_deref().map(std::path::PathBuf::from),
                         tool: tool.clone(),
                         model_routing: model_routing.clone(),
                         model: model.clone(),
@@ -2051,6 +2059,7 @@ fn run_with_engine_provider(
             client,
             no_client,
             supervisor,
+            no_supervisor,
             drain,
             graceful,
             force,
@@ -2180,6 +2189,7 @@ fn run_with_engine_provider(
                         }
                     },
                     supervisor: *supervisor,
+                    no_supervisor: *no_supervisor,
                     drain: *drain,
                     graceful: *graceful,
                     force: *force,
@@ -3862,6 +3872,7 @@ fi
                     client: None,
                     no_client: true,
                     supervisor: false,
+                    no_supervisor: false,
                     drain: false,
                     graceful: true,
                     force: false,
@@ -4287,9 +4298,14 @@ fi
 
     #[test]
     fn test_install_skill_cli() -> macc_core::Result<()> {
+        let _guard = env_test_lock();
         let temp_base =
             std::env::temp_dir().join(format!("macc_install_skill_test_{}", uuid_v4_like()));
         std::fs::create_dir_all(&temp_base).unwrap();
+        let temp_home = temp_base.join("home");
+        std::fs::create_dir_all(&temp_home).unwrap();
+        let old_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &temp_home);
         let ids = fixture_ids();
         let tool_one = ids[0].clone();
 
@@ -4395,15 +4411,25 @@ fi
         );
 
         // Cleanup
+        if let Some(old) = old_home {
+            std::env::set_var("HOME", old);
+        } else {
+            std::env::remove_var("HOME");
+        }
         std::fs::remove_dir_all(&temp_base).ok();
         Ok(())
     }
 
     #[test]
     fn test_install_mcp_cli() -> macc_core::Result<()> {
+        let _guard = env_test_lock();
         let temp_base =
             std::env::temp_dir().join(format!("macc_install_mcp_test_{}", uuid_v4_like()));
         std::fs::create_dir_all(&temp_base).unwrap();
+        let temp_home = temp_base.join("home");
+        std::fs::create_dir_all(&temp_home).unwrap();
+        let old_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &temp_home);
 
         // 1. Init
         run_with_engine(
@@ -4511,6 +4537,11 @@ fi
         );
 
         // Cleanup
+        if let Some(old) = old_home {
+            std::env::set_var("HOME", old);
+        } else {
+            std::env::remove_var("HOME");
+        }
         std::fs::remove_dir_all(&temp_base).ok();
         Ok(())
     }
@@ -4724,6 +4755,7 @@ fi
         use std::io::{BufRead, BufReader, Write};
         use std::thread;
 
+        let _guard = env_test_lock();
         let ids = fixture_ids();
         let tool_one = ids[0].clone();
 
@@ -4806,6 +4838,10 @@ fi
         let temp_base =
             std::env::temp_dir().join(format!("macc_install_multi_zip_test_{}", uuid_v4_like()));
         std::fs::create_dir_all(&temp_base).unwrap();
+        let temp_home = temp_base.join("home");
+        std::fs::create_dir_all(&temp_home).unwrap();
+        let old_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &temp_home);
 
         // 3. Init
         run_with_engine(
@@ -4886,6 +4922,11 @@ fi
             .join(format!(".{}/skills/skill-a/skills", tool_one))
             .exists());
 
+        if let Some(old) = old_home {
+            std::env::set_var("HOME", old);
+        } else {
+            std::env::remove_var("HOME");
+        }
         std::fs::remove_dir_all(&temp_base).ok();
         Ok(())
     }
@@ -5125,6 +5166,7 @@ fi
         use std::io::{BufRead, BufReader, Write};
         use std::thread;
 
+        let _guard = env_test_lock();
         let ids = fixture_ids();
         let tool_one = ids[0].clone();
 
@@ -5189,6 +5231,10 @@ fi
         let temp_base =
             std::env::temp_dir().join(format!("macc_install_symlink_test_{}", uuid_v4_like()));
         std::fs::create_dir_all(&temp_base).unwrap();
+        let temp_home = temp_base.join("home");
+        std::fs::create_dir_all(&temp_home).unwrap();
+        let old_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &temp_home);
 
         run_with_engine(
             Cli {
@@ -5263,6 +5309,11 @@ fi
             err_msg
         );
 
+        if let Some(old) = old_home {
+            std::env::set_var("HOME", old);
+        } else {
+            std::env::remove_var("HOME");
+        }
         std::fs::remove_dir_all(&temp_base).ok();
         Ok(())
     }
@@ -5363,6 +5414,7 @@ fi
                     daemon,
                     attach,
                     coordinator_pid,
+                    ..
                 } => {
                     assert!(daemon);
                     assert!(attach);
@@ -5385,6 +5437,7 @@ fi
                     daemon,
                     attach,
                     coordinator_pid,
+                    ..
                 } => {
                     assert!(!daemon);
                     assert!(attach);

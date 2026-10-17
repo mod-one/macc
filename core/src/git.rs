@@ -609,6 +609,44 @@ pub async fn commits_ahead_of_base_async(
     )))
 }
 
+/// Latest commit on `branch` that carries the `[macc:task <task_id>]` trailer,
+/// or `None` when the task has not landed there. This is the revision a human
+/// approval of `task_id` is bound to.
+pub fn latest_commit_with_task_trailer(
+    repo: &Path,
+    branch: &str,
+    task_id: &str,
+) -> Result<Option<String>> {
+    let grep = format!("--grep=\\[macc:task {}\\]", regex_escape(task_id));
+    let output = run_git_output(
+        repo,
+        &["log", "-1", "--format=%H", &grep, branch],
+        "find latest commit for task trailer",
+    )?;
+    if !output.status.success() {
+        return Err(MaccError::Git {
+            operation: "log".to_string(),
+            message: format!(
+                "Failed to read commits for task {task_id} on {branch}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        });
+    }
+    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Ok((!sha.is_empty()).then_some(sha))
+}
+
+fn regex_escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if "\\.^$|?*+()[]{}".contains(ch) {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
 pub fn commits_containing_pattern(
     repo_or_worktree: &Path,
     base_branch: &str,
@@ -737,6 +775,54 @@ fn parse_commit_info_line(line: &str) -> Option<CommitInfo> {
         subject: parts[1].trim().to_string(),
         author_date: parts[2].trim().to_string(),
     })
+}
+
+/// Tree id of a worktree's full content (tracked, staged and untracked,
+/// honouring ignore rules), computed through a scratch index so the worktree's
+/// own index is left exactly as it was.
+pub fn worktree_content_tree(worktree: &Path) -> Result<String> {
+    let located = run_git_output(
+        worktree,
+        &["rev-parse", "--git-path", "index"],
+        "locate worktree index",
+    )?;
+    if !located.status.success() {
+        return Err(MaccError::Git {
+            operation: "worktree_content_tree".into(),
+            message: String::from_utf8_lossy(&located.stderr).trim().to_string(),
+        });
+    }
+    let index = std::path::PathBuf::from(String::from_utf8_lossy(&located.stdout).trim());
+    let index = if index.is_absolute() {
+        index
+    } else {
+        worktree.join(index)
+    };
+    let scratch = index.with_extension("content-snapshot");
+    let io = |source: std::io::Error| MaccError::Io {
+        path: scratch.display().to_string(),
+        action: "prepare scratch index".into(),
+        source,
+    };
+    if index.exists() {
+        // Seeding from the real index keeps its stat cache: unchanged files are not re-hashed.
+        std::fs::copy(&index, &scratch).map_err(io)?;
+    }
+    let scratch_text = scratch.to_string_lossy().into_owned();
+    let envs = [("GIT_INDEX_FILE", scratch_text.as_str())];
+    let run = |args: &[&str]| -> Result<String> {
+        let output = run_git_output_with_env(worktree, args, &envs, "snapshot worktree content")?;
+        if !output.status.success() {
+            return Err(MaccError::Git {
+                operation: "worktree_content_tree".into(),
+                message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            });
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    };
+    let tree = run(&["add", "--all"]).and_then(|_| run(&["write-tree"]));
+    let _ = std::fs::remove_file(&scratch);
+    tree
 }
 
 /// Returns the list of git identity fields that are not configured.

@@ -1,3 +1,4 @@
+use crate::coordinator::approval_prompt;
 use crate::coordinator::legacy_helpers::{
     stop_coordinator_process_groups, NativeCoordinatorLogger,
 };
@@ -66,6 +67,7 @@ pub struct CoordinatorCommandInput {
     /// Client to open after the coordinator starts.
     pub client_mode: CoordinatorClientMode,
     pub supervisor: bool,
+    pub no_supervisor: bool,
     pub drain: bool,
     pub graceful: bool,
     pub force: bool,
@@ -120,7 +122,7 @@ impl ProjectContext {
 pub fn handle(
     absolute_cwd: &Path,
     engine: &crate::services::engine_provider::SharedEngine,
-    input: CoordinatorCommandInput,
+    mut input: CoordinatorCommandInput,
 ) -> Result<()> {
     // Intercept "sessions" subcommand before normal coordinator dispatch.
     if input.command_name == "sessions" {
@@ -129,9 +131,45 @@ pub fn handle(
     }
 
     let context = ProjectContext::load(absolute_cwd, engine)?;
+    if input.command_name == "prds" {
+        if !matches!(
+            input
+                .extra_args
+                .first()
+                .map(String::as_str)
+                .unwrap_or("list"),
+            "list" | "check" | "status" | "help" | "--help"
+        ) {
+            gate_owner_action(
+                &ClientContext {
+                    client_id: input.client_id.clone(),
+                    project_root: context.paths.root.clone(),
+                },
+                &ProcessHandle {
+                    project_root: context.paths.root.clone(),
+                    kind: ProcessKind::Project,
+                    pid: None,
+                },
+            )?;
+        }
+        return crate::coordinator::prd_queue::handle(&context.paths, &input.extra_args);
+    }
     let paths = &context.paths;
     let canonical = &context.canonical;
     let coordinator_cfg = context.coordinator_cfg.as_ref();
+    if matches!(
+        input.command_name.as_str(),
+        "approvals" | "approve" | "reject" | "request-changes"
+    ) {
+        let (interactive, rest) = approval_prompt::split_interactive_flags(
+            &input.extra_args,
+            approval_prompt::stdio_is_terminal(),
+        );
+        input.extra_args = rest;
+        if interactive {
+            return handle_interactive_approval(engine, paths, canonical, coordinator_cfg, &input);
+        }
+    }
     let command = coordinator_command_from_name(
         &input.command_name,
         &input.extra_args,
@@ -141,6 +179,18 @@ pub fn handle(
         input.remove_worktrees,
         input.remove_branches,
     )?;
+
+    let _direct_runtime_lock = if matches!(command, CoordinatorCommand::RunControlPlane)
+        && std::env::var("MACC_INTERNAL_INVOCATION").as_deref() != Ok("1")
+    {
+        Some(macc_core::fs_lock::AdvisoryLock::acquire(
+            &paths.root.join(".macc/state/supervisor-intervention.lock"),
+            std::time::Duration::ZERO,
+            "direct coordinator runtime during intervention",
+        )?)
+    } else {
+        None
+    };
 
     // Resolve delayed start if this is a 'run' command
     let schedule = if matches!(command, CoordinatorCommand::Run) {
@@ -163,6 +213,12 @@ pub fn handle(
     // The review and choice happen before any wait so the user sees the summary
     // and confirms (or cancels) immediately after typing the command.
     if matches!(command, CoordinatorCommand::Run) {
+        if input.env_cfg.prd.is_none() {
+            if let Some(config) = coordinator_cfg.filter(|c| !c.prd_files.is_empty()) {
+                macc_core::prd_queue::validate(&paths.root, &config.prd_files)?;
+                macc_core::prd_queue::active_path(&paths.root, Some(config), None)?;
+            }
+        }
         // Preflight: git identity must be set before workers can commit.
         {
             let missing = macc_core::git::missing_git_identity_fields(&paths.root);
@@ -190,6 +246,9 @@ Performers cannot commit without it. Fix this first:\n\
 
         // Launch review: summary, client choice, and confirmation — before any wait.
         let chosen_mode = resolve_client_mode(&input, coordinator_cfg, paths, schedule.as_ref());
+
+        input.supervisor =
+            crate::coordinator::supervisor_launch::choose(input.supervisor, input.no_supervisor)?;
 
         // Countdown wait (if a delayed start was requested).
         if let Some(ref sched) = schedule {
@@ -375,6 +434,16 @@ Performers cannot commit without it. Fix this first:\n\
         _ => {}
     }
 
+    if let Some(line) = response.gate_decision.as_ref() {
+        println!("{line}");
+    }
+    if let Some(pending) = response.pending_approvals.as_ref() {
+        print_pending_approvals(
+            pending,
+            matches!(command, CoordinatorCommand::ListApprovals),
+        );
+    }
+
     if let Some(status) = response.status {
         print_status_summary(&paths.root, &status);
     }
@@ -479,6 +548,218 @@ Performers cannot commit without it. Fix this first:\n\
     Ok(())
 }
 
+/// Render gates waiting for a human decision: subject, revision, diff, risks,
+/// required approvers, and the exact command to decide.
+pub(crate) fn print_pending_approvals(
+    pending: &[macc_core::coordinator::approval::PendingApproval],
+    announce_empty: bool,
+) {
+    if pending.is_empty() {
+        if announce_empty {
+            println!("No approval gate is waiting for a decision.");
+        }
+        return;
+    }
+    println!();
+    println!(
+        "Approvals waiting for a human decision ({}):",
+        pending.len()
+    );
+    for p in pending {
+        println!();
+        println!(
+            "  {}{}  [{}]",
+            p.task_id,
+            p.title
+                .as_deref()
+                .map(|t| format!(" — {t}"))
+                .unwrap_or_default(),
+            p.status
+        );
+        if !p.question.is_empty() {
+            println!("    Question:  {}", p.question);
+        }
+        println!(
+            "    Subject:   {} at {}",
+            p.subject_task,
+            p.subject_revision
+                .as_deref()
+                .unwrap_or("unknown revision (not landed with a [macc:task] trailer)")
+        );
+        if let Some(d) = p.description.as_deref() {
+            println!("    Decision:  {d}");
+        }
+        if let Some(trigger) = p.approval_trigger.as_deref() {
+            println!("    Why:       {trigger}");
+        }
+        for risk in &p.risks {
+            println!("    Risk:      {risk}");
+        }
+        println!(
+            "    Approvers: {}{}",
+            p.required,
+            p.governance_ref
+                .as_deref()
+                .map(|g| format!("  (per {g})"))
+                .unwrap_or_default()
+        );
+        if let Some(kind) = p.evidence_type.as_deref() {
+            println!("    Evidence:  {kind}");
+        }
+        if let Some(note) = p.note.as_deref() {
+            println!("    Status:    {note}");
+        }
+        if let Some(stat) = p.diff_stat.as_deref() {
+            println!("    Diff:");
+            for line in stat.lines() {
+                println!("      {line}");
+            }
+        }
+        println!("    Decide:");
+        println!("      {}", p.approve_command);
+        println!(
+            "      macc coordinator reject {} --role <ROLE> --reason \"…\"",
+            p.task_id
+        );
+        println!(
+            "      macc coordinator request-changes {} --role <ROLE> --reason \"…\"",
+            p.task_id
+        );
+    }
+    if pending.iter().any(|p| p.awaiting_decision) {
+        println!();
+        println!(
+            "Run `macc coordinator approvals` in a terminal to read each request in full and decide interactively."
+        );
+    }
+}
+
+/// `approvals` walks every gate awaiting a decision; `approve|reject|
+/// request-changes` prompt only for what the command line leaves out (and
+/// record directly when nothing is missing).
+fn handle_interactive_approval(
+    engine: &crate::services::engine_provider::SharedEngine,
+    paths: &macc_core::ProjectPaths,
+    canonical: &macc_core::config::CanonicalConfig,
+    coordinator_cfg: Option<&macc_core::config::CoordinatorConfig>,
+    input: &CoordinatorCommandInput,
+) -> Result<()> {
+    let execute = |command: CoordinatorCommand| {
+        engine.coordinator_execute_command(
+            paths,
+            command,
+            CoordinatorCommandRequest {
+                canonical: Some(canonical),
+                coordinator_cfg,
+                env_cfg: &input.env_cfg,
+                logger: None,
+            },
+        )
+    };
+    let load = || -> Result<Vec<macc_core::coordinator::approval::PendingApproval>> {
+        Ok(execute(CoordinatorCommand::ListApprovals)?
+            .pending_approvals
+            .unwrap_or_default())
+    };
+    let client_ctx = ClientContext {
+        client_id: input.client_id.clone(),
+        project_root: paths.root.clone(),
+    };
+    let record = |d: approval_prompt::CollectedDecision| -> Result<String> {
+        gate_owner_action(&client_ctx, &coordinator_process_handle(&paths.root))?;
+        let response = execute(CoordinatorCommand::GateDecision {
+            task_id: d.task_id,
+            decision: d.decision,
+            role: d.role,
+            actor: d.actor,
+            revision: d.revision,
+            evidence: d.evidence,
+            reason: d.reason,
+        })?;
+        Ok(response.gate_decision.unwrap_or_default())
+    };
+    let actor_label = {
+        let identity = macc_core::service::coordinator_workflow::operator_identity(&paths.root);
+        if identity.is_empty() {
+            "(no git identity: pass --as <name>)".to_string()
+        } else {
+            identity
+        }
+    };
+    let stdin = std::io::stdin();
+    let mut reader = stdin.lock();
+    let mut stdout = std::io::stdout();
+    let mut prompter = approval_prompt::Prompter::new(&mut reader, &mut stdout);
+
+    if input.command_name == "approvals" {
+        let prefill = approval_prompt::Prefill::parse("approvals", &input.extra_args)?;
+        prompter.walk(
+            &mut || load(),
+            &mut |d| record(d),
+            &actor_label,
+            prefill.actor.as_deref(),
+        )?;
+        return Ok(());
+    }
+
+    let prefill = approval_prompt::Prefill::parse(&input.command_name, &input.extra_args)?;
+    let pending = load()?;
+    let task_id = match prefill.task_id.clone() {
+        Some(id) => id,
+        None => {
+            let waiting: Vec<_> = pending.iter().filter(|p| p.awaiting_decision).collect();
+            match waiting.as_slice() {
+                [only] => only.task_id.clone(),
+                [] => {
+                    return Err(MaccError::Validation(
+                        "No approval gate is waiting for a decision.".into(),
+                    ))
+                }
+                _ => {
+                    return Err(MaccError::Validation(format!(
+                        "Several gates wait for a decision ({}): name one, or run `macc coordinator approvals`.",
+                        waiting
+                            .iter()
+                            .map(|p| p.task_id.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )))
+                }
+            }
+        }
+    };
+    let gate = pending.iter().find(|p| p.task_id == task_id);
+    let prefill = approval_prompt::Prefill {
+        task_id: Some(task_id.clone()),
+        ..prefill
+    };
+    if prefill.is_complete_for(gate) {
+        // Everything was given: record as the plain command would.
+        let line = record(approval_prompt::CollectedDecision {
+            task_id,
+            decision: prefill.decision.expect("complete prefill has a decision"),
+            role: prefill.role.unwrap_or_default(),
+            revision: prefill.revision,
+            evidence: prefill.evidence,
+            reason: prefill.reason,
+            actor: prefill.actor,
+        })?;
+        println!("{line}");
+        return Ok(());
+    }
+    let Some(gate) = gate else {
+        return Err(MaccError::Validation(format!(
+            "'{task_id}' is not a human approval gate waiting for a decision. Run `macc coordinator approvals` to see the open gates."
+        )));
+    };
+    prompter.show_brief(gate);
+    match prompter.collect(gate, &prefill, &actor_label) {
+        Ok(decision) => println!("{}", record(decision)?),
+        Err(_) => println!("No decision recorded."),
+    }
+    Ok(())
+}
+
 fn command_requires_owner_gate(command: &CoordinatorCommand) -> bool {
     matches!(
         command,
@@ -488,6 +769,7 @@ fn command_requires_owner_gate(command: &CoordinatorCommand) -> bool {
             | CoordinatorCommand::Unlock { .. }
             | CoordinatorCommand::BlockTask { .. }
             | CoordinatorCommand::UnblockTask { .. }
+            | CoordinatorCommand::GateDecision { .. }
             | CoordinatorCommand::DispatchReadyTasks
             | CoordinatorCommand::AdvanceTasks
             | CoordinatorCommand::CleanupMaintenance
@@ -509,6 +791,26 @@ fn coordinator_process_handle(project_root: &Path) -> ProcessHandle {
 /// if it crashes. Because the supervisor itself uses `setsid()` it also
 /// survives SSH session close independently.
 fn spawn_attached_supervisor(project_root: &Path, coordinator_pid: u32) -> Result<()> {
+    let pid_file = project_root.join(SUPERVISOR_PID_REL_PATH);
+    if let Ok(raw) = std::fs::read_to_string(&pid_file) {
+        if let Ok(pid) = raw.trim().parse::<u32>() {
+            if pid_is_alive(pid) {
+                let marker =
+                    serde_json::json!({"coordinator_pid":coordinator_pid,"supervisor_pid":pid});
+                std::fs::write(
+                    project_root.join(COORDINATOR_SUPERVISOR_REL_PATH),
+                    format!("{marker}\n"),
+                )
+                .map_err(|source| MaccError::Io {
+                    path: pid_file.display().to_string(),
+                    action: "attach existing supervisor".into(),
+                    source,
+                })?;
+                println!("Supervisor attached (pid {pid}).");
+                return Ok(());
+            }
+        }
+    }
     let current_exe = std::env::current_exe().map_err(|e| MaccError::Io {
         path: project_root.to_string_lossy().into(),
         action: "resolve current executable for coordinator supervisor bootstrap".into(),
@@ -557,7 +859,9 @@ fn spawn_attached_supervisor(project_root: &Path, coordinator_pid: u32) -> Resul
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 
-    if let Some(spid) = supervisor_pid {
+    let spid = supervisor_pid
+        .ok_or_else(|| MaccError::Validation("Supervisor did not register its PID".into()))?;
+    {
         let marker = serde_json::json!({
             "coordinator_pid": coordinator_pid,
             "supervisor_pid": spid
@@ -566,7 +870,12 @@ fn spawn_attached_supervisor(project_root: &Path, coordinator_pid: u32) -> Resul
         if let Some(parent) = marker_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let _ = std::fs::write(&marker_path, format!("{}\n", marker));
+        std::fs::write(&marker_path, format!("{}\n", marker)).map_err(|source| MaccError::Io {
+            path: marker_path.display().to_string(),
+            action: "record supervisor attachment".into(),
+            source,
+        })?;
+        println!("Supervisor attached (pid {spid}).");
     }
 
     Ok(())
@@ -602,12 +911,16 @@ fn stop_attached_supervisor_if_present(project_root: &Path) {
     // Guard: only act if the coordinator that wrote this marker is currently
     // running.  A stale marker (coordinator already exited naturally) must not
     // cause an independently-started supervisor to be killed.
-    if !pid_is_alive(cpid) {
+    // Attachment remains valid even when the coordinator has already exited.
+    let registered = std::fs::read_to_string(project_root.join(SUPERVISOR_PID_REL_PATH))
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok());
+    if registered != Some(spid) {
         let _ = std::fs::remove_file(&marker_path);
         return;
     }
+    let _ = cpid;
 
-    // Send SIGTERM; give the supervisor up to 3 s to exit cleanly.
     let _ = ProcessCommand::new("kill")
         .arg("-TERM")
         .arg(spid.to_string())
@@ -1127,7 +1440,7 @@ fn collect_launch_warnings(
         "rev-list count",
     )
     .ok()
-    .and_then(|o| if o.status.success() { Some(o) } else { None })
+    .filter(|o| o.status.success())
     .and_then(|o| String::from_utf8(o.stdout).ok())
     .and_then(|s| s.trim().parse::<u64>().ok())
     .unwrap_or(0);
@@ -1175,7 +1488,12 @@ fn print_launch_review(
     use macc_core::config::CoordinatorConfigResolved;
     let resolved = CoordinatorConfigResolved::resolve(coordinator_cfg);
 
-    let prd = resolved.prd_file.as_deref().unwrap_or("prd.json");
+    let prd = input
+        .env_cfg
+        .prd
+        .as_deref()
+        .or(resolved.prd_file.as_deref())
+        .unwrap_or("prd.json");
     let ref_branch = input
         .env_cfg
         .reference_branch
@@ -1203,7 +1521,19 @@ fn print_launch_review(
     // ── Project and task source ───────────────────────────────────────────────
     println!("Project:");
     println!("  Root:              {}", paths.root.display());
-    println!("  PRD:               {}", prd);
+    if input.env_cfg.prd.is_some() || coordinator_cfg.is_none_or(|c| c.prd_files.is_empty()) {
+        println!("  PRD:               {}", prd);
+    }
+    if input.env_cfg.prd.is_none() {
+        if let Some(config) = coordinator_cfg.filter(|c| !c.prd_files.is_empty()) {
+            println!("  PRD queue (sequential; stops on incomplete delivery):");
+            for (i, file) in config.prd_files.iter().enumerate() {
+                println!("    {}. {}", i + 1, file);
+            }
+        }
+    } else {
+        println!("  Explicit --prd overrides the configured queue.");
+    }
     println!("  Reference branch:  {}", ref_branch);
     println!();
 
@@ -1304,26 +1634,14 @@ fn launch_coordinator_with_client(
 
     match mode {
         CoordinatorClientMode::Tui => {
-            // TUI path: the TUI itself starts the coordinator daemon and
-            // connects to it. Once the TUI exits the coordinator keeps running
-            // in the background (coordinator child has setsid() — terminal-independent).
-            // If --supervisor was requested, start the supervisor AFTER the TUI
-            // has launched the coordinator so we have the real child PID.
-            let result = macc_tui::run_tui_with_launch(macc_tui::LaunchMode::CoordinatorRun {
+            let coord_pid = run_coordinator_daemon(paths, coordinator_cfg, &input.client_id)?;
+            if input.supervisor {
+                spawn_attached_supervisor(&paths.root, coord_pid as u32)?;
+            }
+            macc_tui::run_tui_with_launch(macc_tui::LaunchMode::CoordinatorAttach {
                 phase_overrides,
             })
-            .map_err(|e| MaccError::Io {
-                path: "tui".into(),
-                action: "run_tui coordinator live".into(),
-                source: std::io::Error::other(e.to_string()),
-            });
-            // Best-effort supervisor start after TUI (coordinator child already running).
-            if input.supervisor {
-                if let Ok(coord_pid) = coordinator_child_pid_from_registry(&paths.root) {
-                    let _ = spawn_attached_supervisor(&paths.root, coord_pid);
-                }
-            }
-            result
+            .map_err(|e| MaccError::Validation(format!("Coordinator TUI: {e}")))
         }
 
         CoordinatorClientMode::Web => {
@@ -1340,7 +1658,7 @@ fn launch_coordinator_with_client(
 
             // Start supervisor with coordinator child PID (not CLI PID).
             if input.supervisor {
-                let _ = spawn_attached_supervisor(&paths.root, coord_pid as u32);
+                spawn_attached_supervisor(&paths.root, coord_pid as u32)?;
             }
 
             // Launch web server as a background daemon so the CLI can return.
@@ -1372,7 +1690,7 @@ fn launch_coordinator_with_client(
             // Start coordinator as background daemon; return immediately.
             let coord_pid = run_coordinator_daemon(paths, coordinator_cfg, &input.client_id)?;
             if input.supervisor {
-                let _ = spawn_attached_supervisor(&paths.root, coord_pid as u32);
+                spawn_attached_supervisor(&paths.root, coord_pid as u32)?;
             }
             Ok(())
         }
@@ -1427,21 +1745,17 @@ fn run_coordinator_daemon(
         Some(client_id),
     )?;
 
+    macc_core::service::coordinator_readiness::wait(
+        paths,
+        pid,
+        std::time::Duration::from_secs(15),
+    )?;
     println!("Coordinator started (pid {}).", pid);
     println!("  Monitor : macc status");
     println!("  Live TUI: macc tui");
     println!("  Stop    : macc coordinator stop");
 
     Ok(pid)
-}
-
-/// Read the coordinator child PID from the managed command registry.
-fn coordinator_child_pid_from_registry(project_root: &Path) -> Result<u32> {
-    use macc_core::coordinator::managed_command_registry::get_managed_command;
-    let paths = macc_core::ProjectPaths::from_root(project_root);
-    get_managed_command(&paths, "run")?
-        .map(|r| r.pid as u32)
-        .ok_or_else(|| MaccError::Validation("coordinator is not running".into()))
 }
 
 /// Spawn the web server as a background daemon (setsid + null stdio).
@@ -1639,6 +1953,7 @@ mod tests {
             client_id: client_id.to_string(),
             client_mode: CoordinatorClientMode::None,
             supervisor: false,
+            no_supervisor: false,
             drain: false,
             graceful: false,
             force: false,

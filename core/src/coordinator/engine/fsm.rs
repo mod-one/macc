@@ -46,6 +46,7 @@ pub struct PhaseTransition {
 pub enum AdvancePlan {
     RunPhase(PhaseTransition),
     Merge,
+    ReviewBudgetExhausted,
     Noop,
 }
 
@@ -77,6 +78,9 @@ pub struct CoordinatorCounts {
     pub active: usize,
     pub blocked: usize,
     pub merged: usize,
+    /// Human approval gates waiting for a decision. Not work, not a stall:
+    /// the run stays alive and idle until the quorum is met.
+    pub waiting_approval: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -123,6 +127,8 @@ pub struct JobCompletionInput {
     pub error_origin: Option<String>,
     pub error_message: Option<String>,
     pub result_explanation: Option<String>,
+    /// Preconditions the tool reported as unsatisfied (`precondition_unmet`).
+    pub unmet_preconditions: Vec<String>,
     pub auto_retry_error_codes: Vec<String>,
     pub auto_retry_max: usize,
     /// Base backoff delay in seconds for E601 rate-limit retries.
@@ -171,7 +177,12 @@ pub enum AdvanceTaskAction {
     /// Task is in a merge-ready state but has no branch recorded (e.g. the
     /// worktree was cleared by ghost cleanup before the job-exit was applied).
     /// Block it so the coordinator can make progress instead of spinning.
-    BlockNoBranch { task_id: String },
+    BlockNoBranch {
+        task_id: String,
+    },
+    BlockReviewBudget {
+        task_id: String,
+    },
 }
 
 /// Task metadata passed to the merge-fix hook so it can resolve conflicts
@@ -219,6 +230,7 @@ pub struct CoordinatorRunController {
     previous_counts: Option<CoordinatorCounts>,
 }
 
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait ControlPlaneBackend {
     async fn on_cycle_start(&mut self, cycle: usize) -> Result<()>;
@@ -250,6 +262,9 @@ pub trait ControlPlaneBackend {
     fn last_dispatch_failure(&self) -> Option<String> {
         None
     }
+    fn waiting_for_tools(&self) -> bool {
+        false
+    }
     /// Explain, one line per task, why nothing could be dispatched.
     ///
     /// Only called when a run is about to abort for lack of progress, so it may
@@ -259,76 +274,7 @@ pub trait ControlPlaneBackend {
     }
 }
 
-/// Plan the next advance action for a task.
-///
-/// `max_review_cycles` controls the review→fix loop budget:
-///   - `None`  → unlimited loops (default)
-///   - `Some(0)` → skip review entirely; go straight to merge
-///   - `Some(1)` → one review + one fix if changes requested, no loopback
-///   - `Some(n)` → up to n review→fix→review loops
-///
-/// `review_cycles` is the number of review cycles already completed for
-/// this task (stored in `task_runtime.review_cycles`).
-pub fn plan_advance(
-    state: WorkflowState,
-    max_review_cycles: Option<usize>,
-    review_cycles: usize,
-    phases: &crate::config::PhasesConfig,
-) -> AdvancePlan {
-    match state {
-        WorkflowState::InProgress => {
-            if phases.testing.enabled {
-                AdvancePlan::RunPhase(PhaseTransition {
-                    mode: "test",
-                    next_state: WorkflowState::Testing,
-                    runtime_phase: "test",
-                })
-            } else if phases.review.enabled && max_review_cycles != Some(0) {
-                AdvancePlan::RunPhase(PhaseTransition {
-                    mode: "review",
-                    next_state: WorkflowState::Reviewing,
-                    runtime_phase: "review",
-                })
-            } else {
-                AdvancePlan::Merge
-            }
-        }
-        WorkflowState::Testing => {
-            if phases.review.enabled && max_review_cycles != Some(0) {
-                AdvancePlan::RunPhase(PhaseTransition {
-                    mode: "review",
-                    next_state: WorkflowState::Reviewing,
-                    runtime_phase: "review",
-                })
-            } else {
-                AdvancePlan::Merge
-            }
-        }
-        WorkflowState::Reviewing => AdvancePlan::Merge,
-        WorkflowState::PrOpen => AdvancePlan::Merge,
-        WorkflowState::ChangesRequested => {
-            // If we've exhausted the review cycle budget, skip fix and go to merge.
-            if let Some(max) = max_review_cycles {
-                if review_cycles >= max {
-                    return AdvancePlan::Merge;
-                }
-            }
-            AdvancePlan::RunPhase(PhaseTransition {
-                mode: "fix",
-                next_state: if phases.testing.enabled {
-                    WorkflowState::Testing
-                } else if phases.review.enabled {
-                    WorkflowState::Reviewing
-                } else {
-                    WorkflowState::PrOpen // fallback
-                },
-                runtime_phase: "fix",
-            })
-        }
-        WorkflowState::Queued => AdvancePlan::Merge,
-        _ => AdvancePlan::Noop,
-    }
-}
+pub use super::advance_plan::plan_advance;
 
 fn transition_workflow_state(
     from: WorkflowState,
@@ -347,10 +293,10 @@ fn transition_workflow_state(
             next_state.unwrap_or(WorkflowState::Reviewing)
         }
         (WorkflowState::Testing, WorkflowEvent::PhaseSucceeded("review")) => {
-            WorkflowState::Reviewing
+            next_state.unwrap_or(WorkflowState::Reviewing)
         }
         (WorkflowState::Reviewing, WorkflowEvent::PhaseSucceeded("review")) => {
-            WorkflowState::Merged
+            next_state.unwrap_or(WorkflowState::PrOpen)
         }
         (WorkflowState::ChangesRequested, WorkflowEvent::PhaseSucceeded("fix")) => {
             next_state.unwrap_or(WorkflowState::PrOpen)
@@ -363,12 +309,21 @@ fn transition_workflow_state(
         (WorkflowState::Reviewing, WorkflowEvent::ReviewChangesRequested) => {
             WorkflowState::ChangesRequested
         }
+        // The review ran while the task was still recorded in `testing` (the
+        // review phase starts from `testing` and the state only moves to
+        // `reviewing` with the verdict). A successful review is already
+        // accepted from there; a changes-requested verdict must be too, or the
+        // whole run aborts on a legitimate review outcome.
+        (WorkflowState::Testing, WorkflowEvent::ReviewChangesRequested) => {
+            WorkflowState::ChangesRequested
+        }
 
         // --- Failure transitions ---
         (WorkflowState::InProgress, WorkflowEvent::PhaseFailed("dev")) => WorkflowState::Blocked,
         (WorkflowState::InProgress, WorkflowEvent::PhaseFailed("review")) => WorkflowState::Blocked,
         (WorkflowState::Testing, WorkflowEvent::PhaseFailed("test")) => WorkflowState::InProgress,
         (WorkflowState::Reviewing, WorkflowEvent::PhaseFailed("review")) => WorkflowState::Blocked,
+        (WorkflowState::Testing, WorkflowEvent::PhaseFailed("review")) => WorkflowState::Blocked,
         (WorkflowState::ChangesRequested, WorkflowEvent::PhaseFailed("fix")) => {
             WorkflowState::Blocked
         }
@@ -513,6 +468,9 @@ pub fn build_advance_actions(
                     merge_context,
                 });
             }
+            AdvancePlan::ReviewBudgetExhausted => {
+                actions.push(AdvanceTaskAction::BlockReviewBudget { task_id });
+            }
             AdvancePlan::Noop => {}
         }
     }
@@ -535,11 +493,61 @@ pub fn apply_phase_outcome_in_registry(
             code: "task_not_found",
             message: format!("Task '{}' not found in registry", task_id),
         })?;
-    if let Some(reason) = phase_error {
-        apply_phase_failure_typed(task, mode, reason, now)?;
-        *registry = typed.to_value()?;
-        return Ok(());
+    let before = task.clone();
+    match apply_phase_outcome_typed(task, mode, transition, review_verdict, phase_error, now) {
+        Ok(()) => {}
+        // One task's outcome arriving in a state the FSM does not expect must
+        // not abort the run for every other task: block that task (work and
+        // worktree kept) with the explanation, and carry on.
+        Err(MaccError::Coordinator {
+            code: "invalid_transition",
+            message,
+        }) => {
+            *task = before;
+            block_unapplicable_phase_outcome(task, mode, &message, now);
+        }
+        Err(err) => return Err(err),
     }
+    *registry = typed.to_value()?;
+    Ok(())
+}
+
+/// Error code for a phase outcome the FSM could not apply.
+pub const E910_PHASE_OUTCOME_UNAPPLICABLE: &str = "E910";
+
+fn block_unapplicable_phase_outcome(task: &mut Task, mode: &str, message: &str, now: &str) {
+    let from = task.state.clone();
+    let detail = format!(
+        "The {mode} phase result of {} could not be applied from state '{from}' ({message}). The task is blocked with its worktree and commits kept; inspect it, then run `macc coordinator unblock-task --task {} --evidence \"<evidence>\"` to resume.",
+        task.id, task.id
+    );
+    task.set_workflow_state(WorkflowState::Blocked);
+    let runtime = task.ensure_runtime();
+    runtime.set_status(RuntimeStatus::Failed);
+    runtime.current_phase = Some(mode.to_string());
+    runtime.pid = None;
+    runtime.set_last_error_details(
+        E910_PHASE_OUTCOME_UNAPPLICABLE,
+        "coordinator",
+        detail.clone(),
+    );
+    runtime.last_error = Some(detail);
+    task.touch_state_changed(now);
+}
+
+fn apply_phase_outcome_typed(
+    task: &mut Task,
+    mode: &'static str,
+    transition: PhaseTransition,
+    review_verdict: Option<ReviewVerdict>,
+    phase_error: Option<&str>,
+    now: &str,
+) -> Result<()> {
+    let task_id = task.id.clone();
+    if let Some(reason) = phase_error {
+        return apply_phase_failure_typed(task, mode, reason, now);
+    }
+    task.task_runtime.extra.remove("phase_tool_unavailable");
     if mode == "review" {
         let verdict = review_verdict.ok_or_else(|| {
             MaccError::Validation(format!(
@@ -552,7 +560,6 @@ pub fn apply_phase_outcome_in_registry(
             let branch = task.branch().unwrap_or("unknown");
             task.pr_url = Some(format!("local://{}", branch));
         }
-        *registry = typed.to_value()?;
         return Ok(());
     }
     apply_phase_success_typed(task, transition, now)?;
@@ -562,7 +569,6 @@ pub fn apply_phase_outcome_in_registry(
         let branch = task.branch().unwrap_or("unknown");
         task.pr_url = Some(format!("local://{}", branch));
     }
-    *registry = typed.to_value()?;
     Ok(())
 }
 
@@ -674,6 +680,10 @@ pub fn apply_dispatch_pid(task: &mut Value, pid: Option<i64>) {
 }
 
 fn apply_dispatch_claim_typed(task: &mut Task, update: &DispatchClaimUpdate) {
+    let tool_changed = task
+        .task_tool()
+        .or(task.task_runtime.last_session_tool.as_deref())
+        .is_some_and(|previous| previous != update.tool);
     task.set_workflow_state(WorkflowState::Claimed);
     task.tool = Some(update.tool.clone());
     let worktree = task.ensure_worktree();
@@ -689,7 +699,10 @@ fn apply_dispatch_claim_typed(task: &mut Task, update: &DispatchClaimUpdate) {
     runtime.run_id = Some(update.run_id.clone());
     runtime.coordinator_epoch = Some(update.coordinator_epoch);
     runtime.claim_id = Some(update.session_id.clone());
-    if let Some(active_session_id) = update.active_session_id.as_ref() {
+    if tool_changed {
+        // Work is portable across tools; their conversation IDs are not.
+        runtime.active_session_id = update.active_session_id.clone();
+    } else if let Some(active_session_id) = update.active_session_id.as_ref() {
         runtime.active_session_id = Some(active_session_id.clone());
     }
     let log_prefix = format!(".macc/log/performer/{}/{}", update.task_id, update.run_id);
@@ -810,7 +823,7 @@ pub(crate) fn apply_review_phase_success_typed(
         ReviewVerdict::Ok => transition_workflow_state(
             from,
             WorkflowEvent::PhaseSucceeded("review"),
-            Some(WorkflowState::Merged),
+            Some(WorkflowState::PrOpen),
         )?,
         ReviewVerdict::ChangesRequested => transition_workflow_state(
             from,
@@ -824,7 +837,7 @@ pub(crate) fn apply_review_phase_success_typed(
     runtime.current_phase = Some("review".to_string());
     runtime.pid = None;
     runtime.delayed_until = None;
-    // Track the number of completed review cycles for max_review_cycles enforcement.
+    // Count completed reviews; a rejection at the limit still owns one correction.
     let cycles = runtime.review_cycles.unwrap_or(0) + 1;
     runtime.review_cycles = Some(cycles);
     task.touch_state_changed(now);
@@ -1164,7 +1177,6 @@ pub(super) enum RetryOutcome {
     },
     QuotaExhaustedRequeue {
         cooldown: u64,
-        delayed_until: String,
         error: CompletionErrorDetails,
         tool_error: Option<ToolError>,
         now_ts: u64,
@@ -1248,6 +1260,7 @@ fn apply_job_completion_typed(
         now,
     );
     task.task_runtime.result_explanation = input.result_explanation.clone();
+    task.task_runtime.unmet_preconditions = input.unmet_preconditions.clone();
     apply_state_transitions(task, &strategy, now)
 }
 
@@ -1263,6 +1276,11 @@ pub fn set_task_gate_verdict_in_registry(
             code: "task_not_found",
             message: format!("Task '{task_id}' not found in registry"),
         })?;
+    if task.is_human_approval_gate() {
+        // A tool can never decide a human approval. Ignore, do not fail the
+        // cycle: the attempt is recorded by the caller's event log.
+        return Ok(());
+    }
     task.task_runtime.gate_verdict = Some(verdict);
     *registry = typed.to_value()?;
     Ok(())
@@ -1441,6 +1459,16 @@ impl CoordinatorRunController {
     where
         F: FnOnce() -> StallDiagnosis,
     {
+        // A human approval gate is a checkpoint the run must wait at: nothing
+        // is stalled, no worker is busy, and the only thing that can move it is
+        // an operator decision. Never abort for "no progress" while one is
+        // open; the dispatcher resumes on its own once the quorum is met.
+        if counts.waiting_approval > 0 && counts.active == 0 {
+            self.no_progress_cycles = 0;
+            self.previous_counts = Some(counts);
+            return Ok(ControlPlaneDecision::Continue);
+        }
+
         if counts.todo == 0 && counts.active == 0 {
             if counts.blocked > 0 {
                 let stalled = diagnose();
@@ -1608,6 +1636,10 @@ async fn run_control_plane_cycle<B: ControlPlaneBackend + ?Sized>(
         return Ok(ControlPlaneDecision::Complete);
     }
     let last_fail = backend.last_dispatch_failure();
+    if counts.active == 0 && counts.todo > 0 && backend.waiting_for_tools() {
+        controller.no_progress_cycles = 0;
+        controller.previous_counts = None;
+    }
     controller.on_cycle_counts_with(counts, last_fail.as_deref(), || backend.diagnose_stall())
 }
 
@@ -1679,6 +1711,15 @@ impl NativeControlPlaneBackend<'_> {
 
 #[async_trait]
 impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
+    fn waiting_for_tools(&self) -> bool {
+        crate::coordinator::control_plane::waiting_for_tools_native(
+            self.repo_root,
+            self.canonical,
+            self.coordinator,
+            self.env_cfg,
+            &self.run_state,
+        )
+    }
     async fn on_cycle_start(&mut self, _cycle: usize) -> Result<()> {
         // Measure the previous cycle before starting this one, so ghost
         // detection can tell "the performer stopped" apart from "we stopped
@@ -1692,6 +1733,9 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
             &crate::ProjectPaths::from_root(self.repo_root),
         );
         let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
+
+        // Observe operator cooldown changes (including clears) without restarting the run.
+        self.run_state.throttle_registry = sqlite.load_throttle_registry()?;
 
         let _ = sqlite.get_active_coordinator_run().map(|run_opt| {
             if let Some(mut r) = run_opt {
@@ -1890,7 +1934,11 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
             }),
         )?;
         let grace = self.effective_ghost_grace_seconds();
-        if grace > self.ghost_heartbeat_grace_seconds {
+        // Logged when the widened grace changes, not on every cycle.
+        static LAST_LOGGED_GRACE: std::sync::atomic::AtomicI64 =
+            std::sync::atomic::AtomicI64::new(0);
+        let previous_grace = LAST_LOGGED_GRACE.swap(grace, std::sync::atomic::Ordering::Relaxed);
+        if grace > self.ghost_heartbeat_grace_seconds && grace != previous_grace {
             if let Some(log) = self.logger {
                 let _ = log.note(format!(
                     "- Ghost grace widened to {}s (configured {}s + {}s spent in the previous cycle)",
@@ -2057,6 +2105,7 @@ impl ControlPlaneBackend for NativeControlPlaneBackend<'_> {
             active,
             blocked,
             merged,
+            waiting_approval: snapshot.registry.waiting_approval_count(),
         };
         self.last_logged_counts = Some(counts);
         Ok(counts)
@@ -2140,6 +2189,25 @@ pub fn sync_storage_with_startup_reconcile(
 }
 
 pub async fn run_native_control_plane(
+    repo_root: &Path,
+    canonical: &CanonicalConfig,
+    coordinator: Option<&CoordinatorConfig>,
+    env_cfg: &crate::coordinator::types::CoordinatorEnvConfig,
+    logger: Option<&dyn CoordinatorLog>,
+) -> Result<()> {
+    let _queue_lock = crate::fs_lock::AdvisoryLock::acquire(
+        &repo_root.join(".macc/state/prd-queue.lock"),
+        std::time::Duration::ZERO,
+        "coordinator PRD queue",
+    )?;
+    if env_cfg.prd.is_some() || coordinator.is_none_or(|c| c.prd_files.is_empty()) {
+        return run_single_prd_control_plane(repo_root, canonical, coordinator, env_cfg, logger)
+            .await;
+    }
+    crate::prd_queue::run(repo_root, canonical, coordinator.unwrap(), env_cfg, logger).await
+}
+
+pub(crate) async fn run_single_prd_control_plane(
     repo_root: &Path,
     canonical: &CanonicalConfig,
     coordinator: Option<&CoordinatorConfig>,
@@ -2331,6 +2399,13 @@ pub async fn run_native_control_plane(
     let storage_mode = resolve_storage_mode(env_cfg, coordinator)?;
     let storage_paths = crate::ProjectPaths::from_root(repo_root);
     sync_storage_with_startup_reconcile(&storage_paths, storage_mode, json_compat, logger)?;
+    crate::coordinator::delivery_evidence::reconcile_before_dispatch(
+        repo_root,
+        &prd_file,
+        coordinator,
+        env_cfg,
+        logger,
+    )?;
     let startup_cleaned = if let Some(log) = logger {
         let note = |line: String| {
             let _ = log.note(line);
@@ -2523,6 +2598,15 @@ pub async fn run_native_control_plane(
         });
     }
 
+    if let Ok(ready_file) = std::env::var("MACC_COORDINATOR_READY_FILE") {
+        std::fs::write(&ready_file, format!("{}\n", std::process::id())).map_err(|source| {
+            MaccError::Io {
+                path: ready_file,
+                action: "publish coordinator readiness".into(),
+                source,
+            }
+        })?;
+    }
     let run_result = tokio::select! {
         res = run_control_plane(&mut backend, loop_cfg) => res,
         _ = shutdown_rx.changed() => {
@@ -2586,13 +2670,9 @@ pub async fn run_native_control_plane(
     // event, so recover it here to persist a meaningful stop_reason for clients
     // (TUI Watch, Web) that read the run record rather than the live process.
     let normal_stop_reason = |sqlite: &crate::coordinator_storage::SqliteStorage| -> String {
-        use crate::coordinator_storage::CoordinatorStorage;
-        if let Ok(snapshot) = sqlite.load_snapshot() {
-            let dispatch_limited = snapshot
-                .events
+        if let Ok(events) = sqlite.load_recent_events(20) {
+            let dispatch_limited = events
                 .iter()
-                .rev()
-                .take(20)
                 .any(|e| e.event_type == "dispatch_limit_reached");
             if dispatch_limited {
                 return "dispatch limit reached".to_string();
@@ -2710,6 +2790,7 @@ mod tests {
             error_origin: None,
             error_message: None,
             result_explanation: None,
+            unmet_preconditions: Vec::new(),
             auto_retry_error_codes: Vec::new(),
             auto_retry_max: 0,
             backoff_base_seconds: 30,
@@ -2914,12 +2995,12 @@ mod tests {
             })
         ));
 
-        // ChangesRequested should transition to RunPhase("fix") with next_state: WorkflowState::Testing
+        // Corrections re-enter validation, including enabled tests.
         assert!(matches!(
             plan_advance(WorkflowState::ChangesRequested, None, 0, &phases_enabled),
             AdvancePlan::RunPhase(PhaseTransition {
                 mode: "fix",
-                next_state: WorkflowState::Testing,
+                next_state: WorkflowState::InProgress,
                 ..
             })
         ));
@@ -2935,12 +3016,12 @@ mod tests {
             })
         ));
 
-        // ChangesRequested should transition to RunPhase("fix") with next_state: WorkflowState::Reviewing
+        // Corrections re-enter validation; review remains subject to its cycle budget.
         assert!(matches!(
             plan_advance(WorkflowState::ChangesRequested, None, 0, &phases_disabled),
             AdvancePlan::RunPhase(PhaseTransition {
                 mode: "fix",
-                next_state: WorkflowState::Reviewing,
+                next_state: WorkflowState::InProgress,
                 ..
             })
         ));
@@ -2998,10 +3079,10 @@ mod tests {
             plan_advance(WorkflowState::InProgress, Some(0), 0, &phases),
             AdvancePlan::Merge
         ));
-        // ChangesRequested with 0 cycles used but max=0 → merge directly
+        // An existing rejected review cannot be bypassed by disabling future reviews.
         assert!(matches!(
             plan_advance(WorkflowState::ChangesRequested, Some(0), 0, &phases),
-            AdvancePlan::Merge
+            AdvancePlan::ReviewBudgetExhausted
         ));
     }
 
@@ -3022,10 +3103,10 @@ mod tests {
             plan_advance(WorkflowState::ChangesRequested, Some(1), 0, &phases),
             AdvancePlan::RunPhase(PhaseTransition { mode: "fix", .. })
         ));
-        // max=1, 1 cycle done → exhausted, merge directly
+        // The first completed review still owns its requested correction.
         assert!(matches!(
             plan_advance(WorkflowState::ChangesRequested, Some(1), 1, &phases),
-            AdvancePlan::Merge
+            AdvancePlan::RunPhase(PhaseTransition { mode: "fix", .. })
         ));
     }
 
@@ -3046,15 +3127,15 @@ mod tests {
             plan_advance(WorkflowState::ChangesRequested, Some(3), 2, &phases),
             AdvancePlan::RunPhase(PhaseTransition { mode: "fix", .. })
         ));
-        // max=3, 3 done → exhausted, merge
+        // The third completed review still owns its correction.
         assert!(matches!(
             plan_advance(WorkflowState::ChangesRequested, Some(3), 3, &phases),
-            AdvancePlan::Merge
+            AdvancePlan::RunPhase(PhaseTransition { mode: "fix", .. })
         ));
-        // max=3, 5 done → way past, merge
+        // Older/inconsistent counters above the budget must block, never merge.
         assert!(matches!(
             plan_advance(WorkflowState::ChangesRequested, Some(3), 5, &phases),
-            AdvancePlan::Merge
+            AdvancePlan::ReviewBudgetExhausted
         ));
     }
 
@@ -3115,6 +3196,7 @@ mod tests {
                 error_origin: None,
                 error_message: None,
                 result_explanation: None,
+                unmet_preconditions: Vec::new(),
                 auto_retry_error_codes: Vec::new(),
                 auto_retry_max: 0,
                 backoff_base_seconds: 30,
@@ -3149,6 +3231,7 @@ mod tests {
                 error_origin: None,
                 error_message: None,
                 result_explanation: None,
+                unmet_preconditions: Vec::new(),
                 auto_retry_error_codes: Vec::new(),
                 auto_retry_max: 0,
                 backoff_base_seconds: 30,
@@ -3189,6 +3272,7 @@ mod tests {
                 error_origin: None,
                 error_message: None,
                 result_explanation: None,
+                unmet_preconditions: Vec::new(),
                 auto_retry_error_codes: Vec::new(),
                 auto_retry_max: 0,
                 backoff_base_seconds: 30,
@@ -3234,6 +3318,7 @@ mod tests {
                 error_origin: Some("runner".to_string()),
                 error_message: Some("non-zero exit".to_string()),
                 result_explanation: None,
+                unmet_preconditions: Vec::new(),
                 auto_retry_error_codes: Vec::new(),
                 auto_retry_max: 0,
                 backoff_base_seconds: 30,
@@ -3278,6 +3363,7 @@ mod tests {
                 error_origin: Some("runner".to_string()),
                 error_message: Some("auth error".to_string()),
                 result_explanation: None,
+                unmet_preconditions: Vec::new(),
                 auto_retry_error_codes: Vec::new(),
                 auto_retry_max: 0,
                 backoff_base_seconds: 30,
@@ -3617,6 +3703,7 @@ mod tests {
                 error_origin: None,
                 error_message: None,
                 result_explanation: None,
+                unmet_preconditions: Vec::new(),
                 auto_retry_error_codes: Vec::new(),
                 auto_retry_max: 0,
                 backoff_base_seconds: 30,
@@ -3690,6 +3777,7 @@ mod tests {
                 error_origin: None,
                 error_message: None,
                 result_explanation: None,
+                unmet_preconditions: Vec::new(),
                 auto_retry_error_codes: Vec::new(),
                 auto_retry_max: 0,
                 backoff_base_seconds: 30,
@@ -4120,6 +4208,7 @@ mod tests {
             error_origin: None,
             error_message: None,
             result_explanation: None,
+            unmet_preconditions: Vec::new(),
             auto_retry_error_codes: Vec::new(),
             auto_retry_max: 0,
             backoff_base_seconds: 30,
@@ -4165,6 +4254,7 @@ mod tests {
                 error_origin: Some("runner".to_string()),
                 error_message: Some("auth error".to_string()),
                 result_explanation: None,
+                unmet_preconditions: Vec::new(),
                 auto_retry_error_codes: Vec::new(),
                 auto_retry_max: 0,
                 backoff_base_seconds: 30,
@@ -4195,6 +4285,7 @@ mod tests {
             error_origin: None,
             error_message: None,
             result_explanation: None,
+            unmet_preconditions: Vec::new(),
             auto_retry_error_codes: Vec::new(),
             auto_retry_max: 0,
             backoff_base_seconds: 30,
@@ -4509,6 +4600,225 @@ mod tests {
         assert_eq!(out.status_label, "precondition_unmet");
     }
 
+    /// The review phase starts while the task is still recorded in `testing`;
+    /// a changes-requested verdict from there must be applied, not abort the run.
+    #[test]
+    fn a_changes_requested_review_is_applied_from_testing() {
+        let mut registry = json!({"tasks":[{
+            "id":"L4L-BASELINE-001","state":"testing",
+            "task_runtime":{"status":"phase_done","current_phase":"test"}
+        }]});
+        apply_phase_outcome_in_registry(
+            &mut registry,
+            "L4L-BASELINE-001",
+            "review",
+            PhaseTransition {
+                mode: "review",
+                next_state: WorkflowState::Reviewing,
+                runtime_phase: "review",
+            },
+            Some(ReviewVerdict::ChangesRequested),
+            None,
+            "2026-10-14T14:30:10Z",
+        )
+        .expect("a legitimate review verdict never aborts the run");
+        let task = &registry["tasks"][0];
+        assert_eq!(task["state"], "changes_requested");
+        assert_eq!(task["task_runtime"]["review_cycles"], 1);
+    }
+
+    /// Any other outcome the FSM cannot apply blocks only that task (E910),
+    /// with an explanation, instead of failing the whole coordinator run.
+    #[test]
+    fn an_unapplicable_phase_outcome_blocks_the_task_instead_of_the_run() {
+        let mut registry = json!({"tasks":[{
+            "id":"T-1","state":"pr_open",
+            "worktree":{"worktree_path":"/tmp/wt","branch":"ai/codex/worker-01"},
+            "task_runtime":{"status":"phase_done"}
+        }]});
+        apply_phase_outcome_in_registry(
+            &mut registry,
+            "T-1",
+            "review",
+            PhaseTransition {
+                mode: "review",
+                next_state: WorkflowState::Reviewing,
+                runtime_phase: "review",
+            },
+            Some(ReviewVerdict::ChangesRequested),
+            None,
+            "2026-10-14T14:30:10Z",
+        )
+        .expect("the run continues");
+        let task = &registry["tasks"][0];
+        assert_eq!(task["state"], "blocked");
+        assert_eq!(task["task_runtime"]["last_error_code"], "E910");
+        assert_eq!(task["worktree"]["branch"], "ai/codex/worker-01");
+        let message = task["task_runtime"]["last_error_message"].as_str().unwrap();
+        assert!(
+            message.contains("could not be applied from state 'pr_open'"),
+            "{message}"
+        );
+        assert!(message.contains("unblock-task --task T-1"), "{message}");
+    }
+
+    /// A precondition whose fix is in another module's source is flagged as
+    /// out of scope, so the operator and the supervisor see a repair is
+    /// needed rather than a retry.
+    #[test]
+    fn a_precondition_fixed_outside_the_change_scope_is_flagged() {
+        let mut task = json!({
+            "id":"WEB-UI-005","state":"claimed","tool":"claude",
+            "change_scope":{"allowed_paths":["apps/web/**"]},
+            "task_runtime":{"status":"running","retries":0}
+        });
+        let mut input = make_error_completion_input(PerformerCompletionKind::PreconditionUnmet);
+        input.success = false;
+        input.unmet_preconditions =
+            vec!["apps/api/src/routes/session.ts must declare the web audience".to_string()];
+
+        let out = apply_job_completion(
+            &mut task,
+            &input,
+            &NormalizerRegistry::empty(),
+            "2026-08-30T10:00:00Z",
+        );
+
+        assert_eq!(
+            task["task_runtime"]["out_of_scope_fix"]["paths"],
+            json!(["apps/api/src/routes/session.ts"])
+        );
+        let message = task["task_runtime"]["last_error_message"].as_str().unwrap();
+        assert!(
+            message.starts_with("Task WEB-UI-005 cannot be implemented"),
+            "{message}"
+        );
+        assert!(
+            message.contains("outside WEB-UI-005's change scope"),
+            "{message}"
+        );
+        assert!(out.detail.contains("not a retry of WEB-UI-005"));
+    }
+
+    /// A quota cooldown recorded on an earlier attempt must not outlive a
+    /// later attempt where the tool ran and answered.
+    #[test]
+    fn a_non_quota_outcome_clears_the_stale_throttle_state() {
+        let mut task = json!({
+            "id":"WEB-UI-005","state":"claimed","tool":"claude",
+            "task_runtime":{
+                "status":"running","retries":0,
+                "delayed_until":"2026-08-31T10:00:00Z",
+                "throttle_state":{"tool_id":"claude","throttled_until":1788170400,"backoff_seconds":86400}
+            }
+        });
+        let mut input = make_error_completion_input(PerformerCompletionKind::PreconditionUnmet);
+        input.success = false;
+        input.unmet_preconditions = vec!["the API audience must include web".to_string()];
+
+        apply_job_completion(
+            &mut task,
+            &input,
+            &NormalizerRegistry::empty(),
+            "2026-08-30T10:00:00Z",
+        );
+
+        assert_eq!(task["state"], "blocked");
+        assert!(task["task_runtime"].get("throttle_state").is_none());
+        assert!(task["task_runtime"]["delayed_until"].is_null());
+    }
+
+    #[test]
+    fn a_waiting_approval_gate_keeps_the_run_alive_instead_of_aborting() {
+        // One dependant in todo, nothing active, a gate waiting for humans.
+        // Without the approval rule this is "no progress for N cycles" and the
+        // run aborts; with it the run idles until someone decides.
+        let mut controller = CoordinatorRunController::new(ControlPlaneLoopConfig {
+            timeout: None,
+            max_no_progress_cycles: 3,
+        });
+        let counts = CoordinatorCounts {
+            total: 3,
+            todo: 1,
+            active: 0,
+            blocked: 0,
+            merged: 1,
+            waiting_approval: 1,
+        };
+        for _ in 0..10 {
+            let decision = controller
+                .on_cycle_counts(counts, None)
+                .expect("a waiting approval must never abort the run");
+            assert_eq!(decision, ControlPlaneDecision::Continue);
+        }
+        // Once the quorum is met and nothing waits, normal stall rules apply again.
+        let mut stuck = counts;
+        stuck.waiting_approval = 0;
+        let mut aborted = false;
+        for _ in 0..10 {
+            if controller.on_cycle_counts(stuck, None).is_err() {
+                aborted = true;
+                break;
+            }
+        }
+        assert!(
+            aborted,
+            "stall detection must resume when nothing waits for approval"
+        );
+    }
+
+    #[test]
+    fn precondition_unmet_records_the_conditions_as_cannot_be_implemented() {
+        // The GTransport SEC-API-003 case: codex listed the unmet conditions,
+        // MACC stored only "tool execution failed". The recorded message must
+        // now carry the list, and the list must persist on the task itself.
+        let mut task = json!({
+            "id":"SEC-API-003","state":"claimed","tool":"codex",
+            "task_runtime":{"status":"running","retries":0}
+        });
+        let mut input = make_error_completion_input(PerformerCompletionKind::PreconditionUnmet);
+        input.success = false;
+        input.status_text = "tool execution failed".to_string();
+        input.result_explanation = Some(
+            "Required approval and recovery-code data-model decisions remain unresolved."
+                .to_string(),
+        );
+        input.unmet_preconditions = vec![
+            "SEC-CR-001 is still explicitly pending Product Owner and lead architect approval."
+                .to_string(),
+            "Recovery-code persistence remains undecided and has no database entity.".to_string(),
+        ];
+
+        let out = apply_job_completion(
+            &mut task,
+            &input,
+            &NormalizerRegistry::empty(),
+            "2026-09-21T09:48:09Z",
+        );
+
+        assert_eq!(task["state"], "blocked");
+        assert!(!out.should_retry);
+        assert_eq!(task["task_runtime"]["last_error_code"], "E903");
+        assert_eq!(task["task_runtime"]["last_error_origin"], "precondition");
+        let message = task["task_runtime"]["last_error_message"]
+            .as_str()
+            .expect("message recorded");
+        assert!(
+            message.starts_with("Task SEC-API-003 cannot be implemented because the following preconditions are not satisfied:"),
+            "{message}"
+        );
+        assert!(message.contains("- SEC-CR-001 is still explicitly pending"));
+        assert!(message.contains("- Recovery-code persistence remains undecided"));
+        assert!(
+            !message.contains("tool execution failed"),
+            "a correct stop must not be recorded as a tool failure: {message}"
+        );
+        let stored = task["task_runtime"]["unmet_preconditions"]
+            .as_array()
+            .expect("list persisted on the task");
+        assert_eq!(stored.len(), 2);
+    }
+
     #[test]
     fn explained_error_without_changes_is_not_retried() {
         let mut task = json!({
@@ -4692,6 +5002,7 @@ mod tests {
                 error_origin: None,
                 error_message: None,
                 result_explanation: None,
+                unmet_preconditions: Vec::new(),
                 auto_retry_error_codes: Vec::new(),
                 auto_retry_max: 0,
                 backoff_base_seconds: 30,
@@ -4874,6 +5185,7 @@ mod tests {
                 error_origin: None,
                 error_message: None,
                 result_explanation: None,
+                unmet_preconditions: Vec::new(),
                 auto_retry_error_codes: Vec::new(),
                 auto_retry_max: 0,
                 backoff_base_seconds: 30,

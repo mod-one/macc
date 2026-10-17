@@ -224,6 +224,11 @@ const WorkerTile: React.FC<{
               {task.title ?? task.id}
             </p>
           )}
+          {task && (
+            <p className="text-[10px] text-[var(--text-muted)] break-words" aria-label="Model and effort">
+              Model: {task.model ?? '-'} · Effort: {task.effort ?? '-'}
+            </p>
+          )}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
           <span
@@ -381,6 +386,9 @@ const TaskRow: React.FC<{ task: ApiRegistryTask; isFeatured?: boolean }> = ({ ta
           {task.tool && (
             <span style={{ fontSize: '10px', color: 'var(--text-muted)' }}>· {task.tool}</span>
           )}
+          <span className="text-[10px] text-[var(--text-muted)]" aria-label="Model and effort">
+            · Model: {task.model ?? '-'} · Effort: {task.effort ?? '-'}
+          </span>
           {phase && (
             <span style={{ fontSize: '10px', color: 'var(--text-muted)' }}>· {phase}</span>
           )}
@@ -779,6 +787,11 @@ const Console: React.FC = () => {
           {status.last_run_summary.dependent_task_ids.length > 0 && (
             <div style={{ marginTop: 4, color: 'var(--text-muted)' }}>
               Affected: {status.last_run_summary.dependent_task_ids.join(', ')}
+            </div>
+          )}
+          {(status.last_run_summary.out_of_scope_paths?.length ?? 0) > 0 && (
+            <div style={{ marginTop: 4, color: 'var(--warning)' }}>
+              Out of scope: the fix lies in {status.last_run_summary.out_of_scope_paths!.join(', ')} (another module) — a repair is needed, not a retry.
             </div>
           )}
           <div style={{ marginTop: 4 }}>Next: {status.last_run_summary.next_action}</div>

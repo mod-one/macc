@@ -18,9 +18,14 @@ use ratatui::{
 };
 use std::{collections::BTreeMap, io, time::Duration};
 
+pub mod approval;
+mod coordinator_poll;
 pub mod ownership;
+pub mod prd_queue;
 pub mod screen;
 pub mod state;
+mod supervisor;
+mod tool_cooldowns;
 pub mod ui;
 
 use macc_core::plan::{PlannedOpKind, Scope};
@@ -36,6 +41,10 @@ pub enum LaunchMode {
     /// `phase_overrides` is a human-readable summary of active runtime phase overrides
     /// (e.g. `"[testing:off] [review:required]"`), or `None` when none are active.
     CoordinatorRun {
+        phase_overrides: Option<String>,
+    },
+    /// Attach to an already running and supervised coordinator.
+    CoordinatorAttach {
         phase_overrides: Option<String>,
     },
     /// Launch into the read-only observer/watch screen (`macc status --watch`).
@@ -88,6 +97,11 @@ pub fn run_tui_with_launch(mode: LaunchMode) -> Result<()> {
             state.start_coordinator_command(CoordinatorCommand::Run);
             state.coordinator_run_auto_quit = true;
             state.coordinator_phase_overrides = phase_overrides;
+        }
+        LaunchMode::CoordinatorAttach { phase_overrides } => {
+            state.goto_screen(Screen::CoordinatorLive);
+            state.coordinator_phase_overrides = phase_overrides;
+            state.coordinator_run_auto_quit = false;
         }
         LaunchMode::Watch {
             control,
@@ -171,6 +185,16 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
         return;
     }
 
+    if let Some(window) = state.approval_window.as_mut() {
+        match window.key(key) {
+            approval::Outcome::Continue => {}
+            approval::Outcome::Later => state.snooze_approval_window(),
+            approval::Outcome::Next => state.next_approval_window(),
+            approval::Outcome::Submit(decision) => state.submit_approval(decision),
+        }
+        return;
+    }
+
     if state.has_coordinator_finished_prompt() {
         match key {
             KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('k') => {
@@ -194,6 +218,31 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
         return;
     }
 
+    if let Some(editor) = &mut state.prd_queue_editor {
+        match editor.key(key) {
+            prd_queue::Outcome::Continue => {}
+            prd_queue::Outcome::Cancel => state.prd_queue_editor = None,
+            prd_queue::Outcome::Reset => {
+                let result = state.reset_prd_queue_progress();
+                if let Some(editor) = &mut state.prd_queue_editor {
+                    editor.report_reset(result);
+                }
+            }
+            prd_queue::Outcome::Save => {
+                let files = editor.files.clone();
+                state.snapshot_before_config_change();
+                if let Some(config) = &mut state.working_copy {
+                    config
+                        .automation
+                        .coordinator
+                        .get_or_insert_with(Default::default)
+                        .prd_files = files;
+                }
+                state.prd_queue_editor = None;
+            }
+        }
+        return;
+    }
     if state.command_palette_open {
         handle_command_palette_key(state, key);
         return;
@@ -456,6 +505,7 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
         KeyCode::Char(c) if current_screen == Screen::Apply && !matches!(c, 'q' | 'Q') => {
             state.append_apply_consent_char(c);
         }
+        KeyCode::Char('A') => state.open_approval_window(),
         // Navigation: Esc/q to quit (or pop if in a sub-screen)
         KeyCode::Esc | KeyCode::Char('q') => {
             if state.screen_stack.len() > 1 {
@@ -486,6 +536,9 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
             state.open_apply_screen();
         }
 
+        KeyCode::Char('C') if current_screen == Screen::Tools => {
+            state.reset_selected_tool_cooldown()
+        }
         // Navigation: Backspace to go back
         KeyCode::Backspace => state.pop_screen(),
 
@@ -689,6 +742,10 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
 }
 
 fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
+    if let Some(editor) = &state.prd_queue_editor {
+        editor.draw(f);
+        return;
+    }
     let theme = theme();
     if full_clear {
         f.render_widget(Clear, f.size());
@@ -706,9 +763,19 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
         } else {
             None
         };
-    let header_height = 5
-        + u16::from(trust_strip.is_some())
-        + u16::from(state.coordinator_phase_overrides.is_some());
+    let supervisor_strip = if current_screen == Screen::CoordinatorLive {
+        state
+            .project_paths
+            .as_ref()
+            .and_then(supervisor::status_strip)
+    } else {
+        None
+    };
+    let override_strip = match (&state.coordinator_phase_overrides, supervisor_strip) {
+        (Some(phases), Some(status)) => Some(format!("{phases} | {status}")),
+        (phases, status) => status.or_else(|| phases.clone()),
+    };
+    let header_height = 5 + u16::from(trust_strip.is_some()) + u16::from(override_strip.is_some());
     let footer_height = if current_screen == Screen::CoordinatorLive {
         4
     } else {
@@ -757,7 +824,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
         status: state.status_line(),
         width: header_area.width,
         trust_strip,
-        override_strip: state.coordinator_phase_overrides.clone(),
+        override_strip,
     };
     let title = Paragraph::new(header_lines(&header_ctx, &theme)).block(panel("MACC"));
     f.render_widget(title, header_area);
@@ -1787,8 +1854,12 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Length(3), // ownership banner
-                    Constraint::Length(1), // summary header status line
-                    Constraint::Min(0),    // vertical stacked panes
+                    Constraint::Length(if state.coordinator_throttled_tools.is_empty() {
+                        1
+                    } else {
+                        2
+                    }),
+                    Constraint::Min(0), // vertical stacked panes
                 ])
                 .split(body_area);
             render_coordinator_ownership_banner(f, live_chunks[0], state);
@@ -1826,9 +1897,32 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             } else {
                 String::new()
             };
+            // Several PRD files can be queued: name the one being executed.
+            let prd_line = state
+                .project_paths
+                .as_ref()
+                .map(|paths| {
+                    let coordinator = state
+                        .working_copy
+                        .as_ref()
+                        .and_then(|config| config.automation.coordinator.as_ref());
+                    macc_core::prd_queue::current(&paths.root, coordinator).label()
+                })
+                .unwrap_or_else(|| "unavailable".to_string());
             let summary_para = Paragraph::new(format!(
-                "Coordinator: {} | Tasks: {}{}",
-                status_line, snapshot_line, search_line
+                "Coordinator: {} | PRD: {} | Tasks: {}{}{}",
+                status_line,
+                prd_line,
+                snapshot_line,
+                search_line,
+                if state.coordinator_throttled_tools.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "\n{}",
+                        tool_cooldowns::label(&state.coordinator_throttled_tools)
+                    )
+                }
             ))
             .style(Style::default().fg(theme.accent_dim));
             f.render_widget(summary_para, live_chunks[1]);
@@ -1860,7 +1954,14 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 && !state.is_coordinator_paused()
                 && snapshot_total == 0
                 && filtered_tasks.is_empty();
-            if filtered_tasks.is_empty() {
+            // The supervisor is not a registry task: it gets its own pinned,
+            // differently styled row so it cannot be mistaken for one.
+            let supervisor_row = state
+                .project_paths
+                .as_ref()
+                .and_then(|paths| supervisor::live(paths, state.is_coordinator_running()));
+            let supervisor_now = chrono::Utc::now();
+            if filtered_tasks.is_empty() && supervisor_row.is_none() {
                 let empty_lines = coordinator_live_empty_lines(
                     coordinator_live_empty,
                     !state.search_query.is_empty(),
@@ -1872,6 +1973,19 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 f.render_widget(empty_para, body_chunks[0]);
             } else {
                 let mut rows = Vec::new();
+                if let Some(live) = supervisor_row.as_ref() {
+                    let style = Style::default()
+                        .fg(if live.active {
+                            Color::Magenta
+                        } else {
+                            theme.warn
+                        })
+                        .add_modifier(Modifier::BOLD);
+                    rows.push(
+                        Row::new(supervisor::row_cells(live, supervisor_now).map(Cell::from))
+                            .style(style),
+                    );
+                }
                 for task in &filtered_tasks {
                     let health_symbol = task.health.symbol();
 
@@ -1924,6 +2038,11 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                         Cell::from(status_text),
                         Cell::from(tool.to_string()),
                         Cell::from(model.to_string()),
+                        Cell::from(if task.effort.is_empty() {
+                            "-"
+                        } else {
+                            &task.effort
+                        }),
                         Cell::from(age_label),
                         Cell::from(hb_label),
                     ];
@@ -1937,6 +2056,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                     Cell::from("Status").style(Style::default().fg(theme.accent)),
                     Cell::from("Tool").style(Style::default().fg(theme.accent)),
                     Cell::from("Model").style(Style::default().fg(theme.accent)),
+                    Cell::from("Effort").style(Style::default().fg(theme.accent)),
                     Cell::from("Age").style(Style::default().fg(theme.accent)),
                     Cell::from("HB").style(Style::default().fg(theme.accent)),
                 ]);
@@ -1944,24 +2064,38 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 let widths = [
                     Constraint::Length(8),
                     Constraint::Length(12),
-                    Constraint::Length(25),
+                    Constraint::Min(16),
                     Constraint::Length(12),
                     Constraint::Length(10),
                     Constraint::Length(15),
                     Constraint::Length(8),
                     Constraint::Length(8),
+                    Constraint::Length(8),
                 ];
+                let live_title = match supervisor_row.as_ref() {
+                    Some(live) if live.active => "LIVE TASKS — supervisor intervention running",
+                    Some(_) => "LIVE TASKS — supervisor intervention needs attention",
+                    None => "LIVE TASKS",
+                };
                 let tasks_table = Table::new(rows, widths)
                     .header(headers)
-                    .block(panel("LIVE TASKS"))
+                    .block(panel(live_title))
                     .highlight_style(Style::default().bg(theme.highlight_bg))
                     .highlight_symbol("› ");
 
                 let mut table_state = TableState::default();
-                let clamped_idx = state
-                    .coordinator_selected_task_index
-                    .min(filtered_tasks.len() - 1);
-                table_state.select(Some(clamped_idx));
+                // Task selection skips the pinned supervisor row; with no task
+                // to select, the row itself is highlighted and detailed below.
+                let offset = usize::from(supervisor_row.is_some());
+                let selected_row = if filtered_tasks.is_empty() {
+                    0
+                } else {
+                    offset
+                        + state
+                            .coordinator_selected_task_index
+                            .min(filtered_tasks.len() - 1)
+                };
+                table_state.select(Some(selected_row));
                 f.render_stateful_widget(tasks_table, body_chunks[0], &mut table_state);
             }
 
@@ -1970,9 +2104,8 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             let mut detail_lines = Vec::new();
             if let Some(ref t) = selected_task {
                 let full_task = state
-                    .load_coordinator_storage_snapshot()
-                    .ok()
-                    .and_then(|s| s.registry.tasks.into_iter().find(|rt| rt.id == t.task_id));
+                    .coordinator_registry_for_render()
+                    .and_then(|r| r.tasks.iter().find(|rt| rt.id == t.task_id).cloned());
                 let title = full_task
                     .as_ref()
                     .and_then(|rt| rt.title.clone())
@@ -2069,6 +2202,18 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                         Span::styled(format!(" {}", exp), Style::default().fg(theme.bad)),
                     ]));
                 }
+            } else if let Some(live) = supervisor_row.as_ref() {
+                for (label, text, kind) in supervisor::detail(live, supervisor_now) {
+                    let style = match kind {
+                        supervisor::DetailKind::Problem => Style::default().fg(theme.bad),
+                        supervisor::DetailKind::Action => Style::default().fg(theme.accent),
+                        supervisor::DetailKind::Info => Style::default(),
+                    };
+                    detail_lines.push(Line::from(vec![
+                        Span::styled(label, Style::default().fg(Color::Magenta)),
+                        Span::styled(text, style),
+                    ]));
+                }
             } else {
                 if coordinator_live_empty {
                     detail_lines.extend(coordinator_live_empty_lines(true, false, snapshot_total));
@@ -2082,8 +2227,13 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                     ));
                 }
             }
+            let detail_title = if selected_task.is_none() && supervisor_row.is_some() {
+                "SUPERVISOR TASK DETAIL"
+            } else {
+                "SELECTED TASK DETAIL"
+            };
             let detail_para = Paragraph::new(detail_lines)
-                .block(panel("SELECTED TASK DETAIL"))
+                .block(panel(detail_title))
                 .wrap(Wrap { trim: true });
             f.render_widget(detail_para, body_chunks[1]);
 
@@ -2121,10 +2271,33 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                             summary.headline.clone(),
                             Style::default().add_modifier(Modifier::BOLD),
                         )));
-                        logs_lines.push(Line::from(vec![
-                            Span::styled("Cause: ", Style::default().fg(theme.muted)),
-                            Span::raw(summary.cause.clone()),
-                        ]));
+                        if summary.unmet_preconditions.is_empty() {
+                            logs_lines.push(Line::from(vec![
+                                Span::styled("Cause: ", Style::default().fg(theme.muted)),
+                                Span::raw(summary.cause.clone()),
+                            ]));
+                        } else {
+                            logs_lines.push(Line::from(vec![
+                                Span::styled("Cause: ", Style::default().fg(theme.muted)),
+                                Span::raw(format!(
+                                    "{} cannot be implemented because the following precondition{} not satisfied:",
+                                    summary.task_id.as_deref().unwrap_or("the blocked task"),
+                                    if summary.unmet_preconditions.len() == 1 { " is" } else { "s are" }
+                                )),
+                            ]));
+                            for item in &summary.unmet_preconditions {
+                                logs_lines.push(Line::from(format!("  - {}", item)));
+                            }
+                        }
+                        if !summary.out_of_scope_paths.is_empty() {
+                            logs_lines.push(Line::from(vec![
+                                Span::styled("Out of scope: ", Style::default().fg(theme.warn)),
+                                Span::raw(format!(
+                                    "the fix lies in {} (another module): a repair is needed, not a retry",
+                                    summary.out_of_scope_paths.join(", ")
+                                )),
+                            ]));
+                        }
                         if !summary.dependent_task_ids.is_empty() {
                             logs_lines.push(Line::from(vec![
                                 Span::styled("Affected: ", Style::default().fg(theme.muted)),
@@ -2172,9 +2345,8 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 } else if let Some(ref t) = selected_task {
                     panel_title = "LIVE LOGS";
                     let full_task = state
-                        .load_coordinator_storage_snapshot()
-                        .ok()
-                        .and_then(|s| s.registry.tasks.into_iter().find(|rt| rt.id == t.task_id));
+                        .coordinator_registry_for_render()
+                        .and_then(|r| r.tasks.iter().find(|rt| rt.id == t.task_id).cloned());
                     let mut read_success = false;
                     if let Some(ref ft) = full_task {
                         if let Some(ref stdout_rel) = ft.task_runtime.stdout_log {
@@ -2223,6 +2395,35 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                         logs_lines.push(Line::from(line.clone()));
                     }
                 }
+                // Human approvals come first, live or idle: the run is alive but
+                // cannot proceed until someone decides, and that is the one
+                // thing the operator must see.
+                let approval_lines = approval_request_lines(&state.coordinator_pending_approvals);
+                let panel_title = if approval_lines.is_empty() {
+                    panel_title
+                } else {
+                    "APPROVAL REQUIRED"
+                };
+                let logs_lines = if approval_lines.is_empty() {
+                    logs_lines
+                } else {
+                    let mut all = approval_lines
+                        .into_iter()
+                        .map(|(text, strong)| {
+                            if strong {
+                                Line::from(Span::styled(
+                                    text,
+                                    Style::default().fg(theme.warn).add_modifier(Modifier::BOLD),
+                                ))
+                            } else {
+                                Line::from(text)
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    all.push(Line::from(""));
+                    all.extend(logs_lines);
+                    all
+                };
                 let logs_para = Paragraph::new(logs_lines)
                     .block(panel(panel_title))
                     .wrap(Wrap { trim: true });
@@ -2355,6 +2556,15 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                     status_label,
                     is_enabled,
                 );
+                detail.push_str("\nC: Reset MACC cooldown (does not renew provider quota).\n");
+                detail.push_str(&tool_cooldowns::label(
+                    &state
+                        .coordinator_throttled_tools
+                        .iter()
+                        .filter(|entry| entry.tool_id == tool.id)
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                ));
                 if matches!(status, macc_core::doctor::ToolStatus::Missing) {
                     if let Some(install) = &tool.install {
                         detail.push_str("\nInstall:\n");
@@ -2514,6 +2724,9 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
     }
     if state.help_open {
         render_help_overlay(f, state);
+    }
+    if let Some(window) = &state.approval_window {
+        window.draw(f);
     }
 }
 
@@ -3834,6 +4047,55 @@ mod tests {
     }
 }
 
+/// Text of the approval block in Coordinator Live: one entry per waiting gate
+/// with subject, revision, risks, approvers and the command to decide.
+/// `(line, emphasised)`; pure so the wording is testable.
+fn approval_request_lines(
+    pending: &[macc_core::coordinator::approval::PendingApproval],
+) -> Vec<(String, bool)> {
+    let mut out = Vec::new();
+    for p in pending {
+        out.push((
+            format!(
+                "{} waits for human approval [{}] — no performer runs, no worker is used",
+                p.task_id, p.status
+            ),
+            true,
+        ));
+        out.push((
+            format!(
+                "  Subject:   {} at {}",
+                p.subject_task,
+                p.subject_revision.as_deref().unwrap_or("unknown revision")
+            ),
+            false,
+        ));
+        if let Some(d) = p.description.as_deref() {
+            out.push((format!("  Decision:  {d}"), false));
+        }
+        for risk in &p.risks {
+            out.push((format!("  Risk:      {risk}"), false));
+        }
+        out.push((format!("  Approvers: {}", p.required), false));
+        if let Some(note) = p.note.as_deref() {
+            out.push((format!("  Status:    {note}"), false));
+        }
+        if let Some(stat) = p.diff_stat.as_deref() {
+            for line in stat.lines().take(8) {
+                out.push((format!("  {line}"), false));
+            }
+        }
+        if p.awaiting_decision {
+            out.push((
+                "  Decide:    press A to read the full request and decide here".to_string(),
+                false,
+            ));
+        }
+        out.push((format!("  CLI:       {}", p.approve_command), false));
+    }
+    out
+}
+
 fn render_coordinator_pause_overlay(f: &mut Frame, state: &AppState) {
     let area = ui::centered_rect(75, 45, f.size());
     f.render_widget(Clear, area);
@@ -3850,6 +4112,84 @@ fn render_coordinator_pause_overlay(f: &mut Frame, state: &AppState) {
         (Some(task), None) => format!("task={} phase=dev", task),
         _ => "global/blocking (no task context)".to_string(),
     };
+    let summary = state.coordinator_run_summary.as_ref();
+    let (title, text, border) = pause_overlay_content(
+        message,
+        &retry_target,
+        command_name,
+        summary.and_then(|s| s.error_code.as_deref()),
+        summary.and_then(|s| s.task_id.as_deref()),
+        summary
+            .map(|s| s.unmet_preconditions.as_slice())
+            .unwrap_or(&[]),
+        summary.map(|s| s.next_action.as_str()),
+    );
+    let popup = Paragraph::new(text)
+        .block(
+            Block::default()
+                .title(title)
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(border)),
+        )
+        .wrap(Wrap { trim: true });
+    f.render_widget(popup, area);
+}
+
+/// Title, body and border colour of the pause/stop overlay.
+///
+/// Pure so the wording can be unit-tested. A `precondition_unmet` stop (E903)
+/// is *not* an error: the tool did exactly what the task specified. It gets
+/// its own title and a body that lists the unsatisfied conditions instead of
+/// the retry/skip menu, which would only re-run the same correct refusal.
+fn pause_overlay_content(
+    message: &str,
+    retry_target: &str,
+    command_name: &str,
+    error_code: Option<&str>,
+    blocked_task_id: Option<&str>,
+    unmet_preconditions: &[String],
+    next_action: Option<&str>,
+) -> (&'static str, String, Color) {
+    // Recorded preconditions decide the overlay, whichever code the failure
+    // was normalized to: the retry menu would only repeat the same refusal.
+    let is_precondition_stop =
+        error_code == Some("E903") || message.contains("[E903]") || !unmet_preconditions.is_empty();
+    if is_precondition_stop {
+        let task = blocked_task_id.unwrap_or("The blocked task");
+        let mut body = format!(
+            "{} cannot be implemented because the following precondition{} not satisfied:\n",
+            task,
+            if unmet_preconditions.len() == 1 {
+                " is"
+            } else {
+                "s are"
+            }
+        );
+        if unmet_preconditions.is_empty() {
+            // No structured list: fall back to the recorded message, which
+            // already carries the tool's explanation.
+            body.push_str(&format!("\n{}\n", message.trim()));
+        } else {
+            for item in unmet_preconditions {
+                body.push_str(&format!("  - {}\n", item));
+            }
+        }
+        body.push_str(
+            "\nThis is not a tool failure: the task stopped as its specification requires. Retrying unchanged will stop again.\n",
+        );
+        if let Some(action) = next_action {
+            body.push_str(&format!("\nNext: {}\n", action));
+        }
+        body.push_str(
+            "\n- Press 'o': open Logs screen\n- Press 'k' or Esc: close and keep the run stopped\n",
+        );
+        body.push_str(&format!("\nCommand: {}\n", command_name));
+        return (
+            "Coordinator Blocked — Preconditions Not Satisfied",
+            body,
+            Color::Yellow,
+        );
+    }
     // RL-TUI-007: show a specific banner when quota is exhausted (E602).
     let is_quota_error = message.contains("quota_exhausted")
         || message.contains("E602")
@@ -3871,15 +4211,7 @@ fn render_coordinator_pause_overlay(f: &mut Frame, state: &AppState) {
             ),
         )
     };
-    let popup = Paragraph::new(text)
-        .block(
-            Block::default()
-                .title(title)
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Red)),
-        )
-        .wrap(Wrap { trim: true });
-    f.render_widget(popup, area);
+    (title, text, Color::Red)
 }
 
 fn render_coordinator_finished_overlay(f: &mut Frame, state: &AppState) {
@@ -4047,5 +4379,126 @@ fn get_last_lines_of_file(path: &std::path::Path, limit: usize) -> Vec<String> {
         lines[start..].to_vec()
     } else {
         Vec::new()
+    }
+}
+
+#[cfg(test)]
+mod pause_overlay_content_tests {
+    use super::pause_overlay_content;
+
+    #[test]
+    fn precondition_stop_gets_its_own_title_and_lists_the_conditions() {
+        let unmet = vec![
+            "SEC-CR-001 approval pending".to_string(),
+            "recovery-code entity undecided".to_string(),
+        ];
+        let (title, body, _) = pause_overlay_content(
+            "Validation error: Coordinator cannot continue …",
+            "task=SEC-API-003 phase=dev",
+            "run",
+            Some("E903"),
+            Some("SEC-API-003"),
+            &unmet,
+            Some("Satisfy the listed preconditions."),
+        );
+        assert_eq!(title, "Coordinator Blocked — Preconditions Not Satisfied");
+        assert!(body.starts_with(
+            "SEC-API-003 cannot be implemented because the following preconditions are not satisfied:"
+        ), "{body}");
+        assert!(body.contains("  - SEC-CR-001 approval pending\n"));
+        assert!(body.contains("  - recovery-code entity undecided\n"));
+        assert!(body.contains("not a tool failure"));
+        assert!(body.contains("Next: Satisfy the listed preconditions."));
+        assert!(
+            !body.contains("retry failed phase"),
+            "retry menu must not be offered: {body}"
+        );
+        assert!(!body.contains("Coordinator Paused (blocking error)"));
+    }
+
+    #[test]
+    fn precondition_stop_is_recognised_from_the_message_when_no_summary_is_loaded() {
+        let (title, body, _) = pause_overlay_content(
+            "Task X cannot be implemented because the following precondition is not satisfied:\n  - gate rejected [E903]",
+            "global/blocking (no task context)",
+            "run",
+            None,
+            None,
+            &[],
+            None,
+        );
+        assert_eq!(title, "Coordinator Blocked — Preconditions Not Satisfied");
+        assert!(body.contains("gate rejected"), "{body}");
+    }
+
+    #[test]
+    fn recorded_preconditions_select_the_precondition_overlay_for_any_error_code() {
+        let unmet = vec!["allowed_paths must include apps/web/src/config.ts".to_string()];
+        let (title, body, _) = pause_overlay_content(
+            "Coordinator 'run' failed in 0:21:00.\n\nCause: # Performer log for task WEB-BFF-002",
+            "task=WEB-BFF-002 phase=dev",
+            "run",
+            Some("E901"),
+            Some("WEB-BFF-002"),
+            &unmet,
+            None,
+        );
+        assert_eq!(title, "Coordinator Blocked — Preconditions Not Satisfied");
+        assert!(body.contains("  - allowed_paths must include apps/web/src/config.ts\n"));
+        assert!(!body.contains("# Performer log"), "{body}");
+    }
+
+    #[test]
+    fn genuine_errors_keep_the_error_overlay() {
+        let (title, body, _) = pause_overlay_content(
+            "sandbox denied network",
+            "task=T phase=dev",
+            "run",
+            Some("E902"),
+            Some("T"),
+            &[],
+            None,
+        );
+        assert_eq!(title, "Coordinator Error");
+        assert!(body.contains("retry failed phase"));
+    }
+}
+
+#[cfg(test)]
+mod approval_request_lines_tests {
+    use super::approval_request_lines;
+    use macc_core::coordinator::approval::PendingApproval;
+
+    #[test]
+    fn a_waiting_gate_shows_subject_approvers_and_the_command() {
+        let lines = approval_request_lines(&[PendingApproval {
+            task_id: "SEC-APP-003".into(),
+            status: "waiting_approval".into(),
+            subject_task: "SEC-ADR-003".into(),
+            subject_revision: Some("abcdef1".into()),
+            risks: vec!["Irreversible recovery-code migration".into()],
+            required: "PRODUCT_OWNER 0/1, SECURITY_OWNER 0/1".into(),
+            approve_command:
+                "macc coordinator approve SEC-APP-003 --role PRODUCT_OWNER --revision abcdef1"
+                    .into(),
+            ..PendingApproval::default()
+        }]);
+        let text = lines
+            .iter()
+            .map(|(l, _)| l.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(lines[0].1, "headline is emphasised");
+        assert!(text.contains("SEC-APP-003 waits for human approval"));
+        assert!(text.contains("no performer runs"));
+        assert!(text.contains("Subject:   SEC-ADR-003 at abcdef1"));
+        assert!(text.contains("Risk:      Irreversible recovery-code migration"));
+        assert!(text.contains("Approvers: PRODUCT_OWNER 0/1, SECURITY_OWNER 0/1"));
+        assert!(text.contains("CLI:       macc coordinator approve SEC-APP-003"));
+    }
+
+    #[test]
+    fn nothing_is_shown_when_no_gate_waits() {
+        assert!(approval_request_lines(&[]).is_empty());
     }
 }

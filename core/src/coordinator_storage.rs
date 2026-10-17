@@ -2,12 +2,34 @@ use crate::coordinator::model::{ResourceLock, Task, TaskRegistry};
 use crate::coordinator::{CoordinatorCursor, CoordinatorEventPayload, CoordinatorEventRecord};
 use crate::{MaccError, ProjectPaths, Result};
 use chrono::Utc;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+
+/// Stored in SQLite's `user_version` once `init_schema` has run. Bump it
+/// whenever `init_schema` gains a table or an index, so existing databases
+/// pick the change up.
+const SQLITE_SCHEMA_VERSION: i64 = 2;
+
+/// Event types emitted on every performer or coordinator heartbeat. They are
+/// most of the event log and never carry a result, an error or a decision.
+pub const HEARTBEAT_EVENT_TYPES: [&str; 2] = ["heartbeat", "coordinator_heartbeat"];
+
+/// Which events `SqliteStorage::scan_events_newest_first` visits.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct EventQuery<'a> {
+    /// Only this task's events.
+    pub task_id: Option<&'a str>,
+    /// Only events of this type.
+    pub event_type: Option<&'a str>,
+    /// Leave out `HEARTBEAT_EVENT_TYPES`.
+    pub skip_heartbeats: bool,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoordinatorControl {
@@ -239,6 +261,46 @@ pub struct EventMutation {
     pub payload: CoordinatorEventPayload,
 }
 
+/// SQL filter keeping events that a replay cursor still points at: deleting
+/// one would make the next replay start over from the first event.
+const NOT_A_CURSOR_EVENT: &str =
+    "event_id NOT IN (SELECT last_event_id FROM event_cursor WHERE last_event_id IS NOT NULL)
+     AND event_id NOT IN (SELECT last_event_id FROM cursors WHERE last_event_id IS NOT NULL)";
+
+fn heartbeat_type_list() -> String {
+    HEARTBEAT_EVENT_TYPES
+        .iter()
+        .map(|t| format!("'{t}'"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A heartbeat only says "still alive at this time": once a newer one of the
+/// same kind is stored for a task, the older ones carry nothing. Dropping them
+/// keeps the event log from growing for as long as a performer runs.
+///
+/// "Newer" is arrival order (`rowid`), not `seq`: performers number their own
+/// events, so their heartbeats all share one `seq`.
+fn prune_superseded_heartbeats(
+    tx: &rusqlite::Transaction<'_>,
+    event_type: &str,
+    task_id: Option<&str>,
+    inserted_rowid: i64,
+) -> Result<()> {
+    if !HEARTBEAT_EVENT_TYPES.contains(&event_type) {
+        return Ok(());
+    }
+    tx.execute(
+        &format!(
+            "DELETE FROM events
+             WHERE task_id IS ?1 AND event_type = ?2 AND rowid < ?3 AND {NOT_A_CURSOR_EVENT}"
+        ),
+        params![task_id, event_type, inserted_rowid],
+    )
+    .map_err(sql_err)?;
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub struct JsonStorage {
     paths: CoordinatorStoragePaths,
@@ -326,6 +388,73 @@ impl CoordinatorStorage for JsonStorage {
     }
 }
 
+/// Idle connections kept per thread and per database path. Opening one costs
+/// a file open plus the WAL and busy-timeout pragmas, and every storage call
+/// used to pay it.
+const MAX_IDLE_CONNECTIONS: usize = 4;
+
+type FileIdentity = (u64, u64);
+
+thread_local! {
+    static CONNECTION_POOL: std::cell::RefCell<HashMap<PathBuf, Vec<(FileIdentity, Connection)>>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+fn database_file_identity(path: &Path) -> Option<FileIdentity> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        // Without an inode, never reuse: a replaced file would go unnoticed.
+        let _ = path;
+        None
+    }
+}
+
+/// A coordinator database connection that goes back to its thread's pool
+/// when dropped. It dereferences to `rusqlite::Connection`.
+pub struct PooledConnection {
+    conn: Option<Connection>,
+    path: PathBuf,
+    identity: Option<FileIdentity>,
+}
+
+impl std::ops::Deref for PooledConnection {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        self.conn.as_ref().expect("connection present until drop")
+    }
+}
+
+impl std::ops::DerefMut for PooledConnection {
+    fn deref_mut(&mut self) -> &mut Connection {
+        self.conn.as_mut().expect("connection present until drop")
+    }
+}
+
+impl Drop for PooledConnection {
+    fn drop(&mut self) {
+        let (Some(conn), Some(identity)) = (self.conn.take(), self.identity) else {
+            return;
+        };
+        // A connection left inside a transaction is not reusable.
+        if !conn.is_autocommit() {
+            return;
+        }
+        let path = std::mem::take(&mut self.path);
+        let _ = CONNECTION_POOL.try_with(|pool| {
+            let mut pool = pool.borrow_mut();
+            let idle = pool.entry(path).or_default();
+            if idle.len() < MAX_IDLE_CONNECTIONS {
+                idle.push((identity, conn));
+            }
+        });
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SqliteStorage {
     pub paths: CoordinatorStoragePaths,
@@ -364,7 +493,7 @@ impl SqliteStorage {
     pub fn append_event_record(&self, event: &CoordinatorEventRecord) -> Result<bool> {
         let mut conn = self.open()?;
         self.init_schema(&conn)?;
-        let tx = conn.transaction().map_err(sql_err)?;
+        let tx = write_transaction(&mut conn)?;
         let inserted = self.append_event_record_in_tx(&tx, event)?;
         tx.commit().map_err(sql_err)?;
         Ok(inserted)
@@ -446,6 +575,14 @@ impl SqliteStorage {
                 ],
             )
             .map_err(sql_err)?;
+        if inserted > 0 {
+            prune_superseded_heartbeats(
+                tx,
+                &raw_event.event_type,
+                raw_event.task_id.as_deref(),
+                tx.last_insert_rowid(),
+            )?;
+        }
         Ok(inserted > 0)
     }
 
@@ -519,6 +656,14 @@ impl SqliteStorage {
                 ],
             )
             .map_err(sql_err)?;
+        if inserted > 0 {
+            prune_superseded_heartbeats(
+                tx,
+                &event.event_type,
+                Some(event.task_id.as_str()),
+                tx.last_insert_rowid(),
+            )?;
+        }
         Ok(inserted > 0)
     }
 
@@ -565,19 +710,53 @@ impl SqliteStorage {
         false
     }
 
-    pub fn open(&self) -> Result<Connection> {
+    /// A connection to the coordinator database, reused across calls on the
+    /// same thread when the database file is still the same one.
+    pub fn open(&self) -> Result<PooledConnection> {
         ensure_parent_dir(&self.paths.sqlite_path)?;
-        let conn = Connection::open(&self.paths.sqlite_path).map_err(sql_err)?;
+        let path = self.paths.sqlite_path.clone();
+        if let Some(file) = database_file_identity(&path) {
+            let reused = CONNECTION_POOL.with(|pool| {
+                let mut pool = pool.borrow_mut();
+                let idle = pool.get_mut(&path)?;
+                // Connections to a database file that was since replaced
+                // would read the old file: drop them.
+                idle.retain(|(identity, _)| *identity == file);
+                idle.pop()
+            });
+            if let Some((identity, conn)) = reused {
+                return Ok(PooledConnection {
+                    conn: Some(conn),
+                    path,
+                    identity: Some(identity),
+                });
+            }
+        }
+        let conn = Connection::open(&path).map_err(sql_err)?;
         // WAL mode allows concurrent readers and writers without blocking.
         conn.execute_batch("PRAGMA journal_mode=WAL;")
             .map_err(sql_err)?;
         // Prevent SQLITE_BUSY errors when multiple performers write concurrently.
         conn.busy_timeout(std::time::Duration::from_secs(5))
             .map_err(sql_err)?;
-        Ok(conn)
+        let identity = database_file_identity(&path);
+        Ok(PooledConnection {
+            conn: Some(conn),
+            path,
+            identity,
+        })
     }
 
     pub fn init_schema(&self, conn: &Connection) -> Result<()> {
+        // Every storage call opens a connection and lands here. Once a database
+        // carries the current schema, skip the DDL batch and the control-row
+        // write: on a busy project they cost a write lock on every read.
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .map_err(sql_err)?;
+        if version >= SQLITE_SCHEMA_VERSION {
+            return Ok(());
+        }
         conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS metadata (
@@ -679,6 +858,14 @@ impl SqliteStorage {
             -- run long.
             CREATE INDEX IF NOT EXISTS idx_events_task_type
               ON events (task_id, event_type);
+            -- Event readers walk the log in `seq` order, usually from the newest
+            -- end and only for the last few rows. Without this, every read sorts
+            -- the whole table first.
+            CREATE INDEX IF NOT EXISTS idx_events_seq
+              ON events (seq, event_id);
+            -- Latest-event-of-a-type lookups (concurrency, cleanup markers).
+            CREATE INDEX IF NOT EXISTS idx_events_type_seq
+              ON events (event_type, seq);
             CREATE TABLE IF NOT EXISTS cursors (
               name TEXT PRIMARY KEY,
               path TEXT,
@@ -715,6 +902,18 @@ impl SqliteStorage {
               version TEXT NOT NULL,
               stop_reason TEXT
             );
+            CREATE TABLE IF NOT EXISTS gate_decisions (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              task_id TEXT NOT NULL,
+              decision TEXT NOT NULL,
+              role TEXT NOT NULL,
+              actor TEXT NOT NULL,
+              revision TEXT,
+              evidence TEXT,
+              reason TEXT,
+              recorded_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_gate_decisions_task ON gate_decisions (task_id, id);
             CREATE TABLE IF NOT EXISTS coordinator_control (
               id INTEGER PRIMARY KEY CHECK (id = 1),
               mode TEXT NOT NULL,
@@ -733,6 +932,28 @@ impl SqliteStorage {
             [],
         )
         .map_err(sql_err)?;
+        if version < 2 {
+            // Logs written before heartbeats were pruned on append: keep the
+            // last heartbeat of each task and give the space back.
+            conn.execute(
+                &format!(
+                    "DELETE FROM events
+                     WHERE event_type IN ({types})
+                       AND rowid NOT IN (SELECT MAX(rowid) FROM events
+                                         WHERE event_type IN ({types})
+                                         GROUP BY task_id, event_type)
+                       AND {not_a_cursor}",
+                    types = heartbeat_type_list(),
+                    not_a_cursor = NOT_A_CURSOR_EVENT,
+                ),
+                [],
+            )
+            .map_err(sql_err)?;
+            // Best effort: another process holding the database only delays it.
+            let _ = conn.execute_batch("VACUUM;");
+        }
+        conn.execute_batch(&format!("PRAGMA user_version = {SQLITE_SCHEMA_VERSION};"))
+            .map_err(sql_err)?;
         Ok(())
     }
 
@@ -826,6 +1047,72 @@ impl SqliteStorage {
         } else {
             Ok(None)
         }
+    }
+
+    /// Append one human approval decision to the gate ledger.
+    ///
+    /// The ledger is append-only by construction: there is no update or delete
+    /// API. Gate state is derived from it on every cycle, so a decision can be
+    /// superseded only by a later decision from the same person and role.
+    pub fn append_gate_decision(
+        &self,
+        task_id: &str,
+        record: &crate::coordinator::model::ApprovalRecord,
+    ) -> Result<()> {
+        let conn = self.open()?;
+        self.init_schema(&conn)?;
+        conn.execute(
+            "INSERT INTO gate_decisions (task_id, decision, role, actor, revision, evidence, reason, recorded_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                task_id,
+                record.decision.as_str(),
+                record.role,
+                record.actor,
+                record.revision,
+                record.evidence,
+                record.reason,
+                record.recorded_at,
+            ],
+        )
+        .map_err(sql_err)?;
+        Ok(())
+    }
+
+    /// Every recorded decision, oldest first, grouped by task id.
+    pub fn gate_decisions_by_task(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, Vec<crate::coordinator::model::ApprovalRecord>>>
+    {
+        let conn = self.open()?;
+        self.init_schema(&conn)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT task_id, decision, role, actor, revision, evidence, reason, recorded_at
+                 FROM gate_decisions ORDER BY id ASC",
+            )
+            .map_err(sql_err)?;
+        let mut rows = stmt.query([]).map_err(sql_err)?;
+        let mut out: std::collections::BTreeMap<String, Vec<_>> = Default::default();
+        while let Some(row) = rows.next().map_err(sql_err)? {
+            let task_id: String = row.get(0).map_err(sql_err)?;
+            let decision: String = row.get(1).map_err(sql_err)?;
+            let Ok(decision) = decision.parse() else {
+                continue;
+            };
+            out.entry(task_id)
+                .or_default()
+                .push(crate::coordinator::model::ApprovalRecord {
+                    decision,
+                    role: row.get(2).map_err(sql_err)?,
+                    actor: row.get(3).map_err(sql_err)?,
+                    revision: row.get(4).map_err(sql_err)?,
+                    evidence: row.get(5).map_err(sql_err)?,
+                    reason: row.get(6).map_err(sql_err)?,
+                    recorded_at: row.get(7).map_err(sql_err)?,
+                });
+        }
+        Ok(out)
     }
 
     pub fn upsert_coordinator_run(&self, run: &CoordinatorRun) -> Result<()> {
@@ -1003,7 +1290,7 @@ impl SqliteStorage {
     ) -> Result<()> {
         let mut conn = self.open()?;
         self.init_schema(&conn)?;
-        let tx = conn.transaction().map_err(sql_err)?;
+        let tx = write_transaction(&mut conn)?;
 
         let task_raw: String = tx
             .query_row(
@@ -1088,7 +1375,7 @@ impl SqliteStorage {
     ) -> Result<()> {
         let mut conn = self.open()?;
         self.init_schema(&conn)?;
-        let tx = conn.transaction().map_err(sql_err)?;
+        let tx = write_transaction(&mut conn)?;
 
         let task_raw: String = tx
             .query_row(
@@ -1201,7 +1488,7 @@ impl SqliteStorage {
     pub fn set_merge_pending(&self, change: &MergePendingMutation) -> Result<()> {
         let mut conn = self.open()?;
         self.init_schema(&conn)?;
-        let tx = conn.transaction().map_err(sql_err)?;
+        let tx = write_transaction(&mut conn)?;
 
         let task_raw: String = tx
             .query_row(
@@ -1239,7 +1526,7 @@ impl SqliteStorage {
     pub fn set_merge_processed(&self, change: &MergeProcessedMutation) -> Result<()> {
         let mut conn = self.open()?;
         self.init_schema(&conn)?;
-        let tx = conn.transaction().map_err(sql_err)?;
+        let tx = write_transaction(&mut conn)?;
 
         let task_raw: String = tx
             .query_row(
@@ -1286,7 +1573,7 @@ impl SqliteStorage {
     pub fn increment_retries(&self, change: &RetryIncrementMutation) -> Result<()> {
         let mut conn = self.open()?;
         self.init_schema(&conn)?;
-        let tx = conn.transaction().map_err(sql_err)?;
+        let tx = write_transaction(&mut conn)?;
 
         let task_raw: String = tx
             .query_row(
@@ -1320,7 +1607,7 @@ impl SqliteStorage {
     pub fn upsert_slo_warning(&self, change: &SloWarningMutation) -> Result<()> {
         let mut conn = self.open()?;
         self.init_schema(&conn)?;
-        let tx = conn.transaction().map_err(sql_err)?;
+        let tx = write_transaction(&mut conn)?;
 
         let task_raw: String = tx
             .query_row(
@@ -1655,11 +1942,15 @@ impl SqliteStorage {
     }
 }
 
-impl CoordinatorStorage for SqliteStorage {
-    fn load_snapshot(&self) -> Result<CoordinatorSnapshot> {
+impl SqliteStorage {
+    /// The task registry alone, without the event log: what most readers need.
+    pub fn load_registry(&self) -> Result<TaskRegistry> {
         let conn = self.open()?;
         self.init_schema(&conn)?;
+        self.load_registry_with_conn(&conn)
+    }
 
+    fn load_registry_with_conn(&self, conn: &Connection) -> Result<TaskRegistry> {
         let metadata_registry = match conn.query_row(
             "SELECT value FROM metadata WHERE key='registry_json'",
             [],
@@ -1674,7 +1965,7 @@ impl CoordinatorStorage for SqliteStorage {
             Err(rusqlite::Error::QueryReturnedNoRows) => None,
             Err(e) => return Err(sql_err(e)),
         };
-        let mut registry = self.load_registry_from_tables(&conn)?;
+        let mut registry = self.load_registry_from_tables(conn)?;
         if let Some(meta) = metadata_registry {
             let TaskRegistry {
                 tasks: meta_tasks,
@@ -1707,6 +1998,165 @@ impl CoordinatorStorage for SqliteStorage {
             }
         }
 
+        Ok(registry)
+    }
+
+    /// The registry and the cursor without the event log.
+    ///
+    /// For read-modify-write callers: `save_snapshot` never deletes events, so
+    /// a snapshot saved with no events leaves the stored log untouched instead
+    /// of re-inserting every row of it.
+    pub fn load_snapshot_without_events(&self) -> Result<CoordinatorSnapshot> {
+        let conn = self.open()?;
+        self.init_schema(&conn)?;
+        Ok(CoordinatorSnapshot {
+            registry: self.load_registry_with_conn(&conn)?,
+            events: Vec::new(),
+            cursor: self.load_cursor_with_conn(&conn)?,
+        })
+    }
+
+    fn load_cursor_with_conn(&self, conn: &Connection) -> Result<Option<CoordinatorCursor>> {
+        match conn.query_row(
+            "SELECT payload_json FROM cursors WHERE name='coordinator'",
+            [],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(raw) => Ok(Some(
+                serde_json::from_str::<CoordinatorCursor>(&raw).map_err(|e| {
+                    MaccError::Storage {
+                        backend: "sqlite",
+                        message: format!("Failed to parse cursor payload_json: {}", e),
+                    }
+                })?,
+            )),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(sql_err(e)),
+        }
+    }
+
+    /// The last `limit` events, oldest first (the order `load_snapshot` uses).
+    pub fn load_recent_events(&self, limit: usize) -> Result<Vec<CoordinatorEventRecord>> {
+        let mut events = Vec::with_capacity(limit.min(1024));
+        if limit == 0 {
+            return Ok(events);
+        }
+        self.scan_events_newest_first(EventQuery::default(), |event| {
+            events.push(event);
+            if events.len() >= limit {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        })?;
+        events.reverse();
+        Ok(events)
+    }
+
+    /// Up to `limit` events with a `seq` above `after_seq`, oldest first: what
+    /// a live stream has not delivered yet.
+    pub fn load_events_after(
+        &self,
+        after_seq: i64,
+        limit: usize,
+    ) -> Result<Vec<CoordinatorEventRecord>> {
+        let conn = self.open()?;
+        self.init_schema(&conn)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT raw_json FROM events WHERE seq > ?1 ORDER BY seq ASC, event_id ASC LIMIT ?2",
+            )
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map(params![after_seq, limit as i64], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(sql_err)?;
+        let mut events = Vec::new();
+        for row in rows {
+            if let Ok(event) =
+                serde_json::from_str::<CoordinatorEventRecord>(&row.map_err(sql_err)?)
+            {
+                events.push(event);
+            }
+        }
+        Ok(events)
+    }
+
+    /// The `seq` of a stored event.
+    pub fn event_seq(&self, event_id: &str) -> Result<Option<i64>> {
+        let conn = self.open()?;
+        self.init_schema(&conn)?;
+        match conn.query_row(
+            "SELECT seq FROM events WHERE event_id = ?1",
+            [event_id],
+            |row| row.get::<_, Option<i64>>(0),
+        ) {
+            Ok(seq) => Ok(seq),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(sql_err(e)),
+        }
+    }
+
+    /// Visit the events matching `query`, newest first, until `visit` breaks.
+    ///
+    /// Readers looking for the latest event of some kind stop at the first
+    /// match instead of loading and parsing the whole log, which grows with
+    /// every heartbeat for as long as the project runs.
+    pub fn scan_events_newest_first<F>(&self, query: EventQuery<'_>, mut visit: F) -> Result<()>
+    where
+        F: FnMut(CoordinatorEventRecord) -> ControlFlow<()>,
+    {
+        let conn = self.open()?;
+        self.init_schema(&conn)?;
+        let mut clauses: Vec<String> = Vec::new();
+        let mut values: Vec<&str> = Vec::new();
+        if let Some(task_id) = query.task_id {
+            values.push(task_id);
+            clauses.push(format!("task_id = ?{}", values.len()));
+        }
+        if let Some(event_type) = query.event_type {
+            values.push(event_type);
+            clauses.push(format!("event_type = ?{}", values.len()));
+        }
+        if query.skip_heartbeats {
+            clauses.push(format!(
+                "IFNULL(event_type, '') NOT IN ({})",
+                heartbeat_type_list()
+            ));
+        }
+        let filter = if clauses.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", clauses.join(" AND "))
+        };
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT raw_json FROM events {filter} ORDER BY seq DESC, event_id DESC"
+            ))
+            .map_err(sql_err)?;
+        let mut rows = stmt
+            .query(rusqlite::params_from_iter(values))
+            .map_err(sql_err)?;
+        while let Some(row) = rows.next().map_err(sql_err)? {
+            let raw: String = row.get(0).map_err(sql_err)?;
+            let Ok(event) = serde_json::from_str::<CoordinatorEventRecord>(&raw) else {
+                continue;
+            };
+            if visit(event).is_break() {
+                break;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl CoordinatorStorage for SqliteStorage {
+    fn load_snapshot(&self) -> Result<CoordinatorSnapshot> {
+        let conn = self.open()?;
+        self.init_schema(&conn)?;
+        let registry = self.load_registry_with_conn(&conn)?;
+
         let mut events = Vec::new();
         let mut stmt = conn
             .prepare("SELECT raw_json FROM events ORDER BY seq ASC, event_id ASC")
@@ -1721,22 +2171,7 @@ impl CoordinatorStorage for SqliteStorage {
             }
         }
 
-        let cursor = match conn.query_row(
-            "SELECT payload_json FROM cursors WHERE name='coordinator'",
-            [],
-            |row| row.get::<_, String>(0),
-        ) {
-            Ok(raw) => Some(
-                serde_json::from_str::<CoordinatorCursor>(&raw).map_err(|e| {
-                    MaccError::Storage {
-                        backend: "sqlite",
-                        message: format!("Failed to parse cursor payload_json: {}", e),
-                    }
-                })?,
-            ),
-            Err(rusqlite::Error::QueryReturnedNoRows) => None,
-            Err(e) => return Err(sql_err(e)),
-        };
+        let cursor = self.load_cursor_with_conn(&conn)?;
 
         Ok(CoordinatorSnapshot {
             registry,
@@ -1748,11 +2183,37 @@ impl CoordinatorStorage for SqliteStorage {
     fn save_snapshot(&self, snapshot: &CoordinatorSnapshot) -> Result<()> {
         let mut conn = self.open()?;
         self.init_schema(&conn)?;
-        let tx = conn.transaction().map_err(sql_err)?;
+        let tx = write_transaction(&mut conn)?;
 
-        tx.execute("DELETE FROM tasks", []).map_err(sql_err)?;
-        tx.execute("DELETE FROM task_runtime", [])
-            .map_err(sql_err)?;
+        // The coordinator saves the registry many times per tick while only a
+        // task or two change: rewrite just the rows whose task changed.
+        let stored_tasks: HashMap<String, String> = {
+            let mut stmt = tx
+                .prepare("SELECT task_id, payload_json FROM tasks")
+                .map_err(sql_err)?;
+            let rows = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .map_err(sql_err)?;
+            rows.collect::<std::result::Result<_, _>>()
+                .map_err(sql_err)?
+        };
+        let kept: HashSet<&str> = snapshot
+            .registry
+            .tasks
+            .iter()
+            .map(|task| task.id.as_str())
+            .filter(|id| !id.is_empty())
+            .collect();
+        for task_id in stored_tasks.keys().filter(|id| !kept.contains(id.as_str())) {
+            tx.execute("DELETE FROM tasks WHERE task_id = ?1", [task_id])
+                .map_err(sql_err)?;
+        }
+        // Runtime rows whose task is gone, including orphans of older saves.
+        tx.execute(
+            "DELETE FROM task_runtime WHERE task_id NOT IN (SELECT task_id FROM tasks)",
+            [],
+        )
+        .map_err(sql_err)?;
         tx.execute("DELETE FROM resource_locks", [])
             .map_err(sql_err)?;
         // Events are append-only — never delete them during snapshot save.
@@ -1762,13 +2223,21 @@ impl CoordinatorStorage for SqliteStorage {
         tx.execute("DELETE FROM jobs", []).map_err(sql_err)?;
 
         let now = now_iso_string();
+        // The tasks live in their own table; `registry_json` keeps the rest of
+        // the registry, and is only rewritten when that changes.
+        let registry_meta = TaskRegistry {
+            tasks: Vec::new(),
+            ..snapshot.registry.clone()
+        };
         let registry_raw =
-            serde_json::to_string(&snapshot.registry).map_err(|e| MaccError::Storage {
+            serde_json::to_string(&registry_meta).map_err(|e| MaccError::Storage {
                 backend: "sqlite",
                 message: format!("Failed to serialize registry json: {}", e),
             })?;
         tx.execute(
-            "INSERT OR REPLACE INTO metadata (key, value, updated_at) VALUES ('registry_json', ?1, ?2)",
+            "INSERT INTO metadata (key, value, updated_at) VALUES ('registry_json', ?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+             WHERE metadata.value <> excluded.value",
             params![registry_raw, now],
         )
         .map_err(sql_err)?;
@@ -1787,13 +2256,6 @@ impl CoordinatorStorage for SqliteStorage {
                 backend: "sqlite",
                 message: format!("Failed to serialize task payload: {}", e),
             })?;
-            tx.execute(
-                "INSERT INTO tasks (task_id, state, title, priority, tool, payload_json, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![task_id, state, title, priority, tool, task_raw, task_updated],
-            )
-            .map_err(sql_err)?;
-
             let runtime_status = task.task_runtime.status.as_deref().unwrap_or("idle");
             let pid = task.task_runtime.pid;
             let runtime_updated = task
@@ -1802,7 +2264,15 @@ impl CoordinatorStorage for SqliteStorage {
                 .get("updated_at")
                 .and_then(Value::as_str)
                 .unwrap_or(task_updated);
-            self.upsert_task_runtime_row(&tx, task, runtime_updated)?;
+            if stored_tasks.get(&task_id) != Some(&task_raw) {
+                tx.execute(
+                    "INSERT OR REPLACE INTO tasks (task_id, state, title, priority, tool, payload_json, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![task_id, state, title, priority, tool, task_raw, task_updated],
+                )
+                .map_err(sql_err)?;
+                self.upsert_task_runtime_row(&tx, task, runtime_updated)?;
+            }
 
             if let Some(pid) = pid {
                 let job_payload = json!({
@@ -1984,7 +2454,7 @@ impl SqliteStorage {
     ) -> Result<()> {
         let mut conn = self.open()?;
         self.init_schema(&conn)?;
-        let tx = conn.transaction().map_err(sql_err)?;
+        let tx = write_transaction(&mut conn)?;
         tx.execute("DELETE FROM tool_throttle", [])
             .map_err(sql_err)?;
         let now = now_iso_string();
@@ -2311,6 +2781,18 @@ fn parse_task_payload(task_id: &str, raw: &str) -> Result<Task> {
     })
 }
 
+/// Start a write transaction holding the write lock from its first statement.
+///
+/// A deferred transaction that reads before it writes cannot upgrade once
+/// another connection (a performer event, the TUI, the web server) has
+/// committed in between: SQLite fails it at once with "database is locked",
+/// without waiting on the busy timeout. Taking the lock up front makes the
+/// transaction wait its turn instead.
+fn write_transaction(conn: &mut Connection) -> Result<rusqlite::Transaction<'_>> {
+    conn.transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(sql_err)
+}
+
 fn sql_err(e: rusqlite::Error) -> MaccError {
     MaccError::Coordinator {
         code: "E411",
@@ -2334,6 +2816,58 @@ mod tests {
         let root = std::env::temp_dir().join(format!("{}_{}", prefix, nonce));
         fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    #[test]
+    fn gate_decision_ledger_round_trips_in_order() {
+        use crate::coordinator::model::{ApprovalDecision, ApprovalRecord};
+        let root = temp_project_root("macc_gate_ledger");
+        let storage = SqliteStorage::new(CoordinatorStoragePaths::from_project_paths(
+            &crate::ProjectPaths::from_root(&root),
+        ));
+        let rec = |decision, actor: &str, at: &str| ApprovalRecord {
+            decision,
+            role: "PRODUCT_OWNER".into(),
+            actor: actor.into(),
+            revision: Some("abcdef1234".into()),
+            evidence: Some("https://example/pr/1".into()),
+            reason: None,
+            recorded_at: at.into(),
+        };
+        storage
+            .append_gate_decision(
+                "GATE-1",
+                &rec(
+                    ApprovalDecision::ChangesRequested,
+                    "alice",
+                    "2026-09-21T10:00:00Z",
+                ),
+            )
+            .unwrap();
+        storage
+            .append_gate_decision(
+                "GATE-1",
+                &rec(ApprovalDecision::Approved, "alice", "2026-09-21T11:00:00Z"),
+            )
+            .unwrap();
+        storage
+            .append_gate_decision(
+                "GATE-2",
+                &rec(ApprovalDecision::Rejected, "bob", "2026-09-21T12:00:00Z"),
+            )
+            .unwrap();
+        let ledger = storage.gate_decisions_by_task().unwrap();
+        let g1 = &ledger["GATE-1"];
+        assert_eq!(g1.len(), 2);
+        assert_eq!(
+            g1[0].decision,
+            ApprovalDecision::ChangesRequested,
+            "oldest first"
+        );
+        assert_eq!(g1[1].decision, ApprovalDecision::Approved);
+        assert_eq!(g1[1].evidence.as_deref(), Some("https://example/pr/1"));
+        assert_eq!(ledger["GATE-2"][0].actor, "bob");
+        let _ = fs::remove_dir_all(root);
     }
 
     fn seed_files(paths: &CoordinatorStoragePaths) {
@@ -2803,6 +3337,384 @@ mod tests {
         assert!(
             !sqlite.task_has_terminal_result_for_claim("T1", "claim-1"),
             "no event log means no proof of completion"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn event_log_storage(prefix: &str) -> (PathBuf, SqliteStorage) {
+        let root = temp_project_root(prefix);
+        let paths = CoordinatorStoragePaths::from_project_paths(&ProjectPaths::from_root(&root));
+        let sqlite = SqliteStorage::new(paths);
+        let records = [
+            (1, "T-1", "started"),
+            (2, "T-1", "heartbeat"),
+            (3, "T-2", "phase_result"),
+            (4, "T-1", "phase_result"),
+            (5, "", "coordinator_heartbeat"),
+            (6, "T-1", "heartbeat"),
+        ];
+        for (seq, task, kind) in records {
+            let record: CoordinatorEventRecord = serde_json::from_value(json!({
+                "event_id": format!("evt-{seq}"),
+                "run_id": "run-1",
+                "seq": seq,
+                "ts": "2026-10-14T00:00:00Z",
+                "type": kind,
+                "task_id": (!task.is_empty()).then_some(task),
+                "payload": {}
+            }))
+            .unwrap();
+            sqlite.append_event_record(&record).unwrap();
+        }
+        (root, sqlite)
+    }
+
+    fn scanned_ids(
+        sqlite: &SqliteStorage,
+        query: EventQuery<'_>,
+        stop_after: usize,
+    ) -> Vec<String> {
+        let mut ids = Vec::new();
+        sqlite
+            .scan_events_newest_first(query, |event| {
+                ids.push(event.event_id);
+                if ids.len() >= stop_after {
+                    ControlFlow::Break(())
+                } else {
+                    ControlFlow::Continue(())
+                }
+            })
+            .unwrap();
+        ids
+    }
+
+    #[test]
+    fn recent_events_are_the_newest_rows_in_log_order() {
+        let (root, sqlite) = event_log_storage("macc_recent_events");
+        let ids: Vec<String> = sqlite
+            .load_recent_events(3)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.event_id)
+            .collect();
+        assert_eq!(ids, ["evt-4", "evt-5", "evt-6"]);
+        assert!(sqlite.load_recent_events(0).unwrap().is_empty());
+        // evt-2 was superseded by the later T-1 heartbeat evt-6.
+        assert_eq!(sqlite.load_recent_events(100).unwrap().len(), 5);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn event_scans_filter_and_stop_early() {
+        let (root, sqlite) = event_log_storage("macc_scan_events");
+        let task_only = EventQuery {
+            task_id: Some("T-1"),
+            ..Default::default()
+        };
+        assert_eq!(
+            scanned_ids(&sqlite, task_only, usize::MAX),
+            ["evt-6", "evt-4", "evt-1"]
+        );
+        let no_heartbeats = EventQuery {
+            task_id: Some("T-1"),
+            skip_heartbeats: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            scanned_ids(&sqlite, no_heartbeats, usize::MAX),
+            ["evt-4", "evt-1"]
+        );
+        let all_without_heartbeats = EventQuery {
+            skip_heartbeats: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            scanned_ids(&sqlite, all_without_heartbeats, usize::MAX),
+            ["evt-4", "evt-3", "evt-1"]
+        );
+        let latest_result = EventQuery {
+            event_type: Some("phase_result"),
+            ..Default::default()
+        };
+        assert_eq!(scanned_ids(&sqlite, latest_result, 1), ["evt-4"]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn schema_setup_runs_once_and_indexes_the_event_log() {
+        let (root, sqlite) = event_log_storage("macc_schema_version");
+        let conn = sqlite.open().unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SQLITE_SCHEMA_VERSION);
+        let plan: String = conn
+            .query_row(
+                "EXPLAIN QUERY PLAN SELECT raw_json FROM events ORDER BY seq DESC, event_id DESC LIMIT 5",
+                [],
+                |row| row.get(3),
+            )
+            .unwrap();
+        assert!(plan.contains("idx_events_seq"), "{plan}");
+
+        // A database written before the version stamp gets the new indexes.
+        conn.execute_batch("DROP INDEX idx_events_seq; PRAGMA user_version = 0;")
+            .unwrap();
+        sqlite.init_schema(&conn).unwrap();
+        let restored: i64 = conn
+            .query_row(
+                "SELECT COUNT(1) FROM sqlite_master WHERE name = 'idx_events_seq'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(restored, 1);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_registry_save_without_events_keeps_the_event_log() {
+        let (root, sqlite) = event_log_storage("macc_save_without_events");
+        let mut snapshot = sqlite.load_snapshot_without_events().unwrap();
+        assert!(snapshot.events.is_empty());
+        snapshot
+            .registry
+            .tasks
+            .push(serde_json::from_value(json!({"id": "T-1", "state": "todo"})).unwrap());
+        sqlite.save_snapshot(&snapshot).unwrap();
+        let reloaded = sqlite.load_snapshot().unwrap();
+        assert_eq!(reloaded.events.len(), 5);
+        assert_eq!(sqlite.load_registry().unwrap().tasks.len(), 1);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn only_the_last_heartbeat_of_a_task_is_kept() {
+        let root = temp_project_root("macc_heartbeat_prune");
+        let paths = CoordinatorStoragePaths::from_project_paths(&ProjectPaths::from_root(&root));
+        let sqlite = SqliteStorage::new(paths);
+        let append = |seq: i64, task: &str, kind: &str| {
+            let record: CoordinatorEventRecord = serde_json::from_value(json!({
+                "event_id": format!("evt-{seq}"),
+                "seq": seq,
+                "ts": "2026-10-14T00:00:00Z",
+                "type": kind,
+                "task_id": task,
+                "payload": {}
+            }))
+            .unwrap();
+            sqlite.append_event_record(&record).unwrap();
+        };
+        let ids = |sqlite: &SqliteStorage| -> Vec<String> {
+            sqlite
+                .load_recent_events(100)
+                .unwrap()
+                .into_iter()
+                .map(|e| e.event_id)
+                .collect()
+        };
+        append(1, "A", "heartbeat");
+        append(2, "B", "heartbeat");
+        append(3, "A", "progress");
+        append(4, "A", "heartbeat");
+        assert_eq!(ids(&sqlite), ["evt-2", "evt-3", "evt-4"]);
+
+        // A heartbeat the replay cursor points at survives newer ones.
+        let conn = sqlite.open().unwrap();
+        conn.execute(
+            "INSERT INTO event_cursor (stream, last_event_id) VALUES ('coordinator', 'evt-4')",
+            [],
+        )
+        .unwrap();
+        append(5, "A", "heartbeat");
+        append(6, "A", "heartbeat");
+        assert_eq!(ids(&sqlite), ["evt-2", "evt-3", "evt-4", "evt-6"]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn older_logs_are_pruned_once_on_upgrade() {
+        let root = temp_project_root("macc_heartbeat_migration");
+        let paths = CoordinatorStoragePaths::from_project_paths(&ProjectPaths::from_root(&root));
+        let sqlite = SqliteStorage::new(paths);
+        let conn = sqlite.open().unwrap();
+        sqlite.init_schema(&conn).unwrap();
+        // Rows written by a binary that kept every heartbeat.
+        for (seq, task, kind) in [
+            (1, "A", "heartbeat"),
+            (2, "A", "heartbeat"),
+            (3, "A", "started"),
+        ] {
+            conn.execute(
+                "INSERT INTO events (event_id, seq, ts, source, task_id, event_type, phase, status, payload_json, raw_json)
+                 VALUES (?1, ?2, '', '', ?3, ?4, '', '', '{}', ?5)",
+                params![
+                    format!("evt-{seq}"),
+                    seq,
+                    task,
+                    kind,
+                    json!({"event_id": format!("evt-{seq}"), "seq": seq, "type": kind, "task_id": task}).to_string()
+                ],
+            )
+            .unwrap();
+        }
+        conn.execute_batch("PRAGMA user_version = 1;").unwrap();
+        sqlite.init_schema(&conn).unwrap();
+        let left: Vec<String> = sqlite
+            .load_recent_events(10)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.event_id)
+            .collect();
+        assert_eq!(left, ["evt-2", "evt-3"]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn events_after_a_seq_come_in_log_order() {
+        let (root, sqlite) = event_log_storage("macc_events_after");
+        let ids: Vec<String> = sqlite
+            .load_events_after(3, 10)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.event_id)
+            .collect();
+        assert_eq!(ids, ["evt-4", "evt-5", "evt-6"]);
+        assert_eq!(sqlite.load_events_after(3, 1).unwrap().len(), 1);
+        assert_eq!(sqlite.event_seq("evt-4").unwrap(), Some(4));
+        assert_eq!(sqlite.event_seq("missing").unwrap(), None);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_replaced_database_file_gets_a_fresh_connection() {
+        let (root, sqlite) = event_log_storage("macc_pool_replace");
+        assert!(!sqlite.load_recent_events(10).unwrap().is_empty());
+        // The pooled connection points at the old file; a new one must be used.
+        let db = sqlite.paths.sqlite_path.clone();
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = fs::remove_file(format!("{}{}", db.display(), suffix));
+        }
+        assert!(sqlite.load_recent_events(10).unwrap().is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_save_rewrites_only_the_tasks_that_changed() {
+        let root = temp_project_root("macc_incremental_save");
+        let paths = CoordinatorStoragePaths::from_project_paths(&ProjectPaths::from_root(&root));
+        let sqlite = SqliteStorage::new(paths);
+        let task = |id: &str, state: &str| -> Task {
+            serde_json::from_value(json!({"id": id, "state": state, "updated_at": "t0"})).unwrap()
+        };
+        let mut snapshot = CoordinatorSnapshot::empty();
+        snapshot.registry.tasks = vec![task("A", "todo"), task("B", "todo"), task("C", "todo")];
+        sqlite.save_snapshot(&snapshot).unwrap();
+
+        // Mark every stored row, then save with one task changed and one gone.
+        let conn = sqlite.open().unwrap();
+        conn.execute("UPDATE tasks SET updated_at = 'untouched'", [])
+            .unwrap();
+        snapshot.registry.tasks = vec![task("A", "todo"), task("B", "in_progress")];
+        sqlite.save_snapshot(&snapshot).unwrap();
+
+        let rows: Vec<(String, String, String)> = conn
+            .prepare("SELECT task_id, state, updated_at FROM tasks ORDER BY task_id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("A".into(), "todo".into(), "untouched".into()),
+                ("B".into(), "in_progress".into(), "t0".into()),
+            ]
+        );
+        let runtime_tasks: i64 = conn
+            .query_row(
+                "SELECT COUNT(1) FROM task_runtime WHERE task_id = 'C'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(runtime_tasks, 0);
+        // The tasks live in their table only.
+        let meta: String = conn
+            .query_row(
+                "SELECT value FROM metadata WHERE key = 'registry_json'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!meta.contains("in_progress"), "{meta}");
+        assert_eq!(sqlite.load_registry().unwrap().tasks.len(), 2);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn performer_heartbeats_sharing_a_seq_are_pruned_by_arrival() {
+        let root = temp_project_root("macc_heartbeat_same_seq");
+        let paths = CoordinatorStoragePaths::from_project_paths(&ProjectPaths::from_root(&root));
+        let sqlite = SqliteStorage::new(paths);
+        // Performers number their own events: every heartbeat carries seq 1.
+        for n in 1..=3 {
+            let record: CoordinatorEventRecord = serde_json::from_value(json!({
+                "event_id": format!("T-1-hb-{n}"),
+                "seq": 1,
+                "type": "heartbeat",
+                "task_id": "T-1",
+                "payload": {}
+            }))
+            .unwrap();
+            sqlite.append_event_record(&record).unwrap();
+        }
+        let left: Vec<String> = sqlite
+            .load_recent_events(10)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.event_id)
+            .collect();
+        assert_eq!(left, ["T-1-hb-3"]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_save_waits_for_a_concurrent_writer_instead_of_failing() {
+        let root = temp_project_root("macc_concurrent_save");
+        let paths = CoordinatorStoragePaths::from_project_paths(&ProjectPaths::from_root(&root));
+        let sqlite = SqliteStorage::new(paths);
+        let mut snapshot = CoordinatorSnapshot::empty();
+        snapshot.registry.tasks =
+            vec![serde_json::from_value(json!({"id": "A", "state": "todo"})).unwrap()];
+        sqlite.save_snapshot(&snapshot).unwrap();
+
+        // Another process writes, holding the write lock for a while, and
+        // commits while the save is under way.
+        let other = sqlite.clone();
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            let mut conn = other.open().unwrap();
+            let tx = write_transaction(&mut conn).unwrap();
+            tx.execute(
+                "UPDATE tasks SET updated_at = 'other' WHERE task_id = 'A'",
+                [],
+            )
+            .unwrap();
+            locked_tx.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            tx.commit().unwrap();
+        });
+        locked_rx.recv().unwrap();
+        snapshot.registry.tasks[0].state = "in_progress".into();
+        sqlite
+            .save_snapshot(&snapshot)
+            .expect("the save waits for the other writer");
+        writer.join().unwrap();
+        assert_eq!(
+            sqlite.load_registry().unwrap().tasks[0].state,
+            "in_progress"
         );
         let _ = fs::remove_dir_all(root);
     }

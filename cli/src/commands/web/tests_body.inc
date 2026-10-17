@@ -1691,6 +1691,7 @@ async fn status_endpoint_maps_engine_errors() {
 async fn registry_tasks_endpoint_returns_registry_metadata() {
     let root = temp_root("registry-list");
     fs::create_dir_all(&root).expect("create root");
+    write_test_config(&root);
 
     let mut task = registry_task("WEB2-BE-REG-001", "Registry task", "blocked", Some("codex"));
     task.task_runtime.status = Some(RuntimeStatus::Failed.as_str().to_string());
@@ -2449,6 +2450,7 @@ async fn coordinator_run_endpoint_returns_envelope() {
             last_run_status: None,
             last_run_stop_reason: None,
             last_run_summary: None,
+            pending_approvals: Vec::new(),
         }),
         resumed: Some(false),
         aggregated_performer_logs: Some(2),
@@ -2647,6 +2649,7 @@ async fn coordinator_dispatch_endpoint_returns_envelope() {
             last_run_status: None,
             last_run_stop_reason: None,
             last_run_summary: None,
+            pending_approvals: Vec::new(),
         }),
         resumed: Some(false),
         aggregated_performer_logs: Some(0),
@@ -3164,6 +3167,7 @@ async fn coordinator_advance_endpoint_returns_envelope() {
             last_run_status: None,
             last_run_stop_reason: None,
             last_run_summary: None,
+            pending_approvals: Vec::new(),
         }),
         aggregated_performer_logs: Some(1),
         runtime_status: Some("running".to_string()),
@@ -5355,4 +5359,153 @@ async fn coordinator_stop_propagates_not_process_owner_as_403() {
     let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
     assert_eq!(payload["error"]["code"], "not_process_owner");
     assert_eq!(payload["error"]["category"], "Auth");
+}
+
+#[tokio::test]
+async fn approvals_endpoints_list_gates_and_record_a_decision() {
+    let root = temp_root("approvals-decide");
+    fs::create_dir_all(&root).expect("create root");
+    let gate = macc_core::coordinator::approval::PendingApproval {
+        task_id: "FIN-APP-001".into(),
+        awaiting_decision: true,
+        question: "Do you approve FIN-CR-001?".into(),
+        ..Default::default()
+    };
+    let state = test_web_state(
+        &root,
+        Arc::new(WebTestEngine::new(Ok(CoordinatorCommandResult {
+            gate_decision: Some("Recorded approved for FIN-APP-001 as FINANCE.".into()),
+            pending_approvals: Some(vec![gate]),
+            ..CoordinatorCommandResult::default()
+        }))),
+        WebAssetsMode::Embedded,
+    );
+    let app = build_web_router(state);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/coordinator/approvals/FIN-APP-001/decision")
+                .method("POST")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "decision": "approved",
+                        "role": "FINANCE",
+                        "revision": "abcdef1",
+                        "evidence": "https://git/pr/7"
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = response.into_body().collect().await.expect("collect").to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(
+        payload["gate_decision"],
+        "Recorded approved for FIN-APP-001 as FINANCE."
+    );
+    assert_eq!(payload["pending_approvals"][0]["task_id"], "FIN-APP-001");
+    assert_eq!(payload["pending_approvals"][0]["awaiting_decision"], true);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/coordinator/approvals/FIN-APP-001/decision")
+                .method("POST")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({"decision": "maybe", "role": "FINANCE"}).to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert!(response.status().is_client_error());
+}
+
+#[tokio::test]
+async fn approvals_list_endpoint_returns_pending_gates_and_the_default_actor() {
+    let root = temp_root("approvals-list");
+    fs::create_dir_all(&root).expect("create root");
+    let state = test_web_state(
+        &root,
+        Arc::new(WebTestEngine::new(Ok(CoordinatorCommandResult {
+            pending_approvals: Some(Vec::new()),
+            ..CoordinatorCommandResult::default()
+        }))),
+        WebAssetsMode::Embedded,
+    );
+    let response = build_web_router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/coordinator/approvals")
+                .method("GET")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = response.into_body().collect().await.expect("collect").to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    assert_eq!(payload["pending_approvals"], serde_json::json!([]));
+    assert!(payload.get("default_actor").is_some());
+}
+
+#[tokio::test]
+async fn event_streams_read_new_events_from_the_coordinator_database() {
+    let root = temp_root("events-storage");
+    fs::create_dir_all(&root).expect("create root");
+    let paths = ProjectPaths::from_root(&root);
+    let sqlite = SqliteStorage::new(CoordinatorStoragePaths::from_project_paths(&paths));
+    sqlite
+        .save_snapshot(&CoordinatorSnapshot::empty())
+        .expect("seed registry");
+    for seq in 1..=3 {
+        let record: CoordinatorEventRecord = serde_json::from_value(serde_json::json!({
+            "event_id": format!("evt-{seq}"),
+            "seq": seq,
+            "ts": "2026-10-14T00:00:00Z",
+            "type": "task_transition",
+            "task_id": "T-1",
+            "payload": {}
+        }))
+        .expect("event");
+        sqlite.append_event_record(&record).expect("append");
+    }
+    // An engine without events: the stream must not read through it.
+    let state = test_web_state(
+        &root,
+        Arc::new(WebTestEngine::with_event_snapshots(Vec::new())),
+        WebAssetsMode::Embedded,
+    );
+
+    let (backlog, resume) = sse::initial_coordinator_events(&state, None)
+        .await
+        .expect("backlog");
+    assert_eq!(backlog.len(), 3);
+    assert_eq!(resume, None);
+
+    // Resuming with nothing new keeps the client's position.
+    let (resumed, resume) = sse::initial_coordinator_events(&state, Some("evt-3".into()))
+        .await
+        .expect("resume");
+    assert!(resumed.is_empty());
+    assert_eq!(resume.as_deref(), Some("cursor-3"));
+    assert_eq!(
+        sse::resolve_source_seq_cursor(&resumed, resume.as_deref()),
+        3
+    );
+
+    let newer = sse::coordinator_events_after(&state, 1)
+        .await
+        .expect("newer");
+    let ids: Vec<_> = newer.iter().filter_map(|e| e.event_id.clone()).collect();
+    assert_eq!(ids, ["evt-2", "evt-3"]);
+    let _ = fs::remove_dir_all(root);
 }

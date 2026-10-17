@@ -1,3 +1,4 @@
+mod advance_plan;
 pub mod completion;
 pub mod fsm;
 pub mod retry;

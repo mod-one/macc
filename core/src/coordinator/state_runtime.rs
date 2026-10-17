@@ -221,16 +221,37 @@ pub fn cleanup_dead_runtime_tasks_in_typed_registry(
         let Some(root) = repo_root else {
             return false;
         };
-        let Some(branch) = task.branch() else {
-            return false;
-        };
-        let base = task.base_branch(&reference_branch);
-        if base.is_empty() || base == branch {
-            return false;
+        if let Some(branch) = task.branch() {
+            let base = task.base_branch(&reference_branch);
+            if !base.is_empty()
+                && base != branch
+                && crate::git::commits_between(root, &base, branch)
+                    .map(|commits| !commits.is_empty())
+                    .unwrap_or(true)
+            {
+                return true;
+            }
         }
-        crate::git::commits_between(root, &base, branch)
-            .map(|commits| !commits.is_empty())
-            .unwrap_or(true)
+        // A crashed tool may not have reached its first commit or terminal IPC.
+        task.worktree_path()
+            .map(Path::new)
+            .filter(|path| path.exists())
+            .is_some_and(|path| {
+                crate::git::run_git_output_mapped(
+                    path,
+                    &[
+                        "status",
+                        "--porcelain",
+                        "--",
+                        ".",
+                        ":!performer.sh",
+                        ":!worktree.prd.json",
+                    ],
+                    "inspect work retained after performer death",
+                )
+                .map(|output| !output.status.success() || !output.stdout.is_empty())
+                .unwrap_or(true)
+            })
     };
 
     let mut registry_value = registry.to_value()?;
@@ -452,7 +473,8 @@ enum MutationAction {
 /// When repair is needed the choice is deliberate:
 /// * the branch holds unmerged commits -> **block**, naming the branch. Work is
 ///   at stake, so an operator must decide whether to recover or discard it.
-/// * the branch holds nothing -> **requeue**, clearing the stale attachment so
+/// * the worktree holds uncommitted edits -> **block**, preserving its attachment.
+/// * the branch and worktree hold nothing -> **requeue**, clearing the stale attachment so
 ///   the task can be dispatched fresh. Nothing is lost.
 ///
 /// Never silently discard a branch with commits on it.
@@ -469,8 +491,9 @@ fn classify_parked_todo_task(
     }
     // Parked for a same-worktree retry with attempts left: dispatch will pick
     // it up on this run, so leave it alone.
-    let resumable = task.is_awaiting_same_worktree_retry()
-        && task.task_runtime.retries_count() <= same_worktree_budget;
+    let resumable = task.is_awaiting_tool_availability_retry()
+        || (task.is_awaiting_same_worktree_retry()
+            && task.task_runtime.retries_count() <= same_worktree_budget);
     if resumable {
         return None;
     }
@@ -481,6 +504,27 @@ fn classify_parked_todo_task(
             .map(|commits| !commits.is_empty())
             .unwrap_or(false);
 
+    let has_uncommitted = task
+        .worktree_path()
+        .map(Path::new)
+        .filter(|path| path.exists())
+        .is_some_and(|path| {
+            crate::git::run_git_output_mapped(
+                path,
+                &[
+                    "status",
+                    "--porcelain",
+                    "--",
+                    ".",
+                    ":!performer.sh",
+                    ":!worktree.prd.json",
+                ],
+                "inspect parked task edits",
+            )
+            .map(|output| !output.status.success() || !output.stdout.is_empty())
+            .unwrap_or(true)
+        });
+
     let (situation, classification, action, act) = if has_commits {
         (
             format!(
@@ -489,6 +533,13 @@ fn classify_parked_todo_task(
             ),
             "parked_unschedulable_with_commits".to_string(),
             "Block for operator review; committed work is unmerged".to_string(),
+            MutationAction::Blocked,
+        )
+    } else if has_uncommitted {
+        (
+            format!("Task is todo with retained uncommitted work on {}", branch),
+            "parked_unschedulable_with_changes".to_string(),
+            "Block for operator review; preserve uncommitted work".to_string(),
             MutationAction::Blocked,
         )
     } else {
@@ -574,6 +625,18 @@ pub fn execute_startup_recovery_sweep(
                 });
                 proposed_mutations.push((task.id.clone(), act, classification));
             }
+            continue;
+        }
+        if task.has_worktree_attached()
+            && task.runtime_status() == crate::coordinator::RuntimeStatus::PhaseDone
+            && task
+                .task_runtime
+                .extra
+                .get("phase_tool_unavailable")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+        {
+            // An interrupted phase has a known handoff, not a dead claim.
             continue;
         }
         if !task.is_active() && task.state != "blocked" {
@@ -724,7 +787,9 @@ pub fn execute_startup_recovery_sweep(
                     "blocked_dirty_worktree" => Some("E417".to_string()),
                     // Same code the live path uses when a same-worktree retry
                     // budget runs out, so both routes to this state read alike.
-                    "parked_unschedulable_with_commits" => Some("E902".to_string()),
+                    "parked_unschedulable_with_commits" | "parked_unschedulable_with_changes" => {
+                        Some("E902".to_string())
+                    }
                     _ => None,
                 };
                 if let Some(code) = err_code {
@@ -737,6 +802,9 @@ pub fn execute_startup_recovery_sweep(
                         "parked_unschedulable_with_commits" => format!(
                             "Task could no longer be dispatched into its own worktree; committed work is unmerged on branch {}",
                             branch
+                        ),
+                        "parked_unschedulable_with_changes" => format!(
+                            "Task could no longer resume its own worktree; uncommitted work was preserved on branch {}", branch
                         ),
                         _ => "Recovery classification".to_string(),
                     });
@@ -905,7 +973,7 @@ pub fn cleanup_registry_native(repo_root: &Path) -> Result<()> {
     for task in registry.tasks.iter_mut() {
         match task.state.as_str() {
             "abandoned" | "todo" => {
-                if task.worktree.is_some() {
+                if task.worktree.is_some() && !task.is_awaiting_same_worktree_retry() {
                     task.worktree = None;
                     changed = true;
                 }

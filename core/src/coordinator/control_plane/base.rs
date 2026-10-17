@@ -1,3 +1,4 @@
+use super::phase_handoff::handle_phase_tool_unavailability;
 use crate::config::CoordinatorConfigResolved;
 use crate::coordinator::helpers::{
     append_coordinator_event, append_coordinator_event_with_severity, append_phase_skipped_event,
@@ -5,7 +6,7 @@ use crate::coordinator::helpers::{
 };
 use crate::coordinator::ipc::ensure_performer_ipc_listener;
 use crate::coordinator::model::{PrdInput, Task, TaskRegistry};
-use crate::coordinator::rate_limit::{RateLimitInfo, ToolThrottleState, E602_QUOTA_EXHAUSTED};
+use crate::coordinator::rate_limit::E602_QUOTA_EXHAUSTED;
 use crate::coordinator::runtime::{
     CoordinatorJob, CoordinatorMergeJob, CoordinatorRunState, CoordinatorRuntimeEventKind,
 };
@@ -207,15 +208,21 @@ pub(super) fn mark_task_merged_from_merge_gate(
 }
 
 /// Persist the volatile throttle registry to SQLite so cooldowns survive restart.
-fn persist_throttle_registry(
+pub(super) fn persist_throttle_registry(
     repo_root: &Path,
     registry: &crate::coordinator::rate_limit::ToolThrottleRegistry,
-) {
+    tool_id: &str,
+) -> Result<()> {
     let paths = crate::ProjectPaths::from_root(repo_root);
     let storage_paths =
         crate::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&paths);
     let sqlite = crate::coordinator_storage::SqliteStorage::new(storage_paths);
-    let _ = sqlite.save_throttle_registry(registry);
+    // Do not overwrite concurrent operator changes to other tools.
+    if let Some(state) = registry.get(tool_id) {
+        sqlite.upsert_tool_throttle(tool_id, state)
+    } else {
+        sqlite.delete_tool_throttle(tool_id).map(|_| ())
+    }
 }
 
 /// Detect transient tool unavailability in a phase failure reason string.
@@ -297,7 +304,7 @@ const TRANSIENT_ERROR_CODES: &[&str] = &["E601", "E602", "E603", "E101"];
 /// Try to classify a phase failure reason via the per-adapter error normalizers.
 /// Returns `(error_code, cooldown_seconds)` if the error is a transient
 /// tool-unavailability error (E601, E602, E603, E101).
-fn extract_cooldown_from_reason(
+pub(super) fn extract_cooldown_from_reason(
     reason: &str,
     tool_id: &str,
     normalizer_registry: &crate::coordinator::error_normalizer::NormalizerRegistry,
@@ -312,215 +319,6 @@ fn extract_cooldown_from_reason(
     } else {
         None
     }
-}
-
-/// Reset a worktree to a known-good commit, discarding any uncommitted or
-/// partially committed changes made during a failed phase attempt.
-fn rollback_worktree_to_sha(worktree_path: &Path, target_sha: &str) -> bool {
-    let reset = crate::git::run_git_output_mapped(
-        worktree_path,
-        &["reset", "--hard", target_sha],
-        "rollback worktree to pre-phase SHA",
-    );
-    let clean = crate::git::run_git_output_mapped(
-        worktree_path,
-        &["clean", "-fd"],
-        "clean worktree after rollback",
-    );
-    reset.map(|o| o.status.success()).unwrap_or(false)
-        && clean.map(|o| o.status.success()).unwrap_or(false)
-}
-
-/// Handle transient tool unavailability detected during a phase
-/// (review/fix).
-///
-/// Covers E601 (rate-limit), E602 (quota exhaustion), E603 (session conflict),
-/// E101 (timeout/network), and any other error that imposes a waiting period or
-/// partial/total tool unavailability.
-///
-/// **Worktree recycling**: when committed work exists on the worktree branch,
-/// it is preserved (it cost tokens) and the task is handed off to a fallback
-/// tool or kept waiting until the throttle expires.
-///
-/// Three cases:
-///
-/// | Committed work? | Fallback tool? | Action                                    |
-/// |-----------------|----------------|-------------------------------------------|
-/// | Yes             | Yes            | Recycle worktree → fallback tool, no delay |
-/// | Yes             | No             | Keep worktree, delay until throttle expires |
-/// | No              | —              | Detach worktree, re-queue as Todo          |
-#[allow(clippy::too_many_arguments)]
-fn handle_phase_tool_unavailability(
-    repo_root: &Path,
-    registry: &mut serde_json::Value,
-    state: &mut CoordinatorRunState,
-    task_snapshot: &Task,
-    task_id: &str,
-    phase: &str,
-    reason: &str,
-    pre_phase_sha: Option<&str>,
-    worktree_path_str: Option<&str>,
-    now: &str,
-    enabled_tools: &[String],
-    logger: Option<&dyn CoordinatorLog>,
-) -> Result<()> {
-    let tool_id = task_snapshot.tool.as_deref().unwrap_or("unknown");
-    let base_branch = task_snapshot.base_branch("master");
-
-    // ── Step 1: roll back worktree to pre-phase HEAD ───────────────────
-    let rolled_back = match (worktree_path_str, pre_phase_sha) {
-        (Some(wp), Some(sha)) => {
-            let ok = rollback_worktree_to_sha(Path::new(wp), sha);
-            if let Some(log) = logger {
-                let _ = log.note(format!(
-                    "- tool-unavail rollback task={} worktree={} sha={} ok={}",
-                    task_id, wp, sha, ok
-                ));
-            }
-            ok
-        }
-        _ => {
-            if let Some(log) = logger {
-                let _ = log.note(format!(
-                    "- tool-unavail rollback skipped task={} (no worktree/sha)",
-                    task_id
-                ));
-            }
-            false
-        }
-    };
-
-    // ── Step 2: compute cooldown and register tool throttle ────────────
-    let (detected_error_code, cooldown) =
-        extract_cooldown_from_reason(reason, tool_id, &state.normalizer_registry)
-            .unwrap_or_else(|| ("E602".to_string(), 3600));
-    let now_epoch = chrono::DateTime::parse_from_rfc3339(now)
-        .map(|dt| dt.timestamp() as u64)
-        .unwrap_or(0);
-    let throttled_until = now_epoch + cooldown;
-
-    let ts = ToolThrottleState {
-        tool_id: tool_id.to_string(),
-        throttled_until,
-        consecutive_429_count: 1,
-        backoff_seconds: cooldown,
-        last_rate_limit_info: Some(RateLimitInfo {
-            tool_id: tool_id.to_string(),
-            error_code: detected_error_code,
-            retry_after_seconds: Some(cooldown),
-            detected_at: now_epoch,
-            source_header: None,
-        }),
-    };
-    state.throttle_registry.insert(tool_id.to_string(), ts);
-    persist_throttle_registry(repo_root, &state.throttle_registry);
-
-    // ── Step 3: check for committed work on the worktree ───────────────
-    let has_committed_work = worktree_path_str
-        .map(|wp| crate::git::has_commits_ahead(Path::new(wp), &base_branch))
-        .unwrap_or(false);
-
-    let has_fallback_tool = enabled_tools.iter().any(|t| {
-        t != tool_id
-            && !crate::coordinator::rate_limit::is_tool_throttled(&state.throttle_registry, t, now)
-    });
-
-    // ── Step 4: apply the appropriate recycling strategy ───────────────
-    let delayed_until_str = chrono::DateTime::parse_from_rfc3339(now)
-        .ok()
-        .and_then(|dt| dt.checked_add_signed(chrono::Duration::seconds(cooldown as i64)))
-        .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
-        .unwrap_or_default();
-
-    let strategy: &str;
-
-    let mut typed = TaskRegistry::from_value(registry)?;
-    if let Some(task) = typed.find_task_mut(task_id) {
-        // First pass: write all runtime fields while borrow is active.
-        {
-            let runtime = task.ensure_runtime();
-            runtime.pid = None;
-            runtime.completion_kind = None;
-            runtime.last_error = Some(format!(
-                "Tool unavailable during {} phase; rolled_back={}; cooldown {}s",
-                phase, rolled_back, cooldown
-            ));
-
-            if has_committed_work && has_fallback_tool {
-                runtime.delayed_until = None;
-                runtime.set_status(crate::coordinator::RuntimeStatus::PhaseDone);
-            } else if has_committed_work {
-                runtime.delayed_until = Some(delayed_until_str.clone());
-            } else {
-                runtime.delayed_until = if has_fallback_tool {
-                    None
-                } else {
-                    Some(delayed_until_str.clone())
-                };
-                runtime.set_status(crate::coordinator::RuntimeStatus::Idle);
-                runtime.current_phase = None;
-            }
-        }
-        // Second pass: write direct task fields (borrow on runtime dropped).
-        if has_committed_work && has_fallback_tool {
-            // ── Case 1: recycle worktree → fallback tool ────────────
-            strategy = "recycle_to_fallback";
-            let fallback = enabled_tools
-                .iter()
-                .find(|t| {
-                    t.as_str() != tool_id
-                        && !crate::coordinator::rate_limit::is_tool_throttled(
-                            &state.throttle_registry,
-                            t,
-                            now,
-                        )
-                })
-                .cloned()
-                .unwrap_or_default();
-            task.tool = Some(fallback);
-            task.touch_state_changed(now);
-        } else if has_committed_work {
-            // ── Case 2: wait for throttle to expire ────────────────
-            strategy = "wait_for_throttle";
-            task.touch_state_changed(now);
-        } else {
-            // ── Case 3: no committed work → re-queue ───────────────
-            strategy = "requeue_fresh";
-            task.worktree = None;
-            task.assignee = None;
-            task.tool = None;
-            task.set_workflow_state(crate::coordinator::WorkflowState::Todo);
-            task.touch_state_changed(now);
-        }
-    } else {
-        strategy = "task_not_found";
-    }
-    *registry = typed.to_value()?;
-
-    // ── Log event ──────────────────────────────────────────────────────
-    let msg = format!(
-        "phase_tool_unavailability task={} phase={} tool={} cooldown={}s rolled_back={} \
-         has_committed_work={} strategy={}",
-        task_id, phase, tool_id, cooldown, rolled_back, has_committed_work, strategy,
-    );
-    let _ = append_coordinator_event_with_severity(
-        repo_root,
-        "phase_tool_unavailability",
-        task_id,
-        phase,
-        match strategy {
-            "recycle_to_fallback" => "recycled",
-            "wait_for_throttle" => "waiting",
-            _ => "requeued",
-        },
-        &msg,
-        "warning",
-    );
-    if let Some(log) = logger {
-        let _ = log.note(format!("- {}", msg));
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -640,6 +438,20 @@ pub fn sync_registry_from_prd_native(
     let registry_value =
         crate::coordinator::state::coordinator_state_registry_load(repo_root, &BTreeMap::new())?;
     let mut registry = TaskRegistry::from_value(&registry_value)?;
+    // Runs every cycle: only a registry that really changed is saved.
+    let stored = registry.clone();
+    let queue = crate::prd_queue::load(repo_root)?;
+    if let Some(current) = queue.entries.get(queue.next) {
+        if prd_file.canonicalize().ok().is_some_and(|path| {
+            repo_root.join(&current.path).canonicalize().ok().as_ref() == Some(&path)
+        }) {
+            for completed in queue.entries.iter().take(queue.next) {
+                registry
+                    .external_merged_task_ids
+                    .extend(completed.task_ids.iter().cloned());
+            }
+        }
+    }
     let raw_prd = std::fs::read_to_string(prd_file).map_err(|e| MaccError::Io {
         path: prd_file.to_string_lossy().into(),
         action: "read coordinator prd".into(),
@@ -661,7 +473,8 @@ pub fn sync_registry_from_prd_native(
         if id.is_empty() {
             continue;
         }
-        let mut task = by_id.remove(&id).unwrap_or_else(|| Task {
+        let before = by_id.remove(&id);
+        let mut task = before.clone().unwrap_or_else(|| Task {
             id: id.clone(),
             state: "todo".to_string(),
             ..Task::default()
@@ -684,6 +497,28 @@ pub fn sync_registry_from_prd_native(
             task.blocked_on_external = None;
         }
         task.gate = prd_task.gate.clone();
+        if let Some(gate) = task.gate.as_ref() {
+            let problems = gate.validate_human_approval(&task.id, &task.dependencies);
+            if !problems.is_empty() {
+                // An invalid gate must never degrade into an ordinary task that
+                // a performer would try to "approve": park it as blocked.
+                task.set_workflow_state(crate::coordinator::WorkflowState::Blocked);
+                task.ensure_runtime().set_last_error_details(
+                    "E908",
+                    "prd",
+                    format!("Invalid human approval gate: {}", problems.join("; ")),
+                );
+            } else if gate.is_human_approval()
+                && task.task_runtime.last_error_code.as_deref() == Some("E908")
+            {
+                task.set_workflow_state(crate::coordinator::WorkflowState::Todo);
+                let runtime = task.ensure_runtime();
+                runtime.last_error = None;
+                runtime.last_error_code = None;
+                runtime.last_error_origin = None;
+                runtime.last_error_message = None;
+            }
+        }
         task.extra.retain(|key, _| {
             !matches!(
                 key.as_str(),
@@ -718,23 +553,50 @@ pub fn sync_registry_from_prd_native(
         if !has_external_block {
             runtime.external_block_resolution = None;
         }
-        task.updated_at = Some(now_iso_coordinator());
+        if before.as_ref() != Some(&task) {
+            task.updated_at = Some(now_iso_coordinator());
+        }
         merged.push(task);
     }
 
     let tasks_changed = registry.tasks != merged;
     registry.tasks = merged;
+    // Human approval gates first: an approval recorded since the last cycle
+    // must satisfy dependants before block propagation runs, and a gate must
+    // be parked in `waiting_approval` before the dispatcher can see it.
+    let gate_transitions = crate::coordinator::approval::reconcile_human_gates_for_project(
+        repo_root,
+        &mut registry,
+        &now_iso_coordinator(),
+    )
+    .unwrap_or_else(|err| {
+        if let Some(log) = logger {
+            let _ = log.note(format!("- Human gate reconciliation skipped: {err}"));
+        }
+        Vec::new()
+    });
+    if let Some(log) = logger {
+        for t in &gate_transitions {
+            let _ = log.note(format!(
+                "- Approval gate {} {}: {}",
+                t.task_id, t.event, t.detail
+            ));
+        }
+    }
     let reconciled_blocks = crate::coordinator::task_selector::reconcile_task_blocks(
         &mut registry,
         &now_iso_coordinator(),
     );
     registry.recompute_resource_locks(&now_iso_coordinator());
-    registry.set_updated_at(now_iso_coordinator());
-    crate::coordinator::state::coordinator_state_registry_save(
-        repo_root,
-        &BTreeMap::new(),
-        &registry.to_value()?,
-    )?;
+    let changed = registry != stored;
+    if changed {
+        registry.set_updated_at(now_iso_coordinator());
+        crate::coordinator::state::coordinator_state_registry_save(
+            repo_root,
+            &BTreeMap::new(),
+            &registry.to_value()?,
+        )?;
+    }
 
     if let Some(log) = logger {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -913,13 +775,6 @@ pub async fn advance_tasks_native(
                             ))
                         })?;
 
-                // ── Part A: snapshot HEAD before the phase so we can roll back
-                // if the tool hits quota exhaustion mid-phase. ──────────────────
-                let worktree_path_str = task_snapshot.worktree_path().map(|s| s.to_string());
-                let pre_phase_sha = worktree_path_str
-                    .as_deref()
-                    .and_then(|wp| crate::git::head_commit(Path::new(wp)).ok());
-
                 let executor = NativePhaseExecutor { repo_root, logger };
                 if mode == "review" {
                     // block_in_place: the phase runner is synchronous blocking I/O (spawns
@@ -969,8 +824,7 @@ pub async fn advance_tasks_native(
                                     &task_id,
                                     mode,
                                     &reason,
-                                    pre_phase_sha.as_deref(),
-                                    worktree_path_str.as_deref(),
+                                    coordinator_tool_override,
                                     &now,
                                     &enabled_tools,
                                     logger,
@@ -1017,8 +871,7 @@ pub async fn advance_tasks_native(
                                     &task_id,
                                     mode,
                                     &reason,
-                                    pre_phase_sha.as_deref(),
-                                    worktree_path_str.as_deref(),
+                                    coordinator_tool_override,
                                     &now,
                                     &enabled_tools,
                                     logger,
@@ -1037,6 +890,7 @@ pub async fn advance_tasks_native(
                         }
                     }
                 }
+                note_unapplicable_phase_outcome(repo_root, &registry, &task_id, mode, logger);
                 progressed = true;
             }
             coordinator_engine::AdvanceTaskAction::QueueMerge {
@@ -1108,6 +962,22 @@ pub async fn advance_tasks_native(
                 }
                 progressed = true;
             }
+            coordinator_engine::AdvanceTaskAction::BlockReviewBudget { task_id } => {
+                coordinator_engine::apply_phase_outcome_in_registry(
+                    &mut registry, &task_id, "fix",
+                    coordinator_engine::PhaseTransition { mode: "fix", next_state: crate::coordinator::WorkflowState::InProgress, runtime_phase: "fix" },
+                    None, Some("review budget exhausted with unresolved changes requested; work preserved and merge refused"), &now,
+                )?;
+                append_coordinator_event(
+                    repo_root,
+                    "task_blocked",
+                    &task_id,
+                    "review",
+                    "blocked",
+                    "Review budget exhausted with unresolved changes requested; merge refused",
+                )?;
+                progressed = true;
+            }
             coordinator_engine::AdvanceTaskAction::BlockNoBranch { task_id } => {
                 // Task reached merge-ready state but has no branch (worktree
                 // cleared by ghost cleanup before the completion was applied).
@@ -1146,6 +1016,90 @@ pub async fn advance_tasks_native(
         progressed,
         blocked_merge,
     })
+}
+
+/// Announce a phase result the FSM could not apply: the task was blocked
+/// (E910) instead of aborting the run, and the operator must know why.
+fn note_unapplicable_phase_outcome(
+    repo_root: &Path,
+    registry: &serde_json::Value,
+    task_id: &str,
+    mode: &str,
+    logger: Option<&dyn CoordinatorLog>,
+) {
+    let Some(task) = TaskRegistry::from_value(registry)
+        .ok()
+        .and_then(|typed| typed.find_task(task_id).cloned())
+    else {
+        return;
+    };
+    if task.task_runtime.last_error_code.as_deref()
+        != Some(coordinator_engine::E910_PHASE_OUTCOME_UNAPPLICABLE)
+        || task.state != "blocked"
+    {
+        return;
+    }
+    let message = task
+        .task_runtime
+        .last_error_message
+        .clone()
+        .unwrap_or_default();
+    let _ = append_coordinator_event_with_severity(
+        repo_root,
+        "phase_outcome_unapplicable",
+        task_id,
+        mode,
+        "blocked",
+        &message,
+        "blocking",
+    );
+    if let Some(log) = logger {
+        let _ = log.note(format!("- {message}"));
+    }
+}
+
+/// Announce a precondition stop whose fix lies outside the task's change
+/// scope: it needs a repair in another module, which retrying or unblocking
+/// the task cannot provide.
+fn note_out_of_scope_precondition(
+    repo_root: &Path,
+    registry: &serde_json::Value,
+    task_id: &str,
+    logger: Option<&dyn CoordinatorLog>,
+) {
+    let Some(paths) = TaskRegistry::from_value(registry)
+        .ok()
+        .and_then(|typed| typed.find_task(task_id).cloned())
+        .and_then(|task| {
+            task.task_runtime
+                .extra
+                .get(crate::coordinator::precondition_scope::OUT_OF_SCOPE_FIX_KEY)
+                .and_then(|v| v.get("paths"))
+                .and_then(|v| v.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect::<Vec<_>>()
+                })
+        })
+        .filter(|paths| !paths.is_empty())
+    else {
+        return;
+    };
+    let message = crate::coordinator::precondition_scope::out_of_scope_note(task_id, &paths);
+    let _ = append_coordinator_event_with_severity(
+        repo_root,
+        "precondition_out_of_scope",
+        task_id,
+        "dev",
+        "out_of_scope",
+        &message,
+        "warning",
+    );
+    if let Some(log) = logger {
+        let _ = log.note(format!("- {message}"));
+    }
 }
 
 pub async fn monitor_active_jobs_native(
@@ -1220,6 +1174,7 @@ pub async fn monitor_active_jobs_native(
                         error_origin: evt.error_origin.clone(),
                         error_message: evt.error_message.clone(),
                         result_explanation: evt.result_explanation.clone(),
+                        unmet_preconditions: evt.unmet_preconditions.clone(),
                         auto_retry_error_codes: retry_codes.clone(),
                         auto_retry_max: retry_max,
                         backoff_base_seconds: resolve_rate_limit_backoff_base_seconds(
@@ -1235,6 +1190,14 @@ pub async fn monitor_active_jobs_native(
                     &state.normalizer_registry,
                     &now_iso_coordinator(),
                 )?;
+                if evt.success {
+                    crate::coordinator::delivery_evidence::attach_reference_completion(
+                        &mut registry,
+                        &evt.task_id,
+                        repo_root,
+                        &job.base_branch,
+                    )?;
+                }
                 if let Some(verdict) = evt.gate_verdict {
                     coordinator_engine::set_task_gate_verdict_in_registry(
                         &mut registry,
@@ -1364,9 +1327,15 @@ pub async fn monitor_active_jobs_native(
                     active_session_id.as_deref(),
                 );
                 aggregate_performer_logs_after_completion(repo_root, &evt.task_id, logger);
+                if completion.status_label == "precondition_unmet" {
+                    note_out_of_scope_precondition(repo_root, &registry, &evt.task_id, logger);
+                }
                 // RL-ROUTE-005 / RL-THROTTLE-006: maintain throttle registry and
                 // adjust effective concurrency based on rate-limit signals.
-                if completion.status_label == "rate_limit_backoff" {
+                if matches!(
+                    completion.status_label,
+                    "rate_limit_backoff" | "quota_exhausted_requeue"
+                ) {
                     // Extract the throttle state written by the engine and
                     // cache it in the volatile registry so `pick_tool()` can
                     // skip this tool on the next dispatch cycle.
@@ -1380,11 +1349,17 @@ pub async fn monitor_active_jobs_native(
                             >(ts_val.clone())
                             {
                                 state.throttle_registry.insert(job.tool.clone(), ts);
-                                persist_throttle_registry(repo_root, &state.throttle_registry);
+                                persist_throttle_registry(
+                                    repo_root,
+                                    &state.throttle_registry,
+                                    &job.tool,
+                                )?;
                             }
                         }
                     }
-                    if resolve_rate_limit_throttle_parallel(env_cfg, coordinator) {
+                    if completion.status_label == "rate_limit_backoff"
+                        && resolve_rate_limit_throttle_parallel(env_cfg, coordinator)
+                    {
                         let new_val = state.reduce_parallel();
                         let msg = format!(
                             "concurrency_adjusted task={} tool={} reason=rate_limit_backoff effective_max_parallel={}",
@@ -1403,21 +1378,22 @@ pub async fn monitor_active_jobs_native(
                             let _ = log.note(format!("- {}", msg));
                         }
                     }
-                } else if evt.success
-                    || matches!(
-                        completion.completion_kind,
-                        Some(
-                            crate::coordinator::PerformerCompletionKind::SuccessWithChanges
-                                | crate::coordinator::PerformerCompletionKind::SuccessWithoutChanges
-                                | crate::coordinator::PerformerCompletionKind::AlreadySatisfied
+                } else if evt.success || completion.completion_kind.is_some() {
+                    // RL-ROUTE-005: the tool ran and answered — with success or
+                    // with a structured report such as precondition_unmet — so
+                    // clear an expired throttle, or one recorded before this job
+                    // started (a stale cooldown must not block redispatch).
+                    let now_ts = chrono::Utc::now().timestamp().max(0) as u64;
+                    let job_started_at = now_ts.saturating_sub(job.started_at.elapsed().as_secs());
+                    if state.throttle_registry.get(&job.tool).is_some_and(|entry| {
+                        crate::coordinator::rate_limit::job_clears_throttle(
+                            entry,
+                            job_started_at,
+                            now_ts,
                         )
-                    )
-                {
-                    // RL-ROUTE-005: clear throttle on success so the tool is
-                    // re-enabled for future tasks.
-                    if state.throttle_registry.contains_key(&job.tool) {
+                    }) {
                         state.throttle_registry.remove(&job.tool);
-                        persist_throttle_registry(repo_root, &state.throttle_registry);
+                        persist_throttle_registry(repo_root, &state.throttle_registry, &job.tool)?;
                         if resolve_rate_limit_throttle_parallel(env_cfg, coordinator) {
                             let new_val = state.restore_parallel();
                             let msg = format!(
@@ -1630,7 +1606,11 @@ pub fn apply_runtime_event_bus_updates(
     loop {
         match state.runtime_event_bus_rx.try_recv() {
             Ok(event) => {
-                if let Some(log) = logger {
+                // Heartbeats arrive every few seconds per performer and carry no news:
+                // they would make up most of the run log.
+                if let Some(log) = logger.filter(|_| {
+                    !matches!(event.kind, CoordinatorRuntimeEventKind::Heartbeat { .. })
+                }) {
                     let event_type = match &event.kind {
                         CoordinatorRuntimeEventKind::Heartbeat { .. } => "heartbeat",
                         CoordinatorRuntimeEventKind::TaskDispatched { .. } => "task_dispatched",
@@ -1964,7 +1944,7 @@ pub fn consume_runtime_events(
     }
 
     let mut stmt = if let (Some(_seq), Some(_id)) = (last_seq, &last_event_id) {
-        conn.prepare("SELECT raw_json, event_id FROM events WHERE seq > ?1 OR (seq = ?1 AND event_id > ?2) ORDER BY seq ASC, event_id ASC")
+        conn.prepare("SELECT raw_json, event_id FROM events WHERE (seq, event_id) > (?1, ?2) ORDER BY seq ASC, event_id ASC")
             .map_err(sql_err)?
     } else {
         conn.prepare("SELECT raw_json, event_id FROM events ORDER BY seq ASC, event_id ASC")
@@ -3194,8 +3174,9 @@ mod tests {
 
         let mut run_state = CoordinatorRunState::new();
 
+        // evt-2 superseded evt-1: only the last heartbeat of a task is stored.
         let replayed = super::consume_runtime_events(&repo, &mut run_state, None).unwrap();
-        assert_eq!(replayed, 2);
+        assert_eq!(replayed, 1);
 
         let last_event_id: String = conn
             .query_row(

@@ -1,6 +1,7 @@
 use crate::{MaccError, ProjectPaths, Result};
 use std::path::{Component, Path, PathBuf};
 
+const EMBEDDED_COMPLETION_EVIDENCE_SH: &str = include_str!("../../automat/completion_evidence.sh");
 const EMBEDDED_PERFORMER_SH: &str = include_str!("../../automat/performer.sh");
 const EMBEDDED_COORDINATOR_SH: &str = include_str!("../../automat/coordinator.sh");
 const EMBEDDED_MERGE_WORKER_SH: &str = include_str!("../../automat/merge_worker.sh");
@@ -25,6 +26,10 @@ pub fn ensure_embedded_automation_scripts(paths: &ProjectPaths) -> Result<Vec<Pa
             action: "create automation hooks directory".into(),
             source: e,
         })?;
+    }
+    let evidence_path = paths.automation_dir().join("completion_evidence.sh");
+    if write_executable_if_changed(&evidence_path, EMBEDDED_COMPLETION_EVIDENCE_SH)? {
+        created.push(evidence_path);
     }
     if write_executable_if_changed(&paths.automation_performer_path(), EMBEDDED_PERFORMER_SH)? {
         created.push(paths.automation_performer_path());

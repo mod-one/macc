@@ -184,11 +184,49 @@ pub fn clear_throttle_state(state: &mut ToolThrottleState) {
     state.last_rate_limit_info = None;
 }
 
+/// Whether a job of `entry`'s tool that just finished without an availability
+/// failure proves the tool usable again.
+///
+/// True once the throttle has expired, or when the job started after the
+/// throttle was recorded: the tool then ran and answered despite the recorded
+/// cooldown, so the cooldown (for a quota, up to a day) is stale — for example
+/// a quota pattern matched in a performer's prose rather than a real limit.
+/// A job that started before the throttle proves nothing about it.
+pub fn job_clears_throttle(entry: &ToolThrottleState, job_started_at: u64, now: u64) -> bool {
+    entry.throttled_until <= now
+        || entry
+            .last_rate_limit_info
+            .as_ref()
+            .is_some_and(|info| job_started_at > info.detected_at)
+}
+
 // ── Unit tests ──────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_job_started_after_the_throttle_clears_it() {
+        let entry = ToolThrottleState {
+            tool_id: "claude".into(),
+            throttled_until: 1_000 + 86_400,
+            last_rate_limit_info: Some(RateLimitInfo {
+                tool_id: "claude".into(),
+                error_code: E602_QUOTA_EXHAUSTED.into(),
+                retry_after_seconds: Some(86_400),
+                detected_at: 1_000,
+                source_header: None,
+            }),
+            ..Default::default()
+        };
+        // Started before the quota was recorded: proves nothing.
+        assert!(!job_clears_throttle(&entry, 900, 2_000));
+        // Started after it and answered: the cooldown is stale.
+        assert!(job_clears_throttle(&entry, 1_100, 2_000));
+        // Expired: always cleared.
+        assert!(job_clears_throttle(&entry, 0, 1_000 + 86_400));
+    }
 
     #[test]
     fn rate_limit_info_roundtrip() {
