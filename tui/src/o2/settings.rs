@@ -1,21 +1,77 @@
 use super::*;
 impl Panel {
+    pub(super) fn setting_indices(&self) -> Vec<usize> {
+        let Some(view) = &self.view else {
+            return vec![];
+        };
+        let group = view
+            .fields
+            .get(self.selected)
+            .and_then(|f| f.path.split('.').next())
+            .unwrap_or("memory");
+        let mut indices: Vec<_> = view
+            .fields
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.path.starts_with(&format!("{group}.")))
+            .map(|(i, _)| i)
+            .collect();
+        indices.sort_by_key(|i| !view.fields[*i].path.ends_with(".enabled"));
+        indices
+    }
     pub(super) fn setting_key(&mut self, root: &Path, key: KeyCode) -> Result<bool> {
         match key {
+            KeyCode::Left | KeyCode::Right => {
+                let groups = [
+                    "memory",
+                    "context_engine",
+                    "adaptive_compaction",
+                    "code_intelligence",
+                ];
+                if let Some(view) = &self.view {
+                    let current = view
+                        .fields
+                        .get(self.selected)
+                        .and_then(|f| {
+                            groups
+                                .iter()
+                                .position(|g| f.path.starts_with(&format!("{g}.")))
+                        })
+                        .unwrap_or(0);
+                    let next = if key == KeyCode::Right {
+                        (current + 1) % 4
+                    } else {
+                        (current + 3) % 4
+                    };
+                    self.selected = view
+                        .fields
+                        .iter()
+                        .position(|f| f.path == format!("{}.enabled", groups[next]))
+                        .or_else(|| {
+                            view.fields
+                                .iter()
+                                .position(|f| f.path.starts_with(&format!("{}.", groups[next])))
+                        })
+                        .unwrap_or(0);
+                    self.details.clear();
+                    self.scroll = 0;
+                }
+            }
             KeyCode::Char('/') => self.start(
                 "find_field",
                 false,
                 &["Find policy by canonical path or label"],
             ),
-            KeyCode::Up => self.selected = self.selected.saturating_sub(1),
-            KeyCode::Down => {
-                self.selected = (self.selected + 1).min(
-                    self.view
-                        .as_ref()
-                        .map(|v| v.fields.len())
-                        .unwrap_or_default()
-                        .saturating_sub(1),
-                )
+            KeyCode::Up | KeyCode::Down => {
+                let indices = self.setting_indices();
+                if let Some(position) = indices.iter().position(|i| *i == self.selected) {
+                    let next = if key == KeyCode::Down {
+                        (position + 1).min(indices.len().saturating_sub(1))
+                    } else {
+                        position.saturating_sub(1)
+                    };
+                    self.selected = indices[next];
+                }
             }
             KeyCode::Enter => {
                 let f = self
@@ -127,23 +183,13 @@ impl Panel {
             }
             _ => return Ok(false),
         }
-        Ok(true)
-    }
-    pub(super) fn draw_settings(&self, lines: &mut Vec<String>) {
-        lines.push("Enter toggle/edit | p validate/preview | s apply | b default draft | i remove overrides | x discard. Mandatory PRD/evidence/isolation rules cannot be disabled.".into());
-        if let Some(view) = &self.view {
-            for (i, f) in view.fields.iter().enumerate() {
-                let pointer = format!("/{}", f.path.replace('.', "/"));
-                lines.push(format!(
-                    "{} {} = {} | {} | default {}",
-                    if i == self.selected { ">" } else { " " },
-                    f.path,
-                    self.draft.pointer(&pointer).unwrap_or(&f.default),
-                    f.label,
-                    f.default
-                ));
-            }
-            lines.push(format!("Source: {} | Activation: next invocation/query. Native auto overrides require a matching version/help probe and explicit opt-in.",view.source));
+        if matches!(
+            key,
+            KeyCode::Enter | KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right
+        ) {
+            self.details.clear();
+            self.scroll = 0;
         }
+        Ok(true)
     }
 }

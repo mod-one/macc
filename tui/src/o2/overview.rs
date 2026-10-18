@@ -79,29 +79,6 @@ impl Panel {
         self.overview.query.after = None;
         self.refresh_overview(root)
     }
-    pub(super) fn overview_lines(&self, lines: &mut Vec<String>) {
-        lines.push("/ exact task filter | [ first page | ] next page | Enter inspect | m scoped memory | t scoped context | s sessions/checkpoints | 5 policies".into());
-        if let Some(v) = &self.overview.snapshot {
-            lines.push(format!(
-                "Snapshot {} | observed records; no delivery inference",
-                v["captured_at"]
-            ));
-            lines.push(v["notice"].as_str().unwrap_or_default().into());
-            lines.push(format!("Project memory statuses: {}", v["memory_statuses"]));
-            lines.push(format!(
-                "Recorded providers (not live health): {}",
-                v["providers"]
-            ));
-            if self.rows.is_empty() {
-                lines.push(
-                    "No matching task evidence. Check task scope or wait for a checkpoint.".into(),
-                );
-            }
-        }
-        for (i, row) in self.rows.iter().enumerate() {
-            lines.push(format!("{} {} | sessions {} / leases {} | checkpoints {} / reconcile {} | context {} | proposals {}",if i==self.selected{">"}else{" "},row["task_id"],row["sessions"],row["lease_records"],row["checkpoints"],row["needs_reconciliation"],row["contexts"],row["proposals"]));
-        }
-    }
     pub(super) fn replace_rows(&mut self, rows: Vec<Value>) {
         let key = |v: &Value| {
             if self.tab == 0 && self.conflicts {

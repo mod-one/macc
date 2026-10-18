@@ -205,6 +205,7 @@ pub struct AppState {
     pub apply_error: Option<String>,
     pub apply_progress: Option<ApplyProgress>,
     pub help_open: bool,
+    pub help_scroll: u16,
     pub tool_checks: Vec<ToolCheck>,
     pub last_screen: Option<Screen>,
     pub worktree_status: Option<WorktreeStatus>,
@@ -377,6 +378,7 @@ impl AppState {
             apply_error: None,
             apply_progress: None,
             help_open: false,
+            help_scroll: 0,
             tool_checks: Vec::new(),
             last_screen: None,
             worktree_status: None,
@@ -2397,7 +2399,8 @@ impl AppState {
 
     pub fn interaction_mode_label(&self) -> &'static str {
         let screen = self.current_screen();
-        if (screen == Screen::ToolSettings && self.is_tool_field_editing())
+        if (matches!(screen, Screen::Sessions | Screen::O2) && self.sessions.input_active())
+            || (screen == Screen::ToolSettings && self.is_tool_field_editing())
             || (screen == Screen::Automation && self.is_automation_field_editing())
         {
             "edit"
@@ -2691,7 +2694,7 @@ impl AppState {
     }
 
     pub fn tick(&mut self) {
-        if self.current_screen() == Screen::Sessions {
+        if matches!(self.current_screen(), Screen::Sessions | Screen::O2) {
             if let Some(paths) = &self.project_paths {
                 self.sessions.tick(&paths.root);
             }
@@ -5920,6 +5923,7 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
 
     pub fn toggle_help(&mut self) {
         self.help_open = !self.help_open;
+        self.help_scroll = 0;
     }
 
     pub fn current_tool_field_validation(&self) -> Option<String> {

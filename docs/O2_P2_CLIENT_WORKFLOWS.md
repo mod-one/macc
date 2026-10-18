@@ -49,8 +49,11 @@ is required to understand a value.
 
 ## TUI
 
-Open Sessions (**J**), then **o**, then **6 Overview**. Existing tabs **1–5** retain
-their shortcuts. Overview keys:
+Press **O** from Home (or choose O2 in the command palette) for the O2 workspace,
+then **6 Overview**. **J** opens Sessions separately; the older **Sessions → o**
+path remains supported. **F2** opens named actions and **?** opens scrollable
+contextual help. See [Terminal workspaces](TUI_O2_WORKSPACES.md) for the grouped
+settings, forms and navigation. Existing numbered tabs retain their shortcuts. Overview keys:
 
 | Key | Operation |
 | --- | --- |

@@ -1,16 +1,18 @@
 //! Interactive session administration. Domain validation and mutations stay in core.
+mod commands;
+mod view;
 use crossterm::event::KeyCode;
 use macc_core::session_store::{self as store, MigrationReport, SessionPolicy, StoreView};
-use ratatui::{
-    layout::Rect,
-    widgets::{Block, Borders, Paragraph, Wrap},
-    Frame,
-};
+use ratatui::{layout::Rect, Frame};
 use serde_json::Value;
 use std::path::Path;
 #[derive(Default)]
 pub struct SessionsScreen {
     o2: crate::o2::Panel,
+    tab: usize,
+    menu: crate::workspace_ui::ActionMenu,
+    raw_details: bool,
+    pub(crate) requested_sessions: bool,
     usage: crate::session_usage::UsagePanel,
     checkpoints: crate::session_checkpoints::CheckpointPanel,
     pub view: Option<StoreView>,
@@ -45,6 +47,13 @@ impl SessionsScreen {
         } else {
             0
         };
+        if self.tab == 1 {
+            self.selected = self.selected.max(view.fields.len()).min(
+                (view.fields.len() + view.sessions.len())
+                    .saturating_sub(1)
+                    .max(view.fields.len()),
+            );
+        }
         self.checkpoints
             .preserve_selection(self.view.as_ref(), &view);
         if self.view.is_none() {
@@ -103,6 +112,8 @@ impl SessionsScreen {
             self.o2.key(root, key)?;
             if let Some(task) = self.o2.session_task.take() {
                 self.o2.open = false;
+                self.requested_sessions = true;
+                self.tab = 1;
                 self.selected = 0;
                 self.details.clear();
                 self.checkpoints.scope_task(task.clone());
@@ -155,7 +166,30 @@ impl SessionsScreen {
             return Ok(false);
         }
         match key {
+            KeyCode::F(4) => {
+                self.raw_details = !self.raw_details;
+            }
+            KeyCode::Tab | KeyCode::BackTab | KeyCode::Char('1' | '2') => {
+                self.tab = match key {
+                    KeyCode::Char('1') => 0,
+                    KeyCode::Char('2') => 1,
+                    _ => 1 - self.tab,
+                };
+                self.selected = if self.tab == 0 {
+                    0
+                } else {
+                    self.view.as_ref().map(|v| v.fields.len()).unwrap_or(0)
+                };
+                self.details.clear();
+                self.scroll = 0;
+            }
             KeyCode::Esc | KeyCode::Char('q') => {
+                if self.plan.is_some() || self.closing.is_some() {
+                    self.plan = None;
+                    self.closing = None;
+                    self.message = "Reviewed operation cancelled; no action was applied.".into();
+                    return Ok(false);
+                }
                 let clean = !self.inherit
                     && self
                         .view
@@ -181,12 +215,26 @@ impl SessionsScreen {
             KeyCode::Char('h') => self.checkpoints.open = true,
             KeyCode::PageDown => self.scroll = self.scroll.saturating_add(10),
             KeyCode::PageUp => self.scroll = self.scroll.saturating_sub(10),
-            KeyCode::Up => self.selected = self.selected.saturating_sub(1),
+            KeyCode::Up => {
+                let first = if self.tab == 1 {
+                    self.view.as_ref().map(|v| v.fields.len()).unwrap_or(0)
+                } else {
+                    0
+                };
+                self.selected = self.selected.saturating_sub(1).max(first);
+                self.details.clear();
+            }
             KeyCode::Down => {
                 let n = self
                     .view
                     .as_ref()
-                    .map(|v| v.fields.len() + v.sessions.len())
+                    .map(|v| {
+                        if self.tab == 0 {
+                            v.fields.len()
+                        } else {
+                            v.fields.len() + v.sessions.len()
+                        }
+                    })
                     .unwrap_or(0);
                 self.selected = (self.selected + 1).min(n.saturating_sub(1));
             }
@@ -242,11 +290,10 @@ impl SessionsScreen {
                 let policy: SessionPolicy = serde_json::from_value(self.draft.clone())
                     .map_err(|e| macc_core::MaccError::Validation(e.to_string()))?;
                 policy.validate()?;
-                self.message = format!(
-                    "Validated. Next session claim only. Before: {}\nAfter: {}",
-                    serde_json::to_string(&self.view.as_ref().unwrap().policy).unwrap(),
-                    self.draft
-                );
+                self.details=serde_json::to_string_pretty(&serde_json::json!({"before":self.view.as_ref().unwrap().policy,"draft":self.draft})).unwrap_or_default();
+                self.scroll = 0;
+                self.message =
+                    "Draft validated. Inspect Before / Draft, then s saves this revision.".into();
             }
             KeyCode::Char('s') => {
                 let policy: SessionPolicy = serde_json::from_value(self.draft.clone())
@@ -274,7 +321,11 @@ impl SessionsScreen {
                 self.message="Review migration evidence below. Stop coordinator/supervisor/runners, then press a to apply.".into();
             }
             KeyCode::Char('c') => {
-                self.closing = self.selected_id();
+                self.closing = Some(self.selected_id().ok_or_else(|| {
+                    macc_core::MaccError::Validation(
+                        "Open Conversations (2) and select a session to close".into(),
+                    )
+                })?);
                 self.plan = None;
                 self.message = format!(
                     "Close session {:?}? Press a to confirm. Leased sessions cannot close.",
@@ -324,85 +375,6 @@ impl SessionsScreen {
             self.checkpoints.draw(f, area, self.view.as_ref());
             return;
         }
-        let mut lines=vec!["Sessions — o O2 | t usage | h checkpoints | r refresh | ↑↓ select | Enter edit/events | p validate/preview | s apply policy".into(),
-            "u inherit defaults | PgUp/PgDn scroll | m preview migration/rollback | a apply reviewed action | c close | v recover | b backup | d defaults | x discard | Esc back".into()];
-        if let Some(v) = &self.view {
-            lines.push(format!(
-                "Authority: {} | Project: {} | Policy changes activate at next claim",
-                v.backend,
-                v.project_id.as_deref().unwrap_or("legacy")
-            ));
-            lines.push(format!(
-                "Policy source: {} | Staged override removal: {} | Draft revision current: {}",
-                v.policy_source,
-                self.inherit,
-                v.revision == self.draft_revision
-            ));
-            for (i, field) in v.fields.iter().enumerate() {
-                let path = format!("/{}", field.path.replace('.', "/"));
-                let value = if i == self.selected {
-                    self.editing.clone().unwrap_or_else(|| {
-                        self.draft
-                            .pointer(&path)
-                            .unwrap_or(&Value::Null)
-                            .to_string()
-                    })
-                } else {
-                    self.draft
-                        .pointer(&path)
-                        .unwrap_or(&Value::Null)
-                        .to_string()
-                };
-                lines.push(format!(
-                    "{} {}: {} {} [{}..{}]",
-                    if i == self.selected { ">" } else { " " },
-                    field.label,
-                    value,
-                    field.unit,
-                    field.min,
-                    field.max
-                ));
-                if i == self.selected {
-                    lines.push(format!("  {} ({})", field.help, field.path));
-                }
-            }
-            lines.push(
-                "Latest sessions: task | role | tool | status | generation | uses | lease owner / expiry"
-                    .into(),
-            );
-            for (i, s) in v.sessions.iter().enumerate() {
-                lines.push(format!(
-                    "{} {} | {} | {} | {} | {} | {} | {:?}",
-                    if i + v.fields.len() == self.selected {
-                        ">"
-                    } else {
-                        " "
-                    },
-                    s.task_id,
-                    s.role,
-                    s.tool_id,
-                    s.status,
-                    s.generation,
-                    s.use_count,
-                    s.owner_pid
-                ));
-            }
-        }
-        if let Some(plan) = &self.plan {
-            lines.push(serde_json::to_string_pretty(plan).unwrap());
-        }
-        lines.push(self.message.clone());
-        lines.push(self.details.clone());
-        f.render_widget(
-            Paragraph::new(lines.join("\n"))
-                .block(
-                    Block::default()
-                        .title("Session ownership")
-                        .borders(Borders::ALL),
-                )
-                .wrap(Wrap { trim: false })
-                .scroll((self.scroll, 0)),
-            area,
-        );
+        self.draw_workspace(f, area);
     }
 }

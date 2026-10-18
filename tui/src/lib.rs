@@ -25,6 +25,7 @@ pub mod ownership;
 pub mod prd_queue;
 pub mod screen;
 mod session_checkpoints;
+mod session_navigation;
 mod session_usage;
 pub mod sessions;
 #[cfg(test)]
@@ -33,6 +34,9 @@ pub mod state;
 mod supervisor;
 mod tool_cooldowns;
 pub mod ui;
+#[cfg(test)]
+mod workspace_tests;
+mod workspace_ui;
 
 use macc_core::plan::{PlannedOpKind, Scope};
 use macc_core::tool::{FieldDefault, FieldKind};
@@ -263,6 +267,22 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
         match key {
             KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('q') => {
                 state.toggle_help();
+                return;
+            }
+            KeyCode::Down => {
+                state.help_scroll = state.help_scroll.saturating_add(1);
+                return;
+            }
+            KeyCode::Up => {
+                state.help_scroll = state.help_scroll.saturating_sub(1);
+                return;
+            }
+            KeyCode::PageDown => {
+                state.help_scroll = state.help_scroll.saturating_add(8);
+                return;
+            }
+            KeyCode::PageUp => {
+                state.help_scroll = state.help_scroll.saturating_sub(8);
                 return;
             }
             _ => return,
@@ -510,63 +530,7 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
         return;
     }
 
-    if current_screen == Screen::Sessions {
-        if let Some(paths) = state.project_paths.clone() {
-            let result = if state.sessions.is_mutation(key) {
-                state.gate_project_mutation()
-            } else {
-                Ok(())
-            };
-            match result.and_then(|_| state.sessions.key(&paths.root, key)) {
-                Ok(true) => state.pop_screen(),
-                Ok(false) => {
-                    if matches!(key, KeyCode::Char('s' | 'a')) {
-                        if let Ok(saved) = macc_core::load_canonical_config(&paths.config_path) {
-                            if let Some(config) = &mut state.config {
-                                config.memory = saved.memory.clone();
-                                config.context_engine = saved.context_engine.clone();
-                                config.adaptive_compaction = saved.adaptive_compaction.clone();
-                                config.code_intelligence = saved.code_intelligence.clone();
-                            }
-                            if let Some(draft) = &mut state.working_copy {
-                                draft.memory = saved.memory;
-                                draft.context_engine = saved.context_engine;
-                                draft.adaptive_compaction = saved.adaptive_compaction;
-                                draft.code_intelligence = saved.code_intelligence;
-                            }
-                        }
-                    }
-                    if key == KeyCode::Char('s') {
-                        if let Some(view) = &state.sessions.view {
-                            if let Some(config) = &mut state.config {
-                                config.session_management = if view.policy_source == "defaults" {
-                                    None
-                                } else {
-                                    Some(view.policy.clone())
-                                };
-                            }
-                            if let Some(draft) = &mut state.working_copy {
-                                draft.session_management = if view.policy_source == "defaults" {
-                                    None
-                                } else {
-                                    Some(view.policy.clone())
-                                };
-                            }
-                        }
-                    }
-                }
-                Err(e) => state.sessions.message = e.to_string(),
-            }
-        }
-        return;
-    }
-    if key == KeyCode::Char('J') {
-        if let Some(paths) = state.project_paths.clone() {
-            if let Err(e) = state.sessions.refresh(&paths.root) {
-                state.sessions.message = e.to_string();
-            }
-            state.push_screen(Screen::Sessions);
-        }
+    if session_navigation::handle(state, key) {
         return;
     }
     match key {
@@ -839,7 +803,14 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
     }
     let current_screen = state.current_screen();
     let frame_width = f.size().width;
-    let next_step_full = next_step_text(state, frame_width.saturating_sub(10) as usize);
+    let next_step_full = if matches!(current_screen, Screen::Sessions | Screen::O2) {
+        format!(
+            "{}: F2 Actions | Tab sections | ? Help",
+            state.sessions.section_name()
+        )
+    } else {
+        next_step_text(state, frame_width.saturating_sub(10) as usize)
+    };
     let next_step_label = next_step_full
         .strip_prefix("Next step: ")
         .unwrap_or(next_step_full.as_str())
@@ -863,7 +834,10 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
         (phases, status) => status.or_else(|| phases.clone()),
     };
     let header_height = 5 + u16::from(trust_strip.is_some()) + u16::from(override_strip.is_some());
-    let footer_height = if current_screen == Screen::CoordinatorLive {
+    let footer_height = if matches!(
+        current_screen,
+        Screen::CoordinatorLive | Screen::Sessions | Screen::O2 | Screen::Home
+    ) {
         4
     } else {
         3
@@ -1564,7 +1538,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
                 .split(body_area);
 
-            let mut overview = String::new();
+            let mut overview = String::from("WORKSPACES\n[O] O2 — Memory, context & intelligence\n[J] Sessions — Conversations & settings\n[:] Search all commands    [?] Help\n\n");
             if !state.errors.is_empty() {
                 overview.push_str("Errors:\n");
                 for err in &state.errors {
@@ -1651,7 +1625,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             let steps_para = wrapped_paragraph(readiness_text, "Readiness");
             f.render_widget(steps_para, body_chunks[1]);
         }
-        Screen::Sessions => state.sessions.draw(f, body_area),
+        Screen::Sessions | Screen::O2 => state.sessions.draw(f, body_area),
         Screen::Settings => {
             // Settings has been merged into Coordinator Settings (Screen::Automation).
             // This screen is no longer the primary destination — it acts as a redirect notice.
@@ -2817,6 +2791,9 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
     if state.command_palette_open {
         render_command_palette_overlay(f, state);
     }
+    if matches!(state.current_screen(), Screen::Sessions | Screen::O2) {
+        state.sessions.draw_overlay(f);
+    }
     if state.help_open {
         render_help_overlay(f, state);
     }
@@ -2840,6 +2817,8 @@ enum CommandPaletteAction {
     RunCoordinator,
     Doctor,
     OpenLogs,
+    OpenO2,
+    OpenSessions,
     OpenSkills,
     OpenMcp,
     ApplyConfig,
@@ -2854,6 +2833,17 @@ struct CommandPaletteItem {
 
 fn command_palette_items() -> Vec<CommandPaletteItem> {
     vec![
+        CommandPaletteItem {
+            title: "O2 — Memory & context",
+            hint:
+                "Configure shared memory, context, compaction, code intelligence and policy trials",
+            action: CommandPaletteAction::OpenO2,
+        },
+        CommandPaletteItem {
+            title: "Sessions — Conversations & settings",
+            hint: "Inspect session history, ownership, checkpoints, usage and storage migration",
+            action: CommandPaletteAction::OpenSessions,
+        },
         CommandPaletteItem {
             title: "Run coordinator",
             hint: "Start a coordinator run and open live view",
@@ -2952,6 +2942,8 @@ fn execute_command_palette_action(state: &mut AppState, action: CommandPaletteAc
             state.goto_screen(Screen::Home);
             state.run_home_doctor_check();
         }
+        CommandPaletteAction::OpenO2 => session_navigation::open(state, true),
+        CommandPaletteAction::OpenSessions => session_navigation::open(state, false),
         CommandPaletteAction::OpenLogs => state.push_screen(Screen::Logs),
         CommandPaletteAction::OpenSkills => state.push_screen(Screen::Skills),
         CommandPaletteAction::OpenMcp => state.push_screen(Screen::Mcp),
@@ -3568,11 +3560,20 @@ fn render_watch_screen(f: &mut Frame, state: &AppState, area: Rect) {
 }
 
 fn render_help_overlay(f: &mut Frame, state: &AppState) {
-    let area = ui::centered_rect(60, 60, f.size());
+    let area = ui::centered_rect(85, 85, f.size());
     f.render_widget(Clear, area); // Clear the background
 
     let current_screen = state.current_screen();
-    let help_items = current_screen.help_keybindings();
+    let help_items: Vec<(String, String)> =
+        if matches!(current_screen, Screen::Sessions | Screen::O2) {
+            session_navigation::help(state)
+        } else {
+            current_screen
+                .help_keybindings()
+                .into_iter()
+                .map(|(a, b)| (a.into(), b.into()))
+                .collect()
+        };
 
     let mut text = format!("Help: {}\n\n", current_screen.title());
     for (key, desc) in help_items {
@@ -3580,9 +3581,10 @@ fn render_help_overlay(f: &mut Frame, state: &AppState) {
     }
 
     let help_para = Paragraph::new(text)
+        .scroll((state.help_scroll, 0))
         .block(
             Block::default()
-                .title("Keybindings")
+                .title("Help — ↑↓ / PgUp/PgDn scroll; ? / Esc close")
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Cyan)),
         )
@@ -3685,6 +3687,23 @@ fn render_coordinator_ownership_banner(f: &mut Frame, area: Rect, state: &AppSta
 }
 
 fn footer_hints_line(state: &AppState, theme: &ui::Theme, max_chars: usize) -> Line<'static> {
+    if matches!(state.current_screen(), Screen::Sessions | Screen::O2) {
+        let bindings = if state.sessions.input_active() {
+            vec![
+                ("Enter", "Next / finish field", false),
+                ("F1", "Help", false),
+                ("Esc", "Cancel input", false),
+            ]
+        } else {
+            vec![
+                ("F2", "Actions", false),
+                ("Tab", "Sections", false),
+                ("Enter", "Edit / inspect", false),
+                ("Esc", "Back", false),
+            ]
+        };
+        return action_bar_line(bindings, theme, max_chars);
+    }
     if state.current_screen() != Screen::CoordinatorLive {
         let bindings = screen_action_bindings(state.current_screen())
             .into_iter()
@@ -3731,6 +3750,7 @@ fn screen_action_bindings(screen: Screen) -> Vec<(&'static str, &'static str)> {
     match screen {
         Screen::Home => vec![
             ("r", "Start coordinator"),
+            ("O", "O2 workspace"),
             ("J", "Sessions"),
             ("d", "Doctor"),
             ("p", "Preview"),
@@ -3800,11 +3820,13 @@ fn screen_action_bindings(screen: Screen) -> Vec<(&'static str, &'static str)> {
             ("e/w/a", "Filter"),
             ("r/l", "Refresh"),
         ],
-        Screen::Sessions => vec![
+        Screen::Sessions | Screen::O2 => vec![
+            ("F2", "Actions"),
+            ("Tab", "Sections"),
             ("↑↓", "Select"),
             ("Enter", "Edit / events"),
             ("p/s", "Preview / apply policy"),
-            ("m/a", "Migration"),
+            ("O/J", "O2 / Sessions"),
         ],
         Screen::About => vec![("Esc/q", "Back")],
         Screen::CoordinatorLive => Vec::new(),
@@ -4066,7 +4088,7 @@ mod tests {
         let text = line.to_string();
 
         assert!(text
-            .contains("Actions: r Start coordinator | J Sessions | d Doctor | p Preview | ? Help"));
+            .contains("Actions: r Start coordinator | O O2 workspace | J Sessions | d Doctor | p Preview | ? Help"));
         assert!(!text.contains("cache:missing"));
     }
 

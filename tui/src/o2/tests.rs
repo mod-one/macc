@@ -249,7 +249,8 @@ fn overview_navigation_preserves_scope_selection_and_policy_draft() {
         .map(|c| c.symbol())
         .collect::<String>();
     assert!(contents.contains("Overview"));
-    assert!(contents.contains("scoped memory"));
+    assert!(contents.contains("F2"));
+    assert!(contents.contains("Get started"));
     panel.tab = 2;
     panel.rows = vec![json!({"tool_id":"a"}), json!({"tool_id":"b"})];
     panel.selected = 1;
@@ -267,6 +268,9 @@ fn overview_navigation_preserves_scope_selection_and_policy_draft() {
 fn overview_async_refresh_does_not_replace_another_domains_rows() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
+    std::fs::create_dir_all(root.join(".macc")).unwrap();
+    let migration = macc_core::session_store::migrate(root, false, None).unwrap();
+    macc_core::session_store::migrate(root, true, Some(&migration.source_sha256)).unwrap();
     let mut panel = Panel::default();
     panel.refresh(root).unwrap();
     panel.open = true;

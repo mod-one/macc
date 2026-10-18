@@ -13,6 +13,7 @@ pub enum Screen {
     Apply,
     Settings,
     Sessions,
+    O2,
     About,
     Watch,
 }
@@ -32,7 +33,8 @@ impl Screen {
             Screen::Preview => "Preview",
             Screen::Apply => "Apply Changes",
             Screen::Settings => "Global Settings",
-            Screen::Sessions => "Session Ownership",
+            Screen::Sessions => "Sessions & Conversations",
+            Screen::O2 => "O2 Memory & Context",
             Screen::About => "About",
             Screen::Watch => "Observer",
         }
@@ -50,7 +52,8 @@ impl Screen {
             ("m", "Go to MCP"),
             ("g", "Go to Logs"),
             ("e", "Go to Settings"),
-            ("J", "Session ownership"),
+            ("J", "Sessions & conversations"),
+            ("O", "O2 memory, context & settings"),
             ("p", "Go to Preview"),
             ("x", "Go to Apply"),
             ("s", "Save Config"),
@@ -73,7 +76,10 @@ impl Screen {
                 ("d", "Refresh Tool Checks"),
                 ("f", "Generate Tool Context"),
             ],
-            Screen::Sessions => vec![
+            Screen::Sessions | Screen::O2 => vec![
+                ("F2", "Browse named actions"),
+                ("Tab / Shift+Tab", "Next / previous section"),
+                ("o", "Open O2 from Sessions"),
                 ("r", "Refresh"),
                 ("m/a", "Preview / apply migration"),
                 ("p/s", "Preview / save policy"),

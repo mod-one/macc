@@ -1,4 +1,5 @@
 //! Interactive O2 clients call the same application service as CLI and Web.
+mod commands;
 mod forms;
 mod jobs;
 mod overview;
@@ -13,6 +14,7 @@ mod transfer_tests;
 mod tuning;
 #[cfg(test)]
 mod tuning_tests;
+mod view;
 use crossterm::event::KeyCode;
 use macc_core::{
     o2::{
@@ -21,16 +23,14 @@ use macc_core::{
     },
     MaccError, Result,
 };
-use ratatui::{
-    layout::Rect,
-    widgets::{Block, Borders, Paragraph, Wrap},
-    Frame,
-};
+use ratatui::{layout::Rect, Frame};
 use serde_json::{json, Value};
 use std::path::Path;
 #[derive(Default)]
 pub struct Panel {
     pub open: bool,
+    menu: crate::workspace_ui::ActionMenu,
+    raw_details: bool,
     pub session_task: Option<String>,
     overview: overview::Overview,
     tuning_field: usize,
@@ -91,9 +91,17 @@ impl Panel {
         }
         self.view = Some(view);
         if self.tab == 5 {
+            if !self.view.as_ref().is_some_and(|v| v.ready) {
+                self.rows.clear();
+                return Ok(());
+            }
             return self.refresh_overview(root);
         }
         if self.tab == 6 {
+            if !self.view.as_ref().is_some_and(|v| v.ready) {
+                self.rows.clear();
+                return Ok(());
+            }
             if self.job.is_none() {
                 self.launch(root, Action::TuningStatus { id: None })?;
             }
@@ -183,6 +191,24 @@ impl Panel {
         if self.form.is_some() {
             return self.form_key(root, key);
         }
+        if key == KeyCode::Esc && self.pending.is_some() {
+            self.pending = None;
+            self.details.clear();
+            self.message = "Reviewed operation discarded; no action was applied.".into();
+            return Ok(());
+        }
+        if key == KeyCode::F(4) {
+            self.raw_details = !self.raw_details;
+            return Ok(());
+        }
+        if matches!(key, KeyCode::Tab | KeyCode::BackTab) {
+            let next = if key == KeyCode::Tab {
+                (self.tab + 1) % 7
+            } else {
+                (self.tab + 6) % 7
+            };
+            return self.key(root, KeyCode::Char((b'1' + next as u8) as char));
+        }
         if let KeyCode::Char(c @ '1'..='7') = key {
             if self.tab == 5 {
                 self.overview.selected_task = self
@@ -206,6 +232,14 @@ impl Panel {
             self.tab = c as usize - '1' as usize;
             self.selected = 0;
             self.scroll = 0;
+            self.details.clear();
+            if self.tab == 4 {
+                self.selected = self
+                    .view
+                    .as_ref()
+                    .and_then(|v| v.fields.iter().position(|f| f.path == "memory.enabled"))
+                    .unwrap_or(0);
+            }
             if self.tab == 5 {
                 self.rows = self
                     .overview
@@ -237,6 +271,7 @@ impl Panel {
         if self.transfer_key(root, key)? {
             return Ok(());
         }
+        let previous_selection = self.selected;
         match key {
             KeyCode::Esc|KeyCode::Char('o')=>{if self.view.as_ref().is_some_and(|v|self.inherit||serde_json::to_value(&v.policy).ok().as_ref()!=Some(&self.draft)){self.message="Unsaved policy draft. Use 5 → x to discard, or p then s to apply.".into();}else{self.open=false;}},
             KeyCode::Char('r')=>self.refresh(root)?,KeyCode::Up=>self.selected=self.selected.saturating_sub(1),KeyCode::Down=>self.selected=(self.selected+1).min(self.rows.len().saturating_sub(1)),KeyCode::PageDown=>self.scroll=self.scroll.saturating_add(10),KeyCode::PageUp=>self.scroll=self.scroll.saturating_sub(10),
@@ -273,84 +308,11 @@ impl Panel {
             KeyCode::Char('b') if self.tab==1=>self.start("reduce",true,&["Reduction bundle (test, lint, trace, diff, log)","Raw output (JSON escapes supported through advanced j)"]),
             _=>{}
         }
+        if self.selected != previous_selection && self.pending.is_none() {
+            self.details.clear();
+            self.scroll = 0;
+        }
         Ok(())
-    }
-    pub fn draw(&self, f: &mut Frame, area: Rect, outer_message: &str) {
-        let mut lines=vec!["1 Memory | 2 Context | 3 Compaction | 4 Code Intelligence | 5 Policies | 6 Overview | 7 Policy trials | r refresh | u preview schema upgrade | a apply reviewed action | j advanced action | o/Esc back".into(),"↑↓ select | Enter inspect | PgUp/PgDn scroll | / scoped search | E export / I import memory".into(),format!("SQLite: {} | O2 ready: {}",self.view.as_ref().is_some_and(|v|v.sqlite),self.view.as_ref().is_some_and(|v|v.ready)),self.message.clone()];
-        lines.push(outer_message.into());
-        if let Some(form) = &self.form {
-            lines.push(format!(
-                "{} ({}/{}): {}",
-                form.name,
-                form.values.len() + 1,
-                form.labels.len(),
-                form.labels[form.values.len()]
-            ));
-            lines.push(format!("> {}", form.input));
-            lines.push("Enter next/prepare | Shift+Tab previous | Esc cancel. Writes require separate a confirmation.".into());
-        } else if self.tab == 4 {
-            self.draw_settings(&mut lines);
-        } else if self.tab == 6 {
-            lines.push(format!(
-                "Safe field: {} (←/→ select)",
-                macc_core::o2::tuning::FIELDS[self.tuning_field]
-            ));
-            lines.push("n pre-register | i inspect | q seal paired quality | e evaluate | x cancel | p preview passing report | s prepare adoption | a confirm. Exact billed costs only; no automatic runs or policy changes. Configure tuning limits under 5 → context_engine.tuning_*.".into());
-        } else if self.tab == 5 {
-            self.overview_lines(&mut lines);
-        } else {
-            lines.push(match self.tab{0=>"Q approved search | S semantic status | B labelled benchmark | G approve / X revoke → a confirm | y capture symbol | Y capture tool version | R review with captured evidence | h scoped MCP setup | e extract checkpoint → a confirm | n propose | p review → a confirm | c conflict | f toggle conflict list | v resolve selected conflict | l agent search page | g agent record fragment | b rebuild FTS. Only reviewed active current facts enter prompts.",1=>"Context manifests keep PRD/criteria and pinned source hashes separate from optional estimated memory. b reduce output and preserve raw artifact.",2=>"p probe version/help | d runtime decisions | c create checkpoint | m preview native setting adoption | v review scoped rotation. Native settings are opt-in under Policies. Compression execution remains unobserved unless an adapter reports it.",_=>"p preview lifecycle → a confirm. Native ships with MACC; external adapters are optional. / current-code query | v compare with native | d inspect operation UUID."}.into());
-            for (i, row) in self.rows.iter().enumerate() {
-                let label = if self.tab == 0 && self.conflicts {
-                    format!("{} | {} | {}", row["id"], row["status"], row["reason"])
-                } else if self.tab == 0 {
-                    format!(
-                        "{} | {} | {} | confidence {} | {} evidence",
-                        row["memory"]["proposal"]["title"],
-                        row["memory"]["status"],
-                        row["memory"]["proposal"]["scope"],
-                        row["memory"]["proposal"]["confidence"],
-                        row["memory"]["proposal"]["evidence"]
-                            .as_array()
-                            .map(|a| a.len())
-                            .unwrap_or(0)
-                    )
-                } else if self.tab == 1 {
-                    format!(
-                        "{} | {} | optional estimate {} tokens",
-                        row["task_id"], row["phase"], row["optional_estimated_tokens"]
-                    )
-                } else if self.tab == 2 {
-                    format!(
-                        "{} | {} | {}",
-                        row["tool_id"], row["state"], row["native_auto"]
-                    )
-                } else {
-                    format!(
-                        "{} | {} | {}",
-                        row["provider"]["id"], row["status"], row["provider"]["version"]
-                    )
-                };
-                lines.push(format!(
-                    "{} {label}",
-                    if i == self.selected { ">" } else { " " }
-                ));
-            }
-        }
-        if self.form.is_none() {
-            lines.push(self.details.clone());
-        }
-        f.render_widget(
-            Paragraph::new(lines.join("\n"))
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title("O2 Memory / Context / Compaction / Code Intelligence"),
-                )
-                .wrap(Wrap { trim: false })
-                .scroll((self.scroll, 0)),
-            area,
-        );
     }
 }
 

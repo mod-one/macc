@@ -85,7 +85,7 @@ impl Panel {
             overview,
             refreshed: std::time::Instant::now(),
         });
-        self.message="Provider operation running. The terminal remains interactive; closing this panel does not cancel it.".into();
+        self.message="O2 operation running. The terminal remains interactive; closing this panel does not cancel it.".into();
         Ok(())
     }
     pub(super) fn retain_job_form(&mut self, form: forms::Form) {
@@ -95,6 +95,7 @@ impl Panel {
     }
     pub fn poll(&mut self, root: &Path) {
         if self.open
+            && self.view.as_ref().is_some_and(|v| v.ready)
             && self.tab == 5
             && self.job.is_none()
             && self
