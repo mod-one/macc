@@ -1,4 +1,4 @@
-.PHONY: fmt fmt-check lint test test-tool-runner test-contract web-build web-ci all check check-generic check-version release-bump
+.PHONY: fmt fmt-check lint test test-tool-runner test-tool-runner-real test-contract web-build web-ci all check check-generic check-version release-bump
 
 all: fmt lint check-version test test-tool-runner web-ci check-generic test-contract
 
@@ -27,6 +27,11 @@ test-tool-runner:
 	bash automat/tests/test_codex_resume_failure.sh
 	bash automat/tests/test_session_resume_flags.sh
 	python3 automat/tests/test_session_isolation.py
+	python3 automat/tests/test_o2_real_tools.py
+
+# Explicit opt-in only; O2_REAL_ARGS must select reviewed tool JSONs and a report.
+test-tool-runner-real:
+	python3 automat/tests/o2_real_tools.py $(O2_REAL_ARGS)
 
 test-contract:
 	cargo test -p macc-registry --test contract --locked

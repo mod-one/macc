@@ -255,6 +255,17 @@ ${report_snippet}
    and stop. Do NOT leave conflict markers in files.
 EOF
 
+# Merge repair has independent history and a pinned checkpoint contract. Only the
+# coordinator's private integration slot may capture an intentional conflict.
+export MACC_SESSION_ROLE=merge_fix
+export MACC_SESSION_PHASE=merge
+if jq -e '.session_store.mode == "sqlite"' "${REPO_DIR}/.macc/state/tool-sessions.json" >/dev/null 2>&1; then
+  jq -nc --arg wt "$MERGE_DIR" --arg source "$TASK_WORKTREE" --arg task "$TASK_ID" \
+    --arg base "$BASE_BRANCH" --arg feature "$BRANCH" \
+    '{worktree:$wt,source_worktree:$source,task_id:$task,base_revision:$base,feature_revision:$feature}' |
+    "${MACC_SESSION_SERVICE_BIN:-macc}" --cwd "$REPO_DIR" session-store merge-repair-prepare
+fi
+
 set +e
 "$runner" \
   --prompt-file "$prompt_file" \

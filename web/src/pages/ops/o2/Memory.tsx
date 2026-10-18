@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useScopedAction } from './useScopedAction';
 import AgentMemory from './AgentMemory';
+import MemoryTransfer from './MemoryTransfer';
 import EvidenceCapture from './EvidenceCapture';
 import Conflicts from './Conflicts';
 import Semantic from './Semantic';
@@ -69,6 +70,7 @@ export default function Memory({ taskScope = '' }: { taskScope?: string }) {
       <label>Conflicting memory ID<input value={right} onChange={e => setRight(e.target.value)} /></label>
       <button disabled={busy || !confirmed} onClick={() => { void run(async request => { await request('memory_conflict', { left: selected.memory.id, right, reason }); setNotice('Conflict recorded; both claims are excluded from automatic context.'); }); }}>Record reviewed conflict</button>
     </section>}
+    <MemoryTransfer key={JSON.stringify([identity, selected?.memory.id])} identity={identity} access={access} selectedId={selected?.memory.id} />
     <Semantic identity={identity} access={access} />
     <Conflicts identity={identity} access={access} />
     {notice && <p role="status">{notice}</p>}{error && <p role="alert">{error}</p>}

@@ -2,6 +2,7 @@
 mod git_state;
 mod lifecycle;
 mod memory_context;
+pub mod merge_repair;
 mod model;
 mod schema;
 #[cfg(test)]
@@ -34,9 +35,22 @@ pub(super) fn make(
             .ok_or_else(|| error("Worktree identity required"))?,
     );
     git_state::verify_repository(root, wt)?;
-    let git = git_state::snapshot(wt)?;
-    let (task, source_hashes) =
-        git_state::task_sources(wt, v["task_id"].as_str().unwrap_or_default())?;
+    let task_id = v["task_id"].as_str().unwrap_or_default();
+    let repair = if v["role"] == "merge_fix" && request.phase == "merge" {
+        Some(merge_repair::load(root, wt, task_id)?)
+    } else {
+        None
+    };
+    let git = if repair.is_some() {
+        git_state::snapshot_for(wt, repair.as_ref())?
+    } else {
+        git_state::snapshot(wt)?
+    };
+    let (task, source_hashes) = if let Some(repair) = &repair {
+        merge_repair::sources(repair)?
+    } else {
+        git_state::task_sources(wt, task_id)?
+    };
     let criteria = task["tasks"][0]["acceptance_criteria"]
         .as_array()
         .map(|rows| {

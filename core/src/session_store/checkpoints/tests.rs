@@ -1,6 +1,6 @@
 use super::*;
 use std::process::Command;
-fn fixture() -> tempfile::TempDir {
+pub(super) fn fixture() -> tempfile::TempDir {
     let temp = tempfile::tempdir().unwrap();
     let r = temp.path();
     let git = |args: &[&str]| {
@@ -25,7 +25,7 @@ fn fixture() -> tempfile::TempDir {
     migrate(r, true, Some(&plan.source_sha256)).unwrap();
     temp
 }
-fn context(root: &Path, task: &str, role: &str, tool: &str) -> ContextRequest {
+pub(super) fn context(root: &Path, task: &str, role: &str, tool: &str) -> ContextRequest {
     let spec = json!({"id":tool,"performer":{"command":"fake","session":{"enabled":true,"scope":"task_role_tool","create":{"command":"fake","args":["new","{session_id}"]}}}});
     ContextRequest {
         identity: crate::coordinator::session_identity::identity(
@@ -44,7 +44,7 @@ fn context(root: &Path, task: &str, role: &str, tool: &str) -> ContextRequest {
         phase: "dev".into(),
     }
 }
-fn claim(root: &Path, c: &ContextRequest, p: &PreparedContext) -> LeaseGrant {
+pub(super) fn claim(root: &Path, c: &ContextRequest, p: &PreparedContext) -> LeaseGrant {
     acquire(
         root,
         &AcquireRequest {

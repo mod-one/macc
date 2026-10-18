@@ -287,3 +287,81 @@ echo 'REVIEW_VERDICT: CHANGES_REQUESTED'
         .tags
         .contains(&"outcome:changes_requested".into()));
 }
+
+#[test]
+fn opt_in_tool_harness_runs_the_real_transport_with_an_unregistered_future_adapter() {
+    let (temp, _) = setup();
+    let root = temp.path();
+    let fake = root.join("fake-ai.sh");
+    std::fs::write(&fake,r#"#!/bin/bash
+set -eu
+prompt="${@: -1}"
+printf '%s\n' "$prompt" | sed -n '/^MACC_CHECKPOINT_ACK: /p'
+nonce="$(printf '%s\n' "$prompt" | sed -n 's/.*Remember private token \([[:xdigit:]]\{32\}\).*/\1/p')"
+file=".macc/nonce-${2:-unknown}"
+if [[ -n "$nonce" ]]; then printf '%s' "$nonce" > "$file"; fi
+if [[ -f "$file" ]]; then cat "$file"; echo; else echo UNKNOWN; fi
+echo "session id: ${2:-unknown}"
+echo 'MACC_TASK_RESULT: success_without_changes'
+"#).unwrap();
+    let mut spec: Value =
+        serde_json::from_slice(&std::fs::read(root.join(".macc/tool.json")).unwrap()).unwrap();
+    spec["api_version"] = json!("v1");
+    spec["display_name"] = json!("Future tool");
+    spec["performer"]["runner"] = json!("adapters/shared/performer_lib.sh");
+    std::fs::write(root.join(".macc/tool.json"), spec.to_string()).unwrap();
+    let report = root.join(".macc/smoke-results.json");
+    let out = Command::new("python3")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../automat/tests/o2_real_tools.py"))
+        .arg("--tool-json")
+        .arg(root.join(".macc/tool.json"))
+        .arg("--macc")
+        .arg(env!("CARGO_BIN_EXE_macc"))
+        .arg("--report")
+        .arg(&report)
+        .args(["--execute", "--confirm-model-calls", "--timeout", "30"])
+        .output()
+        .unwrap();
+    let result: Value = serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
+    assert!(
+        out.status.success(),
+        "{} {} {result}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(result["tools"][0]["calls"], 5);
+    for key in [
+        "exact_resume",
+        "task_isolation",
+        "reviewer_isolation",
+        "checkpoint_rotation",
+    ] {
+        assert_eq!(result["tools"][0]["checks"][key], "verified", "{result}");
+    }
+    assert_eq!(
+        result["tools"][0]["checks"]["native_compression"],
+        "unverified"
+    );
+    // A provider can print success before MACC rejects its missing fresh-session
+    // ACK. The harness must honor the final MACC verdict and stop after one call.
+    let script = std::fs::read_to_string(&fake).unwrap();
+    let ack = r#"printf '%s\n' "$prompt" | sed -n '/^MACC_CHECKPOINT_ACK: /p'"#;
+    assert!(script.contains(ack));
+    std::fs::write(&fake, script.replace(ack, "# omit acknowledgement")).unwrap();
+    let rejected = root.join(".macc/smoke-rejected.json");
+    let out = Command::new("python3")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../automat/tests/o2_real_tools.py"))
+        .arg("--tool-json")
+        .arg(root.join(".macc/tool.json"))
+        .arg("--macc")
+        .arg(env!("CARGO_BIN_EXE_macc"))
+        .arg("--report")
+        .arg(&rejected)
+        .args(["--execute", "--confirm-model-calls", "--timeout", "30"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let rejected: Value = serde_json::from_slice(&std::fs::read(rejected).unwrap()).unwrap();
+    assert_eq!(rejected["tools"][0]["calls"], 1);
+    assert_eq!(rejected["tools"][0]["status"], "failed");
+}

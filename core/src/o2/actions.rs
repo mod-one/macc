@@ -10,6 +10,22 @@ pub enum Action {
     Overview {
         query: overview::Query,
     },
+    MemoryExportPreview {
+        request: memory::transfer::ExportRequest,
+    },
+    MemoryExport {
+        request: memory::transfer::ExportRequest,
+        checksum: String,
+        confirmed: bool,
+    },
+    MemoryImportPreview {
+        request: memory::transfer::ImportRequest,
+    },
+    MemoryImport {
+        request: memory::transfer::ImportRequest,
+        checksum: String,
+        confirmed: bool,
+    },
     MemoryExtract {
         checkpoint_id: String,
     },
@@ -187,6 +203,8 @@ impl Action {
                 | Self::AgentStatus
                 | Self::PolicyPreview { .. }
                 | Self::UpgradePlan
+                | Self::MemoryExportPreview { .. }
+                | Self::MemoryImportPreview { .. }
                 | Self::MemorySearch { .. }
                 | Self::MemoryGet { .. }
                 | Self::MemoryPull { .. }
@@ -213,6 +231,18 @@ fn value<T: Serialize>(v: T) -> Result<Value> {
 }
 pub fn execute(root: &Path, action: Action) -> Result<Value> {
     match action {
+        Action::MemoryExportPreview { request } => memory::transfer::export_preview(root, &request),
+        Action::MemoryExport {
+            request,
+            checksum,
+            confirmed,
+        } => memory::transfer::export(root, &request, &checksum, confirmed),
+        Action::MemoryImportPreview { request } => memory::transfer::import_preview(root, &request),
+        Action::MemoryImport {
+            request,
+            checksum,
+            confirmed,
+        } => memory::transfer::import(root, &request, &checksum, confirmed),
         Action::TuningStatus { id } => tuning::inspect(root, id.as_deref()),
         Action::TuningCreate { plan, confirmed } => tuning::create(root, plan, confirmed),
         Action::TuningObserve {

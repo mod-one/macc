@@ -31,7 +31,7 @@ const PATTERNS: &[SecretPattern] = &[
     },
     SecretPattern {
         name: "Generic Secret Token",
-        regex: r"sk-[a-zA-Z0-9]{20,}",
+        regex: r"sk-(?:(?:proj|svcacct)-)?[a-zA-Z0-9_-]{20,}",
         severity: Severity::Error,
     },
     SecretPattern {

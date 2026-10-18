@@ -33,6 +33,7 @@ pub enum SessionStoreCommands {
         #[arg(long)]
         expected_sha256: Option<String>,
     },
+    MergeRepairPrepare,
     CheckpointPrepare,
     CheckpointFinish,
     Checkpoint {
@@ -151,6 +152,9 @@ impl Command for SessionStoreCommand {
                     super::gate_cli_mutation(root)?;
                 }
                 emit(store::rollback(root, *apply, expected_sha256.as_deref())?)
+            }
+            SessionStoreCommands::MergeRepairPrepare => {
+                emit(store::checkpoints::merge_repair::capture(root, &input()?)?)
             }
             SessionStoreCommands::CheckpointPrepare => {
                 emit(store::checkpoints::prepare(root, &input()?)?)

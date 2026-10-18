@@ -68,6 +68,22 @@ pub enum ExistingCommand {
         #[arg(long)]
         user: Option<String>,
     },
+    /// Preview a scoped transfer request (JSON on stdin).
+    MemoryExportPreview,
+    /// Export the exact reviewed request (JSON on stdin).
+    MemoryExport {
+        checksum: String,
+        #[arg(long)]
+        confirm: bool,
+    },
+    /// Preview an import request containing document, format and access (JSON on stdin).
+    MemoryImportPreview,
+    /// Import the exact reviewed request as proposals (JSON on stdin).
+    MemoryImport {
+        checksum: String,
+        #[arg(long)]
+        confirm: bool,
+    },
     MemoryPropose,
     MemoryReview,
     MemoryGet {
@@ -243,6 +259,26 @@ impl Command for O2 {
                         Action::UpgradePlan
                     }
                 }
+                ExistingCommand::MemoryExportPreview => Action::MemoryExportPreview {
+                    request: serde_json::from_str(&stdin()?)
+                        .map_err(|e| MaccError::Validation(e.to_string()))?,
+                },
+                ExistingCommand::MemoryExport { checksum, confirm } => Action::MemoryExport {
+                    request: serde_json::from_str(&stdin()?)
+                        .map_err(|e| MaccError::Validation(e.to_string()))?,
+                    checksum: checksum.clone(),
+                    confirmed: *confirm,
+                },
+                ExistingCommand::MemoryImportPreview => Action::MemoryImportPreview {
+                    request: serde_json::from_str(&stdin()?)
+                        .map_err(|e| MaccError::Validation(e.to_string()))?,
+                },
+                ExistingCommand::MemoryImport { checksum, confirm } => Action::MemoryImport {
+                    request: serde_json::from_str(&stdin()?)
+                        .map_err(|e| MaccError::Validation(e.to_string()))?,
+                    checksum: checksum.clone(),
+                    confirmed: *confirm,
+                },
                 ExistingCommand::Action => serde_json::from_str(&stdin()?)
                     .map_err(|e| MaccError::Validation(e.to_string()))?,
                 ExistingCommand::MemorySearch {

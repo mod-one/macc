@@ -248,6 +248,7 @@ fn signal_process_group(pgid: i32, signal: &str) -> Result<()> {
     let target = format!("-{}", pgid);
     let status = std::process::Command::new("kill")
         .arg(signal)
+        .arg("--")
         .arg(target)
         .status()
         .map_err(|e| MaccError::Io {
@@ -263,6 +264,7 @@ fn pgid_is_alive(pgid: i32) -> bool {
     let target = format!("-{}", pgid);
     std::process::Command::new("kill")
         .arg("-0")
+        .arg("--")
         .arg(target)
         .status()
         .map(|s| s.success())

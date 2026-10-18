@@ -3,8 +3,8 @@
 **Project:** MACC — Multi-Assistant Code Config  
 **Document:** Revised and unified specification of `10_MACC_O2_SQLite_Shared_Memory_Spec.md`  
 **Motifs:** O2 Cross-Agent Memory Ledger; Shared Context Store; Code Intelligence Providers; Multi-Tool Session Lifecycle; Adaptive Compaction  
-**Version:** 2.12 — P0/P1 and P2-A–D implementation progress; later stages remain proposed
-**Date:** 2026-10-17
+**Version:** 2.13 — P0–P3 bounded implementation and full-audit remediation; live release gates remain explicit
+**Date:** 2026-10-18
 **Code baseline inspected:** `df95759` — `feat: implement review and correction cycle budget management`  
 **Language:** English  
 **Applies to:** Rust core, native coordinator, performer runners, tool adapters, SQLite, local MCP, TUI, local Web UI  
@@ -67,7 +67,7 @@ MACC already separates its native Rust coordinator from isolated agent worktrees
 
 ### 1.4 Implementation baseline and remaining work
 
-This table preserves the original version 2.1 inspection baseline, not deployed runtime state. Delivered P0–P2-D changes and their limits are recorded in §20.1–§20.8. **Existing** means a code path is present; it does not certify all O2 acceptance criteria or provider versions. **Partial** identifies a foundation that must be extended. Unchecked acceptance items in §22 remain delivery gates.
+This table preserves the original version 2.1 inspection baseline, not deployed runtime state. Delivered P0–P3 changes, audit corrections and their limits are recorded in §20.1–§20.9. **Existing** means a code path is present; it does not certify all O2 acceptance criteria or provider versions. **Partial** identifies a foundation that must be extended. Unchecked acceptance items in §22 remain delivery gates.
 
 | Area | Current source baseline | O2 work still required |
 |---|---|---|
@@ -1978,6 +1978,58 @@ provider installation, new AI workers or scheduling changes. Unsupported capabil
 remain explained by existing adapters. The overview uses snapshot polling, with
 honest stored-state/estimate labels; universal event-stream delivery and every
 illustrative future detail route remain outside this increment.
+
+---
+
+### 20.9 P3 implementation and full-audit corrections
+
+P3-A–D are implemented within the following explicit boundaries:
+
+- **P3-A:** parsed Rust symbol evidence, version-bound provider-note observations,
+  kind-specific TTL, prepared freshness outside authority transactions, explicit
+  contradiction resolution and shared ranking controls. See
+  [Freshness and quality](../O2_P3_FRESHNESS_QUALITY.md).
+- **P3-B:** bounded optional Tree-sitter Rust/Python/TypeScript/TSX declaration maps,
+  incremental file reuse and verified current overlays. Syntax maps do not claim
+  full semantic call/type analysis. See [Native maps](../O2_P3_NATIVE_MAP.md).
+- **P3-C:** registered local semantic backend, scoped eligible corpus, representative
+  labeled benchmark and explicit checksum/recipe-bound approval. Runtime and
+  benchmark result caps agree; legacy reports stay inspectable/revocable but cannot
+  grant incompatible approval. FTS remains the fallback. See
+  [Semantic search](../O2_P3_SEMANTIC_SEARCH.md).
+- **P3-D:** supervised pre-registered paired policy trials, complete exact-usage
+  provenance, explicit quality attestations/statistical gates and separate reviewed
+  configuration adoption. No autonomous optimizer or achieved production saving
+  is claimed. See [Policy tuning](../O2_P3_POLICY_TUNING.md).
+
+CLI, TUI and Web use the same typed policy/action ports for the shipped features.
+Populated SQLite save/restore covers memory, conflicts, map receipts, semantic
+approvals and policy-trial state. These extensions reuse the current O2 schema.
+
+The complete-O2 audit adds these corrections:
+
+1. The native coordinator's AI merge repair uses an independent `merge_fix` role
+   and `merge` phase, with pinned base/feature revisions and mandatory task sources
+   from the original task worktree. Its explicit checkpoint contract permits a
+   conflicted/detached state only in the coordinator's private integration slot.
+   Ordinary task restore still rejects unexpected unresolved Git operations.
+2. Reviewed scoped memory transfer supports canonical JSONL and MACC Markdown,
+   pure preview, exact confirmation, secret/schema checks and proposed-only atomic
+   import. Local reviews are preserved; CLI/TUI/Web expose the same operations.
+   See [Memory transfer](../O2_MEMORY_TRANSFER.md).
+3. An opt-in, adapter-driven real-tool verification harness covers exact resume,
+   task/reviewer isolation and checkpoint rotation. Default planning and normal
+   tests make no model calls. Execution is explicit and bounded; unavailable
+   native compression observations remain unverified. See
+   [Real tool verification](../O2_REAL_TOOL_VERIFICATION.md).
+
+Shipped milestones do not imply all §22 checkboxes passed in production. Real
+four-tool certification and §23's representative four-arm quality/cost experiment
+remain execution gates. Shared-user provider installations/reverse references,
+automatic merge-triggered Graphify indexing, universal provider-internal output
+interception, universal MCP registration and unverified provider/platform breadth
+remain deferred. They must not be inferred from native-map incremental reuse,
+explicit project-isolated lifecycle operations or the restricted MCP protocol.
 
 ---
 

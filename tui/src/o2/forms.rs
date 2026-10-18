@@ -57,6 +57,9 @@ impl Panel {
         Ok(())
     }
     fn submit(&mut self, root: &Path, name: &str, v: Vec<String>) -> Result<()> {
+        if self.transfer_form(root, name, &v)? {
+            return Ok(());
+        }
         if self.semantic_form(name, &v)? {
             return Ok(());
         }

@@ -161,3 +161,33 @@ them in SQLite and its consistent snapshot; JSON execution does not use them.
 P0-D [usage accounting](USAGE_TELEMETRY.md) now shares invocation ownership and
 checkpoint phase boundaries. Adaptive token-pressure triggers, semantic memory
 promotion and native compaction capability probes remain later work packages.
+
+
+## Integration merge repair
+
+The coordinator's private `<git-common-dir>/macc/integration` slot has a dedicated
+merge-repair contract. Before invoking its ordinary adapter runner, the merge hook
+calls `session-store merge-repair-prepare` with the source task worktree and pinned
+base/feature revisions, then explicitly selects role `merge_fix`, phase `merge`.
+The checkpoint validates the same Git project, exact integration slot, task ID,
+mandatory sources, HEAD ancestry and any MERGE_HEAD against those pinned inputs.
+It captures index stages, conflict file content and untracked work; it never stages,
+resets or resolves files itself. Successful completion can advance detached HEAD
+only to a commit containing both inputs. An ordinary performer cannot opt into
+this contract in its normal task worktree.
+
+Interrupted repair evidence remains capturable. Changed mandatory sources require
+reviewed reconciliation through the existing checkpoint workflow, which understands
+the same pinned repair contract. The manifest is runtime evidence in the private
+slot's `.macc/merge-repair.json`; it does not replace lease fencing or grant task
+acceptance. No SQLite schema change is required. JSON-mode projects retain their
+existing runner path with an explicitly independent merge-repair role.
+
+
+Merge-hook output is captured in private stdout/stderr log files while the child
+runs, avoiding a full-pipe deadlock with verbose agents. Execution is bounded by
+its timeout/output limit and terminated as an owned process group. Publishing
+requires a successful hook exit and no explicit failure/precondition verdict,
+plus a completed conflict-free merge. A commit alone cannot bypass a failed
+checkpoint/source validation. Existing successful legacy hooks without markers
+remain compatible.

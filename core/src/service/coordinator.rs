@@ -680,6 +680,7 @@ fn signal_process_group(pgid: i32, signal: &str) -> bool {
     }
     Command::new("kill")
         .arg(signal)
+        .arg("--")
         .arg(format!("-{}", pgid))
         .status()
         .map(|s| s.success())
@@ -692,6 +693,7 @@ fn pgid_is_alive(pgid: i32) -> bool {
     }
     Command::new("kill")
         .arg("-0")
+        .arg("--")
         .arg(format!("-{}", pgid))
         .status()
         .map(|s| s.success())

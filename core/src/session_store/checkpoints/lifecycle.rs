@@ -249,8 +249,21 @@ pub fn reconcile(root: &Path, id: &str, expected: Option<&str>) -> Result<Value>
     }
     idle(&db, &previous.worktree)?;
     git_state::verify_repository(root, Path::new(&previous.worktree))?;
-    let git = git_state::snapshot(Path::new(&previous.worktree))?;
-    let (task, hashes) = git_state::task_sources(Path::new(&previous.worktree), &previous.task_id)?;
+    let repair = if previous.role == "merge_fix" && previous.phase == "merge" {
+        Some(merge_repair::load(
+            root,
+            Path::new(&previous.worktree),
+            &previous.task_id,
+        )?)
+    } else {
+        None
+    };
+    let git = git_state::snapshot_for(Path::new(&previous.worktree), repair.as_ref())?;
+    let (task, hashes) = if let Some(repair) = &repair {
+        merge_repair::sources(repair)?
+    } else {
+        git_state::task_sources(Path::new(&previous.worktree), &previous.task_id)?
+    };
     let mut current = previous.clone();
     current.id = uuid::Uuid::new_v4().to_string();
     current.branch = git.branch;

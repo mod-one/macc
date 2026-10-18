@@ -1,4 +1,6 @@
 //! Exercise the actual adapter library and CLI session transport without AI calls.
+#[path = "support/merge_repair_runner.rs"]
+mod merge_repair_runner;
 #[path = "support/o2_runner.rs"]
 mod o2_runner;
 use serde_json::{json, Value};

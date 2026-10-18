@@ -5,6 +5,8 @@ import {
   buildUrl,
   claimProjectOwnership,
   getHealth,
+  getProjectOwnership,
+  listProcessOwnership,
   getStatus,
   getWebClientId,
   heartbeatProjectOwnership,
@@ -98,6 +100,22 @@ describe('ApiClient', () => {
     )
 
     await expect(getHealth()).rejects.toThrow('API request failed with HTTP 500.')
+  })
+
+  it('normalizes actual HTTP ownership DTOs before deciding project control', async () => {
+    const owner = { clientId: 'browser-owner', kind: 'Web', connectedAt: 'start', lastHeartbeat: 'now' }
+    const wire = { kind: 'Project', projectRoot: '/fixture', pid: null, startedAt: 'start', owner,
+      viewers: [{ ...owner, clientId: 'viewer' }],
+      takeoverRequest: { requestId: 'request', requester: owner, requestedAt: 'now' } }
+    server.use(
+      http.get('*/api/v1/processes/project/ownership', () => HttpResponse.json(wire)),
+      http.get('*/api/v1/processes', () => HttpResponse.json([wire])),
+    )
+    const record = await getProjectOwnership()
+    expect(record).toMatchObject({ process: { kind: 'Project', project_root: '/fixture' },
+      owner: { client_id: 'browser-owner' }, viewers: [{ client_id: 'viewer' }],
+      takeover_request: { request_id: 'request', requester: { client_id: 'browser-owner' } } })
+    expect(await listProcessOwnership()).toEqual([record])
   })
 
   it('persists the web client id in sessionStorage', () => {

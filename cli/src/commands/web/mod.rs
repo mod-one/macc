@@ -242,7 +242,7 @@ fn build_web_router(state: WebState) -> Router {
         .route("/api/v1/sessions/checkpoints/:id",get(sessions::checkpoint))
         .route("/api/v1/sessions/checkpoints/:id/reconcile",get(sessions::reconciliation_plan).post(sessions::reconciliation_apply))
         .route("/api/v1/o2", get(o2::status))
-        .route("/api/v1/o2/action", post(o2::action))
+        .route("/api/v1/o2/action", post(o2::action).layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024)))
         .route("/api/v1/sessions/usage",get(usage::status))
         .route("/api/v1/sessions/store",get(sessions::status))
         .route("/api/v1/sessions/policy",put(sessions::policy))

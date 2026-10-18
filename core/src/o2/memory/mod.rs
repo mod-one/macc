@@ -3,6 +3,10 @@ mod conflicts;
 mod freshness;
 mod model;
 pub(crate) mod preflight;
+pub mod transfer;
+mod transfer_format;
+#[cfg(test)]
+mod transfer_tests;
 pub(crate) use preflight::{prepare_record_at, prepare_records, prepare_search, PreparedFreshness};
 pub(crate) mod ranking;
 pub use conflicts::{conflicts, resolve_conflict};

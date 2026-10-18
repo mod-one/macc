@@ -1,3 +1,4 @@
+mod merge_hook;
 use crate::coordinator::engine::{MergeTaskContext, ReviewVerdict};
 use crate::coordinator::integration::{IntegrationWorktree, PublishOutcome};
 use crate::coordinator::model::Task;
@@ -6,10 +7,10 @@ use crate::coordinator::{CoordinatorEventRecord, PerformerCompletionKind};
 use crate::git;
 use crate::service::process_ownership::RegisteredProcessGuard;
 use crate::{MaccError, Result};
+use merge_hook::{coordinator_log_dir, run_merge_hook_with_timeout, HookRunResult};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::OpenOptions;
-use std::io::Read;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -1800,237 +1801,6 @@ pub fn summarize_output(text: &str) -> String {
     }
 }
 
-/// Truncate a diff to a maximum number of lines to avoid overwhelming the
-/// merge-fix prompt with huge diffs.
-fn truncate_diff(text: &str, max_lines: usize) -> String {
-    let lines: Vec<&str> = text.lines().collect();
-    if lines.len() <= max_lines {
-        text.to_string()
-    } else {
-        let mut result: String = lines[..max_lines].join("\n");
-        result.push_str(&format!(
-            "\n... ({} more lines truncated)",
-            lines.len() - max_lines
-        ));
-        result
-    }
-}
-
-fn coordinator_log_dir(repo_root: &Path) -> PathBuf {
-    repo_root.join(".macc").join("log").join("coordinator")
-}
-
-enum HookRunResult {
-    Completed { output: String, timed_out: bool },
-}
-
-/// Run the AI merge-fix hook.
-///
-/// `repo_root` is used for read-only history queries and for resolving the
-/// hook's own tooling; `merge_dir` is the integration worktree that actually
-/// holds the conflicted merge, and is where the hook (and the AI performer it
-/// launches) must do its work.
-#[allow(clippy::too_many_arguments)]
-fn run_merge_hook_with_timeout(
-    repo_root: &Path,
-    merge_dir: &Path,
-    hook: &Path,
-    task_id: &str,
-    branch: &str,
-    base: &str,
-    conflicts: &str,
-    timeout_seconds: u64,
-    ctx: &MergeTaskContext,
-) -> Result<HookRunResult> {
-    use std::process::{Command, Stdio};
-
-    // Build three-way diff context so the AI understands both sides of the
-    // conflict: what the base branch gained since the fork point, and what the
-    // feature branch changed.
-    let merge_base_sha = git::run_git_output_mapped(
-        repo_root,
-        &["merge-base", base, branch],
-        "compute merge-base for merge-fix context",
-    )
-    .ok()
-    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-    .unwrap_or_default();
-
-    let (base_commits, branch_commits, base_diff_stat, branch_diff_stat) =
-        if !merge_base_sha.is_empty() {
-            let base_log = git::run_git_output_mapped(
-                repo_root,
-                &["log", "--oneline", &format!("{}..{}", merge_base_sha, base)],
-                "base commits since fork",
-            )
-            .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_default();
-
-            let branch_log = git::run_git_output_mapped(
-                repo_root,
-                &[
-                    "log",
-                    "--oneline",
-                    &format!("{}..{}", merge_base_sha, branch),
-                ],
-                "branch commits since fork",
-            )
-            .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_default();
-
-            let base_stat = git::run_git_output_mapped(
-                repo_root,
-                &["diff", "--stat", &merge_base_sha, base],
-                "base diff stat since fork",
-            )
-            .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_default();
-
-            let branch_stat = git::run_git_output_mapped(
-                repo_root,
-                &["diff", "--stat", &merge_base_sha, branch],
-                "branch diff stat since fork",
-            )
-            .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_default();
-
-            (base_log, branch_log, base_stat, branch_stat)
-        } else {
-            (String::new(), String::new(), String::new(), String::new())
-        };
-
-    // Build the targeted diff for only the conflicting files so the AI can see
-    // exactly what each side changed in those files.
-    let conflict_diff = if !merge_base_sha.is_empty() && !conflicts.is_empty() {
-        let conflict_files: Vec<&str> = conflicts.split(',').map(|s| s.trim()).collect();
-        let mut diff_sections = String::new();
-        for file in &conflict_files {
-            let base_side = git::run_git_output_mapped(
-                repo_root,
-                &["diff", &merge_base_sha, base, "--", file],
-                "base-side diff for conflict file",
-            )
-            .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_default();
-
-            let branch_side = git::run_git_output_mapped(
-                repo_root,
-                &["diff", &merge_base_sha, branch, "--", file],
-                "branch-side diff for conflict file",
-            )
-            .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-            .unwrap_or_default();
-
-            if !base_side.is_empty() || !branch_side.is_empty() {
-                diff_sections.push_str(&format!("### {}\n", file));
-                diff_sections.push_str(&format!(
-                    "Base side ({}):\n```diff\n{}\n```\n",
-                    base,
-                    truncate_diff(&base_side, 200)
-                ));
-                diff_sections.push_str(&format!(
-                    "Branch side ({}):\n```diff\n{}\n```\n\n",
-                    branch,
-                    truncate_diff(&branch_side, 200)
-                ));
-            }
-        }
-        diff_sections
-    } else {
-        String::new()
-    };
-
-    let mut child = Command::new(hook)
-        .current_dir(merge_dir)
-        .arg("--repo")
-        .arg(repo_root)
-        .arg("--merge-dir")
-        .arg(merge_dir)
-        .arg("--task-id")
-        .arg(task_id)
-        .arg("--branch")
-        .arg(branch)
-        .arg("--base-branch")
-        .arg(base)
-        .arg("--failure-step")
-        .arg("merge")
-        .arg("--failure-reason")
-        .arg("git merge reported conflicts")
-        .arg("--conflicts")
-        .arg(conflicts)
-        .arg("--tool")
-        .arg(&ctx.tool)
-        .arg("--worktree-path")
-        .arg(&ctx.worktree_path)
-        .arg("--task-title")
-        .arg(&ctx.title)
-        .arg("--task-description")
-        .arg(&ctx.description)
-        .arg("--task-objective")
-        .arg(&ctx.objective)
-        .arg("--merge-base")
-        .arg(&merge_base_sha)
-        .arg("--base-commits")
-        .arg(&base_commits)
-        .arg("--branch-commits")
-        .arg(&branch_commits)
-        .arg("--base-diff-stat")
-        .arg(&base_diff_stat)
-        .arg("--branch-diff-stat")
-        .arg(&branch_diff_stat)
-        .arg("--conflict-diff")
-        .arg(&conflict_diff)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| MaccError::Io {
-            path: hook.to_string_lossy().into(),
-            action: "spawn merge-fix hook".into(),
-            source: e,
-        })?;
-    let started = std::time::Instant::now();
-    let mut timed_out = false;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) => {
-                if timeout_seconds > 0 && started.elapsed().as_secs() >= timeout_seconds {
-                    timed_out = true;
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-            Err(e) => {
-                return Err(MaccError::Validation(format!(
-                    "merge-fix hook wait error: {}",
-                    e
-                )));
-            }
-        }
-    }
-
-    let mut out = String::new();
-    if let Some(mut stdout) = child.stdout.take() {
-        let _ = stdout.read_to_string(&mut out);
-    }
-    let mut err = String::new();
-    if let Some(mut stderr) = child.stderr.take() {
-        let _ = stderr.read_to_string(&mut err);
-    }
-    Ok(HookRunResult::Completed {
-        output: format!("{}\n{}", out, err),
-        timed_out,
-    })
-}
-
 /// Publish a completed integration and translate the outcome into the
 /// `failure:local_merge` vocabulary the coordinator already reports on.
 fn finish_integration(
@@ -2154,6 +1924,7 @@ where
             ),
             "info",
         );
+        let mut hook_accepted = false;
         let hook_result = run_merge_hook_with_timeout(
             repo_root,
             &merge_dir,
@@ -2167,18 +1938,29 @@ where
         );
         let hook_elapsed = hook_started.elapsed().as_secs();
         match hook_result {
-            Ok(HookRunResult::Completed { output, timed_out }) => {
+            Ok(HookRunResult::Completed {
+                output,
+                timed_out,
+                succeeded,
+            }) => {
+                hook_accepted = succeeded;
                 hook_output = output;
                 emit_event(
                     "merge_hook",
                     task_id,
                     "merge",
-                    if timed_out { "timeout" } else { "done" },
+                    if timed_out {
+                        "timeout"
+                    } else if succeeded {
+                        "done"
+                    } else {
+                        "failed"
+                    },
                     &format!(
-                        "merge-fix hook completed task={} elapsed={}s timeout={}",
-                        task_id, hook_elapsed, timed_out
+                        "merge-fix hook completed task={} elapsed={}s timeout={} accepted={}",
+                        task_id, hook_elapsed, timed_out, succeeded
                     ),
-                    if timed_out { "warning" } else { "info" },
+                    if succeeded { "info" } else { "warning" },
                 );
             }
             Err(err) => {
@@ -2204,7 +1986,7 @@ where
         .ok()
         .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
         .unwrap_or(true);
-        if !unresolved && !integration.merge_in_progress() {
+        if hook_accepted && !unresolved && !integration.merge_in_progress() {
             return finish_integration(&integration, branch, base, &suggestion);
         }
     }

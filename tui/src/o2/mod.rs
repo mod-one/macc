@@ -7,6 +7,9 @@ mod semantic_forms;
 #[cfg(test)]
 mod semantic_tests;
 mod settings;
+mod transfer;
+#[cfg(test)]
+mod transfer_tests;
 mod tuning;
 #[cfg(test)]
 mod tuning_tests;
@@ -31,6 +34,7 @@ pub struct Panel {
     pub session_task: Option<String>,
     overview: overview::Overview,
     tuning_field: usize,
+    transfer: transfer::Transfer,
     tuning_preview: Option<Value>,
     tab: usize,
     selected: usize,
@@ -230,6 +234,9 @@ impl Panel {
         if self.tab == 4 && self.setting_key(root, key)? {
             return Ok(());
         }
+        if self.transfer_key(root, key)? {
+            return Ok(());
+        }
         match key {
             KeyCode::Esc|KeyCode::Char('o')=>{if self.view.as_ref().is_some_and(|v|self.inherit||serde_json::to_value(&v.policy).ok().as_ref()!=Some(&self.draft)){self.message="Unsaved policy draft. Use 5 → x to discard, or p then s to apply.".into();}else{self.open=false;}},
             KeyCode::Char('r')=>self.refresh(root)?,KeyCode::Up=>self.selected=self.selected.saturating_sub(1),KeyCode::Down=>self.selected=(self.selected+1).min(self.rows.len().saturating_sub(1)),KeyCode::PageDown=>self.scroll=self.scroll.saturating_add(10),KeyCode::PageUp=>self.scroll=self.scroll.saturating_sub(10),
@@ -269,7 +276,7 @@ impl Panel {
         Ok(())
     }
     pub fn draw(&self, f: &mut Frame, area: Rect, outer_message: &str) {
-        let mut lines=vec!["1 Memory | 2 Context | 3 Compaction | 4 Code Intelligence | 5 Policies | 6 Overview | 7 Policy trials | r refresh | u preview schema upgrade | a apply reviewed action | j advanced action | o/Esc back".into(),"↑↓ select | Enter inspect | PgUp/PgDn scroll | / scoped search or decision simulation".into(),format!("SQLite: {} | O2 ready: {}",self.view.as_ref().is_some_and(|v|v.sqlite),self.view.as_ref().is_some_and(|v|v.ready)),self.message.clone()];
+        let mut lines=vec!["1 Memory | 2 Context | 3 Compaction | 4 Code Intelligence | 5 Policies | 6 Overview | 7 Policy trials | r refresh | u preview schema upgrade | a apply reviewed action | j advanced action | o/Esc back".into(),"↑↓ select | Enter inspect | PgUp/PgDn scroll | / scoped search | E export / I import memory".into(),format!("SQLite: {} | O2 ready: {}",self.view.as_ref().is_some_and(|v|v.sqlite),self.view.as_ref().is_some_and(|v|v.ready)),self.message.clone()];
         lines.push(outer_message.into());
         if let Some(form) = &self.form {
             lines.push(format!(

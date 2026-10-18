@@ -1,3 +1,4 @@
+import { ownershipRecord, type OwnershipWire } from './ownershipWire';
 import type {
   ApiActionResult,
   ApiApprovalsResponse,
@@ -416,13 +417,15 @@ export async function postGateDecision(
 export async function listProcessOwnership(
   options: ApiRequestOptions = {},
 ): Promise<ApiOwnershipRecord[]> {
-  return sendJson<ApiOwnershipRecord[]>('/processes', 'GET', options);
+  const records = await sendJson<Array<OwnershipWire | ApiOwnershipRecord>>('/processes', 'GET', options);
+  return records.map(ownershipRecord);
 }
 
 export async function getProjectOwnership(
   options: ApiRequestOptions = {},
 ): Promise<ApiOwnershipRecord | null> {
-  return sendJson<ApiOwnershipRecord | null>('/processes/project/ownership', 'GET', options);
+  const record = await sendJson<OwnershipWire | ApiOwnershipRecord | null>('/processes/project/ownership', 'GET', options);
+  return record ? ownershipRecord(record) : null;
 }
 
 export async function claimProjectOwnership(

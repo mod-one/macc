@@ -25,6 +25,11 @@ fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
     }
     Ok(out.stdout)
 }
+pub(super) fn text(root: &Path, args: &[&str]) -> Result<String> {
+    String::from_utf8(git(root, args)?)
+        .map(|s| s.trim().to_string())
+        .map_err(|e| error(e.to_string()))
+}
 fn names(bytes: &[u8]) -> Result<Vec<String>> {
     bytes
         .split(|b| *b == 0)
@@ -36,7 +41,13 @@ fn names(bytes: &[u8]) -> Result<Vec<String>> {
         .collect()
 }
 pub(super) fn snapshot(root: &Path) -> Result<GitState> {
-    if !git(root, &["ls-files", "--unmerged", "-z"])?.is_empty() {
+    snapshot_for(root, None)
+}
+pub(super) fn snapshot_for(
+    root: &Path,
+    repair: Option<&super::merge_repair::MergeRepair>,
+) -> Result<GitState> {
+    if repair.is_none() && !git(root, &["ls-files", "--unmerged", "-z"])?.is_empty() {
         return Err(error(
             "Unresolved Git index entries require reconciliation before checkpoint restore",
         ));
@@ -57,7 +68,9 @@ pub(super) fn snapshot(root: &Path) -> Result<GitState> {
                 operation,
             ],
         )?;
-        if Path::new(String::from_utf8_lossy(&location).trim()).exists() {
+        if !(repair.is_some() && operation == "MERGE_HEAD")
+            && Path::new(String::from_utf8_lossy(&location).trim()).exists()
+        {
             return Err(error(format!(
                 "Incomplete Git operation {operation}; retained work was preserved"
             )));
@@ -66,9 +79,11 @@ pub(super) fn snapshot(root: &Path) -> Result<GitState> {
     let revision = String::from_utf8_lossy(&git(root, &["rev-parse", "HEAD"])?)
         .trim()
         .to_string();
-    let branch = String::from_utf8_lossy(&git(root, &["symbolic-ref", "--short", "HEAD"])?)
-        .trim()
-        .to_string();
+    let branch = if let Some(repair) = repair {
+        format!("merge:{}:{}", repair.base_revision, repair.feature_revision)
+    } else {
+        text(root, &["symbolic-ref", "--short", "HEAD"])?
+    };
     // Index identity captures partially staged changes independently of file bytes.
     let index = git(root, &["ls-files", "--stage", "-z"])?;
     let mut evidence = Vec::new();
