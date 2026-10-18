@@ -1,3 +1,9 @@
+#[path = "apply.rs"]
+mod apply;
+#[path = "apply_view.rs"]
+mod apply_view;
+#[path = "launch.rs"]
+mod launch;
 #[path = "supervisor_commands.rs"]
 mod supervisor_commands;
 #[path = "supervisor_settings.rs"]
@@ -138,7 +144,7 @@ fn requires_owner_gate(command: &CoordinatorCommand) -> bool {
 pub struct AppState {
     pub sessions: crate::sessions::SessionsScreen,
     pub prd_queue_editor: Option<crate::prd_queue::Editor>,
-    pub engine: Arc<dyn Engine>,
+    pub engine: Arc<dyn Engine + Send + Sync>,
     pub project_paths: Option<ProjectPaths>,
     pub config: Option<CanonicalConfig>,
     pub working_copy: Option<CanonicalConfig>,
@@ -198,6 +204,9 @@ pub struct AppState {
     pub preview_error: Option<String>,
     pub preview_diff_cache: HashMap<String, DiffView>,
     pub preview_diff_scroll: HashMap<String, usize>,
+    pub(crate) launch_dialog: Option<launch::LaunchDialog>,
+    pub(crate) launch_start_rx: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
+    pub(crate) apply_runtime: apply::ApplyRuntime,
     pub apply_context: Option<ApplyContext>,
     pub apply_consent_input: String,
     pub apply_user_consent_granted: bool,
@@ -312,13 +321,13 @@ impl AppState {
         Self::AUTOMATION_FIELD_COUNT
     }
 
-    pub fn new(engine: Arc<dyn Engine>) -> Self {
+    pub fn new(engine: Arc<dyn Engine + Send + Sync>) -> Self {
         let mut state = Self::with_engine(engine);
         state.load_config(None);
         state
     }
 
-    pub fn with_engine(engine: Arc<dyn Engine>) -> Self {
+    pub fn with_engine(engine: Arc<dyn Engine + Send + Sync>) -> Self {
         let client_identity = Self::new_client_identity();
         let mut state = Self {
             sessions: crate::sessions::SessionsScreen::default(),
@@ -371,6 +380,9 @@ impl AppState {
             preview_error: None,
             preview_diff_cache: HashMap::new(),
             preview_diff_scroll: HashMap::new(),
+            launch_dialog: None,
+            launch_start_rx: None,
+            apply_runtime: Default::default(),
             apply_context: None,
             apply_consent_input: String::new(),
             apply_user_consent_granted: false,
@@ -573,7 +585,12 @@ impl AppState {
             return;
         };
 
-        let max_parallel = 2u32;
+        let max_parallel = macc_core::config::CoordinatorConfigResolved::resolve(
+            self.config
+                .as_ref()
+                .and_then(|c| c.automation.coordinator.as_ref()),
+        )
+        .max_parallel as u32;
         let findings = self
             .engine
             .collect_diagnostic_findings(&paths, max_parallel);
@@ -1538,12 +1555,13 @@ impl AppState {
         // spawned child mints a fresh `cli-<pid>` and is rejected by the very
         // lease this TUI holds.
         let client_id = self.client_context.client_id.clone();
-        match self.engine.coordinator_start_managed_command_process(
+        let start = self.engine.coordinator_start_managed_command_process(
             paths,
             &command,
             coordinator_cfg,
             Some(client_id.as_str()),
-        ) {
+        );
+        match start {
             Ok(()) => {
                 let coordinator_registered =
                     self.wait_for_coordinator_registration(Duration::from_secs(2));
@@ -1655,6 +1673,10 @@ impl AppState {
     }
 
     pub fn start_coordinator_command(&mut self, command: CoordinatorCommand) {
+        if command == CoordinatorCommand::Run {
+            self.request_coordinator_launch();
+            return;
+        }
         self.coordinator_pause_next_action = None;
         match command {
             CoordinatorCommand::ResumePausedRun => self.execute_coordinator_command(command),
@@ -2404,7 +2426,7 @@ impl AppState {
             || (screen == Screen::Automation && self.is_automation_field_editing())
         {
             "edit"
-        } else if screen == Screen::Apply {
+        } else if self.apply_confirmation_open() || self.launch_dialog.is_some() {
             "confirm"
         } else {
             "browse"
@@ -2517,7 +2539,7 @@ impl AppState {
     }
 
     pub fn is_coordinator_running(&self) -> bool {
-        self.coordinator_running_command.is_some()
+        self.launch_start_rx.is_some() || self.coordinator_running_command.is_some()
     }
 
     pub fn has_coordinator_pause_prompt(&self) -> bool {
@@ -2694,6 +2716,8 @@ impl AppState {
     }
 
     pub fn tick(&mut self) {
+        self.poll_apply_preparation();
+        self.poll_launch_start();
         if matches!(self.current_screen(), Screen::Sessions | Screen::O2) {
             if let Some(paths) = &self.project_paths {
                 self.sessions.tick(&paths.root);
@@ -2717,7 +2741,11 @@ impl AppState {
         let mut finished_message: Option<(UiStatusLevel, String)> = None;
         let mut post_success_action: Option<CoordinatorPauseNextAction> = None;
         let mut release_coordinator_ownership = false;
-        if let Some(paths) = self.project_paths.as_ref() {
+        if let Some(paths) = self
+            .project_paths
+            .as_ref()
+            .filter(|_| self.launch_start_rx.is_none())
+        {
             match self.engine.coordinator_managed_command_state(paths) {
                 Ok(CoordinatorManagedCommandState::Succeeded {
                     command,
@@ -5623,6 +5651,13 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
         self.preview_error = None;
         self.preview_selection_index = 0;
 
+        if self.apply_preparing() {
+            self.preview_error = Some(
+                "Apply is still preparing shared sources. Refresh Preview when it finishes.".into(),
+            );
+            return;
+        }
+
         let paths = match &self.project_paths {
             Some(paths) => paths,
             None => {
@@ -5652,13 +5687,13 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
             }
         };
 
-        let (quiet, offline) = self
+        let offline = self
             .working_copy
             .as_ref()
-            .map(|c| (c.settings.quiet, c.settings.offline))
-            .unwrap_or((false, false));
+            .map(|c| c.settings.offline)
+            .unwrap_or(false);
 
-        let materialized_units = match materialize_fetch_units(paths, fetch_units, quiet, offline) {
+        let materialized_units = match materialize_fetch_units(paths, fetch_units, true, offline) {
             Ok(units) => units,
             Err(e) => {
                 self.preview_error = Some(format!("Failed to materialize catalog sources: {}", e));
@@ -5678,166 +5713,6 @@ Default: true. Can be disabled via reference_branch_preflight.enabled: false.",
             }
             Err(e) => {
                 self.preview_error = Some(format!("Planning failed: {}", e));
-            }
-        }
-    }
-
-    fn build_apply_context(&self) -> Result<ApplyContext, String> {
-        let paths = self
-            .project_paths
-            .as_ref()
-            .ok_or_else(|| "Apply requires a loaded MACC project.".to_string())?;
-        let canonical = self
-            .working_copy
-            .as_ref()
-            .ok_or_else(|| "No configuration available to build an apply plan.".to_string())?;
-
-        let resolved = resolve(canonical, &CliOverrides::default());
-        let fetch_units = resolve_fetch_units(paths, &resolved)
-            .map_err(|e| format!("Failed to resolve catalog selections: {}", e))?;
-        let materialized_units = materialize_fetch_units(
-            paths,
-            fetch_units,
-            canonical.settings.quiet,
-            canonical.settings.offline,
-        )
-        .map_err(|e| format!("Failed to materialize catalog sources: {}", e))?;
-
-        let plan = self
-            .engine
-            .plan(
-                paths,
-                canonical,
-                &materialized_units,
-                &CliOverrides::default(),
-            )
-            .map_err(|e| format!("Failed to build apply plan: {}", e))?;
-
-        let operations = self.engine.plan_operations(paths, &plan);
-        let mut project_ops = 0;
-        let mut user_ops = 0;
-        for op in &operations {
-            match op.scope {
-                Scope::Project => project_ops += 1,
-                Scope::User => user_ops += 1,
-            }
-        }
-
-        let backup_preview = format!("{}/<timestamp>", paths.backups_dir.display());
-        Ok(ApplyContext {
-            plan,
-            operations,
-            project_ops,
-            user_ops,
-            backup_preview,
-        })
-    }
-
-    pub fn open_apply_screen(&mut self) {
-        self.apply_consent_input.clear();
-        self.apply_user_consent_granted = false;
-        self.apply_feedback = None;
-        self.apply_error = None;
-        self.apply_progress = None;
-
-        match self.build_apply_context() {
-            Ok(context) => self.apply_context = Some(context),
-            Err(err) => {
-                self.apply_context = None;
-                self.apply_error = Some(err);
-            }
-        }
-
-        if self.current_screen() != Screen::Apply {
-            self.push_screen(Screen::Apply);
-        }
-    }
-
-    pub fn append_apply_consent_char(&mut self, ch: char) {
-        self.apply_consent_input.push(ch);
-        self.apply_user_consent_granted = self.apply_consent_input.eq_ignore_ascii_case("YES");
-    }
-
-    pub fn pop_apply_consent_char(&mut self) {
-        self.apply_consent_input.pop();
-        self.apply_user_consent_granted = self.apply_consent_input.eq_ignore_ascii_case("YES");
-    }
-
-    pub fn attempt_apply(&mut self) {
-        if let Err(err) = self.gate_project_mutation() {
-            self.apply_error = Some(format!(
-                "Apply blocked: {}",
-                format_actionable_error(&err.to_string())
-            ));
-            self.set_status(
-                UiStatusLevel::Error,
-                "Apply blocked by project ownership.",
-                Some(Duration::from_secs(6)),
-            );
-            return;
-        }
-
-        let paths = match &self.project_paths {
-            Some(paths) => paths,
-            None => {
-                self.apply_error = Some("No project loaded for apply.".to_string());
-                return;
-            }
-        };
-
-        let context = match &self.apply_context {
-            Some(ctx) => ctx,
-            None => {
-                self.apply_error =
-                    Some("No apply context available. Refresh and try again.".to_string());
-                return;
-            }
-        };
-
-        if context.needs_user_consent() && !self.apply_user_consent_granted {
-            self.apply_error =
-                Some("User-level operations require typing YES before applying.".to_string());
-            return;
-        }
-
-        let allow_user_scope = !context.needs_user_consent() || self.apply_user_consent_granted;
-        let mut plan = context.plan.clone();
-
-        let operations = context.operations.clone();
-        self.apply_feedback = None;
-        self.apply_error = None;
-        self.apply_progress = Some(ApplyProgress {
-            current: 0,
-            total: operations.len(),
-            path: None,
-        });
-
-        let result = {
-            // For now, engine.apply doesn't support progress callback yet,
-            // but we could add it to Engine trait if needed.
-            self.engine.apply(paths, &mut plan, allow_user_scope)
-        };
-
-        match result {
-            Ok(report) => {
-                self.apply_feedback = Some(report.render_cli());
-                self.apply_error = None;
-                self.notices
-                    .push("TUI apply completed successfully.".to_string());
-                self.set_status(
-                    UiStatusLevel::Success,
-                    "Apply completed.",
-                    Some(Duration::from_secs(5)),
-                );
-            }
-            Err(err) => {
-                self.apply_feedback = None;
-                self.apply_error = Some(format!("Apply failed: {}", err));
-                self.set_status(
-                    UiStatusLevel::Error,
-                    format!("Apply failed: {}", err),
-                    Some(Duration::from_secs(8)),
-                );
             }
         }
     }
@@ -6523,8 +6398,8 @@ mod tests {
     };
     use macc_core::tool::ToolDiagnostic;
     use macc_core::{MaccEngine, ToolRegistry};
-    use std::cell::RefCell;
     use std::fs;
+    use std::sync::Mutex;
     use tempfile::tempdir;
 
     fn fixture_ids() -> Vec<String> {
@@ -6537,7 +6412,7 @@ mod tests {
 
     #[derive(Default)]
     struct NoopEngine {
-        stop_calls: RefCell<usize>,
+        stop_calls: Mutex<usize>,
     }
 
     impl Engine for NoopEngine {
@@ -6581,7 +6456,7 @@ mod tests {
             _paths: &ProjectPaths,
             _graceful: bool,
         ) -> macc_core::Result<macc_core::service::coordinator::CoordinatorStopResult> {
-            *self.stop_calls.borrow_mut() += 1;
+            *self.stop_calls.lock().unwrap() += 1;
             Ok(macc_core::service::coordinator::CoordinatorStopResult {
                 targets: 0,
                 used_group: false,
@@ -6784,7 +6659,7 @@ mod tests {
         assert_eq!(status.level, UiStatusLevel::Error);
         assert!(status.message.contains("Failed to run 'stop'"));
         assert!(status.message.contains("not the owner of this process"));
-        assert_eq!(*engine.stop_calls.borrow(), 0);
+        assert_eq!(*engine.stop_calls.lock().unwrap(), 0);
     }
 
     #[test]
@@ -7656,7 +7531,10 @@ mod tests {
         assert_eq!(state.interaction_mode_label(), "browse");
 
         state.push_screen(Screen::Apply);
+        assert_eq!(state.interaction_mode_label(), "browse");
+        state.apply_runtime.confirm_open = true;
         assert_eq!(state.interaction_mode_label(), "confirm");
+        state.apply_runtime.confirm_open = false;
 
         state.pop_screen();
         state.push_screen(Screen::Automation);

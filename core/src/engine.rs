@@ -613,6 +613,41 @@ pub trait Engine {
         crate::service::coordinator::coordinator_stop_command_process(handle, graceful)
     }
 
+    /// Read-only launch decisions shared by graphical clients.
+    fn coordinator_launch_review(
+        &self,
+        paths: &ProjectPaths,
+    ) -> Result<crate::service::launch_review::LaunchReview> {
+        crate::service::launch_review::inspect(self, paths)
+    }
+    fn coordinator_launch_confirmed(
+        &self,
+        paths: &ProjectPaths,
+        decision: &crate::service::launch_review::LaunchDecision,
+        client_id: Option<&str>,
+    ) -> Result<()> {
+        crate::service::launch_review::launch(self, paths, decision, client_id)
+    }
+    fn coordinator_attach_supervisor(&self, paths: &ProjectPaths) -> Result<()> {
+        let Some(record) =
+            crate::coordinator::managed_command_registry::list_managed_commands(paths)?
+                .into_iter()
+                .find(|r| r.kind == "run")
+        else {
+            // A client poll may already have consumed a normally completed run.
+            return Ok(());
+        };
+        crate::service::coordinator_readiness::wait(
+            paths,
+            record.pid,
+            std::time::Duration::from_secs(15),
+        )?;
+        if !crate::coordinator::helpers::is_pid_running(record.pid as i64) {
+            return Ok(());
+        }
+        crate::service::supervisor_launch::attach(&paths.root, record.pid as u32)
+    }
+
     /// Spawn a managed coordinator command.
     ///
     /// `client_id` is the ownership identity of the *caller* (TUI, web server,
@@ -2258,7 +2293,8 @@ fields: []
 
     #[test]
     fn engine_trait_method_count_guard() {
-        const EXPECTED_METHOD_COUNT: usize = 143;
+        // Shared graphical launch review, confirmation and supervisor attachment.
+        const EXPECTED_METHOD_COUNT: usize = 146;
         let source = include_str!("engine.rs");
         let trait_start = source
             .find("pub trait Engine {")

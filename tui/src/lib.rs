@@ -214,6 +214,14 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
         open_command_palette(state);
         return;
     }
+    if state.launch_dialog.is_some() {
+        state.launch_key(key);
+        return;
+    }
+    if state.current_screen() == Screen::Apply && state.apply_confirmation_open() {
+        state.apply_key(key);
+        return;
+    }
     if state.coordinator_task_diff_popup.is_some() || state.coordinator_task_explain_popup.is_some()
     {
         match key {
@@ -538,6 +546,10 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
         return;
     }
 
+    if current_screen == Screen::Apply {
+        state.apply_key(key);
+        return;
+    }
     if session_navigation::handle(state, key) {
         return;
     }
@@ -557,12 +569,6 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
             } else {
                 state.navigate_enter();
             }
-        }
-        KeyCode::Backspace if current_screen == Screen::Apply => {
-            state.pop_apply_consent_char();
-        }
-        KeyCode::Char(c) if current_screen == Screen::Apply && !matches!(c, 'q' | 'Q') => {
-            state.append_apply_consent_char(c);
         }
         KeyCode::Char('A') => state.open_approval_window(),
         // Navigation: Esc/q to quit (or pop if in a sub-screen)
@@ -665,7 +671,6 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
             if current_screen == Screen::Home {
                 // Home screen: 'r' starts the coordinator and navigates to Coordinator Live.
                 state.start_coordinator_command(CoordinatorCommand::Run);
-                state.push_screen(Screen::CoordinatorLive);
             } else if current_screen == Screen::Watch {
                 // Force-refresh the RuntimeSnapshot immediately.
                 state.refresh_watch_snapshot();
@@ -1392,158 +1397,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 .wrap(Wrap { trim: false });
             f.render_widget(diff_para, diff_rect);
         }
-        Screen::Apply => {
-            let apply_chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Percentage(20),
-                    Constraint::Percentage(40),
-                    Constraint::Percentage(15),
-                    Constraint::Percentage(25),
-                ])
-                .split(body_area);
-
-            let summary_rect = apply_chunks[0];
-            let operations_rect = apply_chunks[1];
-            let consent_rect = apply_chunks[2];
-            let result_rect = apply_chunks[3];
-
-            let progress_text = if let Some(progress) = &state.apply_progress {
-                let path = progress.path.as_deref().unwrap_or("(pending)");
-                format!(
-                    "Progress: {}/{} operations (current: {})",
-                    progress.current, progress.total, path
-                )
-            } else {
-                "Progress: not started".to_string()
-            };
-
-            let summary_base = if let Some(ctx) = &state.apply_context {
-                let consent_required = if ctx.needs_user_consent() {
-                    "yes"
-                } else {
-                    "no"
-                };
-                format!(
-                    "Total operations: {}\nProject: {}\nUser: {}\nBackup preview: {}\nUser consent required: {}",
-                    ctx.operations.len(),
-                    ctx.project_ops,
-                    ctx.user_ops,
-                    ctx.backup_preview,
-                    consent_required
-                )
-            } else {
-                state
-                    .apply_error
-                    .as_ref()
-                    .map(|e| format!("Unable to compute apply plan:\n{}", e))
-                    .unwrap_or_else(|| {
-                        "Plan unavailable. Try refreshing the preview first.".to_string()
-                    })
-            };
-
-            let apply_stage = if state.apply_error.is_some() {
-                "failed"
-            } else if state.apply_feedback.is_some() {
-                "done"
-            } else if state.apply_progress.is_some() {
-                "running"
-            } else {
-                "ready"
-            };
-            let summary_text = format!(
-                "Pipeline: plan -> consent -> apply -> verify\nStage: {}\n\n{}\n{}",
-                apply_stage, summary_base, progress_text
-            );
-
-            let summary_para = Paragraph::new(summary_text)
-                .block(panel("Apply Summary"))
-                .wrap(Wrap { trim: false });
-            f.render_widget(summary_para, summary_rect);
-
-            let operations_text = if let Some(ctx) = &state.apply_context {
-                if ctx.operations.is_empty() {
-                    "No operations planned.".to_string()
-                } else {
-                    let mut lines: Vec<String> = ctx
-                        .operations
-                        .iter()
-                        .take(10)
-                        .map(|op| {
-                            format!(
-                                "[{}] {:<8} {}",
-                                scope_label(op.scope),
-                                kind_label(op.kind),
-                                op.path
-                            )
-                        })
-                        .collect();
-                    if ctx.operations.len() > 10 {
-                        lines.push(format!(
-                            "...and {} more operations",
-                            ctx.operations.len() - 10
-                        ));
-                    }
-                    lines.join("\n")
-                }
-            } else {
-                "Preview the plan first to see operation details.".to_string()
-            };
-
-            let operations_para = Paragraph::new(operations_text)
-                .block(panel("Operation Snapshot"))
-                .wrap(Wrap { trim: false });
-            f.render_widget(operations_para, operations_rect);
-
-            let consent_prompt = if let Some(ctx) = &state.apply_context {
-                if ctx.needs_user_consent() {
-                    "Type YES (case-insensitive) below to allow user-scope operations."
-                } else {
-                    "No user-scope operations detected; press Enter to apply the project-only changes."
-                }
-            } else {
-                "Consent state unavailable until a plan is computed."
-            };
-            let consent_status = if state.apply_user_consent_granted {
-                "Consent confirmed"
-            } else {
-                "Consent pending"
-            };
-            let consent_input = if state.apply_consent_input.is_empty() {
-                "<empty>".to_string()
-            } else {
-                state.apply_consent_input.clone()
-            };
-            let consent_text = format!(
-                "{}\nInput buffer: {}\n{}",
-                consent_status, consent_input, consent_prompt
-            );
-            let consent_para = Paragraph::new(consent_text)
-                .block(panel("User Consent"))
-                .wrap(Wrap { trim: false });
-            f.render_widget(consent_para, consent_rect);
-
-            let result_text = if let Some(err) = &state.apply_error {
-                format!("Error applying changes:\n{}", err)
-            } else if let Some(feedback) = &state.apply_feedback {
-                feedback.clone()
-            } else {
-                "Awaiting apply. Press Enter to run once consent requirements (if any) are satisfied."
-                    .to_string()
-            };
-            let result_style = if state.apply_error.is_some() {
-                Style::default().fg(Color::Red)
-            } else if state.apply_feedback.is_some() {
-                Style::default().fg(Color::Green)
-            } else {
-                Style::default()
-            };
-            let result_para = Paragraph::new(result_text)
-                .style(result_style)
-                .block(panel("Apply Result"))
-                .wrap(Wrap { trim: false });
-            f.render_widget(result_para, result_rect);
-        }
+        Screen::Apply => state.draw_apply(f, body_area),
         Screen::Home => {
             let body_chunks = Layout::default()
                 .direction(Direction::Horizontal)
@@ -2785,6 +2639,8 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
     if let Some(window) = &state.approval_window {
         window.draw(f);
     }
+    state.draw_apply_confirmation(f);
+    state.draw_launch_dialog(f);
     if state.command_palette_open {
         render_command_palette_overlay(f, state);
     }

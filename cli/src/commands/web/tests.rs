@@ -577,6 +577,36 @@ impl macc_core::engine::Engine for WebTestEngine {
             .unwrap_or_else(|| Ok(CoordinatorCommandResult::default()))
     }
 
+    fn coordinator_launch_review(
+        &self,
+        paths: &ProjectPaths,
+    ) -> Result<macc_core::service::launch_review::LaunchReview> {
+        Ok(macc_core::service::launch_review::LaunchReview {
+            revision: "review-1".into(),
+            project: paths.root.display().to_string(),
+            task_source: "fixture PRD".into(),
+            ..Default::default()
+        })
+    }
+    fn coordinator_launch_confirmed(
+        &self,
+        paths: &ProjectPaths,
+        decision: &macc_core::service::launch_review::LaunchDecision,
+        client_id: Option<&str>,
+    ) -> Result<()> {
+        if !decision.confirmed || decision.revision != "review-1" {
+            return Err(MaccError::Validation(
+                "Launch review is not confirmed or is stale.".into(),
+            ));
+        }
+        self.coordinator_start_managed_command_process(
+            paths,
+            &macc_core::service::coordinator_workflow::CoordinatorCommand::Run,
+            None,
+            client_id,
+        )
+    }
+
     fn coordinator_start_managed_command_process(
         &self,
         _paths: &ProjectPaths,

@@ -607,6 +607,7 @@ export interface ApiPlanConsent {
 }
 
 export interface ApiPlanResponse {
+  planRevision?: string;
   summary: ApiPlanSummary;
   files: ApiPlanFile[];
   diffs: ApiPlanDiff[];
@@ -615,10 +616,13 @@ export interface ApiPlanResponse {
 }
 
 export interface ApiApplyRequest {
+  planRevision?: string;
   scope?: ApiScope | null;
   tools?: string[];
   allowUserScope?: boolean | null;
   dryRun: boolean;
+  confirmed?: boolean | null;
+  /** Compatibility input; normalized to confirmed by the API client. */
   yes?: boolean | null;
 }
 
@@ -1027,4 +1031,15 @@ export interface ApiVerifyFinding {
   tool: string;
   kind: string;
   message: string;
+}
+
+export interface CoordinatorLaunchReview {
+  revision: string; project: string; taskSource: string; queue: string[];
+  referenceBranch: string; tools: string[]; maxParallel: number; maxDispatch: number;
+  needsBranchCreation: boolean; branchSources: string[]; dirtyReference: boolean;
+  warnings: string[]; blockers: string[];
+}
+export interface CoordinatorLaunchDecision {
+  confirmed: boolean; revision: string; supervisor: boolean;
+  createFrom: string | null; allowDirtyReference: boolean;
 }

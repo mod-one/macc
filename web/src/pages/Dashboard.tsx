@@ -338,6 +338,7 @@ const Dashboard: React.FC = () => {
         showNotice('success', formatResultSummary(action, result));
         await refreshDashboard();
       } catch (error) {
+        if (error instanceof DOMException && error.name === 'AbortError') return;
         if (isOwnershipError(error)) {
           showNotice('error', ownershipErrorMessage(error));
         } else {

@@ -6,7 +6,6 @@ import {
   getDoctorReport,
   getSnapshot,
   listSkills,
-  runApply,
   runPlan,
 } from '../api/client';
 import type { ApiCoordinatorAction, ApiSkillItem } from '../api/models';
@@ -153,7 +152,6 @@ const CommandPalette: React.FC<CommandPaletteProps> = ({ open, onOpenChange }) =
         keywords: ['execute', 'deploy'],
         shortcut: 'A P',
         run: async () => {
-          await runApply({ dryRun: false, yes: true, allowUserScope: true });
           navigate('/apply');
         },
       },

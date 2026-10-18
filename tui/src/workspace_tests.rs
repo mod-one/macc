@@ -28,6 +28,21 @@ pub(super) fn text(b: &Buffer) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
+pub(super) fn export_buffer(name: &str, state: &AppState, width: u16, height: u16) {
+    let Ok(directory) = std::env::var("MACC_TUI_SNAPSHOT_DIR") else {
+        return;
+    };
+    let directory = std::path::Path::new(&directory);
+    std::fs::create_dir_all(directory).unwrap();
+    let b = render(state, width, height);
+    std::fs::write(directory.join(format!("{name}-{width}.txt")), text(&b)).unwrap();
+    let cells:Vec<_>=b.content.iter().map(|c|serde_json::json!({"text":c.symbol(),"fg":format!("{:?}",c.fg),"bg":format!("{:?}",c.bg)})).collect();
+    std::fs::write(
+        directory.join(format!("{name}-{width}.json")),
+        serde_json::json!({"width":width,"height":height,"cells":cells}).to_string(),
+    )
+    .unwrap();
+}
 #[test]
 fn o2_is_a_direct_destination_in_home_palette_help_and_breadcrumbs() {
     let (_t, mut state) = fixture();

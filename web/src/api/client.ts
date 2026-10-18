@@ -561,16 +561,11 @@ export async function runPlan(
   );
 }
 
-export async function runApply(
-  request: ApiApplyRequest,
-  options: ApiRequestOptions = {},
-): Promise<ApiApplyResponse> {
-  return sendJson<ApiApplyResponse, ApiApplyRequest>(
-    '/apply',
-    'POST',
-    options,
-    request,
-  );
+export function runApply(request: ApiApplyRequest & {dryRun: true}, options?: ApiRequestOptions): Promise<ApiPlanResponse>;
+export function runApply(request: ApiApplyRequest & {dryRun: false}, options?: ApiRequestOptions): Promise<ApiApplyResponse>;
+export function runApply(request: ApiApplyRequest, options?: ApiRequestOptions): Promise<ApiApplyResponse | ApiPlanResponse>;
+export async function runApply(request: ApiApplyRequest, options: ApiRequestOptions = {}): Promise<ApiApplyResponse | ApiPlanResponse> {
+  return sendJson('/apply', 'POST', options, { ...request, confirmed: request.confirmed ?? request.yes });
 }
 
 export async function createTerminalSession(
@@ -836,4 +831,11 @@ export async function postCatalogSkillsVerify(
     { method: 'POST', signal: options.signal },
     options.baseUrl,
   );
+}
+
+export function getCoordinatorLaunchReview(): Promise<import('./models').CoordinatorLaunchReview> {
+  return sendJson('/coordinator/launch-review', 'GET');
+}
+export function launchCoordinator(decision: import('./models').CoordinatorLaunchDecision): Promise<ApiCoordinatorCommandResult> {
+  return sendJson('/coordinator/run', 'POST', {}, decision);
 }

@@ -193,13 +193,12 @@ pub fn check_disk_space(project_root: &Path, max_parallel: u32) -> Vec<Diagnosti
 pub fn check_coordinator_ipc(macc_dir: &Path) -> Vec<DiagnosticFinding> {
     let sqlite_path = macc_dir.join("state/coordinator.sqlite");
     if !sqlite_path.exists() {
-        return vec![DiagnosticFinding::error(
+        return vec![DiagnosticFinding::warning(
             "MACC-COORDINATOR-IPC-MISSING",
             "coordinator",
             "No coordinator is running",
             "Coordinator database not found; no coordinator has been started.",
             Some("Start a coordinator:\n  macc coordinator run"),
-            false,
         )];
     }
 
@@ -228,13 +227,12 @@ pub fn check_coordinator_ipc(macc_dir: &Path) -> Vec<DiagnosticFinding> {
                 )]
             }
         }
-        CoordinatorState::NotRunning => vec![DiagnosticFinding::error(
+        CoordinatorState::NotRunning => vec![DiagnosticFinding::warning(
             "MACC-COORDINATOR-IPC-MISSING",
             "coordinator",
             "No coordinator is running",
             "No active coordinator run found in the database.",
             Some("Start a coordinator:\n  macc coordinator run"),
-            false,
         )],
         CoordinatorState::Unknown => vec![DiagnosticFinding::warning(
             "MACC-COORDINATOR-IPC-UNKNOWN",
@@ -247,37 +245,33 @@ pub fn check_coordinator_ipc(macc_dir: &Path) -> Vec<DiagnosticFinding> {
 }
 
 pub fn check_task_readiness(macc_dir: &Path) -> Vec<DiagnosticFinding> {
-    let prd_path = macc_dir.join("prd.json");
-    if !prd_path.exists() {
-        return vec![DiagnosticFinding::error(
-            "MACC-TASK-NONE-READY",
-            "tasks",
-            "No PRD file found",
-            "No prd.json was found in .macc/.",
-            Some(
-                "Create a starter task:\n  macc quickstart --starter-task\n\nOr initialize from a PRD:\n  macc coordinator sync-prd",
-            ),
-            false,
-        )];
-    }
-
-    let ready_count = count_ready_tasks(&prd_path);
-    if ready_count == 0 {
-        vec![DiagnosticFinding::warning(
-            "MACC-TASK-NONE-READY",
-            "tasks",
-            "No ready task found",
-            "PRD exists but no task is in a dispatchable state.",
-            Some(
-                "Create a starter task:\n  macc quickstart --starter-task\n\nOr sync from PRD:\n  macc coordinator sync-prd",
-            ),
-        )]
-    } else {
-        vec![DiagnosticFinding::ok(
-            "MACC-TASK-READY",
-            "tasks",
-            &format!("{} ready task(s) found", ready_count),
-        )]
+    let paths = crate::ProjectPaths::from_root(macc_dir.parent().unwrap_or(macc_dir));
+    let canonical = match crate::config::load_canonical_config(&paths.config_path) {
+        Ok(config) => Some(config),
+        Err(error) if paths.config_path.exists() => {
+            return vec![DiagnosticFinding::error(
+                "MACC-CONFIG-INVALID",
+                "config",
+                "Project configuration cannot be loaded",
+                &error.to_string(),
+                Some("Fix the project configuration before checking its PRD Queue."),
+                false,
+            )]
+        }
+        Err(_) => None,
+    };
+    match crate::prd_queue::readiness::inspect(&paths, canonical.as_ref().and_then(|c| c.automation.coordinator.as_ref())) {
+        Ok(source) if source.current.completed => vec![DiagnosticFinding::ok(
+            "MACC-TASK-QUEUE-COMPLETED", "tasks", "PRD queue completed")],
+        Ok(source) if source.ready_tasks > 0 => vec![DiagnosticFinding::ok(
+            "MACC-TASK-READY", "tasks", &format!("{} ready task(s) in {}", source.ready_tasks, source.current.label()))],
+        Ok(source) => vec![DiagnosticFinding::warning(
+            "MACC-TASK-NONE-READY", "tasks", "No ready task in the active PRD",
+            &format!("{} is the current task source. No dispatchable task is recorded in it.", source.path.display()),
+            Some("Inspect the active PRD and coordinator registry; later queue entries do not bypass the current PRD."))],
+        Err(error) => vec![DiagnosticFinding::error(
+            "MACC-TASK-SOURCE-INVALID", "tasks", "Task source cannot be loaded", &error.to_string(),
+            Some("Review automation.coordinator.prd_files / prd_file and saved PRD Queue progress."), false)],
     }
 }
 

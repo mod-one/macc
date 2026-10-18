@@ -61,7 +61,7 @@ describe('useCoordinatorStore', () => {
     mockedPostCoordinatorAction.mockResolvedValue({ resumed: true });
     mockedGetStatus.mockResolvedValue(coordinatorStatus);
 
-    const result = await useCoordinatorStore.getState().runAction('run');
+    const result = await useCoordinatorStore.getState().runAction('resume');
 
     expect(result).toEqual({ resumed: true });
     expect(mockedGetStatus).toHaveBeenCalledTimes(1);

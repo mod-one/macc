@@ -36,3 +36,7 @@ Coordinator Live distinguishes **[R] Run coordinator** from **[r] Requeue select
 - Sessions and O2 keep domain action metadata in their own command catalogs; the shared surface consumes it.
 
 No storage schema, tool adapter or coordinator execution policy changes are introduced by this command presentation layer.
+
+## Apply and launch confirmations
+
+Enter on Apply opens a separate confirmation. Use Left/Right or Tab to choose Cancel / Apply; user files also require `YES`. A changed plan needs another preview. Run opens an adaptive launch review with supervisor and reference-branch choices. See [client action reviews](CLIENT_ACTION_REVIEWS.md).

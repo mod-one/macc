@@ -3,6 +3,7 @@ import { Link, Outlet, useLocation } from 'react-router-dom';
 import { Icons } from './NavIcons';
 import GitGraphPanel from './GitGraphPanel';
 import CommandPalette from './CommandPalette';
+import { CoordinatorLaunchDialog } from './CoordinatorLaunchDialog';
 import { NotificationsDrawer } from './NotificationsDrawer';
 import RouteLoadingSkeleton from './RouteLoadingSkeleton';
 import { StatusBadge } from './StatusBadge';
@@ -674,6 +675,7 @@ const Layout: React.FC = () => {
 
       {/* Global overlays */}
       <NotificationsDrawer />
+      <CoordinatorLaunchDialog />
       <CommandPalette open={cmdOpen} onOpenChange={setCmdOpen} />
     </div>
   );

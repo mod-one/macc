@@ -140,20 +140,23 @@ const Apply: React.FC = () => {
       setApplying(true);
 
       try {
-        const response = await runApply({
-          scope: 'project',
-          allowUserScope: false,
-          dryRun,
-          yes: dryRun ? undefined : true,
-        });
-        setApplyResult(response);
+        if (dryRun) {
+          const response = await runApply({ scope: 'project', allowUserScope: false, dryRun: true });
+          setPlan(response);
+          setPlanSource('fresh');
+          setApplyResult(null);
+        } else {
+          const response = await runApply({ scope: 'project', allowUserScope: false, dryRun: false,
+            confirmed: true, planRevision: plan?.planRevision });
+          setApplyResult(response);
+        }
       } catch (error) {
         setApplyError(formatError(error));
       } finally {
         setApplying(false);
       }
     },
-    [],
+    [plan?.planRevision],
   );
 
   const filesWritten = React.useMemo(() => {

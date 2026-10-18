@@ -61,7 +61,16 @@ pub(super) async fn run_apply_handler(
             &ops,
             true,
             true,
-        ))));
+        )?)));
+    }
+
+    if let Some(expected) = &request.plan_revision {
+        if expected != &macc_core::service::apply_review::fingerprint(&plan, &ops)? {
+            return Err(ApiError::confirmation_required(
+                "The apply plan changed. Refresh the preview and confirm again.",
+                None,
+            ));
+        }
     }
 
     let report = state

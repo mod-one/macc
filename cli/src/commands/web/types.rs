@@ -531,6 +531,7 @@ pub(crate) struct ApiPlanRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ApiPlanResponse {
+    pub plan_revision: String,
     /// Aggregate statistics about the proposed plan.
     pub summary: ApiPlanSummary,
     /// File-level operations derived from the action plan.
@@ -643,6 +644,7 @@ pub(crate) struct ApiPlanConsent {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ApiApplyRequest {
+    pub plan_revision: Option<String>,
     /// Target scope for apply execution.
     pub scope: Option<Scope>,
     /// Tool IDs to include in apply execution.

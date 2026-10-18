@@ -1,4 +1,5 @@
 //! Ordered PRD inputs shared by the coordinator and its terminal clients.
+pub mod readiness;
 use crate::{MaccError, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

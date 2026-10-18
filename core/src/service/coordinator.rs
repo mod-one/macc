@@ -365,7 +365,7 @@ fn coordinator_start_command_process_with_pid(
     paths: &ProjectPaths,
     command: &str,
     args: &[String],
-    _cfg: Option<&CoordinatorConfig>,
+    cfg: Option<&CoordinatorConfig>,
     client_id: Option<&str>,
     persist_exit_code: bool,
 ) -> Result<(CoordinatorProcessHandle, i32)> {
@@ -384,6 +384,7 @@ fn coordinator_start_command_process_with_pid(
             .arg("control-plane-run")
             .arg("--no-tui")
             .args(args);
+        apply_reference_policy_args(&mut cmd, cfg);
         cmd
     } else {
         ensure_embedded_automation_scripts(paths)?;
@@ -465,6 +466,15 @@ fn coordinator_start_command_process_with_pid(
         .map_err(|_| MaccError::Validation("coordinator process table lock poisoned".into()))?;
     table.insert(id, ManagedCoordinatorProcess { child });
     Ok((handle, pid))
+}
+
+fn apply_reference_policy_args(cmd: &mut Command, cfg: Option<&CoordinatorConfig>) {
+    let policy = crate::config::CoordinatorConfigResolved::resolve(cfg).reference_branch_preflight;
+    if policy.enabled
+        && policy.dirty_policy == crate::coordinator::preflight::DirtyReferencePolicy::Allow
+    {
+        cmd.arg("--allow-dirty-reference");
+    }
 }
 
 fn wrap_command_with_exit_record(
@@ -776,6 +786,27 @@ fn read_dispatch_limit_reason(paths: &ProjectPaths, started_at: &str) -> Option<
 mod client_identity_tests {
     use super::apply_client_identity_env;
     use std::process::Command;
+
+    #[test]
+    fn reviewed_dirty_allowance_reaches_child_preflight() {
+        let mut cfg = crate::config::CoordinatorConfig::default();
+        for (policy, expected) in [("block", false), ("warn", false), ("allow", true)] {
+            cfg.reference_branch_preflight =
+                Some(crate::config::ReferenceBranchPreflightConfigRaw {
+                    dirty_policy: Some(policy.into()),
+                    ..Default::default()
+                });
+            let mut cmd = Command::new("macc");
+            super::apply_reference_policy_args(&mut cmd, Some(&cfg));
+            assert_eq!(
+                cmd.get_args().any(|a| a == "--allow-dirty-reference"),
+                expected
+            );
+        }
+        let mut cmd = Command::new("macc");
+        super::apply_reference_policy_args(&mut cmd, None);
+        assert_eq!(cmd.get_args().count(), 0);
+    }
 
     fn client_identity_of(cmd: &Command) -> Option<String> {
         cmd.get_envs().find_map(|(k, v)| {

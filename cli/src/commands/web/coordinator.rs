@@ -221,42 +221,6 @@ pub(super) async fn status_handler(
     Ok(Json(ApiCoordinatorStatus::from(status)))
 }
 
-pub(super) async fn coordinator_run_handler(
-    State(state): State<WebState>,
-    headers: axum::http::HeaderMap,
-) -> std::result::Result<Json<ApiCoordinatorCommandResult>, ApiError> {
-    crate::commands::web::mutation_gate::require_project_owner(&state, &headers)?;
-    let _ = state.engine.project_ensure_coordinator_run_id();
-    let paths = state.paths.clone();
-    let engine = state.engine.clone();
-    // Propagate the calling web client's identity so the coordinator child
-    // passes the project lease gate this request just passed.
-    let client_id = crate::commands::web::mutation_gate::client_id_from_headers(&headers);
-    let child_client_id = client_id.clone();
-    // Start the coordinator subprocess and return immediately.
-    // The coordinator is a long-running process; callers monitor progress via SSE.
-    tokio::task::spawn_blocking(move || {
-        engine.coordinator_start_managed_command_process(
-            &paths,
-            &CoordinatorCommand::Run,
-            None,
-            child_client_id.as_deref(),
-        )
-    })
-    .await
-    .map_err(|e| ApiError::validation(e.to_string()))??;
-    if let Some(client_id) = client_id {
-        let generation = state
-            .coordinator_lease_generation
-            .fetch_add(1, Ordering::SeqCst)
-            .saturating_add(1);
-        super::coordinator_lease::spawn_release_monitor(state.clone(), client_id, generation);
-    }
-    Ok(Json(ApiCoordinatorCommandResult::from(
-        CoordinatorCommandResult::default(),
-    )))
-}
-
 pub(super) async fn coordinator_stop_handler(
     State(state): State<WebState>,
     headers: axum::http::HeaderMap,

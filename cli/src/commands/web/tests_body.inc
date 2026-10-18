@@ -2484,7 +2484,8 @@ async fn coordinator_run_endpoint_returns_envelope() {
             Request::builder()
                 .uri("/api/v1/coordinator/run")
                 .method("POST")
-                .body(Body::empty())
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"confirmed":true,"revision":"review-1","supervisor":false}"#))
                 .expect("request"),
         )
         .await
@@ -2530,7 +2531,8 @@ async fn coordinator_run_exit_releases_web_client_lease() {
                 .uri("/api/v1/coordinator/run")
                 .method("POST")
                 .header("X-Macc-Client-Id", client_id)
-                .body(Body::empty())
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"confirmed":true,"revision":"review-1","supervisor":false}"#))
                 .expect("request"),
         )
         .await
@@ -2568,7 +2570,8 @@ async fn coordinator_run_endpoint_maps_errors() {
             Request::builder()
                 .uri("/api/v1/coordinator/run")
                 .method("POST")
-                .body(Body::empty())
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"confirmed":true,"revision":"review-1","supervisor":false}"#))
                 .expect("request"),
         )
         .await
@@ -2608,7 +2611,8 @@ async fn coordinator_run_endpoint_maps_internal_coordinator_error_code() {
             Request::builder()
                 .uri("/api/v1/coordinator/run")
                 .method("POST")
-                .body(Body::empty())
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"confirmed":true,"revision":"review-1","supervisor":false}"#))
                 .expect("request"),
         )
         .await
@@ -5511,4 +5515,55 @@ async fn event_streams_read_new_events_from_the_coordinator_database() {
     let ids: Vec<_> = newer.iter().filter_map(|e| e.event_id.clone()).collect();
     assert_eq!(ids, ["evt-2", "evt-3"]);
     let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn coordinator_run_rejects_missing_confirmation_before_starting() {
+    let root = temp_root("run-confirmation-required");
+    fs::create_dir_all(&root).unwrap();
+    let engine = Arc::new(WebTestEngine::with_managed_run_result(Err(MaccError::Validation("must not start".into()))));
+    let app = build_web_router(test_web_state(&root, engine.clone(), WebAssetsMode::Embedded));
+    let response = app.oneshot(Request::builder().uri("/api/v1/coordinator/run").method("POST").body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+    assert!(engine.managed_run_result.lock().unwrap().is_some(), "no start may consume the mocked command");
+}
+
+#[tokio::test]
+async fn coordinator_launch_review_endpoint_is_read_only() {
+    let root = temp_root("run-review"); fs::create_dir_all(&root).unwrap();
+    let engine=Arc::new(WebTestEngine::new(Ok(Default::default())));
+    let app=build_web_router(test_web_state(&root,engine,WebAssetsMode::Embedded));
+    let response=app.oneshot(Request::builder().uri("/api/v1/coordinator/launch-review").body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes=response.into_body().collect().await.unwrap().to_bytes();
+    let json:serde_json::Value=serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["revision"],"review-1");
+    assert!(!root.join(".macc/state/managed_commands.json").exists());
+}
+
+#[tokio::test]
+async fn apply_rejects_a_changed_preview_without_overwriting_new_work() {
+    let _guard=apply_test_guard();
+    let root=temp_root("apply-reviewed-revision");
+    let mut engine=WebTestEngine::new(Ok(Default::default()));engine.use_fixture_plan_from_overrides=true;
+    let tool_id=engine.inner.fixture_ids()[0].clone();
+    write_test_config_with_tools(&root,vec![tool_id.clone()]);
+    // This test exercises confirmation, independently of remote catalog materialization.
+    let paths=ProjectPaths::from_root(&root);
+    let mut catalog=macc_core::catalog::load_effective_skills_catalog(&paths).unwrap();
+    for entry in &mut catalog.entries { entry.mandatory=false; }
+    fs::create_dir_all(&paths.catalog_dir).unwrap();
+    catalog.save_atomically(&paths,&paths.skills_catalog_path()).unwrap();
+    let target=root.join(format!("{tool_id}-output.txt"));fs::write(&target,"before preview").unwrap();
+    let app=build_web_router(test_web_state(&root,Arc::new(engine),WebAssetsMode::Embedded));
+    let response=app.clone().oneshot(Request::builder().uri("/api/v1/plan").method("POST").header("content-type","application/json").body(Body::from(r#"{"includeDiff":true}"#)).unwrap()).await.unwrap();
+    let status=response.status();
+    let bytes=response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(status,axum::http::StatusCode::OK,"{}",String::from_utf8_lossy(&bytes));
+    let json:serde_json::Value=serde_json::from_slice(&bytes).unwrap();
+    fs::write(&target,"new work after preview").unwrap();
+    let body=serde_json::json!({"dryRun":false,"confirmed":true,"planRevision":json["planRevision"]});
+    let response=app.oneshot(Request::builder().uri("/api/v1/apply").method("POST").header("content-type","application/json").body(Body::from(body.to_string())).unwrap()).await.unwrap();
+    assert_eq!(response.status(),axum::http::StatusCode::BAD_REQUEST);
+    assert_eq!(fs::read_to_string(&target).unwrap(),"new work after preview");
 }

@@ -14,6 +14,7 @@ mod errors;
 mod failures;
 #[allow(clippy::result_large_err)]
 mod git;
+mod launch;
 #[allow(clippy::result_large_err)]
 mod logs;
 mod mutation_gate;
@@ -299,9 +300,10 @@ fn build_web_router(state: WebState) -> Router {
             "/api/v1/terminal/:session",
             get(terminal::terminal_ws_handler),
         )
+        .route("/api/v1/coordinator/launch-review", get(launch::review))
         .route(
             "/api/v1/coordinator/run",
-            post(coordinator::coordinator_run_handler),
+            post(launch::run),
         )
         .route(
             "/api/v1/coordinator/dispatch",

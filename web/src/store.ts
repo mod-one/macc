@@ -1,5 +1,6 @@
 import { create } from 'zustand';
-import { getStatus, postCoordinatorAction } from './api/client';
+import { requestCoordinatorLaunch } from './stores/coordinatorLaunchStore';
+import { getStatus, postCoordinatorAction, launchCoordinator } from './api/client';
 import type {
   ApiCoordinatorAction,
   ApiCoordinatorCommandResult,
@@ -55,7 +56,7 @@ export const useCoordinatorStore = create<CoordinatorStore>((set) => ({
     set({ pendingAction: action });
 
     try {
-      const result = await postCoordinatorAction(action);
+      const result = action === 'run' ? await launchCoordinator(await requestCoordinatorLaunch()) : await postCoordinatorAction(action);
 
       if (result.status) {
         set({
@@ -73,7 +74,7 @@ export const useCoordinatorStore = create<CoordinatorStore>((set) => ({
       return result;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unexpected coordinator error.';
-      set({ loadError: message });
+      if (!(error instanceof DOMException && error.name === 'AbortError')) set({ loadError: message });
       throw error;
     } finally {
       set({ pendingAction: null });

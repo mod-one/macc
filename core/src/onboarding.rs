@@ -163,26 +163,35 @@ pub fn compute_readiness_from_state(
     };
 
     // Step 4: PRD/task available
-    let prd_path = canonical
-        .and_then(|c| c.automation.coordinator.as_ref())
-        .and_then(|c| c.prd_files.first().or(c.prd_file.as_ref()))
-        .map(|path| paths.root.join(path))
-        .unwrap_or_else(|| paths.macc_dir.join("prd.json"));
-    let task_count = if prd_path.exists() {
-        crate::doctor::count_ready_tasks_public(&prd_path)
-    } else {
-        0
-    };
-    let step4 = if task_count > 0 {
-        ReadinessStep::done(
+    let task_source = crate::prd_queue::readiness::inspect(
+        paths,
+        canonical.and_then(|c| c.automation.coordinator.as_ref()),
+    );
+    let step4 = match task_source {
+        Ok(source) if source.current.completed => {
+            ReadinessStep::done(4, "PRD/task available", Some("PRD queue completed"))
+        }
+        Ok(source) if source.ready_tasks > 0 => ReadinessStep::done(
             4,
             "PRD/task available",
-            Some(&format!("{} task(s) ready", task_count)),
-        )
-    } else if onboarding.completed_steps.starter_task_created {
-        ReadinessStep::done(4, "PRD/task available", None)
-    } else {
-        ReadinessStep::pending(4, "PRD/task available")
+            Some(&format!(
+                "{} task(s) ready — {}",
+                source.ready_tasks,
+                source.current.label()
+            )),
+        ),
+        Ok(source) => ReadinessStep {
+            number: 4,
+            label: "PRD/task available".into(),
+            status: ReadinessStatus::Pending,
+            detail: Some(format!("No ready tasks in {}", source.current.label())),
+        },
+        Err(error) => ReadinessStep {
+            number: 4,
+            label: "PRD/task available".into(),
+            status: ReadinessStatus::Pending,
+            detail: Some(error.to_string()),
+        },
     };
 
     // Step 5: Git identity configured

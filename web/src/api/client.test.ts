@@ -3,6 +3,8 @@ import { setupServer } from 'msw/node'
 import { http, HttpResponse } from 'msw'
 import {
   buildUrl,
+  runApply,
+  setWebOwnershipMode,
   claimProjectOwnership,
   getHealth,
   getProjectOwnership,
@@ -62,6 +64,22 @@ describe('ApiClient', () => {
     vi.unstubAllGlobals()
   })
   afterAll(() => server.close())
+
+  it('sends explicit apply confirmation and the reviewed plan revision', async () => {
+    setWebOwnershipMode('owner');
+    let body: Record<string, unknown> = {};
+    server.use(http.post('*/api/v1/apply', async ({request}) => {
+      body = await request.json() as Record<string, unknown>;
+      return HttpResponse.json({dryRun:false,appliedActions:0,changedFiles:0,results:[],backupLocations:[],warnings:[]});
+    }));
+    await runApply({dryRun:false,confirmed:true,planRevision:'revision-1'});
+    expect(body).toMatchObject({confirmed:true,planRevision:'revision-1'});
+    await runApply({dryRun:false,yes:true});
+    expect(body.confirmed).toBe(true);
+    await runApply({dryRun:false,yes:true,confirmed:false});
+    expect(body.confirmed).toBe(false);
+    setWebOwnershipMode('unknown');
+  });
 
   it('buildUrl uses the Vite API base URL when configured', () => {
     vi.stubEnv('VITE_API_BASE_URL', 'http://localhost:3450/')

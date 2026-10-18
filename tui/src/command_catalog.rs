@@ -43,7 +43,7 @@ fn rows(bindings: Vec<(&str, &str)>) -> Vec<Command> {
 
 /// Input is isolated from page navigation. Function keys remain available.
 pub(crate) fn input_active(state: &AppState) -> bool {
-    state.current_screen() == Screen::Apply
+    (state.current_screen() == Screen::Apply && state.apply_confirmation_open())
         || state.search_editing
         || (state.current_screen() == Screen::ToolSettings && state.is_tool_field_editing())
         || (matches!(
@@ -57,6 +57,7 @@ pub(crate) fn input_active(state: &AppState) -> bool {
 /// Global destinations must never bypass an active modal or text editor.
 pub(crate) fn exclusive(state: &AppState) -> bool {
     input_active(state)
+        || state.launch_dialog.is_some()
         || state.approval_window.is_some()
         || state.prd_queue_editor.is_some()
         || state.coordinator_task_diff_popup.is_some()
@@ -77,6 +78,16 @@ pub(crate) fn exclusive(state: &AppState) -> bool {
 }
 
 pub(crate) fn active(state: &AppState) -> Vec<Command> {
+    if state.launch_dialog.is_some() {
+        return rows(vec![
+            ("Tab", "Next option"),
+            ("↑↓", "Select option"),
+            ("←→", "Change value / button"),
+            ("Enter", "Activate selection"),
+            ("PgUp/PgDn", "Scroll launch warnings"),
+            ("Esc", "Cancel launch"),
+        ]);
+    }
     if state.coordinator_task_diff_popup.is_some() || state.coordinator_task_explain_popup.is_some()
     {
         return rows(vec![("Esc", "Close details")]);
@@ -149,7 +160,22 @@ pub(crate) fn active(state: &AppState) -> Vec<Command> {
         return rows(state.supervisor_command_bindings());
     }
     if screen == Screen::Apply {
-        return rows(screen_action_bindings(screen));
+        if state.apply_confirmation_open() {
+            return rows(vec![
+                ("←→", "Choose Cancel / Apply"),
+                ("Tab", "Next button"),
+                ("Enter", "Activate selected button"),
+                ("Backspace", "Delete consent character"),
+                ("Esc", "Cancel confirmation"),
+            ]);
+        }
+        let mut commands = rows(screen_action_bindings(screen));
+        if let Some(command) = commands.iter_mut().find(|c| c.key == Some(KeyCode::Enter)) {
+            command.enabled = state.apply_context.is_some()
+                && !state.apply_preparing()
+                && state.apply_feedback.is_none();
+        }
+        return commands;
     }
     if input_active(state) {
         let mut commands = rows(vec![
@@ -318,9 +344,10 @@ pub(crate) fn screen_action_bindings(screen: Screen) -> Vec<(&'static str, &'sta
             ("x", "Apply"),
         ],
         Screen::Apply => vec![
-            ("YES", "Consent"),
-            ("Enter", "Apply"),
-            ("Backspace", "Delete"),
+            ("Enter", "Review and confirm apply…"),
+            ("↑↓", "Select operation"),
+            ("PgUp/PgDn", "Scroll result"),
+            ("r", "Refresh plan"),
             ("Esc", "Back"),
         ],
         Screen::Watch => vec![("↑↓", "Workers"), ("r", "Refresh"), ("/", "Search")],

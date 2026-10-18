@@ -40,7 +40,7 @@ pub(super) async fn run_plan_handler(
         &ops,
         request.include_diff.unwrap_or(true),
         request.explain.unwrap_or(true),
-    )))
+    )?))
 }
 
 pub(super) fn build_overrides(
@@ -86,8 +86,9 @@ pub(super) fn build_plan_response(
     ops: &[PlannedOp],
     include_diff: bool,
     explain: bool,
-) -> ApiPlanResponse {
-    ApiPlanResponse {
+) -> macc_core::Result<ApiPlanResponse> {
+    Ok(ApiPlanResponse {
+        plan_revision: macc_core::service::apply_review::fingerprint(plan, ops)?,
         summary: ApiPlanSummary {
             total_actions: plan.actions.len(),
             files_write: ops
@@ -156,7 +157,7 @@ pub(super) fn build_plan_response(
                 paths: vec![op.path.clone()],
             })
             .collect(),
-    }
+    })
 }
 
 fn validate_preview_plan(plan: &ActionPlan, allow_user_scope: bool) -> macc_core::Result<()> {

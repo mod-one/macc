@@ -18,6 +18,7 @@ export interface ConfirmDialogProps {
   dangerousConfirmationMode?: DangerousConfirmationMode;
   secondaryConfirmationLabel?: string;
   onConfirm: () => void;
+  confirmDisabled?: boolean;
   children?: React.ReactNode;
 }
 
@@ -34,6 +35,7 @@ export function ConfirmDialog({
   secondaryConfirmationLabel = 'I understand this action cannot be undone.',
   onConfirm,
   children,
+  confirmDisabled = false,
 }: ConfirmDialogProps) {
   const [typedPhrase, setTypedPhrase] = useState('');
   const [isAcknowledged, setIsAcknowledged] = useState(false);
@@ -54,7 +56,7 @@ export function ConfirmDialog({
     >
       <AlertDialog.Portal>
         <AlertDialog.Overlay className="fixed inset-0 bg-black/70 backdrop-blur-sm" />
-        <AlertDialog.Content className="fixed left-1/2 top-1/2 w-[min(92vw,32rem)] -translate-x-1/2 -translate-y-1/2 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-secondary)] p-6 text-[var(--text-primary)] shadow-2xl focus:outline-none">
+        <AlertDialog.Content className="fixed left-1/2 top-1/2 max-h-[90vh] overflow-y-auto w-[min(92vw,40rem)] -translate-x-1/2 -translate-y-1/2 rounded-[var(--radius-card)] border border-[var(--border)] bg-[var(--bg-secondary)] p-6 text-[var(--text-primary)] shadow-2xl focus:outline-none">
           <div className="flex items-start gap-3">
             <div
               className={cn('rounded-full p-2', isDangerous ? 'text-[var(--error)]' : 'text-[var(--warning)]')}
@@ -117,7 +119,7 @@ export function ConfirmDialog({
             <AlertDialog.Action asChild>
               <button
                 className="rounded-md bg-[var(--accent)] px-4 py-2 text-sm font-semibold text-white transition-opacity focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--bg-secondary)] disabled:cursor-not-allowed disabled:opacity-50"
-                disabled={!isConfirmed}
+                disabled={!isConfirmed || confirmDisabled}
                 onClick={onConfirm}
                 type="button"
               >
