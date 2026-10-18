@@ -8,6 +8,28 @@ pub(super) struct CommandEditor {
     input: Option<String>,
 }
 impl AppState {
+    pub fn supervisor_command_bindings(&self) -> Vec<(&'static str, &'static str)> {
+        if self
+            .supervisor_commands_editor
+            .as_ref()
+            .is_some_and(|e| e.input.is_some())
+        {
+            return vec![
+                ("Enter", "Accept command"),
+                ("Backspace", "Delete character"),
+                ("Esc", "Cancel input"),
+            ];
+        }
+        vec![
+            ("↑↓", "Select command"),
+            ("←→", "Reorder"),
+            ("a", "Add command"),
+            ("Enter", "Edit command"),
+            ("d", "Remove command"),
+            ("s", "Accept draft"),
+            ("Esc", "Cancel"),
+        ]
+    }
     pub fn supervisor_commands_active(&self) -> bool {
         self.supervisor_commands_editor.is_some()
     }

@@ -4,10 +4,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{
-        Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState,
-        Wrap,
-    },
+    widgets::{Cell, Paragraph, Row, Table, TableState, Wrap},
     Frame,
 };
 use serde_json::Value;
@@ -32,116 +29,6 @@ impl Command {
     pub fn when(mut self, enabled: bool) -> Self {
         self.enabled = enabled;
         self
-    }
-}
-#[derive(Default)]
-pub(crate) struct ActionMenu {
-    pub open: bool,
-    selected: usize,
-}
-impl ActionMenu {
-    /// Resolve before the caller's mutation gate, so menu selection cannot bypass ownership.
-    pub fn resolve(&mut self, key: KeyCode, commands: &[Command]) -> Option<KeyCode> {
-        if !self.open {
-            if key == KeyCode::F(2) {
-                self.open = true;
-                self.selected = 0;
-                return None;
-            }
-            return Some(key);
-        }
-        self.selected = self.selected.min(commands.len().saturating_sub(1));
-        match key {
-            KeyCode::Esc | KeyCode::F(2) => self.open = false,
-            KeyCode::Up => self.selected = self.selected.saturating_sub(1),
-            KeyCode::Down => {
-                self.selected = (self.selected + 1).min(commands.len().saturating_sub(1))
-            }
-            KeyCode::Enter => {
-                if let Some(c) = commands.get(self.selected).filter(|c| c.enabled) {
-                    self.open = false;
-                    return Some(c.key);
-                }
-            }
-            _ => {
-                if let Some(c) = commands.iter().find(|c| c.key == key && c.enabled) {
-                    self.open = false;
-                    return Some(c.key);
-                }
-            }
-        }
-        None
-    }
-    pub fn draw(&self, f: &mut Frame, commands: &[Command]) {
-        if !self.open {
-            return;
-        }
-        let theme = crate::ui::theme();
-        let area = crate::ui::centered_rect(85, 85, f.size());
-        f.render_widget(Clear, area);
-        let parts = Layout::default()
-            .constraints([Constraint::Min(3), Constraint::Length(4)])
-            .split(area);
-        let rows: Vec<_> = commands
-            .iter()
-            .map(|c| {
-                let shortcut = if c.shortcut.is_empty() {
-                    match c.key {
-                        KeyCode::Char(v) => v.to_string(),
-                        _ => String::new(),
-                    }
-                } else {
-                    c.shortcut.into()
-                };
-                ListItem::new(format!(
-                    "[{shortcut}] {}{}",
-                    c.label,
-                    if c.enabled { "" } else { " (unavailable)" }
-                ))
-                .style(Style::default().fg(if c.enabled {
-                    theme.accent_dim
-                } else {
-                    theme.muted
-                }))
-            })
-            .collect();
-        let mut state = ListState::default().with_selected(Some(self.selected));
-        f.render_stateful_widget(
-            List::new(rows)
-                .block(
-                    Block::default()
-                        .title("Actions — choose with ↑↓, then Enter")
-                        .borders(Borders::ALL),
-                )
-                .highlight_style(
-                    Style::default()
-                        .bg(theme.highlight_bg)
-                        .add_modifier(Modifier::BOLD),
-                )
-                .highlight_symbol("› "),
-            parts[0],
-            &mut state,
-        );
-        let hint = commands
-            .get(self.selected)
-            .map(|c| {
-                format!(
-                    "{}{}\nEsc: close without changes",
-                    if c.enabled {
-                        ""
-                    } else {
-                        "Unavailable in the current state. "
-                    },
-                    c.hint
-                )
-            })
-            .unwrap_or_default();
-        f.render_widget(
-            Paragraph::new(hint)
-                .wrap(Wrap { trim: false })
-                .block(crate::ui::panel("What this action does")),
-            parts[1],
-        );
     }
 }
 pub(crate) fn tabs(f: &mut Frame, area: Rect, labels: &[&str], selected: usize) {

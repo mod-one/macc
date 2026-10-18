@@ -2,20 +2,20 @@
 
 ## Open a workspace
 
-The Home overview lists both destinations. Press **O** (uppercase) for **O2 Memory & Context** or **J** for **Sessions & Conversations**. Both also appear in the searchable command palette (**:**), and in global help (**?**). The older **Sessions → o** shortcut remains available.
+The Home overview lists both destinations. Press **O** (uppercase) for **O2 Memory & Context** or **J** for **Sessions & Conversations**. Both also appear in the searchable command palette (**F2**, with **:** outside text input), and in contextual help (**F1**). The older **Sessions → o** shortcut remains available.
 
 Each workspace has its own title and breadcrumb. Opening O2 for the first time shows the task overview or explicit storage setup instructions. A missing PRD does not prevent inspecting these configuration screens.
 
 ## Find an operation
 
-- **F2** opens a menu of named actions for the active section. Select with **Up/Down**, then **Enter**. The lower pane explains the selected action. Unavailable actions remain visible with an explanation; they do not execute.
+- **F2** opens the shared searchable command palette for the active page or window. Type an action name, select with **Up/Down**, then **Enter**. The lower pane explains the selected action. Unavailable actions remain visible with an explanation; they do not execute.
 - **?** or **F1** opens contextual help. Scroll with **Up/Down** or **Page Up/Page Down**; **Esc** closes help.
 - **Tab/Shift+Tab** changes section; number keys open sections directly.
 - **Enter** edits the selected setting or inspects the selected record. The selected row stays visible while navigating.
 - **Page Up/Page Down** scrolls the details pane. **F4** switches between readable evidence and complete raw evidence.
 - **Esc** cancels input or a pending reviewed operation before navigating back. Unsaved policy drafts require explicit save or discard.
 
-Menus resolve to the existing operation shortcuts **before** the project ownership gate runs. A viewer cannot bypass the gate by choosing an operation with Enter. Core services still validate schema, scope, source hashes, revisions and confirmation checksums.
+Palette actions resolve to the existing operation shortcuts **before** the project ownership gate runs. A viewer cannot bypass the gate by choosing an operation with Enter. Core services still validate schema, scope, source hashes, revisions and confirmation checksums.
 
 ## Sessions
 
@@ -48,3 +48,5 @@ JSON/older SQLite projects get a setup card instead of an unexplained empty pane
 The layouts keep list, details and action hints visible at **80×24** and expand at larger sizes. The action menu, forms and help use overlays; long evidence stays scrollable. Switching workspace/group retains drafts and read-only refresh does not silently rebase a stale settings revision.
 
 No persistence schema, policy default, provider adapter or coordinator scheduling behavior changes in this UI update. Existing CLI/Web configuration and checkpoint evidence remain compatible.
+
+See [TUI command conventions](TUI_COMMANDS.md) for the shared footer, modal behavior and shortcut scopes.

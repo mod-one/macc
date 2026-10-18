@@ -116,7 +116,7 @@ impl SessionsScreen {
             self.scroll,
         );
         let status = if self.message.is_empty() {
-            "F2 Actions  •  ? Help  •  Enter edit/inspect  •  p Preview  •  s Save  •  O Open O2"
+            "Select a setting or conversation to inspect its details."
         } else {
             &self.message
         };
@@ -127,7 +127,6 @@ impl SessionsScreen {
                 .block(crate::ui::panel("Status & next action")),
             parts[3],
         );
-        self.menu.draw(f, &self.commands());
     }
     fn selection_details(&self) -> String {
         let Some(v) = &self.view else {

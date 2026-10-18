@@ -27,6 +27,9 @@ impl UsagePanel {
         self.view = store::usage::inspect(root)?;
         Ok(())
     }
+    pub(crate) fn has_reviewed_plan(&self) -> bool {
+        self.plan.is_some()
+    }
     pub fn is_mutation(&self, key: KeyCode) -> bool {
         self.open && key == KeyCode::Char('a')
     }
@@ -70,7 +73,7 @@ impl UsagePanel {
         Ok(())
     }
     pub fn draw(&self, f: &mut Frame, area: Rect) {
-        let mut lines=vec!["Invocation usage — r refresh | ↑↓ select | Enter inspect | u preview upgrade | a apply reviewed upgrade | x cancel | PgUp/PgDn scroll | Esc back".into(),
+        let mut lines=vec!["Invocation usage".into(),
             format!("Usage schema ready: {}. Unknown counters are never zero. Estimated costs are not invoices or subscription quota.",self.view.ready),
             "Known incremental totals (missing measurements excluded; costs stay separated by currency and quality):".into()];
         for t in &self.view.totals {

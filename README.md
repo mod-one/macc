@@ -280,6 +280,8 @@ All commands support `--quiet`, `--offline`, and `--json` where applicable.
 
 ### TUI
 
+Every page and dialog shows a command area at the bottom: **F2** opens the searchable palette, **F1** opens contextual help, and **Esc** goes back or cancels. See [TUI commands](docs/TUI_COMMANDS.md).
+
 ```bash
 macc tui
 ```

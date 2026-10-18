@@ -29,7 +29,6 @@ use std::path::Path;
 #[derive(Default)]
 pub struct Panel {
     pub open: bool,
-    menu: crate::workspace_ui::ActionMenu,
     raw_details: bool,
     pub session_task: Option<String>,
     overview: overview::Overview,

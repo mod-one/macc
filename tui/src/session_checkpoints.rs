@@ -48,6 +48,9 @@ impl CheckpointPanel {
         self.details.clear();
         self.reconciliation = None;
     }
+    pub(crate) fn has_reviewed_plan(&self) -> bool {
+        self.upgrade.is_some() || self.reconciliation.is_some()
+    }
     pub fn is_mutation(&self, key: KeyCode) -> bool {
         self.open && key == KeyCode::Char('a')
     }
@@ -121,9 +124,9 @@ impl CheckpointPanel {
         Ok(())
     }
     pub fn draw(&self, f: &mut Frame, area: Rect, view: Option<&StoreView>) {
-        let mut lines=vec!["Task checkpoints — ↑↓ select | Enter inspect | p preview reconciliation | a apply reviewed plan | x cancel | u preview schema upgrade | PgUp/PgDn scroll | Esc back".to_string(),"Checkpoints are evidence. They never deliver a task or approve a review. Fresh sessions restore current criteria and acknowledge task/phase.".into()];
+        let mut lines=vec!["Task checkpoints".to_string(),"Checkpoints are evidence. They never deliver a task or approve a review. Fresh sessions restore current criteria and acknowledge task/phase.".into()];
         lines.push(format!(
-            "Task scope: {} | * all checkpoints",
+            "Task scope: {}",
             self.task_scope.as_deref().unwrap_or("all")
         ));
         if let Some(view) = view {

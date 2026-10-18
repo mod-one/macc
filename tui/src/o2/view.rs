@@ -64,7 +64,7 @@ impl Panel {
             parts[1],
         );
         if let Some(form) = &self.form {
-            let dialog = crate::ui::centered_rect(90, 85, f.size());
+            let dialog = crate::ui::centered_rect(90, 85, crate::ui::content_area(f.size()));
             f.render_widget(ratatui::widgets::Clear, dialog);
             self.draw_form(f, dialog, form);
         } else {
@@ -112,7 +112,7 @@ impl Panel {
         } else if !self.message.is_empty() {
             &self.message
         } else {
-            "F2 Actions  •  ? Help  •  Tab Sections  •  Enter Inspect  •  Esc Back"
+            "Select a record to inspect its evidence."
         };
         f.render_widget(
             Paragraph::new(status)
@@ -121,15 +121,13 @@ impl Panel {
                 .block(crate::ui::panel("Status & next action")),
             parts[3],
         );
-        self.menu.draw(f, &self.commands());
     }
     pub(crate) fn draw_overlay(&self, f: &mut Frame) {
         if let Some(form) = &self.form {
-            let dialog = crate::ui::centered_rect(90, 85, f.size());
+            let dialog = crate::ui::centered_rect(90, 85, crate::ui::content_area(f.size()));
             f.render_widget(ratatui::widgets::Clear, dialog);
             self.draw_form(f, dialog, form);
         }
-        self.menu.draw(f, &self.commands());
     }
     fn setup_text(&self) -> String {
         if self.view.as_ref().is_some_and(|v| v.sqlite) {

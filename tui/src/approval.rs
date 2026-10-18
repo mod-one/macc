@@ -127,6 +127,31 @@ impl Window {
     }
 
     /// True while the operator is typing, so the window must not be replaced.
+    pub(crate) fn command_bindings(&self) -> Vec<(&'static str, &'static str)> {
+        match self.mode {
+            Mode::Reading => vec![
+                ("a", "Approve…"),
+                ("r", "Reject…"),
+                ("c", "Request changes…"),
+                ("↑↓", "Scroll"),
+                ("PgUp/PgDn", "Scroll page"),
+                ("Tab", "Next approval"),
+                ("Esc", "Decide later"),
+            ],
+            Mode::Role { .. } => vec![
+                ("↑↓", "Select role"),
+                ("Enter", "Choose role"),
+                ("Esc", "Cancel decision"),
+            ],
+            Mode::Input { .. } => vec![
+                ("Enter", "Next field"),
+                ("Backspace", "Delete character"),
+                ("Esc", "Cancel decision"),
+            ],
+            Mode::Confirm(_) => vec![("Enter", "Submit decision"), ("Esc", "Cancel decision")],
+        }
+    }
+
     pub fn is_editing(&self) -> bool {
         !matches!(self.mode, Mode::Reading)
     }
@@ -438,7 +463,7 @@ impl Window {
     }
 
     pub fn draw(&self, frame: &mut Frame) {
-        let area = crate::ui::centered_rect(90, 90, frame.size());
+        let area = crate::ui::centered_rect(90, 90, crate::ui::content_area(frame.size()));
         frame.render_widget(Clear, area);
         let title = format!(
             " APPROVAL REQUIRED — {}{}{} ",

@@ -33,9 +33,6 @@ pub(crate) fn handle(state: &mut AppState, key: KeyCode) -> bool {
         state.toggle_help();
         return true;
     }
-    let Some(key) = state.sessions.command_key(key) else {
-        return true;
-    };
     if !state.sessions.input_active() && matches!(key, KeyCode::Char('O' | 'J')) {
         open(state, key == KeyCode::Char('O'));
         return true;
@@ -100,52 +97,4 @@ fn sync_saved(state: &mut AppState, config_path: &std::path::Path, key: KeyCode)
             }
         }
     }
-}
-pub(crate) fn help(state: &AppState) -> Vec<(String, String)> {
-    let mut rows = vec![
-        ("F2".into(), "Browse named actions with ↑↓ and Enter".into()),
-        ("Tab / Shift+Tab".into(), "Next / previous section".into()),
-        (
-            "1–7".into(),
-            "Open a numbered section (Sessions uses 1–2)".into(),
-        ),
-        (
-            "Enter".into(),
-            "Edit the selected setting or inspect evidence".into(),
-        ),
-        (
-            "← / →".into(),
-            "Switch O2 setting groups or trial fields".into(),
-        ),
-        ("PgUp / PgDn".into(), "Scroll the details pane".into()),
-        ("F4".into(), "Toggle complete raw evidence".into()),
-        (
-            "O / J".into(),
-            "Open O2 / Sessions, retaining drafts".into(),
-        ),
-        (
-            "Esc".into(),
-            "Back; unsaved drafts require save or discard".into(),
-        ),
-    ];
-    rows.extend(state.sessions.commands().into_iter().map(|c| {
-        let key = match c.key {
-            KeyCode::Char(k) => k.to_string(),
-            _ => c.shortcut.into(),
-        };
-        (
-            key,
-            format!(
-                "{} — {}{}",
-                c.label,
-                c.hint,
-                if c.enabled {
-                    ""
-                } else {
-                    " [currently unavailable]"
-                }
-            ),
-        )
-    }));
-    rows
 }

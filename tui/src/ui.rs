@@ -235,3 +235,11 @@ pub fn header_lines(ctx: &HeaderContext<'_>, t: &Theme) -> Vec<Line<'static>> {
 
     lines
 }
+
+/// Reserve the persistent command area beneath every page and modal.
+pub(crate) fn content_area(area: ratatui::layout::Rect) -> ratatui::layout::Rect {
+    ratatui::layout::Rect {
+        height: area.height.saturating_sub(4),
+        ..area
+    }
+}

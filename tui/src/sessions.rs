@@ -10,7 +10,6 @@ use std::path::Path;
 pub struct SessionsScreen {
     o2: crate::o2::Panel,
     tab: usize,
-    menu: crate::workspace_ui::ActionMenu,
     raw_details: bool,
     pub(crate) requested_sessions: bool,
     usage: crate::session_usage::UsagePanel,

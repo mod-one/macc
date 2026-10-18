@@ -2,15 +2,16 @@
 use super::*;
 use crate::workspace_ui::Command;
 impl Panel {
+    pub(crate) fn has_horizontal_controls(&self) -> bool {
+        matches!(self.tab, 4 | 6)
+    }
+
     pub fn view_is_missing(&self) -> bool {
         self.view.is_none()
     }
     pub fn dashboard(&mut self) {
         self.tab = 5;
         self.selected = 0;
-    }
-    pub fn close_picker(&mut self) {
-        self.menu.open = false;
     }
     pub fn input_active(&self) -> bool {
         self.form.is_some()
@@ -25,13 +26,6 @@ impl Panel {
             "Overview",
             "Policy trials",
         ][self.tab]
-    }
-    pub fn command_key(&mut self, key: KeyCode) -> Option<KeyCode> {
-        if self.form.is_some() {
-            return Some(key);
-        }
-        let commands = self.commands();
-        self.menu.resolve(key, &commands)
     }
     pub fn commands(&self) -> Vec<Command> {
         let ready = self.view.as_ref().is_some_and(|v| v.ready);

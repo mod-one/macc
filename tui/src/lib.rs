@@ -19,7 +19,13 @@ use ratatui::{
 use std::{collections::BTreeMap, io, time::Duration};
 
 pub mod approval;
+mod command_catalog;
+mod command_footer;
+mod command_palette;
+#[cfg(test)]
+mod command_tests;
 mod coordinator_poll;
+use command_palette::*;
 mod o2;
 pub mod ownership;
 pub mod prd_queue;
@@ -142,7 +148,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, state: &mut AppState) -> io::
                     if key.code == KeyCode::Char('p')
                         && key.modifiers.contains(KeyModifiers::CONTROL)
                     {
-                        handle_key(state, KeyCode::Char(':'));
+                        handle_key(state, KeyCode::F(2));
                     } else {
                         handle_key(state, key.code);
                     }
@@ -183,6 +189,31 @@ fn relative_time_label(timestamp: &str) -> String {
 }
 
 fn handle_key(state: &mut AppState, key: KeyCode) {
+    if state.command_palette_open {
+        handle_command_palette_key(state, key);
+        return;
+    }
+    if state.help_open {
+        match key {
+            KeyCode::F(1) | KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('q') => {
+                state.toggle_help()
+            }
+            KeyCode::Down => state.help_scroll = state.help_scroll.saturating_add(1),
+            KeyCode::Up => state.help_scroll = state.help_scroll.saturating_sub(1),
+            KeyCode::PageDown => state.help_scroll = state.help_scroll.saturating_add(8),
+            KeyCode::PageUp => state.help_scroll = state.help_scroll.saturating_sub(8),
+            _ => {}
+        }
+        return;
+    }
+    if key == KeyCode::F(1) {
+        state.toggle_help();
+        return;
+    }
+    if key == KeyCode::F(2) {
+        open_command_palette(state);
+        return;
+    }
     if state.coordinator_task_diff_popup.is_some() || state.coordinator_task_explain_popup.is_some()
     {
         match key {
@@ -253,40 +284,12 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
         }
         return;
     }
-    if state.command_palette_open {
-        handle_command_palette_key(state, key);
-        return;
-    }
-
-    if matches!(key, KeyCode::Char(':')) {
+    if key == KeyCode::Char(':')
+        && !command_catalog::input_active(state)
+        && !state.supervisor_commands_active()
+    {
         open_command_palette(state);
         return;
-    }
-
-    if state.help_open {
-        match key {
-            KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('q') => {
-                state.toggle_help();
-                return;
-            }
-            KeyCode::Down => {
-                state.help_scroll = state.help_scroll.saturating_add(1);
-                return;
-            }
-            KeyCode::Up => {
-                state.help_scroll = state.help_scroll.saturating_sub(1);
-                return;
-            }
-            KeyCode::PageDown => {
-                state.help_scroll = state.help_scroll.saturating_add(8);
-                return;
-            }
-            KeyCode::PageUp => {
-                state.help_scroll = state.help_scroll.saturating_sub(8);
-                return;
-            }
-            _ => return,
-        }
     }
 
     if state.search_editing {
@@ -306,11 +309,6 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
             .coordinator_ownership
             .pending_incoming_request
             .is_some();
-
-    if has_pending_takeover && matches!(key, KeyCode::Esc) {
-        state.dismiss_takeover_request_modal();
-        return;
-    }
 
     if current_screen == Screen::ToolSettings && state.is_tool_field_editing() {
         match key {
@@ -530,6 +528,16 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
         return;
     }
 
+    if has_pending_takeover {
+        match key {
+            KeyCode::Char('a') => state.ownership_respond_takeover(true),
+            KeyCode::Char('r') => state.ownership_respond_takeover(false),
+            KeyCode::Esc => state.dismiss_takeover_request_modal(),
+            _ => {}
+        }
+        return;
+    }
+
     if session_navigation::handle(state, key) {
         return;
     }
@@ -631,9 +639,7 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
             state.navigate_toggle();
         }
         KeyCode::Char('a') => {
-            if has_pending_takeover {
-                state.ownership_respond_takeover(true);
-            } else if current_screen == Screen::Skills {
+            if current_screen == Screen::Skills {
                 state.select_all_skills();
             } else if current_screen == Screen::Agents {
                 state.select_all_agents();
@@ -656,9 +662,7 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
             }
         }
         KeyCode::Char('r') => {
-            if has_pending_takeover {
-                state.ownership_respond_takeover(false);
-            } else if current_screen == Screen::Home {
+            if current_screen == Screen::Home {
                 // Home screen: 'r' starts the coordinator and navigates to Coordinator Live.
                 state.start_coordinator_command(CoordinatorCommand::Run);
                 state.push_screen(Screen::CoordinatorLive);
@@ -794,7 +798,23 @@ fn handle_key(state: &mut AppState, key: KeyCode) {
 
 fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
     if let Some(editor) = &state.prd_queue_editor {
-        editor.draw(f);
+        editor.draw_in(f, ui::content_area(f.size()));
+        if state.has_coordinator_pause_prompt() {
+            render_coordinator_pause_overlay(f, state);
+        }
+        if state.has_coordinator_finished_prompt() {
+            render_coordinator_finished_overlay(f, state);
+        }
+        if let Some(window) = &state.approval_window {
+            window.draw(f);
+        }
+        if state.command_palette_open {
+            render_command_palette_overlay(f, state);
+        }
+        if state.help_open {
+            render_help_overlay(f, state);
+        }
+        command_footer::draw(f, state);
         return;
     }
     let theme = theme();
@@ -805,7 +825,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
     let frame_width = f.size().width;
     let next_step_full = if matches!(current_screen, Screen::Sessions | Screen::O2) {
         format!(
-            "{}: F2 Actions | Tab sections | ? Help",
+            "Inspect {} and configure its settings.",
             state.sessions.section_name()
         )
     } else {
@@ -834,14 +854,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
         (phases, status) => status.or_else(|| phases.clone()),
     };
     let header_height = 5 + u16::from(trust_strip.is_some()) + u16::from(override_strip.is_some());
-    let footer_height = if matches!(
-        current_screen,
-        Screen::CoordinatorLive | Screen::Sessions | Screen::O2 | Screen::Home
-    ) {
-        4
-    } else {
-        3
-    };
+    let footer_height = 4;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -852,7 +865,6 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
         .split(f.size());
     let header_area = chunks[0];
     let body_area = chunks[1];
-    let footer_area = chunks[2];
 
     // Header
     let project_label = state
@@ -1538,7 +1550,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
                 .split(body_area);
 
-            let mut overview = String::from("WORKSPACES\n[O] O2 — Memory, context & intelligence\n[J] Sessions — Conversations & settings\n[:] Search all commands    [?] Help\n\n");
+            let mut overview = String::from("WORKSPACES\n[O] O2 — Memory, context & intelligence\n[J] Sessions — Conversations & settings\n[F2] Commands    [F1] Help\n\n");
             if !state.errors.is_empty() {
                 overview.push_str("Errors:\n");
                 for err in &state.errors {
@@ -2408,7 +2420,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                     } else {
                         logs_lines.push(Line::from("No coordinator run has been recorded yet."));
                         logs_lines.push(Line::from(
-                            "Next: prepare a PRD task, then press r to start the coordinator.",
+                            "Next: prepare a PRD task, then start the coordinator.",
                         ));
                     }
                 } else if let Some(ref t) = selected_task {
@@ -2501,7 +2513,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
 
             // Render popups if open
             if let Some(ref diff) = state.coordinator_task_diff_popup {
-                let area = ui::centered_rect(85, 85, f.size());
+                let area = ui::centered_rect(85, 85, ui::content_area(f.size()));
                 let diff_para = Paragraph::new(diff.as_str())
                     .block(panel("Task Diff (Press Esc/q to Close)"))
                     .wrap(Wrap { trim: false });
@@ -2509,7 +2521,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                 f.render_widget(diff_para, area);
             }
             if let Some(ref explain) = state.coordinator_task_explain_popup {
-                let area = ui::centered_rect(85, 85, f.size());
+                let area = ui::centered_rect(85, 85, ui::content_area(f.size()));
                 let explain_para = Paragraph::new(explain.as_str())
                     .block(panel("Task Explanation & Timeline (Press Esc/q to Close)"))
                     .wrap(Wrap { trim: false });
@@ -2741,27 +2753,6 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
         }
     }
 
-    // Footer
-    let mut footer_lines = vec![
-        Line::from(vec![
-            Span::styled("Path: ", Style::default().fg(theme.muted)),
-            Span::raw(ui::truncate_middle(
-                &state.display_breadcrumbs(),
-                footer_area.width.saturating_sub(8) as usize,
-            )),
-        ]),
-        footer_hints_line(state, &theme, footer_area.width.saturating_sub(9) as usize),
-    ];
-    if current_screen == Screen::CoordinatorLive {
-        footer_lines.push(danger_actions_line(
-            state,
-            &theme,
-            footer_area.width.saturating_sub(8) as usize,
-        ));
-    }
-    let footer = Paragraph::new(footer_lines).block(panel("Guide"));
-    f.render_widget(footer, footer_area);
-
     if state.has_coordinator_pause_prompt() {
         render_coordinator_pause_overlay(f, state);
     }
@@ -2774,7 +2765,7 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
         .as_ref()
     {
         if state.current_screen() == Screen::CoordinatorLive {
-            crate::ownership::render_takeover_modal(f, f.size(), req);
+            crate::ownership::render_takeover_modal(f, ui::content_area(f.size()), req);
         }
     }
     if state.current_screen() == Screen::CoordinatorLive {
@@ -2788,18 +2779,19 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
             render_coordinator_recover_dialog(f, state);
         }
     }
-    if state.command_palette_open {
-        render_command_palette_overlay(f, state);
-    }
     if matches!(state.current_screen(), Screen::Sessions | Screen::O2) {
         state.sessions.draw_overlay(f);
-    }
-    if state.help_open {
-        render_help_overlay(f, state);
     }
     if let Some(window) = &state.approval_window {
         window.draw(f);
     }
+    if state.command_palette_open {
+        render_command_palette_overlay(f, state);
+    }
+    if state.help_open {
+        render_help_overlay(f, state);
+    }
+    command_footer::draw(f, state);
 }
 
 fn kind_label(kind: PlannedOpKind) -> &'static str {
@@ -2809,145 +2801,6 @@ fn kind_label(kind: PlannedOpKind) -> &'static str {
         PlannedOpKind::Delete => "delete",
         PlannedOpKind::Mkdir => "mkdir",
         PlannedOpKind::Other => "other",
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CommandPaletteAction {
-    RunCoordinator,
-    Doctor,
-    OpenLogs,
-    OpenO2,
-    OpenSessions,
-    OpenSkills,
-    OpenMcp,
-    ApplyConfig,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct CommandPaletteItem {
-    title: &'static str,
-    hint: &'static str,
-    action: CommandPaletteAction,
-}
-
-fn command_palette_items() -> Vec<CommandPaletteItem> {
-    vec![
-        CommandPaletteItem {
-            title: "O2 — Memory & context",
-            hint:
-                "Configure shared memory, context, compaction, code intelligence and policy trials",
-            action: CommandPaletteAction::OpenO2,
-        },
-        CommandPaletteItem {
-            title: "Sessions — Conversations & settings",
-            hint: "Inspect session history, ownership, checkpoints, usage and storage migration",
-            action: CommandPaletteAction::OpenSessions,
-        },
-        CommandPaletteItem {
-            title: "Run coordinator",
-            hint: "Start a coordinator run and open live view",
-            action: CommandPaletteAction::RunCoordinator,
-        },
-        CommandPaletteItem {
-            title: "Doctor",
-            hint: "Check setup and readiness",
-            action: CommandPaletteAction::Doctor,
-        },
-        CommandPaletteItem {
-            title: "Open logs",
-            hint: "Inspect MACC and coordinator logs",
-            action: CommandPaletteAction::OpenLogs,
-        },
-        CommandPaletteItem {
-            title: "Open skills",
-            hint: "Enable, disable, or inspect skills",
-            action: CommandPaletteAction::OpenSkills,
-        },
-        CommandPaletteItem {
-            title: "Open MCP",
-            hint: "Configure MCP server selections",
-            action: CommandPaletteAction::OpenMcp,
-        },
-        CommandPaletteItem {
-            title: "Apply config",
-            hint: "Preview consent and write managed config",
-            action: CommandPaletteAction::ApplyConfig,
-        },
-    ]
-}
-
-fn filtered_command_palette_items(query: &str) -> Vec<CommandPaletteItem> {
-    let query = query.trim().to_ascii_lowercase();
-    command_palette_items()
-        .into_iter()
-        .filter(|item| {
-            query.is_empty()
-                || item.title.to_ascii_lowercase().contains(&query)
-                || item.hint.to_ascii_lowercase().contains(&query)
-        })
-        .collect()
-}
-
-fn open_command_palette(state: &mut AppState) {
-    state.command_palette_open = true;
-    state.command_palette_query.clear();
-    state.command_palette_selection = 0;
-}
-
-fn close_command_palette(state: &mut AppState) {
-    state.command_palette_open = false;
-    state.command_palette_query.clear();
-    state.command_palette_selection = 0;
-}
-
-fn handle_command_palette_key(state: &mut AppState, key: KeyCode) {
-    match key {
-        KeyCode::Esc => close_command_palette(state),
-        KeyCode::Backspace => {
-            state.command_palette_query.pop();
-            state.command_palette_selection = 0;
-        }
-        KeyCode::Up => {
-            state.command_palette_selection = state.command_palette_selection.saturating_sub(1);
-        }
-        KeyCode::Down => {
-            let max = filtered_command_palette_items(&state.command_palette_query)
-                .len()
-                .saturating_sub(1);
-            state.command_palette_selection = (state.command_palette_selection + 1).min(max);
-        }
-        KeyCode::Enter => {
-            let items = filtered_command_palette_items(&state.command_palette_query);
-            if let Some(item) = items.get(state.command_palette_selection).copied() {
-                close_command_palette(state);
-                execute_command_palette_action(state, item.action);
-            }
-        }
-        KeyCode::Char(c) => {
-            state.command_palette_query.push(c);
-            state.command_palette_selection = 0;
-        }
-        _ => {}
-    }
-}
-
-fn execute_command_palette_action(state: &mut AppState, action: CommandPaletteAction) {
-    match action {
-        CommandPaletteAction::RunCoordinator => {
-            state.start_coordinator_command(CoordinatorCommand::Run);
-            state.push_screen(Screen::CoordinatorLive);
-        }
-        CommandPaletteAction::Doctor => {
-            state.goto_screen(Screen::Home);
-            state.run_home_doctor_check();
-        }
-        CommandPaletteAction::OpenO2 => session_navigation::open(state, true),
-        CommandPaletteAction::OpenSessions => session_navigation::open(state, false),
-        CommandPaletteAction::OpenLogs => state.push_screen(Screen::Logs),
-        CommandPaletteAction::OpenSkills => state.push_screen(Screen::Skills),
-        CommandPaletteAction::OpenMcp => state.push_screen(Screen::Mcp),
-        CommandPaletteAction::ApplyConfig => state.open_apply_screen(),
     }
 }
 
@@ -3105,8 +2958,23 @@ fn next_step_text(state: &AppState, max_chars: usize) -> String {
 
     let ladder = state.engine.readiness_ladder(paths);
     let text = next_step_text_for_ladder(&ladder, state.is_coordinator_running());
-
-    ui::truncate_middle(text, max_chars)
+    let text = if state.current_screen() == Screen::CoordinatorLive {
+        text.replace(
+            "Press r to start coordinator.",
+            "Open Commands to start the coordinator.",
+        )
+        .replace(
+            "Press a to apply configuration.",
+            "Preview and apply configuration.",
+        )
+        .replace(
+            "Press v to watch live tasks.",
+            "Live task status appears below.",
+        )
+    } else {
+        text.to_string()
+    };
+    ui::truncate_middle(&text, max_chars)
 }
 
 fn next_step_text_for_ladder(
@@ -3268,8 +3136,7 @@ fn coordinator_live_empty_lines(
         return vec![
             Line::from("No tasks available"),
             Line::from("Reason: no PRD/task registry entries are ready"),
-            Line::from("Next: create/promote a PRD task, then press r to run"),
-            Line::from("Useful: d Doctor | h Home | p Preview"),
+            Line::from("Next: create/promote a PRD task, then start the coordinator."),
         ];
     }
 
@@ -3284,7 +3151,6 @@ fn coordinator_live_empty_lines(
         return vec![
             Line::from("No live task is currently active."),
             Line::from("Next: start or resume the coordinator to dispatch ready work."),
-            Line::from("Shortcut: [r] run/requeue, [u] resume, [c] reconcile."),
         ];
     }
 
@@ -3526,7 +3392,7 @@ fn render_watch_screen(f: &mut Frame, state: &AppState, area: Rect) {
             .join("\n");
         let log_para = wrapped_paragraph(
             if log_text.is_empty() {
-                "No log tail — 'f' to follow coordinator logs"
+                "No log tail is available."
             } else {
                 &log_text
             },
@@ -3550,109 +3416,44 @@ fn render_watch_screen(f: &mut Frame, state: &AppState, area: Rect) {
     } else {
         String::new()
     };
-    let strip_text = format!(
-        "{}{} | ↑↓ workers | r refresh | '?' help | q quit",
-        title, throttled_label
-    );
+    let strip_text = format!("{}{}", title, throttled_label);
     let strip =
         Paragraph::new(strip_text).block(Block::default().title("Status").borders(Borders::ALL));
     f.render_widget(strip, vertical[2]);
 }
 
 fn render_help_overlay(f: &mut Frame, state: &AppState) {
-    let area = ui::centered_rect(85, 85, f.size());
+    let area = ui::centered_rect(85, 85, ui::content_area(f.size()));
     f.render_widget(Clear, area); // Clear the background
 
     let current_screen = state.current_screen();
-    let help_items: Vec<(String, String)> =
-        if matches!(current_screen, Screen::Sessions | Screen::O2) {
-            session_navigation::help(state)
-        } else {
-            current_screen
-                .help_keybindings()
-                .into_iter()
-                .map(|(a, b)| (a.into(), b.into()))
-                .collect()
-        };
+    let help_items = command_catalog::active(state).into_iter().map(|c| {
+        (
+            c.shortcut,
+            format!(
+                "{}{}",
+                c.label,
+                if c.enabled { "" } else { " [unavailable]" }
+            ),
+        )
+    });
 
     let mut text = format!("Help: {}\n\n", current_screen.title());
     for (key, desc) in help_items {
-        text.push_str(&format!("{:<15} : {}\n", key, desc));
+        text.push_str(&format!("[{}] {}\n", key, desc));
     }
 
     let help_para = Paragraph::new(text)
         .scroll((state.help_scroll, 0))
         .block(
             Block::default()
-                .title("Help — ↑↓ / PgUp/PgDn scroll; ? / Esc close")
+                .title("Help — current page / window")
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Cyan)),
         )
         .wrap(Wrap { trim: true });
 
     f.render_widget(help_para, area);
-}
-
-fn render_command_palette_overlay(f: &mut Frame, state: &AppState) {
-    let area = ui::centered_rect(64, 42, f.size());
-    f.render_widget(Clear, area);
-    let theme = theme();
-    let items = filtered_command_palette_items(&state.command_palette_query);
-
-    let mut lines = Vec::new();
-    let query = if state.command_palette_query.is_empty() {
-        "<type to search>".to_string()
-    } else {
-        state.command_palette_query.clone()
-    };
-    lines.push(Line::from(vec![
-        Span::styled("Search: ", Style::default().fg(theme.muted)),
-        Span::styled(query, Style::default().fg(theme.accent)),
-    ]));
-    lines.push(Line::from(""));
-
-    if items.is_empty() {
-        lines.push(Line::from("No matching command."));
-    } else {
-        for (idx, item) in items.iter().take(8).enumerate() {
-            let selected = idx == state.command_palette_selection.min(items.len() - 1);
-            let style = if selected {
-                Style::default()
-                    .fg(theme.accent)
-                    .bg(theme.highlight_bg)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            let prefix = if selected { "› " } else { "  " };
-            lines.push(Line::from(vec![
-                Span::styled(prefix, style),
-                Span::styled(item.title, style),
-                Span::styled(" — ", Style::default().fg(theme.muted)),
-                Span::styled(item.hint, Style::default().fg(theme.muted)),
-            ]));
-        }
-    }
-
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled("Enter", Style::default().fg(theme.accent)),
-        Span::raw(" run  "),
-        Span::styled("↑↓", Style::default().fg(theme.accent)),
-        Span::raw(" move  "),
-        Span::styled("Esc", Style::default().fg(theme.accent)),
-        Span::raw(" close"),
-    ]));
-
-    let para = Paragraph::new(lines)
-        .block(
-            Block::default()
-                .title("Command Palette")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.accent)),
-        )
-        .wrap(Wrap { trim: true });
-    f.render_widget(para, area);
 }
 
 fn render_coordinator_ownership_banner(f: &mut Frame, area: Rect, state: &AppState) {
@@ -3684,197 +3485,6 @@ fn render_coordinator_ownership_banner(f: &mut Frame, area: Rect, state: &AppSta
             has_pending_request,
         },
     );
-}
-
-fn footer_hints_line(state: &AppState, theme: &ui::Theme, max_chars: usize) -> Line<'static> {
-    if matches!(state.current_screen(), Screen::Sessions | Screen::O2) {
-        let bindings = if state.sessions.input_active() {
-            vec![
-                ("Enter", "Next / finish field", false),
-                ("F1", "Help", false),
-                ("Esc", "Cancel input", false),
-            ]
-        } else {
-            vec![
-                ("F2", "Actions", false),
-                ("Tab", "Sections", false),
-                ("Enter", "Edit / inspect", false),
-                ("Esc", "Back", false),
-            ]
-        };
-        return action_bar_line(bindings, theme, max_chars);
-    }
-    if state.current_screen() != Screen::CoordinatorLive {
-        let bindings = screen_action_bindings(state.current_screen())
-            .into_iter()
-            .map(|(key, desc)| (key, desc, false))
-            .collect();
-        return action_bar_line(bindings, theme, max_chars);
-    }
-
-    let is_viewer = !state.coordinator_ownership.is_owner;
-    let has_pending = state
-        .coordinator_ownership
-        .pending_incoming_request
-        .is_some();
-    let bindings = vec![
-        ("r", "Run Full Cycle", is_viewer),
-        ("y", "Sync Registry", is_viewer),
-        ("c", "Reconcile", is_viewer),
-        ("u", "Resume Paused Run", is_viewer),
-        ("v", "Recover Options", is_viewer),
-        ("l", "Refresh Live Status", false),
-        ("T", "Request Takeover", !is_viewer),
-        ("a/r", "Accept / Reject", !has_pending),
-    ];
-
-    action_bar_line(bindings, theme, max_chars)
-}
-
-fn danger_actions_line(state: &AppState, theme: &ui::Theme, max_chars: usize) -> Line<'static> {
-    let task_label = state
-        .selected_live_task()
-        .map(|task| format!("s Stop selected task ({})", task.task_id))
-        .unwrap_or_else(|| "s Stop selected task (none selected)".to_string());
-    let text = ui::truncate_middle(
-        &format!("Danger: k Stop coordinator | {}", task_label),
-        max_chars,
-    );
-    Line::from(vec![Span::styled(
-        text,
-        Style::default().fg(theme.bad).add_modifier(Modifier::BOLD),
-    )])
-}
-
-fn screen_action_bindings(screen: Screen) -> Vec<(&'static str, &'static str)> {
-    match screen {
-        Screen::Home => vec![
-            ("r", "Start coordinator"),
-            ("O", "O2 workspace"),
-            ("J", "Sessions"),
-            ("d", "Doctor"),
-            ("p", "Preview"),
-        ],
-        Screen::Tools => vec![
-            ("↑↓", "Move"),
-            ("Space", "Toggle"),
-            ("Enter", "Configure"),
-            ("i", "Install"),
-            ("d", "Refresh"),
-            ("f", "Context"),
-        ],
-        Screen::Automation | Screen::Settings => vec![
-            ("Tab/1-7", "Tabs"),
-            ("↑↓", "Move"),
-            ("Space/Enter", "Edit"),
-            ("s", "Save"),
-        ],
-        Screen::ToolSettings => vec![
-            ("↑↓", "Move"),
-            ("Space/Enter", "Edit"),
-            ("Esc", "Cancel edit"),
-            ("s", "Save"),
-        ],
-        Screen::Skills => vec![
-            ("↑↓", "Move"),
-            ("Space/Enter", "Toggle"),
-            ("a", "All"),
-            ("n", "None"),
-            ("/", "Search"),
-        ],
-        Screen::Mcp => vec![
-            ("↑↓", "Move"),
-            ("Space/Enter", "Toggle"),
-            ("a", "All"),
-            ("n", "None"),
-            ("/", "Search"),
-        ],
-        Screen::Agents => vec![
-            ("↑↓", "Move"),
-            ("Space/Enter", "Toggle"),
-            ("a", "All"),
-            ("n", "None"),
-            ("/", "Search"),
-        ],
-        Screen::Logs => vec![
-            ("↑↓", "Files"),
-            ("PgUp/PgDn", "Scroll"),
-            ("r", "Refresh"),
-            ("/", "Search"),
-        ],
-        Screen::Preview => vec![
-            ("↑↓", "Ops"),
-            ("PgUp/PgDn", "Diff"),
-            ("r", "Refresh"),
-            ("x", "Apply"),
-        ],
-        Screen::Apply => vec![
-            ("YES", "Consent"),
-            ("Enter", "Apply"),
-            ("Backspace", "Delete"),
-            ("Esc", "Back"),
-        ],
-        Screen::Watch => vec![
-            ("↑↓", "Workers"),
-            ("f", "Logs"),
-            ("e/w/a", "Filter"),
-            ("r/l", "Refresh"),
-        ],
-        Screen::Sessions | Screen::O2 => vec![
-            ("F2", "Actions"),
-            ("Tab", "Sections"),
-            ("↑↓", "Select"),
-            ("Enter", "Edit / events"),
-            ("p/s", "Preview / apply policy"),
-            ("O/J", "O2 / Sessions"),
-        ],
-        Screen::About => vec![("Esc/q", "Back")],
-        Screen::CoordinatorLive => Vec::new(),
-    }
-}
-
-fn action_bar_line(
-    bindings: Vec<(&'static str, &'static str, bool)>,
-    theme: &ui::Theme,
-    max_chars: usize,
-) -> Line<'static> {
-    let mut spans = Vec::new();
-    let mut used = 0usize;
-    for (idx, (key, desc, disabled)) in bindings.into_iter().enumerate() {
-        let chunk = if idx == 0 {
-            format!("{key} {desc}")
-        } else {
-            format!(" | {key} {desc}")
-        };
-        let chunk_len = chunk.chars().count();
-        if used + chunk_len + 9 > max_chars {
-            break;
-        }
-        if idx > 0 {
-            spans.push(Span::raw(" | "));
-        }
-        let style = if disabled {
-            Style::default().fg(theme.muted)
-        } else {
-            Style::default()
-        };
-        spans.push(Span::styled(key.to_string(), style));
-        spans.push(Span::styled(" ", style));
-        spans.push(Span::styled(desc.to_string(), style));
-        used += chunk_len;
-    }
-
-    if !spans.is_empty() {
-        spans.push(Span::raw(" | "));
-    }
-    spans.push(Span::styled("?", Style::default().fg(theme.accent)));
-    spans.push(Span::raw(" Help | "));
-    spans.push(Span::styled(":", Style::default().fg(theme.accent)));
-    spans.push(Span::raw(" Commands"));
-
-    let mut with_label = vec![Span::styled("Actions: ", Style::default().fg(theme.muted))];
-    with_label.extend(spans);
-    Line::from(with_label)
 }
 
 #[cfg(test)]
@@ -3965,8 +3575,8 @@ mod tests {
 
         assert!(text.contains("No tasks available"));
         assert!(text.contains("Reason: no PRD/task registry entries are ready"));
-        assert!(text.contains("Next: create/promote a PRD task, then press r to run"));
-        assert!(text.contains("Useful: d Doctor | h Home | p Preview"));
+        assert!(text.contains("Next: create/promote a PRD task, then start the coordinator."));
+        assert!(!text.contains("Useful:"));
     }
 
     #[test]
@@ -4075,41 +3685,11 @@ mod tests {
     }
 
     #[test]
-    fn home_footer_actions_are_user_facing() {
-        let theme = theme();
-        let line = action_bar_line(
-            screen_action_bindings(Screen::Home)
-                .into_iter()
-                .map(|(key, desc)| (key, desc, false))
-                .collect(),
-            &theme,
-            120,
-        );
-        let text = line.to_string();
-
-        assert!(text
-            .contains("Actions: r Start coordinator | O O2 workspace | J Sessions | d Doctor | p Preview | ? Help"));
-        assert!(!text.contains("cache:missing"));
-    }
-
-    #[test]
-    fn coordinator_live_danger_actions_are_separated() {
-        let theme = theme();
+    fn command_palette_filters_available_commands() {
         let engine = Arc::new(MaccEngine::new(ToolRegistry::new()));
         let mut state = AppState::with_engine(engine);
-        state.goto_screen(Screen::CoordinatorLive);
-
-        let normal = footer_hints_line(&state, &theme, 120).to_string();
-        let danger = danger_actions_line(&state, &theme, 120).to_string();
-
-        assert!(!normal.contains("Stop coordinator"));
-        assert!(danger.contains("Danger: k Stop coordinator"));
-        assert!(danger.contains("s Stop selected task"));
-    }
-
-    #[test]
-    fn command_palette_filters_available_commands() {
-        let items = filtered_command_palette_items("skill");
+        state.command_palette_query = "skill".into();
+        let items = contextual_items(&state);
 
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].action, CommandPaletteAction::OpenSkills);
@@ -4222,7 +3802,7 @@ fn approval_request_lines(
 }
 
 fn render_coordinator_pause_overlay(f: &mut Frame, state: &AppState) {
-    let area = ui::centered_rect(75, 45, f.size());
+    let area = ui::centered_rect(75, 45, ui::content_area(f.size()));
     f.render_widget(Clear, area);
     let message = state
         .coordinator_pause_error
@@ -4340,7 +3920,7 @@ fn pause_overlay_content(
 }
 
 fn render_coordinator_finished_overlay(f: &mut Frame, state: &AppState) {
-    let area = ui::centered_rect(70, 35, f.size());
+    let area = ui::centered_rect(70, 35, ui::content_area(f.size()));
     f.render_widget(Clear, area);
     let theme = ui::theme();
     let message = state
@@ -4363,7 +3943,7 @@ fn render_coordinator_finished_overlay(f: &mut Frame, state: &AppState) {
 }
 
 fn render_coordinator_stop_dialog(f: &mut Frame, state: &AppState) {
-    let area = ui::centered_rect(65, 40, f.size());
+    let area = ui::centered_rect(65, 40, ui::content_area(f.size()));
     f.render_widget(Clear, area);
     let theme = ui::theme();
 
@@ -4422,7 +4002,7 @@ fn render_coordinator_stop_dialog(f: &mut Frame, state: &AppState) {
 }
 
 fn render_stop_task_confirm_dialog(f: &mut Frame, state: &AppState) {
-    let area = ui::centered_rect(65, 32, f.size());
+    let area = ui::centered_rect(65, 32, ui::content_area(f.size()));
     f.render_widget(Clear, area);
     let theme = ui::theme();
     let task_id = state
@@ -4445,7 +4025,7 @@ fn render_stop_task_confirm_dialog(f: &mut Frame, state: &AppState) {
 }
 
 fn render_coordinator_recover_dialog(f: &mut Frame, state: &AppState) {
-    let area = ui::centered_rect(65, 30, f.size());
+    let area = ui::centered_rect(65, 30, ui::content_area(f.size()));
     f.render_widget(Clear, area);
     let theme = ui::theme();
 

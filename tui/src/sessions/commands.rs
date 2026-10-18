@@ -8,22 +8,17 @@ impl SessionsScreen {
         self.message.clear();
         self.o2.refresh(root)?;
         self.o2.open = true;
-        self.menu.open = false;
         Ok(())
     }
     pub fn draw_overlay(&self, f: &mut Frame) {
         if self.o2.open {
             self.o2.draw_overlay(f);
-        } else {
-            self.menu.draw(f, &self.commands());
         }
     }
     pub fn show_sessions(&mut self) {
         self.o2.open = false;
-        self.o2.close_picker();
         self.usage.open = false;
         self.checkpoints.open = false;
-        self.menu.open = false;
     }
     pub fn o2_open(&self) -> bool {
         self.o2.open
@@ -35,12 +30,86 @@ impl SessionsScreen {
             self.editing.is_some()
         }
     }
+    pub(crate) fn navigation_bindings(&self) -> Vec<(&'static str, &'static str)> {
+        if self.usage.open || self.checkpoints.open {
+            return vec![
+                ("↑↓", "Select record"),
+                ("Enter", "Inspect evidence"),
+                ("PgUp/PgDn", "Scroll details"),
+                ("Esc", "Back"),
+            ];
+        }
+        let mut bindings = vec![
+            ("Tab", "Next section"),
+            ("Shift+Tab", "Previous section"),
+            ("↑↓", "Select"),
+            ("Enter", "Edit / inspect"),
+            ("PgUp/PgDn", "Scroll details"),
+            ("F4", "Raw evidence"),
+            ("O", "O2 workspace"),
+            ("J", "Sessions"),
+            ("Esc", "Back"),
+        ];
+        if self.o2.open && self.o2.has_horizontal_controls() {
+            bindings.push(("←→", "Setting group / trial field"));
+        }
+        bindings.extend(if self.o2.open {
+            vec![
+                ("1", "Memory"),
+                ("2", "Context"),
+                ("3", "Compaction"),
+                ("4", "Code"),
+                ("5", "Settings"),
+                ("6", "Overview"),
+                ("7", "Trials"),
+            ]
+        } else {
+            vec![("1", "Settings"), ("2", "Conversations")]
+        });
+        bindings
+    }
     pub(crate) fn commands(&self) -> Vec<Command> {
         if self.o2.open {
             return self.o2.commands();
         }
-        if self.usage.open || self.checkpoints.open {
-            return vec![];
+        if self.usage.open {
+            return vec![
+                Command::new('r', "Refresh usage", "Reload invocation receipts."),
+                Command::new(
+                    'u',
+                    "Preview usage upgrade",
+                    "Prepare a storage upgrade plan.",
+                ),
+                Command::new(
+                    'a',
+                    "Apply reviewed usage upgrade",
+                    "Requires a preview; retains backup.",
+                )
+                .when(self.usage.has_reviewed_plan()),
+                Command::new('x', "Discard upgrade", "Clear the pending upgrade plan."),
+            ];
+        }
+        if self.checkpoints.open {
+            return vec![
+                Command::new('*', "Toggle all tasks", "Switch checkpoint scope."),
+                Command::new(
+                    'u',
+                    "Preview checkpoint upgrade",
+                    "Prepare a storage upgrade plan.",
+                ),
+                Command::new(
+                    'p',
+                    "Preview reconciliation",
+                    "Inspect the selected checkpoint reconciliation.",
+                ),
+                Command::new(
+                    'a',
+                    "Apply reviewed operation",
+                    "Apply the pending plan with its evidence.",
+                )
+                .when(self.checkpoints.has_reviewed_plan()),
+                Command::new('x', "Discard operation", "Clear the pending plan."),
+            ];
         }
         let sqlite = self.view.as_ref().is_some_and(|v| v.backend == "sqlite");
         let selected = self.selected_id().is_some();
@@ -60,16 +129,6 @@ impl SessionsScreen {
             Command::new('x',"Discard settings draft","Reload saved settings and clear pending storage/session confirmations."),
             Command::new('r',"Refresh recorded sessions","Refresh evidence while preserving unsaved settings."),
         ]
-    }
-    pub fn command_key(&mut self, key: KeyCode) -> Option<KeyCode> {
-        if self.input_active() {
-            return Some(key);
-        }
-        if self.o2.open {
-            return self.o2.command_key(key);
-        }
-        let commands = self.commands();
-        self.menu.resolve(key, &commands)
     }
     pub fn section_name(&self) -> &str {
         if self.o2.open {

@@ -46,6 +46,28 @@ impl Editor {
         }
     }
 
+    pub(crate) fn command_bindings(&self) -> Vec<(&'static str, &'static str)> {
+        if self.confirm_reset {
+            return vec![("y", "Confirm reset"), ("Esc", "Cancel reset")];
+        }
+        if self.input.is_some() {
+            return vec![
+                ("Enter", "Import"),
+                ("Backspace", "Delete character"),
+                ("Esc", "Cancel input"),
+            ];
+        }
+        vec![
+            ("↑↓", "Select / move PRD"),
+            ("Space", "Grab / release"),
+            ("a", "Import PRD…"),
+            ("Delete", "Remove PRD"),
+            ("R", "Reset progress…"),
+            ("Enter", "Save queue"),
+            ("Esc", "Cancel"),
+        ]
+    }
+
     pub fn key(&mut self, key: KeyCode) -> Outcome {
         if self.confirm_reset {
             match key {
@@ -125,6 +147,9 @@ impl Editor {
     }
 
     pub fn draw(&self, frame: &mut Frame) {
+        self.draw_in(frame, frame.size());
+    }
+    pub(crate) fn draw_in(&self, frame: &mut Frame, area: ratatui::layout::Rect) {
         let mut lines = vec![
             Line::from("PRDs run in this order. A blocked/incomplete PRD stops the queue."),
             Line::from("a Add file/directory | Space Grab/release | Up/Down Move | d Remove | Enter Accept | Esc Cancel"),
@@ -132,7 +157,7 @@ impl Editor {
             Line::from("R Reset saved progress (confirmation required; does not undo delivered tasks)"),
             Line::from(""),
         ];
-        let visible = frame.size().height.saturating_sub(10).max(1) as usize;
+        let visible = area.height.saturating_sub(10).max(1) as usize;
         let start = self.selected.saturating_sub(visible - 1);
         for (index, file) in self.files.iter().enumerate().skip(start).take(visible) {
             let line = Line::from(format!(
@@ -185,7 +210,7 @@ impl Editor {
                     .borders(Borders::ALL)
                     .title("Coordinator PRD queue"),
             ),
-            frame.size(),
+            area,
         );
     }
 }

@@ -3,7 +3,7 @@ use super::*;
 use macc_core::{tool::ToolRegistry, MaccEngine, ProjectPaths};
 use ratatui::{backend::TestBackend, buffer::Buffer};
 use std::sync::Arc;
-fn fixture() -> (tempfile::TempDir, AppState) {
+pub(super) fn fixture() -> (tempfile::TempDir, AppState) {
     let t = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(t.path().join(".macc")).unwrap();
     std::fs::write(t.path().join(".macc/macc.yaml"), "tools:\n  enabled: []\n").unwrap();
@@ -13,12 +13,12 @@ fn fixture() -> (tempfile::TempDir, AppState) {
     state.working_copy = Some(Default::default());
     (t, state)
 }
-fn render(state: &AppState, width: u16, height: u16) -> Buffer {
+pub(super) fn render(state: &AppState, width: u16, height: u16) -> Buffer {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     terminal.draw(|f| ui(f, state, true)).unwrap();
     terminal.backend().buffer().clone()
 }
-fn text(b: &Buffer) -> String {
+pub(super) fn text(b: &Buffer) -> String {
     (0..b.area.height)
         .map(|y| {
             (0..b.area.width)
@@ -34,9 +34,11 @@ fn o2_is_a_direct_destination_in_home_palette_help_and_breadcrumbs() {
     let home = text(&render(&state, 120, 32));
     assert!(home.contains("[O] O2"));
     assert!(home.contains("[J] Sessions"));
-    assert!(filtered_command_palette_items("memory")
+    state.command_palette_query = "memory".into();
+    assert!(contextual_items(&state)
         .iter()
         .any(|v| v.action == CommandPaletteAction::OpenO2));
+    state.command_palette_query.clear();
     assert!(Screen::Home
         .help_keybindings()
         .iter()
@@ -51,7 +53,7 @@ fn o2_is_a_direct_destination_in_home_palette_help_and_breadcrumbs() {
     handle_key(&mut state, KeyCode::Char('?'));
     assert!(state.help_open);
     let help = text(&render(&state, 120, 32));
-    assert!(help.contains("Browse named actions"));
+    assert!(help.contains("Help for the current page or window"));
     handle_key(&mut state, KeyCode::PageDown);
     assert!(state.help_scroll > 0);
     handle_key(&mut state, KeyCode::Esc);
@@ -63,7 +65,7 @@ fn standard_terminal_shows_selected_setting_actions_and_empty_conversations() {
     let (_t, mut state) = fixture();
     handle_key(&mut state, KeyCode::Char('J'));
     let small = text(&render(&state, 80, 24));
-    assert!(small.contains("Actions: F2 Actions"));
+    assert!(small.contains("[F2] Commands"));
     assert!(small.contains("Lease TTL"));
     assert!(small.contains("Details"));
     assert!(small.contains("Settings"));
@@ -106,9 +108,9 @@ fn selected_menu_mutations_use_the_same_project_owner_gate_as_shortcuts() {
     handle_key(&mut state, KeyCode::F(2));
     let menu = text(&render(&state, 120, 32));
     assert!(menu.contains("Save session settings"));
-    // Enter selects Save; the translated mutation must pass the existing owner gate.
-    for _ in 0..4 {
-        handle_key(&mut state, KeyCode::Down);
+    // A searched action uses the same project owner gate as its shortcut.
+    for c in "Save session settings".chars() {
+        handle_key(&mut state, KeyCode::Char(c));
     }
     handle_key(&mut state, KeyCode::Enter);
     assert!(state.sessions.message.contains("not the owner"));
@@ -120,7 +122,12 @@ fn selected_menu_mutations_use_the_same_project_owner_gate_as_shortcuts() {
     );
     // Disabled confirmation does not execute or consume any plan.
     handle_key(&mut state, KeyCode::F(2));
-    handle_key(&mut state, KeyCode::Char('a'));
+    for c in "Confirm reviewed operation".chars() {
+        handle_key(&mut state, KeyCode::Char(c));
+    }
+    handle_key(&mut state, KeyCode::Enter);
+    assert!(state.command_palette_open);
+    handle_key(&mut state, KeyCode::Esc);
     assert_eq!(
         macc_core::session_store::inspect(t.path()).unwrap().backend,
         "json"
@@ -163,8 +170,13 @@ fn export_terminal_evidence_when_requested() {
         ("sessions", 'J'),
         ("o2-overview", 'O'),
         ("o2-settings", '5'),
+        ("coordinator-live", 'v'),
     ] {
-        handle_key(&mut state, KeyCode::Char(key));
+        if key == 'v' {
+            state.goto_screen(Screen::CoordinatorLive);
+        } else {
+            handle_key(&mut state, KeyCode::Char(key));
+        }
         for (width, height) in [(120, 36), (80, 24)] {
             let b = render(&state, width, height);
             std::fs::write(directory.join(format!("{name}-{width}.txt")), text(&b)).unwrap();
@@ -245,21 +257,22 @@ fn conversation_table_uses_the_session_inventory_and_inspects_the_selected_ident
 }
 
 #[test]
-fn command_palette_switch_keeps_a_session_edit_without_hijacking_the_o2_workspace() {
+fn literal_colon_stays_in_session_input_and_palette_preserves_the_draft() {
     let (_t, mut state) = fixture();
     handle_key(&mut state, KeyCode::Char('J'));
     handle_key(&mut state, KeyCode::Enter);
     assert!(state.sessions.input_active());
-    handle_key(&mut state, KeyCode::Backspace);
     handle_key(&mut state, KeyCode::Char(':'));
-    for c in "O2".chars() {
-        handle_key(&mut state, KeyCode::Char(c));
-    }
-    handle_key(&mut state, KeyCode::Enter);
-    assert_eq!(state.current_screen(), Screen::O2);
-    assert!(!state.sessions.input_active());
-    handle_key(&mut state, KeyCode::Char('J'));
-    assert_eq!(state.current_screen(), Screen::Sessions);
+    assert!(!state.command_palette_open);
     assert!(state.sessions.input_active());
-    assert!(text(&render(&state, 120, 36)).contains("180 seconds"));
+    handle_key(&mut state, KeyCode::F(2));
+    assert!(state.command_palette_open);
+    assert!(contextual_items(&state)
+        .iter()
+        .all(|c| matches!(c.action, CommandPaletteAction::Key(_))));
+    handle_key(&mut state, KeyCode::Esc);
+    assert!(state.sessions.input_active());
+    handle_key(&mut state, KeyCode::Esc);
+    assert!(!state.sessions.input_active());
+    assert!(text(&render(&state, 120, 36)).contains("1800 seconds"));
 }
