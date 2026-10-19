@@ -40,3 +40,17 @@ apply_usage_args argv
 apply_usage_args argv
 [[ "${argv[*]}" == '--output-format stream-json --model future-model --effort high --resume native-456' ]]
 echo 'PASS: usage projection preserves completion text, raw evidence, session metadata and execution arguments'
+# Multiple assistant blocks preserve the initial ACK even when the terminal
+# result contains only final-turn text. Tool/thinking blocks are not protocol.
+usage_plan='{"profile":{"append_args":["--verbose"],"replace_values":{"--output-format":"stream-json"},"text_match":{"/type":"result"},"text":["/result"],"text_arrays":[{"event_match":{"/type":"assistant"},"path":"/message/content","item_match":{"/type":"text"},"text":["/text"]}],"session_id":"/session_id"}}'
+cat > "$output_capture" <<'JSON'
+{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"private-reasoning"},{"type":"text","text":"MACC_CHECKPOINT_ACK: current task=A phase=dev"},{"type":"text","text":"verified step"}]}}
+{"type":"user","message":{"content":[{"type":"text","text":"exclude-user-text"}]}}
+{"type":"result","session_id":"native-789","result":"MACC_TASK_RESULT: success_with_changes","modelUsage":{"future-model":{"inputTokens":17}}}
+JSON
+project_usage_output > "$fixture_dir/projected"
+grep -Fxq 'MACC_CHECKPOINT_ACK: current task=A phase=dev' "$fixture_dir/projected"
+grep -Fxq 'verified step' "$fixture_dir/projected"
+grep -Fxq 'MACC_TASK_RESULT: success_with_changes' "$fixture_dir/projected"
+! grep -Eq 'private-reasoning|exclude-user-text' "$fixture_dir/projected"
+echo 'PASS: multi-turn assistant protocol is retained without projecting private/tool/user blocks'

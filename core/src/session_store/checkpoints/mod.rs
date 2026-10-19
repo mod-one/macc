@@ -1,4 +1,6 @@
 //! Durable task context, independent of provider conversations and task delivery.
+#[cfg(test)]
+mod budget_tests;
 mod git_state;
 mod lifecycle;
 mod memory_context;

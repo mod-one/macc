@@ -19,10 +19,18 @@ performer:
   command: claude
   args: ["--model", "{model}", "--output-format", "text", "--dangerously-skip-permissions"]
   usage:
-    schema: claude-result-model-usage-v1
-    replace_values: {"--output-format": "json"}
+    schema: claude-stream-result-model-usage-v2
+    required_for_checkpoint: true
+    append_args: ["--verbose"]
+    replace_values: {"--output-format": "stream-json"}
     event_match: {"/type": "result"}
+    text_match: {"/type": "result"}
     text: ["/result"]
+    text_arrays:
+      - event_match: {"/type": "assistant"}
+        path: /message/content
+        item_match: {"/type": "text"}
+        text: ["/text"]
     session_id: /session_id
     model_map: /modelUsage
     token_scope: session

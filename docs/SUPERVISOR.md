@@ -285,3 +285,18 @@ coordinator settings and omitted supervisor fields are preserved. Runtime phase
 policy stays in the supervisor recovery module; AI execution continues to use
 ToolSpec adapters. No PRD schema or provider-specific runner interface changes
 are required.
+
+## Product defects and observable AI execution
+
+Blocking installed-MACC defects are reported separately under
+`.macc/reports/macc-defects/`; application repair is not claimed to fix MACC.
+The diagnosis distinguishes required product updates from non-blocking improvement
+hints and explicit external device/authority requirements. Such blocks use the
+existing wait policy. After fixing/installing MACC, restart the supervisor so the
+new executable identity invalidates the old diagnosis.
+
+AI phases publish five-second liveness heartbeats with PID, elapsed time and
+stdout/stderr sizes, including an explicit waiting-for-output state. These are
+observations, not proof of repair progress or completion. Existing intervention
+timeouts and process cleanup remain enforced. See
+[runner reliability](COORDINATOR_RUN_RELIABILITY.md) for the exact contracts.

@@ -38,12 +38,14 @@ impl Default for LifecyclePolicy {
 #[serde(default, deny_unknown_fields)]
 pub struct CheckpointPolicy {
     pub max_content_bytes: u64,
+    pub max_finish_content_bytes: u64,
     pub rotate_after_uses: u64,
 }
 impl Default for CheckpointPolicy {
     fn default() -> Self {
         Self {
             max_content_bytes: 16384,
+            max_finish_content_bytes: 65536,
             rotate_after_uses: 20,
         }
     }
@@ -67,13 +69,15 @@ impl SessionPolicy {
         if self.usage.capture_mode > 1
             || !(4096..=16777216).contains(&self.usage.max_output_bytes)
             || !(2048..=65536).contains(&self.checkpoints.max_content_bytes)
+            || !(2048..=262144).contains(&self.checkpoints.max_finish_content_bytes)
+            || self.checkpoints.max_finish_content_bytes < self.checkpoints.max_content_bytes
             || !(1..=1000).contains(&self.checkpoints.rotate_after_uses)
             || !(10..=86400).contains(&self.lease.ttl_seconds)
             || self.lease.heartbeat_seconds == 0
             || self.lease.heartbeat_seconds > self.lease.ttl_seconds / 3
             || !(1..=720).contains(&self.lifecycle.max_idle_hours)
         {
-            return Err(super::error("Lease TTL must be 10..86400 seconds, heartbeat 1..TTL/3, idle age 1..720 hours, checkpoint size 2048..65536 bytes, and rotation 1..1000 uses, usage capture mode 0..1 and usage output 4096..16777216 bytes"));
+            return Err(super::error("Lease TTL must be 10..86400 seconds, heartbeat 1..TTL/3, idle age 1..720 hours, checkpoint start size 2048..65536 bytes, finish size start..262144 bytes, and rotation 1..1000 uses, usage capture mode 0..1 and usage output 4096..16777216 bytes"));
         }
         Ok(())
     }
@@ -192,6 +196,15 @@ pub fn fields() -> Vec<FieldDescriptor> {
             "Never truncate mandatory task criteria; oversized checkpoints stop before invocation.",
         ),
         (
+            "checkpoints.max_finish_content_bytes",
+            "Checkpoint finish size limit",
+            65536,
+            2048,
+            262144,
+            "bytes",
+            "Bounded final evidence after work; at least the start limit. Mandatory criteria are never truncated.",
+        ),
+        (
             "checkpoints.rotate_after_uses",
             "Rotate after invocations",
             20,
@@ -200,7 +213,7 @@ pub fn fields() -> Vec<FieldDescriptor> {
             "invocations",
             "Start a fresh transcript from a validated checkpoint at an invocation boundary.",
         ),
-        ("usage.capture_mode","Usage capture mode",0,0,1,"mode","0 preserves existing output arguments; 1 requests adapter-declared machine output at the next invocation."),
+        ("usage.capture_mode","Usage capture mode",0,0,1,"mode","0 preserves output arguments except adapter-required checkpoint protocol output; 1 requests declared machine output."),
         ("usage.max_output_bytes","Usage parse limit",1048576,4096,16777216,"bytes","Oversized output is recorded as unknown, never parsed from a truncated suffix."),
     ]
     .into_iter()

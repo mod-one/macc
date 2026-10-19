@@ -86,6 +86,8 @@ pub struct BeginRequest {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Invocation {
+    #[serde(default)]
+    pub checkpoint: bool,
     pub command: String,
     pub args: Vec<String>,
 }

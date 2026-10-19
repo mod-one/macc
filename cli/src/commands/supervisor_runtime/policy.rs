@@ -94,7 +94,7 @@ pub fn context(
     let reference =
         super::workspace::target(&paths.root, canonical.automation.coordinator.as_ref())?;
     Ok(
-        json!({"tasks":tasks,"head":git(&paths.root,&["rev-parse","HEAD"])?,
+        json!({"runtime_build":super::product_findings::runtime_identity(),"tasks":tasks,"head":git(&paths.root,&["rev-parse","HEAD"])?,
         "reference":{"branch":reference.branch,"tip":reference.base},
         "source_status":git(&paths.root,&["status","--porcelain"])?,
         "source_diff":git(&paths.root,&["diff","HEAD","--binary"])?,
@@ -214,7 +214,19 @@ pub fn next_action(pending: &Pending, report: &Intervention, max_attempts: u32) 
         .unwrap_or_default();
     let human = report.diagnosis.as_ref().is_some_and(|d| d.requires_human)
         || report.detail.contains(super::repair::HUMAN_DECISION);
-    let action = if human {
+    let action = if report
+        .diagnosis
+        .as_ref()
+        .is_some_and(|d| d.macc_repair_required)
+    {
+        format!("Fix and validate MACC in its source repository; install the corrected build, then run `{RETRY}`. Product findings: .macc/reports/macc-defects/. Application edits cannot repair the installed runner.")
+    } else if report
+        .diagnosis
+        .as_ref()
+        .is_some_and(|d| !d.external_prerequisites.is_empty())
+    {
+        format!("Supply the recorded external devices, environment or authority, then run `{RETRY}`. Source repair cannot replace these verification requirements.")
+    } else if human {
         format!("Make the human decision named in the reason, then run `{RETRY}`.")
     } else if let Some(time) = pending
         .next_check

@@ -61,7 +61,11 @@ pub fn begin(root: &Path, r: &BeginRequest) -> Result<CapturePlan> {
     let policy = policy::load(root)?.usage;
     let plan = CapturePlan {
         enabled: true,
-        structured: policy.capture_mode == 1 && profile.is_some(),
+        structured: profile.as_ref().is_some_and(|p| {
+            policy.capture_mode == 1
+                || (p.required_for_checkpoint
+                    && r.invocation.as_ref().is_some_and(|i| i.checkpoint))
+        }),
         max_output_bytes: policy.max_output_bytes,
         profile,
     };

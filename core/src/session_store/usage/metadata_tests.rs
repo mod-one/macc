@@ -57,6 +57,7 @@ fn request(key: &LeaseKey, command: &str, args: &[&str]) -> BeginRequest {
         key: key.clone(),
         phase: "dev".into(),
         invocation: Some(Invocation {
+            checkpoint: false,
             command: command.into(),
             args: args.iter().map(|v| (*v).into()).collect(),
         }),

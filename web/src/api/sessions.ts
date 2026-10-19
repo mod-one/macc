@@ -1,5 +1,5 @@
 import { sendJson } from './client';
-export interface SessionPolicy { lease: { ttl_seconds: number; heartbeat_seconds: number }; lifecycle: { max_idle_hours: number }; checkpoints: { max_content_bytes: number; rotate_after_uses: number }; usage: { capture_mode: number; max_output_bytes: number } }
+export interface SessionPolicy { lease: { ttl_seconds: number; heartbeat_seconds: number }; lifecycle: { max_idle_hours: number }; checkpoints: { max_content_bytes: number; max_finish_content_bytes: number; rotate_after_uses: number }; usage: { capture_mode: number; max_output_bytes: number } }
 export interface SessionField { path: string; label: string; default: number; min: number; max: number; unit: string; help: string; activation: string }
 export interface LogicalSession { id: string; project_id: string; task_id: string; role: string; tool_id: string; provider_session_id: string | null; lineage_id: string; status: string; generation: number; use_count: number; owner_pid: number | null; expires_at: number | null; updated_at: number }
 export interface SessionStoreView { project_root: string; backend: string; project_id: string | null; revision: string; policy: SessionPolicy; policy_source: string; fields: SessionField[]; sessions: LogicalSession[]; checkpoints_ready: boolean; checkpoints: TaskCheckpoint[] }

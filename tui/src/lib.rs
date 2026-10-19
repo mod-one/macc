@@ -1469,7 +1469,10 @@ fn ui(f: &mut Frame, state: &AppState, full_clear: bool) {
                         "Worktree: {} (branch: {}, head: {})\n",
                         name, branch, head
                     ));
-                    overview.push_str(&format!("Worktrees Total: {}\n", status.total));
+                    overview.push_str(&format!(
+                        "Worktrees Total (includes retained/support slots): {}\n{}\n",
+                        status.total, status.activity
+                    ));
                 } else {
                     overview.push_str(&format!(
                         "Worktree: (none) | Worktrees Total: {}\n",

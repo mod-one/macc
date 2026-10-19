@@ -18,6 +18,13 @@ pub struct UsageSpec {
     pub fields: BTreeMap<String, String>,
     #[serde(default)]
     pub text: Vec<String>,
+    /// Additional assistant text carried in declared event collections.
+    #[serde(default)]
+    pub text_arrays: Vec<TextArray>,
+    /// Required protocol output when a checkpoint is active, independent of
+    /// optional numeric capture mode. Never changes model/session permissions.
+    #[serde(default)]
+    pub required_for_checkpoint: bool,
     #[serde(default = "newline")]
     pub text_separator: String,
     pub session_id: Option<String>,
@@ -33,6 +40,16 @@ pub struct UsageSpec {
     pub currency: Option<String>,
     #[serde(default)]
     pub input_includes_cache_read: bool,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TextArray {
+    #[serde(default)]
+    pub event_match: BTreeMap<String, String>,
+    pub path: String,
+    #[serde(default)]
+    pub item_match: BTreeMap<String, String>,
+    pub text: Vec<String>,
 }
 fn newline() -> String {
     "\n".into()
@@ -85,6 +102,11 @@ impl UsageSpec {
                 )));
             }
         }
+        if self.text_arrays.len() > 8 || self.text_arrays.iter().any(|a| a.text.len() > 8) {
+            return Err(crate::MaccError::Validation(
+                "Too many output text projections".into(),
+            ));
+        }
         for p in self
             .fields
             .values()
@@ -94,6 +116,12 @@ impl UsageSpec {
             .chain(self.model_map.iter())
             .chain(self.event_match.keys())
             .chain(self.text_match.keys())
+            .chain(self.text_arrays.iter().flat_map(|a| {
+                std::iter::once(&a.path)
+                    .chain(a.text.iter())
+                    .chain(a.event_match.keys())
+                    .chain(a.item_match.keys())
+            }))
         {
             if !p.is_empty() && !p.starts_with('/') {
                 return Err(crate::MaccError::Validation(

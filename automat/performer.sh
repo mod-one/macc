@@ -51,6 +51,7 @@ LAST_ERROR_CODE=""
 LAST_ERROR_ORIGIN=""
 LAST_ERROR_MESSAGE=""
 TERMINAL_EVENT_EMITTED="false"
+PHASE_FAILURE_REPORTED="false"
 
 PERFORMER_MAX_ITERATIONS="${PERFORMER_MAX_ITERATIONS:-50}"
 PERFORMER_TOOL_MAX_ATTEMPTS="${PERFORMER_TOOL_MAX_ATTEMPTS:-2}"
@@ -445,6 +446,7 @@ must_emit_performer_event() {
   local phase="${2:-}"
   local status="${3:-}"
   local payload_json="${4:-}"
+  if [[ "$event_type" == phase_result && "$status" == failed ]]; then PHASE_FAILURE_REPORTED=true; fi
   if emit_performer_event "$event_type" "$phase" "$status" "$payload_json"; then
     return 0
   fi
@@ -734,14 +736,17 @@ Context:
 - Worktree: ${worktree}
 - Task ID: ${task_id}
 - Task Title: ${task_title}
+- Task file: ${prd}
 
 Task (JSON):
 ${task_json}
 ${continuation}
 
+PROMPT
+  cat <<'PROMPT'
 Instructions:
 1) Implement ONLY the task above.
-2) Do NOT edit or read ${prd}; the runner will update it.
+2) Do NOT edit or read the task file listed above; the runner will update it.
 3) Do NOT commit; the runner will commit if all tasks are done.
 4) Keep output concise; avoid dumping large files.
 5) Use concise professional fragments by default.
@@ -763,8 +768,8 @@ Instructions:
 14) If you finish successfully but forget the marker, the runner will infer the result from repository state; still print the marker explicitly.
 15) If the task JSON contains `gate` (kind `verdict` or no kind), also print exactly one `MACC_TASK_GATE_VERDICT: accepted|rejected|pending` line. A successful task execution does not imply an accepted gate verdict. Never produce, simulate, or claim a human approval: approvals are recorded only by people through `macc coordinator approve`, and a verdict you print is ignored for `human_approval` gates. If your task needs an approval that has not been recorded, that is `precondition_unmet`, not something to decide yourself.
 
-${prompt_closing_line}
 PROMPT
+  printf '\n%s\n' "$prompt_closing_line"
 }
 
 # True when the task JSON declares `gate.kind: human_approval`.
@@ -845,6 +850,9 @@ resolve_task_result_exp() {
   local result_kind="$2"
   local exp=""
   exp="$(extract_task_result_exp "$output_file")"
+  if [[ -z "$exp" && "$result_kind" == error_runner_exit ]]; then
+    exp="$(sed -n 's/^Error:[[:space:]]*//p' "$output_file" | tail -1)"
+  fi
   if [[ -z "$exp" && ( "$result_kind" == error_* || "$result_kind" == "precondition_unmet" ) ]]; then
     # A terminal error with no explanation is not accepted as-is: the tool's
     # own account is the only record of why it stopped, and the continuation
@@ -1129,19 +1137,21 @@ run_tool() {
     if [[ -z "$LAST_ERROR_CODE" || "$LAST_ERROR_CODE" == "E101" ]]; then
       set_last_error "E101" "runner" "runner exited non-zero"
     fi
+    local runner_code
+    runner_code="$(sed -n 's/^MACC_RUNNER_ERROR: \(E[0-9][0-9][0-9]\)$/\1/p' "$output_capture" | tail -1)"
+    if [[ "$runner_code" == E103 || "$runner_code" == E901 ]]; then
+      set_last_error "$runner_code" "runner" "checkpoint/output finalization failed; retained work requires inspection"
+    fi
     local result_exp=""
     result_exp="$(resolve_task_result_exp "$output_capture" "error_runner_exit")"
-    # Same additive-merge pattern as the success path above: never let an empty
-    # optional field collapse the whole object (which would drop error_code and
-    # cause the failure to be misclassified).
-    #
-    # Not made fatal-on-rejection like the "done" path: this is a per-attempt
-    # progress signal, not the mandatory terminal record. run_tool() always
-    # returns the runner's own non-zero $status regardless of whether this
-    # event persists, so the retry loop and the final unconditional exit 1
-    # (after max attempts) already guarantee a correct non-zero exit without
-    # aborting mid-retry over a possibly-transient IPC hiccup.
-    must_emit_performer_event "phase_result" "$CURRENT_PHASE" "failed" "$(jq -nc \
+    # A retry is progress, never a terminal phase failure. Once a terminal
+    # failure is published, the coordinator may stop this process immediately.
+    local failure_event=phase_result failure_status=failed
+    if (( attempt < max_attempts )) && [[ "$LAST_ERROR_CODE" == E101 ]]; then
+      failure_event=progress
+      failure_status=running
+    fi
+    must_emit_performer_event "$failure_event" "$CURRENT_PHASE" "$failure_status" "$(jq -nc \
       --arg attempt "$attempt" \
       --arg status "$status" \
       --arg code "$LAST_ERROR_CODE" \
@@ -1391,6 +1401,7 @@ for ((i=1; i<=PERFORMER_MAX_ITERATIONS; i++)); do
   fi
 
   tool_success=false
+  PHASE_FAILURE_REPORTED=false
   for ((attempt=1; attempt<=PERFORMER_TOOL_MAX_ATTEMPTS; attempt++)); do
     if run_tool "$prompt_file" "$attempt" "$PERFORMER_TOOL_MAX_ATTEMPTS"; then
       tool_success=true
@@ -1399,7 +1410,7 @@ for ((i=1; i<=PERFORMER_MAX_ITERATIONS; i++)); do
       attempt_rc=$?
       echo "Tool failed for task ${next_id} (attempt ${attempt}/${PERFORMER_TOOL_MAX_ATTEMPTS})" >&2
       # Let the coordinator select another tool instead of spending another attempt.
-      if [[ "$LAST_ERROR_CODE" == "E602" || "$LAST_ERROR_CODE" == "E601" || "$LAST_ERROR_CODE" == "E903" ]]; then
+      if [[ "$PHASE_FAILURE_REPORTED" == true || "$LAST_ERROR_CODE" != E101 ]]; then
         break
       fi
     fi

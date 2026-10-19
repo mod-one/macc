@@ -77,6 +77,7 @@ pub struct ApplyProgress {
 }
 
 pub struct WorktreeStatus {
+    pub activity: String,
     pub current: Option<macc_core::WorktreeEntry>,
     pub total: usize,
     pub error: Option<String>,
@@ -746,6 +747,9 @@ impl AppState {
                 let current = macc_core::current_worktree(&paths.root, &entries);
                 self.worktree_status = Some(WorktreeStatus {
                     current,
+                    activity: macc_core::service::worktree::activity::inspect(paths, &entries)
+                        .map(|s| macc_core::service::worktree::activity::summary(&s))
+                        .unwrap_or_else(|e| format!("Activity unavailable: {e}")),
                     total: entries.len(),
                     error: None,
                 });
@@ -754,6 +758,7 @@ impl AppState {
                 self.worktree_status = Some(WorktreeStatus {
                     current: None,
                     total: 0,
+                    activity: String::new(),
                     error: Some(err.to_string()),
                 });
             }

@@ -89,6 +89,8 @@ pub(super) async fn intervene(
     );
     report.detail = diagnosis.summary.clone();
     report.diagnosis = Some(diagnosis.clone());
+    super::product_findings::publish(paths, report, &diagnosis)?;
+    super::product_findings::ensure_application_repair(&diagnosis)?;
     if diagnosis.restart_only && !diagnosis.requires_human {
         if !config.auto_restart {
             return Err(MaccError::Validation(

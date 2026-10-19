@@ -1,7 +1,8 @@
+import { worktreeStatusLabel, worktreeStatusTone } from '../worktreeStatus';
 import React from 'react';
 import type { ApiWorktree } from '../api/models';
 import { Button } from './Button';
-import { StatusBadge, type StatusTone } from './StatusBadge';
+import { StatusBadge } from './StatusBadge';
 import * as Icons from './icons';
 import { Icons as NavIcons } from './NavIcons';
 import { cn, interactiveSurfaceClassName, surfaceClassName } from './styles';
@@ -25,23 +26,7 @@ export const WorktreeCard: React.FC<WorktreeCardProps> = ({
   onOpenTerminal,
   highlighted = false,
 }) => {
-  const getStatusTone = (status: string | null): StatusTone => {
-    switch (status?.toLowerCase()) {
-      case 'active':
-      case 'running':
-        return 'active';
-      case 'blocked':
-        return 'blocked';
-      case 'failed':
-      case 'error':
-        return 'failed';
-      case 'merged':
-      case 'success':
-        return 'merged';
-      default:
-        return 'todo';
-    }
-  };
+
 
   return (
     <article
@@ -62,7 +47,7 @@ export const WorktreeCard: React.FC<WorktreeCardProps> = ({
             <span className="truncate">{worktree.branch || 'no branch'}</span>
           </div>
         </div>
-        <StatusBadge status={worktree.status || 'unknown'} tone={getStatusTone(worktree.status)} />
+        <StatusBadge status={worktreeStatusLabel(worktree.status)} tone={worktreeStatusTone(worktree.status)} />
       </div>
 
       <div className="flex flex-wrap gap-2">

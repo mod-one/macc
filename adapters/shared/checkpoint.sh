@@ -31,6 +31,7 @@ finish_checkpoint() {
       '$key+{phase:$phase,result:$result,acknowledged:$ack}' | session_service checkpoint-finish 2>&1)"; then
     echo "$response" >&2
     if [[ "$response" == *"requires reconciliation"* ]]; then checkpoint_precondition "$response"; return 2; fi
+    printf 'MACC_RUNNER_ERROR: E901\nMACC_TASK_RESULT_EXP: Checkpoint finalization failed: %s; existing Git work is retained.\n' "$(printf '%s' "$response" | tr '\n' ' ')" >&2
     echo 'Error: task checkpoint could not be persisted; existing Git work is retained' >&2
     return 1
   fi
@@ -39,7 +40,10 @@ finish_checkpoint() {
 
 checkpoint_acknowledged() {
   grep -Fxq -- "$checkpoint_ack" "$output_capture" && return 0
-  # Also accept text carried in declared JSON/JSONL output. No provider names.
+  # Structured output has already projected only adapter-declared assistant text.
+  # Never accept an ACK merely echoed by a tool/thinking block in raw JSON.
+  [[ "${usage_structured:-false}" == true ]] && return 1
+  # Legacy passive JSON/JSONL output remains supported. No provider names.
   jq -Rrs '. as $raw | try (fromjson | .. | strings) catch ($raw | split("\n")[] | fromjson? | .. | strings)' "$output_capture" 2>/dev/null | grep -Fx -- "$checkpoint_ack" >/dev/null
 }
 

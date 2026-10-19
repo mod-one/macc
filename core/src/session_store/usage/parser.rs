@@ -149,18 +149,35 @@ pub(super) fn observe(raw: &str, p: Option<&UsageSpec>) -> Observation {
     }
 }
 pub fn render(raw: &str, p: &UsageSpec) -> String {
-    documents(raw)
-        .iter()
-        .filter(|v| {
-            p.text_match
-                .iter()
-                .all(|(path, value)| v.pointer(path).and_then(Value::as_str) == Some(value))
-        })
-        .flat_map(|v| {
-            p.text
-                .iter()
-                .filter_map(|path| v.pointer(path).and_then(Value::as_str))
-        })
-        .collect::<Vec<_>>()
-        .join(&p.text_separator)
+    fn matches(v: &Value, rules: &std::collections::BTreeMap<String, String>) -> bool {
+        rules
+            .iter()
+            .all(|(path, value)| v.pointer(path).and_then(Value::as_str) == Some(value))
+    }
+    let docs = documents(raw);
+    let mut text = Vec::new();
+    for v in &docs {
+        if matches(v, &p.text_match) {
+            text.extend(
+                p.text
+                    .iter()
+                    .filter_map(|path| v.pointer(path).and_then(Value::as_str)),
+            );
+        }
+        for rule in &p.text_arrays {
+            if !matches(v, &rule.event_match) {
+                continue;
+            }
+            if let Some(items) = v.pointer(&rule.path).and_then(Value::as_array) {
+                for item in items.iter().filter(|item| matches(item, &rule.item_match)) {
+                    text.extend(
+                        rule.text
+                            .iter()
+                            .filter_map(|path| item.pointer(path).and_then(Value::as_str)),
+                    );
+                }
+            }
+        }
+    }
+    text.join(&p.text_separator)
 }

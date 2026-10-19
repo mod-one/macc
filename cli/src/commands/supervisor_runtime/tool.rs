@@ -9,6 +9,8 @@ use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 
 pub struct Agent {
+    root: std::path::PathBuf,
+    config: SupervisorConfig,
     pub id: String,
     performer: ToolPerformerSpec,
     model: String,
@@ -93,6 +95,8 @@ impl Agent {
             MaccError::Validation(format!("Supervisor tool '{id}' has no performer"))
         })?;
         Ok(Self {
+            root: root.into(),
+            config: config.clone(),
             id,
             performer,
             model,
@@ -162,6 +166,8 @@ impl Agent {
         }
         let mut child = cmd.spawn().map_err(|e| io(cwd, e))?;
         let _group = ProcessGroup(child.id());
+        let started = std::time::Instant::now();
+        let agent_pid = child.id();
         let execution = async {
             if let Some(mut stdin) = child.stdin.take() {
                 stdin
@@ -169,7 +175,22 @@ impl Agent {
                     .await
                     .map_err(|e| io(cwd, e))?;
             }
-            let status = child.wait().await.map_err(|e| io(cwd, e))?;
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            let status = loop {
+                tokio::select! {
+                    result=child.wait()=>break result.map_err(|e|io(cwd,e))?,
+                    _=interval.tick()=>super::activity::record(&self.root,&self.config,log_dir,phase,agent_pid,started.elapsed().as_secs(),"running")?,
+                }
+            };
+            super::activity::record(
+                &self.root,
+                &self.config,
+                log_dir,
+                phase,
+                agent_pid,
+                started.elapsed().as_secs(),
+                if status.success() { "exited" } else { "failed" },
+            )?;
             if !status.success() {
                 let stderr = std::fs::read_to_string(log_dir.join(format!("{phase}-stderr.log")))
                     .unwrap_or_default();
@@ -209,12 +230,22 @@ impl Agent {
             }
             Ok(())
         };
-        tokio::time::timeout(self.timeout, execution)
-            .await
-            .map_err(|_| MaccError::Coordinator {
-                code: "E101",
-                message: format!("Supervisor {phase} timed out; see {}", log_dir.display()),
-            })?
+        let outcome = tokio::time::timeout(self.timeout, execution).await;
+        if outcome.is_err() {
+            super::activity::record(
+                &self.root,
+                &self.config,
+                log_dir,
+                phase,
+                agent_pid,
+                started.elapsed().as_secs(),
+                "timed_out",
+            )?;
+        }
+        outcome.map_err(|_| MaccError::Coordinator {
+            code: "E101",
+            message: format!("Supervisor {phase} timed out; see {}", log_dir.display()),
+        })?
     }
 }
 pub(super) struct ProcessGroup(pub(super) Option<u32>);

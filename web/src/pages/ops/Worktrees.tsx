@@ -1,3 +1,4 @@
+import { isRunningWorktree, worktreeStatusLabel, worktreeStatusTone } from '../../worktreeStatus';
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { 
@@ -16,7 +17,6 @@ import {
   Button, 
   KpiCard, 
   StatusBadge, 
-  type StatusTone, 
   WorktreeCard,
   ConfirmDialog,
   LoadingSpinner,
@@ -65,10 +65,9 @@ const Worktrees: React.FC = () => {
 
   const kpis = useMemo(() => {
     const total = worktrees.length;
-    const active = worktrees.filter(w => w.status === 'active' || w.status === 'running').length;
-    const idle = worktrees.filter(w => !w.status || w.status === 'idle' || w.status === 'todo').length;
-    // Simple heuristic for stale: if it's been active but not merged and it's old (we don't have timestamps here, so maybe just 0 for now or based on some status)
-    const stale = worktrees.filter(w => w.status === 'blocked' || w.status === 'failed').length;
+    const active = worktrees.filter(w => isRunningWorktree(w.status)).length;
+    const idle = worktrees.filter(w => w.status === 'idle' || w.status === 'clean').length;
+    const stale = worktrees.filter(w => ['blocked','retained','waiting'].includes(w.status ?? '')).length;
     
     return { total, active, idle, stale };
   }, [worktrees]);
@@ -84,23 +83,7 @@ const Worktrees: React.FC = () => {
     );
   }, [worktrees, globalFilter]);
 
-  const getStatusTone = (status: string | null): StatusTone => {
-    switch (status?.toLowerCase()) {
-      case 'active':
-      case 'running':
-        return 'active';
-      case 'blocked':
-        return 'blocked';
-      case 'failed':
-      case 'error':
-        return 'failed';
-      case 'merged':
-      case 'success':
-        return 'merged';
-      default:
-        return 'todo';
-    }
-  };
+
 
   const openTerminal = useCallback((target: TerminalTarget) => {
     setTerminalTarget(target);
@@ -130,7 +113,7 @@ const Worktrees: React.FC = () => {
     }),
     columnHelper.accessor('status', {
       header: 'Status',
-      cell: info => <StatusBadge status={info.getValue() || 'unknown'} tone={getStatusTone(info.getValue())} />,
+      cell: info => <StatusBadge status={worktreeStatusLabel(info.getValue())} tone={worktreeStatusTone(info.getValue())} />,
       size: 120,
     }),
     columnHelper.accessor('scope', {
@@ -253,12 +236,13 @@ const Worktrees: React.FC = () => {
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
           <KpiCard title="Total Worktrees" value={kpis.total} icon={<Icons.FolderIcon className="h-5 w-5" />} />
-          <KpiCard title="Active Leases" value={kpis.active} icon={<Icons.ActivityIcon className="h-5 w-5" />} />
+          <KpiCard title="Running Performers" value={kpis.active} icon={<Icons.ActivityIcon className="h-5 w-5" />} />
           <KpiCard title="Idle Environments" value={kpis.idle} icon={<Icons.ClockIcon className="h-5 w-5" />} />
-          <KpiCard title="Stale / Blocked" value={kpis.stale} icon={<Icons.AlertTriangleIcon className="h-5 w-5" />} />
+          <KpiCard title="Retained / Waiting" value={kpis.stale} icon={<Icons.AlertTriangleIcon className="h-5 w-5" />} />
         </div>
       </header>
 
+      <p className="text-sm text-[var(--text-secondary)]">Worktree count includes retained work, supervisor and merge workspaces. Only Running Performers counts live task processes. Blocked and retained workspaces keep unfinished work.</p>
       <div className="flex items-center justify-between gap-4">
         <div className="relative flex-1 max-w-md">
           <Icons.SearchIcon className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-[var(--text-muted)]" />

@@ -10,7 +10,7 @@ prepare_usage() {
   [[ "$session_backend" == sqlite && -n "$sqlite_lease_key" ]] || return 0
   local plan invoke_command="$1"
   shift
-  if ! plan="$( { if [[ $# -gt 0 ]]; then printf '%s\0' "$@"; fi; } | jq -Rsc --arg command "$invoke_command" --argjson key "$sqlite_lease_key" --arg phase "$checkpoint_phase" '$key+{phase:$phase,invocation:{command:$command,args:(split("\u0000")[:-1])}}' | session_service usage-begin)"; then
+  if ! plan="$( { if [[ $# -gt 0 ]]; then printf '%s\0' "$@"; fi; } | jq -Rsc --arg command "$invoke_command" --argjson checkpoint "${checkpoint_enabled:-false}" --argjson key "$sqlite_lease_key" --arg phase "$checkpoint_phase" '$key+{phase:$phase,invocation:{checkpoint:$checkpoint,command:$command,args:(split("\u0000")[:-1])}}' | session_service usage-begin)"; then
     echo 'Warning: usage capture could not start; preserving normal tool execution' >&2
     return 0
   fi
@@ -65,8 +65,13 @@ project_usage_output() {
     def ptr($p): if $p=="" then . else reduce ($p|ltrimstr("/")|split("/")|map(gsub("~1";"/")|gsub("~0";"~")))[] as $key (.; if type=="array" then .[$key|tonumber] else .[$key] end) end;
     . as $raw | (try fromjson catch ($raw|split("\n")|map(fromjson?))) |
     (if type=="array" then .[] else . end) as $event |
-    select(($profile.text_match // {} | to_entries | all(.[]; . as $entry | ($event | ptr($entry.key)) == $entry.value))) |
-    $profile.text[]? as $p | $event | ptr($p) | select(type=="string") | . + ($profile.text_separator // "\n")
+    def matches($rules): . as $v | $rules // {} | to_entries | all(.[]; . as $entry | ($v | ptr($entry.key)) == $entry.value);
+    (
+      ($event | select(matches($profile.text_match)) | $profile.text[]? as $p | ptr($p)),
+      ($profile.text_arrays[]? as $rule | $event | select(matches($rule.event_match)) |
+        ptr($rule.path) | arrays | .[] | select(matches($rule.item_match)) |
+        $rule.text[]? as $p | ptr($p))
+    ) | select(type=="string") | . + ($profile.text_separator // "\n")
   ' "$output_capture" 2>/dev/null)" || { echo 'Error: structured output text could not be decoded; completion not accepted' >&2; return 1; }
   # Keep this raw capture for numeric parsing: appended text is never a stats source.
   printf '\n%s\n' "$projected" | tee -a "$output_capture"

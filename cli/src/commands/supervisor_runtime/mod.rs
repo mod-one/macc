@@ -1,5 +1,7 @@
 //! Production supervisor: canonical incidents, durable intervention and managed restart.
+mod activity;
 mod policy;
+mod product_findings;
 mod recovery;
 mod repair;
 mod report;

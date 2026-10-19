@@ -191,3 +191,11 @@ requires a successful hook exit and no explicit failure/precondition verdict,
 plus a completed conflict-free merge. A commit alone cannot bypass a failed
 checkpoint/source validation. Existing successful legacy hooks without markers
 remain compatible.
+
+## Finalization headroom
+
+`session_management.checkpoints.max_finish_content_bytes` defaults to 65536 and
+is configurable in the shared Sessions catalog (2048..262144; at least the start
+limit). The starting checkpoint pins this separate allowance for evidence added
+during execution. Starting checkpoints still obey `max_content_bytes`; mandatory
+criteria are never truncated. See [runner reliability](COORDINATOR_RUN_RELIABILITY.md).

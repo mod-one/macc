@@ -4,6 +4,9 @@ mod merge_repair_runner;
 #[path = "support/o2_runner.rs"]
 mod o2_runner;
 #[cfg(unix)]
+#[path = "support/performer_lifecycle.rs"]
+mod performer_lifecycle;
+#[cfg(unix)]
 #[path = "support/usage_identity_runner.rs"]
 mod usage_identity_runner;
 use serde_json::{json, Value};

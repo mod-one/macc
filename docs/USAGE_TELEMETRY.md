@@ -91,7 +91,8 @@ session_management:
     max_output_bytes: 1048576 # 4096..16777216 bytes per invocation
 ```
 
-Default passive mode preserves current CLI arguments and parses structured output
+Default passive mode preserves current CLI arguments except adapter-required
+checkpoint protocol output (`required_for_checkpoint`), and parses structured output
 only if already present; plain text typically produces unknown counters. Mode 1
 changes only declared output flags, on the next invocation. It does not change
 session creation/resume, permissions, model or effort. Capture settings are snapped
@@ -129,7 +130,7 @@ structured mode in production.
 | Adapter | Structured mode | Counters and scope | Cost |
 | --- | --- | --- | --- |
 | Codex | Append `--json` | `turn.completed.usage`, invocation; subtract cached input from total input | Unknown when not reported |
-| Claude | Replace existing `--output-format` with `json` | Terminal `modelUsage`, aggregate across models including subagents; cumulative session watermarks | `total_cost_usd`, cumulative, estimated USD |
+| Claude | Replace `--output-format` with `stream-json`, append `--verbose`; required for active checkpoints | Terminal `modelUsage`, aggregate across models including subagents; cumulative session watermarks | `total_cost_usd`, cumulative, estimated USD |
 | Gemini | Append `--output-format stream-json` | Terminal `result.stats`, invocation; `input` uncached, `cached` separately | Unknown when not reported |
 | Other tools, including Vibe | Existing arguments | Unknown until an explicit verified usage profile is supplied | Unknown |
 
@@ -159,3 +160,6 @@ npm --prefix web test -- --maxWorkers=1 src/pages/ops/Sessions.test.tsx src/page
 Adaptive context-pressure decisions, native compaction probes, retrieval/context
 item attribution, pricing catalogs and billing reconciliation remain later work.
 This ledger supplies the normalized baseline without claiming those features.
+
+The multi-turn assistant projection, checkpoint protocol requirement and unchanged
+terminal-counter semantics are described in [runner reliability](COORDINATOR_RUN_RELIABILITY.md).

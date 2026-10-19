@@ -111,12 +111,22 @@ impl<'a> Command for WorktreeCommand<'a> {
                     project_paths.as_ref(),
                 )?;
 
+                let states = if let Some(paths) = &project_paths {
+                    macc_core::service::worktree::activity::inspect(paths, &entries)?
+                } else {
+                    Default::default()
+                };
                 println!(
-                    "{:<54} {:<12} {:<24} {:<8} {:<10} {:<16} {:<8} {:<8}",
+                    "{}",
+                    macc_core::service::worktree::activity::summary(&states)
+                );
+                println!("Blocked/retained worktrees preserve unfinished work; only Running counts live performers.");
+                println!(
+                    "{:<54} {:<12} {:<24} {:<8} {:<14} {:<16} {:<8} {:<8}",
                     "WORKTREE", "TOOL", "BRANCH", "SCOPE", "STATE", "SESSION", "LOCKED", "PRUNE"
                 );
                 println!(
-                    "{:-<54} {:-<12} {:-<24} {:-<8} {:-<10} {:-<16} {:-<8} {:-<8}",
+                    "{:-<54} {:-<12} {:-<24} {:-<8} {:-<14} {:-<16} {:-<8} {:-<8}",
                     "", "", "", "", "", "", "", ""
                 );
                 for entry in entries {
@@ -139,14 +149,8 @@ impl<'a> Command for WorktreeCommand<'a> {
                         .and_then(|m| m.scope.as_ref())
                         .map(|s| macc_core::service::worktree::truncate_cell(s, 8))
                         .unwrap_or_else(|| "-".into());
-                    let git_state =
-                        if macc_core::service::worktree::git_worktree_is_dirty(&entry.path)
-                            .unwrap_or(false)
-                        {
-                            "dirty"
-                        } else {
-                            "clean"
-                        };
+                    let key = macc_core::service::worktree::canonicalize_path_fallback(&entry.path);
+                    let git_state = states.get(&key).map(String::as_str).unwrap_or("unknown");
                     let session = session_map
                         .get(&macc_core::service::worktree::canonicalize_path_fallback(
                             &entry.path,
@@ -154,7 +158,7 @@ impl<'a> Command for WorktreeCommand<'a> {
                         .cloned()
                         .unwrap_or_else(|| "-".into());
                     println!(
-                        "{:<54} {:<12} {:<24} {:<8} {:<10} {:<16} {:<8} {:<8}",
+                        "{:<54} {:<12} {:<24} {:<8} {:<14} {:<16} {:<8} {:<8}",
                         macc_core::service::worktree::truncate_cell(
                             &entry.path.display().to_string(),
                             54

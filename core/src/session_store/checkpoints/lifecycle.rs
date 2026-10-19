@@ -29,6 +29,7 @@ pub fn prepare(root: &Path, request: &ContextRequest) -> Result<PreparedContext>
     let policy = policy::load(root)?;
     let mut c = make(root, &a, request, "invocation_started")?;
     c.validation["max_content_bytes"] = json!(policy.checkpoints.max_content_bytes);
+    c.validation["max_finish_content_bytes"] = json!(policy.checkpoints.max_finish_content_bytes);
     let tx = sql(db.transaction_with_behavior(TransactionBehavior::Immediate))?;
     idle(&tx, &c.worktree)?;
     if let Some(previous) = latest(&tx, &a.project_id, &c.task_id, &c.role)? {
@@ -201,12 +202,12 @@ pub fn finish(root: &Path, request: &FinishRequest) -> Result<Checkpoint> {
             .push("Fresh-session checkpoint acknowledgement was not verified".into());
     }
     let mut sources_changed = false;
-    let mut content_limit = policy::load(root)?.checkpoints.max_content_bytes;
+    let mut content_limit = policy::load(root)?.checkpoints.max_finish_content_bytes;
     // Preserve all unresolved evidence, including failed attempts across retries.
     if let Some(previous) = latest(&tx, &a.project_id, &c.task_id, &c.role)? {
         sources_changed = !same_source(&previous, &c);
-        if let Some(limit) = previous.validation["max_content_bytes"].as_u64() {
-            content_limit = limit;
+        if let Some(limit) = previous.validation["max_finish_content_bytes"].as_u64() {
+            content_limit = limit.clamp(2048, 262144);
         }
         c.validation["max_content_bytes"] = json!(content_limit);
         c.blocking_issues.extend(previous.blocking_issues);

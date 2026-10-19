@@ -1,3 +1,4 @@
+pub mod activity;
 use crate::engine::Engine;
 use crate::resolve::{resolve, resolve_fetch_units, CliOverrides};
 use crate::{load_canonical_config, MaccError, Result};

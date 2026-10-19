@@ -63,6 +63,9 @@ prepare_mcp_access() {
     echo 'Warning: scoped memory MCP unavailable; provider execution and Git work retained' >&2
   fi
 }
+runner_failure() {
+  printf 'Error: %s\nMACC_RUNNER_ERROR: %s\nMACC_TASK_RESULT_EXP: %s; existing Git work is retained.\n' "$2" "$1" "$2" >&2
+}
 run_sqlite_session() {
   local generate=false request grant interval new_sid rc=0
   local checkpoint_rc=0
@@ -111,13 +114,13 @@ run_sqlite_session() {
   else
     run_default_call || rc=$?
   fi
-  project_usage_output || return 1
+  project_usage_output || { runner_failure E103 "Structured output projection failed"; return 1; }
   # No hidden resume fallback: an invocation may already have changed the worktree.
   new_sid="$(extract_session_id_from_output "$output_capture" "$session_extract_regex")"
   if [[ -n "$new_sid" ]]; then
     if ! jq -nc --argjson key "$sqlite_lease_key" --arg sid "$new_sid" '$key+{provider_session_id:$sid}' |
         session_service bind >/dev/null; then
-      echo 'Error: ambiguous provider identity or stale lease; existing work preserved' >&2
+      runner_failure E901 "Ambiguous provider identity or stale lease"
       return 1
     fi
   fi
@@ -128,7 +131,7 @@ run_sqlite_session() {
   if [[ "$checkpoint_enabled" == true && "$sid_is_new" == 1 ]] && ! checkpoint_acknowledged; then
     acknowledged=false
     if [[ "$rc" == 0 ]]; then
-      echo 'Error: fresh session did not acknowledge the current checkpoint task and phase' >&2
+      runner_failure E103 "Fresh session did not acknowledge the current checkpoint task and phase"
       rc=1
     fi
   fi
@@ -154,7 +157,7 @@ run_sqlite_session() {
   stop_sqlite_heartbeat
   if ! jq -nc --argjson key "$sqlite_lease_key" --argjson clean "$sqlite_clean" '$key+{clean:$clean}' |
       session_service release >/dev/null; then
-    echo 'Error: session release failed; work preserved and transcript left ineligible' >&2
+    runner_failure E901 "Session release failed; transcript left ineligible"
     return 1
   fi
   sqlite_lease_key=""
