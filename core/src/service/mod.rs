@@ -7,6 +7,7 @@ pub mod coordinator;
 pub mod coordinator_readiness;
 pub mod coordinator_workflow;
 pub mod diagnostic;
+mod diagnostic_event_log;
 pub mod interaction;
 pub mod launch_review;
 pub mod lifecycle;

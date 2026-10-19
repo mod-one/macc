@@ -4510,7 +4510,8 @@ async fn worktrees_list_endpoint_returns_managed_worktree_metadata() {
     assert_eq!(items[0]["baseBranch"], "main");
     assert_eq!(items[0]["scope"], "project");
     assert_eq!(items[0]["feature"], "web");
-    assert_eq!(items[0]["status"], "dirty");
+    // Unassigned work is retained; it is not an active performer.
+    assert_eq!(items[0]["status"], "retained");
     assert_eq!(items[0]["path"], created.path.to_string_lossy().to_string());
 }
 

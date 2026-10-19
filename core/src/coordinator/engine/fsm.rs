@@ -692,6 +692,9 @@ fn apply_dispatch_claim_typed(task: &mut Task, update: &DispatchClaimUpdate) {
     worktree.last_commit = Some(update.last_commit.clone());
     worktree.session_id = Some(update.session_id.clone());
     let runtime = task.ensure_runtime();
+    runtime
+        .extra
+        .remove(crate::coordinator::repair_handoff::RESUME_KEY);
     runtime.set_status(RuntimeStatus::Dispatched);
     runtime.current_phase = Some(update.phase.clone());
     runtime.started_at = Some(update.now.clone());

@@ -40,8 +40,15 @@ attached supervisor too. Standalone `macc supervisor start --daemon` is supporte
    does. Integration is deferred if the branch moved or if local changes in
    that checkout overlap the repair; unrelated local changes do not block it.
    PRD, runtime metadata and environment files (`.env`, `.env.*`) are protected.
-7. Requeue diagnosed roots through coordinator APIs, reconcile dependency blocks,
-   restart the managed coordinator and wait for readiness.
+7. Reconcile retained worker content against the repaired reference through
+   coordinator APIs before authorizing its next dispatch. Preserve the original
+   task, branch and worktree. Conflicts keep the task blocked and all work retained.
+8. Restart the managed coordinator, wait for readiness and observe the repaired
+   roots making progress (or a successful completed run) before reporting
+   `recovered`. At least one root must progress and none may be blocked; others
+   can stay queued behind the concurrency limit. A live launcher alone is
+   insufficient. With `auto_restart: false`, report `repair_integrated` and show
+   the manual start command.
 
 Restart without repair: when the engine failed or crashed while every incident
 task was between phases (`testing`, `reviewing`, `changes_requested`, `pr_open`,
@@ -107,7 +114,7 @@ registry. Clients show its intervention as a separate, labelled entry:
   `supervisor` object of `GET /api/v1/snapshot` (also in `macc status --json`).
 
 Phases are `detected`, `diagnosing`, `repairing`, `validating`, `verifying`,
-`integrating`, `requeuing` and `restarting`; the report records the step in
+`integrating`, `requeuing` and `restart_requested` (legacy: `restarting`); the report records the step in
 progress (`activity`, for example `Validation 3/5: pnpm run test`) and the phase
 start time. The entry disappears once the intervention recovers. An unrecovered
 one stays visible until a coordinator runs again.
@@ -300,3 +307,49 @@ stdout/stderr sizes, including an explicit waiting-for-output state. These are
 observations, not proof of repair progress or completion. Existing intervention
 timeouts and process cleanup remain enforced. See
 [runner reliability](COORDINATOR_RUN_RELIABILITY.md) for the exact contracts.
+
+## Retained task handoff and repair traceability
+
+Supervisor slots use named `macc/supervisor/<incident>-<base>` branches under
+`.macc/worktree/supervisor-xx`. A clean integrated slot can be removed after
+archiving evidence; its branch remains traceable. Existing owned detached slots
+remain compatible and can finish their current intervention.
+
+Repair commits fix prerequisites. They must not import unfinished implementations
+or evidence from performer worktrees. Publication rejects paths currently edited
+by incident workers; overlapping work stays retained for explicit reconciliation.
+Task completion requires the task's own acceptance evidence and delivery metadata.
+A supervisor commit or private WIP snapshot never certifies task delivery.
+
+On an authorized unblock, MACC pins the worker's full non-ignored content and its
+original index as private Git refs under `refs/macc/recovery/`. The handoff record
+in `.macc/log/repair-handoff/` identifies both refs and the old/reference commits.
+It computes three-way merges before touching the worker. A conflicting merge
+leaves its HEAD, index and files unchanged and names the recovery ref. A clean
+merge preserves the task branch and existing committed history, incorporates the
+prerequisite repair, and leaves unfinished content uncommitted. Previously staged
+work remains recoverable from the index snapshot; the reconciled pending changes
+are unstaged. Ignored local files are never overwritten by a repair. No worker
+`reset --hard`, clean or forced checkout is used.
+
+The `repair_resume` runtime marker authorizes one same-worktree dispatch without
+consuming the implementation-error retry budget. The next claim consumes it;
+subsequent implementation failures retain normal retry limits. Startup recovery
+recognizes this handoff instead of misclassifying it as E902. Old attached
+`todo/idle` tasks without explicit authorization remain protected by recovery.
+
+Before publication, the supervisor archives a staged diff summary. Newly added
+Vite/dependency/Python caches are left out of the commit, without deleting them.
+Non-integrated files still prevent automatic removal of a slot.
+
+For argument-based tools, prompts larger than 32 KiB are passed as a bounded
+instruction referencing the complete archived UTF-8 phase prompt. No incident or
+mandatory requirement is truncated. Stdin-based tools keep their native transport.
+The ToolSpec continues to select the provider and its invocation arguments.
+
+If a restarted run immediately fails or reblocks a root, its run ID and recorded
+cause are reported and the intervention escalates. If resumption cannot be observed
+within 15 seconds (for example, tasks still wait for a quota), MACC retains the
+restart PID and reports that resumption is unverified. It does not announce recovery.
+Clients also read timestamp-scoped structured coordinator error logs when the
+SQLite event mirror has no failure, preserving causes such as E902 in the TUI.

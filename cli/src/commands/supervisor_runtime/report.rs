@@ -140,7 +140,12 @@ pub fn record_shutdown(paths: &ProjectPaths) -> Result<()> {
     if value
         .pointer("/intervention/status")
         .and_then(|v| v.as_str())
-        .is_some_and(|s| !matches!(s, "recovered" | "escalated" | "interrupted"))
+        .is_some_and(|s| {
+            !matches!(
+                s,
+                "recovered" | "repair_integrated" | "escalated" | "interrupted"
+            )
+        })
     {
         value["intervention"]["status"] = json!("interrupted");
         value["intervention"]["detail"] =

@@ -103,7 +103,9 @@ pub fn dispatch_block_reason_typed(
         if task.workflow_state() != Some(crate::coordinator::WorkflowState::Todo) {
             continue;
         }
-        if task.has_worktree_attached() {
+        if task.has_worktree_attached()
+            && resume_worktree_for(task, config.max_same_worktree_retries).is_none()
+        {
             continue;
         }
         if task.id.is_empty() || task.priority_rank() != 0 {
@@ -237,6 +239,7 @@ fn resume_worktree_for(task: &Task, max_retries: usize) -> Option<ResumeWorktree
         return None;
     }
     if !task.is_awaiting_tool_availability_retry()
+        && !task.is_awaiting_repair_resume()
         && (max_retries == 0 || task.task_runtime.retries_count() > max_retries)
     {
         return None;

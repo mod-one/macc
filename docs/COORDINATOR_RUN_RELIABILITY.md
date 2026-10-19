@@ -84,3 +84,14 @@ repair. Existing configured deadlines, process-group cleanup, tests and AI
 verification gates remain in effect; no live project settings are changed.
 
 Provider output reference: [Claude Code programmatic output](https://code.claude.com/docs/en/headless#stream-responses).
+
+## Supervisor handoff after prerequisite repair
+
+An authorized unblock reconciles retained worker content with the repaired reference,
+then explicitly permits one dispatch into that same branch/worktree. Full content
+and the original index are pinned in private recovery refs before any changes;
+conflicts preserve the original worker and remain blocked. A supervisor repair
+cannot copy an unfinished task into a generic repair commit or attest its delivery.
+See [supervisor handoff](SUPERVISOR.md#retained-task-handoff-and-repair-traceability)
+for recovery artifacts, retry semantics and the distinction between
+`repair_integrated`, `restart_requested` and verified `recovered` execution.

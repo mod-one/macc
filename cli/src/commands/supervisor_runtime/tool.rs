@@ -147,7 +147,9 @@ impl Agent {
                 if let Some(arg) = self.performer.prompt.as_ref().and_then(|p| p.arg.as_ref()) {
                     cmd.arg(arg);
                 }
-                cmd.arg(prompt);
+                let file = std::fs::canonicalize(log_dir.join(format!("{phase}-prompt.txt")))
+                    .map_err(|e| io(log_dir, e))?;
+                cmd.arg(super::prompt::argument(prompt, &file));
                 cmd.stdin(Stdio::null());
             }
             "stdin" => {

@@ -12,7 +12,16 @@ fn git_out(root: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&o.stdout).trim().to_owned()
 }
 fn settled(root: &Path, status: &str) -> Value {
-    wait_for(|| report(root).is_some_and(|v| v["intervention"]["status"] == status));
+    let waited = std::panic::catch_unwind(|| {
+        wait_for(|| report(root).is_some_and(|v| v["intervention"]["status"] == status));
+    });
+    if let Err(error) = waited {
+        eprintln!(
+            "Expected {status}; latest supervisor report: {:?}",
+            report(root)
+        );
+        std::panic::resume_unwind(error);
+    }
     report(root).unwrap()
 }
 fn edit_config(root: &Path, from: &str, to: &str) {
@@ -248,3 +257,6 @@ fn report_command_prints_reason_next_step_and_macc_findings() {
 
 #[path = "supervisor_settings.rs"]
 mod settings;
+
+#[path = "supervisor_handoff.rs"]
+mod handoff;

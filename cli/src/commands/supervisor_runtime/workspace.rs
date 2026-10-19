@@ -74,24 +74,27 @@ pub fn prepare(root: &Path, incident: &str, target: &Target) -> Result<PathBuf> 
                     "Project base changed; supervisor work preserved for operator recovery".into(),
                 ));
             }
-            git(&path, &["checkout", "--detach", head])?;
+            let branch = repair_branch(root, incident, head)?;
+            if macc_core::git::resolve_ref(root, &format!("refs/heads/{branch}")).is_some() {
+                git(&path, &["checkout", &branch])?;
+            } else {
+                git(&path, &["checkout", "-b", &branch, head])?;
+            }
         }
         write_json(&path.join(OWNER), &marker)?;
         sync_config(root, &path)?;
         return Ok(path);
     }
     let path = vacant.ok_or_else(|| MaccError::Validation("No vacant supervisor slot".into()))?;
-    git(
-        root,
-        &[
-            "worktree",
-            "add",
-            "--detach",
-            path.to_str()
-                .ok_or_else(|| MaccError::Validation("Invalid supervisor path".into()))?,
-            head,
-        ],
-    )?;
+    let branch = repair_branch(root, incident, head)?;
+    let slot = path
+        .to_str()
+        .ok_or_else(|| MaccError::Validation("Invalid supervisor path".into()))?;
+    if macc_core::git::resolve_ref(root, &format!("refs/heads/{branch}")).is_some() {
+        git(root, &["worktree", "add", slot, &branch])?;
+    } else {
+        git(root, &["worktree", "add", "-b", &branch, slot, head])?;
+    }
     std::fs::create_dir_all(path.join(".macc")).map_err(|e| io(&path, e))?;
     // This repository-wide exclude keeps local evidence out of repair commits.
     let exclude = PathBuf::from(git(&path, &["rev-parse", "--git-path", "info/exclude"])?);
@@ -118,6 +121,30 @@ pub fn prepare(root: &Path, incident: &str, target: &Target) -> Result<PathBuf> 
     sync_config(root, &path)?;
     Ok(path)
 }
+/// Named repair refs survive clean slot removal for incident traceability.
+fn repair_branch(root: &Path, incident: &str, base: &str) -> Result<String> {
+    let prefix = format!(
+        "macc/supervisor/{}-{}",
+        super::report::slug(incident),
+        &base[..12.min(base.len())]
+    );
+    for n in 0..1000 {
+        let branch = if n == 0 {
+            prefix.clone()
+        } else {
+            format!("{prefix}-{n}")
+        };
+        match macc_core::git::resolve_ref(root, &format!("refs/heads/{branch}")) {
+            None => return Ok(branch),
+            Some(head) if head == base => return Ok(branch),
+            _ => continue,
+        }
+    }
+    Err(MaccError::Validation(
+        "No vacant supervisor repair branch".into(),
+    ))
+}
+
 fn sync_config(root: &Path, path: &Path) -> Result<()> {
     let cfg = root.join(".macc/macc.yaml");
     if cfg.exists() {

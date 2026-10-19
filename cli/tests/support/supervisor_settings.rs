@@ -11,7 +11,7 @@ fn checks_can_be_disabled_and_repair_integrated_without_restarting() {
         "    tests_enabled: false\n    ai_verification_enabled: false\n    auto_restart: false",
     );
     let supervisor = start(root);
-    let r = settled(root, "recovered");
+    let r = settled(root, "repair_integrated");
     assert_eq!(
         std::fs::read_to_string(root.join("defect.txt")).unwrap(),
         "fixed\n"
@@ -53,7 +53,7 @@ fn missing_checks_wait_then_reuse_diagnosis_after_configuration() {
     let first_dir = first["intervention"]["log_dir"].as_str().unwrap();
     assert!(!Path::new(first_dir).join("repair-prompt.txt").exists());
     edit_config(root, "    auto_restart: false", "    auto_restart: false\n    validation_commands:\n      - \"test $(cat defect.txt) = fixed\"");
-    let r = settled(root, "recovered");
+    let r = settled(root, "repair_integrated");
     assert!(r["intervention"]["attempt"].as_u64().unwrap() > 1);
     let dir = Path::new(r["intervention"]["log_dir"].as_str().unwrap());
     assert!(dir.join("repair-prompt.txt").exists());
@@ -155,7 +155,7 @@ fn tests_can_be_disabled_while_ai_verification_still_runs() {
         "    tool: fake\n    tests_enabled: false\n    auto_restart: false",
     );
     let supervisor = start(root);
-    let r = settled(root, "recovered");
+    let r = settled(root, "repair_integrated");
     let dir = Path::new(r["intervention"]["log_dir"].as_str().unwrap());
     assert!(!dir.join("validation-0.log").exists());
     assert!(dir.join("verification-prompt.txt").exists());
@@ -175,7 +175,7 @@ fn ai_verification_can_be_disabled_while_checks_still_run() {
         "    tool: fake\n    ai_verification_enabled: false\n    auto_restart: false",
     );
     let supervisor = start(root);
-    let r = settled(root, "recovered");
+    let r = settled(root, "repair_integrated");
     let dir = Path::new(r["intervention"]["log_dir"].as_str().unwrap());
     assert!(dir.join("validation-0.log").exists());
     assert!(!dir.join("verification-prompt.txt").exists());

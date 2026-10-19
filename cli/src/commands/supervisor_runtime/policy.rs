@@ -169,8 +169,8 @@ pub fn settle(
     delay: u64,
 ) {
     pending.diagnosis = report.diagnosis.clone();
-    if report.status == "recovered" {
-        pending.status = "recovered".into();
+    if matches!(report.status.as_str(), "recovered" | "repair_integrated") {
+        pending.status = report.status.clone();
         return;
     }
     if error.is_some_and(transient) {
@@ -198,6 +198,9 @@ const RETRY: &str = "macc supervisor stop && macc supervisor start --daemon --re
 pub fn next_action(pending: &Pending, report: &Intervention, max_attempts: u32) -> Option<String> {
     if report.status == "recovered" {
         return None;
+    }
+    if report.status == "repair_integrated" {
+        return Some("Repair integrated and retained work reconciled. Automatic restart is disabled; start `macc coordinator run` when ready.".into());
     }
     if pending.status == "retrying" && pending.attempts < max_attempts {
         return Some(format!(

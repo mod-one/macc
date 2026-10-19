@@ -2,10 +2,14 @@
 mod activity;
 mod policy;
 mod product_findings;
+mod prompt;
 mod recovery;
 mod repair;
+mod repair_changes;
 mod report;
+mod restart_observation;
 mod shutdown;
+mod task_requeue;
 mod workspace;
 use recovery::intervene;
 pub use report::{record_failure, record_shutdown};

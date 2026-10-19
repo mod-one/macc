@@ -16,6 +16,7 @@ const ACTIVE: &[&str] = &[
     "integrating",
     "requeuing",
     "restarting",
+    "restart_requested",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

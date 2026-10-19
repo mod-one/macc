@@ -1065,6 +1065,18 @@ impl Task {
         })
     }
 
+    /// An operator/supervisor repair authorizes one dispatch without spending
+    /// the implementation-error retry budget. Consumed by the next claim.
+    pub fn is_awaiting_repair_resume(&self) -> bool {
+        self.workflow_state() == Some(WorkflowState::Todo)
+            && self.branch().is_some()
+            && self.worktree_path().is_some()
+            && self
+                .task_runtime
+                .extra
+                .contains_key(crate::coordinator::repair_handoff::RESUME_KEY)
+    }
+
     /// True when the task was parked by the same-worktree retry path and is
     /// waiting to be re-dispatched into the worktree it already holds.
     ///
@@ -1078,7 +1090,7 @@ impl Task {
     /// selector tell "parked for retry" apart from "already assigned".
     pub fn is_awaiting_same_worktree_retry(&self) -> bool {
         self.workflow_state() == Some(WorkflowState::Todo)
-            && self.runtime_status() == RuntimeStatus::Failed
+            && (self.runtime_status() == RuntimeStatus::Failed || self.is_awaiting_repair_resume())
             && self.branch().is_some()
             && self.worktree_path().is_some()
     }

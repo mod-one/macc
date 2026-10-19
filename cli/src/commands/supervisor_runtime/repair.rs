@@ -61,7 +61,14 @@ pub fn git(root: &Path, args: &[&str]) -> Result<String> {
             String::from_utf8_lossy(&output.stderr)
         )));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    let text = String::from_utf8(output.stdout).map_err(|e| {
+        MaccError::Validation(format!("Unsupported non-UTF-8 supervisor Git output: {e}"))
+    })?;
+    Ok(if args.contains(&"-z") {
+        text
+    } else {
+        text.trim().into()
+    })
 }
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
     let text = std::fs::read_to_string(path).map_err(|e| io(path, e))?;
@@ -274,7 +281,7 @@ async fn repair_round(
     };
     progress.enter(report, "repairing", activity)?;
     let rework = feedback.map(|reason| format!("\nThe previous state of this repair was rejected. Keep the valid work already in the worktree and address every point of the rejection: {reason}\nAn existing assertion may change only when it pins exactly the defective behaviour named in the diagnosis; justify each such change in .macc/repair-notes.md. If a point needs a decision outside your authority, do not guess: state it in .macc/repair-notes.md and leave that point unchanged.")).unwrap_or_default();
-    let prompt=format!("You are the authorized MACC supervisor repair agent in an isolated worktree. Continue the existing repair in this same worktree. Inspect and preserve previous staged, unstaged and untracked work; do not reset or clean it. Repair these diagnosed root causes: {}. Source and database migration changes needed for these roots are authorized even outside the original performer scope. Preserve existing behavior and regression assertions; never bypass MFA or security, weaken tests, fabricate approval, change PRD/state/.macc metadata, or restart the coordinator. Integration rejects any change to prd.json, *.prd.json, .macc/, .env or .env.* (including .env.example): document new settings elsewhere. Add targeted regression tests. Install project dependencies if needed. Do not commit: the supervisor owns commits. Record intervention evidence and MACC improvement recommendations in .macc/repair-notes.md. Read original logs at {}. Validation commands are {:?}; a command that already fails on the unmodified base does not block integration, but the repair must not add failures to it. Report missing external authority without guessing it.{rework}",diagnosis.summary,root.join(".macc/log").display(),commands);
+    let prompt=format!("You are the authorized MACC supervisor repair agent in an isolated worktree. Continue the existing repair in this same worktree. Inspect and preserve previous staged, unstaged and untracked work; do not reset or clean it. Repair these diagnosed root causes: {}. Source and database migration changes needed for these roots are authorized even outside the original performer scope. Preserve existing behavior and regression assertions; never bypass MFA or security, weaken tests, fabricate approval, change PRD/state/.macc metadata, or restart the coordinator. Integration rejects any change to prd.json, *.prd.json, .macc/, .env or .env.* (including .env.example): document new settings elsewhere. Add targeted regression tests. Install project dependencies if needed. Do not commit: the supervisor owns commits. Record intervention evidence and MACC improvement recommendations in .macc/repair-notes.md. Repair only prerequisites. Do not copy, import or commit unfinished implementations or evidence from performer worktrees; those remain task deliveries and must resume in their original workers. Read original logs at {}. Validation commands are {:?}; a command that already fails on the unmodified base does not block integration, but the repair must not add failures to it. Report missing external authority without guessing it.{rework}",diagnosis.summary,root.join(".macc/log").display(),commands);
     agent.run(worktree, &prompt, dir, &phase("repair")).await?;
     progress.enter(
         report,
@@ -353,6 +360,7 @@ pub fn integrate(
     root: &Path,
     worktree: &Path,
     target: &super::workspace::Target,
+    incident: &Incident,
 ) -> Result<String> {
     use macc_core::coordinator::integration::{publish_commit, PublishOutcome};
     let base = target.base.as_str();
@@ -361,7 +369,7 @@ pub fn integrate(
             "Repair agent created commits outside the intervention transaction".into(),
         ));
     }
-    git(worktree, &["add", "--all"])?;
+    super::repair_changes::prepare(worktree, incident)?;
     let changed = git(worktree, &["diff", "--cached", "--name-only"])?;
     if changed.lines().any(|p| {
         p == "prd.json"

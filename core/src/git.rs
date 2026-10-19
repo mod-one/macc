@@ -62,7 +62,7 @@ fn run_git_output(current_dir: &Path, args: &[&str], action: &str) -> Result<Out
         })
 }
 
-fn run_git_output_with_env(
+pub(crate) fn run_git_output_with_env(
     current_dir: &Path,
     args: &[&str],
     envs: &[(&str, &str)],

@@ -1,9 +1,9 @@
 use super::io;
 use super::repair;
 use super::report::{write_json, Intervention};
+use super::task_requeue::requeue;
 use super::tool;
 use macc_core::config::CanonicalConfig;
-use macc_core::coordinator::types::CoordinatorEnvConfig;
 use macc_core::supervisor::{incident, SupervisorConfig};
 use macc_core::{MaccError, ProjectPaths, Result};
 use serde_json::json;
@@ -157,7 +157,12 @@ pub(super) async fn intervene(
         format!("Committing the repair and publishing it to {destination}"),
     )?;
     ensure_not_stopped(paths)?;
-    report.commit = Some(repair::integrate(&paths.root, &worktree, &target)?);
+    report.commit = Some(repair::integrate(
+        &paths.root,
+        &worktree,
+        &target,
+        &report.incident,
+    )?);
     progress.enter(
         report,
         "requeuing",
@@ -166,7 +171,8 @@ pub(super) async fn intervene(
     ensure_not_stopped(paths)?;
     requeue(paths, canonical, &diagnosis.task_ids, &report.detail)?;
     if !config.auto_restart {
-        report.status = "recovered".into();
+        report.status = "repair_integrated".into();
+        report.next_action = Some("Repair integrated and retained work reconciled. Automatic restart is disabled; start `macc coordinator run` when ready.".into());
         report.detail = format!("{}; repair integrated and tasks requeued; automatic restart disabled, coordinator remains stopped", report.detail);
         progress.step(
             report,
@@ -216,7 +222,11 @@ async fn restart(
     lock: &macc_core::fs_lock::AdvisoryLock,
     progress: &super::report::Progress<'_>,
 ) -> Result<()> {
-    progress.enter(report, "restarting", "Restarting the coordinator")?;
+    progress.enter(
+        report,
+        "restart_requested",
+        "Restarting the coordinator; recovery not yet verified",
+    )?;
     ensure_not_stopped(paths)?;
     let pid = macc_core::service::coordinator::coordinator_restart_after_intervention(
         paths,
@@ -240,68 +250,27 @@ async fn restart(
         format!("{pid}\n"),
     )
     .map_err(|e| io(&paths.root, e))?;
+    let ids = report
+        .diagnosis
+        .as_ref()
+        .map(|d| d.task_ids.clone())
+        .filter(|ids| !ids.is_empty())
+        .unwrap_or_else(|| report.incident.tasks.iter().map(|t| t.id.clone()).collect());
+    progress.enter(
+        report,
+        "restart_requested",
+        "Coordinator ready; checking that repaired tasks resume",
+    )?;
+    super::restart_observation::wait(
+        paths,
+        &report.incident.run_id,
+        &ids,
+        Duration::from_secs(15),
+    )
+    .await?;
     report.status = "recovered".into();
     Ok(())
 }
-fn requeue(
-    paths: &ProjectPaths,
-    canonical: &CanonicalConfig,
-    ids: &[String],
-    proof: &str,
-) -> Result<()> {
-    // Existing unblock API reconciles dependency descendants and records operator evidence.
-    let config = canonical.automation.coordinator.as_ref();
-    let env = CoordinatorEnvConfig::default();
-    let mut args = std::collections::BTreeMap::new();
-    if let Some(mode) = config.and_then(|c| c.storage_mode.as_ref()) {
-        args.insert("storage-mode".into(), mode.clone());
-    }
-    for id in ids {
-        let value =
-            macc_core::coordinator::state::coordinator_state_registry_load(&paths.root, &args)?;
-        let registry = macc_core::coordinator::model::TaskRegistry::from_value(&value)?;
-        let task = registry
-            .find_task(id)
-            .ok_or_else(|| MaccError::Validation(format!("Unknown repaired task {id}")))?;
-        if !incident::repair_candidate(task) {
-            return Err(MaccError::Validation(format!(
-                "Task {id} is not an eligible repair root"
-            )));
-        }
-        if task.state == "blocked" {
-            macc_core::service::coordinator_workflow::coordinator_unblock_task(
-                paths, config, &env, id, proof,
-            )?;
-        } else if incident::in_flight_phase(task) {
-            // Between phases: the restarted run resumes the pending phase from
-            // this state. Resetting it to todo would discard the delivered
-            // work's progress (tests passed, review recorded). Only drop the
-            // dead process reference.
-            let mut registry = registry;
-            let task = registry.find_task_mut(id).unwrap();
-            task.ensure_runtime().pid = None;
-            macc_core::coordinator::state::coordinator_state_registry_save(
-                &paths.root,
-                &args,
-                &registry.to_value()?,
-            )?;
-        } else {
-            // Crash recovery runs only with the coordinator stopped; preserve committed work for reconciliation.
-            let mut registry = registry;
-            let task = registry.find_task_mut(id).unwrap();
-            task.set_workflow_state(macc_core::coordinator::WorkflowState::Todo);
-            task.ensure_runtime()
-                .set_status(macc_core::coordinator::RuntimeStatus::Idle);
-            macc_core::coordinator::state::coordinator_state_registry_save(
-                &paths.root,
-                &args,
-                &registry.to_value()?,
-            )?;
-        }
-    }
-    Ok(())
-}
-
 /// A crashed engine can leave performers alive. Signal only their recorded groups.
 async fn stop_orphan_jobs(incident: &macc_core::supervisor::incident::Incident) -> Result<()> {
     #[cfg(unix)]

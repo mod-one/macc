@@ -491,7 +491,8 @@ fn classify_parked_todo_task(
     }
     // Parked for a same-worktree retry with attempts left: dispatch will pick
     // it up on this run, so leave it alone.
-    let resumable = task.is_awaiting_tool_availability_retry()
+    let resumable = task.is_awaiting_repair_resume()
+        || task.is_awaiting_tool_availability_retry()
         || (task.is_awaiting_same_worktree_retry()
             && task.task_runtime.retries_count() <= same_worktree_budget);
     if resumable {

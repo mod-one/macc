@@ -99,6 +99,10 @@ fn analyze_failure(
         return Ok(Some(report));
     }
 
+    if let Some(report) = super::diagnostic_event_log::failure(paths, since.as_ref())? {
+        return Ok(Some(report));
+    }
+
     // Legacy logs do not carry a reliable structured timestamp on every line.
     // They remain a fallback only for unscoped legacy state; using them for a
     // managed command would reintroduce cross-run error attribution.
@@ -252,7 +256,7 @@ fn report_from_logs(logs: &str) -> Option<FailureReport> {
     None
 }
 
-fn build_failure_report(
+pub(super) fn build_failure_report(
     message: String,
     task_id: Option<String>,
     phase: Option<String>,

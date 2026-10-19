@@ -23,6 +23,7 @@ pub mod prd_auditor;
 pub mod precondition_scope;
 pub mod preflight;
 pub mod rate_limit;
+pub mod repair_handoff;
 pub mod runtime;
 pub mod session_identity;
 pub mod session_manager;

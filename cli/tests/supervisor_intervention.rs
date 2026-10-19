@@ -326,7 +326,8 @@ fn stop_command_marks_an_in_flight_intervention_interrupted() {
     assert!(live["intervention"]["activity"]
         .as_str()
         .unwrap()
-        .starts_with("AI diagnosis with fake"));
+        .starts_with("AI diagnosis"));
+    assert_eq!(live["intervention"]["tool"], "fake");
     assert!(live["intervention"]["phase_started_at"].is_string());
     assert!(live["intervention"]["started_at"].is_string());
     let output = Command::new(env!("CARGO_BIN_EXE_macc"))

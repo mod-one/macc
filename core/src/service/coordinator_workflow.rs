@@ -2268,6 +2268,19 @@ pub fn coordinator_unblock_task(
             "Task '{task_id}' is blocked by a dependency. Resolve or unblock the root task shown in its error instead."
         )));
     }
+    // Reconcile before changing task state. A conflict preserves the original
+    // worktree and leaves the task blocked, with durable content/index refs.
+    let repaired_base = if task.has_worktree_attached() {
+        let reference =
+            crate::config::CoordinatorConfigResolved::resolve(coordinator_cfg).reference_branch;
+        Some(crate::coordinator::repair_handoff::reconcile(
+            &paths.root,
+            task,
+            &reference,
+        )?)
+    } else {
+        None
+    };
     if let Some(block) = task.blocked_on_external.as_ref() {
         task.task_runtime.external_block_resolution =
             Some(crate::coordinator::model::ExternalBlockResolution {
@@ -2280,6 +2293,13 @@ pub fn coordinator_unblock_task(
     task.set_workflow_state(WorkflowState::Todo);
     let runtime = task.ensure_runtime();
     runtime.set_status(RuntimeStatus::Idle);
+    runtime.pid = None;
+    if let Some(base) = repaired_base {
+        runtime.extra.insert(
+            crate::coordinator::repair_handoff::RESUME_KEY.into(),
+            serde_json::json!({"base":base,"evidence":evidence}),
+        );
+    }
     runtime.last_error = None;
     runtime.last_error_code = None;
     runtime.last_error_origin = None;
