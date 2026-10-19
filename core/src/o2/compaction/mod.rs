@@ -6,6 +6,28 @@ pub use pressure::states;
 pub(crate) use pressure::{evaluate as evaluate_pressure, observe as observe_pressure};
 mod freshness;
 mod probe;
+/// Observe only the declared provider version, without adopting compaction or
+/// reusing a potentially stale probe. Call outside authority/database locks.
+pub(crate) fn observe_version(
+    root: &Path,
+    command: &str,
+    profile: &crate::tool::compaction::CompactionSpec,
+) -> Result<String> {
+    profile.validate()?;
+    let executable = probe::executable(command)?;
+    let raw = probe::run(root, &executable, "--version")?;
+    if !regex::Regex::new(&profile.version_pattern)
+        .map_err(|e| error(e.to_string()))?
+        .is_match(&raw)
+        || raw.trim().is_empty()
+        || raw.trim().chars().count() > 160
+    {
+        return Err(error(
+            "Provider version output does not match its bounded adapter declaration",
+        ));
+    }
+    Ok(raw.trim().into())
+}
 use super::*;
 pub use options::{execution_options, ExecutionOptions};
 use rusqlite::{params, OptionalExtension};

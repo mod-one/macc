@@ -3,6 +3,9 @@
 mod merge_repair_runner;
 #[path = "support/o2_runner.rs"]
 mod o2_runner;
+#[cfg(unix)]
+#[path = "support/usage_identity_runner.rs"]
+mod usage_identity_runner;
 use serde_json::{json, Value};
 use std::io::Write;
 use std::path::{Path, PathBuf};

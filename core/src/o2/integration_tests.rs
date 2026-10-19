@@ -46,6 +46,7 @@ fn checkpoint_context_cache_and_usage_share_the_exact_invocation() {
     store::usage::begin(
         root,
         &store::usage::BeginRequest {
+            invocation: None,
             key: grant.key.clone(),
             phase: "dev".into(),
         },

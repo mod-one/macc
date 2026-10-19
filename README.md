@@ -419,6 +419,8 @@ macc prd show-run <run-id>
 
 Generated outputs land in `.macc/generated/prd/macc-prd-planner/<run-id>/`.
 `--performer` and `--skill` are intentionally not exposed — the skill is fixed internally.
+For `prd validate`, relative input paths resolve from the effective `--cwd`
+directory (the current directory when omitted); absolute paths are preserved.
 
 </details>
 

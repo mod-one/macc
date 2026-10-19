@@ -7,8 +7,10 @@ usage_plan='null'
 usage_raw_capture=""
 usage_max_output_bytes=1048576
 prepare_usage() {
-  local plan
-  if ! plan="$(jq -nc --argjson key "$sqlite_lease_key" --arg phase "$checkpoint_phase" '$key+{phase:$phase}' | session_service usage-begin)"; then
+  [[ "$session_backend" == sqlite && -n "$sqlite_lease_key" ]] || return 0
+  local plan invoke_command="$1"
+  shift
+  if ! plan="$( { if [[ $# -gt 0 ]]; then printf '%s\0' "$@"; fi; } | jq -Rsc --arg command "$invoke_command" --argjson key "$sqlite_lease_key" --arg phase "$checkpoint_phase" '$key+{phase:$phase,invocation:{command:$command,args:(split("\u0000")[:-1])}}' | session_service usage-begin)"; then
     echo 'Warning: usage capture could not start; preserving normal tool execution' >&2
     return 0
   fi

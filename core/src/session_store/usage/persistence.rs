@@ -11,6 +11,7 @@ fn encoded<T: serde::Serialize>(v: &T) -> Result<String> {
     serde_json::to_string(v).map_err(|e| error(e.to_string()))
 }
 pub fn begin(root: &Path, r: &BeginRequest) -> Result<CapturePlan> {
+    let metadata = metadata::prepare(root, r)?;
     let _guard = lock(root)?;
     let (mut db, _) = db::active(root)?;
     if !ready(&db)? {
@@ -73,8 +74,8 @@ pub fn begin(root: &Path, r: &BeginRequest) -> Result<CapturePlan> {
         role: identity["role"].as_str().unwrap_or_default().into(),
         tool_id: identity["tool_id"].as_str().unwrap_or_default().into(),
         phase: r.phase.clone(),
-        model: None,
-        provider_version: None,
+        model: metadata.model,
+        provider_version: metadata.version,
         schema: plan.profile.as_ref().map(|p| p.schema.clone()),
         measurement_source: "runner_pending".into(),
         token_quality: "unknown".into(),
@@ -82,7 +83,11 @@ pub fn begin(root: &Path, r: &BeginRequest) -> Result<CapturePlan> {
         currency: None,
         reported: Counters::default(),
         incremental: Counters::default(),
-        notes: vec!["usage_pending_or_interrupted".into()],
+        notes: metadata
+            .notes
+            .into_iter()
+            .chain(["usage_pending_or_interrupted".into()])
+            .collect(),
         status: "pending".into(),
         outcome: None,
         elapsed_ms: None,
@@ -162,9 +167,9 @@ pub fn end(root: &Path, r: &EndRequest) -> Result<UsageRecord> {
     {
         crate::o2::compaction::observe_pressure(&tx, root, &r.key, &r.raw)?;
     }
+    let same_session = observation.session.is_none() || observation.session == provider;
+    metadata::finalize(&mut record, &mut observation, same_session);
     record.reported = observation.counters;
-    record.notes = observation.notes;
-    record.model = observation.model;
     if let Some(p) = &plan.profile {
         let scope = encoded(&(
             record.tool_id.as_str(),

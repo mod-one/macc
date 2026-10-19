@@ -79,6 +79,15 @@ pub struct BeginRequest {
     #[serde(flatten)]
     pub key: LeaseKey,
     pub phase: String,
+    /// Prepared argv before prompt/output-mode arguments; optional for old runners.
+    #[serde(default)]
+    pub invocation: Option<Invocation>,
+}
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Invocation {
+    pub command: String,
+    pub args: Vec<String>,
 }
 #[derive(Debug, Deserialize)]
 pub struct EndRequest {

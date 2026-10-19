@@ -78,7 +78,6 @@ run_sqlite_session() {
   sqlite_lease_key="$(jq -c '{session_id,lease_token,generation}' <<<"$grant")"
   sid="$(jq -r '.provider_session_id // empty' <<<"$grant")"
   sid_is_new="$(jq -r 'if .is_new then 1 else 0 end' <<<"$grant")"
-  prepare_usage
   prepare_mcp_access
   local native_options native_key native_value
   if native_options="$(printf '%s' "$sqlite_lease_key" | session_service compaction-options)"; then

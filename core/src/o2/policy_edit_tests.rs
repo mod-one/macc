@@ -4,7 +4,7 @@ fn fixture() -> tempfile::TempDir {
     std::fs::create_dir_all(root.path().join(".macc/state")).unwrap();
     std::fs::write(
         root.path().join(".macc/macc.yaml"),
-        "tools:\n  enabled: [codex]\nsettings:\n  offline: true\n",
+        "tools:\n  enabled: [future-ai]\nsettings:\n  offline: true\n",
     )
     .unwrap();
     root
@@ -25,7 +25,7 @@ fn preview_does_not_write_and_apply_preserves_unrelated_inheritance() {
     assert!(config.adaptive_compaction.is_none());
     assert!(config.code_intelligence.is_none());
     assert!(config.settings.offline);
-    assert_eq!(config.tools.enabled, vec!["codex"]);
+    assert_eq!(config.tools.enabled, vec!["future-ai"]);
     let field = get(root.path(), "memory.enabled").unwrap();
     assert_eq!(field.value, true);
     assert_eq!(field.field.kind, "bool");

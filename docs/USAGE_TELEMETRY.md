@@ -54,8 +54,19 @@ schema, provenance, notes and a receipt digest. They do not contain raw output,
 prompts, credentials or lease tokens. Raw task logs retain their existing logging
 policy. Temporary structured captures use private `mktemp` files and normal runner
 cleanup; a hard process crash may leave a private temporary file for OS cleanup.
-`provider_version` is currently unknown: a declared schema is not a live capability
-probe or certification of the installed CLI version.
+For new runner invocations, `model` comes from the actual prepared `--model`/`-m`
+arguments (after tier routing), or the adapter-declared JSON/TOML model file when
+no model argument is present. A model reported in matching provider output takes
+precedence, including multi-model aggregates. A configured tier alone is not
+proof that a model was applied. Notes record the metadata source.
+
+`provider_version` uses a fresh local `--version` observation when the adapter
+declares a compaction version pattern. This reuses the bounded capability probe
+(three seconds, 64 KiB), outside session authority/database locks; it does not
+enable compaction, change provider arguments or invoke a model. Unavailable,
+unrecognized or unsafe metadata remains unknown. Raw argv is not stored. These
+observations do not certify other CLI capabilities and do not backfill historical
+receipts or infer prices.
 
 ## Rollout and configuration
 
@@ -100,6 +111,9 @@ unknown receipt rather than falsely accepting measurements.
   `GET/POST /api/v1/sessions/authority/usage-upgrade` ownership/review gates.
 - Internal `usage-begin` and `usage-end` accept bounded JSON on stdin, using the
   existing internal session-service transport and fenced lease keys.
+  `usage-begin` optionally accepts `invocation: {command, args}` before prompt
+  insertion; older callers may omit it. Repeated begins retain the first receipt's
+  plan and metadata. Observation failures preserve normal tool execution.
 - `macc save` includes the SQLite usage ledger by default; see
   [Save and Restore](SAVE_RESTORE.md). Restores keep receipts and clear cumulative
   watermarks while quarantining native transcripts. Standalone consistent SQLite

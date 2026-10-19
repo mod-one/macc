@@ -141,7 +141,12 @@ impl Command for PrdCommand {
                 &*self.app.engine,
             ),
             PrdSubcommand::Validate { prd_path, json } => {
-                run_validate(prd_path, *json, &*self.app.engine)
+                let target = if prd_path.is_absolute() {
+                    prd_path.clone()
+                } else {
+                    self.app.cwd.join(prd_path)
+                };
+                run_validate(&target, *json, &*self.app.engine)
             }
             PrdSubcommand::Runs { json } => run_list_runs(&paths, *json, &*self.app.engine),
             PrdSubcommand::ShowRun { run_id, json } => run_show_run(&paths, run_id, *json),

@@ -1,4 +1,5 @@
 //! Invocation-level usage. Native-format knowledge belongs to ToolSpec profiles.
+mod metadata;
 mod model;
 mod normalization;
 mod parser;

@@ -77,6 +77,7 @@ fn run(root: &Path, task: &str, cost: f64) -> String {
     store::usage::begin(
         root,
         &store::usage::BeginRequest {
+            invocation: None,
             key: grant.key.clone(),
             phase: "dev".into(),
         },

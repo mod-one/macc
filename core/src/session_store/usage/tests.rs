@@ -53,6 +53,7 @@ fn cumulative_resume_and_replayed_receipts_never_double_count() {
     begin(
         r,
         &BeginRequest {
+            invocation: None,
             key: first.key.clone(),
             phase: "dev".into(),
         },
@@ -71,6 +72,7 @@ fn cumulative_resume_and_replayed_receipts_never_double_count() {
     begin(
         r,
         &BeginRequest {
+            invocation: None,
             key: second.key.clone(),
             phase: "fix".into(),
         },
@@ -153,6 +155,7 @@ fn unknown_and_oversized_calls_are_visible_without_affecting_tasks() {
     let plan = begin(
         r,
         &BeginRequest {
+            invocation: None,
             key: lease.key.clone(),
             phase: "dev".into(),
         },
@@ -191,6 +194,7 @@ fn tasks_tools_and_stale_fencing_remain_isolated() {
     begin(
         r,
         &BeginRequest {
+            invocation: None,
             key: a.key.clone(),
             phase: "dev".into(),
         },
@@ -202,6 +206,7 @@ fn tasks_tools_and_stale_fencing_remain_isolated() {
     begin(
         r,
         &BeginRequest {
+            invocation: None,
             key: b.key.clone(),
             phase: "dev".into(),
         },
@@ -287,6 +292,7 @@ fn concurrent_receipt_replays_record_one_invocation() {
     begin(
         t.path(),
         &BeginRequest {
+            invocation: None,
             key: lease.key.clone(),
             phase: "dev".into(),
         },
@@ -316,6 +322,7 @@ fn mismatched_native_session_is_not_attributed() {
     begin(
         t.path(),
         &BeginRequest {
+            invocation: None,
             key: lease.key.clone(),
             phase: "dev".into(),
         },
@@ -335,6 +342,7 @@ fn active_capture_plan_is_immutable_until_the_next_invocation() {
     let t = root();
     let lease = claim(t.path(), "A", "future-tool", "invocation");
     let request = BeginRequest {
+        invocation: None,
         key: lease.key.clone(),
         phase: "dev".into(),
     };
@@ -351,6 +359,7 @@ fn active_capture_plan_is_immutable_until_the_next_invocation() {
         begin(
             t.path(),
             &BeginRequest {
+                invocation: None,
                 key: next.key,
                 phase: "fix".into()
             }
@@ -367,6 +376,7 @@ fn cache_write_only_observations_count_as_measured_calls() {
     begin(
         t.path(),
         &BeginRequest {
+            invocation: None,
             key: lease.key.clone(),
             phase: "dev".into(),
         },
@@ -412,6 +422,7 @@ fn imported_transcripts_with_zero_legacy_uses_do_not_get_a_zero_baseline() {
     begin(
         t.path(),
         &BeginRequest {
+            invocation: None,
             key: lease.key.clone(),
             phase: "dev".into(),
         },

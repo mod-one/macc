@@ -75,6 +75,7 @@ fn record(root: &Path, lease: &store::LeaseGrant) {
     store::usage::begin(
         root,
         &store::usage::BeginRequest {
+            invocation: None,
             key: lease.key.clone(),
             phase: "dev".into(),
         },
