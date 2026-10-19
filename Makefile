@@ -23,6 +23,7 @@ test-tool-runner:
 	bash automat/tests/test_terminal_payload_construction.sh
 	bash automat/tests/test_precondition_markers.sh
 	bash automat/tests/test_quota_classification.sh
+	bash automat/tests/test_provider_unavailable_resume.sh
 	bash automat/tests/test_continuation_prompt.sh
 	bash automat/tests/test_codex_effort_args.sh
 	bash automat/tests/test_codex_resume_failure.sh

@@ -2,6 +2,38 @@
 use super::*;
 
 #[test]
+fn related_task_context_retains_external_diagnosis_without_repair() {
+    let temp = fixture(false);
+    let root = temp.path();
+    std::fs::write(root.join(".macc/fake-agent.sh"), r#"#!/bin/sh
+set -eu
+printf '%s' '{"summary":"Native host unavailable; related deployment has a quota","repairable":false,"requires_human":true,"task_ids":["ROOT","DEPLOYMENT"],"external_prerequisites":["iOS host"]}' > .macc/supervisor-diagnosis.json
+"#).unwrap();
+    let supervisor = start(root);
+    wait_for(|| report(root).is_some_and(|r| r["intervention"]["status"] == "escalated"));
+    let r = report(root).unwrap();
+    assert_eq!(
+        r["intervention"]["diagnosis"]["task_ids"],
+        serde_json::json!(["ROOT"])
+    );
+    assert_eq!(
+        r["intervention"]["diagnosis"]["related_task_ids"],
+        serde_json::json!(["DEPLOYMENT"])
+    );
+    assert_eq!(
+        r["intervention"]["diagnosis"]["external_prerequisites"],
+        serde_json::json!(["iOS host"])
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("defect.txt"))
+            .unwrap()
+            .trim(),
+        "broken"
+    );
+    drop(supervisor);
+}
+
+#[test]
 fn external_diagnosis_waits_durably_and_rechecks_only_after_configuration_changes() {
     let temp = fixture(false);
     let root = temp.path();

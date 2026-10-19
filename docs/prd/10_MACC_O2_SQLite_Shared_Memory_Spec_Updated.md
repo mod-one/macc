@@ -2339,6 +2339,18 @@ Additional local baseline references (inspected for version 2.1):
 
 ## 27. Final Recommendation / Definition of Done
 
+### Apply and restart readiness (2026-10-19 correction)
+
+O2 flags describe requested policy; operational readiness additionally requires
+SQLite session authority and a ready O2 schema. Shared `macc apply` planning must
+include the required session migration/schema upgrade, expose it before CLI,
+TUI or Web confirmation, and bind execution to the reviewed configuration and
+source revision. Use existing migration backups and ownership/lease safeguards.
+An incompatible or orphaned authority must fail with recovery instructions.
+Coordinator preflight must refuse configured-but-unavailable O2, and Doctor must
+surface it as blocking. Clear retains session authority and O2 history; restoring
+configuration alone must not be presented as restoring historical O2 data.
+
 MACC should **build and own** a minimal, robust Rust+SQLite Shared Context Engine. Graphify is an opt-in, fully managed code-intelligence provider; Serena is an optional precise symbol-navigation provider. Neither replaces the O2 Memory Ledger or the task checkpoint store. The Coordinator should give each new task a fresh compatible conversation, retrieve only approved and relevant project knowledge, and adaptively compact or rotate sessions using the strongest **verified** mechanism supported by each tool.
 
 **Delivery order matters:** fix cross-task session reuse (P0), implement checkpoints and trustworthy metrics (P0), deliver O2/context retrieval (P1), then provider-neutral compaction and managed code-intelligence lifecycle (P1), and only afterward measure Graphify/Serena benefits (P2). Never accept token savings that degrade correctness, test results, security boundaries or adherence to pinned PRD/design-system requirements.

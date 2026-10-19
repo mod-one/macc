@@ -19,6 +19,7 @@ pub mod semantic;
 mod tests;
 pub mod tuning;
 pub use schema::{ready, upgrade};
+pub mod activation;
 pub(crate) fn initial_schema() -> &'static str {
     schema::SCHEMA
 }

@@ -21,6 +21,8 @@ pub enum Scope {
 #[derive(Debug, Serialize, Deserialize, Default, Clone, PartialEq)]
 pub struct ActionPlan {
     pub actions: Vec<Action>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub o2_activation: Option<crate::o2::activation::Activation>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -153,6 +155,9 @@ impl ActionPlan {
 
         let mut output = String::new();
         writeln!(output, "Planned changes summary:").unwrap();
+        if let Some(activation) = &self.o2_activation {
+            writeln!(output, "O2 prerequisite: {}", activation.operation).unwrap();
+        }
         writeln!(
             output,
             "{:<8} {:<10} {:<40} {:>10}",

@@ -26,4 +26,8 @@ printf '%s\n' 'permission denied' > "$tmp/output"
 LAST_ERROR_CODE=''
 detect_rate_limit "$tmp/output"
 [[ -z "$LAST_ERROR_CODE" ]]
+printf '%s\n' "You've hit your session limit · resets 10:10pm (UTC)" > "$tmp/output"
+LAST_ERROR_CODE=''
+detect_rate_limit "$tmp/output"
+[[ "$LAST_ERROR_CODE" == E602 && "$LAST_ERROR_MESSAGE" == *'resets 10:10pm (UTC)'* ]]
 printf '%s\n' 'Quota classification and log path tests passed.'

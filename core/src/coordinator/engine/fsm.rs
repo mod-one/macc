@@ -2201,6 +2201,7 @@ pub(crate) async fn run_single_prd_control_plane(
     env_cfg: &crate::coordinator::types::CoordinatorEnvConfig,
     logger: Option<&dyn CoordinatorLog>,
 ) -> Result<()> {
+    crate::o2::activation::require_ready(repo_root)?;
     let cfg = CanonicalCoordinatorConfigResolved::resolve(coordinator);
     let run_id = if let Ok(existing) = std::env::var("COORDINATOR_RUN_ID") {
         let trimmed = existing.trim();
@@ -2651,21 +2652,12 @@ pub(crate) async fn run_single_prd_control_plane(
         ));
     }
 
-    // Reason for a normal (non-error, non-operator) stop. The control-plane loop
-    // returns Ok(()) both when all tasks complete and when the dispatch limit is
-    // reached; that distinction is only recorded as a `dispatch_limit_reached`
-    // event, so recover it here to persist a meaningful stop_reason for clients
-    // (TUI Watch, Web) that read the run record rather than the live process.
-    let normal_stop_reason = |sqlite: &crate::coordinator_storage::SqliteStorage| -> String {
-        if let Ok(events) = sqlite.load_recent_events(20) {
-            let dispatch_limited = events
-                .iter()
-                .any(|e| e.event_type == "dispatch_limit_reached");
-            if dispatch_limited {
-                return "dispatch limit reached".to_string();
-            }
-        }
-        "all tasks completed".to_string()
+    // Use this run's dispatch state: draining jobs can produce more than twenty
+    // events after the budget marker, and prior runs' markers are irrelevant.
+    let normal_stop_reason = if backend.run_state.dispatch_limit_event_emitted {
+        "dispatch limit reached"
+    } else {
+        "all tasks completed"
     };
 
     let _ = sqlite.get_active_coordinator_run().map(|run_opt| {
@@ -2694,7 +2686,7 @@ pub(crate) async fn run_single_prd_control_plane(
             } else {
                 // Normal completion (exit 0): persist the human-readable reason so
                 // it is not lost the way it previously was.
-                r.stop_reason = Some(normal_stop_reason(&sqlite));
+                r.stop_reason = Some(normal_stop_reason.to_string());
             }
             let _ = sqlite.upsert_coordinator_run(&r);
         }

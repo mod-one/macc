@@ -130,6 +130,12 @@ impl AppState {
                 )
             })
             .unwrap_or_default();
+        if let Some(activation) = context.and_then(|c| c.plan.o2_activation.as_ref()) {
+            text.push_str(&format!(
+                "O2: {}. Migration backups are retained under .macc/state.\n\n",
+                activation.operation
+            ));
+        }
         if context.is_some_and(|c| c.needs_user_consent()) {
             text.push_str(&format!(
                 "These operations also change user files. Type YES to allow them.\nConsent: {}_\n",

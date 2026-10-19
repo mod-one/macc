@@ -23,6 +23,9 @@ pub struct Diagnosis {
     pub requires_human: bool,
     #[serde(default)]
     pub task_ids: Vec<String>,
+    /// Related evidence only; never authorizes repair or requeue outside this incident.
+    #[serde(default)]
+    pub related_task_ids: Vec<String>,
     #[serde(default)]
     pub macc_findings: Vec<String>,
     /// Blocking defect in the installed MACC runtime; project edits cannot fix it.
@@ -89,26 +92,31 @@ pub async fn diagnose(
     let evidence =
         serde_json::to_string_pretty(incident).map_err(|e| MaccError::Validation(e.to_string()))?;
     let prompt=format!("You are the MACC supervisor diagnosing a coordinator incident. Project: {}. Isolated analysis worktree: {}. Read the original coordinator and performer logs under {}/.macc/log, the task requirements and source. Identify root causes, distinguishing project defects, missing migrations, external conditions, and MACC defects. Prefer recorded unmet_preconditions/result_explanation over normalized error fragments. Do not edit source, reset files, invoke a coordinator, change task state, or approve human gates. Write exactly one JSON object to .macc/supervisor-diagnosis.json: {{\"summary\":\"evidence-based diagnosis\",\"repairable\":true,\"requires_human\":false,\"restart_only\":false,\"task_ids\":[\"root task ids verified by evidence\"],\"macc_findings\":[\"MACC dysfunction and concrete improvement suggestions\"],\"macc_repair_required\":false,\"external_prerequisites\":[]}}. Set restart_only=true when no source change is needed and restarting the coordinator resumes the work: the coordinator stopped on a MACC engine error or a transient condition while the root tasks were intact (for example between phases: testing, reviewing, changes_requested), and their pending phase (test, review, fix, merge) will handle any project finding such as a changes-requested review. A missing human decision, external credential or explicit operator gate requires_human=true. Source/schema fixes are repairable by this authorized supervisor even when outside the original task's writable scope; a task with out_of_scope_fix names the paths, owned by another module, where its precondition must be fixed (for example an API route whose declared audience or contract does not serve the consuming web task). For an external quota, also include retry_at as an absolute RFC3339 provider reset time and unavailable_tool as its tool ID when supported by evidence; omit them when unknown. Set macc_repair_required=true when an installed MACC defect must be fixed before the selected tasks can complete; source repair here targets only the application, never the MACC product or generated .macc runtime. List concrete unavailable devices, external approvals or credentials under external_prerequisites; do not claim source edits can supply them. Keep non-blocking MACC improvement ideas in macc_findings with macc_repair_required=false. Diagnose first; do not repair in this phase.\nIncident:\n{evidence}",root.display(),worktree.display(),root.display());
+    let prompt = format!("{prompt}\nOnly incident task IDs belong in task_ids. Put other tasks mentioned as context in related_task_ids; they cannot authorize any repair or task-state change.");
     remove_response(&worktree.join(".macc/supervisor-diagnosis.json"))?;
     // A retried incident diagnoses in a slot that already holds repair work.
     let before = super::workspace::snapshot(worktree)?;
     agent.run(worktree, &prompt, dir, "diagnosis").await?;
-    let diagnosis: Diagnosis = read_json(&worktree.join(".macc/supervisor-diagnosis.json"))?;
-    if diagnosis
-        .task_ids
-        .iter()
-        .any(|id| !incident.tasks.iter().any(|t| t.id == *id))
-    {
-        return Err(MaccError::Validation(
-            "AI diagnosis selected a task outside this incident".into(),
-        ));
-    }
+    let mut diagnosis: Diagnosis = read_json(&worktree.join(".macc/supervisor-diagnosis.json"))?;
+    scope_diagnosis(&mut diagnosis, incident);
     if super::workspace::snapshot(worktree)? != before {
         return Err(MaccError::Validation(
             "Diagnosis modified source; analysis worktree retained for inspection".into(),
         ));
     }
     Ok(diagnosis)
+}
+
+fn scope_diagnosis(diagnosis: &mut Diagnosis, incident: &Incident) {
+    diagnosis.task_ids.retain(|id| {
+        if incident.tasks.iter().any(|t| t.id == *id) {
+            return true;
+        }
+        if !diagnosis.related_task_ids.contains(id) {
+            diagnosis.related_task_ids.push(id.clone());
+        }
+        false
+    });
 }
 pub use macc_core::supervisor::validation::commands as validation_commands;
 const VALIDATION_REGRESSION: &str = "Validation failed";
@@ -282,6 +290,7 @@ async fn repair_round(
     progress.enter(report, "repairing", activity)?;
     let rework = feedback.map(|reason| format!("\nThe previous state of this repair was rejected. Keep the valid work already in the worktree and address every point of the rejection: {reason}\nAn existing assertion may change only when it pins exactly the defective behaviour named in the diagnosis; justify each such change in .macc/repair-notes.md. If a point needs a decision outside your authority, do not guess: state it in .macc/repair-notes.md and leave that point unchanged.")).unwrap_or_default();
     let prompt=format!("You are the authorized MACC supervisor repair agent in an isolated worktree. Continue the existing repair in this same worktree. Inspect and preserve previous staged, unstaged and untracked work; do not reset or clean it. Repair these diagnosed root causes: {}. Source and database migration changes needed for these roots are authorized even outside the original performer scope. Preserve existing behavior and regression assertions; never bypass MFA or security, weaken tests, fabricate approval, change PRD/state/.macc metadata, or restart the coordinator. Integration rejects any change to prd.json, *.prd.json, .macc/, .env or .env.* (including .env.example): document new settings elsewhere. Add targeted regression tests. Install project dependencies if needed. Do not commit: the supervisor owns commits. Record intervention evidence and MACC improvement recommendations in .macc/repair-notes.md. Repair only prerequisites. Do not copy, import or commit unfinished implementations or evidence from performer worktrees; those remain task deliveries and must resume in their original workers. Read original logs at {}. Validation commands are {:?}; a command that already fails on the unmodified base does not block integration, but the repair must not add failures to it. Report missing external authority without guessing it.{rework}",diagnosis.summary,root.join(".macc/log").display(),commands);
+    let prompt = format!("{prompt}\nAuthorized incident targets: {:?}. Related tasks {:?} are read-only context; do not implement their work or repair their independent causes.", diagnosis.task_ids, diagnosis.related_task_ids);
     agent.run(worktree, &prompt, dir, &phase("repair")).await?;
     progress.enter(
         report,
@@ -434,6 +443,35 @@ fn io(path: &Path, source: std::io::Error) -> MaccError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn related_diagnostic_context_cannot_authorize_outside_tasks() {
+        let mut diagnosis: Diagnosis = serde_json::from_value(serde_json::json!({
+            "summary":"Native devices unavailable; deployment waits for quota",
+            "repairable":false,"requires_human":true,
+            "external_prerequisites":["Android device"],
+            "task_ids":["NATIVE","DEPLOYMENT"]
+        }))
+        .unwrap();
+        let incident = Incident {
+            id: "incident".into(),
+            run_id: "run".into(),
+            epoch: 1,
+            reason: "blocked".into(),
+            tasks: vec![macc_core::coordinator::model::Task {
+                id: "NATIVE".into(),
+                ..Default::default()
+            }],
+            recent_events: vec![],
+            run_status: Some("blocked".into()),
+        };
+        scope_diagnosis(&mut diagnosis, &incident);
+        scope_diagnosis(&mut diagnosis, &incident);
+        assert_eq!(diagnosis.task_ids, ["NATIVE"]);
+        assert_eq!(diagnosis.related_task_ids, ["DEPLOYMENT"]);
+        assert_eq!(diagnosis.external_prerequisites, ["Android device"]);
+        assert!(diagnosis.requires_human);
+        assert!(!diagnosis.repairable);
+    }
     #[test]
     fn validation_requires_tests() {
         let d = tempfile::tempdir().unwrap();

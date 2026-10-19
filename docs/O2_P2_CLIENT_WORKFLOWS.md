@@ -1,5 +1,29 @@
 # O2 P2-D: consolidated task workflows
 
+## Activating configured features
+
+Enabled O2 policy flags require SQLite session authority and the O2 schema.
+Enabling session usage capture also requests that storage, even with memory off.
+`macc apply --dry-run` includes that prerequisite in its reviewed operations.
+Confirming `macc apply` (or Apply in TUI/Web) migrates legacy sessions with a
+backup, or upgrades an existing SQLite schema with a database backup. New SQLite
+migrations already include the current O2 schema. The confirmation displays the
+O2 operation; configuration and migration-source revisions are checked again
+before generated files are written. Stop coordinator/supervisor and resolve
+outstanding session owners before migration. An orphaned database or invalid
+authority requires explicit recovery; apply does not overwrite it.
+Managed worker setup checks the main project's readiness and does not initialize
+an independent database in each worker.
+
+If an earlier saved session/O2 bundle contains history to recover, restore it
+before applying. A configuration-only restore recovers settings, not history.
+`macc clear` retains session authority and the O2 database, including memories,
+checkpoints and metrics. It refuses to remove worktrees while a recorded
+coordinator or supervisor is alive. Doctor reports configured-but-unavailable O2
+as blocking, and coordinator startup refuses a silent fallback to JSON. Use
+`macc o2 status` to check readiness after apply or restore. These operations do
+not activate disabled MCP, semantic search, Serena or Graphify integrations.
+
 P2-D connects the delivered memory, context, checkpoint/session and provider
 services in the two operator clients. The shared Rust `overview` application
 action supplies the same curated read model to CLI, TUI and Web. It is outside

@@ -14,10 +14,9 @@ pub fn clear_project(
     ui: &dyn InteractionHandler,
 ) -> Result<ClearExecutionReport> {
     ui.info("This will:");
-    ui.info(
-        "  1) Remove all non-root worktrees (equivalent to: macc worktree remove --all --force)",
-    );
+    ui.info("  1) Remove non-root worktrees; dirty worktrees are protected against removal");
     ui.info("  2) Remove MACC-managed files/directories in this project (macc clear)");
+    ui.info("  Session authority and O2 memory/checkpoints are retained. A configuration-only restore does not restore historical O2 data; use a saved session bundle for that.");
 
     if dry_run {
         let entries = crate::list_worktrees(&paths.root).unwrap_or_default();
@@ -38,8 +37,8 @@ pub fn clear_project(
             removed_worktrees
         ));
         ui.info(&format!(
-            "[Dry run] Would clear managed paths: removed={}, skipped=0",
-            clear_report.removed
+            "[Dry run] Would clear managed paths: removed={}, skipped={}",
+            clear_report.removed, clear_report.skipped
         ));
 
         return Ok(ClearExecutionReport {
@@ -52,6 +51,7 @@ pub fn clear_project(
         return Err(MaccError::Validation("Clear cancelled.".into()));
     }
 
+    crate::session_store::require_stopped(&paths.root)?;
     let removed_worktrees = crate::service::worktree::remove_all_worktrees(&paths.root, false)?;
     crate::prune_worktrees(&paths.root)?;
     ui.info(&format!("Removed worktrees: {}", removed_worktrees));

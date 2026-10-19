@@ -171,6 +171,9 @@ pub fn apply(
     ));
     let mut plan = engine.plan(&paths, &canonical, &materialized_units, &overrides)?;
     let ops = engine.plan_operations(&paths, &plan);
+    if let Some(activation) = &plan.o2_activation {
+        ui.info(&format!("O2 prerequisite: {}. Existing sessions/data are retained; migrations create backups. Restore a saved session bundle first if you want to recover earlier O2 history.", activation.operation));
+    }
     if !json {
         crate::ops_motif::print_trust_review_card(&paths, &plan, allow_user_scope);
         if !ui.confirm_yes_no("Proceed with apply [y/N]? ")? {

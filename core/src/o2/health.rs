@@ -4,16 +4,17 @@ use crate::doctor::DiagnosticFinding;
 pub(crate) fn findings(root: &Path) -> Vec<DiagnosticFinding> {
     let check = || -> Result<Vec<DiagnosticFinding>> {
         let p = policy::load(root)?;
-        if !p.memory.enabled
-            && !p.context_engine.enabled
-            && !p.adaptive_compaction.enabled
-            && !p.code_intelligence.enabled
-        {
+        let paths = crate::ProjectPaths::from_root(root);
+        let config = if paths.config_path.exists() {
+            crate::load_canonical_config(&paths.config_path)?
+        } else {
+            Default::default()
+        };
+        if !activation::requested(&config) {
             return Ok(vec![]);
         }
-        let view = policy::inspect(root)?;
-        if !view.ready {
-            return Ok(vec![DiagnosticFinding::warning("MACC-O2-UPGRADE","tools","O2 SQLite schema is unavailable","Enabled O2 features require the reviewed SQLite session authority and O2 schema upgrade.",Some("Open Sessions/O2 migration preview or run `macc o2 status`."))]);
+        if let Err(error) = activation::require_ready(root) {
+            return Ok(vec![DiagnosticFinding::error("MACC-O2-UPGRADE","tools","O2 configured but not operational",&error.to_string(),Some("Run `macc apply` and confirm the SQLite/O2 activation preview, or restore a saved O2 session bundle before running."), false)]);
         }
         if !p.code_intelligence.enabled {
             return Ok(vec![]);

@@ -82,6 +82,7 @@ pub fn apply_worktree(
     worktree_root: &Path,
     allow_user_scope: bool,
 ) -> Result<()> {
+    crate::o2::activation::require_ready(repo_root)?;
     let paths = crate::ProjectPaths::from_root(worktree_root);
     if worktree_root != repo_root {
         let repo_paths = crate::ProjectPaths::from_root(repo_root);

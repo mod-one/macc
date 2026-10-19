@@ -10,6 +10,15 @@ vi.mock('../api/client',async()=>{
 });
 const plan:ApiPlanResponse={planRevision:'plan-1',summary:{totalActions:1,filesWrite:1,filesMerge:0,consentRequired:0,backupRequired:1,backupPath:'.macc/backups'},files:[],diffs:[],risks:[],consents:[]};
 beforeEach(()=>{vi.mocked(runPlan).mockReset().mockResolvedValue(plan);vi.mocked(runApply).mockReset().mockResolvedValue({dryRun:false,appliedActions:1,changedFiles:1,results:[],backupLocations:[],warnings:[]});});
+it('shows SQLite activation and migration backups in the apply confirmation',async()=>{
+  vi.mocked(runPlan).mockResolvedValue({...plan,files:[{path:'O2: migrate sessions to SQLite',kind:'other',scope:'project',consentRequired:false,backupRequired:true,setExecutable:false,riskLevel:'caution',contentPreview:null,explain:null}]});
+  render(<MemoryRouter><Apply /></MemoryRouter>);
+  await screen.findByText('Plan Summary');
+  fireEvent.click(screen.getByRole('button',{name:'Apply Changes'}));
+  expect(screen.getByRole('alertdialog')).toHaveTextContent('migrate sessions to SQLite');
+  expect(screen.getByRole('alertdialog')).toHaveTextContent('Migration backups are retained under .macc/state');
+  expect(runApply).not.toHaveBeenCalled();
+});
 it('requires confirmation even for project-only apply and Cancel sends no write',async()=>{
   render(<MemoryRouter><Apply /></MemoryRouter>);
   await screen.findByText('Plan Summary');

@@ -176,6 +176,20 @@ pub fn collect_plan_operations(paths: &ProjectPaths, plan: &ActionPlan) -> Vec<P
         .filter_map(|(path, entry)| entry.into_planned_op(paths, path))
         .collect();
 
+    if let Some(activation) = &plan.o2_activation {
+        ops.push(PlannedOp {
+            path: format!("O2: {}", activation.operation),
+            scope: Scope::Project,
+            consent_required: false,
+            kind: PlannedOpKind::Other,
+            metadata: PlannedOpMetadata {
+                backup_required: activation.source_sha256.is_some(),
+                ..Default::default()
+            },
+            before: None,
+            after: serde_json::to_vec_pretty(activation).ok(),
+        });
+    }
     ops.sort_by(|a, b| a.path.cmp(&b.path).then(a.kind.cmp(&b.kind)));
     ops
 }

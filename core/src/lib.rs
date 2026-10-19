@@ -751,6 +751,7 @@ pub fn build_plan(
         }
     }
 
+    total_plan.o2_activation = o2::activation::preview(&paths.root)?;
     total_plan.normalize();
     Ok(total_plan)
 }
@@ -1149,8 +1150,25 @@ pub fn apply_plan(
     plan.normalize();
     validate_plan(plan, allow_user_scope)?;
 
+    if o2::activation::preview(&paths.root)? != plan.o2_activation {
+        return Err(MaccError::Validation(
+            "O2 prerequisites changed after preview; review macc apply again".into(),
+        ));
+    }
+    if let Some(activation) = &plan.o2_activation {
+        o2::activation::apply(&paths.root, activation)?;
+    }
     let operations = plan::collect_plan_operations(paths, plan);
-    apply_operations(paths, &operations, allow_user_scope, |_, _, _| {})
+    let mut report = apply_operations(paths, &operations, allow_user_scope, |_, _, _| {})?;
+    if let Some(activation) = &plan.o2_activation {
+        if activation.source_sha256.is_some() {
+            report.outcomes.insert(
+                format!("O2: {}", activation.operation),
+                plan::ActionStatus::Updated,
+            );
+        }
+    }
+    Ok(report)
 }
 
 pub fn apply_operations<F>(
@@ -1424,6 +1442,10 @@ pub fn clear(paths: &ProjectPaths) -> Result<ClearReport> {
     let mut report = ClearReport::default();
     let mut removed_paths: Vec<PathBuf> = Vec::new();
     for rel in entries {
+        if o2::activation::retained_state(&rel) {
+            report.skipped += 1;
+            continue;
+        }
         let full = paths.root.join(&rel);
         if !full.exists() {
             continue;
@@ -1468,6 +1490,10 @@ pub fn clear_dry_run(paths: &ProjectPaths) -> Result<ClearReport> {
 
     let mut report = ClearReport::default();
     for rel in entries {
+        if o2::activation::retained_state(&rel) {
+            report.skipped += 1;
+            continue;
+        }
         let full = paths.root.join(&rel);
         if !full.exists() {
             continue;

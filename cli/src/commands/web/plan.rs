@@ -90,7 +90,7 @@ pub(super) fn build_plan_response(
     Ok(ApiPlanResponse {
         plan_revision: macc_core::service::apply_review::fingerprint(plan, ops)?,
         summary: ApiPlanSummary {
-            total_actions: plan.actions.len(),
+            total_actions: plan.actions.len() + usize::from(plan.o2_activation.is_some()),
             files_write: ops
                 .iter()
                 .filter(|op| op.kind == PlannedOpKind::Write)

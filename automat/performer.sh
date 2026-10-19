@@ -917,7 +917,7 @@ detect_rate_limit() {
       'macc_tool_limit:.*quota_exhausted|quota[[:space:]]+exceeded|insufficient[_[:space:]]quota|usage[[:space:]]+limit[[:space:]]+reached|hit[[:space:]]+your[[:space:]]+(usage[[:space:]]+|session[[:space:]]+)?limit|billing[[:space:]]+quota' "$output_file"; then
     LAST_ERROR_CODE="E602"
     LAST_ERROR_ORIGIN="runner"
-    LAST_ERROR_MESSAGE="quota exhausted; $(grep -iE 'try again at|retry_hint|retry.after' "$output_file" | tail -n 1 || true)"
+    LAST_ERROR_MESSAGE="quota exhausted; $(grep -iE 'try again at|resets |retry_hint|retry.after' "$output_file" | tail -n 1 || true)"
     return 0
   fi
   # E601: transient rate-limit / 429
@@ -1143,7 +1143,11 @@ run_tool() {
       set_last_error "$runner_code" "runner" "checkpoint/output finalization failed; retained work requires inspection"
     fi
     local result_exp=""
-    result_exp="$(resolve_task_result_exp "$output_capture" "error_runner_exit")"
+    if [[ "$LAST_ERROR_CODE" == E601 || "$LAST_ERROR_CODE" == E602 ]]; then
+      result_exp="$LAST_ERROR_MESSAGE"
+    else
+      result_exp="$(resolve_task_result_exp "$output_capture" "error_runner_exit")"
+    fi
     # A retry is progress, never a terminal phase failure. Once a terminal
     # failure is published, the coordinator may stop this process immediately.
     local failure_event=phase_result failure_status=failed

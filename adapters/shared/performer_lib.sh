@@ -507,9 +507,9 @@ override_rc_for_success_marker() {
 }
 
 # RL-PERFORMER-010: Detect tool-reported quota/session-limit errors that the
-# tool emits as human-readable text but exits 0 (a tool-level bug/design quirk).
+# tool emits as human-readable text, regardless of its process exit status.
 #
-# When detected on a zero exit code:
+# When detected:
 #   - Prints a structured MACC_TOOL_LIMIT line to stderr so the coordinator
 #     log and the per-adapter error normalizer can classify it as E602
 #     (QuotaExhausted / not retryable).
@@ -520,9 +520,12 @@ override_rc_for_success_marker() {
 # Patterns covered:
 #   Codex:  "ERROR: You've hit your usage limit. ... try again at <DATE>"
 #   Claude: "You've hit your session limit · resets <TIME>"
+provider_unavailable() {
+  grep -qiE 'you.ve hit your (usage|session) limit|quota[ _]+exceeded|insufficient[ _]quota|rate[ _]+limit|too many requests|(^|[^0-9])(429|529)([^0-9]|$)|authentication failed|invalid api key|not authenticated' "$1" 2>/dev/null
+}
+
 detect_tool_limit_exit() {
   local rc="$1"
-  [[ "$rc" -ne 0 ]] && { echo "$rc"; return; }
   [[ -f "$output_capture" ]] || { echo "$rc"; return; }
 
   # Match the usage/session limit phrases both tools emit.
@@ -547,7 +550,7 @@ detect_tool_limit_exit() {
   {
     echo ""
     echo "MACC_TOOL_LIMIT: quota_exhausted tool=${tool_id}${retry_hint:+ retry_hint=\"${retry_hint}\"}"
-    echo "The tool '${tool_id}' has exhausted its usage quota and exited 0 without doing any work."
+    echo "The tool '${tool_id}' has exhausted its usage quota (exit ${rc}); pending work is retained."
     echo "This is treated as an error (E602) so the coordinator can handle it correctly."
     if [[ -n "$retry_hint" ]]; then
       echo "Retry hint from tool: ${retry_hint}"
@@ -598,7 +601,7 @@ if [[ "$session_enabled" == "true" && -n "$session_resume_command" ]]; then
       rc=0
     else
       rc=$?
-      if [[ "${TOOL_RESUME_FALLBACK:-true}" == "true" ]]; then
+      if [[ "${TOOL_RESUME_FALLBACK:-true}" == "true" ]] && ! provider_unavailable "$output_capture"; then
         acquire_session_lock || exit 1
         mark_lease_status "$sid" "available"
         release_session_lock

@@ -747,6 +747,22 @@ fn read_dispatch_limit_reason(paths: &ProjectPaths, started_at: &str) -> Option<
     };
     let storage_paths = CoordinatorStoragePaths::from_project_paths(paths);
     let sqlite = SqliteStorage::new(storage_paths.clone());
+    // The durable run reason survives long drains; the original budget event
+    // may no longer be in the last twenty events by the time the command exits.
+    if let Ok(Some(run)) = sqlite.get_latest_coordinator_run() {
+        let current = run
+            .stopped_at
+            .as_deref()
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .zip(chrono::DateTime::parse_from_rfc3339(started_at).ok())
+            .is_some_and(|(stopped, started)| stopped >= started);
+        if current
+            && run.status == "success"
+            && run.stop_reason.as_deref() == Some("dispatch limit reached")
+        {
+            return Some("Stopped: dispatch limit reached. The current PRD and unfinished work are retained. Restart the coordinator to continue.".into());
+        }
+    }
     let events = if sqlite.has_snapshot_data().unwrap_or(false) {
         sqlite.load_recent_events(20).ok()?
     } else {

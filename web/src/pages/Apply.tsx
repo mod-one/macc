@@ -490,7 +490,7 @@ const Apply: React.FC = () => {
         open={confirmOpen}
         onOpenChange={setConfirmOpen}
         title="Confirm Apply"
-        description={`Apply ${plan?.summary.totalActions ?? 0} planned actions. Backup path: ${plan?.summary.backupPath || 'not provided'}. Continue?`}
+        description={`Apply ${plan?.summary.totalActions ?? 0} planned actions. Backup path: ${plan?.summary.backupPath || 'not provided'}. ${plan?.files.filter(file => file.path.startsWith('O2: ')).map(file => `${file.path}. Migration backups are retained under .macc/state.`).join(' ') || ''} Continue?`}
         confirmLabel="Confirm Apply"
         intent="caution"
         onConfirm={handleConfirmApply}

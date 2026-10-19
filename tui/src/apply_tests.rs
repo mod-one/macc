@@ -70,6 +70,21 @@ fn project_apply_requires_a_separate_confirmation_and_cancel_does_not_write() {
     );
     assert!(state.apply_feedback.is_some());
 }
+
+#[test]
+fn o2_migration_is_visible_before_apply_confirmation() {
+    let (_root, mut state) = state_with_plan(Scope::Project, 1);
+    state.apply_context.as_mut().unwrap().plan.o2_activation =
+        Some(macc_core::o2::activation::Activation {
+            config_revision: "reviewed".into(),
+            operation: "migrate sessions to SQLite and install O2".into(),
+            source_sha256: Some("reviewed-source".into()),
+        });
+    state.attempt_apply();
+    let rendered = crate::workspace_tests::text(&crate::workspace_tests::render(&state, 100, 30));
+    assert!(rendered.contains("migrate sessions to SQLite"));
+    assert!(rendered.contains("Migration backups are retained"));
+}
 #[test]
 fn user_consent_and_configuration_changes_cannot_bypass_confirmation() {
     let (root, mut state) = state_with_plan(Scope::User, 1);

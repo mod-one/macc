@@ -1,4 +1,5 @@
 //! Ordered PRD inputs shared by the coordinator and its terminal clients.
+mod budget;
 pub mod readiness;
 use crate::{MaccError, Result};
 use serde::{Deserialize, Serialize};
@@ -410,8 +411,11 @@ pub async fn run(
             let snapshot = storage.load_snapshot()?;
             let incomplete = incomplete_tasks(&entry, &snapshot.registry);
             if incomplete.is_empty() {
-                Ok(())
+                Ok(true)
             } else {
+                if budget::pause(root, &mut progress, storage.get_coordinator_run(&run_id)?.as_ref(), incomplete.len())? {
+                    return Ok(false);
+                }
                 let reasons: Vec<_> = incomplete.iter().map(|id| {
                     match snapshot.registry.find_task(id) {
                         Some(task) if task.is_merged() => format!(
@@ -431,6 +435,9 @@ pub async fn run(
                 )))
             }
         });
+        if matches!(outcome, Ok(false)) {
+            return Ok(());
+        }
         if let Err(error) = outcome {
             progress.status = "blocked".into();
             if let Some(mut run) = storage.get_coordinator_run(&run_id)? {
