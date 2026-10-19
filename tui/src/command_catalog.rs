@@ -160,12 +160,24 @@ pub(crate) fn active(state: &AppState) -> Vec<Command> {
         return rows(state.supervisor_command_bindings());
     }
     if screen == Screen::Apply {
+        if state.apply_assistant_open() {
+            return rows(vec![
+                ("Enter", "Continue / validate choice"),
+                ("c", "Configure O2"),
+                ("s", "Provide labelled suite"),
+                ("↑↓", "Select setting"),
+                ("PgUp/PgDn", "Scroll preparation proof"),
+                ("←→", "Choose value"),
+                ("Esc", "Close assistant"),
+            ]);
+        }
         if state.apply_confirmation_open() {
             return rows(vec![
                 ("←→", "Choose Cancel / Apply"),
                 ("Tab", "Next button"),
                 ("Enter", "Activate selected button"),
                 ("Backspace", "Delete consent character"),
+                ("PgUp/PgDn", "Scroll reviewed preparation"),
                 ("Esc", "Cancel confirmation"),
             ]);
         }

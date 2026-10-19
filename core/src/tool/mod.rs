@@ -2,7 +2,9 @@ pub mod args;
 pub mod compaction;
 pub mod descriptor;
 pub mod loader;
+pub mod preparation;
 pub mod registry;
+pub mod scoped_mcp;
 pub mod spec;
 pub mod usage;
 

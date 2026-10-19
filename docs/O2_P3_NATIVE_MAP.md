@@ -1,5 +1,9 @@
 # O2 P3-B: optional native symbol map
 
+For normal activation, use [Apply preparation](APPLY_PREPARATION.md). It prepares
+and verifies enabled features across CLI, TUI and Web; the individual commands
+below remain available for inspection and maintenance.
+
 P3-B extends the bundled `native` code-intelligence adapter with pinned Tree-sitter
 grammars for Rust, Python, TypeScript and TSX. It runs locally inside MACC: no AI
 provider, external language server, model call, runtime install or network upload

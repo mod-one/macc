@@ -1,7 +1,8 @@
 import React from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { ApiClientError, runApply, runPlan } from '../api/client';
-import type { ApiApplyResponse, ApiPlanResponse } from '../api/models';
+import { ApiClientError, getApplyPreparation, runApply, runPlan } from '../api/client';
+import type { ApiApplyResponse, ApiPlanResponse, ApiPreparationInputs, ApiPreparationReport } from '../api/models';
+import ApplyPreparation from './ApplyPreparation';
 import { Button, ConfirmDialog, ErrorBanner, LoadingSpinner } from '../components';
 
 type ApplyMode = 'apply-now' | 'dry-run';
@@ -101,13 +102,22 @@ const Apply: React.FC = () => {
   const [applying, setApplying] = React.useState(false);
   const [applyError, setApplyError] = React.useState<string | null>(null);
   const [applyResult, setApplyResult] = React.useState<ApiApplyResponse | null>(null);
+  const [preparationInputs, setPreparationInputs] = React.useState<ApiPreparationInputs>({});
+  const [preparationReport, setPreparationReport] = React.useState<ApiPreparationReport | null>(null);
+  React.useEffect(() => {
+    if (!applying) return;
+    let active = true;
+    const timer = setInterval(() => {void getApplyPreparation().then(report => {if(active) setPreparationReport(report);}).catch(() => {});},1000);
+    return () => {active=false;clearInterval(timer);};
+  },[applying]);
 
-  const loadFreshPlan = React.useCallback(async () => {
+  const loadFreshPlan = React.useCallback(async (inputs: ApiPreparationInputs = {}) => {
     setLoadingPlan(true);
     setPlanError(null);
 
     try {
       const response = await runPlan({
+        ...(inputs && Object.keys(inputs).length ? {preparationInputs: inputs} : {}),
         scope: 'project',
         allowUserScope: false,
         includeDiff: true,
@@ -115,8 +125,11 @@ const Apply: React.FC = () => {
       });
       setPlan(response);
       setPlanSource('fresh');
+      setPreparationInputs(inputs);
+      return true;
     } catch (error) {
       setPlanError(formatError(error));
+      return false;
     } finally {
       setLoadingPlan(false);
     }
@@ -138,6 +151,7 @@ const Apply: React.FC = () => {
     async (dryRun: boolean) => {
       setApplyError(null);
       setApplying(true);
+      let succeeded = false;
 
       try {
         if (dryRun) {
@@ -147,16 +161,22 @@ const Apply: React.FC = () => {
           setApplyResult(null);
         } else {
           const response = await runApply({ scope: 'project', allowUserScope: false, dryRun: false,
-            confirmed: true, planRevision: plan?.planRevision });
+            confirmed: true, planRevision: plan?.planRevision,
+            ...(Object.keys(preparationInputs).length ? {preparationInputs} : {}) });
           setApplyResult(response);
         }
+        succeeded = true;
       } catch (error) {
         setApplyError(formatError(error));
       } finally {
+        try {
+          const report = await getApplyPreparation();
+          setPreparationReport(!succeeded && report?.status === 'ready' ? null : report);
+        } catch { /* Execution result remains visible if status cannot be loaded. */ }
         setApplying(false);
       }
     },
-    [plan?.planRevision],
+    [plan?.planRevision, preparationInputs],
   );
 
   const filesWritten = React.useMemo(() => {
@@ -390,6 +410,9 @@ const Apply: React.FC = () => {
         </>
       )}
 
+      <ApplyPreparation report={preparationReport} busy={applying || loadingPlan} resume={async inputs => {
+        if (await loadFreshPlan(inputs)) setConfirmOpen(true);
+      }} />
       {applyError && (
         <ErrorBanner
           title="Apply failed"
@@ -490,7 +513,7 @@ const Apply: React.FC = () => {
         open={confirmOpen}
         onOpenChange={setConfirmOpen}
         title="Confirm Apply"
-        description={`Apply ${plan?.summary.totalActions ?? 0} planned actions. Backup path: ${plan?.summary.backupPath || 'not provided'}. ${plan?.files.filter(file => file.path.startsWith('O2: ')).map(file => `${file.path}. Migration backups are retained under .macc/state.`).join(' ') || ''} Continue?`}
+        description={`Apply ${plan?.summary.totalActions ?? 0} planned actions. Backup path: ${plan?.summary.backupPath || 'not provided'}. ${plan?.files.filter(file => file.path.startsWith('O2: ')).map(file => `${file.path}. Migration backups are retained under .macc/state.`).join(' ') || ''} ${(plan?.preparation?.steps ?? []).join('. ')} ${plan?.preparation?.network ? 'Preparation may download pinned packages or run declared installers.' : ''} Continue?`}
         confirmLabel="Confirm Apply"
         intent="caution"
         onConfirm={handleConfirmApply}

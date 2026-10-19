@@ -1,5 +1,9 @@
 # O2 P3-C: benchmark-gated local semantic memory search
 
+For normal activation, use [Apply preparation](APPLY_PREPARATION.md). It prepares
+and verifies enabled features across CLI, TUI and Web; the individual commands
+below remain available for inspection and maintenance.
+
 P3-C adds an optional local second pass to the Memory Ledger's FTS retrieval.
 The bundled `local_lsa` backend computes corpus-local TF-IDF/latent semantic
 vectors with a deterministic truncated-SVD approximation (12 orthogonal power

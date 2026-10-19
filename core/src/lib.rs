@@ -752,6 +752,8 @@ pub fn build_plan(
     }
 
     total_plan.o2_activation = o2::activation::preview(&paths.root)?;
+    service::preparation::configure(paths, &mut total_plan)?;
+    total_plan.preparation = service::preparation::preview(paths)?;
     total_plan.normalize();
     Ok(total_plan)
 }
@@ -1150,6 +1152,12 @@ pub fn apply_plan(
     plan.normalize();
     validate_plan(plan, allow_user_scope)?;
 
+    let _preparation_guard = if plan.preparation.is_some() {
+        Some(service::preparation::lock(paths)?)
+    } else {
+        None
+    };
+    service::preparation::validate_review(paths, plan.preparation.as_ref())?;
     if o2::activation::preview(&paths.root)? != plan.o2_activation {
         return Err(MaccError::Validation(
             "O2 prerequisites changed after preview; review macc apply again".into(),
@@ -1160,6 +1168,13 @@ pub fn apply_plan(
     }
     let operations = plan::collect_plan_operations(paths, plan);
     let mut report = apply_operations(paths, &operations, allow_user_scope, |_, _, _| {})?;
+    if let Some(preparation) = &plan.preparation {
+        service::preparation::execute(paths, preparation)?;
+        report.outcomes.insert(
+            "Preparation: all enabled features verified".into(),
+            plan::ActionStatus::Updated,
+        );
+    }
     if let Some(activation) = &plan.o2_activation {
         if activation.source_sha256.is_some() {
             report.outcomes.insert(
@@ -1956,6 +1971,8 @@ mod tests {
 
         let paths = ProjectPaths::from_root(&temp_dir);
         init(&paths, false)?;
+        // Isolate file-operation tests from installed AI accounts and inherited profiles.
+        fs::write(&paths.config_path, "tools:\n  enabled: [\"test\"]\n").unwrap();
 
         // 1. Create an existing file that will be overwritten by TestAdapter
         let target_file = temp_dir.join("MACC_GENERATED.txt");
@@ -2010,6 +2027,8 @@ mod tests {
 
         let paths = ProjectPaths::from_root(&temp_dir);
         init(&paths, false)?;
+        // Isolate file-operation tests from installed AI accounts and inherited profiles.
+        fs::write(&paths.config_path, "tools:\n  enabled: [\"test\"]\n").unwrap();
 
         // 1. Create a file with same content as TestAdapter produces
         let target_file = temp_dir.join("MACC_GENERATED.txt");
@@ -2054,6 +2073,8 @@ mod tests {
 
         let paths = ProjectPaths::from_root(&temp_dir);
         init(&paths, false)?;
+        // Isolate file-operation tests from installed AI accounts and inherited profiles.
+        fs::write(&paths.config_path, "tools:\n  enabled: [\"test\"]\n").unwrap();
 
         // 1. Create a JSON file with specific formatting
         let target_file = temp_dir.join("test.json");
@@ -2241,6 +2262,8 @@ mod tests {
         fs::create_dir_all(&temp_dir).unwrap();
         let paths = ProjectPaths::from_root(&temp_dir);
         init(&paths, false)?;
+        // Isolate file-operation tests from installed AI accounts and inherited profiles.
+        fs::write(&paths.config_path, "tools:\n  enabled: []\n").unwrap();
 
         let mut plan = plan::ActionPlan::new();
         // Add actions in "wrong" order

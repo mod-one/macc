@@ -509,6 +509,8 @@ pub(crate) struct ApiPrdUpdateRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ApiPlanRequest {
+    #[serde(default)]
+    pub preparation_inputs: macc_core::service::preparation::Inputs,
     /// Target scope for planned operations.
     pub scope: Option<Scope>,
     /// Tool IDs to include in planning.
@@ -531,6 +533,8 @@ pub(crate) struct ApiPlanRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ApiPlanResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preparation: Option<macc_core::service::preparation::Plan>,
     pub plan_revision: String,
     /// Aggregate statistics about the proposed plan.
     pub summary: ApiPlanSummary,
@@ -644,6 +648,8 @@ pub(crate) struct ApiPlanConsent {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ApiApplyRequest {
+    #[serde(default)]
+    pub preparation_inputs: macc_core::service::preparation::Inputs,
     pub plan_revision: Option<String>,
     /// Target scope for apply execution.
     pub scope: Option<Scope>,

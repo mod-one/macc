@@ -7,6 +7,13 @@ gitignore:
   - .agents/
   - GEMINI.md
 performer:
+  preparation:
+    verify: {command: agy, args: [models]}
+    setup: null
+  scoped_mcp:
+    path: .agents/mcp_config.json
+    format: json
+    servers_key: mcpServers
   runner: adapters/agy/agy.performer.sh
   command: agy
   args: ["--dangerously-skip-permissions", "--mode", "accept-edits"]

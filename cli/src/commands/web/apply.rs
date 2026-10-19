@@ -42,6 +42,7 @@ pub(super) async fn run_apply_handler(
     }
 
     let plan_request = super::types::ApiPlanRequest {
+        preparation_inputs: request.preparation_inputs.clone(),
         scope: request.scope,
         tools: request.tools.clone(),
         worktrees: Vec::new(),
@@ -52,6 +53,7 @@ pub(super) async fn run_apply_handler(
     };
     let overrides = build_overrides(&state, &plan_request).map_err(ApiError::from)?;
     let mut plan = build_plan(&state, &canonical, &overrides).map_err(ApiError::from)?;
+    macc_core::service::preparation::set_inputs(&mut plan, request.preparation_inputs);
     let ops = state.engine.plan_operations(&state.paths, &plan);
 
     if request.dry_run {
@@ -73,15 +75,41 @@ pub(super) async fn run_apply_handler(
         }
     }
 
-    let report = state
-        .engine
-        .apply(&state.paths, &mut plan, false)
+    let engine = state.engine.clone();
+    let paths = state.paths.clone();
+    let report = tokio::task::spawn_blocking(move || engine.apply(&paths, &mut plan, false))
+        .await
+        .map_err(|e| ApiError::from(MaccError::Validation(format!("Apply worker failed: {e}"))))?
         .map_err(ApiError::from)?;
     macc_core::service::context::mark_apply_completed(&state.paths).map_err(ApiError::from)?;
 
     Ok(Json(ApplyEndpointResponse::Applied(build_apply_response(
         &ops, &report,
     ))))
+}
+
+pub(super) async fn preparation_status(
+    State(state): State<WebState>,
+    headers: axum::http::HeaderMap,
+) -> std::result::Result<Json<Option<macc_core::service::preparation::Report>>, ApiError> {
+    crate::commands::web::mutation_gate::require_project_owner(&state, &headers)?;
+    Ok(Json(
+        macc_core::service::preparation::status(&state.paths.root).map_err(ApiError::from)?,
+    ))
+}
+pub(super) async fn preparation_network(
+    State(state): State<WebState>,
+    headers: axum::http::HeaderMap,
+    Json(request): Json<serde_json::Value>,
+) -> std::result::Result<Json<serde_json::Value>, ApiError> {
+    crate::commands::web::mutation_gate::require_project_owner(&state, &headers)?;
+    macc_core::service::preparation::allow_network(
+        &state.paths.root,
+        request["revision"].as_str().unwrap_or_default(),
+        request["confirmed"] == true,
+    )
+    .map_err(ApiError::from)?;
+    Ok(Json(serde_json::json!({"updated":true})))
 }
 
 fn validate_request(request: &ApiApplyRequest) -> std::result::Result<(), ApiError> {

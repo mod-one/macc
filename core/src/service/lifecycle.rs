@@ -17,7 +17,7 @@ pub trait LifecycleFetchMaterializer {
     ) -> Result<Vec<MaterializedFetchUnit>>;
 }
 
-pub trait LifecycleUi: InteractionHandler {
+pub trait LifecycleUi: InteractionHandler + Sync {
     fn print_checks(&self, checks: &[crate::doctor::ToolCheck]);
     fn render_plan_preview(
         &self,
@@ -174,6 +174,14 @@ pub fn apply(
     if let Some(activation) = &plan.o2_activation {
         ui.info(&format!("O2 prerequisite: {}. Existing sessions/data are retained; migrations create backups. Restore a saved session bundle first if you want to recover earlier O2 history.", activation.operation));
     }
+    if let Some(preparation) = &plan.preparation {
+        for step in &preparation.steps {
+            ui.info(&format!("Prepare: {step}"));
+        }
+        if preparation.network {
+            ui.info("Preparation may download pinned provider packages or run the selected tools' declared installers.");
+        }
+    }
     if !json {
         crate::ops_motif::print_trust_review_card(&paths, &plan, allow_user_scope);
         if !ui.confirm_yes_no("Proceed with apply [y/N]? ")? {
@@ -186,15 +194,30 @@ pub fn apply(
             ui.print_pre_apply_explanations(&ops);
         }
     }
+    if json && !ui.confirm_yes_no("Confirm reviewed Apply preparation and writes [y/N]? ")? {
+        return Err(MaccError::Validation("Apply cancelled by user".into()));
+    }
     if allow_user_scope {
         ui.confirm_user_scope_apply(&paths, &ops)?;
     }
-    let report = engine.apply(&paths, &mut plan, allow_user_scope)?;
+    let report = crate::service::preparation::interactive::apply(
+        &paths,
+        engine,
+        &mut plan,
+        allow_user_scope,
+        ui,
+        || {
+            let current = load_canonical_config(&paths.config_path)?;
+            engine.plan(&paths, &current, &materialized_units, &overrides)
+        },
+    )?;
     ui.info(&report.render_cli());
     // Auto-save configuration to user-level profiles so 'macc init' can offer it
     // on the next fresh checkout. Failure is non-fatal.
     if let Ok(mgr) = crate::profile::ProfileManager::new() {
-        if let Err(e) = mgr.save_auto(&paths.root, &canonical) {
+        if let Err(e) = load_canonical_config(&paths.config_path)
+            .and_then(|current| mgr.save_auto(&paths.root, &current))
+        {
             ui.warn(&format!("Note: configuration auto-save failed: {}", e));
         }
     }

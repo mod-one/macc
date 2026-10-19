@@ -23,6 +23,8 @@ pub struct ActionPlan {
     pub actions: Vec<Action>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub o2_activation: Option<crate::o2::activation::Activation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preparation: Option<crate::service::preparation::Plan>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]

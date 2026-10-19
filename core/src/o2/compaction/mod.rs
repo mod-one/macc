@@ -250,5 +250,7 @@ pub(crate) fn probe_spec(
 }
 
 mod native_settings;
+mod preparation;
+pub use preparation::prepare_configuration;
 
 pub mod adoption;

@@ -2,6 +2,10 @@
 
 ## Activating configured features
 
+Use [Apply preparation](APPLY_PREPARATION.md) for the complete activation flow:
+storage, enabled provider runtimes and indexes, scoped MCP, account checks and
+interactive evidence/configuration questions are handled in one reviewed Apply.
+
 Enabled O2 policy flags require SQLite session authority and the O2 schema.
 Enabling session usage capture also requests that storage, even with memory off.
 `macc apply --dry-run` includes that prerequisite in its reviewed operations.

@@ -29,7 +29,8 @@ pub(super) async fn run_plan_handler(
         .load_canonical_config(&state.paths)
         .map_err(ApiError::from)?;
     let overrides = build_overrides(&state, &request).map_err(ApiError::from)?;
-    let plan = build_plan(&state, &canonical, &overrides).map_err(ApiError::from)?;
+    let mut plan = build_plan(&state, &canonical, &overrides).map_err(ApiError::from)?;
+    macc_core::service::preparation::set_inputs(&mut plan, request.preparation_inputs);
     validate_preview_plan(&plan, request.allow_user_scope.unwrap_or(false))
         .map_err(ApiError::from)?;
     let ops = state.engine.plan_operations(&state.paths, &plan);
@@ -88,9 +89,10 @@ pub(super) fn build_plan_response(
     explain: bool,
 ) -> macc_core::Result<ApiPlanResponse> {
     Ok(ApiPlanResponse {
+        preparation: plan.preparation.clone(),
         plan_revision: macc_core::service::apply_review::fingerprint(plan, ops)?,
         summary: ApiPlanSummary {
-            total_actions: plan.actions.len() + usize::from(plan.o2_activation.is_some()),
+            total_actions: ops.len(),
             files_write: ops
                 .iter()
                 .filter(|op| op.kind == PlannedOpKind::Write)

@@ -10,6 +10,7 @@ mod native;
 mod native_lifecycle;
 mod native_map;
 mod operations;
+pub mod preparation;
 mod process;
 mod response;
 mod routing;
@@ -29,6 +30,10 @@ pub(crate) use native::worktree as native_worktree;
 use rusqlite::OptionalExtension;
 pub trait CodeIntelligenceProvider: Send + Sync {
     fn descriptor(&self) -> Descriptor;
+    /// Selection belongs to the adapter; orchestration never branches on provider IDs.
+    fn enabled(&self, _policy: &super::policy::CodePolicy) -> bool {
+        false
+    }
     fn symbol_languages(&self) -> Vec<String> {
         vec![]
     }

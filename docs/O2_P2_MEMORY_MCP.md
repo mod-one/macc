@@ -19,7 +19,8 @@ using the shared revision-checked field catalog. Enable `memory.enabled` first.
 | `mcp_input_bytes` | `65536` | 4096–262144 bytes per request frame |
 | `mcp_max_proposals_per_session` | `20` | 0–100, across lease generations of a logical session |
 
-Policy edits do not start workers or install/register providers. Disabling MCP or
+Policy edits do not start workers or install/register providers. Confirm
+[Apply preparation](APPLY_PREPARATION.md) to register enabled scoped MCP adapters. Disabling MCP or
 agent proposals takes effect on subsequent calls. After enabling additional tools,
 refresh/reconnect the MCP client if it caches the tool catalog. Extraction applies to subsequent
 checkpoint finishes and explicit backfills. New databases already contain the
@@ -63,7 +64,8 @@ them. A candidate never marks a task complete or grants permission to merge.
 ## MCP registration and scope
 
 `macc o2 mcp` serves newline-delimited JSON-RPC 2.0 on local stdio only. Register
-that command using the existing MCP configuration/adapter for the chosen AI client.
+that command automatically through the selected tools’ declarative adapters during
+Apply. Manual registration remains an advanced maintenance path.
 The common SQLite runner exports these runtime values after acquiring a lease:
 
 - `MACC_O2_PROJECT_ROOT`
@@ -72,9 +74,9 @@ The common SQLite runner exports these runtime values after acquiring a lease:
 - `MACC_O2_MCP_TOKEN`
 
 **The client's MCP configuration must forward these inherited environment values.**
-Some clients filter subprocess environments. Inspect the installed client's
-supported MCP configuration before enabling it. MACC exposes a registration recipe;
-it does not automatically register the server for every AI client. Never copy a
+Some clients filter subprocess environments. The registration adapter declares
+the appropriate environment allowlist or inherited environment behavior. An
+enabled tool without a scoped registration adapter is reported as unsupported. Never copy a
 live token into project settings, logs, reports or committed files. The token is a
 derived capability, separate from the runner's private lease token.
 

@@ -1,6 +1,23 @@
 //! Own only the individual native setting MACC wrote; unrelated settings stay user-owned.
 use super::*;
 use crate::tool::compaction::NativeAuto;
+pub(super) fn matches(
+    root: &Path,
+    native: &NativeAuto,
+    desired: &serde_json::Value,
+) -> Result<bool> {
+    let path = root.join(
+        native
+            .path
+            .as_ref()
+            .ok_or_else(|| error("Missing native path"))?,
+    );
+    let raw = std::fs::read_to_string(path).map_err(|e| error(e.to_string()))?;
+    Ok(Document::parse(&native.format, &raw)?
+        .current(&native.key.split('.').collect::<Vec<_>>())?
+        .as_ref()
+        == Some(desired))
+}
 pub(super) fn manage(
     db: &rusqlite::Connection,
     root: &Path,

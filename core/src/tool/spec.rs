@@ -113,6 +113,10 @@ pub struct ModelTierSpec {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ToolPerformerSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preparation: Option<super::preparation::PreparationSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scoped_mcp: Option<super::scoped_mcp::RegistrationSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction: Option<super::compaction::CompactionSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<super::usage::UsageSpec>,

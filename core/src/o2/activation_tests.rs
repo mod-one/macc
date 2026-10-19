@@ -63,6 +63,7 @@ fn reviewed_apply_activates_o2_and_preserves_it_across_clear() {
     );
     let mut again = crate::plan::ActionPlan::new();
     again.o2_activation = preview(&paths.root).unwrap();
+    again.preparation = crate::service::preparation::preview(&paths).unwrap();
     crate::apply_plan(&paths, &mut again, false).unwrap();
 }
 

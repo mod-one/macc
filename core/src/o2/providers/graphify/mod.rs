@@ -12,6 +12,9 @@ fn supported() -> bool {
     cfg!(all(target_os = "linux", target_arch = "x86_64"))
 }
 impl CodeIntelligenceProvider for Graphify {
+    fn enabled(&self, policy: &super::super::policy::CodePolicy) -> bool {
+        policy.enabled && policy.graphify_enabled
+    }
     fn descriptor(&self) -> Descriptor {
         Descriptor{schema_version:1,id:"graphify".into(),version:runtime::VERSION.into(),origin:format!("https://pypi.org/project/graphifyy/{}/; lock sha256:{}",runtime::VERSION,digest(runtime::LOCK.as_bytes())),operations:["install","deploy","index","update","rollback","disable","undeploy","uninstall","query"].into_iter().map(str::to_string).collect(),local_only:true,unsupported:vec!["Managed runtime: Linux x86_64 / Python 3.12 only".into(),"Cloud, semantic documents/media, global skills, MCP and live incremental updates disabled".into(),"Precise LSP definitions, dependency_path and impact_analysis unsupported".into()]}
     }

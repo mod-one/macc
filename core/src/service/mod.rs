@@ -13,6 +13,7 @@ pub mod launch_review;
 pub mod lifecycle;
 pub mod logs;
 pub mod migrate;
+pub mod preparation;
 pub mod process_ownership;
 pub mod process_ownership_gate;
 pub mod project;

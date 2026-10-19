@@ -16,6 +16,9 @@ pub(crate) fn findings(root: &Path) -> Vec<DiagnosticFinding> {
         if let Err(error) = activation::require_ready(root) {
             return Ok(vec![DiagnosticFinding::error("MACC-O2-UPGRADE","tools","O2 configured but not operational",&error.to_string(),Some("Run `macc apply` and confirm the SQLite/O2 activation preview, or restore a saved O2 session bundle before running."), false)]);
         }
+        if let Err(error) = crate::service::preparation::verify_enabled(root) {
+            return Ok(vec![DiagnosticFinding::error("MACC-O2-PREPARATION", "tools", "Enabled O2 features need preparation", &error.to_string(), Some("Complete `macc apply` in CLI, TUI or Web; resolve the questions in its preparation assistant."), false)]);
+        }
         if !p.code_intelligence.enabled {
             return Ok(vec![]);
         }

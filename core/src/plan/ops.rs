@@ -190,6 +190,19 @@ pub fn collect_plan_operations(paths: &ProjectPaths, plan: &ActionPlan) -> Vec<P
             after: serde_json::to_vec_pretty(activation).ok(),
         });
     }
+    if let Some(preparation) = &plan.preparation {
+        for step in &preparation.steps {
+            ops.push(PlannedOp {
+                path: format!("Prepare: {step}"),
+                scope: Scope::Project,
+                consent_required: false,
+                kind: PlannedOpKind::Other,
+                metadata: Default::default(),
+                before: None,
+                after: None,
+            });
+        }
+    }
     ops.sort_by(|a, b| a.path.cmp(&b.path).then(a.kind.cmp(&b.kind)));
     ops
 }

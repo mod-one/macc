@@ -2202,6 +2202,7 @@ pub(crate) async fn run_single_prd_control_plane(
     logger: Option<&dyn CoordinatorLog>,
 ) -> Result<()> {
     crate::o2::activation::require_ready(repo_root)?;
+    crate::service::preparation::require_ready(repo_root)?;
     let cfg = CanonicalCoordinatorConfigResolved::resolve(coordinator);
     let run_id = if let Ok(existing) = std::env::var("COORDINATOR_RUN_ID") {
         let trimmed = existing.trim();

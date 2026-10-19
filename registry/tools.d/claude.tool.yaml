@@ -6,6 +6,14 @@ gitignore:
   - .claude/
   - CLAUDE.md
 performer:
+  preparation:
+    verify: {command: claude, args: [auth, status, --json]}
+    expected_json: {"/loggedIn": true}
+    setup: {command: claude, args: [auth, login]}
+  scoped_mcp:
+    path: .mcp.json
+    format: json
+    servers_key: mcpServers
   compaction:
     schema: native-auto-config-v1
     version_pattern: '(?i)^[0-9]+\.[0-9]+\.[0-9]+.*Claude Code'

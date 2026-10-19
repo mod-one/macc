@@ -2224,6 +2224,7 @@ mod tests {
         };
 
         // 1. Plan
+        crate::save_canonical_config(&paths, &config)?;
         let mut plan = engine.plan(&paths, &config, &[], &CliOverrides::default())?;
         assert!(plan.actions.len() > 0);
 

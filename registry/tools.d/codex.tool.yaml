@@ -6,6 +6,14 @@ gitignore:
   - .codex/
   - AGENTS.md
 performer:
+  preparation:
+    verify: {command: codex, args: [login, status]}
+    setup: {command: codex, args: [login, --device-auth]}
+  scoped_mcp:
+    path: .codex/config.toml
+    format: toml
+    servers_key: mcp_servers
+    environment_allowlist_key: env_vars
   compaction:
     schema: native-auto-config-v1
     version_pattern: '(?m)^codex-cli [0-9]+\.[0-9]+'

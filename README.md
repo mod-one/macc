@@ -125,7 +125,7 @@ flowchart LR
 | Start from scratch | `macc quickstart` |
 | Initialize manually | `macc init` |
 | Preview generated changes | `macc plan` |
-| Apply tool configs | `macc apply` |
+| Apply configs and prepare enabled features | `macc apply` |
 | Check what is broken | `macc doctor` |
 | See what is happening | `macc status` |
 | Open the TUI | `macc` or `macc tui` |
@@ -321,6 +321,11 @@ macc doctor [--fix] [--json] [--git-name "Name"] [--git-email "email"] [--coordi
 macc status [--json] [--watch] [--events N] [--verbose]
 macc watch                     # alias for status --watch
 ```
+
+Apply also prepares and verifies enabled O2 features. Its interactive assistant
+handles missing prerequisites and approvals in CLI, TUI and Web. See
+[Apply preparation](docs/APPLY_PREPARATION.md).
+
 
 </details>
 

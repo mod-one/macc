@@ -7,6 +7,10 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Added
+- Confirmed Apply now prepares and verifies enabled O2 storage, provider runtimes/indexes, scoped MCP, native compaction and semantic evidence through the shared adapter layer. CLI, TUI and Web keep configuration, network permission and benchmark questions inside Apply, with progress and retained failure evidence.
+- Coordinator startup verifies prerequisites and refreshes compatible local indexes without downloads or login. Doctor reports pending O2 preparation without repairing it.
+
 ## [0.3.0] - 2026-10-17
 
 ### Fixed — Coordinator restarts after an interrupted dispatch

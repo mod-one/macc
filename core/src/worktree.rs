@@ -874,6 +874,8 @@ mod tests {
             id: "codex".to_string(),
             display_name: "Codex".to_string(),
             performer: crate::tool::ToolPerformerSpec {
+                preparation: None,
+                scoped_mcp: None,
                 usage: None,
                 compaction: None,
                 runner: "runner.sh".to_string(),

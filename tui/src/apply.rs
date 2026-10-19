@@ -3,11 +3,18 @@ use super::*;
 use crossterm::event::KeyCode;
 use macc_core::resolve::MaterializedFetchUnit;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+#[path = "apply/assistant.rs"]
+mod assistant;
 
 #[derive(Default)]
 pub(crate) struct ApplyRuntime {
+    pub(super) applying: Option<Receiver<Result<macc_core::ApplyReport, String>>>,
+    pub assistant: assistant::State,
+    inputs: macc_core::service::preparation::Inputs,
+    resume_after_prepare: bool,
     pub confirm_open: bool,
     pub confirm_selected: usize,
+    pub confirm_scroll: u16,
     pub selected: usize,
     pub scroll: u16,
     preparing: Option<Receiver<Result<Vec<MaterializedFetchUnit>, String>>>,
@@ -16,12 +23,16 @@ pub(crate) struct ApplyRuntime {
 }
 impl AppState {
     pub(crate) fn apply_confirmation_open(&self) -> bool {
-        self.apply_runtime.confirm_open
+        self.apply_runtime.confirm_open || self.apply_runtime.assistant.open
     }
     pub(crate) fn apply_preparing(&self) -> bool {
-        self.apply_runtime.preparing.is_some()
+        self.apply_runtime.preparing.is_some() || self.apply_runtime.applying.is_some()
     }
     pub fn open_apply_screen(&mut self) {
+        if self.apply_runtime.assistant.open {
+            self.push_screen(Screen::Apply);
+            return;
+        }
         if self.apply_preparing() {
             self.push_screen(Screen::Apply);
             return;
@@ -66,6 +77,7 @@ impl AppState {
         }
     }
     pub(crate) fn poll_apply_preparation(&mut self) {
+        self.poll_apply_execution();
         let Some(rx) = &self.apply_runtime.preparing else {
             return;
         };
@@ -87,10 +99,14 @@ impl AppState {
                 .planned_config
                 .as_ref()
                 .ok_or("Missing plan configuration")?;
-            let plan = self
+            let mut plan = self
                 .engine
                 .plan(paths, canonical, &units, &CliOverrides::default())
                 .map_err(|e| e.to_string())?;
+            macc_core::service::preparation::set_inputs(
+                &mut plan,
+                self.apply_runtime.inputs.clone(),
+            );
             let operations = self.engine.plan_operations(paths, &plan);
             let user_ops = operations
                 .iter()
@@ -117,6 +133,10 @@ impl AppState {
             },
             Err(error) => self.apply_error = Some(error),
         }
+        if self.apply_runtime.resume_after_prepare && self.apply_context.is_some() {
+            self.apply_runtime.resume_after_prepare = false;
+            self.attempt_apply();
+        }
     }
     pub fn append_apply_consent_char(&mut self, ch: char) {
         self.apply_consent_input.push(ch);
@@ -137,12 +157,38 @@ impl AppState {
         }
         self.apply_runtime.confirm_open = true;
         self.apply_runtime.confirm_selected = 0;
+        self.apply_runtime.confirm_scroll = 0;
         self.apply_consent_input.clear();
         self.apply_user_consent_granted = false;
     }
     pub(crate) fn apply_key(&mut self, key: KeyCode) {
+        if self.apply_runtime.assistant.open {
+            self.apply_assistant_key(key);
+            return;
+        }
+        if self.apply_runtime.applying.is_some() {
+            match key {
+                KeyCode::Esc => self.pop_screen(),
+                KeyCode::PageDown => {
+                    self.apply_runtime.scroll = self.apply_runtime.scroll.saturating_add(5)
+                }
+                KeyCode::PageUp => {
+                    self.apply_runtime.scroll = self.apply_runtime.scroll.saturating_sub(5)
+                }
+                _ => {}
+            }
+            return;
+        }
         if self.apply_runtime.confirm_open {
             match key {
+                KeyCode::PageDown => {
+                    self.apply_runtime.confirm_scroll =
+                        self.apply_runtime.confirm_scroll.saturating_add(5)
+                }
+                KeyCode::PageUp => {
+                    self.apply_runtime.confirm_scroll =
+                        self.apply_runtime.confirm_scroll.saturating_sub(5)
+                }
                 KeyCode::Esc => self.apply_runtime.confirm_open = false,
                 KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::BackTab => {
                     self.apply_runtime.confirm_selected ^= 1
@@ -257,15 +303,51 @@ impl AppState {
             path: None,
         });
 
-        let result = {
-            // For now, engine.apply doesn't support progress callback yet,
-            // but we could add it to Engine trait if needed.
-            self.engine.apply(paths, &mut plan, allow_user_scope)
+        if plan.preparation.is_some() {
+            let (tx, rx) = mpsc::channel();
+            let engine = self.engine.clone();
+            let paths = paths.clone();
+            self.apply_runtime.applying = Some(rx);
+            thread::spawn(move || {
+                let _ = tx.send(
+                    engine
+                        .apply(&paths, &mut plan, allow_user_scope)
+                        .map_err(|e| e.to_string()),
+                );
+            });
+        } else {
+            let result = self
+                .engine
+                .apply(paths, &mut plan, allow_user_scope)
+                .map_err(|e| e.to_string());
+            self.complete_apply(result);
+        }
+    }
+    fn poll_apply_execution(&mut self) {
+        let Some(receiver) = &self.apply_runtime.applying else {
+            return;
         };
-
+        if let Some(paths) = &self.project_paths {
+            self.apply_runtime.assistant.report =
+                macc_core::service::preparation::status(&paths.root)
+                    .ok()
+                    .flatten();
+        }
+        let result = match receiver.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => Err("Apply worker exited unexpectedly".into()),
+        };
+        self.apply_runtime.applying = None;
+        self.complete_apply(result);
+    }
+    fn complete_apply(&mut self, result: Result<macc_core::ApplyReport, String>) {
+        let Some(paths) = self.project_paths.clone() else {
+            return;
+        };
         match result {
             Ok(report) => {
-                if let Err(error) = macc_core::service::context::mark_apply_completed(paths) {
+                if let Err(error) = macc_core::service::context::mark_apply_completed(&paths) {
                     self.apply_error = Some(format!(
                         "Changes applied, but readiness tracking failed: {error}"
                     ));
@@ -288,6 +370,12 @@ impl AppState {
                 );
             }
             Err(err) => {
+                self.apply_runtime.assistant.report =
+                    macc_core::service::preparation::status(&paths.root)
+                        .ok()
+                        .flatten()
+                        .filter(|report| report.status != "ready");
+                self.apply_runtime.assistant.open = true;
                 self.apply_feedback = None;
                 self.apply_error = Some(format!("Apply failed: {}", err));
                 self.set_status(

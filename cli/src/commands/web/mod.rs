@@ -268,6 +268,8 @@ fn build_web_router(state: WebState) -> Router {
         )
         .route("/api/v1/plan", post(plan::run_plan_handler))
         .route("/api/v1/apply", post(apply::run_apply_handler))
+        .route("/api/v1/apply/preparation", get(apply::preparation_status))
+        .route("/api/v1/apply/network", post(apply::preparation_network))
         .route("/api/v1/status", get(coordinator::status_handler))
         .route("/api/v1/git/graph", get(git::get_git_graph_handler))
         .route("/api/v1/logs", get(logs::list_logs_handler))

@@ -1,5 +1,9 @@
 # O2 P2-B: managed Serena symbol navigation
 
+For normal activation, use [Apply preparation](APPLY_PREPARATION.md). It prepares
+and verifies enabled features across CLI, TUI and Web; the individual commands
+below remain available for inspection and maintenance.
+
 ## Delivered contract
 
 The optional `serena` code-intelligence provider implements precise Python symbol

@@ -11,6 +11,9 @@ fn supported() -> bool {
     cfg!(all(target_os = "linux", target_arch = "x86_64"))
 }
 impl CodeIntelligenceProvider for Serena {
+    fn enabled(&self, policy: &CodePolicy) -> bool {
+        policy.enabled && policy.serena_enabled
+    }
     fn descriptor(&self) -> Descriptor {
         Descriptor{schema_version:1,id:"serena".into(),version:runtime::VERSION.into(),origin:format!("https://pypi.org/project/serena-agent/{}/; SolidLSP subset lock sha256:{}",runtime::VERSION,digest(runtime::LOCK.as_bytes())),operations:["install","deploy","update","rollback","disable","undeploy","uninstall","query"].into_iter().map(str::to_string).collect(),local_only:true,unsupported:vec!["Linux x86_64 / Python 3.12 runtime; only Python/Jedi language supported".into(),"No durable index, edits, MCP, project hooks or language-server downloads".into(),"dependency_path, architecture_summary, impact_analysis and non-Python languages unsupported".into()]}
     }

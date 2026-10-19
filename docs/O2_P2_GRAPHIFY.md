@@ -1,5 +1,9 @@
 # O2 P2-A: managed Graphify
 
+For normal activation, use [Apply preparation](APPLY_PREPARATION.md). It prepares
+and verifies enabled features across CLI, TUI and Web; the individual commands
+below remain available for inspection and maintenance.
+
 Graphify is an optional read-side adapter for the existing Code Intelligence port.
 SQLite remains the authority for sessions, checkpoints, memories and reviewed
 provider receipts. No assistant-specific integration or global skill is installed.

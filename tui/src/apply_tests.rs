@@ -152,3 +152,62 @@ fn changed_files_require_another_preview_instead_of_overwriting_new_work() {
         "work added after preview"
     );
 }
+
+#[test]
+fn failing_semantic_proof_cannot_bypass_the_apply_assistant() {
+    let (_root, mut state) = state_with_plan(Scope::Project, 1);
+    state.apply_runtime.assistant.open = true;
+    state.apply_runtime.assistant.report = Some(macc_core::service::preparation::Report {
+        current: None,
+        live_output: None,
+        revision: "review".into(),
+        status: "waiting_for_input".into(),
+        completed: vec![],
+        error: None,
+        question: Some(macc_core::service::preparation::Question {
+            kind: "semantic_review".into(),
+            message: "Review benchmark".into(),
+            data: serde_json::json!({"approvable":false,"report":{"id":"failed"}}),
+        }),
+    });
+    state.apply_key(KeyCode::Enter);
+    assert!(state.apply_assistant_open());
+    assert!(!state.apply_runtime.resume_after_prepare);
+    let rendered = crate::workspace_tests::text(&crate::workspace_tests::render(&state, 100, 30));
+    assert!(rendered.contains("Benchmark did not pass"));
+    state.apply_key(KeyCode::Esc);
+    assert!(!state.apply_assistant_open());
+}
+
+#[test]
+fn apply_confirmation_scrolls_long_preparation_without_writing() {
+    let (root, mut state) = state_with_plan(Scope::Project, 1);
+    state.attempt_apply();
+    state.apply_key(KeyCode::PageDown);
+    assert_eq!(state.apply_runtime.confirm_scroll, 5);
+    state.apply_key(KeyCode::PageUp);
+    assert_eq!(state.apply_runtime.confirm_scroll, 0);
+    assert!(!root.path().join("output-00.txt").exists());
+}
+
+#[test]
+fn failed_apply_does_not_show_a_previous_ready_report_as_current() {
+    let (_root, mut state) = state_with_plan(Scope::Project, 1);
+    let path = state
+        .project_paths
+        .as_ref()
+        .unwrap()
+        .macc_dir
+        .join("state/apply-preparation.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+        path,
+        r#"{"revision":"old","status":"ready","completed":[],"error":null,"question":null}"#,
+    )
+    .unwrap();
+    state.complete_apply(Err("Configuration changed before execution".into()));
+    assert!(state.apply_assistant_open());
+    assert!(state.apply_runtime.assistant.report.is_none());
+    let text = crate::workspace_tests::text(&crate::workspace_tests::render(&state, 100, 30));
+    assert!(text.contains("Configuration changed before execution"));
+}

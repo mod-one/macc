@@ -2,6 +2,9 @@ pub(super) use super::snapshot::{source_snapshot as snapshot, SourceSnapshot as 
 use super::*;
 pub(super) struct Native;
 impl CodeIntelligenceProvider for Native {
+    fn enabled(&self, policy: &super::super::policy::CodePolicy) -> bool {
+        policy.enabled
+    }
     fn symbol_languages(&self) -> Vec<String> {
         vec!["rust".into()]
     }

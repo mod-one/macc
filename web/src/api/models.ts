@@ -554,6 +554,7 @@ export interface ApiPrdUpdateRequest {
 }
 
 export interface ApiPlanRequest {
+  preparationInputs?: ApiPreparationInputs;
   scope?: ApiScope | null;
   tools?: string[];
   worktrees?: string[];
@@ -607,6 +608,7 @@ export interface ApiPlanConsent {
 }
 
 export interface ApiPlanResponse {
+  preparation?: {steps: string[]; network: boolean};
   planRevision?: string;
   summary: ApiPlanSummary;
   files: ApiPlanFile[];
@@ -616,6 +618,7 @@ export interface ApiPlanResponse {
 }
 
 export interface ApiApplyRequest {
+  preparationInputs?: ApiPreparationInputs;
   planRevision?: string;
   scope?: ApiScope | null;
   tools?: string[];
@@ -624,6 +627,20 @@ export interface ApiApplyRequest {
   confirmed?: boolean | null;
   /** Compatibility input; normalized to confirmed by the API client. */
   yes?: boolean | null;
+}
+
+export interface ApiPreparationInputs {
+  semantic_suite?: unknown;
+  semantic_approval?: {report_id: string; checksum: string};
+}
+export interface ApiPreparationReport {
+  current?: string | null;
+  live_output?: string | null;
+  revision: string;
+  status: string;
+  completed: string[];
+  error: string | null;
+  question: {kind: string; message: string; data: Record<string, unknown>} | null;
 }
 
 export interface ApiApplyResult {

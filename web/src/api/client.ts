@@ -567,6 +567,12 @@ export function runApply(request: ApiApplyRequest, options?: ApiRequestOptions):
 export async function runApply(request: ApiApplyRequest, options: ApiRequestOptions = {}): Promise<ApiApplyResponse | ApiPlanResponse> {
   return sendJson('/apply', 'POST', options, { ...request, confirmed: request.confirmed ?? request.yes });
 }
+export async function getApplyPreparation() {
+  return sendJson<import('./models').ApiPreparationReport | null>('/apply/preparation', 'GET', {});
+}
+export async function allowApplyNetwork(revision: string) {
+  return sendJson('/apply/network', 'POST', {}, {revision, confirmed: true});
+}
 
 export async function createTerminalSession(
   request: ApiTerminalCreateRequest,
