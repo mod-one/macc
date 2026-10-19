@@ -98,10 +98,16 @@ pub(crate) fn search_in(
         }
         if !r.include_inactive {
             let conflict:bool=sql(db.query_row("SELECT EXISTS(SELECT 1 FROM memory_conflicts WHERE status='open' AND (left_id=?1 OR right_id=?1))",[&id],|r|r.get(0)))?;
-            if conflict || m.proposal.confidence < policy.memory.min_confidence {
+            if conflict {
+                exclusions.push(format!("{id}: unresolved memory conflict"));
+            }
+            if m.proposal.confidence < policy.memory.min_confidence {
                 exclusions.push(format!(
-                    "{id}: unresolved conflict or confidence below policy minimum"
+                    "{id}: confidence {} below policy minimum {}",
+                    m.proposal.confidence, policy.memory.min_confidence
                 ));
+            }
+            if conflict || m.proposal.confidence < policy.memory.min_confidence {
                 continue;
             }
         }

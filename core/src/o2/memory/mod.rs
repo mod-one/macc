@@ -1,5 +1,7 @@
 //! Durable claims, evidence and review, never task completion authority.
 mod conflicts;
+mod explain;
+pub use explain::{explain, Explanation};
 mod freshness;
 mod model;
 pub(crate) mod preflight;

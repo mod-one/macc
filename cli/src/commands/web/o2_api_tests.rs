@@ -64,6 +64,30 @@ async fn o2_policy_has_shared_catalog_and_mutations_require_the_project_owner() 
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    for payload in [
+        serde_json::json!({"action":"policy_field_get","path":"memory.enabled"}),
+        serde_json::json!({"action":"policy_field_preview","path":"memory.enabled","value":"true","revision":null}),
+        serde_json::json!({"action":"policy_field_apply","path":"memory.enabled","value":"true","revision":view["revision"],"confirmed":true}),
+    ] {
+        let expected = if payload["action"] == "policy_field_apply" {
+            StatusCode::FORBIDDEN
+        } else {
+            StatusCode::OK
+        };
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/o2/action")
+                    .header("X-Macc-Client-Id", "viewer")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+    }
     let response = app
         .oneshot(
             Request::builder()

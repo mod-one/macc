@@ -22,6 +22,7 @@ pub mod migrate;
 pub mod o2;
 mod o2_mcp;
 mod o2_parser;
+mod o2_policy;
 mod o2_tuning;
 pub mod plan;
 pub mod prd;

@@ -37,11 +37,28 @@ pub enum Action {
         revision: String,
         policy: Option<policy::Policy>,
     },
+    PolicyFieldGet {
+        path: String,
+    },
+    PolicyFieldPreview {
+        path: String,
+        value: String,
+        revision: Option<String>,
+    },
+    PolicyFieldApply {
+        path: String,
+        value: String,
+        revision: String,
+        confirmed: bool,
+    },
     UpgradePlan,
     UpgradeApply {
         source_sha256: String,
     },
     MemorySearch {
+        search: memory::Search,
+    },
+    MemoryExplain {
         search: memory::Search,
     },
     MemoryPull {
@@ -202,10 +219,13 @@ impl Action {
                 | Self::Overview { .. }
                 | Self::AgentStatus
                 | Self::PolicyPreview { .. }
+                | Self::PolicyFieldGet { .. }
+                | Self::PolicyFieldPreview { .. }
                 | Self::UpgradePlan
                 | Self::MemoryExportPreview { .. }
                 | Self::MemoryImportPreview { .. }
                 | Self::MemorySearch { .. }
+                | Self::MemoryExplain { .. }
                 | Self::MemoryGet { .. }
                 | Self::MemoryPull { .. }
                 | Self::MemoryRead { .. }
@@ -292,9 +312,29 @@ pub fn execute(root: &Path, action: Action) -> Result<Value> {
             )
         }
         Action::PolicyApply { revision, policy } => value(policy::update(root, &revision, policy)?),
+        Action::PolicyFieldGet { path } => value(policy_edit::get(root, &path)?),
+        Action::PolicyFieldPreview {
+            path,
+            value: input,
+            revision,
+        } => value(policy_edit::preview(
+            root,
+            &path,
+            &input,
+            revision.as_deref(),
+        )?),
+        Action::PolicyFieldApply {
+            path,
+            value: input,
+            revision,
+            confirmed,
+        } => value(policy_edit::apply(
+            root, &path, &input, &revision, confirmed,
+        )?),
         Action::UpgradePlan => value(upgrade(root, false, None)?),
         Action::UpgradeApply { source_sha256 } => value(upgrade(root, true, Some(&source_sha256))?),
         Action::MemorySearch { search } => value(memory::search(root, &search)?),
+        Action::MemoryExplain { search } => value(memory::explain(root, &search)?),
         Action::MemoryPull { search, cursor } => value(memory::pull(root, &search, cursor)?),
         Action::MemoryRead { id, access, offset } => {
             value(memory::read(root, &id, &access, offset)?)

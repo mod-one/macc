@@ -9,6 +9,7 @@ pub mod memory;
 pub mod overview;
 mod paths;
 pub mod policy;
+pub mod policy_edit;
 #[cfg(test)]
 mod probe_tests;
 pub mod providers;

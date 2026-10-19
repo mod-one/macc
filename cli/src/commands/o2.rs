@@ -61,6 +61,9 @@ pub enum ExistingCommand {
         all: bool,
         #[arg(long)]
         full: bool,
+        /// Explain scoped exclusions without changing facts; operator output is not token-budgeted.
+        #[arg(long, conflicts_with_all = ["full", "cursor"])]
+        explain: bool,
         #[arg(long, default_value_t = 0)]
         cursor: usize,
         #[arg(long)]
@@ -204,7 +207,11 @@ impl Command for O2 {
         if self.command.is_mcp() {
             return super::o2_mcp::run();
         }
+        if let O2Command::Policy(command) = &self.command {
+            return super::o2_policy::run(&self.app, command);
+        }
         let action = match &self.command {
+            O2Command::Policy(_) => unreachable!("policy transport handled above"),
             O2Command::Tuning(command) => command.action()?,
             O2Command::Existing(command) => match command {
                 ExistingCommand::Mcp => unreachable!(),
@@ -288,6 +295,7 @@ impl Command for O2 {
                     worktree,
                     all,
                     full,
+                    explain,
                     cursor,
                     feature,
                     user,
@@ -303,7 +311,9 @@ impl Command for O2 {
                         },
                         include_inactive: *all,
                     };
-                    if *full {
+                    if *explain {
+                        Action::MemoryExplain { search }
+                    } else if *full {
                         Action::MemorySearch { search }
                     } else {
                         Action::MemoryPull {
