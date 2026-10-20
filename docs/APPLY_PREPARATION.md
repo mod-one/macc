@@ -1,5 +1,8 @@
 # Apply: prepare and verify enabled features
 
+See [Apply output and degraded preparation](APPLY_OUTPUT.md) for output modes,
+consent in scripts and partial-index decisions.
+
 ## Operator workflow
 
 Save the desired settings, then run **Apply** in CLI, TUI or Web. Review the file
@@ -96,7 +99,7 @@ account commands live in ToolSpecs, not coordinator or client code.
 
 `.macc/state/apply-preparation.json` records status, config revision, completed
 steps, errors and pending questions. Bounded command logs are retained under
-`.macc/log/apply/` with private file permissions; UI output is redacted. Existing
+`.macc/log/apply/<run-id>/` with private file permissions; UI output is redacted. Existing
 provider plans/receipts, schema backups and semantic reports remain authoritative.
 
 Doctor performs read-only O2 readiness checks. Coordinator startup checks tool

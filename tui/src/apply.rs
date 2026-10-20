@@ -15,6 +15,7 @@ pub(crate) struct ApplyRuntime {
     pub confirm_open: bool,
     pub confirm_selected: usize,
     pub confirm_scroll: u16,
+    pub show_output: bool,
     pub selected: usize,
     pub scroll: u16,
     preparing: Option<Receiver<Result<Vec<MaterializedFetchUnit>, String>>>,
@@ -103,6 +104,7 @@ impl AppState {
                 .engine
                 .plan(paths, canonical, &units, &CliOverrides::default())
                 .map_err(|e| e.to_string())?;
+            macc_core::validate_plan(&plan, true).map_err(|e| e.to_string())?;
             macc_core::service::preparation::set_inputs(
                 &mut plan,
                 self.apply_runtime.inputs.clone(),
@@ -168,6 +170,9 @@ impl AppState {
         }
         if self.apply_runtime.applying.is_some() {
             match key {
+                KeyCode::Char('v') => {
+                    self.apply_runtime.show_output = !self.apply_runtime.show_output
+                }
                 KeyCode::Esc => self.pop_screen(),
                 KeyCode::PageDown => {
                     self.apply_runtime.scroll = self.apply_runtime.scroll.saturating_add(5)
@@ -211,6 +216,7 @@ impl AppState {
             return;
         }
         match key {
+            KeyCode::Char('v') => self.apply_runtime.show_output = !self.apply_runtime.show_output,
             KeyCode::Enter => self.attempt_apply(),
             KeyCode::Char('r') => self.open_apply_screen(),
             KeyCode::Esc | KeyCode::Char('q') => self.pop_screen(),
@@ -353,10 +359,16 @@ impl AppState {
                     ));
                 }
                 self.apply_feedback = Some(report.render_cli());
-                self.notices
-                    .push("TUI apply completed successfully.".to_string());
+                self.notices.push(
+                    if report.warnings.is_empty() {
+                        "TUI apply completed."
+                    } else {
+                        "TUI apply completed with warnings."
+                    }
+                    .to_string(),
+                );
                 self.set_status(
-                    if self.apply_error.is_some() {
+                    if self.apply_error.is_some() || !report.warnings.is_empty() {
                         UiStatusLevel::Warning
                     } else {
                         UiStatusLevel::Success
@@ -364,7 +376,11 @@ impl AppState {
                     if self.apply_error.is_some() {
                         "Apply completed; readiness tracking needs attention."
                     } else {
-                        "Apply completed."
+                        if report.warnings.is_empty() {
+                            "Apply completed."
+                        } else {
+                            "Apply completed with warnings; inspect the result."
+                        }
                     },
                     Some(Duration::from_secs(5)),
                 );

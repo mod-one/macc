@@ -161,15 +161,7 @@ pub(crate) fn active(state: &AppState) -> Vec<Command> {
     }
     if screen == Screen::Apply {
         if state.apply_assistant_open() {
-            return rows(vec![
-                ("Enter", "Continue / validate choice"),
-                ("c", "Configure O2"),
-                ("s", "Provide labelled suite"),
-                ("↑↓", "Select setting"),
-                ("PgUp/PgDn", "Scroll preparation proof"),
-                ("←→", "Choose value"),
-                ("Esc", "Close assistant"),
-            ]);
+            return rows(state.apply_assistant_bindings());
         }
         if state.apply_confirmation_open() {
             return rows(vec![
@@ -182,6 +174,7 @@ pub(crate) fn active(state: &AppState) -> Vec<Command> {
             ]);
         }
         let mut commands = rows(screen_action_bindings(screen));
+        commands.extend(rows(vec![("v", "Toggle technical output")]));
         if let Some(command) = commands.iter_mut().find(|c| c.key == Some(KeyCode::Enter)) {
             command.enabled = state.apply_context.is_some()
                 && !state.apply_preparing()

@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 pub mod apply;
+mod apply_output;
 pub mod backups;
 pub mod catalog;
 pub mod catalog_support;

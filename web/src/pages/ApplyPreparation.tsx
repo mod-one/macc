@@ -17,9 +17,14 @@ export default function ApplyPreparation({ report, busy, resume }: {
   const benchmark = question?.data;
   const result = benchmark?.report as {id?: string; passed?: boolean} | undefined;
   return <section aria-label="Apply preparation assistant" className="rounded-xl border border-[var(--border)] p-4 space-y-3">
-    <h2 className="text-lg font-semibold">Preparation · {report.status.replaceAll('_', ' ')}</h2>
+    <h2 className="text-lg font-semibold">Preparation · {report.status.replaceAll('_', ' ')}{report.warnings?.length ? ' · with warnings' : ''}</h2>
     {report.current && <p role="status">{report.current}</p>}
-    {report.live_output && <pre className="max-h-64 overflow-auto whitespace-pre-wrap" aria-label="Preparation output">{report.live_output}</pre>}
+    {report.live_output && <details open={report.output_kind === 'interaction'}><summary>{report.output_kind === 'interaction' ? 'Account setup: action required' : 'Technical output'}</summary><pre className="max-h-64 overflow-auto whitespace-pre-wrap" aria-label="Preparation output">{report.live_output}</pre></details>}
+    {!!report.warnings?.length && <ul aria-label="Preparation warnings">{report.warnings.map((warning,i)=><li key={i}>WARN {warning}</li>)}</ul>}
+    {question?.kind === 'provider_quality' && <div className="flex flex-wrap gap-3">
+      <button disabled={busy} onClick={async()=>{try{await o2Action('policy_field_apply',{path:question.data.path,value:question.data.value,revision:report.revision,confirmed:true});await resume({});}catch(e){setError(String(e));}}}>Increase budget to {String(question.data.value)} ms and review rebuild</button>
+      <button disabled={busy} onClick={()=>resume({accept_degraded:true})}>Keep partial coverage and review Apply</button>
+    </div>}
     <ul>{report.completed.map((step, i) => <li key={i}>✓ {step}</li>)}</ul>
     {report.error && <p role="status">{report.error}</p>}
     {question && <p>{question.message}</p>}

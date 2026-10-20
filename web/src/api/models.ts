@@ -630,10 +630,14 @@ export interface ApiApplyRequest {
 }
 
 export interface ApiPreparationInputs {
+  accept_degraded?: boolean;
   semantic_suite?: unknown;
   semantic_approval?: {report_id: string; checksum: string};
 }
 export interface ApiPreparationReport {
+  warnings?: string[];
+  output_kind?: string | null;
+  run_id?: string;
   current?: string | null;
   live_output?: string | null;
   revision: string;

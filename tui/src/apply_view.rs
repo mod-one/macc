@@ -90,15 +90,19 @@ impl AppState {
             .as_deref()
             .or(self.apply_feedback.as_deref())
             .unwrap_or(
-                "No changes applied. Confirmation is required for project and user operations.",
+                if self.apply_runtime.applying.is_some(){"Preparing enabled features. Technical output is hidden; press v to show it. Logs: .macc/log/apply/"}else{"No changes applied. Confirmation is required for project and user operations."},
             );
         let result = self
             .apply_runtime
             .assistant
             .report
             .as_ref()
+            .filter(|r| {
+                self.apply_runtime.applying.is_some()
+                    && (self.apply_runtime.show_output
+                        || r.output_kind.as_deref() == Some("interaction"))
+            })
             .and_then(|r| r.live_output.as_deref())
-            .filter(|_| self.apply_runtime.applying.is_some())
             .unwrap_or(result);
         f.render_widget(
             Paragraph::new(format!(

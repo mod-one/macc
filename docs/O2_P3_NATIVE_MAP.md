@@ -115,7 +115,7 @@ All keys are under `code_intelligence`:
 | `native_index_max_bytes` | 16777216 | 1–64 MiB persisted artifact |
 | `native_symbols_per_file` | 1000 | 1–10000 |
 | `native_parse_timeout_ms` | 100 | 1–1000 ms per file parser |
-| `native_build_timeout_ms` | 5000 | 100–60000 ms parse/reuse loop |
+| `native_build_timeout_ms` | 15000 | 100–60000 ms parse/reuse loop |
 
 Existing `max_files`, `max_file_bytes`, `query_limit` and `output_tokens` still
 apply. Corpus/output/loop budget exhaustion marks coverage truncated explicitly;

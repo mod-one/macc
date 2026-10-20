@@ -50,6 +50,24 @@ impl AppState {
             self.apply_runtime.assistant.open = false;
             return;
         }
+        let mode = &self.apply_runtime.assistant.mode;
+        let question = self
+            .apply_runtime
+            .assistant
+            .report
+            .as_ref()
+            .and_then(|r| r.question.as_ref())
+            .map(|q| q.kind.as_str());
+        let mutating = (mode == &Mode::Confirm && key == KeyCode::Enter)
+            || (mode == &Mode::Overview
+                && ((key == KeyCode::Char('i') && question == Some("provider_quality"))
+                    || (key == KeyCode::Enter && question == Some("network_access"))));
+        if mutating {
+            if let Err(error) = self.gate_project_mutation() {
+                self.apply_runtime.assistant.error = Some(error.to_string());
+                return;
+            }
+        }
         let fields = macc_core::o2::policy::fields();
         let state = &mut self.apply_runtime.assistant;
         if key == KeyCode::PageDown {
@@ -122,6 +140,7 @@ impl AppState {
                     match parsed {
                         Ok(suite) => {
                             self.resume_apply_assistant(Inputs {
+                                accept_degraded: false,
                                 semantic_suite: Some(suite),
                                 semantic_approval: None,
                             });
@@ -160,6 +179,19 @@ impl AppState {
                 }
             }
             Mode::Overview => match key {
+                KeyCode::Char('i')
+                    if state
+                        .report
+                        .as_ref()
+                        .and_then(|r| r.question.as_ref())
+                        .is_some_and(|q| q.kind == "provider_quality") =>
+                {
+                    let report = state.report.as_ref().unwrap();
+                    match macc_core::service::preparation::improve_quality(&root, report, true) {
+                        Ok(()) => self.resume_apply_assistant(Default::default()),
+                        Err(e) => state.error = Some(e.to_string()),
+                    }
+                }
                 KeyCode::Char('c') => {
                     state.mode = Mode::Settings;
                     state.scroll = 0;
@@ -171,6 +203,10 @@ impl AppState {
                 KeyCode::Enter => {
                     let question = state.report.as_ref().and_then(|r| r.question.as_ref());
                     match question.map(|q| q.kind.as_str()) {
+                        Some("provider_quality") => self.resume_apply_assistant(Inputs {
+                            accept_degraded: true,
+                            ..Default::default()
+                        }),
                         Some("network_access") => {
                             let revision = state.report.as_ref().unwrap().revision.clone();
                             match macc_core::service::preparation::allow_network(
@@ -195,6 +231,7 @@ impl AppState {
                                     checksum: data["checksum"].as_str().unwrap_or_default().into(),
                                 };
                                 self.resume_apply_assistant(Inputs {
+                                    accept_degraded: false,
                                     semantic_suite: None,
                                     semantic_approval: Some(approval),
                                 });
@@ -209,6 +246,47 @@ impl AppState {
             },
         }
     }
+    pub(crate) fn apply_assistant_bindings(&self) -> Vec<(&'static str, &'static str)> {
+        let state = &self.apply_runtime.assistant;
+        let mut rows = match state.mode {
+            Mode::Overview => {
+                let quality = state
+                    .report
+                    .as_ref()
+                    .and_then(|r| r.question.as_ref())
+                    .is_some_and(|q| q.kind == "provider_quality");
+                let mut actions = vec![
+                    (
+                        "Enter",
+                        if quality {
+                            "Keep partial coverage and review Apply"
+                        } else {
+                            "Continue / review Apply"
+                        },
+                    ),
+                    ("c", "Configure O2"),
+                    ("s", "Provide labelled suite"),
+                ];
+                if quality {
+                    actions.push(("i", "Confirm suggested budget and review rebuild"));
+                }
+                actions
+            }
+            Mode::Settings => vec![("↑↓", "Select setting"), ("Enter", "Edit selected setting")],
+            Mode::Value => vec![
+                ("←→", "Choose value"),
+                ("Backspace", "Delete character"),
+                ("Enter", "Preview setting"),
+            ],
+            Mode::Suite => vec![
+                ("Backspace", "Delete character"),
+                ("Enter", "Validate suite and review Apply"),
+            ],
+            Mode::Confirm => vec![("Enter", "Confirm setting and review Apply")],
+        };
+        rows.extend([("PgUp/PgDn", "Scroll evidence"), ("Esc", "Close assistant")]);
+        rows
+    }
     pub(crate) fn draw_apply_assistant(&self, f: &mut Frame) {
         let state = &self.apply_runtime.assistant;
         let area = crate::ui::centered_rect(90, 90, crate::ui::content_area(f.size()));
@@ -219,6 +297,28 @@ impl AppState {
             Mode::Overview => {
                 if let Some(report) = &state.report {
                     text.push_str(&format!("Preparation: {}\n", report.status));
+                    for warning in &report.warnings {
+                        text.push_str(&format!("WARN {warning}\n"));
+                    }
+                    if report
+                        .question
+                        .as_ref()
+                        .is_some_and(|q| q.kind == "provider_quality")
+                    {
+                        text.push_str(
+                            "[i] Confirm suggested budget and rebuild · [Enter] Keep partial coverage\n",
+                        );
+                    }
+                    if let Some(q) = report
+                        .question
+                        .as_ref()
+                        .filter(|q| q.kind == "provider_quality")
+                    {
+                        text.push_str(&format!(
+                            "Proposed setting: {} = {}\n",
+                            q.data["path"], q.data["value"]
+                        ));
+                    }
                     for step in &report.completed {
                         text.push_str(&format!("✓ {step}\n"));
                     }

@@ -136,55 +136,14 @@ pub type Result<T> = std::result::Result<T, MaccError>;
 
 #[derive(Debug, Clone, Default)]
 pub struct ApplyReport {
+    pub warnings: Vec<String>,
+    pub details_path: Option<PathBuf>,
     pub outcomes: std::collections::BTreeMap<String, plan::ActionStatus>,
     pub backup_dir: Option<PathBuf>,
     pub user_backup_report: Option<UserBackupReport>,
 }
 
-impl ApplyReport {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn render_cli(&self) -> String {
-        use std::fmt::Write;
-        let mut output = String::new();
-
-        writeln!(output, "\nApply Summary:").unwrap();
-        writeln!(output, "{:<40} {:<10}", "PATH", "STATUS").unwrap();
-        writeln!(output, "{:-<40} {:-<10}", "", "").unwrap();
-
-        let mut created = 0;
-        let mut updated = 0;
-        let mut unchanged = 0;
-
-        for (path, status) in &self.outcomes {
-            writeln!(output, "{:<40} {:<10}", path, status.as_str()).unwrap();
-            match status {
-                plan::ActionStatus::Created => created += 1,
-                plan::ActionStatus::Updated => updated += 1,
-                plan::ActionStatus::Unchanged => unchanged += 1,
-                _ => {}
-            }
-        }
-
-        writeln!(
-            output,
-            "\nTotal: {} created, {} updated, {} unchanged",
-            created, updated, unchanged
-        )
-        .unwrap();
-
-        if let Some(backup_dir) = &self.backup_dir {
-            writeln!(output, "Backups created in: {}", backup_dir.display()).unwrap();
-        }
-        if let Some(report) = &self.user_backup_report {
-            writeln!(output, "User backups created in: {}", report.root.display()).unwrap();
-        }
-
-        output
-    }
-}
+mod apply_report;
 
 #[derive(Debug, Clone, Default)]
 pub struct ClearReport {
@@ -1015,17 +974,6 @@ pub fn preview_plan(plan: &plan::ActionPlan, paths: &ProjectPaths) -> Result<()>
                     );
                 }
 
-                // Placeholder validation for sensitive files
-                if is_sensitive_file(path) {
-                    let content_str = std::str::from_utf8(content).unwrap_or("");
-                    if !security::contains_placeholder(content_str) {
-                        println!(
-                            "    [SECURITY WARNING] {} - Missing placeholders in sensitive file",
-                            path
-                        );
-                    }
-                }
-
                 let full_path = paths.root.join(path);
                 let existing = plan::read_existing(&full_path);
 
@@ -1163,27 +1111,63 @@ pub fn apply_plan(
             "O2 prerequisites changed after preview; review macc apply again".into(),
         ));
     }
-    if let Some(activation) = &plan.o2_activation {
-        o2::activation::apply(&paths.root, activation)?;
-    }
-    let operations = plan::collect_plan_operations(paths, plan);
-    let mut report = apply_operations(paths, &operations, allow_user_scope, |_, _, _| {})?;
     if let Some(preparation) = &plan.preparation {
-        service::preparation::execute(paths, preparation)?;
-        report.outcomes.insert(
-            "Preparation: all enabled features verified".into(),
-            plan::ActionStatus::Updated,
-        );
+        service::preparation::begin(paths, preparation)?;
     }
-    if let Some(activation) = &plan.o2_activation {
-        if activation.source_sha256.is_some() {
+    let result = (|| {
+        if let Some(activation) = &plan.o2_activation {
+            o2::activation::apply(&paths.root, activation)?;
+        }
+        if plan.preparation.is_some() {
+            service::preparation::phase(&paths.root, "Applying project configuration")?;
+        }
+        let operations = plan::collect_plan_operations(paths, plan);
+        let mut report = apply_operations(paths, &operations, allow_user_scope, |_, _, _| {})?;
+        if let Some(preparation) = &plan.preparation {
+            let prepared = service::preparation::execute(paths, preparation)?;
+            report.warnings.extend(prepared.warnings);
+            report.details_path = Some(
+                paths
+                    .macc_dir
+                    .join("log/apply")
+                    .join(&prepared.run_id)
+                    .join("result.json"),
+            );
             report.outcomes.insert(
-                format!("O2: {}", activation.operation),
+                if report.warnings.is_empty() {
+                    "Preparation: all enabled features verified"
+                } else {
+                    "Preparation: verified with warnings"
+                }
+                .into(),
                 plan::ActionStatus::Updated,
             );
         }
+        if let Some(activation) = &plan.o2_activation {
+            if activation.source_sha256.is_some() {
+                report.outcomes.insert(
+                    format!("O2: {}", activation.operation),
+                    plan::ActionStatus::Updated,
+                );
+            }
+        }
+        let run_id = report
+            .details_path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.file_name())
+            .map(|s| s.to_string_lossy().into_owned());
+        report.save_details(paths, run_id.as_deref())?;
+        Ok(report)
+    })();
+    if let Err(error) = &result {
+        if plan.preparation.is_some() {
+            if let Err(record_error) = service::preparation::record_failure(&paths.root, error) {
+                tracing::warn!("Cannot record Apply failure: {record_error}");
+            }
+        }
     }
-    Ok(report)
+    result
 }
 
 pub fn apply_operations<F>(
@@ -1262,20 +1246,10 @@ where
                     let findings = security::scan_bytes(&path, &effective_content);
                     for finding in &findings {
                         if finding.severity == security::Severity::Warning {
-                            println!(
-                                "    [SECURITY WARNING] {} - {} ({})",
+                            report.warnings.push(format!(
+                                "{}: {} ({})",
                                 path, finding.pattern_name, finding.redacted_match
-                            );
-                        }
-                    }
-
-                    if is_sensitive_file(&path) {
-                        let content_str = std::str::from_utf8(&effective_content).unwrap_or("");
-                        if !security::contains_placeholder(content_str) {
-                            println!(
-                                "    [SECURITY WARNING] {} - Missing placeholders in sensitive file",
-                                path
-                            );
+                            ));
                         }
                     }
 
@@ -1647,17 +1621,6 @@ pub fn ensure_gitignore_entries(
     } else {
         plan::ActionStatus::Created
     })
-}
-
-fn is_sensitive_file(path: &str) -> bool {
-    let lower = path.to_lowercase();
-    lower.contains("secret")
-        || lower.contains("key")
-        || lower.contains("token")
-        || lower.ends_with(".env")
-        || lower.ends_with(".example")
-        || lower.contains("config")
-        || lower.contains("settings")
 }
 
 pub fn write_if_changed<F>(
@@ -2501,17 +2464,6 @@ mod tests {
             panic!("Expected SecretDetected error, got {:?}", result);
         }
         Ok(())
-    }
-
-    #[test]
-    fn test_is_sensitive_file() {
-        assert!(is_sensitive_file(".env"));
-        assert!(is_sensitive_file("config.json"));
-        assert!(is_sensitive_file("settings.yaml"));
-        assert!(is_sensitive_file("my_secret_token.txt"));
-        assert!(is_sensitive_file("api_key.example"));
-        assert!(!is_sensitive_file("README.md"));
-        assert!(!is_sensitive_file("src/main.rs"));
     }
 
     #[test]

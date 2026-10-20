@@ -10,47 +10,10 @@ use crate::{MaccError, ProjectPaths, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Plan {
-    #[serde(default)]
-    pub mcp_cleanup: Vec<crate::tool::scoped_mcp::RegistrationSpec>,
-    #[serde(default)]
-    pub inputs: Inputs,
-    pub revision: String,
-    pub tools: Vec<tools::Requirement>,
-    pub providers: Vec<crate::o2::providers::preparation::Requirement>,
-    pub steps: Vec<String>,
-    pub network: bool,
-}
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Report {
-    #[serde(default)]
-    pub current: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub live_output: Option<String>,
-    pub revision: String,
-    pub status: String,
-    pub completed: Vec<String>,
-    pub error: Option<String>,
-    #[serde(default)]
-    pub question: Option<Question>,
-}
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Inputs {
-    pub semantic_suite: Option<serde_json::Value>,
-    pub semantic_approval: Option<Approval>,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Approval {
-    pub report_id: String,
-    pub checksum: String,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Question {
-    pub kind: String,
-    pub message: String,
-    pub data: serde_json::Value,
-}
+mod model;
+pub use model::*;
+mod attempt;
+pub(crate) use attempt::{begin, phase, record_failure};
 pub fn preview(paths: &ProjectPaths) -> Result<Option<Plan>> {
     if paths.macc_dir.join("worktree.json").is_file() || !paths.config_path.exists() {
         return Ok(None);
@@ -169,19 +132,19 @@ pub fn validate_review(paths: &ProjectPaths, reviewed: Option<&Plan>) -> Result<
     Ok(())
 }
 pub fn execute(paths: &ProjectPaths, plan: &Plan) -> Result<Report> {
-    let mut report = Report {
-        revision: plan.revision.clone(),
-        status: "preparing".into(),
-        completed: vec![],
-        error: None,
-        question: None,
-        current: None,
-        live_output: None,
-    };
-    publish(&paths.root, &report)?;
+    let mut report = status(&paths.root)?
+        .filter(|r| {
+            r.status == "preparing"
+                && r.revision == plan.revision
+                && uuid::Uuid::parse_str(&r.run_id).is_ok()
+        })
+        .map(Ok)
+        .unwrap_or_else(|| begin(paths, plan))?;
     let result: Result<()> = (|| {
+        progress::clear(&paths.root)?;
         mcp::cleanup(paths, &plan.mcp_cleanup, &mut report)?;
         for tool in &plan.tools {
+            progress::clear(&paths.root)?;
             report.current = Some(format!("Preparing tool {}", tool.spec.id));
             publish(&paths.root, &report)?;
             tools::prepare(paths, tool, true)?;
@@ -191,13 +154,31 @@ pub fn execute(paths: &ProjectPaths, plan: &Plan) -> Result<Report> {
             publish(&paths.root, &report)?;
         }
         for provider in &plan.providers {
+            progress::clear(&paths.root)?;
             report.current = Some(format!("Preparing provider {}", provider.id));
             publish(&paths.root, &report)?;
-            crate::o2::providers::preparation::execute(&paths.root, provider)?;
+            if !plan.inputs.accept_degraded
+                || crate::o2::providers::preparation::verify(&paths.root, provider).is_err()
+            {
+                crate::o2::providers::preparation::execute(&paths.root, provider)?;
+            }
             report
                 .completed
                 .push(format!("Provider {} prepared and verified", provider.id));
             publish(&paths.root, &report)?;
+        }
+        progress::clear(&paths.root)?;
+        for provider in &plan.providers {
+            let quality =
+                crate::o2::providers::preparation_quality::inspect(&paths.root, &provider.id)?;
+            report.warnings.extend(quality.warnings);
+            if let Some(suggestion) = quality.suggestion.filter(|_| !plan.inputs.accept_degraded) {
+                report.question = Some(Question {kind: "provider_quality".into(),message: "The local index reached its build budget. Increase the budget and rebuild, or keep partial coverage with warnings.".into(),data:serde_json::to_value(suggestion).map_err(|e|MaccError::Validation(e.to_string()))?});
+                return Err(MaccError::Validation(
+                    "Index preparation needs a coverage decision; completed work is retained"
+                        .into(),
+                ));
+            }
         }
         o2::prepare(paths, plan, &mut report)?;
         let current = crate::load_canonical_config(&paths.config_path)?;
@@ -279,12 +260,28 @@ pub fn verify_enabled(root: &Path) -> Result<()> {
     o2::verify(&paths, &plan)
 }
 fn publish(root: &Path, report: &Report) -> Result<()> {
+    let paths = ProjectPaths::from_root(root);
+    let bytes =
+        serde_json::to_vec_pretty(report).map_err(|e| MaccError::Validation(e.to_string()))?;
     crate::atomic_write(
-        &ProjectPaths::from_root(root),
-        &root.join(".macc/state/apply-preparation.json"),
-        &serde_json::to_vec_pretty(report).map_err(|e| MaccError::Validation(e.to_string()))?,
-    )
+        &paths,
+        &paths.macc_dir.join("state/apply-preparation.json"),
+        &bytes,
+    )?;
+    if uuid::Uuid::parse_str(&report.run_id).is_ok() {
+        crate::atomic_write(
+            &paths,
+            &paths
+                .macc_dir
+                .join("log/apply")
+                .join(&report.run_id)
+                .join("preparation.json"),
+            &bytes,
+        )?;
+    }
+    Ok(())
 }
+
 pub fn status(root: &Path) -> Result<Option<Report>> {
     let path = root.join(".macc/state/apply-preparation.json");
     if !path.exists() {
@@ -297,7 +294,12 @@ pub fn status(root: &Path) -> Result<Option<Report>> {
     })?;
     let mut report: Report =
         serde_json::from_slice(&raw).map_err(|e| MaccError::Validation(e.to_string()))?;
-    report.live_output = progress::output(root)?;
+    report.output_kind = progress::kind(root);
+    report.live_output = if report.status == "preparing" {
+        progress::output(root)?
+    } else {
+        None
+    };
     Ok(Some(report))
 }
 pub fn set_inputs(plan: &mut crate::plan::ActionPlan, inputs: Inputs) {
@@ -315,5 +317,25 @@ pub fn allow_network(root: &Path, revision: &str, confirmed: bool) -> Result<()>
         config.settings.offline = false;
         Ok(())
     })?;
+    Ok(())
+}
+
+/// Apply an adapter-proposed setting only after the operator reviews it.
+pub fn improve_quality(root: &Path, report: &Report, confirmed: bool) -> Result<()> {
+    let question = report
+        .question
+        .as_ref()
+        .filter(|q| q.kind == "provider_quality")
+        .ok_or_else(|| MaccError::Validation("No pending provider quality suggestion".into()))?;
+    let suggestion: crate::o2::providers::preparation_quality::SettingSuggestion =
+        serde_json::from_value(question.data.clone())
+            .map_err(|e| MaccError::Validation(e.to_string()))?;
+    crate::o2::policy_edit::apply(
+        root,
+        &suggestion.path,
+        &suggestion.value,
+        &report.revision,
+        confirmed,
+    )?;
     Ok(())
 }

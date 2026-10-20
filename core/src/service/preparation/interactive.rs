@@ -14,15 +14,39 @@ pub fn apply(
             Ok(report) => return Ok(report),
             Err(error) => error,
         };
-        ui.error(&error.to_string());
         let report = status(&paths.root)?;
         let question = report.as_ref().and_then(|r| r.question.as_ref());
+        if question.is_none() {
+            ui.error(&error.to_string());
+        }
         let mut inputs = initial
             .preparation
             .as_ref()
             .map(|p| p.inputs.clone())
             .unwrap_or_default();
         match question.map(|q| q.kind.as_str()) {
+            Some("provider_quality") => {
+                for warning in &report.as_ref().unwrap().warnings {
+                    ui.warn(warning);
+                }
+                let question = question.unwrap();
+                ui.decision_info(&question.message);
+                ui.decision_info(&format!(
+                    "Proposed setting: {} = {}",
+                    question.data["path"].as_str().unwrap_or_default(),
+                    question.data["value"].as_str().unwrap_or_default()
+                ));
+                let choice=ui.prompt_line("Partial index: [i] increase budget and rebuild, [k] keep partial coverage, [c] configure, [Enter] cancel: ")?;
+                match choice.trim().to_ascii_lowercase().as_str() {
+                    "i" => {
+                        improve_quality(&paths.root, report.as_ref().unwrap(), true)?;
+                        inputs.accept_degraded = false;
+                    }
+                    "k" => inputs.accept_degraded = true,
+                    "c" => configure(&paths.root, ui)?,
+                    _ => return Err(error),
+                }
+            }
             Some("network_access") => {
                 if !ui.confirm_yes_no(
                     "Allow network access for project preparation and refresh Apply [y/N]? ",
@@ -32,7 +56,7 @@ pub fn apply(
                 allow_network(&paths.root, &report.as_ref().unwrap().revision, true)?;
             }
             Some("semantic_suite") => {
-                ui.info(&question.unwrap().message);
+                ui.decision_info(&question.unwrap().message);
                 let path = ui.prompt_line("Labelled benchmark JSON file (empty cancels): ")?;
                 if path.trim().is_empty() {
                     return Err(error);
@@ -57,7 +81,7 @@ pub fn apply(
             }
             Some("semantic_review") => {
                 let question = question.unwrap();
-                ui.info(
+                ui.decision_info(
                     &serde_json::to_string_pretty(&question.data)
                         .map_err(|e| MaccError::Validation(e.to_string()))?,
                 );
@@ -93,14 +117,11 @@ pub fn apply(
         }
         *initial = refresh()?;
         set_inputs(initial, inputs);
-        for operation in engine.plan_operations(paths, initial) {
-            ui.info(&format!("{:?}: {}", operation.kind, operation.path));
-        }
-        if let Some(preparation) = &initial.preparation {
-            for step in &preparation.steps {
-                ui.info(&format!("Preparation: {step}"));
-            }
-        }
+        ui.decision_info(&crate::service::apply_presentation::review(
+            paths,
+            initial,
+            &engine.plan_operations(paths, initial),
+        ));
         if !ui.confirm_yes_no("Continue with the refreshed Apply plan [y/N]? ")? {
             return Err(MaccError::Validation(
                 "Apply cancelled; completed preparation and evidence retained".into(),
@@ -117,26 +138,13 @@ fn with_progress(
 ) -> Result<crate::ApplyReport> {
     std::thread::scope(|scope| {
         let (tx, rx) = std::sync::mpsc::channel();
-        scope.spawn(move || {
-            let mut previous = String::new();
-            loop {
-                match rx.recv_timeout(std::time::Duration::from_millis(200)) {
-                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                }
-                if let Ok(Some(report)) = status(&paths.root) {
-                    if report.status == "preparing" {
-                        let message = format!(
-                            "{}\n{}",
-                            report.current.unwrap_or_default(),
-                            report.live_output.unwrap_or_default()
-                        );
-                        if message != previous {
-                            ui.info(&message);
-                            previous = message;
-                        }
-                    }
-                }
+        scope.spawn(move || loop {
+            match rx.recv_timeout(std::time::Duration::from_millis(200)) {
+                Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            }
+            if let Ok(Some(report)) = status(&paths.root) {
+                ui.apply_progress(&report);
             }
         });
         let result = engine.apply(paths, plan, allow_user_scope);
@@ -147,7 +155,7 @@ fn with_progress(
 fn configure(root: &Path, ui: &dyn LifecycleUi) -> Result<()> {
     let fields = crate::o2::policy::fields();
     for (i, field) in fields.iter().enumerate() {
-        ui.info(&format!("{}. {} ({})", i + 1, field.label, field.path));
+        ui.decision_info(&format!("{}. {} ({})", i + 1, field.label, field.path));
     }
     let choice = ui.prompt_line("O2 setting number (empty cancels): ")?;
     let field = choice
@@ -161,7 +169,7 @@ fn configure(root: &Path, ui: &dyn LifecycleUi) -> Result<()> {
     };
     let value = ui.prompt_line(&format!("{}: ", field.label))?;
     let preview = crate::o2::policy_edit::preview(root, &field.path, &value, None)?;
-    ui.info(
+    ui.decision_info(
         &serde_json::to_string_pretty(&preview)
             .map_err(|e| MaccError::Validation(e.to_string()))?,
     );

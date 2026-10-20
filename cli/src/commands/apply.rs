@@ -10,6 +10,7 @@ pub struct ApplyCommand {
     json: bool,
     explain: bool,
     locked: bool,
+    yes: bool,
 }
 
 impl ApplyCommand {
@@ -30,7 +31,12 @@ impl ApplyCommand {
             json,
             explain,
             locked,
+            yes: false,
         }
+    }
+    pub fn with_confirmation(mut self, yes: bool) -> Self {
+        self.yes = yes;
+        self
     }
 }
 
@@ -66,23 +72,35 @@ fn validate_locked(paths: &macc_core::ProjectPaths) -> Result<()> {
 
 impl Command for ApplyCommand {
     fn run(&self) -> Result<()> {
-        let paths = self.app.project_paths()?;
-        if self.locked {
-            validate_locked(&paths)?;
-        }
+        let result = (|| {
+            let paths = self.app.project_paths()?;
+            if self.locked {
+                validate_locked(&paths)?;
+            }
 
-        // L6-OWN-008: gate `apply` against the project-wide control lease.
-        // Dry-runs are read-only; skip the gate for those.
-        if !self.dry_run {
-            crate::commands::gate_cli_mutation(&paths.root)?;
+            // L6-OWN-008: gate `apply` against the project-wide control lease.
+            // Dry-runs are read-only; skip the gate for those.
+            if !self.dry_run {
+                crate::commands::gate_cli_mutation(&paths.root)?;
+            }
+            crate::commands::lifecycle_support::apply(
+                &self.app,
+                self.tools.as_deref(),
+                self.dry_run,
+                self.allow_user_scope,
+                self.json,
+                self.explain,
+                self.yes,
+            )
+        })();
+        if let Err(error) = &result {
+            if self.json {
+                println!(
+                    "{}",
+                    serde_json::json!({"schema_version":1,"status":"failed","error":error.to_string(),"details_path":self.app.cwd.join(".macc/log/apply")})
+                );
+            }
         }
-        crate::commands::lifecycle_support::apply(
-            &self.app,
-            self.tools.as_deref(),
-            self.dry_run,
-            self.allow_user_scope,
-            self.json,
-            self.explain,
-        )
+        result
     }
 }

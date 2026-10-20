@@ -11,6 +11,7 @@ mod native_lifecycle;
 mod native_map;
 mod operations;
 pub mod preparation;
+pub mod preparation_quality;
 mod process;
 mod response;
 mod routing;
@@ -33,6 +34,13 @@ pub trait CodeIntelligenceProvider: Send + Sync {
     /// Selection belongs to the adapter; orchestration never branches on provider IDs.
     fn enabled(&self, _policy: &super::policy::CodePolicy) -> bool {
         false
+    }
+    fn preparation_quality(
+        &self,
+        _receipt: &Receipt,
+        _policy: &super::policy::CodePolicy,
+    ) -> preparation_quality::Quality {
+        Default::default()
     }
     fn symbol_languages(&self) -> Vec<String> {
         vec![]

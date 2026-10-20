@@ -22,3 +22,5 @@ pub mod supervisor_launch;
 pub mod task_runner;
 pub mod tooling;
 pub mod worktree;
+
+pub mod apply_presentation;

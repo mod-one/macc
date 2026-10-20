@@ -316,7 +316,7 @@ macc web                               # API at localhost:3450
 macc quickstart [-y] [--tool <tool>] [--starter-task] [--start-coordinator] [--check-only]
 macc init [--force] [--wizard] [--profile <name>]
 macc plan [--tools t1,t2] [--json] [--explain]
-macc apply [--tools ...] [--dry-run] [--allow-user-scope] [--json]
+macc apply [--tools ...] [--dry-run] [--allow-user-scope] [--json] [--yes] [--verbose | --quiet]
 macc doctor [--fix] [--json] [--git-name "Name"] [--git-email "email"] [--coordinator]
 macc status [--json] [--watch] [--events N] [--verbose]
 macc watch                     # alias for status --watch
@@ -324,7 +324,7 @@ macc watch                     # alias for status --watch
 
 Apply also prepares and verifies enabled O2 features. Its interactive assistant
 handles missing prerequisites and approvals in CLI, TUI and Web. See
-[Apply preparation](docs/APPLY_PREPARATION.md).
+[Apply preparation](docs/APPLY_PREPARATION.md) and [output modes](docs/APPLY_OUTPUT.md).
 
 
 </details>

@@ -330,3 +330,80 @@ fn concurrent_apply_cannot_write_while_preparation_is_owned() {
     crate::apply_plan(&paths, &mut reviewed, false).unwrap();
     assert!(paths.root.join("concurrent.txt").exists());
 }
+
+#[test]
+fn parse_failures_are_visible_in_apply_and_its_saved_result() {
+    let (_temp, paths) = fixture(true);
+    std::fs::write(paths.root.join("contract.rs"), "pub fn broken( {").unwrap();
+    let result = crate::apply_plan(&paths, &mut plan(&paths), false).unwrap();
+    assert!(result
+        .warnings
+        .iter()
+        .any(|w| w.contains("could not be parsed")));
+    assert!(!status(&paths.root).unwrap().unwrap().warnings.is_empty());
+    let details: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(result.details_path.unwrap()).unwrap()).unwrap();
+    assert_eq!(details["status"], "completed_with_warnings");
+    assert!(details["warnings"].as_array().unwrap().len() > 0);
+}
+
+#[test]
+fn reviewed_quality_suggestion_rebuilds_a_partial_receipt_and_preserves_explicit_budgets() {
+    let (_temp, paths) = fixture(true);
+    crate::apply_plan(&paths, &mut plan(&paths), false).unwrap();
+    let mut config = crate::load_canonical_config(&paths.config_path).unwrap();
+    config
+        .code_intelligence
+        .as_mut()
+        .unwrap()
+        .native_build_timeout_ms = 5000;
+    std::fs::write(&paths.config_path, serde_yaml::to_string(&config).unwrap()).unwrap();
+    let (db, _) = crate::o2::database(&paths.root).unwrap();
+    let raw: String = db
+        .query_row(
+            "SELECT receipt_json FROM provider_receipts WHERE provider_id='native'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let mut receipt: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    receipt["metadata"]["truncated"] = serde_json::json!(true);
+    receipt["metadata"]["stats"]["elapsed_ms"] = serde_json::json!(5020);
+    db.execute(
+        "UPDATE provider_receipts SET receipt_json=?1 WHERE provider_id='native'",
+        [receipt.to_string()],
+    )
+    .unwrap();
+    drop(db);
+    // Simulate the recorded partial index decision without depending on CPU speed.
+    let mut partial = status(&paths.root).unwrap().unwrap();
+    partial.revision = crate::config::transaction::revision(&config).unwrap();
+    partial.question = Some(Question {
+        kind: "provider_quality".into(),
+        message: "Increase budget".into(),
+        data: serde_json::json!({"path":"code_intelligence.native_build_timeout_ms","value":"15000"}),
+    });
+    assert!(improve_quality(&paths.root, &partial, false).is_err());
+    assert_eq!(
+        crate::load_canonical_config(&paths.config_path)
+            .unwrap()
+            .code_intelligence
+            .unwrap()
+            .native_build_timeout_ms,
+        5000
+    );
+    improve_quality(&paths.root, &partial, true).unwrap();
+    assert!(
+        improve_quality(&paths.root, &partial, true).is_err(),
+        "stale suggestions cannot overwrite a newer config"
+    );
+    let result = crate::apply_plan(&paths, &mut plan(&paths), false).unwrap();
+    assert!(result.warnings.is_empty());
+    let after = crate::o2::providers::inspect(&paths.root)
+        .unwrap()
+        .receipts
+        .into_iter()
+        .find(|r| r.provider_id == "native")
+        .unwrap();
+    assert_ne!(after.index.as_deref(), receipt["index"].as_str());
+}

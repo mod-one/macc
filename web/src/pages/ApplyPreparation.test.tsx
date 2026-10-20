@@ -39,3 +39,18 @@ it('asks before allowing network and uses the report revision', async () => {
   await waitFor(()=>expect(allowApplyNetwork).toHaveBeenCalledWith('current'));
   expect(resume).toHaveBeenCalledWith({});
 });
+it('shows partial coverage and asks before keeping it', async () => {
+  const resume=vi.fn().mockResolvedValue(undefined);
+  render(<ApplyPreparation report={{...base,warnings:['Native index has partial coverage'],question:{kind:'provider_quality',message:'Choose coverage',data:{path:'code_intelligence.native_build_timeout_ms',value:'15000'}}}} busy={false} resume={resume} />);
+  expect(screen.getByLabelText('Preparation warnings')).toHaveTextContent('partial coverage');
+  expect(resume).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button',{name:/Keep partial coverage/}));
+  await waitFor(()=>expect(resume).toHaveBeenCalledWith({accept_degraded:true}));
+});
+it('keeps technical output collapsed while account setup instructions open directly', () => {
+  const resume=vi.fn();
+  const view=render(<ApplyPreparation report={{...base,status:'preparing',live_output:'Technical diagnostics',output_kind:'diagnostic'}} busy={true} resume={resume} />);
+  expect(screen.getByText('Technical output').closest('details')).not.toHaveAttribute('open');
+  view.rerender(<ApplyPreparation report={{...base,status:'preparing',live_output:'Visit the login URL',output_kind:'interaction'}} busy={true} resume={resume} />);
+  expect(screen.getByText('Account setup: action required').closest('details')).toHaveAttribute('open');
+});

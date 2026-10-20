@@ -130,11 +130,8 @@ fn build_apply_response(ops: &[PlannedOp], report: &macc_core::ApplyReport) -> A
         backup_locations.push(user_report.root.display().to_string());
     }
 
-    let changed_files = report
-        .outcomes
-        .values()
-        .filter(|status| matches!(status, ActionStatus::Created | ActionStatus::Updated))
-        .count();
+    let counts = report.file_counts();
+    let changed_files = counts.0 + counts.1;
 
     let results = report
         .outcomes
@@ -160,7 +157,7 @@ fn build_apply_response(ops: &[PlannedOp], report: &macc_core::ApplyReport) -> A
         changed_files,
         backup_locations,
         results,
-        warnings: Vec::new(),
+        warnings: report.warnings.clone(),
     }
 }
 
@@ -171,5 +168,25 @@ fn status_message(status: ActionStatus) -> String {
         ActionStatus::Unchanged => "unchanged".to_string(),
         ActionStatus::Noop => "noop".to_string(),
         ActionStatus::Unknown => "unknown".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod preparation_result_tests {
+    use super::*;
+    #[test]
+    fn warnings_are_shared_and_preparation_is_not_counted_as_a_changed_file() {
+        let mut report = macc_core::ApplyReport::new();
+        report.warnings.push("Partial index".into());
+        report.outcomes.insert(
+            "Preparation: verified with warnings".into(),
+            ActionStatus::Updated,
+        );
+        report
+            .outcomes
+            .insert("config.json".into(), ActionStatus::Unchanged);
+        let response = build_apply_response(&[], &report);
+        assert_eq!(response.changed_files, 0);
+        assert_eq!(response.warnings, vec!["Partial index"]);
     }
 }

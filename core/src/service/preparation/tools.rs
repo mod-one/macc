@@ -179,13 +179,16 @@ fn run(
     {
         return Err(MaccError::Validation("Invalid Apply operation name".into()));
     }
-    let directory = paths.macc_dir.join("log/apply");
+    let directory = super::progress::directory(paths);
     std::fs::create_dir_all(&directory).map_err(|e| MaccError::Validation(e.to_string()))?;
     let path = directory.join(format!("{}-{name}.log", uuid::Uuid::new_v4()));
     crate::atomic_write(
         paths,
         &paths.macc_dir.join("state/apply-current-log"),
-        path.file_name().unwrap().to_string_lossy().as_bytes(),
+        path.strip_prefix(paths.macc_dir.join("log/apply"))
+            .unwrap()
+            .to_string_lossy()
+            .as_bytes(),
     )?;
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);

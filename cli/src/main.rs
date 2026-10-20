@@ -170,7 +170,7 @@ enum Commands {
         /// Allow user-scope operations (requires explicit consent)
         #[arg(long)]
         allow_user_scope: bool,
-        /// Output machine-readable JSON for dry-run preview
+        /// Output machine-readable JSON for preview or execution results
         #[arg(long)]
         json: bool,
         /// Explain why each file operation exists in preview
@@ -180,6 +180,9 @@ enum Commands {
         /// Fail if resolution differs from the lock file
         #[arg(long)]
         locked: bool,
+        /// Confirm the initial reviewed Apply plan; does not answer preparation questions
+        #[arg(short = 'y', long)]
+        yes: bool,
     },
     /// Catalog management
     Catalog {
@@ -1369,7 +1372,7 @@ fn main() {
     let protocol_stdio = matches!(
         &cli.command,
         Some(Commands::O2 { command }) if command.is_mcp()
-    );
+    ) || matches!(&cli.command, Some(Commands::Apply { .. }));
     init_tracing(cli.verbose, protocol_stdio);
 
     // Propagate debug mode to child processes (coordinator, performers, workers).
@@ -1381,12 +1384,15 @@ fn main() {
         info!("Verbose mode enabled");
     }
 
+    let concise_apply_errors = matches!(&cli.command, Some(Commands::Apply { .. })) && !cli.verbose;
     // Initialize the real engine with default registry
     let engine = MaccEngine::new(macc_registry::default_registry());
     let provider = services::engine_provider::EngineProvider::new(engine);
 
     if let Err(e) = run_with_engine_provider(cli, provider) {
-        error!(error = %e, "Command failed");
+        if !concise_apply_errors {
+            error!(error = %e, "Command failed");
+        }
         if let MaccError::Validation(ref msg) = e {
             if msg.starts_with("error:") {
                 eprintln!("{}", msg);
@@ -1403,7 +1409,15 @@ fn init_tracing(verbose: bool, protocol_stdio: bool) {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .or_else(|_| tracing_subscriber::EnvFilter::try_new(fallback))
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    use std::io::IsTerminal;
+    let color = std::env::var_os("NO_COLOR").is_none()
+        && if protocol_stdio {
+            std::io::stderr().is_terminal()
+        } else {
+            std::io::stdout().is_terminal()
+        };
     let subscriber = tracing_subscriber::fmt()
+        .with_ansi(color)
         .with_env_filter(filter)
         .with_target(false);
     if protocol_stdio {
@@ -1588,6 +1602,7 @@ fn run_with_engine_provider(
             json,
             explain,
             locked,
+            yes,
         }) => commands::apply::ApplyCommand::new(
             app.clone(),
             tools.clone(),
@@ -1597,6 +1612,7 @@ fn run_with_engine_provider(
             *explain,
             *locked,
         )
+        .with_confirmation(*yes)
         .run(),
         Some(Commands::Catalog { catalog_command }) => {
             commands::catalog::CatalogCommand::new(app.clone(), catalog_command).run()
@@ -4015,6 +4031,7 @@ fi
                     json: false,
                     explain: false,
                     locked: false,
+                    yes: true,
                 }),
             },
             fixture_engine(&ids),

@@ -97,6 +97,7 @@ const Apply: React.FC = () => {
   const [loadingPlan, setLoadingPlan] = React.useState(false);
   const [planError, setPlanError] = React.useState<string | null>(null);
 
+  const [showUnchanged, setShowUnchanged] = React.useState(false);
   const [mode, setMode] = React.useState<ApplyMode>('apply-now');
   const [confirmOpen, setConfirmOpen] = React.useState(false);
   const [applying, setApplying] = React.useState(false);
@@ -184,7 +185,7 @@ const Apply: React.FC = () => {
       return 0;
     }
 
-    return applyResult.results.filter((result) => result.success).length;
+    return applyResult.changedFiles;
   }, [applyResult]);
 
   const backupPaths = React.useMemo(() => {
@@ -432,7 +433,7 @@ const Apply: React.FC = () => {
           <div className="flex flex-wrap items-center justify-between gap-3">
             <h2 className="text-lg font-semibold text-[var(--text-primary)]">Results</h2>
             <span className={`rounded-md px-2.5 py-1 text-xs font-semibold uppercase tracking-wide ${applyResult.dryRun ? 'bg-sky-500/15 text-sky-300' : 'bg-emerald-500/15 text-emerald-300'}`}>
-              {applyResult.dryRun ? 'Dry Run' : 'Applied'}
+              {applyResult.dryRun ? 'Dry Run' : applyResult.warnings.length ? 'Applied with warnings' : 'Applied'}
             </span>
           </div>
 
@@ -466,6 +467,7 @@ const Apply: React.FC = () => {
             </div>
           )}
 
+          <label className="mt-4 flex gap-2"><input type="checkbox" checked={showUnchanged} onChange={e=>setShowUnchanged(e.target.checked)} />Show unchanged operations</label>
           <div className="mt-4 overflow-x-auto rounded-xl border border-[var(--border)]">
             <table className="w-full min-w-[680px] text-left text-sm">
               <thead className="bg-[var(--bg-card)]">
@@ -478,7 +480,7 @@ const Apply: React.FC = () => {
                 </tr>
               </thead>
               <tbody>
-                {applyResult.results.map((result) => (
+                {applyResult.results.filter(result=>showUnchanged || result.message !== 'unchanged').map((result) => (
                   <tr className="border-t border-[var(--border)]" key={`${result.path}:${result.kind}`}> 
                     <td className="px-3 py-2 font-mono text-xs text-[var(--text-primary)]">{result.path}</td>
                     <td className="px-3 py-2 text-[var(--text-secondary)]">{result.kind}</td>

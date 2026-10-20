@@ -16,11 +16,20 @@ impl macc_core::service::lifecycle::LifecycleFetchMaterializer for CliFetchMater
     }
 }
 
-pub(crate) struct CliLifecycleUi;
+#[derive(Default)]
+pub(crate) struct CliLifecycleUi {
+    pub(super) output: Option<super::apply_output::Options>,
+}
 
 impl InteractionHandler for CliLifecycleUi {
     fn info(&self, message: &str) {
-        println!("{}", message);
+        if let Some(options) = &self.output {
+            if !options.quiet {
+                eprintln!("{}", message);
+            }
+        } else {
+            println!("{}", message);
+        }
     }
 
     fn warn(&self, message: &str) {
@@ -32,11 +41,45 @@ impl InteractionHandler for CliLifecycleUi {
     }
 
     fn confirm_yes_no(&self, prompt: &str) -> Result<bool> {
-        crate::confirm_yes_no(prompt)
+        if self.output.is_some() {
+            self.apply_confirm(prompt)
+        } else {
+            crate::confirm_yes_no(prompt)
+        }
     }
 }
 
 impl macc_core::service::lifecycle::LifecycleUi for CliLifecycleUi {
+    fn review_apply(
+        &self,
+        paths: &ProjectPaths,
+        plan: &macc_core::plan::ActionPlan,
+        ops: &[macc_core::plan::PlannedOp],
+    ) -> Result<()> {
+        if self.output.is_some() {
+            self.review(paths, plan, ops)
+        } else {
+            self.info(&macc_core::service::apply_presentation::review(
+                paths, plan, ops,
+            ));
+            Ok(())
+        }
+    }
+    fn decision_info(&self, message: &str) {
+        self.finish_progress();
+        eprintln!("{message}");
+    }
+    fn apply_progress(&self, report: &macc_core::service::preparation::Report) {
+        self.preparation_progress(report);
+    }
+    fn apply_result(&self, report: &macc_core::ApplyReport) -> Result<()> {
+        if self.output.is_some() {
+            self.result(report)
+        } else {
+            self.info(&report.render_cli());
+            Ok(())
+        }
+    }
     fn print_checks(&self, checks: &[macc_core::doctor::ToolCheck]) {
         crate::print_checks(checks);
     }
@@ -49,7 +92,25 @@ impl macc_core::service::lifecycle::LifecycleUi for CliLifecycleUi {
         json: bool,
         explain: bool,
     ) -> Result<()> {
-        crate::render_plan_preview(paths, plan, ops, json, explain)
+        if self.output.as_ref().is_some_and(|o| !o.verbose || o.quiet)
+            && !json
+            && (!explain || self.output.as_ref().is_some_and(|o| o.quiet))
+        {
+            if self.output.as_ref().is_some_and(|o| o.quiet) {
+                for line in macc_core::service::apply_presentation::review(paths, plan, ops)
+                    .lines()
+                    .filter(|s| s.starts_with("WARN "))
+                {
+                    eprintln!("{line}");
+                }
+            } else {
+                self.review_apply(paths, plan, ops)?;
+            }
+            self.info("Preview only; no project changes applied.");
+            Ok(())
+        } else {
+            crate::render_plan_preview(paths, plan, ops, json, explain)
+        }
     }
 
     fn print_pre_apply_summary(
@@ -62,7 +123,16 @@ impl macc_core::service::lifecycle::LifecycleUi for CliLifecycleUi {
     }
 
     fn print_pre_apply_explanations(&self, ops: &[macc_core::plan::PlannedOp]) {
-        crate::print_pre_apply_explanations(ops);
+        if self.output.as_ref().is_some_and(|o| o.quiet) {
+            return;
+        }
+        if self.output.is_some() {
+            for op in ops {
+                eprintln!("{:?} {}", op.kind, op.path);
+            }
+        } else {
+            crate::print_pre_apply_explanations(ops);
+        }
     }
 
     fn confirm_user_scope_apply(
@@ -70,7 +140,11 @@ impl macc_core::service::lifecycle::LifecycleUi for CliLifecycleUi {
         paths: &ProjectPaths,
         ops: &[macc_core::plan::PlannedOp],
     ) -> Result<()> {
-        crate::confirm_user_scope_apply(paths, ops)
+        if self.output.is_some() {
+            self.user_scope(paths, ops)
+        } else {
+            crate::confirm_user_scope_apply(paths, ops)
+        }
     }
 
     fn mark_apply_completed(&self, paths: &ProjectPaths) -> Result<()> {
@@ -94,9 +168,20 @@ impl macc_core::service::lifecycle::LifecycleUi for CliLifecycleUi {
     }
 
     fn prompt_line(&self, prompt: &str) -> Result<String> {
-        use std::io::{self, Write};
-        print!("{}", prompt);
-        io::stdout().flush().map_err(|e| MaccError::Io {
+        use std::io::{self, IsTerminal, Write};
+        self.finish_progress();
+        if self.output.is_some() {
+            if !io::stdin().is_terminal() {
+                return Err(MaccError::Validation(
+                    "Preparation requires interactive input; completed work and logs are retained"
+                        .into(),
+                ));
+            }
+            eprint!("{}", prompt);
+        } else {
+            print!("{}", prompt);
+        }
+        io::stderr().flush().map_err(|e| MaccError::Io {
             path: "stdout".into(),
             action: "flush prompt".into(),
             source: e,
@@ -167,7 +252,7 @@ pub(crate) fn init(app: &AppContext, force: bool, wizard: bool) -> Result<()> {
         app.engine.as_ref(),
         force,
         wizard,
-        &CliLifecycleUi,
+        &CliLifecycleUi::default(),
     )
 }
 
@@ -186,7 +271,7 @@ pub(crate) fn plan(app: &AppContext, tools: Option<&str>, json: bool, explain: b
         overrides,
         json,
         explain,
-        &CliLifecycleUi,
+        &CliLifecycleUi::default(),
         &CliFetchMaterializer,
     )
 }
@@ -198,6 +283,7 @@ pub(crate) fn apply(
     allow_user_scope: bool,
     json: bool,
     explain: bool,
+    yes: bool,
 ) -> Result<()> {
     let mut overrides = app.overrides.clone();
     if let Some(tools_csv) = tools {
@@ -207,7 +293,17 @@ pub(crate) fn apply(
             macc_core::resolve::CliOverrides::from_tools_csv(tools_csv, &allowed_tools)?.tools;
     }
 
-    macc_core::service::lifecycle::apply(
+    let config = app.canonical_config()?;
+    let ui = CliLifecycleUi {
+        output: Some(super::apply_output::Options {
+            json,
+            verbose: config.settings.debug || std::env::var("MACC_DEBUG").is_ok_and(|v| v == "1"),
+            quiet: app.overrides.quiet.unwrap_or(config.settings.quiet),
+            yes,
+            ..Default::default()
+        }),
+    };
+    let result = macc_core::service::lifecycle::apply(
         &app.cwd,
         app.engine.as_ref(),
         overrides,
@@ -215,9 +311,17 @@ pub(crate) fn apply(
         allow_user_scope,
         json,
         explain,
-        &CliLifecycleUi,
+        &ui,
         &CliFetchMaterializer,
-    )
+    );
+    ui.finish_progress();
+    if result.is_err() && !json {
+        eprintln!(
+            "Apply stopped. Completed work is retained. Review the cause and retry Apply. Logs: {}",
+            app.cwd.join(".macc/log/apply").display()
+        );
+    }
+    result
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -244,7 +348,7 @@ pub(crate) fn quickstart_extended(
         start_coordinator,
         check_only,
         json,
-        &CliLifecycleUi,
+        &CliLifecycleUi::default(),
         &CliFetchMaterializer,
     )
 }

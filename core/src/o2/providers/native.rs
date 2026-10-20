@@ -5,6 +5,13 @@ impl CodeIntelligenceProvider for Native {
     fn enabled(&self, policy: &super::super::policy::CodePolicy) -> bool {
         policy.enabled
     }
+    fn preparation_quality(
+        &self,
+        receipt: &Receipt,
+        policy: &super::super::policy::CodePolicy,
+    ) -> preparation_quality::Quality {
+        preparation_quality::native(receipt, policy)
+    }
     fn symbol_languages(&self) -> Vec<String> {
         vec!["rust".into()]
     }

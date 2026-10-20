@@ -82,6 +82,7 @@ impl Command for InitCommand {
                     false, // allow_user_scope
                     false, // json
                     false, // explain
+                    true,  // Apply was explicitly requested or confirmed by this flow
                 )?;
             }
             return Ok(());
@@ -154,7 +155,7 @@ impl Command for InitCommand {
 
                     if run_apply {
                         crate::commands::lifecycle_support::apply(
-                            &self.app, None, false, false, false, false,
+                            &self.app, None, false, false, false, false, true,
                         )?;
                     }
                     return Ok(());

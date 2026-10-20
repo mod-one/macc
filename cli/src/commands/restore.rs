@@ -142,6 +142,7 @@ impl Command for RestoreCommand {
                     false, // allow_user_scope
                     false, // json
                     false, // explain
+                    true,  // Apply was explicitly requested or confirmed by this flow
                 )?;
             } else {
                 println!("Next recommended command:\n  macc apply");

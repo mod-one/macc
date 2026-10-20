@@ -7,6 +7,14 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+### Changed
+- Apply now uses a compact review/progress/result presentation, preserves complete logs, and offers verbose, quiet and clean JSON modes. Redirected input requires explicit initial `--yes` consent; preparation questions keep their own approval gates.
+- Partial native indexes and parse failures are visible across clients. The assistant can propose a reviewed budget increase/rebuild or retain partial coverage with warnings. The default native build budget is 15 seconds; explicit existing budgets are preserved.
+
+### Fixed
+- Removed path-based “Missing placeholders” warnings for ordinary configuration and design-token files; real secret scanning remains enabled.
+- Preparation output no longer carries a previous tool's output into the next phase. Migration/preparation markers no longer inflate changed-file counts.
+
 ### Added
 - Confirmed Apply now prepares and verifies enabled O2 storage, provider runtimes/indexes, scoped MCP, native compaction and semantic evidence through the shared adapter layer. CLI, TUI and Web keep configuration, network permission and benchmark questions inside Apply, with progress and retained failure evidence.
 - Coordinator startup verifies prerequisites and refreshes compatible local indexes without downloads or login. Doctor reports pending O2 preparation without repairing it.

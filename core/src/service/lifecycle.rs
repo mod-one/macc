@@ -18,6 +18,25 @@ pub trait LifecycleFetchMaterializer {
 }
 
 pub trait LifecycleUi: InteractionHandler + Sync {
+    fn review_apply(
+        &self,
+        paths: &ProjectPaths,
+        plan: &crate::plan::ActionPlan,
+        ops: &[crate::plan::PlannedOp],
+    ) -> Result<()> {
+        self.info(&crate::service::apply_presentation::review(
+            paths, plan, ops,
+        ));
+        Ok(())
+    }
+    fn decision_info(&self, message: &str) {
+        self.info(message);
+    }
+    fn apply_progress(&self, _report: &crate::service::preparation::Report) {}
+    fn apply_result(&self, report: &crate::ApplyReport) -> Result<()> {
+        self.info(&report.render_cli());
+        Ok(())
+    }
     fn print_checks(&self, checks: &[crate::doctor::ToolCheck]);
     fn render_plan_preview(
         &self,
@@ -147,7 +166,7 @@ pub fn apply(
     let materialized_units = fetch_materializer.materialize_fetch_units(
         &paths,
         fetch_units,
-        resolved.settings.quiet,
+        true,
         resolved.settings.offline,
     )?;
 
@@ -164,38 +183,17 @@ pub fn apply(
         return ui.render_plan_preview(&paths, &plan, &ops, json, explain);
     }
 
-    ui.info(&format!(
-        "Core: Applying in {} with tools: {:?}",
-        paths.root.display(),
-        enabled_titles
-    ));
     let mut plan = engine.plan(&paths, &canonical, &materialized_units, &overrides)?;
     let ops = engine.plan_operations(&paths, &plan);
-    if let Some(activation) = &plan.o2_activation {
-        ui.info(&format!("O2 prerequisite: {}. Existing sessions/data are retained; migrations create backups. Restore a saved session bundle first if you want to recover earlier O2 history.", activation.operation));
+    ui.review_apply(&paths, &plan, &ops)?;
+    crate::validate_plan(&plan, allow_user_scope)?;
+    if !ui.confirm_yes_no("Continue? [y/N] ")? {
+        return Err(MaccError::Validation(
+            "Apply cancelled; no project changes were applied".into(),
+        ));
     }
-    if let Some(preparation) = &plan.preparation {
-        for step in &preparation.steps {
-            ui.info(&format!("Prepare: {step}"));
-        }
-        if preparation.network {
-            ui.info("Preparation may download pinned provider packages or run the selected tools' declared installers.");
-        }
-    }
-    if !json {
-        crate::ops_motif::print_trust_review_card(&paths, &plan, allow_user_scope);
-        if !ui.confirm_yes_no("Proceed with apply [y/N]? ")? {
-            return Err(crate::MaccError::Validation(
-                "Apply cancelled by user".to_string(),
-            ));
-        }
-        ui.print_pre_apply_summary(&paths, &plan, &ops);
-        if explain {
-            ui.print_pre_apply_explanations(&ops);
-        }
-    }
-    if json && !ui.confirm_yes_no("Confirm reviewed Apply preparation and writes [y/N]? ")? {
-        return Err(MaccError::Validation("Apply cancelled by user".into()));
+    if explain {
+        ui.print_pre_apply_explanations(&ops);
     }
     if allow_user_scope {
         ui.confirm_user_scope_apply(&paths, &ops)?;
@@ -211,7 +209,6 @@ pub fn apply(
             engine.plan(&paths, &current, &materialized_units, &overrides)
         },
     )?;
-    ui.info(&report.render_cli());
     // Auto-save configuration to user-level profiles so 'macc init' can offer it
     // on the next fresh checkout. Failure is non-fatal.
     if let Ok(mgr) = crate::profile::ProfileManager::new() {
@@ -222,6 +219,7 @@ pub fn apply(
         }
     }
     ui.mark_apply_completed(&paths)?;
+    ui.apply_result(&report)?;
     Ok(())
 }
 

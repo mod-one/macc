@@ -158,6 +158,10 @@ fn failing_semantic_proof_cannot_bypass_the_apply_assistant() {
     let (_root, mut state) = state_with_plan(Scope::Project, 1);
     state.apply_runtime.assistant.open = true;
     state.apply_runtime.assistant.report = Some(macc_core::service::preparation::Report {
+        accepted_degraded: false,
+        run_id: String::new(),
+        output_kind: None,
+        warnings: vec![],
         current: None,
         live_output: None,
         revision: "review".into(),
@@ -210,4 +214,39 @@ fn failed_apply_does_not_show_a_previous_ready_report_as_current() {
     assert!(state.apply_runtime.assistant.report.is_none());
     let text = crate::workspace_tests::text(&crate::workspace_tests::render(&state, 100, 30));
     assert!(text.contains("Configuration changed before execution"));
+}
+
+#[test]
+fn apply_warning_feedback_is_compact_and_explains_partial_coverage() {
+    let (_root, mut state) = state_with_plan(Scope::Project, 1);
+    let mut report = macc_core::ApplyReport::new();
+    report
+        .warnings
+        .push("Native index has partial coverage".into());
+    state.complete_apply(Ok(report));
+    assert!(state
+        .apply_feedback
+        .as_deref()
+        .unwrap()
+        .contains("completed with warnings"));
+    assert!(state
+        .apply_feedback
+        .as_deref()
+        .unwrap()
+        .contains("partial coverage"));
+    assert!(!state.apply_assistant_open());
+}
+#[test]
+fn partial_coverage_can_be_accepted_without_editing_policy_or_bypassing_apply_review() {
+    let (_root, mut state) = state_with_plan(Scope::Project, 1);
+    state.apply_runtime.assistant.open = true;
+    state.apply_runtime.assistant.report=Some(serde_json::from_value(serde_json::json!({"revision":"test","status":"waiting_for_input","completed":[],"warnings":["Partial coverage"],"error":null,"question":{"kind":"provider_quality","message":"Choose coverage","data":{"path":"code_intelligence.native_build_timeout_ms","value":"15000"}}})).unwrap());
+    assert!(state
+        .apply_assistant_bindings()
+        .iter()
+        .any(|(key, _)| *key == "i"));
+    state.apply_key(KeyCode::Enter);
+    assert!(state.apply_runtime.inputs.accept_degraded);
+    assert!(state.apply_runtime.resume_after_prepare);
+    assert!(state.apply_feedback.is_none());
 }

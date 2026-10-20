@@ -55,6 +55,9 @@ pub fn execute(root: &Path, requirement: &Requirement) -> Result<()> {
         .as_ref()
         .is_some_and(|r| r.state == "healthy" && r.version == requirement.version)
         && health.status == "healthy"
+        && previous
+            .as_ref()
+            .is_some_and(|r| adapter.preparation_quality(r, &policy).warnings.is_empty())
         && (!adapter.requires_cached_snapshot()
             || previous.as_ref().is_some_and(|r| {
                 routing::cached_compatible(root, root, &adapter.descriptor(), r, &policy)
