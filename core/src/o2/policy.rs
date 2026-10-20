@@ -185,7 +185,7 @@ impl Default for CodePolicy {
             native_index_max_bytes: 16777216,
             native_symbols_per_file: 1000,
             native_parse_timeout_ms: 1000,
-            native_build_timeout_ms: 15000,
+            native_build_timeout_ms: 60000,
             enabled: false,
             routing: "native_only".into(),
             max_files: 10000,
