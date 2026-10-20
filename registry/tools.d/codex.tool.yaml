@@ -7,6 +7,8 @@ gitignore:
   - AGENTS.md
 performer:
   preparation:
+    authentication_errors: ["not logged in", "not logged into", "authentication required", "unauthorized"]
+    network_errors: ["could not resolve host", "connection refused", "network is unreachable", "connection timed out", "tls handshake timeout"]
     verify: {command: codex, args: [login, status]}
     setup: {command: codex, args: [login, --device-auth]}
   scoped_mcp:

@@ -1036,7 +1036,10 @@ fn run_reference_branch_preflight(
         preflight::ReferencePreflightStatus::Clean
         | preflight::ReferencePreflightStatus::NotCheckedOut => {
             if cfg.log_clean_result {
-                println!("Reference branch: {}\nPreflight: OK", reference_branch);
+                println!(
+                    "Reference branch: {}\nReference branch preflight: OK",
+                    reference_branch
+                );
             }
             Ok(())
         }
@@ -1061,7 +1064,7 @@ fn run_reference_branch_preflight(
                     .map_err(|e| MaccError::Validation(format!("{}", e)))?;
 
                 println!(
-                    "Created local branch \"{}\" from \"{}\".\nPreflight: OK",
+                    "Created local branch \"{}\" from \"{}\".\nReference branch preflight: OK",
                     reference_branch, base
                 );
                 return Ok(());
@@ -1094,7 +1097,7 @@ fn run_reference_branch_preflight(
                     )
                     .map_err(|e| MaccError::Validation(format!("{}", e)))?;
                 println!(
-                    "Created local branch \"{}\" from HEAD.\nPreflight: OK",
+                    "Created local branch \"{}\" from HEAD.\nReference branch preflight: OK",
                     reference_branch
                 );
                 return Ok(());
@@ -1111,7 +1114,7 @@ fn run_reference_branch_preflight(
                         )
                         .map_err(|e| MaccError::Validation(format!("{}", e)))?;
                     println!(
-                        "Created local tracking branch \"{}\" from \"{}\".\nPreflight: OK",
+                        "Created local tracking branch \"{}\" from \"{}\".\nReference branch preflight: OK",
                         reference_branch, remote
                     );
                     return Ok(());
@@ -1660,11 +1663,20 @@ fn run_coordinator_daemon(
         Some(client_id),
     )?;
 
-    macc_core::service::coordinator_readiness::wait(
+    if let Err(error) = macc_core::service::coordinator_readiness::wait(
         paths,
         pid,
         std::time::Duration::from_secs(15),
-    )?;
+    ) {
+        let rollback =
+            macc_core::service::coordinator::coordinator_stop_managed_command_process(paths, true);
+        return Err(MaccError::Validation(format!(
+            "{error}. Coordinator startup rollback: {}",
+            rollback
+                .map(|_| "stopped".to_string())
+                .unwrap_or_else(|e| e.to_string())
+        )));
+    }
     println!("Coordinator started (pid {}).", pid);
     println!("  Monitor : macc status");
     println!("  Live TUI: macc tui");

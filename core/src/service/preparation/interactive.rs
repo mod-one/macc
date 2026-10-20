@@ -15,6 +15,9 @@ pub fn apply(
             Err(error) => error,
         };
         let report = status(&paths.root)?;
+        if let Some(report) = &report {
+            ui.apply_progress(report);
+        }
         let question = report.as_ref().and_then(|r| r.question.as_ref());
         if question.is_none() {
             ui.error(&error.to_string());

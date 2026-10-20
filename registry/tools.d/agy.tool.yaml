@@ -8,6 +8,9 @@ gitignore:
   - GEMINI.md
 performer:
   preparation:
+    require_output: true
+    authentication_errors: ["not logged in", "not logged into", "authentication required", "unauthorized"]
+    network_errors: ["could not resolve host", "connection refused", "network is unreachable", "connection timed out", "tls handshake timeout"]
     verify: {command: agy, args: [models]}
     setup: null
   scoped_mcp:

@@ -31,6 +31,10 @@ pub(crate) use native::worktree as native_worktree;
 use rusqlite::OptionalExtension;
 pub trait CodeIntelligenceProvider: Send + Sync {
     fn descriptor(&self) -> Descriptor;
+    fn startup_budget_seconds(&self, _policy: &super::policy::CodePolicy) -> u64 {
+        30
+    }
+
     /// Selection belongs to the adapter; orchestration never branches on provider IDs.
     fn enabled(&self, _policy: &super::policy::CodePolicy) -> bool {
         false

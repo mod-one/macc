@@ -370,6 +370,12 @@ fn coordinator_start_command_process_with_pid(
     persist_exit_code: bool,
 ) -> Result<(CoordinatorProcessHandle, i32)> {
     let root = &paths.root;
+    if command == "run" {
+        // Reject static configuration/storage prerequisites before spawning;
+        // the child still verifies live tools before publishing readiness.
+        super::preparation::verify_enabled(root)?;
+        super::preparation::startup_timeout(root)?;
+    }
     let mut cmd = if command == "run" {
         let current_exe = std::env::current_exe().map_err(|e| MaccError::Io {
             path: root.to_string_lossy().into(),
@@ -489,6 +495,13 @@ fn wrap_command_with_exit_record(
         source: e,
     })?;
 
+    std::fs::create_dir_all(root.join(".macc/log/coordinator")).map_err(|source| {
+        MaccError::Io {
+            path: root.display().to_string(),
+            action: "create managed command logs".into(),
+            source,
+        }
+    })?;
     let program = command.get_program().to_os_string();
     let args = command
         .get_args()
@@ -522,13 +535,20 @@ fn wrap_command_with_exit_record(
         }
     }
     wrapped
+        .env(
+            "MACC_COORDINATOR_LOG_DIR",
+            root.join(".macc/log/coordinator"),
+        )
         .env("MACC_MANAGED_RESULT_DIR", result_dir)
         .env("MACC_MANAGED_COMMAND_KIND", safe_kind)
         .arg("-c")
         .arg(
             r#"export MACC_COORDINATOR_READY_FILE="$MACC_MANAGED_RESULT_DIR/$MACC_MANAGED_COMMAND_KIND-$$.ready"
-"$@"
+diagnostic_path="$MACC_COORDINATOR_LOG_DIR/run-$$.stderr.log"
+(umask 077; : > "$diagnostic_path") || exit 1
+"$@" 2>"$diagnostic_path"
 status=$?
+cat "$diagnostic_path" >&2
 result_path="$MACC_MANAGED_RESULT_DIR/$MACC_MANAGED_COMMAND_KIND-$$.exit"
 tmp_path="$result_path.tmp"
 printf '%s\n' "$status" > "$tmp_path" && mv "$tmp_path" "$result_path"
@@ -933,7 +953,7 @@ mod managed_command_result_tests {
     fn wrapper_persists_the_real_child_exit_code_before_exit() {
         let root = tempfile::tempdir().expect("temp project");
         let mut command = std::process::Command::new("/bin/sh");
-        command.arg("-c").arg("exit 7");
+        command.arg("-c").arg("echo probe-failure >&2; exit 7");
         let mut wrapped =
             wrap_command_with_exit_record(command, root.path(), "reconcile").expect("wrap command");
         let mut child = wrapped.spawn().expect("spawn wrapped command");
@@ -945,5 +965,12 @@ mod managed_command_result_tests {
             std::fs::read_to_string(managed_command_result_path(root.path(), "reconcile", pid))
                 .expect("persisted exit code");
         assert_eq!(persisted.trim(), "7");
+        let diagnostic = root
+            .path()
+            .join(format!(".macc/log/coordinator/run-{pid}.stderr.log"));
+        assert_eq!(
+            std::fs::read_to_string(diagnostic).unwrap().trim(),
+            "probe-failure"
+        );
     }
 }

@@ -7,7 +7,10 @@ gitignore:
   - CLAUDE.md
 performer:
   preparation:
+    authentication_errors: ["not logged in", "not logged into", "authentication required", "unauthorized"]
+    network_errors: ["could not resolve host", "connection refused", "network is unreachable", "connection timed out", "tls handshake timeout"]
     verify: {command: claude, args: [auth, status, --json]}
+    authentication_json: {"/loggedIn": false}
     expected_json: {"/loggedIn": true}
     setup: {command: claude, args: [auth, login]}
   scoped_mcp:

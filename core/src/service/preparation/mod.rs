@@ -1,4 +1,5 @@
 //! One reviewed prepare-and-verify boundary for every interactive client.
+mod command_check;
 pub mod interactive;
 mod mcp;
 mod o2;
@@ -338,4 +339,37 @@ pub fn improve_quality(root: &Path, report: &Report, confirmed: bool) -> Result<
         confirmed,
     )?;
     Ok(())
+}
+
+/// Bounded probes plus provider refreshes, with a margin for storage/recovery.
+pub fn startup_timeout(root: &Path) -> Result<std::time::Duration> {
+    let paths = ProjectPaths::from_root(root);
+    let Some(plan) = preview(&paths)? else {
+        return Ok(std::time::Duration::from_secs(30));
+    };
+    let mut seconds = 30u64;
+    for tool in &plan.tools {
+        if tool.spec.version_check.is_some() {
+            seconds = seconds.saturating_add(15);
+        }
+        if let Some(p) = tool
+            .spec
+            .performer
+            .as_ref()
+            .and_then(|p| p.preparation.as_ref())
+        {
+            if !(1..=120).contains(&p.timeout_seconds) {
+                return Err(MaccError::Validation(format!(
+                    "{} preparation timeout_seconds must be between 1 and 120",
+                    tool.spec.id
+                )));
+            }
+            seconds = seconds.saturating_add(p.timeout_seconds);
+        }
+    }
+    let policy = crate::o2::policy::load(root)?;
+    seconds = seconds.saturating_add(crate::o2::providers::preparation::startup_budget_seconds(
+        &policy.code_intelligence,
+    )?);
+    Ok(std::time::Duration::from_secs(seconds))
 }

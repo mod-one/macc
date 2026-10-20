@@ -151,8 +151,8 @@ fn declarative_tool_setup_runs_account_flow_and_verifies_its_result() {
     let calls = paths.macc_dir.join("setup-calls");
     let spec = serde_json::json!({"api_version":"v1","id":"future-ai","display_name":"Future AI","fields":[],
         "performer":{"command":"/bin/sh","runner":"future","args":[],"preparation":{
-            "verify":{"command":"/bin/sh","args":["-c",format!("test -f '{}' && printf '{{\"ready\":true}}'",account.display())]},
-            "expected_json":{"/ready":true},"setup":{"command":"/bin/sh","args":["-c",format!("printf x >> '{}'; touch '{}'",calls.display(),account.display())]}}}});
+            "verify":{"command":"/bin/sh","args":["-c",format!("if test -f '{}'; then printf '{{\"ready\":true}}'; else printf '{{\"ready\":false}}'; fi",account.display())]},
+            "expected_json":{"/ready":true},"authentication_json":{"/ready":false},"setup":{"command":"/bin/sh","args":["-c",format!("printf x >> '{}'; touch '{}'",calls.display(),account.display())]}}}});
     std::fs::write(folder.join("future-ai.tool.json"), spec.to_string()).unwrap();
     let mut config = crate::load_canonical_config(&paths.config_path).unwrap();
     config.tools.enabled = vec!["future-ai".into()];
@@ -406,4 +406,29 @@ fn reviewed_quality_suggestion_rebuilds_a_partial_receipt_and_preserves_explicit
         .find(|r| r.provider_id == "native")
         .unwrap();
     assert_ne!(after.index.as_deref(), receipt["index"].as_str());
+}
+
+#[test]
+fn startup_budget_includes_declared_checks_and_unknown_failure_does_not_login() {
+    let (_temp, paths) = fixture(false);
+    let folder = paths.macc_dir.join("tools.d");
+    std::fs::create_dir_all(&folder).unwrap();
+    let spec = serde_json::json!({"api_version":"v1","id":"future-ai","display_name":"Future AI","fields":[],
+        "performer":{"command":"/bin/sh","runner":"future","args":[],"preparation":{
+            "timeout_seconds":41,
+            "verify":{"command":"/bin/sh","args":["-c","exit 17"]},
+            "setup":{"command":"/bin/sh","args":["-c","touch must-not-login"]}}}});
+    std::fs::write(folder.join("future-ai.tool.json"), spec.to_string()).unwrap();
+    let mut config = crate::load_canonical_config(&paths.config_path).unwrap();
+    config.tools.enabled = vec!["future-ai".into()];
+    std::fs::write(&paths.config_path, serde_yaml::to_string(&config).unwrap()).unwrap();
+    assert_eq!(startup_timeout(&paths.root).unwrap().as_secs(), 71);
+    let error = crate::apply_plan(&paths, &mut plan(&paths), false)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("Exit"));
+    assert!(error.contains("17"));
+    assert!(error.contains("evidence:"));
+    assert!(!paths.root.join("must-not-login").exists());
+    assert!(!error.contains("requires account setup"));
 }

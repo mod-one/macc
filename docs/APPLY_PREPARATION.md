@@ -115,3 +115,34 @@ Apply can invalidate it.
 - [Codex MCP environment forwarding](https://developers.openai.com/codex/mcp/)
 - [Codex configuration reference](https://developers.openai.com/codex/config-reference/)
 - [Antigravity workspace MCP configuration](https://docs.cloud.google.com/application-design-center/docs/design-deploy-antigravity-cli)
+
+## Runtime check failures and coordinator startup
+
+Tool readiness failures retain their category, process exit status or launch
+cause, and evidence log path across CLI, TUI and Web. A timeout, network error,
+invalid/empty response, output limit or unknown exit is not an authentication
+failure. Only explicit adapter evidence can trigger a declared account setup;
+startup never installs tools or starts login. AGY model-list failures therefore
+no longer automatically ask the operator to configure an account.
+
+ToolSpec `performer.preparation` supports optional `timeout_seconds` (default 15,
+range 1–120), `require_output`, `authentication_errors`, `network_errors`, and
+`authentication_json`. String patterns match failed-command output only;
+transport/process failures keep their original category. `authentication_json`
+maps JSON pointers to explicit denial values, separately from `expected_json`
+readiness predicates. Missing/malformed JSON is an invalid response. Pattern
+classification never turns successful diagnostic chatter into a failed login.
+
+Coordinator readiness uses the sum of declared tool version/probe budgets and
+enabled provider startup budgets, plus a 30-second storage/recovery margin.
+Provider adapters own their startup bound; it excludes installation and login.
+This changes the launcher's waiting budget, not the individual probe deadlines.
+Static O2/configuration prerequisites are checked before spawning, and live tool
+checks finish in the child before it publishes readiness. The reference-branch
+preflight message explicitly refers to Git checks only.
+
+Managed children retain a private `log/coordinator/run-<pid>.stderr.log` for the
+current launch. Startup errors include its bounded, redacted tail and path,
+rather than replacing the real failure with a generic readiness timeout or
+reading an unrelated earlier daemon failure. CLI and graphical launch paths
+roll back a failed startup; the supervisor attaches only after readiness.

@@ -12,6 +12,9 @@ fn supported() -> bool {
     cfg!(all(target_os = "linux", target_arch = "x86_64"))
 }
 impl CodeIntelligenceProvider for Graphify {
+    fn startup_budget_seconds(&self, policy: &crate::o2::policy::CodePolicy) -> u64 {
+        policy.graphify_timeout_seconds.saturating_mul(4)
+    }
     fn enabled(&self, policy: &super::super::policy::CodePolicy) -> bool {
         policy.enabled && policy.graphify_enabled
     }

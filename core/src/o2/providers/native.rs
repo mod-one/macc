@@ -2,6 +2,9 @@ pub(super) use super::snapshot::{source_snapshot as snapshot, SourceSnapshot as 
 use super::*;
 pub(super) struct Native;
 impl CodeIntelligenceProvider for Native {
+    fn startup_budget_seconds(&self, policy: &crate::o2::policy::CodePolicy) -> u64 {
+        policy.native_build_timeout_ms.div_ceil(1000) + 5
+    }
     fn enabled(&self, policy: &super::super::policy::CodePolicy) -> bool {
         policy.enabled
     }

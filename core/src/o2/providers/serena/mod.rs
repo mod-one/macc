@@ -11,6 +11,9 @@ fn supported() -> bool {
     cfg!(all(target_os = "linux", target_arch = "x86_64"))
 }
 impl CodeIntelligenceProvider for Serena {
+    fn startup_budget_seconds(&self, policy: &crate::o2::policy::CodePolicy) -> u64 {
+        policy.serena_timeout_seconds.saturating_mul(4)
+    }
     fn enabled(&self, policy: &CodePolicy) -> bool {
         policy.enabled && policy.serena_enabled
     }

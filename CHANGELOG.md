@@ -12,6 +12,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Partial native indexes and parse failures are visible across clients. The assistant can propose a reviewed budget increase/rebuild or retain partial coverage with warnings. The default native build budget is 15 seconds; explicit existing budgets are preserved.
 
 ### Fixed
+- Tool preparation preserves timeout, launch, exit, response, network and authentication failures with evidence. Account setup runs only for explicit adapter authentication evidence.
+- Coordinator startup waiting accounts for enabled checks and provider refresh budgets; launch failures include the current child's diagnostics and roll back failed CLI startup.
 - Removed path-based “Missing placeholders” warnings for ordinary configuration and design-token files; real secret scanning remains enabled.
 - Preparation output no longer carries a previous tool's output into the next phase. Migration/preparation markers no longer inflate changed-file counts.
 

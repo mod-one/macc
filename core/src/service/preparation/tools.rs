@@ -1,6 +1,7 @@
+use super::command_check::{run, Failure, FailureKind};
 use super::*;
 use crate::doctor::{check_tool, SystemRunner, ToolStatus};
-use crate::tool::{DoctorCheckKind, ToolInstallCommand, ToolSpec, ToolSpecLoader};
+use crate::tool::{DoctorCheckKind, ToolSpec, ToolSpecLoader};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Requirement {
@@ -109,16 +110,13 @@ pub(super) fn prepare(
         )));
     }
     if let Some(preparation) = spec.performer.as_ref().and_then(|p| p.preparation.as_ref()) {
-        if verify(paths, &spec.id, preparation).is_err() {
-            if !allow_setup {
-                return Err(MaccError::Validation(format!(
-                    "{} account/runtime is not ready; complete Apply account setup",
-                    spec.id
-                )));
+        if let Err(failure) = verify(paths, &spec.id, preparation) {
+            if failure.kind != FailureKind::Authentication || !allow_setup {
+                return Err(failure.into());
             }
             let setup = preparation.setup.as_ref().ok_or_else(|| {
                 MaccError::Validation(format!(
-                    "{} requires account setup; its adapter has no automated setup flow",
+                    "{failure}; adapter {} has no automated account setup flow",
                     spec.id
                 ))
             })?;
@@ -140,108 +138,89 @@ fn verify(
     paths: &ProjectPaths,
     id: &str,
     spec: &crate::tool::preparation::PreparationSpec,
-) -> Result<()> {
-    let path = run(paths, &spec.verify, &format!("{id}-account-check"), 15)?;
+) -> std::result::Result<(), Failure> {
+    if !(1..=120).contains(&spec.timeout_seconds) {
+        return Err(Failure::new(
+            FailureKind::InvalidResponse,
+            &paths.config_path,
+            format!("{id} preparation timeout_seconds must be between 1 and 120"),
+        ));
+    }
+    let path = run(
+        paths,
+        &spec.verify,
+        &format!("{id}-account-check"),
+        spec.timeout_seconds,
+    )
+    .map_err(|failure| failure.classify(spec))?;
+    if spec.require_output
+        && std::fs::read(&path)
+            .map(|raw| raw.iter().all(u8::is_ascii_whitespace))
+            .unwrap_or(true)
+    {
+        return Err(Failure::new(
+            FailureKind::InvalidResponse,
+            &path,
+            format!("{id} readiness returned no output"),
+        ));
+    }
     if !spec.expected_json.is_empty() {
-        let raw = std::fs::read(&path).map_err(|e| MaccError::Validation(e.to_string()))?;
+        let invalid = |reason: String| Failure::new(FailureKind::InvalidResponse, &path, reason);
+        let raw = std::fs::read(&path).map_err(|e| invalid(e.to_string()))?;
         if raw.len() > 65536 {
-            return Err(MaccError::Validation("Readiness JSON exceeds bound".into()));
+            return Err(invalid("Readiness JSON exceeds bound".into()));
         }
         let start = raw.iter().position(|c| *c == b'{').unwrap_or(0);
         let value = serde_json::Deserializer::from_slice(&raw[start..])
             .into_iter::<serde_json::Value>()
             .next()
-            .ok_or_else(|| MaccError::Validation("Readiness JSON missing".into()))?
-            .map_err(|e| MaccError::Validation(e.to_string()))?;
+            .ok_or_else(|| invalid("Readiness JSON missing".into()))?
+            .map_err(|e| invalid(e.to_string()))?;
         for (pointer, expected) in &spec.expected_json {
             if value.pointer(pointer) != Some(expected) {
-                return Err(MaccError::Validation(format!(
-                    "{id} readiness predicate {pointer} is not satisfied"
-                )));
+                let authentication = spec
+                    .authentication_json
+                    .get(pointer)
+                    .is_some_and(|denied| value.pointer(pointer) == Some(denied));
+                return Err(Failure::new(
+                    if authentication {
+                        FailureKind::Authentication
+                    } else {
+                        FailureKind::InvalidResponse
+                    },
+                    &path,
+                    format!("{id} readiness predicate {pointer} is not satisfied"),
+                ));
             }
         }
     }
     Ok(())
 }
-fn run(
-    paths: &ProjectPaths,
-    command: &ToolInstallCommand,
-    name: &str,
-    timeout: u64,
-) -> Result<std::path::PathBuf> {
-    use std::{
-        process::{Command, Stdio},
-        time::{Duration, Instant},
-    };
-    if name
-        .chars()
-        .any(|c| !c.is_ascii_alphanumeric() && c != '-' && c != '_')
-    {
-        return Err(MaccError::Validation("Invalid Apply operation name".into()));
-    }
-    let directory = super::progress::directory(paths);
-    std::fs::create_dir_all(&directory).map_err(|e| MaccError::Validation(e.to_string()))?;
-    let path = directory.join(format!("{}-{name}.log", uuid::Uuid::new_v4()));
-    crate::atomic_write(
-        paths,
-        &paths.macc_dir.join("state/apply-current-log"),
-        path.strip_prefix(paths.macc_dir.join("log/apply"))
-            .unwrap()
-            .to_string_lossy()
-            .as_bytes(),
-    )?;
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let file = options
-        .open(&path)
-        .map_err(|e| MaccError::Validation(e.to_string()))?;
-    let mut process = Command::new(&command.command);
-    process
-        .args(&command.args)
-        .current_dir(&paths.root)
-        .stdin(Stdio::null())
-        .stdout(
-            file.try_clone()
-                .map_err(|e| MaccError::Validation(e.to_string()))?,
-        )
-        .stderr(file);
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        process.process_group(0);
-    }
-    let mut child = process
-        .spawn()
-        .map_err(|e| MaccError::Validation(format!("{}: {e}", command.command)))?;
-    let deadline = Instant::now() + Duration::from_secs(timeout);
-    let result = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                break if status.success() {
-                    Ok(())
-                } else {
-                    Err(format!("exit {status}"))
-                }
-            }
-            Ok(None) => {}
-            Err(e) => break Err(e.to_string()),
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn malformed_and_empty_responses_are_not_account_failures() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = ProjectPaths::from_root(tmp.path());
+        for (script, extra) in [
+            (
+                "printf malformed",
+                serde_json::json!({"expected_json":{"/ready":true}}),
+            ),
+            ("exit 0", serde_json::json!({"require_output":true})),
+        ] {
+            let mut value =
+                serde_json::json!({"verify":{"command":"/bin/sh","args":["-c",script]}});
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            let spec = serde_json::from_value(value).unwrap();
+            let failure = verify(&paths, "fake", &spec).unwrap_err();
+            assert_eq!(failure.kind, FailureKind::InvalidResponse);
+            assert!(failure.path.is_file());
         }
-        if Instant::now() >= deadline
-            || std::fs::metadata(&path).is_ok_and(|m| m.len() > 10 * 1024 * 1024)
-        {
-            break Err("timeout/output limit exceeded".into());
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    };
-    #[cfg(unix)]
-    unsafe {
-        libc::kill(-(child.id() as i32), libc::SIGKILL);
     }
-    let _ = child.wait();
-    result.map(|_|path.clone()).map_err(|reason|MaccError::Validation(format!("Apply preparation {} failed ({reason}); evidence: {}. Resolve the requested setup in Apply and retry.",command.command,path.display())))
 }

@@ -149,3 +149,13 @@ pub fn ensure_current(root: &Path, requirement: &Requirement) -> Result<()> {
     }
     verify(root, requirement)
 }
+
+/// Sum only enabled adapters; startup never installs or logs in.
+pub fn startup_budget_seconds(policy: &super::super::policy::CodePolicy) -> Result<u64> {
+    Ok(registry()?
+        .iter()
+        .filter(|p| p.enabled(policy))
+        .fold(0u64, |sum, p| {
+            sum.saturating_add(p.startup_budget_seconds(policy))
+        }))
+}
