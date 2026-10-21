@@ -274,7 +274,10 @@ pub(super) fn apply_state_transitions(
                 tool_error,
                 now_ts,
             } => {
-                let tool_id_str = task.tool.as_deref().unwrap_or("").to_string();
+                let tool_id_str = crate::coordinator::quota_scope::assignment(
+                    task,
+                    task.tool.as_deref().unwrap_or(""),
+                );
                 let runtime = task.ensure_runtime();
                 let mut throttle: ToolThrottleState = runtime
                     .extra
@@ -645,5 +648,42 @@ mod describe_unmet_preconditions_tests {
             text.contains("the tool did not name the condition"),
             "{text}"
         );
+    }
+}
+
+#[cfg(test)]
+mod quota_scope_tests {
+    use super::*;
+    #[test]
+    fn quota_cooldown_uses_the_captured_pool_and_retains_attached_work() {
+        let mut task: Task=serde_json::from_value(serde_json::json!({"id":"Q","state":"in_progress","tool":"test-tool","worktree":{"worktree_path":"worker-kept","branch":"ai/task-kept","base_branch":"main"},"task_runtime":{"status":"running","current_phase":"dev","quota_scope_key":"test-tool::pool-a"}})).unwrap();
+        task.task_runtime
+            .extra
+            .insert("quota_scope_key".into(), "test-tool::pool-a".into());
+        let result = apply_state_transitions(
+            &mut task,
+            &RetryStrategy::Retry {
+                same_worktree: true,
+                reason: "quota".into(),
+                outcome: RetryOutcome::QuotaExhaustedRequeue {
+                    cooldown: 231527,
+                    now_ts: 100,
+                    error: super::super::fsm::CompletionErrorDetails {
+                        code: "E602".into(),
+                        origin: "tool".into(),
+                        message: "quota".into(),
+                    },
+                    tool_error: None,
+                },
+            },
+            "2026-10-21T00:00:00Z",
+        );
+        assert_eq!(result.status_label, "quota_exhausted_requeue");
+        assert_eq!(task.worktree_path(), Some("worker-kept"));
+        let throttle: ToolThrottleState =
+            serde_json::from_value(task.task_runtime.extra["throttle_state"].clone()).unwrap();
+        assert_eq!(throttle.tool_id, "test-tool::pool-a");
+        assert_eq!(throttle.throttled_until, 231627);
+        assert!(task.task_runtime.delayed_until.is_none());
     }
 }

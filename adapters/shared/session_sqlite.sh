@@ -136,7 +136,7 @@ run_sqlite_session() {
     fi
   fi
   if [[ "$rc" != 0 ]]; then result=failure; fi
-  if grep -qiE "(hit your (usage|session) limit|MACC_TOOL_LIMIT:)" "$output_capture"; then result=quota; fi
+  if grep -qiE "(individual quota reached|hit your (usage|session) limit|MACC_TOOL_LIMIT:)" "$output_capture"; then result=quota; fi
   if grep -Eq '^MACC_TASK_RESULT: *precondition_unmet' "$output_capture"; then result=precondition_unmet; fi
   finish_usage "$result"
   # The shared review protocol is provider-neutral. This records an observation,

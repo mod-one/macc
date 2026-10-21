@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TaskSelectorConfig {
+    pub quota_keys: std::sync::Arc<crate::coordinator::quota_scope::TaskKeys>,
     pub enabled_tools: Vec<String>,
     pub tool_priority: Vec<String>,
     pub max_parallel_per_tool: HashMap<String, usize>,
@@ -820,11 +821,15 @@ fn pick_tool(
         task.task_runtime.current_phase.as_deref(),
         Some("review") | Some("fix")
     );
-    let own_tool_throttled = task
-        .tool
-        .as_deref()
-        .map(|t| is_tool_throttled(&config.throttle_registry, t, &config.now))
-        .unwrap_or(false);
+    let throttled = |tool: &str| {
+        is_tool_throttled(&config.throttle_registry, tool, &config.now)
+            || config
+                .quota_keys
+                .get(&task.id)
+                .and_then(|keys| keys.get(tool))
+                .is_some_and(|key| is_tool_throttled(&config.throttle_registry, key, &config.now))
+    };
+    let own_tool_throttled = task.tool.as_deref().map(throttled).unwrap_or(false);
     let apply_throttle_filter = config.rate_limit_fallback_enabled
         && !config.throttle_registry.is_empty()
         && (!in_mid_flight_phase || own_tool_throttled);
@@ -832,7 +837,7 @@ fn pick_tool(
     let selected = if apply_throttle_filter {
         candidates
             .into_iter()
-            .find(|(_, _, tool)| !is_tool_throttled(&config.throttle_registry, tool, &config.now))
+            .find(|(_, _, tool)| !throttled(tool))
             .map(|(_, _, tool)| tool)
     } else {
         candidates.into_iter().next().map(|(_, _, tool)| tool)

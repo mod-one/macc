@@ -19,6 +19,7 @@ fn patterns() -> &'static Vec<Pattern> {
     static PATTERNS: OnceLock<Vec<Pattern>> = OnceLock::new();
     PATTERNS.get_or_init(|| {
         vec![
+            Pattern { regex: Regex::new(r"(?i)(individual\s+quota\s+reached|MACC_TOOL_LIMIT:\s*quota_exhausted)").unwrap(), class: CanonicalClass::QuotaExhausted },
             Pattern {
                 regex: Regex::new(
                     r"(?i)(MODEL_CAPACITY_EXHAUSTED|[Nn]o\s+capacity\s+available\s+for\s+model)",
@@ -87,7 +88,8 @@ fn patterns() -> &'static Vec<Pattern> {
 fn request_id_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        Regex::new(r#"(?:request_id|requestId|x-request-id)[":\s]+([a-zA-Z0-9_-]{10,})"#).unwrap()
+        Regex::new(r#"(?:request_id|requestId|x-request-id|error_id)[":\s]+([a-zA-Z0-9_-]{10,})"#)
+            .unwrap()
     })
 }
 
@@ -96,9 +98,46 @@ fn retry_after_regex() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r#"(?i)(?:retry.after|retry_after)\s*[:=]\s*(\d+)"#).unwrap())
 }
 
+fn reset_duration(message: &str) -> Option<u64> {
+    static RESET: OnceLock<Regex> = OnceLock::new();
+    static UNIT: OnceLock<Regex> = OnceLock::new();
+    let reset =
+        RESET.get_or_init(|| Regex::new(r"(?i)resets\s+in\s+((?:[0-9]+\s*[dhms]\s*)+)").unwrap());
+    let unit = UNIT.get_or_init(|| Regex::new(r"(?i)([0-9]+)\s*([dhms])").unwrap());
+    let duration = reset.captures(message)?.get(1)?.as_str();
+    unit.captures_iter(duration).try_fold(0u64, |sum, c| {
+        let factor = match c[2].to_ascii_lowercase().as_str() {
+            "d" => 86400,
+            "h" => 3600,
+            "m" => 60,
+            _ => 1,
+        };
+        sum.checked_add(c[1].parse::<u64>().ok()?.checked_mul(factor)?)
+    })
+}
+
 impl ErrorNormalizer for AgyErrorNormalizer {
+    fn quota_scope(&self, model: &str) -> Option<String> {
+        let model = model.to_ascii_lowercase().replace([' ', '-', '_'], "");
+        if model.starts_with("gemini4argon") {
+            Some("gemini-4-argon".into())
+        } else if model.starts_with("gemini") {
+            Some("gemini".into())
+        } else if model.starts_with("claude") || model.starts_with("gpt") {
+            Some("claude-gpt".into())
+        } else {
+            None
+        }
+    }
     fn normalize(&self, exit_code: i32, stderr: &str, stdout: &str) -> Option<ToolError> {
         let combined = format!("{}\n{}", stderr, stdout);
+        if exit_code == 0
+            && !combined
+                .lines()
+                .any(|line| line.trim_start().starts_with("AGY_ERROR:"))
+        {
+            return None;
+        }
 
         if combined.trim().is_empty() {
             return None;
@@ -123,10 +162,12 @@ impl ErrorNormalizer for AgyErrorNormalizer {
             .and_then(|caps| caps.get(1))
             .map(|m| m.as_str().to_string());
 
-        let retry_after_seconds = retry_after_regex()
-            .captures(&combined)
-            .and_then(|caps| caps.get(1))
-            .and_then(|m| m.as_str().parse::<u64>().ok());
+        let retry_after_seconds = reset_duration(&combined).or_else(|| {
+            retry_after_regex()
+                .captures(&combined)
+                .and_then(|caps| caps.get(1))
+                .and_then(|m| m.as_str().parse::<u64>().ok())
+        });
 
         let error_code = canonical_to_error_code(&class).to_string();
         let retryable = is_retryable(&class);
@@ -171,5 +212,43 @@ mod tests {
         let err = norm(1, stderr, "").unwrap();
         assert_eq!(err.canonical_class, CanonicalClass::Auth);
         assert!(!err.retryable);
+    }
+}
+
+#[cfg(test)]
+mod quota_tests {
+    use super::*;
+    #[test]
+    fn individual_quota_extracts_multi_day_reset_before_raw_truncation() {
+        let message = "error: Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 64h18m47s.";
+        let error = AgyErrorNormalizer.normalize(1, message, "").unwrap();
+        assert_eq!(error.error_code, "E602");
+        assert_eq!(error.retry_after_seconds, Some(231527));
+        assert_eq!(error.canonical_class, CanonicalClass::QuotaExhausted);
+        let json = r#"AGY_ERROR: {"short_error":"RESOURCE_EXHAUSTED (code 429): Individual quota reached. Resets in 64h18m47s.","status":"RESOURCE_EXHAUSTED","error_code":429,"retryable":true,"error_id":"5d2129f8-3309-4af8-8e5c-4dee386d3a0f-1"}"#;
+        let error = AgyErrorNormalizer.normalize(1, json, "").unwrap();
+        assert_eq!(error.retry_after_seconds, Some(231527));
+        assert!(error.request_id.is_some());
+        assert_eq!(error.error_code, "E602");
+        assert!(AgyErrorNormalizer.normalize(0, message, "").is_none());
+    }
+    #[test]
+    fn shared_pools_include_aliases_and_do_not_merge_argon_with_other_gemini() {
+        let n = AgyErrorNormalizer;
+        assert_eq!(
+            n.quota_scope("Gemini 4 Argon (Medium)"),
+            n.quota_scope("gemini-4-argon-high")
+        );
+        assert_ne!(
+            n.quota_scope("Gemini 4 Argon (Medium)"),
+            n.quota_scope("Gemini 3.8 Flash (High)")
+        );
+        assert_eq!(
+            n.quota_scope("claude-opus-5-5-high"),
+            n.quota_scope("gpt-oss-120b-medium")
+        );
+        assert!(n.quota_scope("unknown-model").is_none());
+        assert_eq!(reset_duration("Resets in 2d16h18m47s."), Some(231527));
+        assert!(reset_duration("Resets in 999999999999999999999h").is_none());
     }
 }

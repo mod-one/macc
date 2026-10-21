@@ -521,7 +521,7 @@ override_rc_for_success_marker() {
 #   Codex:  "ERROR: You've hit your usage limit. ... try again at <DATE>"
 #   Claude: "You've hit your session limit · resets <TIME>"
 provider_unavailable() {
-  grep -qiE 'you.ve hit your (usage|session) limit|quota[ _]+exceeded|insufficient[ _]quota|rate[ _]+limit|too many requests|(^|[^0-9])(429|529)([^0-9]|$)|authentication failed|invalid api key|not authenticated' "$1" 2>/dev/null
+  grep -qiE 'you.ve hit your (usage|session) limit|individual[ _]+quota[ _]+reached|quota[ _]+exceeded|insufficient[ _]quota|rate[ _]+limit|too many requests|(^|[^0-9])(429|529)([^0-9]|$)|authentication failed|invalid api key|not authenticated' "$1" 2>/dev/null
 }
 
 detect_tool_limit_exit() {
@@ -530,7 +530,7 @@ detect_tool_limit_exit() {
 
   # Match the usage/session limit phrases both tools emit.
   if ! grep -qiE \
-      "(you.ve hit your (usage|session) limit|hit your usage limit|your usage limit)" \
+      "(individual quota reached|you.ve hit your (usage|session) limit|hit your usage limit|your usage limit)" \
       "$output_capture" 2>/dev/null; then
     echo "$rc"
     return
@@ -542,7 +542,7 @@ detect_tool_limit_exit() {
   # date parsing which is fragile across distros.
   local retry_hint=""
   retry_hint="$(grep -oiE \
-      "(try again at [A-Za-z]+ [0-9]+[a-z]*, [0-9]+ [0-9]+:[0-9]+ [AaPp][Mm]([^.]*)?|resets [0-9]+:[0-9]+[AaPp][Mm]([^)]*)?)" \
+      "(try again at [A-Za-z]+ [0-9]+[a-z]*, [0-9]+ [0-9]+:[0-9]+ [AaPp][Mm]([^.]*)?|resets in ([0-9]+[dhms])+|resets [0-9]+:[0-9]+[AaPp][Mm]([^)]*)?)" \
       "$output_capture" 2>/dev/null | head -1 || true)"
 
   # Emit a structured notification that appears in the performer log and is

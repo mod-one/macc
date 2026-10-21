@@ -4,7 +4,7 @@ use super::phase_runner::phase_tool_for_task;
 use crate::coordinator::control_plane::CoordinatorLog;
 use crate::coordinator::helpers::append_coordinator_event_with_severity;
 use crate::coordinator::model::{Task, TaskRegistry};
-use crate::coordinator::rate_limit::{is_tool_throttled, RateLimitInfo, ToolThrottleState};
+use crate::coordinator::rate_limit::{RateLimitInfo, ToolThrottleState};
 use crate::coordinator::runtime::CoordinatorRunState;
 use crate::{MaccError, Result};
 use std::path::Path;
@@ -30,15 +30,31 @@ pub(super) fn handle_phase_tool_unavailability(
     let now_epoch = chrono::DateTime::parse_from_rfc3339(now)
         .map(|dt| dt.timestamp() as u64)
         .unwrap_or(0);
+    let keys = crate::coordinator::quota_scope::configured_keys(
+        repo_root,
+        registry,
+        &state.normalizer_registry,
+    );
+    let scoped = |tool: &str| {
+        keys.get(task_id)
+            .and_then(|keys| keys.get(tool))
+            .cloned()
+            .unwrap_or_else(|| tool.into())
+    };
+    let key = if code == "E602" {
+        scoped(tool_id)
+    } else {
+        tool_id.into()
+    };
     state.throttle_registry.insert(
-        tool_id.into(),
+        key.clone(),
         ToolThrottleState {
-            tool_id: tool_id.into(),
+            tool_id: key.clone(),
             throttled_until: now_epoch.saturating_add(cooldown),
             backoff_seconds: cooldown,
             consecutive_429_count: 1,
             last_rate_limit_info: Some(RateLimitInfo {
-                tool_id: tool_id.into(),
+                tool_id: key.clone(),
                 error_code: code.clone(),
                 retry_after_seconds: Some(cooldown),
                 detected_at: now_epoch,
@@ -46,17 +62,24 @@ pub(super) fn handle_phase_tool_unavailability(
             }),
         },
     );
-    persist_throttle_registry(repo_root, &state.throttle_registry, tool_id)?;
-    let fallback = enabled_tools
-        .iter()
-        .find(|tool| !is_tool_throttled(&state.throttle_registry, tool, now));
+    persist_throttle_registry(repo_root, &state.throttle_registry, &key)?;
+    let fallback = enabled_tools.iter().find(|tool| {
+        crate::coordinator::quota_scope::available(
+            &state.throttle_registry,
+            &scoped(tool),
+            tool,
+            now,
+        )
+    });
     let deferred = enabled_tools
         .iter()
         .filter_map(|tool| {
-            state
-                .throttle_registry
-                .get(tool)
-                .map(|state| (state.throttled_until, tool))
+            let until = crate::coordinator::quota_scope::until(
+                &state.throttle_registry,
+                &scoped(tool),
+                tool,
+            );
+            (until > now_epoch).then_some((until, tool))
         })
         .min_by_key(|(until, _)| *until);
     let next_tool = fallback.or_else(|| deferred.as_ref().map(|(_, tool)| *tool));

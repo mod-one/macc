@@ -75,8 +75,9 @@ pub struct ToolThrottleState {
 
 // ── Tool throttle registry ──────────────────────────────────────────
 
-/// Runtime registry of per-tool throttle states, keyed by tool identifier.
-/// Stored in `CoordinatorRunState` (volatile — not persisted to disk).
+/// Availability registry keyed by tool ID or adapter-owned `tool::pool` identity.
+/// The control plane persists entries to SQLite and restores them on restart.
+/// Account-wide entries remain authoritative alongside scoped quota entries.
 pub type ToolThrottleRegistry = BTreeMap<String, ToolThrottleState>;
 
 /// Return `true` when the named tool's `throttled_until` epoch is still in the

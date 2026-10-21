@@ -123,6 +123,13 @@ fn build_task_selector_config(
         .unwrap_or_default()
     });
     crate::coordinator::task_selector::TaskSelectorConfig {
+        quota_keys: crate::coordinator::quota_scope::keys(
+            repo_root,
+            registry,
+            canonical,
+            &state.normalizer_registry,
+        )
+        .into(),
         enabled_tools: canonical.tools.enabled.clone(),
         tool_priority: env_cfg
             .tool_priority
@@ -630,6 +637,25 @@ pub(super) async fn launch_performer(
     let mut registry =
         crate::coordinator::state::coordinator_state_registry_load(repo_root, &BTreeMap::new())?;
     coordinator_engine::apply_dispatch_pid_in_registry(&mut registry, &claim.task_id, pid)?;
+    let keys = crate::coordinator::quota_scope::keys(
+        repo_root,
+        &registry,
+        canonical,
+        &state.normalizer_registry,
+    );
+    if let Some(key) = keys
+        .get(&claim.task_id)
+        .and_then(|keys| keys.get(&claim.tool))
+    {
+        let mut typed = crate::coordinator::model::TaskRegistry::from_value(&registry)?;
+        if let Some(task) = typed.find_task_mut(&claim.task_id) {
+            task.task_runtime
+                .extra
+                .insert("quota_scope_key".into(), key.clone().into());
+        }
+        registry = typed.to_value()?;
+    }
+
     set_registry_updated_at(&mut registry);
     crate::coordinator::state::coordinator_state_registry_save(
         repo_root,

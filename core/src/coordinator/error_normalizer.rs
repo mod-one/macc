@@ -207,6 +207,10 @@ pub struct ToolError {
 /// [`ToolError`]. The coordinator calls the appropriate normalizer based
 /// on the tool ID.
 pub trait ErrorNormalizer: Send + Sync {
+    /// Adapter-owned shared model quota pool. None retains tool-wide throttling.
+    fn quota_scope(&self, _model: &str) -> Option<String> {
+        None
+    }
     /// Attempt to classify the tool's output into a canonical [`ToolError`].
     ///
     /// Returns `None` if the output does not match any known error pattern,

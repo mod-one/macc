@@ -430,3 +430,68 @@ fn next_throttle_expiry_returns_earliest_non_zero_expiry() {
 fn next_throttle_expiry_returns_none_when_registry_empty() {
     assert!(next_throttle_expiry(&ToolThrottleRegistry::default()).is_none());
 }
+
+#[test]
+fn agy_model_pool_cooldown_does_not_block_other_models_and_survives_sqlite() {
+    use macc_adapter_agy::error_normalizer::AgyErrorNormalizer;
+    use macc_core::coordinator::error_normalizer::NormalizerRegistry;
+    use macc_core::coordinator::quota_scope;
+    let normalizer = AgyErrorNormalizer;
+    let error = normalizer
+        .normalize(1, "Individual quota reached. Resets in 64h18m47s.", "")
+        .unwrap();
+    let root = std::env::temp_dir().join(format!(
+        "macc-quota-pools-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let mut config = macc_core::config::CanonicalConfig::default();
+    config.tools.enabled = vec!["agy".into()];
+    config.tools.config.insert("agy".into(),serde_json::json!({"model_tiers":{"standard":{"model":"Gemini 4 Argon (Medium)"},"mini":{"model":"Gemini 3.8 Flash (Low)"}}}));
+    let mut blocked = make_todo_task("A", "agy");
+    blocked.extra.insert(
+        "routing_hints".into(),
+        serde_json::json!({"model_tier":"standard"}),
+    );
+    let mut available = make_todo_task("B", "agy");
+    available.extra.insert(
+        "routing_hints".into(),
+        serde_json::json!({"execution_mode":"micro"}),
+    );
+    let registry = make_registry_with_tools(vec![blocked.clone(), available]);
+    let keys = quota_scope::keys(
+        root.as_path(),
+        &registry.to_value().unwrap(),
+        &config,
+        &NormalizerRegistry::from_inventory(),
+    );
+    let key = keys["A"]["agy"].clone();
+    assert_eq!(key, "agy::gemini-4-argon");
+    assert_eq!(keys["B"]["agy"], "agy::gemini");
+    let state = ToolThrottleState {
+        tool_id: key.clone(),
+        throttled_until: far_future_epoch(),
+        ..Default::default()
+    };
+    let paths = macc_core::ProjectPaths::from_root(root.as_path());
+    let storage = macc_core::coordinator_storage::SqliteStorage::new(
+        macc_core::coordinator_storage::CoordinatorStoragePaths::from_project_paths(&paths),
+    );
+    storage.upsert_tool_throttle(&key, &state).unwrap();
+    let mut selector = base_selector_config(vec!["agy"], 2);
+    selector.rate_limit_fallback_enabled = true;
+    selector.quota_keys = keys.into();
+    selector.throttle_registry = storage.load_throttle_registry().unwrap();
+    let selected = select_next_ready_task_typed(&registry, &selector).unwrap();
+    assert_eq!(selected.id, "B");
+    assert_eq!(error.retry_after_seconds, Some(231527));
+    // Once the reset passes, the same task/model becomes eligible again.
+    selector.now = "2100-01-01T00:00:00Z".into();
+    let only_blocked = make_registry_with_tools(vec![blocked]);
+    assert!(select_next_ready_task_typed(&only_blocked, &selector).is_some());
+    std::fs::remove_dir_all(root).unwrap();
+}

@@ -8,6 +8,7 @@ trap 'rm -rf "$tmp"' EXIT
 performer_log_dir="$tmp"
 [[ "$(task_log_path SEC-API-004)" == "$tmp/SEC-API-004.md" ]]
 for message in \
+  'error: Individual quota reached. Resets in 64h18m47s.' \
   'ERROR: You’ve hit your usage limit. Try again at Oct 4th, 2026 2:13 AM.' \
   'MACC_TOOL_LIMIT: quota_exhausted tool=codex' \
   "You've hit your session limit"; do
@@ -30,4 +31,13 @@ printf '%s\n' "You've hit your session limit · resets 10:10pm (UTC)" > "$tmp/ou
 LAST_ERROR_CODE=''
 detect_rate_limit "$tmp/output"
 [[ "$LAST_ERROR_CODE" == E602 && "$LAST_ERROR_MESSAGE" == *'resets 10:10pm (UTC)'* ]]
+# Exercise the actual shared adapter exit override without starting a tool.
+shared="$(dirname "$performer")/../adapters/shared/performer_lib.sh"
+eval "$(sed -n '/^detect_tool_limit_exit()/,/^}/p' "$shared")"
+output_capture="$tmp/output"
+tool_id=agy
+printf '%s\n' 'error: Individual quota reached. Resets in 64h18m47s.' > "$output_capture"
+[[ "$(detect_tool_limit_exit 0 2> "$tmp/limit")" == 1 ]]
+grep -q 'MACC_TOOL_LIMIT: quota_exhausted' "$tmp/limit"
+grep -q 'Resets in 64h18m47s' "$tmp/limit"
 printf '%s\n' 'Quota classification and log path tests passed.'

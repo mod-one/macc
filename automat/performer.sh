@@ -914,7 +914,7 @@ detect_rate_limit() {
   [[ -f "$output_file" ]] || return 0
   # E602: hard quota exhaustion — do NOT retry
   if grep -qiE \
-      'macc_tool_limit:.*quota_exhausted|quota[[:space:]]+exceeded|insufficient[_[:space:]]quota|usage[[:space:]]+limit[[:space:]]+reached|hit[[:space:]]+your[[:space:]]+(usage[[:space:]]+|session[[:space:]]+)?limit|billing[[:space:]]+quota' "$output_file"; then
+      'individual[[:space:]]+quota[[:space:]]+reached|macc_tool_limit:.*quota_exhausted|quota[[:space:]]+exceeded|insufficient[_[:space:]]quota|usage[[:space:]]+limit[[:space:]]+reached|hit[[:space:]]+your[[:space:]]+(usage[[:space:]]+|session[[:space:]]+)?limit|billing[[:space:]]+quota' "$output_file"; then
     LAST_ERROR_CODE="E602"
     LAST_ERROR_ORIGIN="runner"
     LAST_ERROR_MESSAGE="quota exhausted; $(grep -iE 'try again at|resets |retry_hint|retry.after' "$output_file" | tail -n 1 || true)"

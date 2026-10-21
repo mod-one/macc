@@ -1348,11 +1348,12 @@ pub async fn monitor_active_jobs_native(
                                 crate::coordinator::rate_limit::ToolThrottleState,
                             >(ts_val.clone())
                             {
-                                state.throttle_registry.insert(job.tool.clone(), ts);
+                                let key = ts.tool_id.clone();
+                                state.throttle_registry.insert(key.clone(), ts);
                                 persist_throttle_registry(
                                     repo_root,
                                     &state.throttle_registry,
-                                    &job.tool,
+                                    &key,
                                 )?;
                             }
                         }
@@ -1385,15 +1386,25 @@ pub async fn monitor_active_jobs_native(
                     // started (a stale cooldown must not block redispatch).
                     let now_ts = chrono::Utc::now().timestamp().max(0) as u64;
                     let job_started_at = now_ts.saturating_sub(job.started_at.elapsed().as_secs());
-                    if state.throttle_registry.get(&job.tool).is_some_and(|entry| {
+                    let assigned = crate::coordinator::quota_scope::assigned(
+                        &registry,
+                        &evt.task_id,
+                        &job.tool,
+                    );
+                    let key = if state.throttle_registry.contains_key(&job.tool) {
+                        job.tool.clone()
+                    } else {
+                        assigned
+                    };
+                    if state.throttle_registry.get(&key).is_some_and(|entry| {
                         crate::coordinator::rate_limit::job_clears_throttle(
                             entry,
                             job_started_at,
                             now_ts,
                         )
                     }) {
-                        state.throttle_registry.remove(&job.tool);
-                        persist_throttle_registry(repo_root, &state.throttle_registry, &job.tool)?;
+                        state.throttle_registry.remove(&key);
+                        persist_throttle_registry(repo_root, &state.throttle_registry, &key)?;
                         if resolve_rate_limit_throttle_parallel(env_cfg, coordinator) {
                             let new_val = state.restore_parallel();
                             let msg = format!(
@@ -3126,6 +3137,7 @@ mod tests {
             "resource_locks": {}
         });
         let cfg = crate::coordinator::task_selector::TaskSelectorConfig {
+            quota_keys: Default::default(),
             enabled_tools: vec!["codex".to_string()],
             tool_priority: vec!["codex".to_string()],
             max_parallel_per_tool: HashMap::new(),

@@ -3202,6 +3202,7 @@ fn parse_select_ready_task_command(args: &[String]) -> Result<CoordinatorCommand
     Ok(CoordinatorCommand::SelectReadyTask {
         registry_path,
         config: TaskSelectorConfig {
+            quota_keys: Default::default(),
             enabled_tools: parse_json_string_vec(
                 map.get("enabled-tools-json")
                     .map(String::as_str)
